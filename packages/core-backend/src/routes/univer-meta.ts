@@ -87,7 +87,7 @@ import {
   tryResolveView as tryResolveViewShared,
   type MultitableViewConfig as SharedMultitableViewConfig,
 } from '../multitable/loaders'
-import { parseAggregations, aggregateField, groupRowsByFields, type AggregateGroupBucket, type AggregationFn } from '../multitable/aggregation-helpers'
+import { parseAggregations, aggregateField, groupRowsByFields, isNumericFieldType, type AggregateGroupBucket, type AggregationFn } from '../multitable/aggregation-helpers'
 import { ensureLegacyBase as ensureLegacyBaseShared } from '../multitable/provisioning'
 import {
   MultitableTemplateConflictError,
@@ -9704,6 +9704,25 @@ export function univerMetaRouter(): Router {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const viewId = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : ''
     const search = normalizeSearchTerm(req.query.search) // same normalization as /view (trim+lowercase) → search parity
+    // A5 full-column scale stats: optional CSV of field ids the caller wants numeric min/max/count for
+    // (conditional-formatting scale endpoints — data-bar denominator + color-scale gradient bounds, computed
+    // over the WHOLE filtered column, not the client page). ABSENT (or empty) → `stats` is OMITTED from the
+    // response (byte-identical to the footer-only shape — the existing aggregate tests assert exact bodies).
+    // Each requested field is gated through the SAME layer-1∧layer-3∧taint-survived OUTPUT set as the footer
+    // aggregates (aggregateFieldTypeById below), so a hidden/denied/tainted field yields NO stats (its
+    // min/max would leak the column's distribution) — see the leak gate at the stats build.
+    const statsFieldIds = (() => {
+      const raw = req.query.statsFields
+      const csv = typeof raw === 'string' ? raw : Array.isArray(raw) && typeof raw[0] === 'string' ? (raw[0] as string) : ''
+      if (!csv) return null
+      const seen = new Set<string>()
+      for (const part of csv.split(',')) {
+        const id = part.trim()
+        if (id) seen.add(id)
+        if (seen.size >= 200) break // bound the request fan-out (a sheet can't realistically scale > this many columns)
+      }
+      return seen.size > 0 ? seen : null
+    })()
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     }
@@ -9823,6 +9842,33 @@ export function univerMetaRouter(): Router {
         }
         return out
       }
+
+      // A5 full-column SCALE STATS (only when statsFields was requested). Per-field { min, max, count }
+      // over the SAME filtered + row-deny-masked `rows` the footer aggregates use, so the conditional-
+      // formatting scale (data-bar denominator + color-scale endpoints) spans the WHOLE filtered column,
+      // not the client page. LEAK GATE: a requested field is included ONLY if it survived
+      // aggregateFieldTypeById (layer-1∧layer-3∧§2a.3-taint, identical to computeAggregates) AND is a
+      // numeric type — a hidden/denied/tainted/non-numeric field gets NO entry, so its distribution
+      // (min/max) is never disclosed. `count` is the numeric-value count (omits non-numeric/empty cells),
+      // matching what the FE scale uses; min===max is valid (a constant column → FE renders a full bar).
+      const computeScaleStats = (): Record<string, { min: number; max: number; count: number }> => {
+        const out: Record<string, { min: number; max: number; count: number }> = {}
+        if (!statsFieldIds) return out
+        for (const fieldId of statsFieldIds) {
+          const fieldType = aggregateFieldTypeById.get(fieldId)
+          if (!fieldType || !isNumericFieldType(fieldType)) continue // hidden / denied / tainted / non-numeric → omit (no leak)
+          // countNonEmpty over a numeric field = the count of numeric values that fed min/max (numeric
+          // fields never hold non-numeric non-empty cells in practice; empty cells are excluded by both).
+          const values = rows.map((rec) => rec.data[fieldId])
+          const min = aggregateField(values, 'min', fieldType)
+          const max = aggregateField(values, 'max', fieldType)
+          if (min === null || max === null) continue // no numeric values in the filtered column → omit
+          const count = aggregateField(values, 'countNonEmpty', fieldType) ?? 0
+          out[fieldId] = { min, max, count }
+        }
+        return out
+      }
+
       // group subtotals (#4-3b-2a / nested grouping): grid group fields are view.groupInfo.fieldIds
       // (ordered list, NEW multi-level shape) with dual-read of the legacy single view.groupInfo.fieldId
       // for back-compat (NOT view.config.groupFieldId). Resolve + run the 422 gates BEFORE the grand
@@ -9856,9 +9902,12 @@ export function univerMetaRouter(): Router {
       }
 
       const aggregates = computeAggregates(rows.map((rec) => rec.data))
+      // `stats` is added ONLY when statsFields was requested → when absent the response stays
+      // byte-identical to the footer-only shape (the existing aggregate tests assert exact bodies).
+      const statsField = statsFieldIds ? { stats: computeScaleStats() } : {}
       if (groupFieldIds.length === 0) {
-        // not grouped → response byte-identical to #4-3b-1
-        return res.json({ ok: true, data: { total: rows.length, aggregates } })
+        // not grouped → response byte-identical to #4-3b-1 (plus `stats` iff requested)
+        return res.json({ ok: true, data: { total: rows.length, aggregates, ...statsField } })
       }
       // Recurse the bucket tree → response tree. Each node aggregates over its OWN full membership
       // (node.rows); children are NEVER summed for avg/countDistinct (groupRowsByFields keeps node.rows
@@ -9872,8 +9921,8 @@ export function univerMetaRouter(): Router {
         }))
       const groups = serializeBuckets(groupRowsByFields(rows.map((rec) => rec.data), groupFieldIds))
       // Emit the ordered fieldIds[] (NEW) plus the legacy single groupFieldId = level-1 (back-compat for
-      // any reader still on the single-field shape).
-      return res.json({ ok: true, data: { total: rows.length, aggregates, groupFieldId: groupFieldIds[0], groupFieldIds, groups } })
+      // any reader still on the single-field shape). `stats` (grand-total scale stats) appended iff requested.
+      return res.json({ ok: true, data: { total: rows.length, aggregates, groupFieldId: groupFieldIds[0], groupFieldIds, groups, ...statsField } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })

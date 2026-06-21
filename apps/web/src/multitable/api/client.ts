@@ -887,6 +887,12 @@ export interface ViewAggregateResult {
   groupFieldId?: string
   groupFieldIds?: string[]
   groups?: ViewAggregateGroup[]
+  // A5 full-column scale stats: present ONLY when `statsFields` was requested. Per-field { min, max,
+  // count } over the WHOLE filtered (+ permission-masked) column — the conditional-formatting scale
+  // (data-bar denominator + color-scale endpoints) uses this instead of the client page's local min/max.
+  // A requested field that the actor cannot read (hidden / denied / tainted / non-numeric) is OMITTED
+  // here (its distribution must not leak), so a missing field → caller keeps its page-local fallback.
+  stats?: Record<string, { min: number; max: number; count: number }>
 }
 
 // Formula dry-run (#5b, design #1869). Diagnostics carry structured context; the client localizes by
@@ -1330,9 +1336,12 @@ export class MultitableApiClient {
   // Footer aggregation (#4-3b-1): server aggregates over the full filtered set. On 413 (too large)
   // parseJson throws a MultitableApiError with code 'AGGREGATE_TOO_LARGE' — caller handles, never
   // falls back to local aggregation.
-  async aggregateView(params: { sheetId: string; viewId?: string; search?: string }): Promise<ViewAggregateResult> {
-    const { sheetId, ...rest } = params
-    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/view-aggregate${qs(rest as Record<string, string | undefined>)}`)
+  async aggregateView(params: { sheetId: string; viewId?: string; search?: string; statsFields?: string[] }): Promise<ViewAggregateResult> {
+    const { sheetId, statsFields, ...rest } = params
+    // A5: request full-column numeric min/max/count for the given fields (conditional-formatting scale).
+    // Joined CSV → the server omits `stats` entirely when this is absent (byte-identical footer shape).
+    const query = qs({ ...(rest as Record<string, string | undefined>), statsFields: statsFields && statsFields.length ? statsFields.join(',') : undefined })
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/view-aggregate${query}`)
     return this.parseJson(res)
   }
 

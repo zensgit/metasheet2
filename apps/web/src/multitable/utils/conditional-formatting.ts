@@ -540,18 +540,76 @@ const EMPTY_SCALE_MAP: FieldScaleMap = Object.freeze({
   byField: Object.freeze({}) as Record<string, FieldScaleResult>,
 }) as FieldScaleMap
 
+/** Server-computed full-column numeric stats per fieldId (A5). Mirrors the
+ *  `view-aggregate?statsFields=…` response's `stats` map — min/max over the WHOLE
+ *  filtered+permission-masked column. A field absent here → no server stats (the
+ *  builder falls back to the page-local min/max for that field). */
+export type FieldScaleServerStats = Record<string, { min: number; max: number; count?: number }>
+
+// Numeric field types that accept a value→endpoint scale (data-bar / color-scale auto range). Mirror of
+// the backend `isNumericFieldType` (aggregation-helpers.ts) — keep in sync. Only these can request
+// full-column server stats (the server also re-checks the type before returning any min/max).
+const NUMERIC_SCALE_FIELD_TYPES: ReadonlySet<string> = new Set(['number', 'currency', 'percent', 'rating', 'duration', 'autoNumber'])
+
+/**
+ * A5 lazy gate: which fieldIds need a FULL-COLUMN server min/max. A field qualifies iff its (first,
+ * enabled) scale rule is `dataBar` or `colorScale` AND its range is `auto` (a `fixed` range uses its own
+ * bounds; `iconSet` uses absolute thresholds — neither needs min/max) AND the field is a numeric type.
+ * Returns a sorted, de-duplicated list (stable cache key). Empty → the caller skips the network entirely.
+ */
+export function scaleStatsFieldIds(
+  rules: ConditionalFormattingScaleRule[],
+  fieldTypeById: Record<string, string | undefined>,
+): string[] {
+  const out = new Set<string>()
+  for (const rule of rules) {
+    if (!rule.enabled) continue
+    if (rule.kind !== 'dataBar' && rule.kind !== 'colorScale') continue
+    if (rule.range.mode !== 'auto') continue
+    if (out.has(rule.fieldId)) continue
+    const type = fieldTypeById[rule.fieldId]
+    if (!type || !NUMERIC_SCALE_FIELD_TYPES.has(type)) continue
+    out.add(rule.fieldId)
+  }
+  return [...out].sort()
+}
+
+/**
+ * A5 idle-gated refetch decision (pure — extracted so it is unit-tested without mounting the workbench).
+ * The full-column stats are over the PERSISTED view filter, so the caller must NOT refetch while the grid is
+ * loading (the persist may be in flight) and must NOT refetch on an unchanged key (pagination / no-op).
+ *
+ * The KEY encodes the post-apply (persisted) filter + search + view + requested fields. Returning
+ * `{ fetch: true }` ALSO yields the key the caller must store as the new `lastKey`. The contract that makes
+ * draft-filter edits safe: the caller passes the live key (which reflects a draft edit) but only INVOKES
+ * this on idle-safe triggers — a draft edit alone never calls in, so it can neither fetch nor advance
+ * `lastKey`; the post-apply call then sees `key !== lastKey` and fetches. See MultitableWorkbench wiring.
+ */
+export function decideScaleStatsRefetch(
+  input: { loading: boolean; key: string; lastKey: string },
+): { fetch: false } | { fetch: true; key: string } {
+  if (input.loading) return { fetch: false } // mid-load → wait for the idle edge
+  if (input.key === input.lastKey) return { fetch: false } // unchanged (pagination / no-op re-fire)
+  return { fetch: true, key: input.key }
+}
+
 /**
  * Pre-compute scale presentation (data-bar / color-scale / icon-set) per
- * (fieldId, recordId). Mirrors the backend `buildFieldScaleMap`: min/max over
- * the passed records (auto) or the rule's fixed range; dataBar → 0..100 fill
+ * (fieldId, recordId). Mirrors the backend `buildFieldScaleMap`: for an `auto`
+ * range, the min/max come from `serverStats` (full filtered column) when that
+ * field has an entry, else from the passed records (page-local fallback); a
+ * `fixed` range always uses the rule's own bounds. dataBar → 0..100 fill
  * (degenerate range → full bar, negatives take negativeColor); colorScale →
- * interpolated scaleColor; iconSet → iconKey bucket; non-numeric skipped; first
- * rule per field wins. The grid renders all three (MetaGridTable, #2640/#2680).
- * Caller passes the already-loaded/masked rows (client-side discipline).
+ * interpolated scaleColor; iconSet → iconKey bucket (absolute thresholds — never
+ * uses min/max); non-numeric skipped; first rule per field wins. The grid renders
+ * all three (MetaGridTable, #2640/#2680). Caller passes the already-loaded/masked
+ * rows for per-record presentation; `serverStats` only relocates the AUTO
+ * endpoints to the full column (A5) — the per-record cell values are still local.
  */
 export function buildFieldScaleMap(
   rules: ConditionalFormattingScaleRule[],
   records: ReadonlyArray<MetaRecord | { id?: string; data?: Record<string, unknown> }>,
+  serverStats?: FieldScaleServerStats,
 ): FieldScaleMap {
   if (!rules.length || !records.length) return EMPTY_SCALE_MAP
   const byField: Record<string, FieldScaleResult> = {}
@@ -565,9 +623,14 @@ export function buildFieldScaleMap(
 
     let min: number
     let max: number
+    const serverEntry = serverStats?.[rule.fieldId]
     if (rule.range.mode === 'fixed' && typeof rule.range.min === 'number' && typeof rule.range.max === 'number') {
       min = rule.range.min
       max = rule.range.max
+    } else if (serverEntry && Number.isFinite(serverEntry.min) && Number.isFinite(serverEntry.max)) {
+      // A5: auto range over the FULL filtered column (server stats) — not just the loaded page.
+      min = serverEntry.min
+      max = serverEntry.max
     } else {
       let lo = Infinity
       let hi = -Infinity

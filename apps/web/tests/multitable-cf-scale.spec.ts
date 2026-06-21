@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildFieldScaleMap,
+  decideScaleStatsRefetch,
   extractScaleRulesFromConfig,
   sanitizeScaleRule,
   sanitizeScaleRules,
+  scaleStatsFieldIds,
   lerpHexColor,
 } from '../src/multitable/utils/conditional-formatting'
 import { CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT } from '../src/multitable/types'
@@ -182,5 +184,145 @@ describe('FE lerpHexColor parity', () => {
     expect(lerpHexColor('#000000ff', '#ffffff00', 0.5)).toBe('#808080')
     expect(lerpHexColor('#000000', '#ffffff', -1)).toBe('#000000')
     expect(lerpHexColor('#000000', '#ffffff', 2)).toBe('#ffffff')
+  })
+})
+
+// ===========================================================================
+// A5 full-column scale stats: when the caller passes server min/max (the whole
+// filtered column), the AUTO-range builder uses THOSE endpoints instead of the
+// page-local min/max — so the gradient/bar is correct across pages.
+// ===========================================================================
+
+describe('A5 buildFieldScaleMap uses server stats for the auto-range endpoints', () => {
+  // The loaded PAGE only has values 10..20, but the full column (server) is 0..100.
+  const page = [
+    { id: 'r1', data: { fld_n: 10 } },
+    { id: 'r2', data: { fld_n: 20 } },
+  ]
+
+  it('data-bar: page-local would be 10/20; server 0..100 → r1=10%, r2=20% (full column)', () => {
+    const rule = sanitizeScaleRule(validBar())! // auto range
+    // Sanity: WITHOUT server stats the page-local endpoints make r1=0%, r2=100%.
+    const local = buildFieldScaleMap([rule], page).byField.fld_n
+    expect([local.min, local.max]).toEqual([10, 20])
+    expect([local.byRecordId.r1.barPct, local.byRecordId.r2.barPct]).toEqual([0, 100])
+    // WITH server stats the endpoints become the full column 0..100.
+    const f = buildFieldScaleMap([rule], page, { fld_n: { min: 0, max: 100, count: 50 } }).byField.fld_n
+    expect([f.min, f.max]).toEqual([0, 100])
+    expect(f.byRecordId.r1.barPct).toBe(10) // 10 / 100
+    expect(f.byRecordId.r2.barPct).toBe(20) // 20 / 100
+  })
+
+  it('color-scale: interpolates against the server min/max, not the page min/max', () => {
+    const rule = sanitizeScaleRule({
+      id: 'cs', fieldId: 'fld_n', kind: 'colorScale', order: 0, range: { mode: 'auto' },
+      colorScale: { stops: [{ at: 'min', color: '#000000' }, { at: 'max', color: '#ffffff' }] },
+    })!
+    // Full column 0..100 → value 10 sits at t=0.1 → #1a1a1a (not #000000 it would be at page-local min).
+    const f = buildFieldScaleMap([rule], page, { fld_n: { min: 0, max: 100 } }).byField.fld_n
+    expect(f.byRecordId.r1.scaleColor).toBe(lerpHexColor('#000000', '#ffffff', 0.1))
+    expect(f.byRecordId.r1.scaleColor).not.toBe('#000000') // would be #000000 with page-local min=10
+  })
+
+  it('a FIXED range ignores server stats (uses its own bounds)', () => {
+    const fixed = sanitizeScaleRule(validBar({ range: { mode: 'fixed', min: 0, max: 50 } }))!
+    const f = buildFieldScaleMap([fixed], page, { fld_n: { min: 0, max: 100 } }).byField.fld_n
+    expect([f.min, f.max]).toEqual([0, 50]) // fixed bounds win over server stats
+    expect(f.byRecordId.r2.barPct).toBe(40) // 20 / 50, NOT 20 / 100
+  })
+
+  it('falls back to page-local min/max when the field has no server entry', () => {
+    const rule = sanitizeScaleRule(validBar())!
+    const f = buildFieldScaleMap([rule], page, { other_field: { min: 0, max: 100 } }).byField.fld_n
+    expect([f.min, f.max]).toEqual([10, 20]) // no fld_n entry → page-local
+  })
+
+  it('ignores a server entry with non-finite bounds (defensive) → page-local', () => {
+    const rule = sanitizeScaleRule(validBar())!
+    const f = buildFieldScaleMap([rule], page, { fld_n: { min: NaN, max: 100 } as { min: number; max: number } }).byField.fld_n
+    expect([f.min, f.max]).toEqual([10, 20])
+  })
+})
+
+describe('A5 scaleStatsFieldIds — the lazy fetch gate', () => {
+  const numericTypes = { fld_n: 'number', fld_cur: 'currency', fld_str: 'text' }
+
+  it('includes only auto-range data-bar / color-scale on a numeric field', () => {
+    const bar = sanitizeScaleRule(validBar({ id: 'b', fieldId: 'fld_n' }))!
+    const cs = sanitizeScaleRule({
+      id: 'c', fieldId: 'fld_cur', kind: 'colorScale', order: 1, range: { mode: 'auto' },
+      colorScale: { stops: [{ at: 'min', color: '#000000' }, { at: 'max', color: '#ffffff' }] },
+    })!
+    expect(scaleStatsFieldIds([bar, cs], numericTypes)).toEqual(['fld_cur', 'fld_n']) // sorted, de-duped
+  })
+
+  it('excludes iconSet (absolute thresholds), fixed range, and non-numeric / unknown fields', () => {
+    const icon = sanitizeScaleRule({
+      id: 'i', fieldId: 'fld_n', kind: 'iconSet', order: 0, range: { mode: 'auto' },
+      iconSet: { set: 'arrows3', thresholds: [10, 20] },
+    })!
+    const fixedBar = sanitizeScaleRule(validBar({ id: 'fx', fieldId: 'fld_cur', range: { mode: 'fixed', min: 0, max: 9 } }))!
+    const strBar = sanitizeScaleRule(validBar({ id: 's', fieldId: 'fld_str' }))! // string field
+    const unknownBar = sanitizeScaleRule(validBar({ id: 'u', fieldId: 'fld_missing' }))!
+    expect(scaleStatsFieldIds([icon, fixedBar, strBar, unknownBar], numericTypes)).toEqual([])
+  })
+
+  it('excludes disabled rules', () => {
+    const disabled = sanitizeScaleRule(validBar({ id: 'd', fieldId: 'fld_n', enabled: false }))!
+    expect(scaleStatsFieldIds([disabled], numericTypes)).toEqual([])
+  })
+})
+
+describe('A5 decideScaleStatsRefetch — idle-gated refetch decision', () => {
+  it('does not fetch while loading (persist may be in flight)', () => {
+    expect(decideScaleStatsRefetch({ loading: true, key: 'B', lastKey: 'A' })).toEqual({ fetch: false })
+  })
+
+  it('does not fetch when the key is unchanged (pagination / no-op re-fire)', () => {
+    expect(decideScaleStatsRefetch({ loading: false, key: 'A', lastKey: 'A' })).toEqual({ fetch: false })
+  })
+
+  it('fetches + adopts the new key when idle and the key changed', () => {
+    expect(decideScaleStatsRefetch({ loading: false, key: 'B', lastKey: 'A' })).toEqual({ fetch: true, key: 'B' })
+  })
+
+  // The regression this guards: a DRAFT filter edit (no apply) must NOT advance lastKey, otherwise the
+  // real post-apply fetch is suppressed and the scale renders B's rows with A's (stale) min/max. The
+  // workbench only INVOKES this on idle-safe triggers (the grid.loading edge + view/search/fields), never
+  // on a draft filter ref change — so a draft edit never reaches this decision. We simulate the full flow:
+  // the only calls that happen are at the loading edges; the draft mutation in between is a no-call.
+  it('draft-edit-then-apply still fetches with the POST-APPLY key (no stale suppression)', () => {
+    let lastKey = ''
+    const apply = (loading: boolean, key: string) => {
+      const d = decideScaleStatsRefetch({ loading, key, lastKey })
+      if (d.fetch) lastKey = d.key
+      return d.fetch
+    }
+    // 1) Filter A applied: loading goes true (no fetch) then false (fetch A).
+    expect(apply(true, 'K_A')).toBe(false)
+    expect(apply(false, 'K_A')).toBe(true)
+    expect(lastKey).toBe('K_A')
+    // 2) User edits a DRAFT filter to B with NO apply → the workbench does NOT call decide at all (the
+    //    filter refs are not watch triggers). lastKey stays K_A. (No invocation = nothing to assert here.)
+    // 3) User clicks apply: loading true (no fetch), persist B, loading false → the key is now K_B (the
+    //    handler reads the just-persisted refs) → fetch fires for B. This is the bug fix.
+    expect(apply(true, 'K_B')).toBe(false)
+    expect(apply(false, 'K_B')).toBe(true)
+    expect(lastKey).toBe('K_B')
+  })
+
+  // Counter-proof: if a draft edit WERE allowed to call decide (the buggy wiring), it would advance lastKey
+  // to K_B before apply, and the post-apply call would be suppressed → stale. This documents WHY the
+  // workbench must not put the draft filter refs in the watch source list.
+  it('counter-proof: a draft edit reaching decide would suppress the post-apply fetch (the bug)', () => {
+    let lastKey = ''
+    const apply = (loading: boolean, key: string) => {
+      const d = decideScaleStatsRefetch({ loading, key, lastKey })
+      if (d.fetch) lastKey = d.key
+      return d.fetch
+    }
+    expect(apply(false, 'K_A')).toBe(true) // A applied + fetched
+    expect(apply(false, 'K_B')).toBe(true) // BUGGY: draft edit reaches decide while idle → advances to K_B
+    expect(apply(false, 'K_B')).toBe(false) // post-apply: key already K_B → SUPPRESSED (stale stats)
   })
 })
