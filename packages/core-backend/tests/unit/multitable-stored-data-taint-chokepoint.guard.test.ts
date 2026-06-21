@@ -14,7 +14,7 @@
  *      one-line reason). This is a SOURCE-LEVEL allowlist of audited sink call sites.
  *
  *   2. Every taint resolver call (`resolveTaintedFormulaFieldIds`) outside the two chokepoint helpers
- *      and the two write-path recompute-skip sites is forbidden — the rule must flow through the
+ *      and the three write-path recompute-skip sites is forbidden — the rule must flow through the
  *      chokepoint, never be re-bolted onto a surface ad hoc (that is exactly how the prior rounds
  *      drifted). This is enforced whole-`src`: the resolver may be called ONLY from `univer-meta.ts`
  *      (where it is defined alongside the chokepoints); a call from any other file fails the test.
@@ -221,7 +221,7 @@ describe('§2a.3 stored-data taint chokepoint — durable structural guard', () 
 
   test('the taint resolver is only called from the two chokepoint helpers + the three write-path skips (no ad-hoc re-bolting)', () => {
     // resolveTaintedFormulaFieldIds(...) — the resolver may live ONLY in univer-meta.ts (alongside the
-    // chokepoints + the two write-path recompute-SKIP sites). Whole-`src` enforcement: a call from ANY
+    // chokepoints + the three write-path recompute-SKIP sites). Whole-`src` enforcement: a call from ANY
     // OTHER file is forbidden (that is exactly the ad-hoc re-bolting the chokepoint design forbids).
     const offFile = RUNTIME_FILES.filter((f) => f !== 'routes/univer-meta.ts').filter((f) =>
       /\bresolveTaintedFormulaFieldIds\s*\(/.test(read(f)),
@@ -230,7 +230,7 @@ describe('§2a.3 stored-data taint chokepoint — durable structural guard', () 
       offFile,
       `resolveTaintedFormulaFieldIds is called outside routes/univer-meta.ts:\n  - ${offFile.join('\n  - ')}\n` +
         'The taint resolver must flow through the read chokepoints (maskStoredRecordFieldIds, ' +
-        'resolveDisplayFieldTaint) or the two write-path recompute skips, all in univer-meta.ts. ' +
+        'resolveDisplayFieldTaint) or the three write-path recompute skips, all in univer-meta.ts. ' +
         'Do NOT re-bolt the resolver onto another surface — route through the chokepoint instead.',
     ).toEqual([])
     // Within univer-meta.ts: exclude the definition line. Every remaining call must live inside
