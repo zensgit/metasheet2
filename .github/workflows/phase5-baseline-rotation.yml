@@ -20,6 +20,7 @@ jobs:
       - name: Install deps
         run: |
           corepack enable
+          corepack prepare pnpm@10.16.1 --activate
           pnpm install --frozen-lockfile
 
       - name: Count consecutive PASS days
@@ -59,4 +60,3 @@ jobs:
           title: "Phase5: Baseline rotation (14-day PASS streak)"
           body: "Automated baseline rotation based on 14 consecutive PASS nightly validations."
           branch: chore/phase5-baseline-rotation
-

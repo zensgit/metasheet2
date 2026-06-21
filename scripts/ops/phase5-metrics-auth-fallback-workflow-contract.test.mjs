@@ -63,6 +63,15 @@ test('regression workflow limits nightly artifact PR contents', () => {
   assert.doesNotMatch(raw, /add-paths:[\s\S]*package\.json/)
 })
 
+test('baseline rotation workflow pins pnpm before installing dependencies', () => {
+  const raw = readWorkflow('.github/workflows/phase5-baseline-rotation.yml')
+
+  assert.match(raw, /node-version:\s+'18'/)
+  assert.match(raw, /corepack enable/)
+  assert.match(raw, /corepack prepare pnpm@10\.16\.1 --activate/)
+  assert.match(raw, /pnpm install --frozen-lockfile/)
+})
+
 test('attendance remote metrics reuses metrics scrape auth fallback', () => {
   const raw = readWorkflow('.github/workflows/attendance-remote-metrics-prod.yml')
 
