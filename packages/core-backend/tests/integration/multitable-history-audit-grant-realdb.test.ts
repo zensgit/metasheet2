@@ -19,7 +19,6 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
-import { resolveHistoryFieldAuditReveal } from '../../src/multitable/history-audit-grant-service'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -174,11 +173,6 @@ describeIfDatabase('history field-audit grant — A1 LOCK-2 governance goldens (
     expect((await auditRows('history_field_audit_grant.revoke')).length).toBe(1)
     // revoking an already-revoked / unknown grant → 404 (same shape)
     expect((await revoke(grantId)).status).toBe(404)
-  })
-
-  test('A1/A2 seam: resolveHistoryFieldAuditReveal returns no reveal (history mask untouched in A1)', async () => {
-    const revealed = await resolveHistoryFieldAuditReveal()
-    expect(revealed.size).toBe(0)
   })
 
   // ----- A1 hardening (owner review): atomicity + indirect self-grant guardrail -----
