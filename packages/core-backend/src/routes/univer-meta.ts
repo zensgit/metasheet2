@@ -1701,6 +1701,14 @@ async function validateFormulaReferences(
   fieldId: string,
   expression: string,
 ): Promise<string | null> {
+  // 1b Slice A: a relation-aggregation function (RELSUMIF) is SOLE-CALL only in this slice — composing it
+  // with other operators is a deferred follow-up. Reject the cliff fail-loud at SAVE (the recompute path
+  // also degrades it to #ERROR!, but rejecting here gives a clear authoring error instead of a stored cell
+  // error). A well-formed sole call passes through (extractFieldReferences only sees its {fld} criteria ref).
+  const bareExpr = expression.startsWith('=') ? expression.slice(1).trim() : expression.trim()
+  if (expressionHasRelationAggregationButNotSole(bareExpr)) {
+    return `关系聚合函数（如 RELSUMIF）当前仅支持作为整个公式单独使用，暂不支持与其它运算组合：{${fieldId}}`
+  }
   const refs = multitableFormulaEngine.extractFieldReferences(expression)
   if (refs.length === 0) return null
   if (refs.includes(fieldId)) {
