@@ -207,8 +207,11 @@ describeIfDatabase('W6 start_approval full HTTP approve -> same-process resume (
   })
 
   async function devToken(userId: string): Promise<string> {
+    // Least-privilege actor: a non-admin user whose ONLY permission is approvals:act
+    // (plus the DB grant in seedUsers). This makes the positive case exercise the specific
+    // approvals:act rbacGuard path rather than an admin/`*:*` bypass.
     const res = await realFetch(
-      `${base}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('approvals:act,approvals:write,approvals:read,*:*')}`,
+      `${base}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=user&perms=${encodeURIComponent('approvals:act')}`,
     )
     const body = (await res.json()) as { token?: string; data?: { token?: string } }
     const token = body.token ?? body.data?.token
