@@ -149,4 +149,19 @@ describeIfDatabase('multitable 1b Slice A — relation-scoped RELSUMIF (real DB)
   test('composition cliff: RELSUMIF composed with arithmetic is rejected fail-loud as #ERROR! (not silent-wrong)', async () => {
     expect(await readField(ALLOW, FLD_CLIFF)).toBe('#ERROR!')
   })
+
+  // A.2 — foreign-write fan-out (reverse-edge). Runs LAST: it mutates FR1's amount, which the earlier
+  // assertions (FLD_SUMIF=30) depend on staying at 10.
+  test('A.2 fan-out: editing a FOREIGN target record recomputes the source RELSUMIF via the reverse-edge', async () => {
+    const before = await readField(ALLOW, FLD_SUMIF)
+    expect(before).toBe(30) // FR1(10)+FR2(20), both paid
+    const cur = await q('SELECT version FROM meta_records WHERE id = $1', [FR1])
+    const res = await request(buildApp(ALLOW)).post('/api/multitable/patch').send({
+      sheetId: FS,
+      changes: [{ recordId: FR1, fieldId: FLD_AMT, value: 1000, expectedVersion: Number((cur.rows[0] as any)?.version ?? 1) }],
+    })
+    expect(res.status).toBe(200)
+    // the source record's RELSUMIF recomputed without touching the source record: 1000(FR1)+20(FR2) = 1020
+    expect(await readField(ALLOW, FLD_SUMIF)).toBe(1020)
+  })
 })
