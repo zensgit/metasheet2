@@ -1209,6 +1209,8 @@ const MAX_RELATION_SCAN_RECORDS = 1000
 // extension point for RELCOUNTIF/RELAVGIF (own goldens each).
 const RELATION_AGG_FUNCTIONS: Record<string, RollupAggregation> = {
   RELSUMIF: 'sum',
+  RELAVGIF: 'avg',
+  RELCOUNTIF: 'countall', // counts MATCHED linked records (no sum target — 4-arg form, see the parser)
 }
 
 type RelationAggregationCall = {
@@ -1256,12 +1258,31 @@ export function parseRelationAggregationCall(expression: string): RelationAggreg
   const aggregation = RELATION_AGG_FUNCTIONS[fnName]
   if (!aggregation) return null
   const args = splitTopLevelArgs(m[2])
-  if (!args || args.length !== 5) return null
-  const linkFieldId = unquoteStringArg(args[0])
-  const targetFieldId = unquoteStringArg(args[1])
-  const criteriaFieldId = unquoteStringArg(args[2])
-  const operator = unquoteStringArg(args[3])
-  const valueExpr = args[4]
+  if (!args) return null
+  // RELCOUNTIF counts MATCHED linked records — no sum target (4 args: link, criteria, op, value). The
+  // others sum/avg a foreign target (5 args: link, target, criteria, op, value). For COUNTIF, targetFieldId
+  // is set to the criteria field so the foreign-FIELD readability + taint gates (which key on targetFieldId)
+  // still cover the only foreign field it reads (and `countall` ignores the per-record value).
+  let linkFieldId: string | null
+  let targetFieldId: string | null
+  let criteriaFieldId: string | null
+  let operator: string | null
+  let valueExpr: string
+  if (fnName === 'RELCOUNTIF') {
+    if (args.length !== 4) return null
+    linkFieldId = unquoteStringArg(args[0])
+    criteriaFieldId = unquoteStringArg(args[1])
+    operator = unquoteStringArg(args[2])
+    valueExpr = args[3]
+    targetFieldId = criteriaFieldId
+  } else {
+    if (args.length !== 5) return null
+    linkFieldId = unquoteStringArg(args[0])
+    targetFieldId = unquoteStringArg(args[1])
+    criteriaFieldId = unquoteStringArg(args[2])
+    operator = unquoteStringArg(args[3])
+    valueExpr = args[4]
+  }
   if (!linkFieldId || !targetFieldId || !criteriaFieldId || !operator || valueExpr.length === 0) return null
   return { fnName, aggregation, linkFieldId, targetFieldId, criteria: { fieldId: criteriaFieldId, operator, valueExpr } }
 }
