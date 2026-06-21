@@ -9,7 +9,7 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
 export type ApprovalAssigneeType = 'user' | 'role'
-export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers'
+export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level'
 export type ApprovalMode = 'single' | 'all' | 'any'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
@@ -102,6 +102,14 @@ export type ApprovalAssigneeSource =
    * `levels` is validated `[1, MAX_MANAGER_CHAIN_LEVELS]` at normalize time.
    */
   | { kind: 'continuous_managers'; levels: number }
+  /**
+   * The requester's manager at a SINGLE chain level (`level` = 1 → direct manager,
+   * 2 → manager's manager, …), resolved from the baked `managerChainIds` snapshot.
+   * Authoring N approval nodes at levels 1..N composes sequential 逐级 approval
+   * (Reading B / B1) — no publish-time auto-expansion. `level` is validated
+   * `[1, MAX_MANAGER_CHAIN_LEVELS]` at normalize time.
+   */
+  | { kind: 'manager_at_level'; level: number }
 
 export interface ApprovalAssigneeResolutionMetadata {
   resolvedFrom: {

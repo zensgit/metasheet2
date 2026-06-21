@@ -1311,6 +1311,47 @@ describe('ApprovalProductService', () => {
     expect(pgState.pool.connect).not.toHaveBeenCalled()
   })
 
+  it('rejects manager_at_level with invalid level before hitting the database (no silent default)', async () => {
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService()
+
+    const requestWithLevel = (level: unknown) => ({
+      key: 'mal-bad',
+      name: 'MAL Bad',
+      visibilityScope: { type: 'all', ids: [] },
+      formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: 'Start', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            name: 'Level',
+            config: {
+              assigneeSources: [{ kind: 'manager_at_level', level }],
+              approvalMode: 'all',
+              emptyAssigneePolicy: 'error',
+            },
+          },
+          { key: 'end', type: 'end', name: 'End', config: {} },
+        ],
+        edges: [
+          { key: 'e1', source: 'start', target: 'approval_1' },
+          { key: 'e2', source: 'approval_1', target: 'end' },
+        ],
+      },
+    })
+
+    for (const badLevel of [0, 11, 1.5, undefined, 'two']) {
+      await expect(service.createTemplate(requestWithLevel(badLevel) as never)).rejects.toMatchObject({
+        message: 'approvalGraph.nodes[1].config.assigneeSources[0].level must be an integer between 1 and 10',
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+      })
+    }
+    expect(pgState.pool.connect).not.toHaveBeenCalled()
+  })
+
   it('rejects invalid visibility rules before hitting the database', async () => {
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
     const service = new ApprovalProductService()

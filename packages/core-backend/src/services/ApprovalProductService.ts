@@ -422,6 +422,15 @@ function normalizeApprovalAssigneeSources(
         }
         return { kind: 'continuous_managers', levels }
       }
+      case 'manager_at_level': {
+        // Deterministic validation — an out-of-range / non-integer / missing
+        // `level` is rejected, never silently defaulted (enum-strictness).
+        const level = source.level
+        if (typeof level !== 'number' || !Number.isInteger(level) || level < 1 || level > MAX_MANAGER_CHAIN_LEVELS) {
+          failValidation(context, `${sourcePath}.level must be an integer between 1 and ${MAX_MANAGER_CHAIN_LEVELS}`)
+        }
+        return { kind: 'manager_at_level', level }
+      }
       case 'form_field_user':
         if (!isNonEmptyString(source.fieldId)) {
           failValidation(context, `${sourcePath}.fieldId is required`)

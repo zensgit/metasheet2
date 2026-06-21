@@ -481,6 +481,22 @@ describe('approval template authoring helpers', () => {
     expect(rehydrated.steps[0].levels).toBe(3)
   })
 
+  it('round-trips a manager_at_level source incl. level (save emits {kind, level}; level survives the real wire)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'mal'
+    draft.name = '逐级上级审批'
+    draft.steps[0].sourceKind = 'manager_at_level'
+    draft.steps[0].level = 2
+
+    const payload = buildCreateTemplatePayload(draft)
+    expect((payload.approvalGraph.nodes[1]?.config as any).assigneeSources).toEqual([{ kind: 'manager_at_level', level: 2 }])
+
+    // wire-vs-fixture trap: assert `level` survives the real serialize→parse, not a hand-built chip.
+    const rehydrated = draftFromTemplate(buildTemplate({ approvalGraph: payload.approvalGraph }))
+    expect(rehydrated.steps[0].sourceKind).toBe('manager_at_level')
+    expect(rehydrated.steps[0].level).toBe(2)
+  })
+
   // Lane E — self-approver authoring (autoApprovalPolicy.mergeWithRequester).
   function buildAutoApprovalTemplate(
     policy: AutoApprovalPolicy,
