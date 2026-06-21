@@ -73,6 +73,13 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
 import {
+  HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
+  HistoryAuditGrantError,
+  issueHistoryAuditGrant,
+  revokeHistoryAuditGrant,
+  listHistoryAuditGrants,
+} from '../multitable/history-audit-grant-service'
+import {
   loadFieldsForSheet as loadFieldsForSheetShared,
   loadSheetRow as loadSheetRowShared,
   tryResolveView as tryResolveViewShared,
@@ -6583,6 +6590,118 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] list record history failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record history' } })
+    }
+  })
+
+  // ---------------------------------------------------------------------------
+  // History Field-Audit Permission — A1 grant management (issue / list / revoke).
+  // Design-lock: docs/development/multitable-history-field-audit-permission-design-lock-20260620.md (#2973).
+  // LOCK-2: the SOLE authority is the standalone platform capability; base-admin / multitable:admin / a coarse
+  // 'admin' role can NOT issue (NO isAdminRole bypass). A1 does NOT wire any reveal into the history mask.
+  // ---------------------------------------------------------------------------
+  async function requireHistoryAuditGrantAuthority(
+    req: Request,
+    res: Response,
+  ): Promise<Awaited<ReturnType<typeof resolveRequestAccess>> | null> {
+    const access = await resolveRequestAccess(req)
+    if (!access.userId) {
+      res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      return null
+    }
+    // LOCK-2: the capability is the only key. NO isAdminRole / multitable:admin bypass — else every base/space
+    // admin could self-serve restricted-field history, which is exactly the anti-goal of a separate permission.
+    if (!access.permissions.includes(HISTORY_FIELD_AUDIT_GRANT_PERMISSION)) {
+      sendForbidden(res)
+      return null
+    }
+    return access
+  }
+
+  router.post('/bases/:baseId/history-audit-grants', async (req: Request, res: Response) => {
+    try {
+      const access = await requireHistoryAuditGrantAuthority(req, res)
+      if (!access) return
+      const pool = poolManager.get()
+      const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
+      if (!baseId) return res.status(400).json({ ok: false, error: { code: 'BAD_REQUEST', message: 'baseId required' } })
+      const schema = z.object({
+        subjectType: z.enum(['user', 'role', 'member-group']),
+        subjectId: z.string().min(1),
+        reason: z.string().max(2000).optional(),
+        ticket: z.string().max(200).optional(),
+        expiresAt: z.string().optional(),
+        standing: z.boolean().optional(),
+      })
+      const parsed = schema.safeParse(req.body)
+      if (!parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid grant body' } })
+      const { subjectType, subjectId } = parsed.data
+      const baseCheck = await pool.query('SELECT id FROM meta_bases WHERE id = $1', [baseId])
+      if (baseCheck.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Base not found: ${baseId}` } })
+      // Subject must exist — mirror the field_permissions route's subject validation.
+      if (subjectType === 'user') {
+        const u = await pool.query('SELECT id FROM users WHERE id = $1', [subjectId])
+        if (u.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `User not found: ${subjectId}` } })
+      } else if (subjectType === 'role') {
+        const r = await pool.query('SELECT id FROM roles WHERE id = $1', [subjectId])
+        if (r.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Role not found: ${subjectId}` } })
+      } else {
+        const g = await pool.query('SELECT id FROM platform_member_groups WHERE id::text = $1', [subjectId])
+        if (g.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Member group not found: ${subjectId}` } })
+      }
+      const grant = await issueHistoryAuditGrant(
+        pool.query.bind(pool),
+        { baseId, subjectType, subjectId, reason: parsed.data.reason, ticket: parsed.data.ticket, expiresAt: parsed.data.expiresAt, standing: parsed.data.standing },
+        access.userId,
+        Date.now(),
+      )
+      return res.status(201).json({ ok: true, data: grant })
+    } catch (err) {
+      if (err instanceof HistoryAuditGrantError) {
+        return res.status(err.code === 'SELF_GRANT' ? 403 : 400).json({ ok: false, error: { code: err.code, message: err.message } })
+      }
+      if (err && typeof err === 'object' && 'code' in err && (err as { code?: string }).code === '23505') {
+        return res.status(409).json({ ok: false, error: { code: 'GRANT_EXISTS', message: 'An active grant already exists for this subject on this base' } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] issue history-audit grant failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to issue grant' } })
+    }
+  })
+
+  router.get('/bases/:baseId/history-audit-grants', async (req: Request, res: Response) => {
+    try {
+      const access = await requireHistoryAuditGrantAuthority(req, res)
+      if (!access) return
+      const pool = poolManager.get()
+      const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
+      if (!baseId) return res.status(400).json({ ok: false, error: { code: 'BAD_REQUEST', message: 'baseId required' } })
+      const grants = await listHistoryAuditGrants(pool.query.bind(pool), baseId)
+      return res.json({ ok: true, data: { grants } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list history-audit grants failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to list grants' } })
+    }
+  })
+
+  router.delete('/bases/:baseId/history-audit-grants/:grantId', async (req: Request, res: Response) => {
+    try {
+      const access = await requireHistoryAuditGrantAuthority(req, res)
+      if (!access) return
+      const pool = poolManager.get()
+      const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
+      const grantId = typeof req.params.grantId === 'string' ? req.params.grantId.trim() : ''
+      if (!baseId || !grantId) return res.status(400).json({ ok: false, error: { code: 'BAD_REQUEST', message: 'baseId and grantId required' } })
+      const revoked = await revokeHistoryAuditGrant(pool.query.bind(pool), baseId, grantId, access.userId)
+      if (!revoked) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Active grant not found' } })
+      return res.json({ ok: true, data: { revoked: true } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] revoke history-audit grant failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to revoke grant' } })
     }
   })
 
