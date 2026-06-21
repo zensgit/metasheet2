@@ -19,6 +19,7 @@ describe('parseRelationAggregationCall — sole-call grammar', () => {
     const c = parseRelationAggregationCall('RELSUMIF("fld_link", "fld_amt", "fld_status", "is", "paid")')
     expect(c).toEqual({
       fnName: 'RELSUMIF',
+      kind: 'aggregation',
       aggregation: 'sum',
       linkFieldId: 'fld_link',
       targetFieldId: 'fld_amt',
@@ -55,16 +56,24 @@ describe('parseRelationAggregationCall — sole-call grammar', () => {
 
   it('A.3 — parses RELAVGIF (avg) with the same 5-arg signature as RELSUMIF', () => {
     expect(parseRelationAggregationCall('RELAVGIF("fld_link","fld_amt","fld_status","is","paid")')).toEqual({
-      fnName: 'RELAVGIF', aggregation: 'avg', linkFieldId: 'fld_link', targetFieldId: 'fld_amt',
+      fnName: 'RELAVGIF', kind: 'aggregation', aggregation: 'avg', linkFieldId: 'fld_link', targetFieldId: 'fld_amt',
       criteria: { fieldId: 'fld_status', operator: 'is', valueExpr: '"paid"' },
     })
   })
 
   it('A.3 — parses RELCOUNTIF (countall, 4-arg, no sum target → targetFieldId = criteria for the readability gate)', () => {
     expect(parseRelationAggregationCall('RELCOUNTIF("fld_link","fld_status","is","paid")')).toEqual({
-      fnName: 'RELCOUNTIF', aggregation: 'countall', linkFieldId: 'fld_link', targetFieldId: 'fld_status',
+      fnName: 'RELCOUNTIF', kind: 'aggregation', aggregation: 'countall', linkFieldId: 'fld_link', targetFieldId: 'fld_status',
       criteria: { fieldId: 'fld_status', operator: 'is', valueExpr: '"paid"' },
     })
+  })
+
+  it('B — parses RELLOOKUP (kind=lookup, 5-arg: link, returnField→target, matchField→criteria, op, value)', () => {
+    expect(parseRelationAggregationCall('RELLOOKUP("fld_link","fld_name","fld_status","is","paid")')).toEqual({
+      fnName: 'RELLOOKUP', kind: 'lookup', aggregation: null, linkFieldId: 'fld_link', targetFieldId: 'fld_name',
+      criteria: { fieldId: 'fld_status', operator: 'is', valueExpr: '"paid"' },
+    })
+    expect(parseRelationAggregationCall('RELLOOKUP("a","b","c","is")')).toBeNull() // 4 args → null (lookup is 5-arg)
   })
 
   it('A.3 — per-function arity: RELCOUNTIF needs 4 (5→null); RELAVGIF/RELSUMIF need 5 (4→null)', () => {
