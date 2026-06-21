@@ -7,7 +7,7 @@
       <button v-if="canDelete" class="meta-grid__bulk-btn meta-grid__bulk-btn--danger" :aria-label="l('grid.deleteSelectedAria')" @click="onBulkDelete">{{ l('grid.deleteSelected') }}</button>
       <button class="meta-grid__bulk-btn" :aria-label="l('grid.clearSelection')" @click="selectedIds = new Set(); emit('selection-change', [])">{{ l('grid.clear') }}</button>
     </div>
-    <div class="meta-grid__table-wrap">
+    <div ref="tableWrap" class="meta-grid__table-wrap">
       <table class="meta-grid__table">
         <thead>
           <tr>
@@ -158,7 +158,12 @@
           </tr>
         </tbody>
         <tbody v-else>
-          <template v-for="(row, ri) in filteredRows" :key="row.id">
+          <!-- A1 virtualization top spacer: reserves the height of rows scrolled above the window so the
+               scrollbar + row positions match a fully-rendered table. Height 0 → effectively absent. -->
+          <tr v-if="topSpacerHeight > 0" class="meta-grid__spacer" aria-hidden="true" data-test="grid-top-spacer">
+            <td :colspan="colSpan" :style="{ height: `${topSpacerHeight}px`, padding: '0', border: 'none' }"></td>
+          </tr>
+          <template v-for="{ row, index: ri } in windowRows" :key="row.id">
             <tr
               role="row"
               :aria-selected="row.id === selectedRecordId || undefined"
@@ -283,6 +288,10 @@
               </td>
             </tr>
           </template>
+          <!-- A1 virtualization bottom spacer: reserves the height of rows scrolled below the window. -->
+          <tr v-if="bottomSpacerHeight > 0" class="meta-grid__spacer" aria-hidden="true" data-test="grid-bottom-spacer">
+            <td :colspan="colSpan" :style="{ height: `${bottomSpacerHeight}px`, padding: '0', border: 'none' }"></td>
+          </tr>
           <tr v-if="!filteredRows.length && !loading">
             <td :colspan="colSpan" class="meta-grid__empty">
               <template v-if="searchText">
@@ -349,7 +358,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
@@ -551,6 +560,138 @@ const allSelected = computed(() =>
 // Server-side search replaces client-side filtering.
 // filteredRows now passes through rows directly (search is handled by the API).
 const filteredRows = computed(() => props.rows)
+
+// ── A1: row virtualization (windowing) for the FLAT body path ──────────────────────────────
+// RENDER-ONLY: we still receive the exact same (already masked/paged) `props.rows`; we just mount a
+// visible window of <tr>s plus two spacer rows so the DOM node count stays bounded as the row set
+// grows past current paging. No data-loading / masking / permission path is touched.
+//
+// Scope (v1): only the flat (ungrouped, no-expanded-row) path is windowed. The grouped path renders
+// interleaved header/subtotal rows of non-uniform height (see groupRenderItems) so uniform spacer math
+// doesn't apply; and an open expand-row is taller than a data row. In both cases we fall back to
+// full render — preserving exact current behavior — and document it as an intentional v1 limitation.
+//
+// jsdom note: clientHeight/scrollTop are 0 under test (no layout). We default the viewport to a sane
+// height so the INITIAL render is already windowed, and read scrollTop off the wrap ref on scroll.
+const tableWrap = ref<HTMLElement | null>(null)
+const scrollTop = ref(0)
+const viewportHeight = ref(0)
+const measuredRowHeight = ref(0)
+// Overscan rows above/below the viewport so fast scroll / keyboard nav never reveals a blank gap.
+const OVERSCAN_ROWS = 8
+// Below this many rows the common case renders identically (no spacer rows) — small datasets are
+// untouched, matching the "no regression for the common case" requirement.
+const VIRTUALIZE_MIN_ROWS = 60
+const DEFAULT_VIEWPORT_HEIGHT = 600
+
+// Fallback row height by density, matching the CSS contain-intrinsic-size (28 / 36 / 52). An onMounted
+// first-row measure overrides this with the real rendered height when layout is available.
+function densityRowHeight(): number {
+  if (props.rowDensity === 'compact') return 28
+  if (props.rowDensity === 'expanded') return 52
+  return 36
+}
+const rowHeightPx = computed(() => (measuredRowHeight.value > 0 ? measuredRowHeight.value : densityRowHeight()))
+
+// While printing we render EVERY row (a windowed table would print only ~20 rows). beforeprint flips
+// this and afterprint restores it (the print itself reads the synchronously-rendered DOM).
+const printing = ref(false)
+
+// Windowing is active only on the flat path, with no expanded rows, and once the set is large enough to
+// matter. Otherwise the template renders every row exactly as before.
+const flatWindowEnabled = computed(() =>
+  !printing.value
+  && !groupedRows.value
+  && expandedRowIds.value.size === 0
+  && filteredRows.value.length > VIRTUALIZE_MIN_ROWS,
+)
+
+const effectiveViewportHeight = computed(() => (viewportHeight.value > 0 ? viewportHeight.value : DEFAULT_VIEWPORT_HEIGHT))
+
+// First row index to render (clamped, minus overscan). Also clamped against the row count so a stale
+// scrollTop after the set shrinks (search/filter, short last page) can't push the window past the end
+// and blank the grid behind a giant top spacer.
+const windowStart = computed(() => {
+  if (!flatWindowEnabled.value) return 0
+  const total = filteredRows.value.length
+  const visibleCount = Math.ceil(effectiveViewportHeight.value / rowHeightPx.value)
+  const maxStart = Math.max(0, total - visibleCount - OVERSCAN_ROWS)
+  const raw = Math.floor(scrollTop.value / rowHeightPx.value) - OVERSCAN_ROWS
+  return Math.min(maxStart, Math.max(0, raw))
+})
+// One-past-last row index to render (clamped, plus overscan).
+const windowEnd = computed(() => {
+  const total = filteredRows.value.length
+  if (!flatWindowEnabled.value) return total
+  const visibleCount = Math.ceil(effectiveViewportHeight.value / rowHeightPx.value)
+  return Math.min(total, windowStart.value + visibleCount + OVERSCAN_ROWS * 2)
+})
+// The rows actually mounted. Carries each row's ABSOLUTE index so row-number / focus / selection /
+// keyboard-nav all keep using the real index (window-local `ri` would desync them — the keystone bug).
+const windowRows = computed<Array<{ row: MetaRecord; index: number }>>(() => {
+  const rowsArr = filteredRows.value
+  if (!flatWindowEnabled.value) return rowsArr.map((row, index) => ({ row, index }))
+  const out: Array<{ row: MetaRecord; index: number }> = []
+  for (let i = windowStart.value; i < windowEnd.value; i++) out.push({ row: rowsArr[i], index: i })
+  return out
+})
+// Spacer heights reserve the off-screen rows' vertical space so the scrollbar + scroll position match a
+// fully-rendered table. zero when windowing is off (no spacer rows are emitted then).
+const topSpacerHeight = computed(() => (flatWindowEnabled.value ? windowStart.value * rowHeightPx.value : 0))
+const bottomSpacerHeight = computed(() =>
+  flatWindowEnabled.value ? (filteredRows.value.length - windowEnd.value) * rowHeightPx.value : 0,
+)
+
+function onTableScroll() {
+  if (!tableWrap.value) return
+  scrollTop.value = tableWrap.value.scrollTop
+}
+function measureViewport() {
+  if (!tableWrap.value) return
+  const h = tableWrap.value.clientHeight
+  if (h > 0) viewportHeight.value = h
+  // First data row height (real layout) overrides the density fallback when available.
+  const firstRow = tableWrap.value.querySelector<HTMLElement>('tbody tr.meta-grid__row')
+  const rh = firstRow?.offsetHeight ?? 0
+  if (rh > 0) measuredRowHeight.value = rh
+}
+// Keep the focused row inside the mounted window during keyboard navigation so arrow-keys never land on
+// an un-rendered row. No-op when windowing is off or no row is focused.
+function scrollFocusedRowIntoWindow() {
+  if (!flatWindowEnabled.value || !tableWrap.value || focusRow.value < 0) return
+  const rowTop = focusRow.value * rowHeightPx.value
+  const rowBottom = rowTop + rowHeightPx.value
+  const viewTop = tableWrap.value.scrollTop
+  const viewBottom = viewTop + effectiveViewportHeight.value
+  let next = viewTop
+  if (rowTop < viewTop) next = rowTop
+  else if (rowBottom > viewBottom) next = rowBottom - effectiveViewportHeight.value
+  if (next !== viewTop) {
+    tableWrap.value.scrollTop = next
+    scrollTop.value = next
+  }
+}
+
+function onBeforePrint() { printing.value = true }
+function onAfterPrint() { printing.value = false }
+
+onMounted(() => {
+  measureViewport()
+  tableWrap.value?.addEventListener('scroll', onTableScroll, { passive: true })
+  window.addEventListener('resize', measureViewport)
+  window.addEventListener('beforeprint', onBeforePrint)
+  window.addEventListener('afterprint', onAfterPrint)
+})
+onBeforeUnmount(() => {
+  tableWrap.value?.removeEventListener('scroll', onTableScroll)
+  window.removeEventListener('resize', measureViewport)
+  window.removeEventListener('beforeprint', onBeforePrint)
+  window.removeEventListener('afterprint', onAfterPrint)
+})
+// Re-measure when the row set or density changes (e.g. page load swaps the rows / new first-row height).
+watch([() => props.rows, () => props.rowDensity], () => {
+  nextTick(measureViewport)
+})
 
 // --- GroupBy (nested / multi-level) ---
 // Collapse state is CONTROLLED by the parent (persisted in view.config). collapsedGroups derives a Set
@@ -1040,6 +1181,11 @@ function onKeydown(e: KeyboardEvent) {
       if (focusRow.value >= 0 && focusCol.value >= 0) { const r = navRows[focusRow.value]; const f = props.visibleFields[focusCol.value]; if (r && f) startEdit(r, f) }
       break
     case 'Escape': e.preventDefault(); focusRow.value = -1; focusCol.value = -1; break
+  }
+  // A1: after a vertical move, keep the focused row inside the rendered window so arrow-keys never land
+  // on an un-mounted row (no-op when windowing is off / no focus).
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === 'Tab') {
+    scrollFocusedRowIntoWindow()
   }
 }
 </script>
