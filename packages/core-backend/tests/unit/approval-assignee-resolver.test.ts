@@ -155,6 +155,17 @@ describe('ApprovalAssigneeResolver', () => {
     expect(resolveManagerAtLevel(2, { id: 'requester-1', managerChainIds: ['requester-1', 'm2'] })).toEqual([malEntry('m2')])
   })
 
+  // Density-contract pin: the production snapshot is DENSE (resolveManagerChain in
+  // ApprovalDirectoryOrg pushes only linked, non-self ids — it walks THROUGH unlinked
+  // rungs), so positional chain[level-1] = the level-th linked manager. This pins the
+  // defensive behavior if a null/'' rung ever reached the resolver: that level resolves
+  // empty (positional, no compaction), and a later dense level is unaffected.
+  it('manager_at_level treats a null/empty rung positionally (dense-snapshot contract)', () => {
+    expect(resolveManagerAtLevel(2, { id: 'requester-1', managerChainIds: ['m1', null as never, 'm3'] })).toEqual([])
+    expect(resolveManagerAtLevel(1, { id: 'requester-1', managerChainIds: ['m1', null as never, 'm3'] })).toEqual([malEntry('m1')])
+    expect(resolveManagerAtLevel(3, { id: 'requester-1', managerChainIds: ['m1', null as never, 'm3'] })).toEqual([malEntry('m3')])
+  })
+
   it('resolves requester and static sources with source metadata', () => {
     expect(resolve({
       assigneeSources: [

@@ -170,6 +170,12 @@ export function resolveApprovalAssignees(
         // snapshot. Self-exclusion drops a hop resolving to the requester; an empty
         // result (chain shorter than `level`) falls through to emptyAssigneePolicy.
         // Authoring N nodes at levels 1..N composes sequential 逐级 approval (B1).
+        // managerChainIds is DENSE — resolveManagerChain (ApprovalDirectoryOrg) walks
+        // THROUGH unlinked/self rungs at snapshot-build (pushes only linked, non-self
+        // ids), so chain[level-1] is the level-th *linked* manager. The design's
+        // "positional pick" and "skip-unlinked walk" reconcile here: the walk already
+        // happened at build. A null rung (defensive, never produced by the builder)
+        // resolves that level to empty via normalizeId — positional, no compaction.
         const requesterId = normalizeId(options.requesterSnapshot?.id)
         const rawChain = options.requesterSnapshot?.managerChainIds
         const chain = Array.isArray(rawChain) ? rawChain : []
