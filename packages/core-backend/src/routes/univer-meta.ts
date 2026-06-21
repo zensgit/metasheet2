@@ -3409,7 +3409,11 @@ async function computeDependentLookupRollupRecords(
     if (!allowedFieldIds) continue
     const fields = fieldsBySheet.get(sheetId) ?? []
     if (fields.length === 0) continue
-    const hasComputed = fields.some((f) => f.type === 'lookup' || f.type === 'rollup')
+    // A.2: a relation-aggregation formula (RELSUMIF) is a DIRECT-foreign dependent (no lookup/rollup
+    // intermediary), so a related sheet whose only foreign dependents are relation-agg formulas must NOT be
+    // skipped here — otherwise its RELSUMIF never fans out on a foreign target/criteria edit.
+    const hasRelationAgg = fields.some((f) => f.type === 'formula' && parseRelationAggregationCall(formulaExpressionOf(f) ?? '') !== null)
+    const hasComputed = fields.some((f) => f.type === 'lookup' || f.type === 'rollup') || hasRelationAgg
     if (!hasComputed) continue
 
     const relationalLinkFields = fields
