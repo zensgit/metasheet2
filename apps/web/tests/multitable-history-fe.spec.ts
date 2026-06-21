@@ -25,7 +25,7 @@ type FakeClient = Parameters<typeof useHistoryCenter>[0]
 type Spied = { listHistoryEvents: ReturnType<typeof vi.fn>; getHistoryBatch: ReturnType<typeof vi.fn> }
 function fakeClient(over: Partial<Spied> = {}): FakeClient {
   return {
-    listHistoryEvents: over.listHistoryEvents ?? vi.fn().mockResolvedValue({ batches: [batch('b1', 2), batch('b2')], total: 2, nextCursor: null }),
+    listHistoryEvents: over.listHistoryEvents ?? vi.fn().mockResolvedValue({ batches: [batch('b1', 2), batch('b2')], total: 2, nextCursor: null, searchTruncated: false }),
     getHistoryBatch: over.getHistoryBatch ?? vi.fn().mockResolvedValue(detailOf('b1')),
   } as FakeClient
 }
@@ -63,6 +63,14 @@ describe('useHistoryCenter — read-only history center', () => {
     expect(batches.value.map((b) => b.batchId)).toEqual(['b1', 'b2']) // appended, not replaced
     expect(nextCursor.value).toBeNull() // exhausted
     expect(calls.mock.calls[1][1]).toMatchObject({ cursor: 'cur1', q: 'x' }) // forwards cursor + reuses filters
+  })
+
+  it('T2b surfaces searchTruncated from the response (so the UI can warn of incomplete results)', async () => {
+    const c = fakeClient({ listHistoryEvents: vi.fn().mockResolvedValue({ batches: [batch('b1')], total: 1, nextCursor: null, searchTruncated: true }) })
+    const { searchTruncated, load } = useHistoryCenter(c)
+    expect(searchTruncated.value).toBe(false)
+    await load('base1', { search: 'x' })
+    expect(searchTruncated.value).toBe(true)
   })
 
   it('T2b loadMore is a no-op when there is no nextCursor', async () => {

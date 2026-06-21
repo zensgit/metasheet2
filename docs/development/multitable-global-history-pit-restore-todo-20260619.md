@@ -84,11 +84,11 @@ Scope — T2a (SHIPPED, #2961):
 - expandable per-batch detail (the T3 drilldown);
 - empty, loading, error states.
 
-Scope — T2b (FOLLOW-UP, read-only, NOT yet built — each a small slice, not gated):
+Scope — T2b (read-only, in the MVP envelope, not gated) — **ALL SHIPPED 2026-06-21**:
 
-- ~~time-range (from/to) + sheet + field filters in the FE~~ — **SHIPPED 2026-06-21**: from/to date inputs + sheet-scope toggle (FE-wired the backend's existing params) + a `fieldId` filter (new backend param, applied POST-mask so it's leak-free: a field the actor can't read is never in `visibleFields`, so filtering by it returns no batch);
-- search by visible record title / data — FOLLOW-UP (needs a new backend data-search param; search must only hit records/fields the actor can read — LOCK-3 boundary);
-- cursor pagination — FOLLOW-UP (the current backend is `offset`/`limit`; a cursor needs a new backend param + must keep the LOCK-3 "total is post-filter" semantics).
+- ~~time-range (from/to) + sheet + field filters~~ — **SHIPPED (#2988)**: from/to date inputs + sheet-scope toggle + a `fieldId` filter applied POST-mask so it's leak-free (a field the actor can't read is never in `visibleFields`);
+- ~~search by visible record title / data~~ — **SHIPPED (#2989)**: post-mask snapshot value-search (revision-snapshot ∩ `visibleFields`), leak-free on both axes (row-deny skip + field mask). Bounded by a 20000 candidate-row cap; when hit, the API returns `searchTruncated: true` and the UI warns — NOT silent;
+- ~~cursor pagination~~ — **SHIPPED (#2990)**: a stable key-cursor over the post-filter set sorted on (createdAt DESC, batchId DESC); `total` stays exact post-filter (and post-search). Buys reachability + stability, not lower DB load (SQL-level efficiency that drops the exact total = deferred).
 
 Out of scope:
 
