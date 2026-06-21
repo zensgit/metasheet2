@@ -323,6 +323,20 @@ function firstFieldError(fieldErrors?: Record<string, string>): string | null {
   return first ?? null
 }
 
+// Extract the download filename from a Content-Disposition header (handles both `filename="x.csv"` and
+// RFC-5987 `filename*=UTF-8''x.csv`). Falls back to a generic name so the download always has one.
+function parseContentDispositionFilename(header: string | null): string {
+  if (header) {
+    const star = header.match(/filename\*=(?:UTF-8'')?([^;]+)/i)
+    if (star?.[1]) {
+      try { return decodeURIComponent(star[1].trim().replace(/^["']|["']$/g, '')) } catch { /* fall through */ }
+    }
+    const plain = header.match(/filename="?([^";]+)"?/i)
+    if (plain?.[1]) return plain[1].trim()
+  }
+  return 'export'
+}
+
 type RawComment = Partial<MultitableComment> & {
   spreadsheetId?: string
   rowId?: string
@@ -1344,6 +1358,47 @@ export class MultitableApiClient {
     const query = qs({ ...(rest as Record<string, string | undefined>), statsFields: statsFields && statsFields.length ? statsFields.join(',') : undefined })
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/view-aggregate${query}`)
     return this.parseJson(res)
+  }
+
+  // Full-sheet export (the mask-preserving backend route). The server applies the SAME field_permissions +
+  // view-hidden + §2a.3 formula-taint masking as the grid read, AFTER the `fieldIds` selection (which can
+  // only NARROW within the permitted set, never widen), then cursor-paginates the WHOLE sheet up to the
+  // server's row cap. This is why "all rows" goes here instead of serializing the 50-row client page:
+  // the client only holds one masked page; the server holds the full masked sheet. Returns the binary blob
+  // + the server's suggested filename (Content-Disposition). On a non-2xx (e.g. 400 when the column
+  // selection resolves to zero exportable columns) it throws a MultitableApiError so the caller can toast
+  // the server message rather than downloading an error body.
+  async exportSheet(params: {
+    sheetId: string
+    viewId?: string
+    fieldIds?: string[]
+    format: 'csv' | 'xlsx'
+  }): Promise<{ blob: Blob; filename: string }> {
+    const query = qs({
+      viewId: params.viewId,
+      // The route accepts the comma-joined form (?fieldIds=a,b); join here. An empty/absent selection
+      // means "all permitted columns" server-side — never send an empty fieldIds (that would be a 400).
+      fieldIds: params.fieldIds && params.fieldIds.length ? params.fieldIds.join(',') : undefined,
+      format: params.format,
+    })
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(params.sheetId)}/export-xlsx${query}`)
+    if (!res.ok) {
+      // Reuse the shared error normalization (same shape parseJson throws) so the caller sees the
+      // server's VALIDATION_ERROR / FORBIDDEN message + code, not a generic "failed to fetch".
+      const isZh = this.resolveIsZh()
+      const raw = await res.text()
+      const payload = normalizeApiErrorPayload(raw ? safeParseJson(raw) : null, isZh)
+      const error = new Error(firstFieldError(payload.fieldErrors) ?? payload.message ?? apiDefaultErrorMessage(payload.code, res.status, isZh)) as Error & {
+        status?: number
+        code?: string
+      }
+      error.name = 'MultitableApiError'
+      error.status = res.status
+      error.code = payload.code
+      throw error
+    }
+    const blob = await res.blob()
+    return { blob, filename: parseContentDispositionFilename(res.headers.get('Content-Disposition')) }
   }
 
   // Formula dry-run (#5b): evaluate an UNSAVED expression against caller-supplied sample values.

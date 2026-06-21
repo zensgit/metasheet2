@@ -71,7 +71,15 @@ const GOLDEN: Record<string, Partial<Record<(typeof EGRESS_HELPERS)[number], num
     // so a hidden link can neither match a value op nor leak its display. Locking test:
     // tests/integration/multitable-filter-by-link-view.test.ts (denied-link non-leak + isEmpty
     // permission-invariant + admin-bypass/flag-OFF canaries).
-    buildLinkSummaries: 6,
+    // 7 = +1 for the view-filtered EXPORT (export-xlsx, view row-filter parity): when a filtered view's
+    // filter references a LINK field, export-xlsx materializes the same permission-filtered display set to
+    // evaluate evaluateLinkFilterCondition over the loaded rows, then DISCARDS it (it is never serialized —
+    // the export cells come from the single filterRecordDataByFieldIds(record.data, fieldIds) projection,
+    // which never includes a link cell's display). Identical filter-internal/discarded pattern as GET /view,
+    // so it adds no NEW wire-egress channel; the denied-link non-leak is already locked by
+    // multitable-filter-by-link-view.test.ts, and the export parity case is in
+    // tests/integration/multitable-export-allrows-maskroute-realdb.test.ts.
+    buildLinkSummaries: 7,
     serializeLinkSummaryMap: 1,
     // 3 = linkSummaries + attachmentSummaries + native person (人员) personSummaries (design
     // 2026-06-16). The personSummaries egress is routed through the SAME layer-2 ∧ layer-3

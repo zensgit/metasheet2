@@ -4388,8 +4388,43 @@ function parseJsonFormField(value: unknown, fieldName: string): unknown {
 }
 
 function buildXlsxAttachmentFilename(sheetName: string): string {
+  return buildExportAttachmentFilename(sheetName, 'xlsx')
+}
+
+// Shared attachment-filename builder for the export route (xlsx + csv share the same sanitization).
+function buildExportAttachmentFilename(sheetName: string, extension: 'xlsx' | 'csv'): string {
   const base = sheetName.replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '') || 'multitable'
-  return `${base}.xlsx`
+  return `${base}.${extension}`
+}
+
+// Parse the optional ?format= query param for the export route. Default 'xlsx' (back-compat). 'csv' is the
+// only other accepted value; anything else is an explicit 400 (no silent fallback — a typo'd format must
+// not silently downgrade to xlsx). Returned as a discriminated result so the caller emits a VALIDATION_ERROR.
+function parseExportFormat(value: unknown):
+  | { ok: true; format: 'xlsx' | 'csv' }
+  | { ok: false; message: string } {
+  const raw = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (raw === '' || raw === 'xlsx') return { ok: true, format: 'xlsx' }
+  if (raw === 'csv') return { ok: true, format: 'csv' }
+  return { ok: false, message: `Unsupported export format: ${raw} (expected 'xlsx' or 'csv')` }
+}
+
+// Serialize the already-MASKED header + cell matrix as CSV (RFC-4180-ish). The `rows` cells are the
+// serializeXlsxCell projection (string | number | boolean | null | undefined), so this only stringifies +
+// quotes — it adds NO data access and inherits the same field/view/§2a.3-taint mask applied upstream.
+function buildExportCsv(
+  headers: string[],
+  rows: Array<Array<string | number | boolean | null | undefined>>,
+): string {
+  const escape = (value: string | number | boolean | null | undefined): string => {
+    if (value === null || value === undefined) return ''
+    const s = typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value)
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  const lines = [headers.map(escape).join(',')]
+  for (const row of rows) lines.push(row.map(escape).join(','))
+  // CRLF line endings = the CSV de-facto standard (Excel-friendly).
+  return lines.join('\r\n')
 }
 
 async function loadDashboardSourceRows(args: {
@@ -9577,6 +9612,17 @@ export function univerMetaRouter(): Router {
     // hint only; it is intersected with the permitted/masked field set below and can ONLY narrow,
     // never widen — a denied/masked/tainted id requested here stays excluded.
     const requestedFieldIds = parseFieldIdSelection(req.query.fieldIds)
+    // Output format. Default 'xlsx' (unchanged behavior). 'csv' emits the SAME masked + cursor-paginated
+    // FULL-SHEET record set, only re-serialized as CSV — every field/view/§2a.3-taint mask below runs
+    // BEFORE the format branch (the `fields`/`fieldIds`/`rows` pipeline is format-agnostic), so CSV
+    // inherits the identical enforcement with no separate masking path. Unknown values 400 (no silent
+    // fallback — the enum-strictness convention; a typo'd format must not silently downgrade to xlsx).
+    const formatResult = parseExportFormat(req.query.format)
+    if (formatResult.ok === false) {
+      const message = formatResult.message
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message } })
+    }
+    const format = formatResult.format
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     }
@@ -9588,8 +9634,14 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
       let viewHiddenFieldIds: string[] = []
+      // Capture the resolved view so the export can apply its ROW filter + sort (not only the
+      // hidden-field mask). #3003 wired "all rows" to this route but exported the WHOLE sheet — it read
+      // view.hiddenFieldIds and ignored view.filterInfo / view.sortInfo, so a filtered view still
+      // exported every row. parity fix: export ALL rows OF THE VIEW'S FILTER (the full filtered set,
+      // not a page, not the unfiltered sheet), in the view's sort order.
+      let view: SharedMultitableViewConfig | null = null
       if (viewId) {
-        const view = await tryResolveViewShared(pool.query.bind(pool), viewId)
+        view = await tryResolveViewShared(pool.query.bind(pool), viewId)
         if (!view || view.sheetId !== sheetId) {
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
         }
@@ -9651,44 +9703,200 @@ export function univerMetaRouter(): Router {
       const exportDeniedIds = (!access.isAdminRole && access.userId && await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))
         ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
         : null
-      let cursor: string | undefined
       let truncated = false
-      do {
-        const result = await queryRecordsWithCursor({
-          query: pool.query.bind(pool),
-          sheetId,
-          cursor,
-          limit: Math.min(5000, XLSX_MAX_ROWS - rows.length),
-        })
-        for (const record of result.items) {
-          if (exportDeniedIds && exportDeniedIds.has(record.id)) continue
-          const data = filterRecordDataByFieldIds(record.data, fieldIds)
-          rows.push(fields.map((field) => {
-            const cell = data[field.id]
-            // Rich-longText export = the §7 plain-text projection, NOT the raw HTML
-            // (a cell must read as text, never `<p>…</p>`).
-            if (field.type === 'longText' && isRichLongTextProperty(field.property) && typeof cell === 'string') {
-              return serializeXlsxCell(richLongTextToPlainText(cell))
-            }
-            return serializeXlsxCell(cell)
-          }))
-          if (rows.length >= XLSX_MAX_ROWS) {
-            truncated = result.hasMore
-            break
-          }
-        }
-        cursor = result.hasMore && rows.length < XLSX_MAX_ROWS ? result.nextCursor ?? undefined : undefined
-      } while (cursor)
 
+      // SHARED projection (single egress chokepoint): both the streaming and the filtered-load branch
+      // funnel each surviving record through THIS one `filterRecordDataByFieldIds(record.data, fieldIds)`
+      // call — `fieldIds` is the fully-masked set (field_permissions ∧ view-hidden ∧ §2a.3-taint ∧
+      // selection). Keeping it a single call-site preserves the egress-coverage + taint-chokepoint
+      // guard counts (a denied/tainted column never reaches a cell regardless of which branch ran).
+      const projectRecord = (record: { data: Record<string, unknown> }): Array<string | number | boolean | null | undefined> => {
+        const data = filterRecordDataByFieldIds(record.data, fieldIds)
+        return fields.map((field) => {
+          const cell = data[field.id]
+          // Rich-longText export = the §7 plain-text projection, NOT the raw HTML
+          // (a cell must read as text, never `<p>…</p>`).
+          if (field.type === 'longText' && isRichLongTextProperty(field.property) && typeof cell === 'string') {
+            return serializeXlsxCell(richLongTextToPlainText(cell))
+          }
+          return serializeXlsxCell(cell)
+        })
+      }
+
+      // Resolve the view's ROW filter + sort. CRITICAL: the filter/sort prune set is NOT the output
+      // `fieldIds` — it is `/view`'s SELECTION set: layer-2 ∧ layer-3 (field_permissions) ∧ §2a.3-taint,
+      // with view-hidden DELIBERATELY EXCLUDED (hiddenFieldIds: []). Two distinct concerns, exactly as
+      // GET /view separates them (:10114 / comment :10127-10131):
+      //   • OUTPUT columns (`fields`/`fieldIds`): view-hidden + per-request selection apply — those
+      //     columns aren't EMITTED.
+      //   • FILTER/SORT eligibility (`filterSortFieldIds`): a field the actor can READ stays
+      //     filterable/sortable even if it's view-HIDDEN or the user didn't SELECT it for export. The
+      //     canonical saved-filter idiom hides the filtered column (hide `status`, filter status=active);
+      //     pruning the filter by the output set would silently export the WHOLE sheet (#3003's bug).
+      // The prune STILL drops permission-denied + §2a.3-tainted fields (silently, like a non-existent
+      // field — no existence/value oracle, no leak via the filter); it only stops dropping
+      // readable-but-hidden / readable-but-unselected fields. Reuses fieldScopeMap from the output derive.
+      const filterSortPerms = deriveFieldPermissions(visibleFields, capabilities, { hiddenFieldIds: [], fieldScopeMap })
+      let filterSortFieldIds = new Set(
+        visibleFields.filter((field) => filterSortPerms[field.id]?.visible !== false).map((field) => field.id),
+      )
+      filterSortFieldIds = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, visibleFields, filterSortFieldIds)
+      const exportFieldTypeById = new Map(visibleFields.map((field) => [field.id, resolveEffectiveFieldType(field)] as const))
+      const rawExportFilterInfo = view ? parseMetaFilterInfo(view.filterInfo) : null
+      const exportFilterInfo = rawExportFilterInfo
+        ? pruneFilterNode(rawExportFilterInfo, (c) => exportFieldTypeById.has(c.fieldId) && filterSortFieldIds.has(c.fieldId))
+        : null
+      const exportSortRules = (view ? parseMetaSortRules(view.sortInfo) : []).filter(
+        (rule) => exportFieldTypeById.has(rule.fieldId) && filterSortFieldIds.has(rule.fieldId),
+      )
+      const hasFilterOrSort = !!exportFilterInfo || exportSortRules.length > 0
+
+      if (!hasFilterOrSort) {
+        // No view filter/sort (or the only conditions were on masked fields) → keep #3003's full-sheet
+        // cursor stream byte-identical: keyset-paginate the whole sheet up to XLSX_MAX_ROWS.
+        let cursor: string | undefined
+        do {
+          const result = await queryRecordsWithCursor({
+            query: pool.query.bind(pool),
+            sheetId,
+            cursor,
+            limit: Math.min(5000, XLSX_MAX_ROWS - rows.length),
+          })
+          for (const record of result.items) {
+            if (exportDeniedIds && exportDeniedIds.has(record.id)) continue
+            rows.push(projectRecord(record))
+            if (rows.length >= XLSX_MAX_ROWS) {
+              truncated = result.hasMore
+              break
+            }
+          }
+          cursor = result.hasMore && rows.length < XLSX_MAX_ROWS ? result.nextCursor ?? undefined : undefined
+        } while (cursor)
+      } else {
+        // View has a row filter and/or sort. Computed-field (lookup/rollup/formula) and link conditions
+        // need in-memory evaluation (no SQL form), and a globally-correct sort can't be done per-page —
+        // so this branch loads-all then filters/sorts/caps, mirroring GET /view's in-memory branch. The
+        // memory profile equals a filtered /view of the same sheet; the output stays bounded by
+        // XLSX_MAX_ROWS. The masked projection (`projectRecord`) is reused unchanged afterward.
+        const recordRes = await pool.query(
+          'SELECT id, version, data, created_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
+          [sheetId],
+        )
+        let all = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown; created_at: unknown }>).map((r) => ({
+          id: String(r.id),
+          version: Number(r.version ?? 1),
+          data: normalizeJson(r.data),
+          createdAt: r.created_at as unknown,
+        }))
+
+        // #18 row-level read-deny: drop denied records BEFORE filter/sort/cap so the filtered set, the
+        // truncation flag, and the exported rows all exclude them (parity with the cursor branch).
+        if (exportDeniedIds) all = all.filter((rec) => !exportDeniedIds.has(rec.id))
+
+        const relationalLinkFields = fields
+          .map((field) => (field.type === 'link' ? { fieldId: field.id, cfg: parseLinkFieldConfig(field.property) } : null))
+          .filter((value): value is { fieldId: string; cfg: LinkFieldConfig } => !!value && !!value.cfg)
+        const computedFieldIdSet = new Set(
+          visibleFields.filter((field) => field.type === 'lookup' || field.type === 'rollup').map((field) => field.id),
+        )
+        // Only materialize lookup/rollup when the filter OR sort actually references a computed field
+        // (same gate as /view's needsComputedFilterSort) — a scalar-only filtered export skips it.
+        const needsComputedFilterSort =
+          computedFieldIdSet.size > 0 &&
+          (exportSortRules.some((rule) => computedFieldIdSet.has(rule.fieldId)) ||
+            collectLeafConditions(exportFilterInfo).some((c) => computedFieldIdSet.has(c.fieldId)))
+        let linkValuesByRecord: Map<string, Map<string, string[]>> | null = null
+        if (needsComputedFilterSort && all.length > 0) {
+          linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), all.map((r) => r.id), relationalLinkFields)
+          await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, all, relationalLinkFields, linkValuesByRecord)
+        }
+
+        // Link-FILTER materialization (parity with /view): a link condition matches on the linked
+        // records' PERMISSION-FILTERED display strings + ids from meta_links — never record.data — so a
+        // denied foreign link can neither match a value op nor leak its display. The summary map is used
+        // ONLY by the predicate below and then discarded (no new wire-egress channel).
+        const linkFilterFieldIds = new Set(
+          collectLeafConditions(exportFilterInfo).filter((c) => exportFieldTypeById.get(c.fieldId) === 'link').map((c) => c.fieldId),
+        )
+        const linkFilterFields = relationalLinkFields.filter((rl) => linkFilterFieldIds.has(rl.fieldId))
+        let filterLinkValues: Map<string, Map<string, string[]>> | null = null
+        let filterLinkSummaries: Map<string, Map<string, LinkedRecordSummary[]>> | null = null
+        if (linkFilterFields.length > 0 && all.length > 0) {
+          filterLinkValues = await loadLinkValuesByRecord(pool.query.bind(pool), all.map((r) => r.id), linkFilterFields)
+          filterLinkSummaries = await buildLinkSummaries(req, pool.query.bind(pool), sheetId, all, linkFilterFields, filterLinkValues)
+        }
+
+        if (exportFilterInfo) {
+          all = all.filter((record) => evaluateFilterNode(exportFilterInfo, (condition) => {
+            const fieldType = exportFieldTypeById.get(condition.fieldId)
+            if (!fieldType) return true
+            if (fieldType === 'link') {
+              const ids = filterLinkValues?.get(record.id)?.get(condition.fieldId) ?? []
+              const displays = (filterLinkSummaries?.get(record.id)?.get(condition.fieldId) ?? []).map((s) => s.display)
+              return evaluateLinkFilterCondition(ids, displays, condition)
+            }
+            return evaluateMetaFilterCondition(fieldType, record.data[condition.fieldId], condition)
+          }))
+        }
+
+        // Native person sort-by-DISPLAY (parity with /view): order person cells by the visible name,
+        // not the raw userId array. Resolve the display map only for person fields in the sort rules.
+        const personSortFieldIds = new Set(
+          exportSortRules.filter((rule) => exportFieldTypeById.get(rule.fieldId) === 'person').map((rule) => rule.fieldId),
+        )
+        const personSortDisplayByUserId = personSortFieldIds.size > 0
+          ? await resolvePersonSortDisplayMap(pool.query.bind(pool), all, personSortFieldIds)
+          : new Map<string, string>()
+        const personSortKey = (value: unknown): string => {
+          if (!Array.isArray(value) || value.length === 0) return ''
+          return value
+            .map((item) => (typeof item === 'string' && item.trim() ? (personSortDisplayByUserId.get(item.trim()) ?? item.trim()) : ''))
+            .filter(Boolean)
+            .join(', ')
+        }
+
+        if (exportSortRules.length > 0) {
+          all = [...all].sort((a, b) => {
+            for (const rule of exportSortRules) {
+              const fieldType = exportFieldTypeById.get(rule.fieldId) ?? 'string'
+              const aValue = personSortFieldIds.has(rule.fieldId) ? personSortKey(a.data[rule.fieldId]) : a.data[rule.fieldId]
+              const bValue = personSortFieldIds.has(rule.fieldId) ? personSortKey(b.data[rule.fieldId]) : b.data[rule.fieldId]
+              const cmp = compareMetaSortValue(fieldType, aValue, bValue, rule.desc)
+              if (cmp !== 0) return cmp
+            }
+            // Stable tiebreak identical to /view: created_at then id.
+            const aEpoch = toEpoch(a.createdAt)
+            const bEpoch = toEpoch(b.createdAt)
+            if (aEpoch !== null && bEpoch !== null && aEpoch !== bEpoch) return aEpoch > bEpoch ? 1 : -1
+            return a.id.localeCompare(b.id)
+          })
+        }
+
+        // Cap the FILTERED set at XLSX_MAX_ROWS — truncation reflects the filtered count, not raw rows.
+        truncated = all.length > XLSX_MAX_ROWS
+        const capped = truncated ? all.slice(0, XLSX_MAX_ROWS) : all
+        for (const record of capped) rows.push(projectRecord(record))
+      }
+
+      const headers = fields.map((field) => field.name)
+      // Format branch (mask already applied above — headers/rows are the masked projection). The
+      // truncation header is emitted for BOTH formats so a client can detect a >XLSX_MAX_ROWS cap.
+      res.setHeader('X-MetaSheet-XLSX-Truncated', truncated ? 'true' : 'false')
+      if (format === 'csv') {
+        const csv = buildExportCsv(headers, rows)
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+        res.setHeader('Content-Disposition', `attachment; filename="${buildExportAttachmentFilename(sheet.name, 'csv')}"`)
+        // UTF-8 BOM so Excel opens non-ASCII (e.g. CJK) CSV without mojibake — matches common export tooling.
+        return res.send(Buffer.concat([Buffer.from('﻿', 'utf8'), Buffer.from(csv, 'utf8')]))
+      }
       const xlsx = await loadXlsxModule()
       const buffer = buildXlsxBuffer(xlsx, {
         sheetName: sheet.name,
-        headers: fields.map((field) => field.name),
+        headers,
         rows,
       })
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
       res.setHeader('Content-Disposition', `attachment; filename="${buildXlsxAttachmentFilename(sheet.name)}"`)
-      res.setHeader('X-MetaSheet-XLSX-Truncated', truncated ? 'true' : 'false')
       return res.send(buffer)
     } catch (err) {
       if (err instanceof ValidationError) {
