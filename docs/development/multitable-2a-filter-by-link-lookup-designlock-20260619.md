@@ -38,6 +38,15 @@ The owner ratified the leaning options. They are now **locked** and define the f
 - **D2 — a denied linked record is excluded from the comparison set** for **value operators** (`contains`/
   `is`): a hidden link is simply "not a match", consistent with row-deny precedent, and its display string
   is never compared or surfaced. (Presence operators are the explicit exception — see D5.)
+  - **Semantics pin: this is a "does not match", NOT an error.** A hidden link among a row's links silently
+    fails to contribute a match; it never raises `#PERM!` or errors the condition (one denied link must not
+    blank a whole filter result). This differs from 1b record-set *aggregation*, where a partial-permission
+    aggregate returns a sentinel because the number would encode the hidden rows — a filter non-match leaks
+    nothing, so it stays a plain non-match.
+  - **Materialization-order pin: the exclusion happens DURING display materialization, before eval.**
+    `buildLinkSummaries` drops denied foreign ids while assembling the display set, so the pure evaluator is
+    structurally **never handed a denied display string** to compare — leak-proof by construction, not by a
+    post-eval check. (Implemented exactly so in #2970.)
 - **D3 — reuse the nested-groups per-leaf evaluator threading.** Extend the existing per-leaf evaluator to
   receive the record's permission-filtered link summaries; link conditions are normal leaves inside the
   nested AND/OR tree — no separate link-only pass.
