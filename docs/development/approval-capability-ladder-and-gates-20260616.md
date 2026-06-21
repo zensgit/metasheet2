@@ -71,7 +71,7 @@ P0 should finish before advertising approval as broadly usable.
 
 ### P1-A. Organization-Derived Assignees
 
-**Status (reconciled 2026-06-20): SHIPPED (first wave).** `direct_manager` (#2852), `dept_head` (#2873), and `continuous_managers` / manager-chain "reading A" (#2907 resolver+authoring, #2911 design-lock ratified+shipped, #2915 configurable `APPROVAL_MANAGER_CHAIN_MAX_LEVELS`) all landed against the real DingTalk directory mirror; the "Likely contract" below matches what shipped. Still deferred within P1-A: `continuous_managers` "reading B" (sequential, level-by-level approval — design-locked, runtime not built) and `stopAt`-style chain termination beyond the shipped cap.
+**Status (reconciled 2026-06-20): SHIPPED (first wave).** `direct_manager` (#2852), `dept_head` (#2873), and `continuous_managers` / manager-chain "reading A" (#2907 resolver+authoring, #2911 design-lock ratified+shipped, #2915 configurable `APPROVAL_MANAGER_CHAIN_MAX_LEVELS`) all landed against the real DingTalk directory mirror; the as-built contract is below. Still deferred within P1-A: `continuous_managers` "reading B" (sequential, level-by-level approval — design-locked, runtime not built) and `stopAt`-style chain termination beyond the shipped cap.
 
 **Goal:** support dynamic assignees derived from organizational structure, such
 as direct manager, department owner, or a bounded chain of managers.
@@ -79,19 +79,14 @@ as direct manager, department owner, or a bounded chain of managers.
 **Why first:** it is the highest-value extension to the existing assignment
 resolver and should not require rewriting the approval executor.
 
-**Likely contract:**
+**As-built contract:**
 
 ```ts
 type ApprovalAssigneeSource =
   | ExistingSources
-  | { kind: 'direct_manager'; of: 'requester' | { formFieldId: string } }
-  | { kind: 'department_owner'; of: 'requester' | { formFieldId: string } }
-  | {
-      kind: 'manager_chain'
-      of: 'requester' | { formFieldId: string }
-      maxLevels: number
-      stopAt?: { userId?: string; roleId?: string }
-    }
+  | { kind: 'direct_manager' }
+  | { kind: 'dept_head' }
+  | { kind: 'continuous_managers'; levels: number }
 ```
 
 **Hard gate (satisfied):** runtime required a real directory/reporting source — met by the DingTalk directory mirror (org-tree admin mirror #1524, `directory_departments`). The gate held until that source existed; a fake hierarchy would only have proven fixtures.
@@ -106,6 +101,8 @@ type ApprovalAssigneeSource =
 
 ### P1-B. Add / Remove Signers
 
+**Status (reconciled 2026-06-20): SHIPPED.** `add_sign` / `reduce_sign` landed in #2800 (runtime + FE/BE union) and is covered by the cross-lane acceptance guard #2856. Remaining policy extensions, if any, need their own scope-gate.
+
 **Goal:** allow a running approval to add or remove approvers without corrupting
 the current node state.
 
@@ -117,7 +114,7 @@ the current node state.
 - How is the action audited?
 - How does it interact with existing auto-approval dedupe rules?
 
-This is a runtime action rung. It needs a scope-gate before implementation.
+This was a runtime action rung; the shipped #2800 slice answers the base add/reduce-sign path. Do not reopen it for richer signer policies without a separate scope.
 
 ### P1-C. Node-Level Field Permissions
 
@@ -240,4 +237,3 @@ Any PR derived from this ladder must:
 - No hidden approval-to-record writes.
 - No fake organization hierarchy just to demo dynamic assignees.
 - No silent flattening of richer templates into the MVP authoring shape.
-
