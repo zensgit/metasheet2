@@ -16,7 +16,7 @@ import {
   isFieldPermissionHidden,
 } from '../multitable/permission-derivation'
 import { validateAiShortcutFieldProperty } from '../multitable/ai-shortcut-config'
-import { withFieldVisibilityRule } from '../multitable/field-visibility-rule'
+import { withFieldRequiredWhenRule, withFieldVisibilityRule } from '../multitable/field-visibility-rule'
 import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
 import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
 import { projectFormContextView } from '../multitable/form-context-view-projection'
@@ -2117,10 +2117,14 @@ function applyFieldValidationNormalisation(obj: Record<string, unknown>): Record
 }
 
 function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown): Record<string, unknown> {
-  // `visibilityRule` is cross-cutting (any field type) — sanitize + merge it
-  // uniformly so the write path can never leak a malformed rule via `...obj`
-  // passthrough. Mirrors field-codecs.ts's sanitizeFieldProperty (shared helper).
-  return withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property)
+  // `visibilityRule` + `requiredWhen` are cross-cutting (any field type) —
+  // sanitize + merge them uniformly so the write path can never leak a malformed
+  // rule via `...obj` passthrough. Mirrors field-codecs.ts's sanitizeFieldProperty
+  // (shared helpers).
+  return withFieldRequiredWhenRule(
+    withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+    property,
+  )
 }
 
 function sanitizeFieldPropertyByType(type: UniverMetaField['type'], property: unknown): Record<string, unknown> {

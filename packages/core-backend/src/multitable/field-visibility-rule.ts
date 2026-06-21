@@ -89,3 +89,40 @@ export function withFieldVisibilityRule(
   }
   return { ...sanitizedByType, visibilityRule: rule }
 }
+
+/**
+ * Conditional-REQUIRED rule (`property.requiredWhen`). A field carrying this rule
+ * is required in the public form ONLY when the condition holds against the
+ * record being filled — the "required-IF" counterpart to `visibilityRule`'s
+ * "show-IF". It REUSES the exact `FieldVisibilityRule` shape (same single
+ * `{ fieldId, operator, value }` condition + the same conditional-formatting
+ * operator vocabulary), so `sanitizeFieldVisibilityRule` is the shared
+ * normalizer — there is deliberately no second condition grammar.
+ *
+ * Absent/invalid rule ⇒ the key is omitted, so a field without a rule behaves
+ * exactly as today (static `required` only; backward-compatible). Like
+ * `withFieldVisibilityRule`, this is the single cross-cutting merge applied at
+ * BOTH `sanitizeFieldProperty` chokepoints (read-serialize + write) so a
+ * malformed rule can never leak through a type branch's `...obj` passthrough.
+ *
+ * NOTE: persistence only. Like static `field.required`, `requiredWhen` is
+ * ENFORCED client-side (in the form view's submit validation, visibility-aware);
+ * `validateRecord` keys off `property.validation[]`, not these top-level gates.
+ * Sanitizing here keeps the authored rule durable on the field property without
+ * adding a new server gate that would reject submits existing forms accept.
+ */
+export function withFieldRequiredWhenRule(
+  sanitizedByType: Record<string, unknown>,
+  rawProperty: unknown,
+): Record<string, unknown> {
+  const candidate = isPlainObject(rawProperty) ? rawProperty.requiredWhen : undefined
+  const rule = sanitizeFieldVisibilityRule(candidate)
+  if (!rule) {
+    if ('requiredWhen' in sanitizedByType) {
+      const { requiredWhen: _omit, ...rest } = sanitizedByType
+      return rest
+    }
+    return sanitizedByType
+  }
+  return { ...sanitizedByType, requiredWhen: rule }
+}

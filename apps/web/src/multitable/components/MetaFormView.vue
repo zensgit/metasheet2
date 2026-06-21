@@ -42,7 +42,7 @@
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="text"
             :disabled="isFieldReadOnly(field.id)"
-            :aria-required="field.required ? 'true' : undefined"
+            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="textControlValue(formData[field.id])"
@@ -68,7 +68,7 @@
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             rows="5"
             :disabled="isFieldReadOnly(field.id)"
-            :aria-required="field.required ? 'true' : undefined"
+            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="textControlValue(formData[field.id])"
@@ -83,7 +83,7 @@
             inputmode="text"
             :placeholder="lc('cell.barcodePlaceholder')"
             :disabled="isFieldReadOnly(field.id)"
-            :aria-required="field.required ? 'true' : undefined"
+            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="textControlValue(formData[field.id])"
@@ -98,7 +98,7 @@
             inputmode="text"
             :placeholder="lc('cell.qrcodePlaceholder')"
             :disabled="isFieldReadOnly(field.id)"
-            :aria-required="field.required ? 'true' : undefined"
+            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="textControlValue(formData[field.id])"
@@ -112,7 +112,7 @@
             type="text"
             :placeholder="lc('cell.locationPlaceholder')"
             :disabled="isFieldReadOnly(field.id)"
-            :aria-required="field.required ? 'true' : undefined"
+            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="locationAddressValue(formData[field.id])"
@@ -125,7 +125,7 @@
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="number"
             :disabled="isFieldReadOnly(field.id)"
-            :aria-required="field.required ? 'true' : undefined"
+            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="formData[field.id] ?? ''"
@@ -142,7 +142,7 @@
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="date"
             :disabled="isFieldReadOnly(field.id)"
-            :aria-required="field.required ? 'true' : undefined"
+            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="formData[field.id] ?? ''"
@@ -155,7 +155,7 @@
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="datetime-local"
             :disabled="isFieldReadOnly(field.id)"
-            :aria-required="field.required ? 'true' : undefined"
+            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="dateTimeInputValue(formData[field.id])"
@@ -167,7 +167,7 @@
             class="meta-form-view__input"
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             :disabled="isFieldReadOnly(field.id)"
-            :aria-required="field.required ? 'true' : undefined"
+            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="formData[field.id] ?? ''"
@@ -183,7 +183,7 @@
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             multiple
             :disabled="isFieldReadOnly(field.id)"
-            :aria-required="field.required ? 'true' : undefined"
+            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="multiSelectValue(field.id)"
@@ -244,7 +244,7 @@
             type="number"
             step="any"
             :disabled="isFieldReadOnly(field.id)"
-            :aria-required="field.required ? 'true' : undefined"
+            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :value="formData[field.id] ?? ''"
             @input="formData[field.id] = ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value)"
@@ -272,7 +272,7 @@
             inputmode="numeric"
             :placeholder="durationPlaceholderFor(field)"
             :disabled="isFieldReadOnly(field.id)"
-            :aria-required="field.required ? 'true' : undefined"
+            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :value="durationDisplayFor(field)"
             @change="onDurationChange(field, ($event.target as HTMLInputElement).value)"
           />
@@ -405,7 +405,7 @@ import {
   locationValueFromAddress,
 } from '../utils/field-display'
 import { isSystemField } from '../utils/system-fields'
-import { isFieldVisible } from '../utils/field-visibility'
+import { isFieldConditionallyRequired, isFieldVisible } from '../utils/field-visibility'
 import { resolveFormPages } from '../utils/form-layout'
 
 const props = defineProps<{
@@ -476,6 +476,21 @@ const editableFields = computed(() => {
       isFieldVisible(field, formData, byId),
   )
 })
+
+// A4 (required-IF): is `field` required RIGHT NOW? Static `field.required` OR a
+// satisfied `property.requiredWhen` condition (conditional-required, evaluated
+// through the same path as visibility). Drives BOTH the submit gate (`validate`)
+// and the `aria-required` indicator so the two never disagree. `formData` is
+// read inside `isFieldConditionallyRequired`, so anything bound to this
+// re-computes live as the user edits the dependency. The hidden-field guarantee
+// is structural: both call sites operate on VISIBLE fields only (the template
+// renders `currentPageFields` ⊆ `editableFields`; `validate` iterates
+// `editableFields`), so a field hidden by a visibility rule is never treated as
+// conditionally required.
+function fieldIsRequired(field: MetaField): boolean {
+  if (field.required) return true
+  return isFieldConditionallyRequired(field, formData, fieldsById.value)
+}
 
 // A4: render pages, derived from the layout + the FULL visible field list.
 // `editableFields` (above) stays the authoritative visible list that
@@ -597,10 +612,14 @@ onBeforeUnmount(() => {
 function validate(): boolean {
   const errs: Record<string, string> = {}
   // Iterate the FULL visible field list (NOT the current page) so a required
-  // field on another page can never slip through unvalidated.
+  // field on another page can never slip through unvalidated. A field counts as
+  // required if it is statically `required` OR its `requiredWhen` condition holds
+  // (`fieldIsRequired`). Because this list is the VISIBLE set, a field hidden by
+  // a visibility rule is excluded here and so can never block submit when its
+  // requiredWhen condition is (vacuously) satisfied.
   for (const f of editableFields.value) {
     const v = formData[f.id]
-    if (f.required && isEmptyFormValue(v)) {
+    if (fieldIsRequired(f) && isEmptyFormValue(v)) {
       errs[f.id] = requiredField(f.name, isZh.value)
     }
   }

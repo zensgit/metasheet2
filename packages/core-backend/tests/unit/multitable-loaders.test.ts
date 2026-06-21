@@ -106,6 +106,34 @@ describe('multitable loaders helper', () => {
     expect(result[0]).toMatchObject({ id: 'fld_name', type: 'string' })
   })
 
+  it('carries conditional rules (visibilityRule + requiredWhen) through to the field property', async () => {
+    // The public form (`GET /form-context`) gets its fields via loadFieldsForSheet,
+    // which serializes each row through serializeFieldRow → sanitizeFieldProperty.
+    // Both the visibility (show-IF) and required-IF rules must survive that path or
+    // the conditional form logic silently no-ops on the wire. (Wire-vs-fixture
+    // drift guard: the feature evaluates these rules client-side, so they MUST
+    // reach the client.)
+    const pool = createPool((_sql, params) => {
+      expect(params).toEqual(['sheet_cond'])
+      return [
+        {
+          id: 'fld_reason',
+          name: 'Reason',
+          type: 'string',
+          property: {
+            visibilityRule: { fieldId: 'fld_status', operator: 'eq', value: 'rejected' },
+            requiredWhen: { fieldId: 'fld_status', operator: 'eq', value: 'rejected' },
+          },
+          order: 1,
+        },
+      ]
+    })
+
+    const result = await loadFieldsForSheet(pool.query, 'sheet_cond')
+    expect(result[0].property?.visibilityRule).toEqual({ fieldId: 'fld_status', operator: 'eq', value: 'rejected' })
+    expect(result[0].property?.requiredWhen).toEqual({ fieldId: 'fld_status', operator: 'eq', value: 'rejected' })
+  })
+
   it('loads one view config and caches it', async () => {
     let calls = 0
     const cache = new Map<string, any>()

@@ -160,6 +160,12 @@ export const CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT = 20
 // Reuses the conditional-formatting operator vocabulary. PRESENTATION ONLY — not
 // a security boundary (see utils/field-visibility.ts). Mirrors backend
 // `field-visibility-rule.ts`.
+//
+// The SAME shape is reused for `property.requiredWhen` (conditional-required /
+// "required-IF"): a field required in the form only when the condition holds.
+// One condition grammar serves show-IF and required-IF — see
+// `getFieldRequiredWhenRule` / `isFieldConditionallyRequired` in
+// utils/field-visibility.ts.
 export interface FieldVisibilityRule {
   fieldId: string
   operator: ConditionalFormattingOperator
