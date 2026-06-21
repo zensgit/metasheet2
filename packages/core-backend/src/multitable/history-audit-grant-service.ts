@@ -235,42 +235,46 @@ export async function listHistoryAuditGrants(query: QueryFn, baseId: string): Pr
 }
 
 /**
- * The active, non-expired grant for any of the actor's subject keys on a base (or null). A2 reads this to
- * decide whether a reveal is permitted; A1 exposes it for grant administration + tests. `subjectKeys` is the
- * actor's identity set: their user id + role ids + member-group ids, each as `{type, id}`.
+ * A2 reveal-authority resolver. Returns the active, non-expired grant that authorises `userId` to reveal
+ * field-permission-masked history on `baseId` — matching the actor by user id, role membership, OR
+ * member-group membership (the same subject model as `field_permissions`) — and EXCLUDING any grant the
+ * actor issued to themselves.
+ *
+ * `granted_by <> userId` is the IMMUTABLE, subject-type-agnostic LOCK-2a closure: because `granted_by` never
+ * changes, it defeats every self-grant path — direct (user→own id) AND indirect (a role/group the issuer
+ * later joined) — that an issue-time membership check structurally cannot. Returns null when no qualifying
+ * grant exists. Fail-closed: any resolver error (e.g. a missing membership table) → null → no reveal → the
+ * masked response, never a leak.
  */
-export async function loadActiveHistoryAuditGrant(
+export async function resolveActiveRevealGrant(
   query: QueryFn,
   baseId: string,
-  subjectKeys: Array<{ type: HistoryAuditGrantSubjectType; id: string }>,
+  userId: string,
   nowMs: number,
 ): Promise<HistoryAuditGrantRow | null> {
-  if (subjectKeys.length === 0) return null
-  const types = subjectKeys.map((k) => k.type)
-  const ids = subjectKeys.map((k) => k.id)
-  const res = await query(
-    `SELECT id, base_id, subject_type, subject_id, granted_by, reason, ticket, expires_at, is_standing, created_at
-     FROM meta_history_audit_grants
-     WHERE base_id = $1
-       AND revoked_at IS NULL
-       AND (expires_at IS NULL OR expires_at > $4)
-       AND (subject_type, subject_id) IN (
-         SELECT * FROM unnest($2::text[], $3::text[])
-       )
-     ORDER BY created_at DESC
-     LIMIT 1`,
-    [baseId, types, ids, new Date(nowMs).toISOString()],
-  )
-  const rows = res.rows as Array<Record<string, unknown>>
-  return rows.length > 0 ? serializeGrantRow(rows[0]) : null
-}
-
-/**
- * A1/A2 SEAM. A2 will compute the field ids a valid grant + explicit reveal request lifts and UNION them into
- * the #2968 allowed-field set. For A1 this ALWAYS returns an empty set (no reveal) and is NOT called from the
- * history mask path — so the history field mask is byte-for-byte the #2968 behaviour. Do not wire this into
- * `buildHistoryAllowedFieldsBySheet` or the per-record allowed-set until the A2 opt-in.
- */
-export async function resolveHistoryFieldAuditReveal(): Promise<Set<string>> {
-  return new Set<string>()
+  if (!baseId || !userId) return null
+  try {
+    const res = await query(
+      `SELECT g.id, g.base_id, g.subject_type, g.subject_id, g.granted_by, g.reason, g.ticket, g.expires_at, g.is_standing, g.created_at
+       FROM meta_history_audit_grants g
+       WHERE g.base_id = $1
+         AND g.revoked_at IS NULL
+         AND (g.expires_at IS NULL OR g.expires_at > $3)
+         AND g.granted_by <> $2
+         AND (
+           (g.subject_type = 'user' AND g.subject_id = $2)
+           OR (g.subject_type = 'role' AND EXISTS (
+                 SELECT 1 FROM user_roles ur WHERE ur.user_id = $2 AND ur.role_id = g.subject_id))
+           OR (g.subject_type = 'member-group' AND EXISTS (
+                 SELECT 1 FROM platform_member_group_members m WHERE m.user_id = $2 AND m.group_id::text = g.subject_id))
+         )
+       ORDER BY g.created_at DESC
+       LIMIT 1`,
+      [baseId, userId, new Date(nowMs).toISOString()],
+    )
+    const rows = res.rows as Array<Record<string, unknown>>
+    return rows.length > 0 ? serializeGrantRow(rows[0]) : null
+  } catch {
+    return null // fail-closed: a resolver error never enables a reveal
+  }
 }

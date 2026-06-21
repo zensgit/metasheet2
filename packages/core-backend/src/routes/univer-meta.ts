@@ -78,6 +78,7 @@ import {
   issueHistoryAuditGrant,
   revokeHistoryAuditGrant,
   listHistoryAuditGrants,
+  resolveActiveRevealGrant,
 } from '../multitable/history-audit-grant-service'
 import {
   loadFieldsForSheet as loadFieldsForSheetShared,
@@ -3777,6 +3778,18 @@ async function loadAllowedFieldIds(query: QueryFn, sheetId: string | null | unde
 }
 
 /**
+ * A2 reveal allowed-field set: visible property fields with the per-subject `field_permissions` scope LIFTED
+ * (empty scope map). This lifts ONLY the field_permissions axis — `filterVisiblePropertyFields` inside
+ * `computeAllowedFieldIds` still drops field-definition `hidden`/system fields, the caller still applies the
+ * formula-taint mask afterwards (D6), and row-level deny is unaffected. Used only after a valid reveal grant
+ * is confirmed.
+ */
+async function loadRevealedFieldIds(query: QueryFn, sheetId: string, capabilities: MultitableCapabilities): Promise<Set<string>> {
+  const fields = await loadFieldsForSheet(query, sheetId)
+  return computeAllowedFieldIds(fields, capabilities, new Map<string, FieldPermissionScope>())
+}
+
+/**
  * Global History LOCK-3 FIELD layer: build the per-sheet readable field-id sets the project-on-read
  * history projection masks with. Uses the EXACT chain the per-record history route uses —
  * `loadAllowedFieldIds` (visible property fields ∧ field_permissions scope) then `maskStoredRecordFieldIds`
@@ -3790,14 +3803,55 @@ async function buildHistoryAllowedFieldsBySheet(
   query: QueryFn,
   sheetIds: string[],
   userId: string,
+  reveal = false,
 ): Promise<Map<string, Set<string>>> {
   const map = new Map<string, Set<string>>()
   for (const sheetId of sheetIds) {
     const { capabilities } = await resolveSheetReadableCapabilities(req, query, sheetId)
-    const baseAllowed = await loadAllowedFieldIds(query, sheetId, userId, capabilities)
+    // A2 reveal lifts ONLY the per-subject field_permissions scope; taint is still masked below (D6), hidden/
+    // system fields stay excluded, and row-level deny (projection row layer) is untouched.
+    const baseAllowed = reveal
+      ? await loadRevealedFieldIds(query, sheetId, capabilities)
+      : await loadAllowedFieldIds(query, sheetId, userId, capabilities)
     map.set(sheetId, await maskStoredRecordFieldIds(req, query, sheetId, undefined, baseAllowed))
   }
   return map
+}
+
+/**
+ * A2 reveal gate (audit-before-disclosure). Returns true ONLY when (a) an explicit reveal was requested,
+ * (b) the actor holds a valid non-expired grant they did NOT self-issue (`resolveActiveRevealGrant` enforces
+ * `granted_by <> actor` — the immutable LOCK-2a closure), AND (c) the reveal-intent audit row was written
+ * FIRST. If the audit write fails we degrade to false (the masked response): there is never an unaudited
+ * reveal — the read-side of LOCK-2c / LOCK-5. The caller enforces reason-required (L8). We log INTENT
+ * (who / base / scope / reason / grantId), never a field-value diff.
+ */
+async function resolveHistoryRevealActive(
+  query: QueryFn,
+  baseId: string,
+  userId: string,
+  revealRequested: boolean,
+  reason: string | undefined,
+  ticket: string | undefined,
+  scope: string,
+): Promise<boolean> {
+  if (!revealRequested) return false
+  const grant = await resolveActiveRevealGrant(query, baseId, userId, Date.now())
+  if (!grant) return false
+  try {
+    const meta = JSON.stringify({
+      baseId, scope, reason: reason ?? null, ticket: ticket ?? null,
+      grantId: grant.id, subjectType: grant.subjectType, subjectId: grant.subjectId,
+    })
+    await query(
+      `INSERT INTO operation_audit_logs (actor_id, actor_type, action, resource_type, resource_id, metadata, meta)
+       VALUES ($1, 'user', 'history_field_audit.reveal', 'meta_history_audit_reveal', $2, $3::jsonb, $3::jsonb)`,
+      [userId, baseId, meta],
+    )
+  } catch {
+    return false // audit write failed → never disclose unaudited revealed data
+  }
+  return true
 }
 
 // #2052 (b): PURE — returns a redacted COPY (view configs are cached/shared; never mutate in place, or a
@@ -6461,8 +6515,15 @@ export function univerMetaRouter(): Router {
       const limit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
       const offset = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : 0
       const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+      // A2 field-audit reveal: explicit opt-in (?reveal=1) + a reason (L8); the audit-before-disclosure gate
+      // resolves a valid non-self-issued grant and logs the reveal BEFORE any unmasked field is built.
+      const revealRequested = req.query.reveal === '1' || req.query.reveal === 'true'
+      const reason = str(req.query.reason)
+      const ticket = str(req.query.ticket)
+      if (revealRequested && !reason) return res.status(400).json({ ok: false, error: { code: 'REASON_REQUIRED', message: 'A field-audit reveal requires a reason' } })
+      const revealActive = await resolveHistoryRevealActive(pool.query.bind(pool), baseId, access.userId, revealRequested, reason, ticket, 'history.events')
       // LOCK-3 field layer: a base-level list can show any readable sheet, so resolve allowed fields for all.
-      const allowedFieldsBySheet = await buildHistoryAllowedFieldsBySheet(req, pool.query.bind(pool), readableSheetIds, access.userId)
+      const allowedFieldsBySheet = await buildHistoryAllowedFieldsBySheet(req, pool.query.bind(pool), readableSheetIds, access.userId, revealActive)
       const { batches, total } = await loadHistoryBatchSummaries(
         pool.query.bind(pool),
         {
@@ -6508,7 +6569,13 @@ export function univerMetaRouter(): Router {
             `SELECT DISTINCT sheet_id FROM meta_record_revisions WHERE sheet_id = ANY($1::text[]) AND COALESCE(batch_id, id::text) = $2`,
             [readableSheetIds, batchId],
           )).rows as Array<{ sheet_id: unknown }>).map((r) => String(r.sheet_id))
-      const allowedFieldsBySheet = await buildHistoryAllowedFieldsBySheet(req, pool.query.bind(pool), batchSheetIds, access.userId)
+      // A2 field-audit reveal (audit-before-disclosure); reason required (L8), ticket optional.
+      const revealRequested = req.query.reveal === '1' || req.query.reveal === 'true'
+      const dReason = typeof req.query.reason === 'string' && req.query.reason.trim() ? req.query.reason.trim() : undefined
+      const dTicket = typeof req.query.ticket === 'string' && req.query.ticket.trim() ? req.query.ticket.trim() : undefined
+      if (revealRequested && !dReason) return res.status(400).json({ ok: false, error: { code: 'REASON_REQUIRED', message: 'A field-audit reveal requires a reason' } })
+      const revealActive = await resolveHistoryRevealActive(pool.query.bind(pool), baseId, access.userId, revealRequested, dReason, dTicket, `history.batch:${batchId}`)
+      const allowedFieldsBySheet = await buildHistoryAllowedFieldsBySheet(req, pool.query.bind(pool), batchSheetIds, access.userId, revealActive)
       const detail = await loadHistoryBatchDetail(pool.query.bind(pool), readableSheetIds, batchId, { userId: access.userId, isAdminRole: access.isAdminRole }, allowedFieldsBySheet)
       // Denied and missing share the SAME 404 shape (LOCK-3: no existence oracle).
       if (!detail) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'History batch not found' } })
@@ -6566,7 +6633,18 @@ export function univerMetaRouter(): Router {
         }
       }
 
-      const baseAllowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+      // A2 field-audit reveal (audit-before-disclosure); reason required (L8). Reveal lifts ONLY the field
+      // mask — the row-deny check above already ran and is unaffected (LOCK-4).
+      const revealRequested = req.query.reveal === '1' || req.query.reveal === 'true'
+      const pReason = typeof req.query.reason === 'string' && req.query.reason.trim() ? req.query.reason.trim() : undefined
+      const pTicket = typeof req.query.ticket === 'string' && req.query.ticket.trim() ? req.query.ticket.trim() : undefined
+      if (revealRequested && !pReason) return res.status(400).json({ ok: false, error: { code: 'REASON_REQUIRED', message: 'A field-audit reveal requires a reason' } })
+      const recBaseRow = await pool.query('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])
+      const recBaseId = recBaseRow.rows.length > 0 ? String((recBaseRow.rows[0] as { base_id: unknown }).base_id) : ''
+      const revealActive = await resolveHistoryRevealActive(pool.query.bind(pool), recBaseId, access.userId, revealRequested, pReason, pTicket, `history.record:${recordId}`)
+      const baseAllowedFieldIds = revealActive
+        ? await loadRevealedFieldIds(pool.query.bind(pool), sheetId, capabilities)
+        : await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
       // §2a.3 (m1) via the single CHOKEPOINT (maskStoredRecordFieldIds): a record-revision
       // snapshot/patch can carry a MATERIALIZED formula value whose foreign lookup input is masked for
       // this actor; the source-sheet allowed-field set above does not catch it (the formula field
