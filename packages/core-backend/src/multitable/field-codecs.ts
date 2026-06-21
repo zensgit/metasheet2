@@ -1,7 +1,7 @@
 import sanitizeHtml from 'sanitize-html'
 import { normalizeAutoNumberProperty } from './auto-number-property'
 import { fieldTypeRegistry } from './field-type-registry'
-import { withFieldVisibilityRule } from './field-visibility-rule'
+import { withFieldRequiredWhenRule, withFieldVisibilityRule } from './field-visibility-rule'
 
 export type MultitableFieldType =
   | 'string'
@@ -228,11 +228,15 @@ export function sanitizeFieldProperty(
   type: MultitableFieldType | string,
   property: unknown,
 ): Record<string, unknown> {
-  // `visibilityRule` is a CROSS-CUTTING property (any field type may carry it),
-  // so it is sanitized + merged uniformly after the per-type normalization
-  // rather than relying on each branch's incidental `...obj` passthrough (which
-  // would also let a *malformed* rule leak through). See field-visibility-rule.ts.
-  return withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property)
+  // `visibilityRule` + `requiredWhen` are CROSS-CUTTING properties (any field
+  // type may carry them), so they are sanitized + merged uniformly after the
+  // per-type normalization rather than relying on each branch's incidental
+  // `...obj` passthrough (which would also let a *malformed* rule leak through).
+  // See field-visibility-rule.ts.
+  return withFieldRequiredWhenRule(
+    withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+    property,
+  )
 }
 
 function sanitizeFieldPropertyByType(

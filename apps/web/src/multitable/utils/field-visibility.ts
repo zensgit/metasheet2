@@ -64,14 +64,73 @@ export function isFieldVisible(
 ): boolean {
   const rule = getFieldVisibilityRule(field)
   if (!rule) return true
+  return evaluateConditionRule(rule, recordData, fieldsById, options)
+}
+
+/**
+ * Evaluate a single `{ fieldId, operator, value }` condition against the current
+ * record data by reusing the conditional-formatting evaluator. Shared by the
+ * show-IF (`isFieldVisible`) and required-IF (`isFieldConditionallyRequired`)
+ * gates so they can never diverge on how a condition is judged. A dangling
+ * dependency (named field absent from `fieldsById`) resolves to FALSE — a
+ * missing reference must not silently flip the gate on.
+ */
+function evaluateConditionRule(
+  rule: FieldVisibilityRule,
+  recordData: Record<string, unknown>,
+  fieldsById: Record<string, MetaField | undefined>,
+  options: VisibilityEvaluateOptions = {},
+): boolean {
   const dependency = fieldsById[rule.fieldId]
   if (!dependency) return false
   // Reuse the conditional-formatting evaluator by synthesizing the full rule
   // envelope it expects (id/order/style/enabled are irrelevant to the boolean).
   return evaluateRule(
-    { id: '__visibility__', order: 0, fieldId: rule.fieldId, operator: rule.operator, value: rule.value, style: {}, enabled: true },
+    { id: '__condition__', order: 0, fieldId: rule.fieldId, operator: rule.operator, value: rule.value, style: {}, enabled: true },
     recordData,
     dependency,
     options,
   )
+}
+
+/**
+ * Read + lightly validate a field's `property.requiredWhen` (conditional-required
+ * rule). Returns `null` when absent or malformed (⇒ the field has no
+ * required-IF; only its static `field.required` applies). REUSES the
+ * `FieldVisibilityRule` shape + the same operator-validity check as
+ * `getFieldVisibilityRule` — there is one condition grammar for show-IF and
+ * required-IF. The backend is canonical; this guards a hand-built / stale rule.
+ */
+export function getFieldRequiredWhenRule(field: MetaField): FieldVisibilityRule | null {
+  const raw = isPlainObject(field.property) ? field.property.requiredWhen : undefined
+  if (!isPlainObject(raw)) return null
+  const fieldId = typeof raw.fieldId === 'string' ? raw.fieldId.trim() : ''
+  if (!fieldId) return null
+  if (!isOperator(raw.operator)) return null
+  const rule: FieldVisibilityRule = { fieldId, operator: raw.operator }
+  if ('value' in raw) rule.value = raw.value
+  return rule
+}
+
+/**
+ * Is `field` conditionally required given the current record data? FALSE when the
+ * field has no `requiredWhen` rule (its static `field.required` is then the only
+ * requiredness — handled by the caller). When a rule is present, the field is
+ * required iff its condition holds, evaluated through the SAME path as visibility.
+ *
+ * This is ONLY the conditional half: the form's submit validation treats a field
+ * as required when `field.required` (static) OR this returns true. The caller is
+ * responsible for restricting the check to currently-VISIBLE fields, so a field
+ * hidden by a visibility rule is never conditionally required (you cannot fill an
+ * invisible field; it must not block submit).
+ */
+export function isFieldConditionallyRequired(
+  field: MetaField,
+  recordData: Record<string, unknown>,
+  fieldsById: Record<string, MetaField | undefined>,
+  options: VisibilityEvaluateOptions = {},
+): boolean {
+  const rule = getFieldRequiredWhenRule(field)
+  if (!rule) return false
+  return evaluateConditionRule(rule, recordData, fieldsById, options)
 }
