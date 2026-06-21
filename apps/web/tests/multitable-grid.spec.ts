@@ -202,6 +202,210 @@ describe('useMultitableGrid', () => {
     expect(grid.totalPages.value).toBe(6)
   })
 
+  // ── A1 infinite-scroll accumulation (the ACTIVATION of the grid windowing) ─────────────────────────
+  describe('A1 infinite-scroll accumulation (loadMore)', () => {
+    // A paginated /view backend: `total` rows served in `pageSize` chunks keyed by the offset query
+    // param. Returns a per-row link summary so we can assert the summary maps MERGE (never replace).
+    function makePaginatedViewFetch(total: number, pageSize: number) {
+      const calls: Array<{ offset: number; limit: number; search: string | null }> = []
+      const fetchFn = vi.fn(async (input: string) => {
+        if (!input.startsWith('/api/multitable/view')) throw new Error(`Unexpected request: ${input}`)
+        const url = new URL(input, 'http://metasheet.local')
+        const offset = Number(url.searchParams.get('offset') ?? '0')
+        const limit = Number(url.searchParams.get('limit') ?? String(pageSize))
+        const search = url.searchParams.get('search')
+        calls.push({ offset, limit, search })
+        const slice: Array<{ id: string; version: number; data: Record<string, unknown> }> = []
+        const linkSummaries: Record<string, Record<string, Array<{ id: string; display: string }>>> = {}
+        for (let i = offset; i < Math.min(offset + limit, total); i++) {
+          slice.push({ id: `r${i}`, version: 1, data: { title: `Row ${i}` } })
+          linkSummaries[`r${i}`] = { link: [{ id: `l${i}`, display: `Link ${i}` }] }
+        }
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            fields: [{ id: 'title', name: 'Title', type: 'string' }],
+            rows: slice,
+            linkSummaries,
+            view: { id: 'v1', sheetId: 's1', name: 'Grid', type: 'grid', hiddenFieldIds: [] },
+            page: { offset, limit, total, hasMore: offset + slice.length < total },
+          },
+        }), { status: 200 })
+      })
+      return { fetchFn, calls }
+    }
+
+    it('appends the next page on loadMore (rows grow past one page → windowing can engage)', async () => {
+      const { fetchFn, calls } = makePaginatedViewFetch(200, 50)
+      const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client: new MultitableApiClient({ fetchFn }) })
+
+      // initial page-1 load (offset 0, 50 rows)
+      await vi.waitFor(() => expect(grid.rows.value).toHaveLength(50))
+      expect(grid.page.value.hasMore).toBe(true)
+      expect(grid.canLoadMore.value).toBe(true)
+      // offset pinned at 0 on the infinite path (not bumped to 50) so row numbers + mutation reloads behave
+      expect(grid.page.value.offset).toBe(0)
+
+      // scroll-append → next page fetched at offset = accumulated count (50), APPENDED
+      await grid.loadMore()
+      await vi.waitFor(() => expect(grid.rows.value).toHaveLength(100))
+      // crossed the 60-row windowing threshold → the grid now holds enough rows for the DOM windowing
+      expect(grid.rows.value.length).toBeGreaterThan(60)
+      expect(calls.map((c) => c.offset)).toEqual([0, 50])
+      // earlier page's rows are still present (append, not replace)
+      expect(grid.rows.value[0]?.id).toBe('r0')
+      expect(grid.rows.value[99]?.id).toBe('r99')
+      // summary maps MERGED across pages (page-1 + page-2 link summaries both present)
+      expect(grid.linkSummaries.value.r0?.link?.[0]?.display).toBe('Link 0')
+      expect(grid.linkSummaries.value.r99?.link?.[0]?.display).toBe('Link 99')
+      expect(grid.page.value.offset).toBe(0) // still pinned
+    })
+
+    it('stops fetching at end-of-data (hasMore=false → loadMore is a no-op)', async () => {
+      const { fetchFn, calls } = makePaginatedViewFetch(120, 50)
+      const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client: new MultitableApiClient({ fetchFn }) })
+      await vi.waitFor(() => expect(grid.rows.value).toHaveLength(50))
+
+      await grid.loadMore() // offset 50 → rows 50..99
+      await vi.waitFor(() => expect(grid.rows.value).toHaveLength(100))
+      await grid.loadMore() // offset 100 → rows 100..119 (last, short page)
+      await vi.waitFor(() => expect(grid.rows.value).toHaveLength(120))
+      expect(grid.page.value.hasMore).toBe(false)
+      expect(grid.canLoadMore.value).toBe(false)
+
+      // further loadMore does nothing (no fetch beyond the three pages)
+      await grid.loadMore()
+      await grid.loadMore()
+      expect(calls.map((c) => c.offset)).toEqual([0, 50, 100])
+      expect(grid.rows.value).toHaveLength(120)
+    })
+
+    it('dedups overlapping loadMore (rapid scroll) into a single fetch', async () => {
+      // first /view load resolves immediately; subsequent (append) /view loads are gated so two rapid
+      // loadMore() calls overlap in flight.
+      let firstResolved = false
+      let releaseAppend: (() => void) | null = null
+      const appendFetches: number[] = []
+      const fetchFn = vi.fn((input: string) => {
+        const url = new URL(input, 'http://metasheet.local')
+        const offset = Number(url.searchParams.get('offset') ?? '0')
+        if (!firstResolved) {
+          firstResolved = true
+          return Promise.resolve(new Response(JSON.stringify({
+            ok: true,
+            data: {
+              fields: [{ id: 'title', name: 'Title', type: 'string' }],
+              rows: Array.from({ length: 50 }, (_, i) => ({ id: `r${i}`, version: 1, data: {} })),
+              view: { id: 'v1', sheetId: 's1', name: 'Grid', type: 'grid', hiddenFieldIds: [] },
+              page: { offset: 0, limit: 50, total: 500, hasMore: true },
+            },
+          }), { status: 200 }))
+        }
+        appendFetches.push(offset)
+        return new Promise<Response>((resolve) => {
+          releaseAppend = () => resolve(new Response(JSON.stringify({
+            ok: true,
+            data: {
+              rows: Array.from({ length: 50 }, (_, i) => ({ id: `r${offset + i}`, version: 1, data: {} })),
+              page: { offset, limit: 50, total: 500, hasMore: true },
+            },
+          }), { status: 200 }))
+        })
+      })
+      const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client: new MultitableApiClient({ fetchFn }) })
+      await vi.waitFor(() => expect(grid.rows.value).toHaveLength(50))
+
+      // fire two loadMore() back-to-back; the second must bail (loadingMore in-flight) → ONE append fetch
+      const p1 = grid.loadMore()
+      const p2 = grid.loadMore()
+      expect(appendFetches).toHaveLength(1)
+      expect(appendFetches[0]).toBe(50)
+      releaseAppend?.()
+      await Promise.all([p1, p2])
+      await vi.waitFor(() => expect(grid.rows.value).toHaveLength(100))
+      // still exactly one append fetch happened
+      expect(appendFetches).toHaveLength(1)
+    })
+
+    it('a filter/sort change while an append is in flight RESETS (refetch offset 0, replace) and the stale append is dropped', async () => {
+      let releaseAppend: ((rows: unknown[]) => void) | null = null
+      const offsets: number[] = []
+      const fetchFn = vi.fn((input: string) => {
+        const url = new URL(input, 'http://metasheet.local')
+        const offset = Number(url.searchParams.get('offset') ?? '0')
+        const search = url.searchParams.get('search')
+        offsets.push(offset)
+        // The in-flight APPEND (offset 50, no search) is held until we release it AFTER the reset.
+        if (offset === 50 && !search) {
+          return new Promise<Response>((resolve) => {
+            releaseAppend = (rows) => resolve(new Response(JSON.stringify({
+              ok: true,
+              data: { rows, page: { offset: 50, limit: 50, total: 500, hasMore: true } },
+            }), { status: 200 }))
+          })
+        }
+        // page-1 loads (offset 0): the initial one, and the post-filter RESET one (with search).
+        return Promise.resolve(new Response(JSON.stringify({
+          ok: true,
+          data: {
+            fields: [{ id: 'title', name: 'Title', type: 'string' }],
+            rows: search
+              ? [{ id: 'f0', version: 1, data: { title: 'filtered' } }] // reset result (1 filtered row)
+              : Array.from({ length: 50 }, (_, i) => ({ id: `r${i}`, version: 1, data: {} })),
+            view: { id: 'v1', sheetId: 's1', name: 'Grid', type: 'grid', hiddenFieldIds: [] },
+            page: { offset: 0, limit: 50, total: search ? 1 : 500, hasMore: !search },
+          },
+        }), { status: 200 }))
+      })
+      const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client: new MultitableApiClient({ fetchFn }) })
+      await vi.waitFor(() => expect(grid.rows.value).toHaveLength(50))
+
+      // start an append (held in flight at offset 50)
+      const appendPromise = grid.loadMore()
+      await vi.waitFor(() => expect(offsets).toContain(50))
+
+      // ...meanwhile a search change RESETS: refetch offset 0 (with search) and REPLACE rows
+      grid.setSearchQuery('zzz')
+      await vi.waitFor(() => expect(grid.rows.value).toEqual([{ id: 'f0', version: 1, data: { title: 'filtered' } }]))
+
+      // now release the STALE append; it must be DROPPED (post-await request-id guard) — never appended
+      releaseAppend?.(Array.from({ length: 50 }, (_, i) => ({ id: `stale${i}`, version: 1, data: {} })))
+      await appendPromise
+      await nextTick()
+      // the freshly-filtered single row stands; no cross-filter rows mixed in
+      expect(grid.rows.value).toEqual([{ id: 'f0', version: 1, data: { title: 'filtered' } }])
+      expect(grid.rows.value.some((r) => r.id.startsWith('stale'))).toBe(false)
+    })
+
+    it('caps accumulation at the ceiling and surfaces it (no silent truncation)', async () => {
+      // total far exceeds the 5000 ceiling; drive loadMore until capped. Use a small page to keep it quick
+      // but assert the cap behavior generically (capped flag set + hasMore forced false + warn logged).
+      const { fetchFn } = makePaginatedViewFetch(6000, 1000)
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client: new MultitableApiClient({ fetchFn }), pageSize: 1000 })
+      await vi.waitFor(() => expect(grid.rows.value).toHaveLength(1000))
+      for (let i = 0; i < 6 && grid.canLoadMore.value; i++) {
+        await grid.loadMore()
+        await nextTick()
+      }
+      expect(grid.rows.value.length).toBe(5000)
+      expect(grid.accumulationCapped.value).toBe(true)
+      expect(grid.canLoadMore.value).toBe(false)
+      expect(warn).toHaveBeenCalled()
+      warn.mockRestore()
+    })
+
+    it('a reset (loadViewData offset 0) clears the accumulation cap latch', async () => {
+      const { fetchFn } = makePaginatedViewFetch(200, 50)
+      const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client: new MultitableApiClient({ fetchFn }) })
+      await vi.waitFor(() => expect(grid.rows.value).toHaveLength(50))
+      grid.accumulationCapped.value = true // simulate a prior cap
+      await grid.loadViewData(0)
+      await vi.waitFor(() => expect(grid.rows.value).toHaveLength(50))
+      expect(grid.accumulationCapped.value).toBe(false)
+    })
+  })
+
   it('resolves record-create context from the multitable route when refs are temporarily blank', () => {
     expect(resolveCreateRecordContext({
       sheetId: '',

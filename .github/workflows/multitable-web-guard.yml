@@ -136,4 +136,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run multitable web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-history-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule multitable-person-picker multitable-cell-renderer-person-inactive meta-toolbar-filter-builder meta-filter-group --reporter=dot
+        # A1: meta-grid-table (windowing + infinite-scroll trigger) + multitable-grid (useMultitableGrid
+        # accumulation/loadMore) added so the grid virtualization ACTIVATION has real CI enforcement —
+        # the guard already triggers on MetaGridTable.vue / useMultitableGrid.ts / MultitableWorkbench.vue
+        # edits but, before this, ran none of those specs (and plugin-tests.yml only build-checks web).
+        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-history-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule multitable-person-picker multitable-cell-renderer-person-inactive meta-toolbar-filter-builder meta-filter-group meta-grid-table multitable-grid --reporter=dot
