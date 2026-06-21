@@ -9,7 +9,7 @@
  * must be DROPPED from that reader's response — never the writer's materialized aggregate. Without the
  * resolveTaintedFormulaFieldIds extension this test is RED (the denied reader would receive 300).
  *
- * Trigger: a PATCH (here, re-setting the link) recomputes dependent formulas via recalculateFormulaFields;
+ * Trigger: a PATCH of the current-record criteria field ('unpaid'→'paid') recomputes dependent formulas via recalculateFormulaFields;
  * GET /records/:id reads through maskStoredRecordFieldIds → resolveTaintedFormulaFieldIds.
  */
 import express, { type Express } from 'express'
@@ -56,7 +56,9 @@ function buildApp(userId: string): Express {
   return a
 }
 const fx = (fieldId: string) => JSON.stringify({ expression: `=${fieldId}` })
-const relExpr = (target: string, value: string) => JSON.stringify({ expression: `RELSUMIF("${FLD_LINK}","${target}","${FLD_STATUS}","is","${value}")` })
+// criteria value = a current-record {fld} (the genuine delta over rollup-with-filter) — and patching it
+// is a guaranteed real change that triggers recompute (re-setting the link to identical ids can be a no-op).
+const relExpr = (target: string) => JSON.stringify({ expression: `RELSUMIF("${FLD_LINK}","${target}","${FLD_STATUS}","is",{${FLD_CURVAL}})` })
 
 async function readField(userId: string, fieldId: string): Promise<unknown> {
   const res = await request(buildApp(userId)).get(`/api/multitable/records/${REC}`)
@@ -68,13 +70,14 @@ async function hasField(userId: string, fieldId: string): Promise<boolean> {
   expect(res.status).toBe(200)
   return Object.prototype.hasOwnProperty.call(res.body?.data?.record?.data ?? {}, fieldId)
 }
-// Re-set the link to its current ids → triggers recalculateFormulaFields (formulas depend on the link).
+// Patch the current-record criteria field 'unpaid'→'paid' (a REAL change) → triggers recalculateFormulaFields
+// (the formulas depend on it); the RELSUMIF criteria value resolves to this current-record {fld} = 'paid'.
 async function materializeAs(userId: string): Promise<void> {
   const cur = await q('SELECT version FROM meta_records WHERE id = $1', [REC])
   const version = Number((cur.rows[0] as any)?.version ?? 1)
   const res = await request(buildApp(userId)).post('/api/multitable/patch').send({
     sheetId: MS,
-    changes: [{ recordId: REC, fieldId: FLD_LINK, value: [FR1, FR2, FR3], expectedVersion: version }],
+    changes: [{ recordId: REC, fieldId: FLD_CURVAL, value: 'paid', expectedVersion: version }],
   })
   expect(res.status).toBe(200)
 }
@@ -98,18 +101,18 @@ describeIfDatabase('multitable 1b Slice A — relation-scoped RELSUMIF (real DB)
 
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_LINK, MS, 'Link', 'link', JSON.stringify({ foreignSheetId: FS }), 1])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_CURVAL, MS, 'CurVal', 'string', '{}', 2])
-    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_SUMIF, MS, 'SumIf', 'formula', relExpr(FLD_AMT, 'paid'), 3])
-    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_SECRETSUM, MS, 'SecretSum', 'formula', relExpr(FLD_SECRET, 'paid'), 4])
-    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_CLIFF, MS, 'Cliff', 'formula', JSON.stringify({ expression: `RELSUMIF("${FLD_LINK}","${FLD_AMT}","${FLD_STATUS}","is","paid")+1` }), 5])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_SUMIF, MS, 'SumIf', 'formula', relExpr(FLD_AMT), 3])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_SECRETSUM, MS, 'SecretSum', 'formula', relExpr(FLD_SECRET), 4])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_CLIFF, MS, 'Cliff', 'formula', JSON.stringify({ expression: `RELSUMIF("${FLD_LINK}","${FLD_AMT}","${FLD_STATUS}","is",{${FLD_CURVAL}})+1` }), 5])
 
-    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [REC, MS, JSON.stringify({ [FLD_LINK]: [FR1, FR2, FR3], [FLD_CURVAL]: 'paid' })])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [REC, MS, JSON.stringify({ [FLD_LINK]: [FR1, FR2, FR3], [FLD_CURVAL]: 'unpaid' })])
     for (const fr of [FR1, FR2, FR3]) {
       await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [`lnk_rel_${fr}`, FLD_LINK, REC, fr])
     }
-    // Formula deps on the link (the string-literal link arg is invisible to the {fld} extractor; the
-    // create handler would register it, but these fields are seeded via SQL, so insert the edge directly).
+    // Formula deps on the current-record criteria field {CURVAL} (the recompute trigger; the create handler
+    // would register it via extractFieldReferences, but these fields are seeded via SQL → insert directly).
     for (const ff of [FLD_SUMIF, FLD_SECRETSUM, FLD_CLIFF]) {
-      await q('INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id) VALUES ($1,$2,$3,NULL)', [MS, ff, FLD_LINK])
+      await q('INSERT INTO formula_dependencies (sheet_id, field_id, depends_on_field_id, depends_on_sheet_id) VALUES ($1,$2,$3,NULL)', [MS, ff, FLD_CURVAL])
     }
     // DENY cannot read the foreign SECRET field → any RELSUMIF over it must be masked for DENY on read.
     await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [FS, FLD_SECRET, 'user', DENY, false, false])

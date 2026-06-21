@@ -2687,6 +2687,7 @@ async function recalculateFormulaFields(
           updates[fieldId] = '#ERROR!' // composition deferred (Slice A is sole-call) — fail loud, never silent-wrong
         }
         if (Object.keys(updates).length > 0) {
+          // lock-exempt: system relation-aggregation materialization — derived value, no user actor (same posture as recalculateRecordFromData; a record lock is read-only to users, not system recompute).
           await query(
             'UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3',
             [JSON.stringify(updates), recordId, sheetId],
