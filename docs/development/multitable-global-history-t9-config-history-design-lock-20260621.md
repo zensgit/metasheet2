@@ -20,10 +20,17 @@ lock forbids.
 
 ## 2. Locks (T9; CH-* are config-history-specific)
 
-- **CH-1 — Separate stream, separate store.** Config changes are recorded in their own append-only log (e.g.
-  `meta_config_revisions` — entity_type ∈ {field, view, permission, …}, entity_id, action, before/after config
-  snapshot, actor, source, created_at), NOT in `meta_record_revisions`. Data-history projections never read it
-  and vice versa.
+- **CH-1 — Separate stream, separate store, SCOPE-KEYED.** Config changes are recorded in their own append-only
+  log `meta_config_revisions`, NOT in `meta_record_revisions` (data-history projections never read it, and vice
+  versa). The schema MUST lock the scope keys the CH-3 permission gate filters on, not just the entity:
+  - **`base_id text NOT NULL`** — every config change belongs to a base (the gate's primary scope);
+  - **`sheet_id text NULL`** — the sheet for field/view changes; **null for base-level config** (e.g. base
+    permission rules) — so the gate can distinguish base-scope from sheet-scope authority;
+  - `entity_type` ∈ {field, view, permission, …}, `entity_id`, `action`, before/after config snapshot
+    (redacted per CH-4), `actor_id`, `source`, `created_at`;
+  - **indexed on `(base_id, sheet_id, created_at DESC)`** so the gated read is scoped cleanly by base/sheet and
+    paginates in LOCK-11 order. Without these scope keys the CH-3 permission gate cannot land stably (it would
+    have to infer scope from `entity_id`, which is not authority-bearing).
 - **CH-2 — Read-only first.** The first T9 release is a config-history VIEW (who changed which field/view/rule,
   when, before→after) — no config restore. Restore is a later, separately-designed slice (CH boundary).
 - **CH-3 — Permission-gated display.** Config detail is visible only to authorized users (the people who can

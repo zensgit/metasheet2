@@ -26,12 +26,29 @@ const rev = (recordId: string, version: number, action: 'create' | 'update' | 'd
     [SHEET, recordId, version, action, data === null ? null : JSON.stringify(data), createdAtIso],
   )
 
+// Top-level (NOT inside describeIfDatabase) so it runs even without a DB and FAILS — not silently skips — when
+// the REAL-DB ALLOWLIST STEP runs this file without the harness. Scoped to that step via the workflow-injected
+// METASHEET_REAL_DB_TEST_STEP env: the NORMAL core-backend test job also collects this file (CI=true, no
+// DATABASE_URL) and there the sentinel MUST pass — the describeIfDatabase goldens skip; we don't red that job.
+test('sentinel: the real-DB allowlist step must have DATABASE_URL (fail-not-skip, scoped to that step)', () => {
+  if (process.env.METASHEET_REAL_DB_TEST_STEP === '1' && !process.env.DATABASE_URL) {
+    throw new Error('real-DB allowlist step is missing DATABASE_URL — the harness is broken, not legitimately skippable')
+  }
+  expect(true).toBe(true)
+})
+
+// Pins the `number | null` version contract via a mock query: `version` column is NOT NULL in the DB, so a
+// null can only arrive through a degraded/mocked row — and it must become null, never 0.
+test('version contract: a non-numeric version normalizes to null, NOT 0 (unknown ≠ real version 0)', async () => {
+  const mockQuery = (async () => ({ rows: [{ record_id: 'r', action: 'update', snapshot: { f: 'x' }, version: null }] })) as unknown as Parameters<typeof reconstructRecordsAtT>[0]
+  const map = await reconstructRecordsAtT(mockQuery, 'sheet', '2026-06-01T00:00:00Z')
+  expect(map.get('r')).toMatchObject({ exists: true, data: { f: 'x' }, version: null })
+})
+
 describeIfDatabase('record reconstruction as of T — T5-1 (real DB)', () => {
   beforeAll(() => { /* the reconstructor reads only meta_record_revisions; no sheet/record seed needed */ })
   afterEach(async () => { await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET]).catch(() => {}) })
   afterAll(async () => { await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET]).catch(() => {}) })
-
-  test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
 
   test('state at T = the latest revision <= T (create → update → update)', async () => {
     await rev(REC, 1, 'create', { f: 'a' }, '2026-06-01T00:00:00Z')
