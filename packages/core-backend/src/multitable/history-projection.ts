@@ -205,7 +205,11 @@ export async function loadHistoryBatchSummaries(
   // over a huge history is bounded. Capping a READ-ONLY search yields incomplete results, NOT a failure — do
   // NOT fail-closed here (unlike T5/PV-7, search has no execution-matches-preview invariant to protect).
   const searchQuery = params.search && params.search.trim() ? params.search.trim().toLowerCase() : null
-  const searchRowCap = Math.max(Number(params.searchRowCap ?? SEARCH_CANDIDATE_ROW_CAP), 1)
+  // Finite positive integer only. Resolve the default FIRST (`??` catches null + undefined — `Number(null)` is
+  // 0, which would otherwise clamp to LIMIT 1 instead of the default), then guard: a non-finite value falls
+  // back to the default (never `LIMIT NaN`), a fractional value is floored (never `LIMIT 2.5`). SQL-interpolated.
+  const numericRowCap = Number(params.searchRowCap ?? SEARCH_CANDIDATE_ROW_CAP)
+  const searchRowCap = Number.isFinite(numericRowCap) ? Math.max(Math.floor(numericRowCap), 1) : SEARCH_CANDIDATE_ROW_CAP
   const res = await query(
     `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, created_at${searchQuery ? ', snapshot' : ''}
      FROM meta_record_revisions

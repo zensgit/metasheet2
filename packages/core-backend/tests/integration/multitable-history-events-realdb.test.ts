@@ -354,4 +354,19 @@ describeIfDatabase('global-history events — LOCK-3 security goldens (real DB)'
     const full = await loadHistoryBatchSummaries(q, { ...params, searchRowCap: 10000 }, access)
     expect(full.searchTruncated).toBe(false) // generous cap → complete
   })
+
+  test('T2b search cap is finite-guarded: a NaN / non-integer searchRowCap never produces invalid SQL', async () => {
+    await mixedFieldRev()
+    const params = { sheetIds: [SHEET_ID], allowedFieldsBySheet: new Map([[SHEET_ID, new Set([STATUS, SALARY])]]), search: '99999' }
+    const access = { userId: USER_ID, isAdminRole: false }
+    // NaN → falls back to the default cap (no `LIMIT NaN` — the await would reject on invalid SQL); not truncated.
+    const nanCap = await loadHistoryBatchSummaries(q, { ...params, searchRowCap: NaN }, access)
+    expect(nanCap.searchTruncated).toBe(false)
+    // null → the DEFAULT cap, NOT 1 (Number(null)===0 would clamp to LIMIT 1 → spuriously "truncated").
+    const nullCap = await loadHistoryBatchSummaries(q, { ...params, searchRowCap: null as unknown as number }, access)
+    expect(nullCap.searchTruncated).toBe(false)
+    // A fractional cap is floored to a valid integer LIMIT (no `LIMIT 1.9`); floor(1.9)=1 with ≥2 rows → truncated.
+    const fracCap = await loadHistoryBatchSummaries(q, { ...params, searchRowCap: 1.9 }, access)
+    expect(fracCap.searchTruncated).toBe(true)
+  })
 })
