@@ -3881,22 +3881,18 @@ async function testFieldOptionsSyncRoute() {
   })
   assertOkResponse(res, 200)
   assert.equal(res.body.data.target.presetId, STOCK_PREP_PRESET_ID)
-  assert.equal(res.body.data.target.targetTable, 'stock_preparation_main')
+  assert.equal(res.body.data.target.targetTable, 'plm_stock_preparation_main')
   assert.equal(res.body.data.target.fieldCount, 2, 'two supplied fields synced')
 
   const patches = findCalls(provisioning.calls, 'patchObjectFieldProperty')
   assert.equal(patches.length, 2, 'generic route patches only supplied + mapped fields')
   const materialPatch = patches.find((call) => call[1].fieldId === 'materialType')
   assert.ok(materialPatch, 'materialType (mapped from material_type) patched')
-  // BLOCKER (see report / FOS-2 hand-off): the generic route derives objectId from
-  // preset.targetTable = 'stock_preparation_main', which DIFFERS from the runtime stock-prep
-  // objectId 'plm_stock_preparation_main' (stock-preparation-templates.cjs). The host resolves a
-  // sheet via getObjectSheetId(projectId, objectId) = a hash of the objectId string, so against a
-  // REAL host this targets a nonexistent sheet ("Provisioned field not found"). The permissive test
-  // mock accepts any objectId and hides this. Asserting the literal value here makes the gap visible
-  // to the reviewer; the fix (correct FOS-1 targetTable, OR a FOS-2 preset→objectId resolution +
-  // readiness gating) is the parent's design call and is intentionally NOT made here.
-  assert.equal(materialPatch[1].objectId, 'stock_preparation_main', 'generic route sends preset.targetTable verbatim as objectId (see BLOCKER above)')
+  // The generic route sends preset.targetTable verbatim as objectId. FOS-2 corrected the FOS-1
+  // preset.targetTable to the REAL stock-prep objectId 'plm_stock_preparation_main' (= STOCK_PREPARATION_
+  // MAIN_TABLE_TEMPLATE.objectId; the host hashes objectId→sheetId, so it MUST match or it targets a
+  // nonexistent sheet). Readiness is gated above (FIELD_OPTION_SYNC_TARGET_NOT_READY) before any patch.
+  assert.equal(materialPatch[1].objectId, 'plm_stock_preparation_main', 'generic route targets the real stock-prep objectId (preset.targetTable corrected in FOS-2)')
   assert.deepEqual(materialPatch[1].propertyPatch.options, [
     { value: 'plate', label: 'Plate' },
     { value: 'bar', disabled: true },

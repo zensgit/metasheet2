@@ -2099,6 +2099,24 @@ function createHandlers(services, options = {}) {
       const provisioning = getFieldOptionSyncProvisioning()
       const optionFields = fieldOptionSyncKernelFields(preset)
 
+      // FOS-2: readiness gate, bound per preset. The stock-preparation preset targets the canonical
+      // stock-prep table, so it reuses that table's readiness inspection — parity with the stock-prep
+      // route: never patch an unprovisioned target (avoids a partial patch / opaque FIELD_PATCH_FAILED).
+      // Fail closed for any preset without a readiness binding (additional presets are gated to FOS-4).
+      if (preset.presetId === 'preset.stock-preparation.v1') {
+        const readiness = await inspectStockPreparationCanonicalTarget({ context, projectId: input.projectId, permission: 'admin' })
+        if (readiness.ready !== true) {
+          throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_TARGET_NOT_READY', 'field-option-sync target is not ready', {
+            presetId: preset.presetId,
+            targetObjectId: preset.targetTable,
+          })
+        }
+      } else {
+        throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_PRESET_NO_READINESS', 'preset has no readiness binding (additional presets are gated to FOS-4)', {
+          presetId: preset.presetId,
+        })
+      }
+
       // Reject any operator option-set key the preset does not declare (mirrors stock-prep).
       const allowedSourceKeys = new Set(optionFields.map((field) => field.optionSource.key))
       const unknownSourceKey = Object.keys(input.optionSets).find((key) => !allowedSourceKeys.has(key))
