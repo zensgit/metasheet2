@@ -9,7 +9,7 @@
 
 ## 0. TL;DR
 
-- **#1 年假/法定假额度引擎 ✅ 已落**（自 v2 后：L0–L5c + `/me` 员工自助余额卡 #2850/#2853；grant/accrual/跨年过期/审批扣减/admin 操作 UI 齐全。**仅剩 owner-run L6 staging smoke，非代码开发**）。
+- **#1 年假/法定假额度引擎 ✅ 已落（L0–L6 staging-proven）**（自 v2 后：L0–L5c build + `/me` 员工自助余额卡 #2850/#2853 + **L6 staging smoke PASS**；grant/accrual/跨年过期/审批扣减/admin 操作 UI 齐全。L6 已闭环（closeout 见 tracker §0.5）——非 pending、非欠账）。
 - **当前真实剩余 = 7 候选**，按 **文件级并行独立性** 重排（碰撞图见 §2）：
   - **最安全并行（文件不相交）**：**#3 通知渠道 adapter**（唯一独立文件 + 1 行注册）、**#2 员工自助统一入口**（前端为主 + 1 个隔离 read-route）。
   - **`index.cjs` 内局部、彼此隔离**：**#4 补卡结构化**（`/punch`+`/requests`）、**#7 销假/余额反冲**（与 #1 年假 **同表**，随其家族排期）。
