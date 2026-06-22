@@ -17,8 +17,10 @@
 - **Probe-safe ordering:** mask *then* `fieldIds`-filter — a requested-but-hidden field is already gone before the
   selection, so no 403-vs-no-op oracle.
 - **Empty handling:** an empty `fieldIds` array → **400** (schema `.min(1)`); a selection that nets zero changes
-  (unchanged/hidden) → **no executable identity** (preview returns `previewIdentity: null`, execute no-ops
-  *before* consulting the identity) — never a `hash([])` executable token.
+  (unchanged/hidden) → **no executable identity** — preview returns `previewIdentity: null`, and execute
+  **verifies the identity FIRST**, so an arbitrary / foreign / forged token → **409 `PREVIEW_IDENTITY_INVALID`**;
+  the empty-diff noop is reachable only AFTER a valid identity is consumed — never a `hash([])` executable token.
+  (Corrected post-#3045 `d0c27aed`: the earlier "noop before consulting the identity" was the bug that PR fixed.)
 - **FE:** the drawer already emits `fieldIds`; the client + workbench now carry it through preview→execute, and
   the legacy `restoreFieldsDirect` direct-`/restore` fallback is removed. Full-record and per-field share one path.
 
