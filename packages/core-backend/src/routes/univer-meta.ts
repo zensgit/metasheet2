@@ -7397,9 +7397,13 @@ export function univerMetaRouter(): Router {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     if (!sheetId || !recordId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
-    const previewParsed = z.object({ targetVersion: z.number().int().positive() }).safeParse(req.body)
+    const previewParsed = z.object({ targetVersion: z.number().int().positive(), fieldIds: z.array(z.string().min(1)).min(1).optional() }).safeParse(req.body)
     if (!previewParsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: previewParsed.error.message } })
     const previewTargetVersion = previewParsed.data.targetVersion
+    // T6 per-field: an optional fieldIds subset. Omitted = full-record. Provided = the masked diff is FILTERED to
+    // this selection BEFORE hashing (filter-then-hash; fieldIds is folded into the changesHash, never a trusted
+    // side input). The empty array is rejected by the schema (.min(1)) — never a hash([]) executable token.
+    const previewFieldIds = previewParsed.data.fieldIds
     try {
       const pool = poolManager.get()
       // Denied/missing record share the SAME 404 shape (no existence oracle), like the per-record history route.
@@ -7429,8 +7433,7 @@ export function univerMetaRouter(): Router {
       let schemaDrift = false
       for (const fid of Object.keys(targetSnapshot)) if (!previewCtx.fieldById.has(fid)) { schemaDrift = true; break }
 
-      // Mirror of the restore route's set ∪ unset diff (scalar) + link-as-report. Helpers mirror restore (P3 dup).
-      // T6 P3 unify: the canonical raw diff (shared computeRecordRestoreDiff). The preview projects it to
+      // T6 P3: the shared computeRecordRestoreDiff is the source; the preview projects it to
       // {fieldId,op,value} for the changesHash + masking; recordId/expectedVersion are dropped (preview writes nothing).
       const changes = computeRecordRestoreDiff({ fieldById: previewCtx.fieldById, rawTypeById, targetSnapshot, currentData, recordId, currentVersion: 0, normalizeLinkIds })
         .map((c) => ({ fieldId: c.fieldId, op: (c.op ?? 'set') as 'set' | 'unset', value: c.value }))
@@ -7439,22 +7442,27 @@ export function univerMetaRouter(): Router {
       const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
       const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
       const visibleChanges = changes.filter((c) => allowed.has(c.fieldId))
+      // Per-field: filter the ALREADY-MASKED diff to the selection (mask-then-filter, so a hidden requested field is
+      // already gone — no 403-vs-no-op probe). Order/dups are irrelevant — a Set membership over the masked diff.
+      const selectedChanges = previewFieldIds ? visibleChanges.filter((c) => new Set(previewFieldIds).has(c.fieldId)) : visibleChanges
       // T6-2: mint a preview identity binding this MASKED diff (what the actor saw) so a later restore-execute can
       // confirm execution matches this preview (SR-3). Reveal-free by construction (this route has no reveal path).
       // NOT executable under schema drift: a snapshot field deleted from the current schema can't be faithfully
       // reproduced, so an executable identity would let execute SILENTLY partial-restore the surviving fields.
       // Withhold the identity (FE must surface the drift); execute also re-checks and rejects (defense in depth).
-      const previewIdentity = schemaDrift
+      // No executable identity when the (filtered) diff is empty — a selection that nets zero changes behaves like
+      // the no-op/drift path, never a hash([]) executable token.
+      const previewIdentity = (schemaDrift || selectedChanges.length === 0)
         ? null
         : mintRestorePreviewIdentity({
             sheetId,
             recordId,
             targetVersion: previewTargetVersion,
             strategy: 'revert',
-            changesHash: hashPreviewChanges(visibleChanges),
+            changesHash: hashPreviewChanges(selectedChanges),
             actorId: access.userId,
           })
-      return res.json({ ok: true, data: { changes: visibleChanges, visibleAffectedFieldCount: visibleChanges.length, schemaDrift, targetVersion: previewTargetVersion, previewIdentity } })
+      return res.json({ ok: true, data: { changes: selectedChanges, visibleAffectedFieldCount: selectedChanges.length, schemaDrift, targetVersion: previewTargetVersion, previewIdentity } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -7705,9 +7713,11 @@ export function univerMetaRouter(): Router {
       targetVersion: z.number().int().positive(),
       expectedVersion: z.number().int().nonnegative(),
       previewIdentity: z.string().min(1),
+      // T6 per-field: optional subset, symmetric with restore-preview. Empty array rejected by .min(1).
+      fieldIds: z.array(z.string().min(1)).min(1).optional(),
     }).safeParse(req.body)
     if (!exParsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: exParsed.error.message } })
-    const { targetVersion, expectedVersion, previewIdentity } = exParsed.data
+    const { targetVersion, expectedVersion, previewIdentity, fieldIds: executeFieldIds } = exParsed.data
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
     try {
       const pool = poolManager.get()
@@ -7751,33 +7761,33 @@ export function univerMetaRouter(): Router {
         if (!fieldById.has(fid)) return res.status(422).json({ ok: false, error: { code: 'SCHEMA_DRIFT', message: `Field ${fid} in revision ${targetVersion} no longer exists in the current schema` } })
       }
 
-      // The faithful set ∪ unset diff (same shape as /restore + T5-2's preview), then MASK to the actor's allowed
-      // fields — this masked set is exactly what T5-2's preview hashed into the identity (3rd copy of the diff;
-      // the end-to-end preview→execute golden is the drift guard, unifying the copies is a follow-up P3).
-      // T6 P3 unify: the canonical raw diff (shared computeRecordRestoreDiff). Masking / gate / schema-drift /
-      // expectedVersion stay below in this route — the helper only produces the raw diff.
+      // T6 P3: the shared computeRecordRestoreDiff is the source; masking / gate / schema-drift / expectedVersion
+      // stay in this route — the helper only produces the raw diff.
       const diff = computeRecordRestoreDiff({ fieldById, rawTypeById, targetSnapshot, currentData, recordId, currentVersion, normalizeLinkIds })
       const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
       const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
       const maskedDiff = diff.filter((c) => allowed.has(c.fieldId))
+      // Per-field: filter the ALREADY-MASKED diff to the selection (mask-then-filter, symmetric with the preview),
+      // so the hash is over the SAME filtered set the preview minted. Order/dups irrelevant (Set membership).
+      const selectedDiff = executeFieldIds ? maskedDiff.filter((c) => new Set(executeFieldIds).has(c.fieldId)) : maskedDiff
+      // An empty (filtered) diff is a no-op BEFORE the identity is even consulted — no hash([]) token can "succeed".
+      if (selectedDiff.length === 0) return res.json({ ok: true, data: { recordId, newVersion: currentVersion, noop: true, restoredFieldIds: [] } })
 
-      // Verify the identity against claims recomputed FRESH from the current masked diff (execution matches the
+      // Verify the identity against claims recomputed FRESH from the current FILTERED diff (execution matches the
       // preview). A stale diff (data / permissions moved) re-hashes differently → mismatch → reject → re-preview.
-      const recomputedHash = hashPreviewChanges(maskedDiff.map((c) => ({ fieldId: c.fieldId, op: c.op, value: c.value })))
+      const recomputedHash = hashPreviewChanges(selectedDiff.map((c) => ({ fieldId: c.fieldId, op: c.op, value: c.value })))
       const verdict = verifyRestorePreviewIdentity(previewIdentity, { sheetId, recordId, targetVersion, strategy: 'revert', changesHash: recomputedHash, actorId: access.userId })
       if (!verdict.valid) {
         const status = verdict.reason === 'expired' ? 410 : 409
         return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Preview identity rejected (${verdict.reason})` } })
       }
-
-      if (maskedDiff.length === 0) return res.json({ ok: true, data: { recordId, newVersion: currentVersion, noop: true, restoredFieldIds: [] } })
       const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
       const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
       if (yjsInvalidator) recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
       try {
         const result = await recordWriteService.patchRecords({
           sheetId,
-          changesByRecord: new Map([[recordId, maskedDiff]]),
+          changesByRecord: new Map([[recordId, selectedDiff]]),
           actorId: getRequestActorId(req),
           fields,
           visiblePropertyFields: readableEchoFields,
@@ -7790,7 +7800,7 @@ export function univerMetaRouter(): Router {
           source: 'restore',
         })
         const newVersion = result.updated.find((u) => u.recordId === recordId)?.version ?? currentVersion + 1
-        return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds: maskedDiff.map((c) => c.fieldId) } })
+        return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds: selectedDiff.map((c) => c.fieldId) } })
       } catch (err) {
         if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) return res.status(409).json({ ok: false, error: { code: 'VERSION_CONFLICT', message: (err as Error).message } })
         if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: (err as Error).message } })

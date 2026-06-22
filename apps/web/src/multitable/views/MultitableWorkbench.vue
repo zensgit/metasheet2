@@ -1858,30 +1858,19 @@ const restorePreview = ref<{
   schemaDrift: boolean
   executable: boolean
   identity: string | null
-  payload: { recordId: string; targetVersion: number; expectedVersion: number } | null
+  payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] } | null
 }>({ visible: false, loading: false, changes: [], schemaDrift: false, executable: false, identity: null, payload: null })
 
 const restorePreviewFieldName = (fieldId: string): string => scopedAllFields.value.find((f) => f.id === fieldId)?.name ?? fieldId
 
-async function restoreFieldsDirect(sheetId: string, payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] }) {
-  if (!window.confirm(recordLabel('record.restoreConfirm', isZh.value))) return
-  try {
-    const result = await workbench.client.restoreRecordVersion(sheetId, payload.recordId, payload.targetVersion, payload.expectedVersion, payload.fieldIds)
-    showSuccess(recordLabel(result.noop ? 'record.restoreNoop' : 'record.restoreSuccess', isZh.value))
-    await grid.loadViewData(grid.page.value.offset)
-    if (selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
-  } catch (error) {
-    showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
-  }
-}
-
 async function onRestoreRecordVersion(payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] }) {
   const sheetId = workbench.activeSheetId.value
   if (!sheetId) return
-  if (payload.fieldIds && payload.fieldIds.length > 0) { await restoreFieldsDirect(sheetId, payload); return }
-  restorePreview.value = { visible: true, loading: true, changes: [], schemaDrift: false, executable: false, identity: null, payload: { recordId: payload.recordId, targetVersion: payload.targetVersion, expectedVersion: payload.expectedVersion } }
+  // Full-record AND per-field (column-subset) both go through preview→confirm→execute now — fieldIds is carried
+  // through so the preview shows exactly the selected changes and the identity binds that filtered set.
+  restorePreview.value = { visible: true, loading: true, changes: [], schemaDrift: false, executable: false, identity: null, payload: { recordId: payload.recordId, targetVersion: payload.targetVersion, expectedVersion: payload.expectedVersion, fieldIds: payload.fieldIds } }
   try {
-    const pv = await workbench.client.restorePreviewRecord(sheetId, payload.recordId, payload.targetVersion)
+    const pv = await workbench.client.restorePreviewRecord(sheetId, payload.recordId, payload.targetVersion, payload.fieldIds)
     restorePreview.value = { ...restorePreview.value, loading: false, changes: pv.changes, schemaDrift: pv.schemaDrift, executable: pv.previewIdentity != null, identity: pv.previewIdentity }
   } catch (error) {
     restorePreview.value = { ...restorePreview.value, visible: false }
@@ -1893,10 +1882,10 @@ async function onConfirmRestore() {
   const sheetId = workbench.activeSheetId.value
   const state = restorePreview.value
   if (!sheetId || !state.payload || !state.identity) { restorePreview.value = { ...state, visible: false }; return }
-  const { recordId, targetVersion, expectedVersion } = state.payload
+  const { recordId, targetVersion, expectedVersion, fieldIds } = state.payload
   restorePreview.value = { ...state, visible: false }
   try {
-    const result = await workbench.client.restoreExecuteRecord(sheetId, recordId, targetVersion, expectedVersion, state.identity)
+    const result = await workbench.client.restoreExecuteRecord(sheetId, recordId, targetVersion, expectedVersion, state.identity, fieldIds)
     showSuccess(recordLabel(result.noop ? 'record.restoreNoop' : 'record.restoreSuccess', isZh.value))
     await grid.loadViewData(grid.page.value.offset)
     if (selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
