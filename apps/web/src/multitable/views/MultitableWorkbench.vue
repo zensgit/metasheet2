@@ -1848,9 +1848,9 @@ async function onToggleRecordLock(payload: { recordId: string; locked: boolean }
 // confirm + API call + refresh (mirrors onToggleRecordLock). The backend error carries `.code`
 // (VERSION_CONFLICT / VERSION_EXPIRED / RESTORE_UNSUPPORTED / SNAPSHOT_UNAVAILABLE / SCHEMA_DRIFT /
 // RESTORE_FORBIDDEN); we surface error.message (already localized server-side) with a static fallback.
-// T6-3: full-record restore goes through preview→confirm→execute (the T6-2 chain); the panel shows what would
-// change before the actor commits, and a schema-drift conflict blocks it. Per-field (column-level) restore keeps
-// the existing direct path (the T6 identity binds the full-record diff; per-field-through-preview is a follow-up).
+// T6: BOTH full-record and per-field (column-subset) restore go through preview→confirm→execute; the panel shows
+// what would change before the actor commits, and a schema-drift conflict blocks it. fieldIds is carried through
+// so the preview + identity bind exactly the selected subset (the legacy direct /restore fallback was removed).
 const restorePreview = ref<{
   visible: boolean
   loading: boolean

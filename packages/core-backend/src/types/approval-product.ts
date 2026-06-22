@@ -112,11 +112,22 @@ export type ApprovalAssigneeSource =
   | { kind: 'manager_at_level'; level: number }
 
 export interface ApprovalAssigneeResolutionMetadata {
-  resolvedFrom: {
+  /**
+   * Present for assignees resolved from an `assigneeSources` entry (the dynamic-source
+   * discriminator downstream keys on its presence). Absent for legacy `assigneeIds`
+   * assignments — including a legacy assignment that a delegation substituted, which
+   * then carries only `delegatedFrom`.
+   */
+  resolvedFrom?: {
     kind: ApprovalAssigneeSourceKind
     sourceIndex: number
     fieldId?: string
   }
+  /**
+   * Set when a delegation (委托) substituted this assignee: the original delegator's
+   * id. The resolved `assigneeId` is already the delegatee; this is audit-trail only.
+   */
+  delegatedFrom?: string
 }
 
 export interface ConditionNodeConfig {
@@ -246,6 +257,14 @@ export interface ApprovalRequesterSnapshot {
    * to its own `levels`. Purely additive; existing snapshots omit it.
    */
   managerChainIds?: string[]
+  /**
+   * Delegation (委托) substitution map (delegator localUserId -> delegatee localUserId),
+   * frozen at create time from the active `approval_delegations` scoped to this template
+   * + the create-time instant. Read by `ApprovalAssigneeResolver` inside `pushResolved`
+   * to route a delegator's resolved assignment to the delegatee. Absent when no active
+   * delegation applies; purely additive.
+   */
+  delegations?: Record<string, string>
   [key: string]: unknown
 }
 
