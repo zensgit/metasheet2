@@ -7770,9 +7770,6 @@ export function univerMetaRouter(): Router {
       // Per-field: filter the ALREADY-MASKED diff to the selection (mask-then-filter, symmetric with the preview),
       // so the hash is over the SAME filtered set the preview minted. Order/dups irrelevant (Set membership).
       const selectedDiff = executeFieldIds ? maskedDiff.filter((c) => new Set(executeFieldIds).has(c.fieldId)) : maskedDiff
-      // An empty (filtered) diff is a no-op BEFORE the identity is even consulted — no hash([]) token can "succeed".
-      if (selectedDiff.length === 0) return res.json({ ok: true, data: { recordId, newVersion: currentVersion, noop: true, restoredFieldIds: [] } })
-
       // Verify the identity against claims recomputed FRESH from the current FILTERED diff (execution matches the
       // preview). A stale diff (data / permissions moved) re-hashes differently → mismatch → reject → re-preview.
       const recomputedHash = hashPreviewChanges(selectedDiff.map((c) => ({ fieldId: c.fieldId, op: c.op, value: c.value })))
@@ -7781,6 +7778,10 @@ export function univerMetaRouter(): Router {
         const status = verdict.reason === 'expired' ? 410 : 409
         return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Preview identity rejected (${verdict.reason})` } })
       }
+      // Empty filtered diff is a no-op — but ONLY AFTER a valid identity is consumed. Preview never mints an
+      // identity for an empty diff, so a forged/arbitrary token 409s at the verify above; a success ALWAYS
+      // consumes a valid preview identity, never an empty-selection bypass.
+      if (selectedDiff.length === 0) return res.json({ ok: true, data: { recordId, newVersion: currentVersion, noop: true, restoredFieldIds: [] } })
       const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
       const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
       if (yjsInvalidator) recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
