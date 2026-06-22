@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express'
+import { randomUUID } from 'crypto'
 import { z } from 'zod'
 import { requireAdminRole } from '../guards/audit-integration'
 import { redactString, redactValue } from '../multitable/automation-log-redact'
@@ -34,7 +35,12 @@ import {
   createRecordWriteHelpers,
   getYjsInvalidatorForRoutes,
   requireRecordReadable,
+  parseMetaFilterInfo,
+  evaluateFilterNode,
+  evaluateMetaFilterCondition,
+  collectLeafConditions,
   type RecordPatchRouteContext,
+  type MetaFilterCondition,
 } from './univer-meta'
 import {
   RecordWriteService,
@@ -50,8 +56,9 @@ import { normalizeJson } from '../multitable/field-codecs'
 import { poolManager } from '../integration/db/connection-pool'
 import { eventBus } from '../integration/events/event-bus'
 import { createRateLimiter } from '../middleware/rate-limiter'
-import { ensureRecordWriteAllowed, resolveSheetCapabilities } from '../multitable/permission-service'
-import { loadFieldsForSheet } from '../multitable/loaders'
+import { ensureRecordWriteAllowed, resolveSheetCapabilities, resolveSheetReadableCapabilities } from '../multitable/permission-service'
+import { loadFieldsForSheet, tryResolveView } from '../multitable/loaders'
+import { insertBulkPreviewCacheRow, type BulkPreviewCacheRow } from '../services/ai-bulk-preview-cache'
 
 /**
  * Multitable AI routes — A1 readiness (M1b) + A2 shortcut preview/run (M2).
@@ -110,6 +117,26 @@ interface ShortcutRequestContext {
   action: AiUsageAction
   userId: string
 }
+
+/**
+ * Res-free per-attempt outcome of `runShortcutCore` (B-1). The discriminant is
+ * the charge boundary: only `charged` consumed the provider (and the quota);
+ * every other variant is provider-never-reached → UNCHARGED. `settle` is
+ * present only on `charged` so a caller can re-settle the STATUS keeping usage
+ * (e.g. a downstream write conflict) without re-charging.
+ */
+type ShortcutCoreOutcome =
+  | { kind: 'unsafe_input'; message: string }
+  | { kind: 'blocked'; message: string }
+  | { kind: 'reserve_failed'; message: string }
+  | { kind: 'quota_exhausted'; reason: string }
+  | { kind: 'generation_failed_before_usage'; httpStatus: number; code: string; message: string }
+  | {
+      kind: 'charged'
+      result: AiCompletionResult
+      usage: AiUsage
+      settle: (status: AiUsageLedgerStatus, error?: string | null) => Promise<void>
+    }
 
 function sendStatus(
   res: Response,
@@ -218,26 +245,37 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
   })
 
   /**
-   * Shared gate pipeline from "prompt assembled" onward (review-fix F1,
-   * RESERVE-THEN-SETTLE): unsafe scan → double-confirm/readiness preflight
-   * (blocked: zero-token row, NO lock) → burst limit (429: NO lock, NO ledger
-   * row) → quota RESERVE (one SHORT advisory-locked tx: stale sweep → SUM
-   * incl. in_flight → insert the in_flight reservation) → provider call (NO
-   * lock / NO pooled connection held) → SETTLE the reservation to actual
-   * usage → onSuccess (run: patch + Yjs; write failures re-settle the status
-   * KEEPING usage via `finalize`). Settles are best-effort (§2.5); a failing
-   * reserve fails closed as `blocked`.
+   * RES-FREE reserve-then-settle CORE (review-fix F1) — the unit the bulk path
+   * reuses per row WITHOUT touching `res` (so a 200-row loop cannot double-send;
+   * the single-record `executeShortcut` below is now a thin wrapper over this).
+   *
+   * Gate order from "prompt assembled" onward: unsafe scan → double-confirm/
+   * readiness preflight (blocked: zero-token row, NO lock) → quota RESERVE (one
+   * SHORT advisory-locked tx: stale sweep → SUM incl. in_flight → insert the
+   * in_flight reservation) → provider call (NO lock / NO pooled connection
+   * held) → SETTLE the reservation to actual usage. Settles are best-effort
+   * (§2.5); a failing reserve fails closed.
+   *
+   * The BURST LIMITER is deliberately NOT here — it is a per-HTTP-request guard
+   * the caller applies ONCE (per-row bounding is the D3 row-cap + the D4 quota
+   * pre-check, never tenantBurstRpm self-tripping mid-batch).
+   *
+   * Returns a discriminated per-row outcome:
+   *  - `unsafe_input`                    — not sent, NO ledger row, UNCHARGED.
+   *  - `blocked`                         — preflight blocked: zero-token ledger row, UNCHARGED.
+   *  - `reserve_failed`                  — ledger unavailable, fail-closed, UNCHARGED (no row).
+   *  - `quota_exhausted`                 — reserve rejected, UNCHARGED (no row).
+   *  - `generation_failed_before_usage`  — provider blocked/errored with NO usage → settled to
+   *                                        zero usage, UNCHARGED (provider never produced output).
+   *  - `charged`                         — the provider returned (succeeded OR errored WITH usage);
+   *                                        settled to ACTUAL usage = CHARGED. `result` carries the
+   *                                        completion (text present only when `result.ok`); `settle`
+   *                                        re-settles the STATUS keeping usage (write failures etc.).
    */
-  async function executeShortcut(
-    req: Request,
-    res: Response,
+  async function runShortcutCore(
     ctx: ShortcutRequestContext,
     prompt: string,
-    onSuccess: (
-      result: AiCompletionResult & { ok: true },
-      finalize: (status: AiUsageLedgerStatus, error?: string) => Promise<void>,
-    ) => Promise<void>,
-  ): Promise<void> {
+  ): Promise<ShortcutCoreOutcome> {
     const baseEntry = {
       subjectKey: ctx.userId,
       userId: ctx.userId,
@@ -259,17 +297,14 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         estimatedCostUsd: 0,
         status: 'unsafe_input',
       })
-      return sendStatus(
-        res,
-        422,
-        'unsafe_input',
-        'AI_UNSAFE_INPUT',
-        'The assembled prompt contains secret-shaped content; the request was not sent.',
-      )
+      return {
+        kind: 'unsafe_input',
+        message: 'The assembled prompt contains secret-shaped content; the request was not sent.',
+      }
     }
 
     // Double-confirm / readiness / price preflight — `blocked` resolves BEFORE
-    // the limiter and the reserve (zero-token row, no lock, zero outbound).
+    // the reserve (zero-token row, no lock, zero outbound).
     // complete() re-runs the same gates internally (defense in depth).
     const pre = aiClient.preflight()
     // `in`-guard (not `!pre.ok`): non-strict tsconfig, no boolean-discriminant narrowing.
@@ -283,13 +318,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         status: 'blocked',
         error: pre.message,
       })
-      return sendStatus(res, 503, 'blocked', 'AI_BLOCKED', pre.message)
-    }
-
-    // Burst rate limit (Q-3) — 429 EARLY: no lock, no pooled connection held,
-    // and NEVER a ledger row (the limiter responds itself).
-    if ((await applyBurstLimiter(burstLimiter, req, res)) === 'limited') {
-      return
+      return { kind: 'blocked', message: pre.message }
     }
 
     // Quota RESERVE — the advisory locks wrap ONLY this short check+insert
@@ -321,10 +350,10 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
     } catch (err) {
       // Quota-reserve-time ledger unavailability → fail closed (§2.5).
       console.error('[multitable-ai] quota reserve failed; failing closed:', err)
-      return sendStatus(res, 503, 'blocked', 'AI_BLOCKED', 'AI usage ledger is unavailable; request blocked (fail-closed).')
+      return { kind: 'reserve_failed', message: 'AI usage ledger is unavailable; request blocked (fail-closed).' }
     }
     if ('reason' in reservation) {
-      return sendStatus(res, 429, 'quota_exhausted', 'AI_QUOTA_EXHAUSTED', `AI usage quota exhausted (${reservation.reason}).`)
+      return { kind: 'quota_exhausted', reason: reservation.reason }
     }
     const reservationId = reservation.reservationId
 
@@ -355,21 +384,90 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
 
     if (result.status === 'blocked') {
       // Post-reserve blocked = the env raced between preflight and the call —
-      // settle to zero usage (result.usage is null on blocked) with the blocking status.
+      // settle to zero usage (result.usage is null on blocked). The provider
+      // never produced output → UNCHARGED (generation_failed_before_usage).
       await settle('blocked', result.message ?? null)
-      return sendStatus(res, 503, 'blocked', 'AI_BLOCKED', result.message ?? 'AI requests are not enabled for this deployment.')
+      return { kind: 'generation_failed_before_usage', httpStatus: 503, code: 'AI_BLOCKED', message: result.message ?? 'AI requests are not enabled for this deployment.' }
     }
 
     if (result.status === 'provider_error') {
-      // Tokens are recorded whenever the provider returned usage — the money is spent.
+      // Charge invariant (§2.5): tokens are recorded WHENEVER the provider
+      // returned usage — the money is spent. A provider error with NO usage =
+      // generation_failed_before_usage (UNCHARGED, zero-token settle); a
+      // provider error WITH usage settles the ACTUAL tokens (CHARGED) — the
+      // output was produced even though the call surfaced an error.
       await settle('provider_error', result.message ?? null)
-      return sendStatus(res, 502, 'provider_error', 'AI_PROVIDER_ERROR', result.message ?? 'AI provider request failed.')
+      if (result.usage) {
+        return { kind: 'charged', result: result as AiCompletionResult, usage, settle }
+      }
+      return { kind: 'generation_failed_before_usage', httpStatus: 502, code: 'AI_PROVIDER_ERROR', message: result.message ?? 'AI provider request failed.' }
     }
 
-    // Settle to actual usage BEFORE the downstream write so the quota account
-    // reflects the real spend even if the write path crashes mid-flight.
+    // Settle to actual usage BEFORE any downstream write so the quota account
+    // reflects the real spend even if the write path crashes mid-flight. The
+    // provider was called and produced OUTPUT → CHARGED. NB: a 200 that omits a
+    // usage object is still a successful generation → CHARGED at zero tokens
+    // (token-sum invariant holds: 0 == 0). That is distinct from an
+    // error/blocked result with null usage above, which produced NO output and
+    // is generation_failed_before_usage (UNCHARGED). The discriminator is
+    // "output produced?", not "usage object present?".
     await settle('succeeded')
-    await onSuccess(result as AiCompletionResult & { ok: true }, (status, error) => settle(status, error ?? null))
+    return { kind: 'charged', result: result as AiCompletionResult & { ok: true }, usage, settle }
+  }
+
+  /**
+   * Single-record thin wrapper over `runShortcutCore` (review-fix F1 gate
+   * order preserved): burst limit (429 EARLY: NO lock, NO ledger row, the
+   * limiter responds itself) → core → map the per-row outcome to `res` →
+   * onSuccess on the charged-success path (run: patch + Yjs; write failures
+   * re-settle the status KEEPING usage via `finalize`).
+   */
+  async function executeShortcut(
+    req: Request,
+    res: Response,
+    ctx: ShortcutRequestContext,
+    prompt: string,
+    onSuccess: (
+      result: AiCompletionResult & { ok: true },
+      finalize: (status: AiUsageLedgerStatus, error?: string) => Promise<void>,
+    ) => Promise<void>,
+  ): Promise<void> {
+    // Burst rate limit (Q-3) — runs BEFORE the core's reserve (gate order
+    // unchanged): 429 EARLY, no lock, no pooled connection held, NEVER a
+    // ledger row (the limiter responds itself).
+    if ((await applyBurstLimiter(burstLimiter, req, res)) === 'limited') {
+      return
+    }
+
+    const outcome = await runShortcutCore(ctx, prompt)
+    switch (outcome.kind) {
+      case 'unsafe_input':
+        return sendStatus(res, 422, 'unsafe_input', 'AI_UNSAFE_INPUT', outcome.message)
+      case 'blocked':
+        return sendStatus(res, 503, 'blocked', 'AI_BLOCKED', outcome.message)
+      case 'reserve_failed':
+        return sendStatus(res, 503, 'blocked', 'AI_BLOCKED', outcome.message)
+      case 'quota_exhausted':
+        return sendStatus(res, 429, 'quota_exhausted', 'AI_QUOTA_EXHAUSTED', `AI usage quota exhausted (${outcome.reason}).`)
+      case 'generation_failed_before_usage':
+        return sendStatus(
+          res,
+          outcome.httpStatus,
+          outcome.httpStatus === 502 ? 'provider_error' : 'blocked',
+          outcome.code,
+          outcome.message,
+        )
+      case 'charged': {
+        if (!outcome.result.ok) {
+          // A charged-but-errored row (provider error WITH usage) has no usable
+          // text on the single-record path — surface the provider error (the
+          // spend is already settled).
+          return sendStatus(res, 502, 'provider_error', 'AI_PROVIDER_ERROR', outcome.result.message ?? 'AI provider request failed.')
+        }
+        await onSuccess(outcome.result as AiCompletionResult & { ok: true }, (status, error) => outcome.settle(status, error ?? null))
+        return
+      }
+    }
   }
 
   router.post('/sheets/:sheetId/ai/shortcut/preview', async (req: Request, res: Response) => {
@@ -638,6 +736,358 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
     } catch (err) {
       console.error('[multitable-ai] shortcut run failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to run AI shortcut' } })
+    }
+  })
+
+  /**
+   * B-1 — AI bulk-PREVIEW (INTERNAL, not in OpenAPI). Apply an ALREADY-PERSISTED
+   * field.property.aiShortcut across MANY records at once, generating + charging
+   * per provider-called row, returning the proposed values for a review-before-
+   * write (the WRITE itself is B-2 — this route never writes a record).
+   *
+   * Design lock:
+   * docs/development/multitable-ai-bulk-fill-review-before-write-designlock-20260621.md
+   *
+   * Posture (extend, don't fork): the SAME per-record gate sequence + the SAME
+   * res-free reserve-then-settle core (runShortcutCore), looped per row. The
+   * BURST limiter runs ONCE at route entry (per-HTTP-request guard); per-row
+   * bounding is the D3 row-cap + the D4 quota pre-check.
+   *
+   * Gate map:
+   *  - inline config REJECTED (run parity).
+   *  - SHEET-LEVEL gates ONCE (hoisted out of the loop): record-read capability
+   *    → canEditRecord → buildRecordPatchContext → target type ∈ {string,longText}
+   *    + layer-3 fieldPermissions[fieldId] (visible/readOnly) → persisted config.
+   *  - D2-A scope: the FULL server-resolved filtered set (scope:'view' applies
+   *    the view's persisted filterInfo over ALL records, NOT the loaded page);
+   *    scope:'sheet' = whole sheet. Optional recordIds intersect the set.
+   *  - D3-A cap: |resolved set| > MULTITABLE_AI_BULK_MAX_ROWS → 400
+   *    BULK_SCOPE_TOO_LARGE (no silent truncation).
+   *  - D4: pre-check rows × per-row est-tokens vs the per-tenant cap; whole run
+   *    won't fit → AI_BULK_QUOTA_INSUFFICIENT (generate NOTHING).
+   *  - PER ROW (D5 + D1-A): requireRecordReadable (read-deny → OMITTED from the
+   *    response entirely) → ensureRecordWriteAllowed (not writable →
+   *    skipped_no_perm, NO generation) → readRecordOnce (capture version) →
+   *    assembleMaskedPrompt (unreadable sources NEVER enter the prompt) →
+   *    runShortcutCore. A provider-called row is CHARGED + cached + returned;
+   *    its diff is MASKED (masked:true when any source field was dropped). A
+   *    provider-never-reached row (skipped/over-cap/quota/no-usage) is UNCHARGED.
+   *  - 429/blocked mid-batch PAUSES the run: stop and return PARTIAL; un-reached
+   *    rows are uncharged. (AiCompletionResult collapses provider 429 into
+   *    provider_error, so a provider failure stops the batch — un-reached rows
+   *    are never charged.)
+   */
+  router.post('/sheets/:sheetId/ai/shortcut/bulk-preview', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    // Persisted config only (run parity) — reject inline config BEFORE shape parse.
+    if (req.body && typeof req.body === 'object' && 'config' in (req.body as Record<string, unknown>)) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'AI_INLINE_CONFIG_REJECTED', message: 'bulk-preview executes only the persisted field.property.aiShortcut config; inline config is not accepted' },
+      })
+    }
+    const schema = z.object({
+      fieldId: z.string().min(1).max(50),
+      scope: z.enum(['view', 'sheet']),
+      viewId: z.string().min(1).max(50).optional(),
+      recordIds: z.array(z.string().min(1).max(50)).max(5000).optional(),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!sheetId || !parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: !sheetId ? 'sheetId is required' : parsed.error?.message } })
+    }
+    const { fieldId, scope, viewId, recordIds } = parsed.data
+    if (scope === 'view' && !viewId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId is required when scope is "view"' } })
+    }
+
+    // Burst rate limit ONCE at entry (per-HTTP-request guard) — never per row.
+    if ((await applyBurstLimiter(burstLimiter, req, res)) === 'limited') {
+      return
+    }
+
+    try {
+      const pool = poolManager.get() as unknown as PoolLike
+      const query = pool.query.bind(pool) as QueryFn
+      const ledgerQuery = pool.query.bind(pool) as AiUsageQueryFn
+
+      // ── SHEET-LEVEL gates (ONCE, hoisted) ──────────────────────────────────
+      const { access, capabilities, sheetScope } = await resolveSheetReadableCapabilities(req, query, sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
+      }
+      if (!capabilities.canRead) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      if (!capabilities.canEditRecord) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+
+      const patchContext = await buildRecordPatchContext(req, query, sheetId, access, capabilities)
+      if (!patchContext) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+
+      const targetField = patchContext.fields.find((field) => field.id === fieldId)
+      if (!targetField) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Field not found: ${fieldId}` } })
+      }
+      if (!AI_SHORTCUT_TARGET_FIELD_TYPES.has(targetField.type)) {
+        return res.status(400).json({
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: `AI shortcut target field must be string or longText, got: ${targetField.type}` },
+        })
+      }
+      // Layer-3 write gate (#2106 F3) — the per-record run's enforcement point, hoisted.
+      const targetPermission = patchContext.fieldPermissions[fieldId]
+      if (!targetPermission || targetPermission.visible === false || targetPermission.readOnly === true) {
+        return res.status(403).json({ ok: false, error: { code: 'FIELD_FORBIDDEN', message: `AI shortcut target field is not editable: ${fieldId}` } })
+      }
+
+      const resolved = resolvePersistedShortcutConfig(patchContext, fieldId)
+      if ('error' in resolved) {
+        return res.status(resolved.httpStatus).json({ ok: false, error: { code: resolved.code, message: resolved.error } })
+      }
+      const config = resolved.config
+
+      // ── D2-A scope: server-resolved FULL filtered set (NOT the loaded page) ──
+      // Resolve the view filter over the SAME visible field set the read path
+      // uses (patchContext.fields), reusing parseMetaFilterInfo + evaluateFilterNode
+      // (the #3010 export semantic). scope:'sheet' = every record on the sheet.
+      const fieldTypeById = new Map(patchContext.fields.map((field) => [field.id, field.type]))
+      // A condition on a field the actor cannot SELECT (layer-2 ∧ layer-3 denied)
+      // is dropped = treated as non-existent (parity with /view); a computed
+      // (lookup/rollup/formula) filter can't be evaluated here without
+      // applyLookupRollup, so it's dropped too (the row simply isn't excluded by
+      // it — conservative: a bulk preview must not silently disagree with the
+      // grid by SILENTLY DROPPING rows it can't evaluate).
+      const selectableFieldIds = patchContext.readableEchoFieldIds
+      const COMPUTED_FILTER_TYPES = new Set(['lookup', 'rollup', 'formula'])
+
+      let filterNode: ReturnType<typeof parseMetaFilterInfo> = null
+      if (scope === 'view') {
+        const view = await tryResolveView(query, viewId!, new Map())
+        if (!view || view.sheetId !== sheetId) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+        }
+        filterNode = parseMetaFilterInfo(view.filterInfo)
+      }
+
+      const recordIdFilter = recordIds && recordIds.length > 0 ? new Set(recordIds) : null
+      const recordRes = await query('SELECT id, version, data FROM meta_records WHERE sheet_id = $1', [sheetId])
+      let candidateIds = (recordRes.rows as Array<{ id: unknown; data: unknown }>)
+        .map((row) => ({ id: String(row.id), data: normalizeJson(row.data) }))
+        .filter((row) => (recordIdFilter ? recordIdFilter.has(row.id) : true))
+      if (filterNode) {
+        // A COMPUTED (lookup/rollup/formula) filter leaf the actor CAN select cannot be
+        // evaluated here without hydration. Treating it as match-all would generate AI
+        // for rows OUTSIDE the user's view (over-scope + over-charge for a write-preview),
+        // so v1 REFUSES rather than silently over-generate. (A computed leaf on a DENIED
+        // field is dropped = non-existent, parity with the actor's own /view which also
+        // can't apply it.) Reusing the #3010 computed-filter hydration is the later option.
+        const computedLeaf = collectLeafConditions(filterNode).find(
+          (leaf) => selectableFieldIds.has(leaf.fieldId) && COMPUTED_FILTER_TYPES.has(fieldTypeById.get(leaf.fieldId) ?? ''),
+        )
+        if (computedLeaf) {
+          return res.status(422).json({
+            ok: false,
+            error: {
+              code: 'AI_BULK_VIEW_FILTER_UNSUPPORTED',
+              message: 'This view filters on a computed (lookup/rollup/formula) field, which bulk preview cannot resolve yet — narrow the view to non-computed filters, or pass an explicit record selection.',
+            },
+          })
+        }
+        // A leaf on a denied (non-selectable) field is treated as non-existent (matches
+        // everything), matching the actor's own /view "denied field == non-existent" rule.
+        const leafMatches = (leaf: MetaFilterCondition, cellValue: unknown): boolean => {
+          if (!selectableFieldIds.has(leaf.fieldId)) return true
+          return evaluateMetaFilterCondition(fieldTypeById.get(leaf.fieldId)!, cellValue, leaf)
+        }
+        const hasEvaluableLeaf = collectLeafConditions(filterNode).some((leaf) => selectableFieldIds.has(leaf.fieldId))
+        if (hasEvaluableLeaf) {
+          candidateIds = candidateIds.filter((row) =>
+            evaluateFilterNode(filterNode!, (leaf) => leafMatches(leaf, row.data[leaf.fieldId])),
+          )
+        }
+      }
+      const candidates = candidateIds.map((row) => row.id)
+
+      // ── D5 gates BEFORE D3/D4: only PROVIDER-BOUND rows count toward cap/quota ──
+      // Build the generation set FIRST so a read-denied row is OMITTED (never counted →
+      // no hidden-row oracle via total/400/429) and a not-writable row is skipped_no_perm
+      // (never counted toward the provider-call cap/quota → a small real batch is never
+      // false-blocked by many unreadable/unwritable rows). The version captured here
+      // rides into the run cache as previewVersion (anti-TOCTOU for B-2).
+      const runId = `aibulk_${randomUUID()}`
+      const skipped: Array<{ recordId: string; reason: string }> = []
+      // CHARGED but NOT confirmable (provider responded WITH usage but errored, or the
+      // run-cache write failed). Distinct from `skipped` (UNCHARGED). B-2 must never
+      // treat a `failures` row as committable — there is no usable cached output.
+      const failures: Array<{ recordId: string; reason: string }> = []
+      // The full source-field set the config wants — used to flag a masked diff (a row
+      // whose readable source set is smaller generated against a reduced context).
+      const configSourceCount = config.sourceFieldIds.length
+
+      const generationCandidates: Array<{ recordId: string; version: number; data: Record<string, unknown> }> = []
+      for (const recordId of candidates) {
+        // Row-level READ gate — a read-denied / vanished row is OMITTED entirely (never
+        // counted, never a skipped entry that would confirm existence = no oracle).
+        const readable = await requireRecordReadable(req, query, sheetId, recordId)
+        if ('status' in readable) continue
+        const captured = await readRecordOnce(query, sheetId, recordId)
+        if (!captured) continue
+        // Row-policy WRITE gate — not writable → skipped_no_perm, NOT counted toward cap/quota.
+        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, captured.createdBy, 'edit')) {
+          skipped.push({ recordId, reason: 'skipped_no_perm' })
+          continue
+        }
+        generationCandidates.push({ recordId, version: captured.version, data: captured.data })
+      }
+
+      // ── D3-A hard row cap on the PROVIDER-BOUND set (total = generatable rows, no leak) ──
+      const maxRows = (() => {
+        const raw = Number(process.env.MULTITABLE_AI_BULK_MAX_ROWS)
+        return Number.isInteger(raw) && raw > 0 ? raw : 200
+      })()
+      if (generationCandidates.length > maxRows) {
+        return res.status(400).json({
+          ok: false,
+          error: { code: 'BULK_SCOPE_TOO_LARGE', message: `Bulk scope resolves to ${generationCandidates.length} generatable rows, over the cap of ${maxRows}. Narrow the view/selection.`, total: generationCandidates.length, cap: maxRows },
+        })
+      }
+
+      // ── D4 pre-check on the PROVIDER-BOUND set: whole run must fit the per-tenant cap ──
+      // Estimate generatable-rows × per-row tokens against the CALLER's daily/weekly
+      // windows; if it can't fit, refuse the WHOLE run before generating (no partial spend).
+      const pre = aiClient.preflight()
+      if ('message' in pre) {
+        // Provider not ready — refuse the whole run up front (no per-row blocked rows).
+        return sendStatus(res, 503, 'blocked', 'AI_BLOCKED', pre.message)
+      }
+      if (generationCandidates.length > 0) {
+        const perRowEstTokens = conservativePromptTokenEstimate('') + pre.caps.maxOutputTokens
+        const estTotalTokens = generationCandidates.length * perRowEstTokens
+        const sums = await sumAiUsageWindows(ledgerQuery, access.userId)
+        const dailyFits = sums.userDailyTokens + estTotalTokens <= pre.caps.tenantDailyTokenCap
+        const weeklyFits = sums.userWeeklyTokens + estTotalTokens <= pre.caps.tenantWeeklyTokenCap
+        if (!dailyFits || !weeklyFits) {
+          return res.status(429).json({
+            ok: false,
+            status: 'quota_exhausted',
+            error: {
+              code: 'AI_BULK_QUOTA_INSUFFICIENT',
+              message: `This bulk run needs ~${estTotalTokens} tokens which exceeds the remaining per-tenant ${!dailyFits ? 'daily' : 'weekly'} token quota; nothing was generated.`,
+            },
+          })
+        }
+      }
+
+      // ── PER-ROW generation (D1-A charge-on-generation) over the gated set ───────────
+      const rows: Array<{ recordId: string; version: number; proposed: string; masked: boolean; writable: boolean }> = []
+      let settledCost = 0
+      let paused = false
+
+      for (const cand of generationCandidates) {
+        const recordId = cand.recordId
+        const captured = { version: cand.version, data: cand.data }
+        // Mask + assemble: unreadable source fields NEVER enter the prompt.
+        const prompt = assembleMaskedPrompt(config, patchContext, captured.data)
+        // masked diff: how many of the config's sources actually survived the read mask.
+        const readableSourceCount = config.sourceFieldIds.filter((id) => patchContext.readableEchoFieldIds.has(id)).length
+        const masked = readableSourceCount < configSourceCount
+
+        const outcome = await runShortcutCore(
+          { pool, sheetId, recordId, fieldId, action: 'preview', userId: access.userId },
+          prompt,
+        )
+
+        if (outcome.kind === 'charged') {
+          // The CHARGE stands regardless of what follows — runShortcutCore already
+          // settled provider usage into the ledger (provider spend is real).
+          const usageTokens = outcome.usage.promptTokens + outcome.usage.completionTokens
+          const costUsd = outcome.result.estimatedCostUsd
+          settledCost += costUsd
+
+          // `charged` ALSO covers provider_error-WITH-usage (runShortcutCore: the
+          // provider billed but produced no usable output). That row is CHARGED but
+          // NOT confirmable — never cache an empty/failed output, never return it as
+          // writable (B-2 commits ONLY real cached outputs). Pause: a provider
+          // erroring mid-batch must not keep spending on subsequent rows.
+          if (!outcome.result.ok) {
+            failures.push({ recordId, reason: 'provider_error_charged' })
+            paused = true
+            break
+          }
+
+          const proposed = outcome.result.text ?? ''
+          // Persist the cached output — B-2 commits ONLY from this. The cache is the
+          // OUTPUT store, never the charge ledger (the charge already settled above).
+          const cacheRow: BulkPreviewCacheRow = {
+            runId,
+            actorId: access.userId,
+            sheetId,
+            fieldId,
+            recordId,
+            previewVersion: captured.version,
+            proposedValue: proposed,
+            usageTokens,
+            costUsd,
+          }
+          let cached = false
+          try {
+            await insertBulkPreviewCacheRow(ledgerQuery, cacheRow)
+            cached = true
+          } catch (err) {
+            console.error('[multitable-ai] bulk-preview cache insert failed (fail-closed for this row):', err)
+          }
+          if (!cached) {
+            // FAIL-CLOSED (#3019 persistent-run-cache lock): the row is CHARGED
+            // (provider spend is real) but has NO cached output for B-2 to commit,
+            // so it must NOT be a confirmable row. Pause — a cache outage would
+            // otherwise charge every subsequent row un-confirmably.
+            failures.push({ recordId, reason: 'cache_failed_after_generation' })
+            paused = true
+            break
+          }
+          rows.push({ recordId, version: captured.version, proposed, masked, writable: true })
+          continue
+        }
+
+        if (outcome.kind === 'quota_exhausted' || outcome.kind === 'blocked' || outcome.kind === 'reserve_failed') {
+          // Quota/availability hit mid-batch → PAUSE: stop here, return partial.
+          // This row + every un-reached row is UNCHARGED.
+          skipped.push({ recordId, reason: outcome.kind === 'quota_exhausted' ? 'rate_limited_before_call' : 'blocked_before_call' })
+          paused = true
+          break
+        }
+
+        if (outcome.kind === 'generation_failed_before_usage') {
+          // Provider failed with NO usage (incl. a collapsed 429) → UNCHARGED.
+          // A provider failure pauses the batch (un-reached rows uncharged).
+          skipped.push({ recordId, reason: 'generation_failed_before_usage' })
+          paused = true
+          break
+        }
+
+        if (outcome.kind === 'unsafe_input') {
+          // Secret-shaped prompt for this row — not sent, UNCHARGED; skip the row
+          // but DO NOT pause (other rows may be clean).
+          skipped.push({ recordId, reason: 'unsafe_input' })
+          continue
+        }
+      }
+
+      return res.json({
+        runId,
+        rows,
+        skipped,
+        failures,
+        settledCost,
+        capped: paused,
+      })
+    } catch (err) {
+      console.error('[multitable-ai] bulk-preview failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to run AI bulk preview' } })
     }
   })
 
