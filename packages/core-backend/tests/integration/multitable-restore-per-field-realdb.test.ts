@@ -113,6 +113,21 @@ describeIfDatabase('multitable per-field restore through preview — slice (2) (
     expect(pv.body?.data?.previewIdentity).toBeNull()
   })
 
+  test('empty filtered diff + ANY token → 409 (no 200-noop bypass of the identity verify)', async () => {
+    // A valid signed token, minted for [NAME] (a different, non-empty selection).
+    const realToken = (await preview({ targetVersion: 1, fieldIds: [NAME] })).body?.data?.previewIdentity as string
+    // Each of these filters to an EMPTY diff (unchanged / hidden / unknown). The execute must 409 — the success
+    // contract consumes a valid identity, and the [NAME] token's hash != hash([]). NOT a 200 noop.
+    for (const fids of [[UNCH], [SECRET], ['ghost_field_x']]) {
+      const ex = await execute({ targetVersion: 1, expectedVersion: 2, previewIdentity: realToken, fieldIds: fids })
+      expect(ex.status).toBe(409)
+      expect(ex.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
+    }
+    // a forged/garbage token likewise 409s (signature), never a noop.
+    expect((await execute({ targetVersion: 1, expectedVersion: 2, previewIdentity: 'forged.token.value', fieldIds: [UNCH] })).status).toBe(409)
+    expect((await dataOf())?.[NAME]).toBe('b') // nothing written
+  })
+
   test('an empty fieldIds array is a 400 at both preview and execute (never a hash([]) token)', async () => {
     expect((await preview({ targetVersion: 1, fieldIds: [] })).status).toBe(400)
     expect((await execute({ targetVersion: 1, expectedVersion: 2, previewIdentity: 'x.y.z', fieldIds: [] })).status).toBe(400)
