@@ -875,6 +875,8 @@ const deepLinkedRecordCommentsScope = ref<MetaCommentsScope | null>(null)
 const deepLinkedRecordFieldPermissions = ref<Record<string, MetaFieldPermission>>({})
 const deepLinkedRecordViewPermissions = ref<Record<string, MetaViewPermission>>({})
 const deepLinkedRecordRowActions = ref<MetaRowActions | null>(null)
+// declared up-front (before effectiveFieldPermissions/scopedAllFields that read it) to avoid a TDZ on eager eval.
+const deepLinkedRecord = ref<MetaRecord | null>(null)
 const standaloneFormFieldPermissions = ref<Record<string, MetaFieldPermission>>({})
 const standaloneFormViewPermissions = ref<Record<string, MetaViewPermission>>({})
 const standaloneFormRowActions = ref<MetaRowActions | null>(null)
@@ -3447,7 +3449,6 @@ async function onBulkEditApply(payload: { mode: 'set' | 'clear'; fieldId: string
 }
 
 // --- Deep-link record fetch (when record not in current page) ---
-const deepLinkedRecord = ref<MetaRecord | null>(null)
 
 async function resolveDeepLink(recordId: string, options?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
   // First check if it's in the current rows
