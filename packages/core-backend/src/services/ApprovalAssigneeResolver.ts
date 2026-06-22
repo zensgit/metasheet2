@@ -75,6 +75,20 @@ function assertFormUserSource(
   }
 }
 
+// Delegation map (delegator localUserId -> delegatee localUserId), read from the
+// frozen instance snapshot. Both ids normalized; malformed entries dropped.
+function extractDelegationMap(snapshot: Record<string, unknown> | null): Record<string, string> {
+  const raw = snapshot?.delegations
+  if (!isRecord(raw)) return {}
+  const map: Record<string, string> = {}
+  for (const [delegator, delegatee] of Object.entries(raw)) {
+    const d = normalizeId(delegator)
+    const t = normalizeId(delegatee)
+    if (d && t) map[d] = t
+  }
+  return map
+}
+
 export function resolveApprovalAssignees(
   options: ResolveApprovalAssigneesOptions,
 ): ResolvedApprovalAssignment[] {
@@ -90,6 +104,9 @@ export function resolveApprovalAssignees(
 
   const resolved: ResolvedApprovalAssignment[] = []
   const seen = new Set<string>()
+  // Delegation substitution map (delegator -> delegatee), frozen in the instance
+  // snapshot at create. Applied inside pushResolved BEFORE the dedup key.
+  const delegations = extractDelegationMap(options.requesterSnapshot)
 
   const pushResolved = (
     assignmentType: 'user' | 'role',
@@ -97,15 +114,29 @@ export function resolveApprovalAssignees(
     source: ApprovalAssigneeSource,
     sourceIndex: number,
   ): void => {
-    const key = `${assignmentType}:${assigneeId}`
+    // Delegation (委托): a resolved USER assignee who is an active delegator routes to
+    // the delegatee. Substituted HERE — before the dedup key — so `seen` dedups on the
+    // delegatee: a delegatee already resolved by another source collapses to one. One
+    // hop only (the delegatee's own delegation is not re-resolved); user-only.
+    let finalId = assigneeId
+    let delegatedFrom: string | undefined
+    if (assignmentType === 'user') {
+      const delegatee = delegations[assigneeId]
+      if (delegatee && delegatee !== assigneeId) {
+        delegatedFrom = assigneeId
+        finalId = delegatee
+      }
+    }
+    const key = `${assignmentType}:${finalId}`
     if (seen.has(key)) return
     seen.add(key)
+    const metadata = metadataFor(source, sourceIndex)
     resolved.push({
       assignmentType,
-      assigneeId,
+      assigneeId: finalId,
       nodeKey: options.nodeKey,
       sourceStep: options.sourceStep,
-      metadata: metadataFor(source, sourceIndex),
+      metadata: delegatedFrom ? { ...metadata, delegatedFrom } : metadata,
     })
   }
 

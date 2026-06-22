@@ -280,4 +280,51 @@ describe('ApprovalAssigneeResolver', () => {
       },
     ])
   })
+
+  // delegation (委托) — substitution INSIDE pushResolved, before the dedup key,
+  // user-only, with delegatedFrom metadata; dedup runs on the substituted id.
+  function resolveWithDelegations(
+    assigneeSources: ApprovalNodeConfig['assigneeSources'],
+    delegations: Record<string, string>,
+  ) {
+    return resolveApprovalAssignees({
+      nodeKey: 'review',
+      sourceStep: 2,
+      config: { assigneeSources },
+      formSnapshot: {},
+      requesterSnapshot: { id: 'requester-1', delegations },
+    })
+  }
+
+  it('substitutes a delegated user assignee and records delegatedFrom', () => {
+    expect(resolveWithDelegations([{ kind: 'static_user', userIds: ['A'] }], { A: 'B' })).toEqual([
+      { assignmentType: 'user', assigneeId: 'B', nodeKey: 'review', sourceStep: 2, metadata: { resolvedFrom: { kind: 'static_user', sourceIndex: 0 }, delegatedFrom: 'A' } },
+    ])
+  })
+
+  it('KEYSTONE: delegator A→B where B is already another source assignee resolves to exactly one B', () => {
+    // Substitution before the dedup key collapses A→B and the existing B to one B. A
+    // post-loop replace would build the seen key on A, then replace → two B entries.
+    const result = resolveWithDelegations([{ kind: 'static_user', userIds: ['A', 'B'] }], { A: 'B' })
+    expect(result.map((r) => r.assigneeId)).toEqual(['B'])
+    expect(result).toHaveLength(1)
+  })
+
+  it('does not substitute role assignees (user-only)', () => {
+    expect(resolveWithDelegations([{ kind: 'static_role', roleIds: ['A'] }], { A: 'B' })).toEqual([
+      { assignmentType: 'role', assigneeId: 'A', nodeKey: 'review', sourceStep: 2, metadata: { resolvedFrom: { kind: 'static_role', sourceIndex: 0 } } },
+    ])
+  })
+
+  it('is one hop only: A→B→C resolves A to B, not C', () => {
+    expect(resolveWithDelegations([{ kind: 'static_user', userIds: ['A'] }], { A: 'B', B: 'C' }).map((r) => r.assigneeId))
+      .toEqual(['B'])
+  })
+
+  it('ignores a self-delegation entry and a missing map (no substitution, no delegatedFrom)', () => {
+    const selfLoop = resolveWithDelegations([{ kind: 'static_user', userIds: ['A'] }], { A: 'A' })
+    expect(selfLoop.map((r) => r.assigneeId)).toEqual(['A'])
+    expect(selfLoop[0].metadata).toEqual({ resolvedFrom: { kind: 'static_user', sourceIndex: 0 } })
+    expect(resolveWithDelegations([{ kind: 'static_user', userIds: ['A'] }], {}).map((r) => r.assigneeId)).toEqual(['A'])
+  })
 })

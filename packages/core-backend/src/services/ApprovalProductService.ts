@@ -41,6 +41,7 @@ import {
 } from './ApprovalGraphExecutor'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
 import { resolveApprovalRequesterOrgRelations, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
+import { resolveActiveDelegationMap } from './ApprovalDelegations'
 import type {
   ApprovalAssignmentDTO,
   ApprovalAssignmentRow,
@@ -2650,6 +2651,25 @@ export class ApprovalProductService {
       )
     }
 
+    // Delegation (委托) — freeze the active delegator->delegatee map (scoped to this
+    // template + the create instant) into the snapshot BEFORE the executor resolves the
+    // initial state, so the resolver's pushResolved substitution reads a frozen set and an
+    // in-flight approval never re-routes under a later config edit. Best-effort: a read
+    // failure must not block create.
+    let delegationMap: Record<string, string> = {}
+    try {
+      delegationMap = await resolveActiveDelegationMap(pool.query.bind(pool), {
+        templateId: request.templateId,
+        now: new Date(),
+      })
+    } catch (error) {
+      metricsLogger.warn(
+        `Failed to resolve active delegations for template ${request.templateId}: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      )
+    }
+
     const requesterSnapshot: ApprovalRequesterSnapshot = {
       id: actor.userId,
       name: actor.userName || actor.userId,
@@ -2660,6 +2680,7 @@ export class ApprovalProductService {
       ...(orgRelations.managerId ? { managerId: orgRelations.managerId } : {}),
       ...(orgRelations.deptHeadId ? { deptHeadId: orgRelations.deptHeadId } : {}),
       ...(orgRelations.managerChainIds ? { managerChainIds: orgRelations.managerChainIds } : {}),
+      ...(Object.keys(delegationMap).length > 0 ? { delegations: delegationMap } : {}),
     }
     const executor = new ApprovalGraphExecutor(runtimeGraph, normalizedFormData, {
       assignmentResolver: buildApprovalAssignmentResolver({
