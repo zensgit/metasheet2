@@ -879,19 +879,31 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         .map((row) => ({ id: String(row.id), data: normalizeJson(row.data) }))
         .filter((row) => (recordIdFilter ? recordIdFilter.has(row.id) : true))
       if (filterNode) {
-        // A leaf on a denied (non-selectable) OR computed (lookup/rollup/formula)
-        // field is treated as non-existent — it matches everything (does not
-        // exclude the row), matching /view's "denied field == non-existent" rule
-        // and refusing to SILENTLY DROP rows a materialized read can't evaluate.
+        // A COMPUTED (lookup/rollup/formula) filter leaf the actor CAN select cannot be
+        // evaluated here without hydration. Treating it as match-all would generate AI
+        // for rows OUTSIDE the user's view (over-scope + over-charge for a write-preview),
+        // so v1 REFUSES rather than silently over-generate. (A computed leaf on a DENIED
+        // field is dropped = non-existent, parity with the actor's own /view which also
+        // can't apply it.) Reusing the #3010 computed-filter hydration is the later option.
+        const computedLeaf = collectLeafConditions(filterNode).find(
+          (leaf) => selectableFieldIds.has(leaf.fieldId) && COMPUTED_FILTER_TYPES.has(fieldTypeById.get(leaf.fieldId) ?? ''),
+        )
+        if (computedLeaf) {
+          return res.status(422).json({
+            ok: false,
+            error: {
+              code: 'AI_BULK_VIEW_FILTER_UNSUPPORTED',
+              message: 'This view filters on a computed (lookup/rollup/formula) field, which bulk preview cannot resolve yet — narrow the view to non-computed filters, or pass an explicit record selection.',
+            },
+          })
+        }
+        // A leaf on a denied (non-selectable) field is treated as non-existent (matches
+        // everything), matching the actor's own /view "denied field == non-existent" rule.
         const leafMatches = (leaf: MetaFilterCondition, cellValue: unknown): boolean => {
           if (!selectableFieldIds.has(leaf.fieldId)) return true
-          if (COMPUTED_FILTER_TYPES.has(fieldTypeById.get(leaf.fieldId) ?? '')) return true
           return evaluateMetaFilterCondition(fieldTypeById.get(leaf.fieldId)!, cellValue, leaf)
         }
-        // Short-circuit when EVERY leaf is dropped (no real filtering left).
-        const hasEvaluableLeaf = collectLeafConditions(filterNode).some(
-          (leaf) => selectableFieldIds.has(leaf.fieldId) && !COMPUTED_FILTER_TYPES.has(fieldTypeById.get(leaf.fieldId) ?? ''),
-        )
+        const hasEvaluableLeaf = collectLeafConditions(filterNode).some((leaf) => selectableFieldIds.has(leaf.fieldId))
         if (hasEvaluableLeaf) {
           candidateIds = candidateIds.filter((row) =>
             evaluateFilterNode(filterNode!, (leaf) => leafMatches(leaf, row.data[leaf.fieldId])),
@@ -900,30 +912,61 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       }
       const candidates = candidateIds.map((row) => row.id)
 
-      // ── D3-A hard row cap (no silent truncation) ───────────────────────────
+      // ── D5 gates BEFORE D3/D4: only PROVIDER-BOUND rows count toward cap/quota ──
+      // Build the generation set FIRST so a read-denied row is OMITTED (never counted →
+      // no hidden-row oracle via total/400/429) and a not-writable row is skipped_no_perm
+      // (never counted toward the provider-call cap/quota → a small real batch is never
+      // false-blocked by many unreadable/unwritable rows). The version captured here
+      // rides into the run cache as previewVersion (anti-TOCTOU for B-2).
+      const runId = `aibulk_${randomUUID()}`
+      const skipped: Array<{ recordId: string; reason: string }> = []
+      // CHARGED but NOT confirmable (provider responded WITH usage but errored, or the
+      // run-cache write failed). Distinct from `skipped` (UNCHARGED). B-2 must never
+      // treat a `failures` row as committable — there is no usable cached output.
+      const failures: Array<{ recordId: string; reason: string }> = []
+      // The full source-field set the config wants — used to flag a masked diff (a row
+      // whose readable source set is smaller generated against a reduced context).
+      const configSourceCount = config.sourceFieldIds.length
+
+      const generationCandidates: Array<{ recordId: string; version: number; data: Record<string, unknown> }> = []
+      for (const recordId of candidates) {
+        // Row-level READ gate — a read-denied / vanished row is OMITTED entirely (never
+        // counted, never a skipped entry that would confirm existence = no oracle).
+        const readable = await requireRecordReadable(req, query, sheetId, recordId)
+        if ('status' in readable) continue
+        const captured = await readRecordOnce(query, sheetId, recordId)
+        if (!captured) continue
+        // Row-policy WRITE gate — not writable → skipped_no_perm, NOT counted toward cap/quota.
+        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, captured.createdBy, 'edit')) {
+          skipped.push({ recordId, reason: 'skipped_no_perm' })
+          continue
+        }
+        generationCandidates.push({ recordId, version: captured.version, data: captured.data })
+      }
+
+      // ── D3-A hard row cap on the PROVIDER-BOUND set (total = generatable rows, no leak) ──
       const maxRows = (() => {
         const raw = Number(process.env.MULTITABLE_AI_BULK_MAX_ROWS)
         return Number.isInteger(raw) && raw > 0 ? raw : 200
       })()
-      if (candidates.length > maxRows) {
+      if (generationCandidates.length > maxRows) {
         return res.status(400).json({
           ok: false,
-          error: { code: 'BULK_SCOPE_TOO_LARGE', message: `Bulk scope resolves to ${candidates.length} rows, over the cap of ${maxRows}. Narrow the view/selection.`, total: candidates.length, cap: maxRows },
+          error: { code: 'BULK_SCOPE_TOO_LARGE', message: `Bulk scope resolves to ${generationCandidates.length} generatable rows, over the cap of ${maxRows}. Narrow the view/selection.`, total: generationCandidates.length, cap: maxRows },
         })
       }
 
-      // ── D4 pre-check: whole run must fit the per-tenant token cap ───────────
-      // Estimate rows × per-row tokens (the same conservative bound a single run
-      // reserves) against the CALLER's daily/weekly token windows. If it can't
-      // fit, refuse the WHOLE run before generating anything (no partial spend).
+      // ── D4 pre-check on the PROVIDER-BOUND set: whole run must fit the per-tenant cap ──
+      // Estimate generatable-rows × per-row tokens against the CALLER's daily/weekly
+      // windows; if it can't fit, refuse the WHOLE run before generating (no partial spend).
       const pre = aiClient.preflight()
       if ('message' in pre) {
         // Provider not ready — refuse the whole run up front (no per-row blocked rows).
         return sendStatus(res, 503, 'blocked', 'AI_BLOCKED', pre.message)
       }
-      if (candidates.length > 0) {
+      if (generationCandidates.length > 0) {
         const perRowEstTokens = conservativePromptTokenEstimate('') + pre.caps.maxOutputTokens
-        const estTotalTokens = candidates.length * perRowEstTokens
+        const estTotalTokens = generationCandidates.length * perRowEstTokens
         const sums = await sumAiUsageWindows(ledgerQuery, access.userId)
         const dailyFits = sums.userDailyTokens + estTotalTokens <= pre.caps.tenantDailyTokenCap
         const weeklyFits = sums.userWeeklyTokens + estTotalTokens <= pre.caps.tenantWeeklyTokenCap
@@ -939,43 +982,14 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         }
       }
 
-      // ── PER-ROW generation (D5 gates + D1-A charge-on-generation) ───────────
-      const runId = `aibulk_${randomUUID()}`
+      // ── PER-ROW generation (D1-A charge-on-generation) over the gated set ───────────
       const rows: Array<{ recordId: string; version: number; proposed: string; masked: boolean; writable: boolean }> = []
-      const skipped: Array<{ recordId: string; reason: string }> = []
-      // CHARGED but NOT confirmable (provider responded WITH usage but errored, or the
-      // run-cache write failed). Distinct from `skipped` (UNCHARGED). B-2 must never
-      // treat a `failures` row as committable — there is no usable cached output.
-      const failures: Array<{ recordId: string; reason: string }> = []
       let settledCost = 0
       let paused = false
 
-      // The full source-field set the config wants — used to flag a masked diff
-      // (a row whose readable source set is smaller generated against a reduced
-      // context, so the viewer is told the proposal may be incomplete).
-      const configSourceCount = config.sourceFieldIds.length
-
-      for (const recordId of candidates) {
-        // Row-level READ gate (reuses requireRecordReadable → row-level read-deny
-        // / conditional-read rules). A read-denied row is OMITTED from the
-        // response ENTIRELY (never a skipped entry that would confirm existence).
-        const readable = await requireRecordReadable(req, query, sheetId, recordId)
-        if ('status' in readable) {
-          // 404 (record vanished mid-run) / 403 (row-level read-deny) → omit silently.
-          continue
-        }
-
-        const captured = await readRecordOnce(query, sheetId, recordId)
-        if (!captured) {
-          continue // vanished between the SELECT and the per-row read — omit.
-        }
-
-        // Row-policy WRITE gate (own-write scope etc.) — not writable → skipped, NO generation.
-        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, captured.createdBy, 'edit')) {
-          skipped.push({ recordId, reason: 'skipped_no_perm' })
-          continue
-        }
-
+      for (const cand of generationCandidates) {
+        const recordId = cand.recordId
+        const captured = { version: cand.version, data: cand.data }
         // Mask + assemble: unreadable source fields NEVER enter the prompt.
         const prompt = assembleMaskedPrompt(config, patchContext, captured.data)
         // masked diff: how many of the config's sources actually survived the read mask.

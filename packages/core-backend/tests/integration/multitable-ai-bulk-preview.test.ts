@@ -425,6 +425,78 @@ describeIfDatabase('B-1 AI bulk-preview (real DB)', () => {
     expect(await ledgerTokenSum()).toBe(0)
   })
 
+  test('cap counts ONLY provider-bound rows: read-denied rows over the cap do NOT 400 (no hidden-row oracle)', async () => {
+    await q(
+      `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code) VALUES ($1,'user',$2,$3)`,
+      [SHEET_ID, ACTOR, 'multitable:write-own'],
+    )
+    process.env.MULTITABLE_AI_BULK_MAX_ROWS = '1' // cap = 1 GENERATABLE row
+
+    const G1 = `rec_b1_capok_${TS}`
+    await seedRecord(G1, { [FLD_SRC]: 'generate me' }, ACTOR)
+    // 3 read-denied rows (actor-created so WRITE would pass; the READ gate omits them) →
+    // raw candidates = 4 > cap, but generatable = 1. Pre-fix this 400'd AND leaked total=4.
+    for (let i = 0; i < 3; i += 1) {
+      const H = `rec_b1_caphidden${i}_${TS}`
+      await seedRecord(H, { [FLD_SRC]: 'hidden' }, ACTOR)
+      await q(
+        `INSERT INTO record_permissions (sheet_id, record_id, subject_type, subject_id, access_level) VALUES ($1,$2,'user',$3,'none')`,
+        [SHEET_ID, H, ACTOR],
+      )
+    }
+
+    const res = await bulkReq({ fieldId: FLD_TARGET, scope: 'sheet' })
+    expect(res.status).toBe(200) // NOT 400 — hidden rows are never counted toward the cap
+    expect((res.body.rows as unknown[]).length).toBe(1)
+    expect(fetchCallCount).toBe(1)
+  })
+
+  test('quota counts ONLY provider-bound rows: many unwritable rows do NOT trip AI_BULK_QUOTA_INSUFFICIENT', async () => {
+    await q(
+      `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code) VALUES ($1,'user',$2,$3)`,
+      [SHEET_ID, ACTOR, 'multitable:write-own'],
+    )
+    // Cap 1500 fits ONE generatable row (~1024) but not two (same math as the Test 3 quota case).
+    process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP = '1500'
+
+    await seedRecord(`rec_b1_qok_${TS}`, { [FLD_SRC]: 'mine' }, ACTOR) // 1 writable
+    // 5 NOT-writable rows (created by OTHER) → skipped_no_perm, NOT counted toward quota.
+    // Pre-fix, the estimate over 6 rows (~6144) would have 429'd the whole run.
+    for (let i = 0; i < 5; i += 1) await seedRecord(`rec_b1_qother${i}_${TS}`, { [FLD_SRC]: 'theirs' }, OTHER)
+
+    const res = await bulkReq({ fieldId: FLD_TARGET, scope: 'sheet' })
+    expect(res.status).toBe(200) // NOT 429 — unwritable rows are never counted toward the quota
+    expect((res.body.rows as unknown[]).length).toBe(1)
+    expect((res.body.skipped as Array<{ reason: string }>).filter((s) => s.reason === 'skipped_no_perm').length).toBe(5)
+  })
+
+  test('view filter on a COMPUTED (formula) field → 422 AI_BULK_VIEW_FILTER_UNSUPPORTED, generates NOTHING (no out-of-view rows)', async () => {
+    await q(
+      `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code) VALUES ($1,'user',$2,$3)`,
+      [SHEET_ID, ACTOR, 'multitable:write-own'],
+    )
+    const FLD_FORMULA = `fld_b1_formula_${TS}`
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_FORMULA, SHEET_ID, 'Calc', 'formula', '{}', 9])
+    const CVIEW = `view_b1_computed_${TS}`
+    await q(
+      `INSERT INTO meta_views (id, sheet_id, name, type, filter_info) VALUES ($1,$2,$3,'grid',$4::jsonb)`,
+      [CVIEW, SHEET_ID, 'Computed view', JSON.stringify({ conjunction: 'and', conditions: [{ fieldId: FLD_FORMULA, operator: 'is', value: 'x' }] })],
+    )
+    // Rows the formula filter would exclude in the grid — they must NOT be generated.
+    await seedRecord(`rec_b1_cf1_${TS}`, { [FLD_SRC]: 'a' }, ACTOR)
+    await seedRecord(`rec_b1_cf2_${TS}`, { [FLD_SRC]: 'b' }, ACTOR)
+
+    try {
+      const res = await bulkReq({ fieldId: FLD_TARGET, scope: 'view', viewId: CVIEW })
+      expect(res.status).toBe(422) // refused — never match-all, never out-of-view generation
+      expect(res.body.error.code).toBe('AI_BULK_VIEW_FILTER_UNSUPPORTED')
+      expect(fetchCallCount).toBe(0)
+    } finally {
+      // meta_fields isn't reset between tests — drop the formula field so it can't perturb others.
+      await q('DELETE FROM meta_fields WHERE id = $1', [FLD_FORMULA]).catch(() => {})
+    }
+  })
+
   // ── Test 4: run-cache rows persisted with the full shape ──────────────────
   test('run-cache: one persisted row per generated output with the full shape', async () => {
     await q(
