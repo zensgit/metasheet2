@@ -3623,6 +3623,7 @@ function createTableActionRecordsApi() {
 function createStockPreparationTargetProvisioningApi({
   sheetExists = false,
   missingFields = [],
+  currentOptionsByField = {}, // FOS-4: { [targetFieldId]: [{value,...}] } served by the read-only getObjectField
 } = {}) {
   const calls = []
   let sheet = sheetExists
@@ -3657,6 +3658,20 @@ function createStockPreparationTargetProvisioningApi({
           property: field.property || {},
           order: index,
         })),
+      }
+    },
+    // FOS-2b-pre: read-only current-field-options reader (used by non-default sync modes).
+    async getObjectField(input) {
+      calls.push(['getObjectField', clone(input)])
+      const options = currentOptionsByField[input.fieldId]
+      if (!options) return null
+      return {
+        id: `fld_${input.fieldId}`,
+        sheetId: sheet ? sheet.id : 'sheet_stock_canonical_private',
+        name: input.fieldId,
+        type: 'select',
+        property: { options: clone(options) },
+        order: 0,
       }
     },
     async patchObjectFieldProperty(input) {
@@ -3844,6 +3859,59 @@ async function testStockPreparationOptionSyncRoute() {
   })
   assert.equal(res.statusCode, 422)
   assert.equal(res.body.error.code, 'OPTION_SYNC_EXECUTABLE_REJECTED')
+}
+
+async function testFieldOptionsSyncDisableMissing() {
+  // FOS-4 (prove-the-path / P2 wire-test): the 2nd catalog preset (disable_missing) drives the generic
+  // route through the REAL getObjectField-backed closure (closing the wire-vs-fixture gap), and proves
+  // disable_missing only DISABLES the missing option in the real route — never deletes it.
+  const DISABLE_PRESET_ID = 'preset.stock-preparation.disable-missing.v1'
+  const provisioning = createStockPreparationTargetProvisioningApi({
+    sheetExists: true,
+    currentOptionsByField: {
+      materialType: [{ value: 'plate', label: 'Plate' }, { value: 'bar', label: 'Bar' }],
+      blankType: [{ value: 'casting' }],
+    },
+  })
+  const records = createTableActionRecordsApi()
+  const { routes } = mountRoutes(createMockServices().services, {
+    provisioningApi: provisioning.api,
+    recordsApi: records.recordsApi,
+  })
+
+  // source DROPS 'bar' from materialType (present in current); disable_missing must keep+disable it.
+  const res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: {
+      presetId: DISABLE_PRESET_ID,
+      optionSets: {
+        material_type: [{ value: 'plate' }],
+        blank_type: [{ value: 'casting' }],
+      },
+    },
+  })
+  assertOkResponse(res, 200)
+
+  // (1) the route REACHED the real getObjectField closure — the FOS-2b non-default path is now live (P2 closed)
+  assert.ok(findCalls(provisioning.calls, 'getObjectField').length >= 1, 'route reached the real getObjectField closure')
+
+  // (2) per-preset readiness binding (target-keyed) covered the 2nd preset — it got past readiness to patch
+  const patches = findCalls(provisioning.calls, 'patchObjectFieldProperty')
+  const materialPatch = patches.find((call) => call[1].fieldId === 'materialType')
+  assert.ok(materialPatch, 'materialType patched via the disable-missing preset (readiness bound by target)')
+  assert.equal(materialPatch[1].objectId, 'plm_stock_preparation_main', 'targets the canonical stock-prep objectId')
+
+  // (3) disable_missing ONLY DISABLES the missing option (bar) — NEVER deletes it
+  const opts = materialPatch[1].propertyPatch.options
+  assert.deepEqual(opts.map((o) => o.value).sort(), ['bar', 'plate'], 'bar is KEPT (not deleted) under disable_missing')
+  assert.equal(opts.find((o) => o.value === 'bar').disabled, true, 'bar is DISABLED (disable_missing only disables in the real route)')
+
+  // (4) values-free evidence — no option values/labels leak
+  assert.equal(
+    /"plate"|"bar"|"Plate"|"Bar"/.test(JSON.stringify(res.body.data.evidence || {})),
+    false,
+    'evidence is values-free (no option values/labels)',
+  )
 }
 
 async function testFieldOptionsSyncRoute() {
@@ -5085,6 +5153,7 @@ async function main() {
   await testStockPreparationTargetProvisioningRoutes()
   await testStockPreparationOptionSyncRoute()
   await testFieldOptionsSyncRoute()
+  await testFieldOptionsSyncDisableMissing()
   await testTableActionRoutes()
   await testLargeBomBackgroundExpansionJobRoutes()
   await testLargeBomBackgroundExpansionJobsSurviveDurableRouteRemount()

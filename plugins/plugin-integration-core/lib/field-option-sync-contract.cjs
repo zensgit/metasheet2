@@ -162,6 +162,26 @@ const FIELD_OPTION_SYNC_PRESETS = Object.freeze([
     conflictPolicy: 'update_from_source', // §7
     triggerMode: 'manual', // §7
   }),
+  // FOS-4 (prove-the-path): a 2nd reference preset on the SAME stock-prep canonical table, differing
+  // ONLY by a non-default syncMode (disable_missing). Purpose is not product-surface expansion — it
+  // proves: the catalog carries a 2nd preset, the per-preset readiness binding works, the generic
+  // route truly reaches getObjectField, and disable_missing only DISABLES (never deletes) in the real
+  // route (HTTP wire-test, closing the P2 caveat). Real domain presets / authoring remain FOS-4+.
+  Object.freeze({
+    presetId: 'preset.stock-preparation.disable-missing.v1',
+    label: 'Stock-preparation option sync (disable-missing)',
+    sourceKind: 'static-preset',
+    sourceObjectOrTable: 'operator-config',
+    targetKind: TARGET_KIND,
+    targetTable: 'plm_stock_preparation_main', // same canonical own-sheet target as the v1 preset
+    optionFields: Object.freeze([
+      Object.freeze({ valueField: 'material_type', targetField: 'materialType', targetFieldType: 'single_select' }),
+      Object.freeze({ valueField: 'blank_type', targetField: 'blankType', targetFieldType: 'single_select' }),
+    ]),
+    syncMode: 'disable_missing', // the non-default mode being proven end-to-end
+    conflictPolicy: 'update_from_source',
+    triggerMode: 'manual',
+  }),
 ])
 
 // Returns deep, validated copies of the catalog (asserts values-free first; never mutates the frozen consts).
