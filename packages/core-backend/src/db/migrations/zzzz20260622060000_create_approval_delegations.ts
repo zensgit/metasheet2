@@ -31,13 +31,18 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       CONSTRAINT chk_approval_delegations_window CHECK (end_at > start_at),
       CONSTRAINT chk_approval_delegations_not_self CHECK (delegator_user_id <> delegatee_user_id),
       CONSTRAINT chk_approval_delegations_scope CHECK (scope IN ('all', 'template')),
+      -- Bidirectional: scope='template' REQUIRES a target, and scope='all' REQUIRES
+      -- scope_template_id IS NULL (an 'all' row with a stray target would be ambiguous,
+      -- since resolveActiveDelegationMap ignores scope_template_id for 'all' rows).
       CONSTRAINT chk_approval_delegations_scope_target
-        CHECK (scope <> 'template' OR scope_template_id IS NOT NULL)
+        CHECK ((scope = 'template') = (scope_template_id IS NOT NULL))
     )
   `.execute(db)
 
-  // One ACTIVE delegation per (delegator, scope target) — rejects overlapping active
-  // windows (v1: a delegator has at most one active delegation per scope target).
+  // v1 semantics: at most ONE active delegation per (delegator, scope target) — i.e.
+  // "one enabled row per scope target", NOT time-range-overlap scheduling. Two active
+  // rows are rejected even with non-overlapping future windows; multi-window scheduling
+  // (range-overlap exclusion / CRUD overlap validation) is a reopen-only enhancement.
   // COALESCE keeps 'all'-scope rows unique without a partial-null collision.
   await sql`
     CREATE UNIQUE INDEX IF NOT EXISTS uq_approval_delegations_active

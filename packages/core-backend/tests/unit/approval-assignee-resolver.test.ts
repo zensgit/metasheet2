@@ -327,4 +327,31 @@ describe('ApprovalAssigneeResolver', () => {
     expect(selfLoop[0].metadata).toEqual({ resolvedFrom: { kind: 'static_user', sourceIndex: 0 } })
     expect(resolveWithDelegations([{ kind: 'static_user', userIds: ['A'] }], {}).map((r) => r.assigneeId)).toEqual(['A'])
   })
+
+  // P1 regression: delegation applies to LEGACY assigneeIds templates too (not only
+  // authored assigneeSources). The legacy path now routes through pushResolved.
+  function resolveLegacy(assigneeIds: string[], delegations: Record<string, string>) {
+    return resolveApprovalAssignees({
+      nodeKey: 'review',
+      sourceStep: 2,
+      config: { assigneeType: 'user', assigneeIds },
+      formSnapshot: {},
+      requesterSnapshot: { id: 'requester-1', delegations },
+    })
+  }
+
+  it('applies delegation to a legacy assigneeIds template (A→B, B already listed → one B)', () => {
+    const result = resolveLegacy(['A', 'B'], { A: 'B' })
+    expect(result.map((r) => r.assigneeId)).toEqual(['B'])
+    expect(result).toHaveLength(1)
+    // legacy-delegated metadata carries delegatedFrom but NO resolvedFrom (stays non-dynamic)
+    expect(result[0].metadata).toEqual({ delegatedFrom: 'A' })
+  })
+
+  it('keeps a legacy assigneeIds template metadata-free when no delegation applies', () => {
+    expect(resolveLegacy(['A', 'B'], {})).toEqual([
+      { assignmentType: 'user', assigneeId: 'A', nodeKey: 'review', sourceStep: 2 },
+      { assignmentType: 'user', assigneeId: 'B', nodeKey: 'review', sourceStep: 2 },
+    ])
+  })
 })

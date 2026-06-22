@@ -5,7 +5,7 @@ const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
 // 'add_sign' / 'reduce_sign' (mirrors migration
 // zzzz20260616130000_add_add_reduce_sign_actions_to_approval_records.ts). The
 // version marker re-runs the DDL on an already-bootstrapped test DB.
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260616-p1b-add-reduce-sign-action'
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260622-delegations'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -360,6 +360,28 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_metrics_tenant_terminal ON approval_metrics(tenant_id, terminal_at DESC)`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_metrics_template ON approval_metrics(template_id) WHERE template_id IS NOT NULL`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_metrics_sla_breached_active ON approval_metrics(tenant_id, sla_breached) WHERE sla_breached = TRUE`)
+
+    // approval_delegations (委托) — mirrors migration zzzz20260622060000_create_approval_delegations.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS approval_delegations (
+        id TEXT PRIMARY KEY,
+        delegator_user_id TEXT NOT NULL,
+        delegatee_user_id TEXT NOT NULL,
+        scope TEXT NOT NULL DEFAULT 'all',
+        scope_template_id TEXT,
+        start_at TIMESTAMPTZ NOT NULL,
+        end_at TIMESTAMPTZ NOT NULL,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT chk_approval_delegations_window CHECK (end_at > start_at),
+        CONSTRAINT chk_approval_delegations_not_self CHECK (delegator_user_id <> delegatee_user_id),
+        CONSTRAINT chk_approval_delegations_scope CHECK (scope IN ('all', 'template')),
+        CONSTRAINT chk_approval_delegations_scope_target CHECK ((scope = 'template') = (scope_template_id IS NOT NULL))
+      )
+    `)
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_approval_delegations_active ON approval_delegations (delegator_user_id, scope, COALESCE(scope_template_id, '')) WHERE active`)
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_delegations_lookup ON approval_delegations (active, scope, scope_template_id, start_at, end_at)`)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_metrics_sla_scan ON approval_metrics(started_at) WHERE terminal_at IS NULL AND sla_hours IS NOT NULL AND sla_breached = FALSE`)
     await client.query(`ALTER TABLE approval_metrics ADD COLUMN IF NOT EXISTS breach_notified_at TIMESTAMPTZ`)
     await client.query(`CREATE INDEX IF NOT EXISTS approval_metrics_breach_pending_idx ON approval_metrics (sla_breached_at NULLS FIRST, started_at) WHERE sla_breached = TRUE AND breach_notified_at IS NULL`)

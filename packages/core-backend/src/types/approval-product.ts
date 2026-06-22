@@ -112,7 +112,13 @@ export type ApprovalAssigneeSource =
   | { kind: 'manager_at_level'; level: number }
 
 export interface ApprovalAssigneeResolutionMetadata {
-  resolvedFrom: {
+  /**
+   * Present for assignees resolved from an `assigneeSources` entry (the dynamic-source
+   * discriminator downstream keys on its presence). Absent for legacy `assigneeIds`
+   * assignments — including a legacy assignment that a delegation substituted, which
+   * then carries only `delegatedFrom`.
+   */
+  resolvedFrom?: {
     kind: ApprovalAssigneeSourceKind
     sourceIndex: number
     fieldId?: string

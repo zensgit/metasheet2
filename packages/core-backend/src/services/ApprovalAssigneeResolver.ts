@@ -92,32 +92,23 @@ function extractDelegationMap(snapshot: Record<string, unknown> | null): Record<
 export function resolveApprovalAssignees(
   options: ResolveApprovalAssigneesOptions,
 ): ResolvedApprovalAssignment[] {
-  const sources = options.config.assigneeSources
-  if (!sources) {
-    return (options.config.assigneeIds ?? []).map((assigneeId) => ({
-      assignmentType: options.config.assigneeType === 'role' ? 'role' : 'user',
-      assigneeId,
-      nodeKey: options.nodeKey,
-      sourceStep: options.sourceStep,
-    }))
-  }
-
   const resolved: ResolvedApprovalAssignment[] = []
   const seen = new Set<string>()
   // Delegation substitution map (delegator -> delegatee), frozen in the instance
-  // snapshot at create. Applied inside pushResolved BEFORE the dedup key.
+  // snapshot at create. Applied inside pushResolved BEFORE the dedup key — so it
+  // covers BOTH the legacy assigneeIds path and the assigneeSources path.
   const delegations = extractDelegationMap(options.requesterSnapshot)
 
   const pushResolved = (
     assignmentType: 'user' | 'role',
     assigneeId: string,
-    source: ApprovalAssigneeSource,
+    source: ApprovalAssigneeSource | null,
     sourceIndex: number,
   ): void => {
     // Delegation (委托): a resolved USER assignee who is an active delegator routes to
     // the delegatee. Substituted HERE — before the dedup key — so `seen` dedups on the
-    // delegatee: a delegatee already resolved by another source collapses to one. One
-    // hop only (the delegatee's own delegation is not re-resolved); user-only.
+    // delegatee: a delegatee already resolved collapses to one. One hop only (the
+    // delegatee's own delegation is not re-resolved); user-only.
     let finalId = assigneeId
     let delegatedFrom: string | undefined
     if (assignmentType === 'user') {
@@ -130,14 +121,30 @@ export function resolveApprovalAssignees(
     const key = `${assignmentType}:${finalId}`
     if (seen.has(key)) return
     seen.add(key)
-    const metadata = metadataFor(source, sourceIndex)
+    // Legacy (no source) stays metadata-free UNLESS a delegation applied — then it
+    // carries `delegatedFrom` only (no `resolvedFrom`, so downstream dynamic-source
+    // discriminators still treat it as a legacy/non-dynamic assignment).
+    const base = source ? metadataFor(source, sourceIndex) : undefined
+    const metadata = delegatedFrom ? { ...(base ?? {}), delegatedFrom } : base
     resolved.push({
       assignmentType,
       assigneeId: finalId,
       nodeKey: options.nodeKey,
       sourceStep: options.sourceStep,
-      metadata: delegatedFrom ? { ...metadata, delegatedFrom } : metadata,
+      ...(metadata ? { metadata } : {}),
     })
+  }
+
+  const sources = options.config.assigneeSources
+  if (!sources) {
+    // Legacy assigneeType/assigneeIds — routed through pushResolved so delegation
+    // applies to existing templates too (delegation is a property of the approval task,
+    // not only newly-authored assigneeSources). Metadata-free unless a delegation hits.
+    const legacyType: 'user' | 'role' = options.config.assigneeType === 'role' ? 'role' : 'user'
+    for (const assigneeId of options.config.assigneeIds ?? []) {
+      pushResolved(legacyType, assigneeId, null, 0)
+    }
+    return resolved
   }
 
   sources.forEach((source, sourceIndex) => {
