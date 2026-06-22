@@ -918,4 +918,24 @@ describeIfDatabase('Layer 1 record-level version restore (real DB)', () => {
       await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_id = $3', [SHEET_ID, FLD_LK, USER_RO]).catch(() => {})
     }
   })
+
+  // SR-2 row-deny — legacy-bypass closure (owner review of #3023). The /restore route now applies the SAME
+  // row-level read-deny seam as the history surfaces + restore-execute: a sheet editor row-read-denied on a
+  // record cannot restore (write) it. Denied → 404 (no-oracle), no write. The gate is INERT when the per-sheet
+  // flag is off (so every other golden above is unaffected); this test toggles it on and resets it in `finally`.
+  test('row-deny: a row-read-denied record cannot be restored via /restore (404, no write)', async () => {
+    const rid = await seedRecord({ [FLD_A]: 'secret' }, 2, [
+      { version: 1, action: 'create', snapshot: { [FLD_A]: 'old' } },
+      { version: 2, snapshot: { [FLD_A]: 'secret' } },
+    ])
+    await q("UPDATE meta_sheets SET row_level_read_permissions_enabled = true, conditional_read_rules = $2::jsonb WHERE id = $1", [SHEET_ID, JSON.stringify([{ id: 'rd1', fieldId: FLD_A, operator: 'eq', value: 'secret', effect: 'deny_read' }])])
+    try {
+      testUserId = USER_W // a writer, but row-read-denied on THIS record by the rule (read-deny ⟂ write capability)
+      const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
+      expect(res.status).toBe(404) // denied → not-found shape, before any write
+      expect((await liveData(rid))[FLD_A]).toBe('secret') // unchanged — the legacy route no longer bypasses row-deny
+    } finally {
+      await q("UPDATE meta_sheets SET row_level_read_permissions_enabled = false, conditional_read_rules = '[]'::jsonb WHERE id = $1", [SHEET_ID])
+    }
+  })
 })
