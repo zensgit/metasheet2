@@ -33,10 +33,13 @@
 
 ## 3. The ONE canonicalization — link equality
 
-`sameLinks` (`[...a].sort().join(' ') === [...b].sort().join(' ')`) has a **delimiter collision**: `['a b']` and
-`['a','b']` both serialize to `'a b'`. This is reachable — `normalizeLinkIds` parses a legacy `'a b,c'` value into
-`['a b','c']`, so a space-bearing token can occur. `/restore`'s `sameLinkSet` (length check + sorted `.every()`)
-has no collision.
+`sameLinks` (`[...a].sort().join(' ') === [...b].sort().join(' ')`) has a **delimiter collision**, but ONLY for
+EQUAL-LENGTH sets (the leading `a.length === b.length` short-circuits unequal ones — so the first-cut example
+`['a b']` vs `['a','b']` is *not* actually a collision, it's caught by the length check). The real case is two
+distinct same-size sets whose space-joins coincide: `['a','b c']` and `['a b','c']` (both length 2) both serialize
+to `'a b c'`. This requires a link id that itself contains a space — latent/defensive rather than common, since
+generated record ids have none, but reachable via a legacy `normalizeLinkIds` parse of `'a,b c'` → `['a','b c']`
+vs `'a b,c'` → `['a b','c']`. `/restore`'s `sameLinkSet` (length check + sorted `.every()`) has no collision.
 
 - **Canonical = `/restore`'s `sameLinkSet` (robust set-equality).** Rationale: (a) it leaves the SHIPPED
   destructive write path byte-identical — only the two newer paths converge, minimizing blast radius where it is
