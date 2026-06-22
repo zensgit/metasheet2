@@ -15435,6 +15435,11 @@ async function reverseLeaveBalanceDeduction(trx, { orgId, userId, requestId }) {
     const deducted = -Number(row.delta_minutes) // deduct delta is negative → positive restore amount
     if (deducted <= 0) continue
     if (row.expired === true || row.status === 'expired') {
+      // §3a: an expired lot is NOT resurrected. No reverse event is written for this portion, so it stays
+      // durably auditable as (Σdeduct − Σreverse) for this source_id over the immutable events ledger — the
+      // deduct event remains, unmatched by a reverse. The response surfaces `unrecoverableExpired` for
+      // immediate visibility; the ledger derivation is the durable record (the events table has no note
+      // column, and a zero/marker event would violate the delta-sign CHECK).
       unrecoverableExpired += deducted
       continue
     }
