@@ -73,6 +73,7 @@ const AI_ENV_KEYS = [
 let app: Express
 let currentUser: { id: string; roles: string[]; perms: string[] } = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
 let stubUsage = { input_tokens: 20, output_tokens: 10 }
+let stubText = 'AI OUT'
 let fetchCallCount = 0
 /** When true the provider stub returns a NON-200 with no usage = the genuine generation_failed_before_usage path. */
 let providerErrorMode = false
@@ -98,7 +99,7 @@ const fetchStub = (async (_url: unknown, init?: unknown) => {
     return new Response(JSON.stringify({ error: 'billed but failed', usage: { ...stubUsage } }), { status: 500, headers: { 'content-type': 'application/json' } })
   }
   return new Response(
-    JSON.stringify({ content: [{ type: 'text', text: 'AI OUT' }], usage: { ...stubUsage } }),
+    JSON.stringify({ content: [{ type: 'text', text: stubText }], usage: { ...stubUsage } }),
     { status: 200, headers: { 'content-type': 'application/json' } },
   )
 }) as typeof fetch
@@ -215,6 +216,7 @@ describeIfDatabase('B-1 AI bulk-preview (real DB)', () => {
   beforeEach(async () => {
     currentUser = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
     stubUsage = { input_tokens: 20, output_tokens: 10 }
+    stubText = 'AI OUT'
     providerErrorMode = false
     providerErrorWithUsageMode = false
     // Reset per-test caps (a low cap leaking forward would turn later tests red).
@@ -564,6 +566,28 @@ describeIfDatabase('B-1 AI bulk-preview (real DB)', () => {
     expect(res.status).toBe(400)
     expect(res.body.error.code).toBe('AI_INLINE_CONFIG_REJECTED')
     expect(fetchCallCount).toBe(0)
+  })
+
+  test('cache stores the EXACT previewed value — no redaction (confirm-what-you-see == what B-2 writes)', async () => {
+    await q(
+      `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code) VALUES ($1,'user',$2,$3)`,
+      [SHEET_ID, ACTOR, 'multitable:write-own'],
+    )
+    // An output that WOULD trip the shared redactor (contains a sk- token). The cache
+    // must store it VERBATIM so B-2 commits exactly what the preview showed — and so it
+    // matches the per-record run, which writes the raw model text. Pre-fix, the cache
+    // held the redacted form → B-2 would write a value the user never confirmed.
+    stubText = `summary ${API_KEY_SENTINEL} end`
+    const X1 = `rec_b1_exact_${TS}`
+    await seedRecord(X1, { [FLD_SRC]: 'redactor-triggering output' }, ACTOR)
+
+    const res = await bulkReq({ fieldId: FLD_TARGET, scope: 'sheet' })
+    expect(res.status).toBe(200)
+    const previewRow = (res.body.rows as Array<{ recordId: string; proposed: string }>).find((r) => r.recordId === X1)!
+    expect(previewRow.proposed).toBe(stubText) // preview returns the raw value
+    const cached = await cacheRows(res.body.runId as string)
+    // cache == preview, NOT redacted (the sk- token survives verbatim).
+    expect(cached.find((c) => c.record_id === X1)!.proposed_value).toBe(stubText)
   })
 
   test('response top-level shape is pinned (fixture-drift discipline)', async () => {

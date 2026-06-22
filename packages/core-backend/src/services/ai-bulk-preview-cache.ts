@@ -17,7 +17,6 @@
  *    settled. NEVER stores prompt or source text.
  */
 
-import { redactString } from '../multitable/automation-log-redact'
 
 export const AI_BULK_PREVIEW_CACHE_TABLE = 'multitable_ai_bulk_preview_cache'
 
@@ -49,9 +48,13 @@ export interface BulkPreviewCacheRow {
 
 /**
  * Insert one cached output row (PK = (run_id, record_id)). `proposed_value` is
- * defensively run through the shared redactor before insert (the provider text
- * is model output, but the redactor is cheap defense in depth — same posture as
- * the usage-ledger `error` column).
+ * stored EXACTLY as previewed — NO redaction. The cache is the value B-2 commits,
+ * and it MUST equal what the user reviewed ("confirm what you see = what's written");
+ * it also matches the per-record run, which writes the raw model text to the field
+ * (multitable-ai.ts shortcut/run, `value: result.text`). Redacting here would commit
+ * a different value than the user confirmed. (The cache is short-lived + TTL'd, and
+ * the same raw text reaches the field on commit regardless, so there is nothing to
+ * "defend" by diverging the stored value from the previewed one.)
  */
 export async function insertBulkPreviewCacheRow(
   query: AiBulkPreviewCacheQueryFn,
@@ -71,7 +74,7 @@ export async function insertBulkPreviewCacheRow(
       row.sheetId,
       row.fieldId,
       Math.max(0, Math.round(row.previewVersion)),
-      redactString(row.proposedValue),
+      row.proposedValue,
       Math.max(0, Math.round(row.usageTokens)),
       row.costUsd,
       expiresAt.toISOString(),
