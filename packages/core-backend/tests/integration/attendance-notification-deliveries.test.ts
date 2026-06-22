@@ -7,6 +7,7 @@ import {
   AttendanceNotificationDeliveryWorker,
   DeterministicFakeAttendanceDeliveryChannel,
   DingTalkAttendanceDeliveryChannel,
+  EmailAttendanceDeliveryChannel,
   type AttendanceNotificationDeliveryQuery,
 } from '../../src/services/AttendanceNotificationDeliveryWorker'
 import type { DingTalkMessageConfig } from '../../src/integrations/dingtalk/client'
@@ -547,6 +548,112 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       await publicPool.query('DELETE FROM directory_accounts WHERE id = $1', [directoryAccountId]).catch(() => undefined)
       await publicPool.query('DELETE FROM directory_integrations WHERE id = $1', [integrationId]).catch(() => undefined)
       await publicPool.query('DELETE FROM users WHERE id = $1', [localUserId]).catch(() => undefined)
+      await publicPool.end().catch(() => undefined)
+    }
+  })
+
+  it('C5 email_smtp — org-scoped recipient: active in-org→sent, transport 5xx→failed(no retry), NOT-in-org→failed & never sent', async () => {
+    if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
+    const publicPool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = `c5-email-${runSuffix}`
+    const otherOrgId = `c5-email-other-${runSuffix}`
+    const okUser = `u-c5-email-ok-${runSuffix}`
+    const failUser = `u-c5-email-fail-${runSuffix}`
+    const noOrgUser = `u-c5-email-noorg-${runSuffix}`
+    const sourceId = randomUUID()
+    const ids: Record<string, string> = {}
+    // SMTP transport is mocked; this env only needs to make resolveEmailSmtpTransportConfig succeed.
+    const smtpEnv = {
+      MULTITABLE_EMAIL_TRANSPORT: 'smtp',
+      MULTITABLE_EMAIL_SMTP_HOST: 'smtp.example.test',
+      MULTITABLE_EMAIL_SMTP_PORT: '587',
+      MULTITABLE_EMAIL_SMTP_USER: 'smtp-user',
+      MULTITABLE_EMAIL_SMTP_PASSWORD: 'smtp-password-secret',
+      MULTITABLE_EMAIL_SMTP_FROM: 'ops@example.test',
+    } as NodeJS.ProcessEnv
+    const sentTo: string[] = []
+    const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
+      const r = await publicPool.query(sqlText, params as unknown[])
+      return { rows: r.rows, rowCount: r.rowCount }
+    }
+    const emailOf = (uid: string) => `${uid}@example.test`
+    try {
+      await requireTable(publicPool, 'users')
+      await requireTable(publicPool, 'user_orgs')
+      await requireTable(publicPool, 'attendance_notification_deliveries')
+
+      for (const uid of [okUser, failUser, noOrgUser]) {
+        await publicPool.query(
+          `INSERT INTO users (id, email, password_hash, name, role, is_active)
+           VALUES ($1,$2,'hash',$3,'user',true)
+           ON CONFLICT (id) DO UPDATE SET is_active = EXCLUDED.is_active, email = EXCLUDED.email`,
+          [uid, emailOf(uid), uid],
+        )
+      }
+      // ok + fail are ACTIVE members of the delivery org; noOrg is active but only a member of ANOTHER org.
+      await publicPool.query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1,$2,true) ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`, [okUser, orgId])
+      await publicPool.query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1,$2,true) ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`, [failUser, orgId])
+      await publicPool.query(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1,$2,true) ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`, [noOrgUser, otherOrgId])
+
+      const insertEmailRow = async (uid: string) => {
+        const r = await publicPool.query<{ id: string }>(
+          `INSERT INTO attendance_notification_deliveries
+             (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+           VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','email_smtp',$5::jsonb)
+           RETURNING id::text AS id`,
+          [orgId, sourceId, `c5-email:${sourceId}:${uid}`, uid, JSON.stringify({ title: 'Email smoke', body: 'Please check the attendance reminder.' })],
+        )
+        return r.rows[0].id
+      }
+      ids.ok = await insertEmailRow(okUser)
+      ids.fail = await insertEmailRow(failUser)
+      ids.noorg = await insertEmailRow(noOrgUser)
+
+      const transport = {
+        sendMail: async (opts: { to: string }) => {
+          sentTo.push(opts.to)
+          if (opts.to === emailOf(failUser)) {
+            throw Object.assign(new Error('550 mailbox unavailable'), { responseCode: 550 })
+          }
+          return { messageId: 'ok' }
+        },
+      }
+      const channel = new EmailAttendanceDeliveryChannel({ query, env: smtpEnv, createTransport: () => transport })
+      const worker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [channel],
+        now: () => new Date('2026-08-03T00:00:00.000Z'),
+        maxAttempts: 2,
+        workerId: 'worker-c5-email',
+      })
+
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 3, sent: 1, retrying: 0, failed: 2 })
+
+      const row = async (id: string) => (await publicPool.query(
+        `SELECT status, delivered_at, last_error FROM attendance_notification_deliveries WHERE id = $1`,
+        [id],
+      )).rows[0]
+      // active in-org member + transport ok → sent
+      expect(await row(ids.ok)).toMatchObject({ status: 'sent', last_error: null })
+      expect((await row(ids.ok)).delivered_at).toBeTruthy()
+      // in-org + transport 5xx → permanent failure, not retried
+      const failRow = await row(ids.fail)
+      expect(failRow.status).toBe('failed')
+      expect(String(failRow.last_error)).toContain('email_send_failed_550')
+      // NOT a member of the delivery org → fail-closed (dead-lettered) AND the transport was never invoked for it
+      const noorgRow = await row(ids.noorg)
+      expect(noorgRow.status).toBe('failed')
+      expect(String(noorgRow.last_error)).toContain('email_recipient_unresolved')
+      expect(sentTo).toContain(emailOf(okUser))
+      expect(sentTo).toContain(emailOf(failUser))
+      expect(sentTo).not.toContain(emailOf(noOrgUser))
+    } finally {
+      for (const id of Object.values(ids)) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [id]).catch(() => undefined)
+      }
+      await publicPool.query('DELETE FROM user_orgs WHERE user_id = ANY($1)', [[okUser, failUser, noOrgUser]]).catch(() => undefined)
+      await publicPool.query('DELETE FROM users WHERE id = ANY($1)', [[okUser, failUser, noOrgUser]]).catch(() => undefined)
       await publicPool.end().catch(() => undefined)
     }
   })
