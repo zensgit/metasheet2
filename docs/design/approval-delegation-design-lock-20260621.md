@@ -10,29 +10,38 @@ the same #2980→#2999 arc B1 followed.
 
 A user (the **delegator**) configures a time-boxed delegation: while it is active, their
 approval tasks route to a **delegatee**. This is **not** a new node type or a graph change —
-it is a **post-resolution substitution** inside the existing `ApprovalAssigneeResolver`: after
-a node resolves its assignee set, any resolved `user` assignee that has an active delegation is
-replaced by the delegatee. Like the management chain, the delegation is read at
+it is a **substitution applied as each resolved `user` assignee is pushed through
+`pushResolved`** in the existing `ApprovalAssigneeResolver`: an assignee that has an active
+delegation is replaced by the delegatee **before** dedup (see §2). Like the management chain, the
+delegation is read at
 assignee-resolution time and **frozen in the instance** at create — no live re-query
 mid-instance, so an in-flight approval never re-routes under a later config edit.
 
 It stays small because it adds **no graph runtime, no new node type, no automation coupling**.
 It reuses the resolver's existing `pushResolved` dedup + self-exclusion machinery; it adds one
-frozen delegation snapshot plus a post-resolution substitution pass.
+frozen delegation snapshot plus a substitution applied **inside `pushResolved`, before the dedup
+key is built** (see §2 — substituting after the resolve loop would bypass the `seen` set).
 
 ## 2. Contract
 
 - **Config store** — a new `approval_delegations` row: `delegator_user_id`,
   `delegatee_user_id`, `start_at`, `end_at`, `scope` (`all` | `template:{id}`), `active`. A
   unique constraint rejects overlapping active windows per `(delegator, scope)`.
-- **Bake (frozen-at-start)** — at `createApproval`, the active delegation set is captured into
-  the instance snapshot (same posture as `managerChainIds`); the resolver reads only that
-  frozen set. (Impl detail to settle: capture-all-active vs. capture-for-resolved-assignees —
-  either preserves the frozen-at-start guarantee.)
-- **Resolver substitution** — for each resolved `user` assignee with a baked active delegation
-  (now within `[start_at, end_at]`, scope matches the template), **substitute** the delegatee.
-  A delegatee equal to the delegator, or already in the set, collapses via the existing `seen`
-  set (no double-assign). Metadata records `delegatedFrom` for the audit trail.
+- **Bake (frozen-at-start) — DECIDED:** at `createApproval`, capture the set of **active
+  delegations scoped to the template + time window** into the instance snapshot (same posture as
+  `managerChainIds`), prepared **before `executor.resolveInitialState()`**. **Not**
+  capture-for-resolved-assignees-of-the-initial-node — later nodes, and `return` / admin-jump
+  re-resolution, can resolve to different assignees, so an initial-node-only capture would break
+  the "frozen at instance create" semantics. The resolver reads only this frozen set.
+- **Resolver substitution — INSIDE `pushResolved`, before the dedup key:** substituting *after*
+  the `sources.forEach` resolve loop would build the `seen` key on the **original** id, so
+  replacing A→B when B is already resolved would **bypass dedup → duplicate assignment + wrong
+  metadata**. Instead the substitution runs inside `pushResolved`, only for
+  `assignmentType === 'user'`, and **before** `key = user:${assigneeId}` is computed:
+  (1) original assignee = delegator; (2) look up the frozen delegation map; (3) replace with the
+  delegatee; (4) record `delegatedFrom` metadata; (5) run `seen` dedup on the **substituted** id.
+  A delegatee already in the set collapses to one; a delegatee equal to the delegator
+  self-collapses.
 - **One hop only (v1)** — A→B, B→C resolves A→B (deterministic, cycle-free). Multi-hop is
   reopen-only.
 - **1→1 empty-safety** — substitution replaces, never empties: a node with one delegating
@@ -50,17 +59,20 @@ frozen delegation snapshot plus a post-resolution substitution pass.
 
 ## 4. Implementation slices (mirror the B1 PR checklist)
 
-1. **Backend:** `approval_delegations` table + migration; the frozen delegation snapshot read;
-   the resolver post-substitution pass (substitute, self-collapse, dedup, `delegatedFrom`
+1. **Backend:** `approval_delegations` table + migration (a unique `zzzz…` timestamp **after** the
+   latest existing tail); the active-delegations snapshot baked **before `resolveInitialState()`**;
+   the substitution **inside `pushResolved` before the dedup key** (user-only, `delegatedFrom`
    metadata); one-hop determinism.
 2. **Frontend:** a "委托设置" CRUD (delegator picks delegatee + window + scope) with the same
    fail-closed authoring discipline as the template editor; read-only display of active
    delegations.
 3. **Tests:** resolver substitution (active window) / no-substitution (outside window, wrong
-   scope) / self-collapse / one-hop only / 1→1 empty-safety; CRUD validation (window ordering,
-   self-delegation rejected, overlapping-active rejected); FE wire round-trip; **a service-level
-   bake→substitute test** (mirroring the B1 end-to-end linkage test) so the create/start path is
-   covered, not just a hand-fed resolver.
+   scope) / self-collapse / one-hop only / 1→1 empty-safety; **the keystone dedup case —
+   delegator A→delegatee B where B is already another source's assignee resolves to exactly one
+   B** (proves the substitution-before-dedup ordering, not a post-loop replace); CRUD validation
+   (window ordering, self-delegation rejected, overlapping-active rejected); FE wire round-trip;
+   **a service-level bake→substitute test** (mirroring the B1 end-to-end linkage test) so the
+   create/start path is covered, not just a hand-fed resolver.
 
 ## 5. Acceptance
 
