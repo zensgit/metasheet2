@@ -39,6 +39,13 @@ async function syncFieldOptions({
   buildPropertyPatch,
   resolveSkipReason,
   errorFactory,
+  // FOS-2b: sync-mode runtime. Defaults reproduce the pre-FOS-2b behavior EXACTLY (replace +
+  // update_from_source = full overwrite, no read, no merge) so stock-prep stays byte-identical.
+  syncMode = 'replace',
+  conflictPolicy = 'update_from_source',
+  // readCurrentOptions(field) => Promise<optionObject[]|null> — required ONLY for non-default modes
+  // (append / disable_missing / keep_existing / manual_confirm), wired by the caller to getObjectField.
+  readCurrentOptions,
 } = {}) {
   if (!provisioning || typeof provisioning.patchObjectFieldProperty !== 'function') {
     throw new TypeError('syncFieldOptions requires provisioning.patchObjectFieldProperty')
@@ -59,8 +66,15 @@ async function syncFieldOptions({
 
   const fields = Array.isArray(optionFields) ? optionFields : []
   const sets = optionSets && typeof optionSets === 'object' ? optionSets : {}
+  // ZERO-DRIFT fast path: replace + update_from_source = the exact pre-FOS-2b behavior (no read, no
+  // merge). stock-prep stays here. Any other mode reads current options + merges.
+  const isDefaultMode = syncMode === 'replace' && conflictPolicy === 'update_from_source'
+  if (!isDefaultMode && typeof readCurrentOptions !== 'function') {
+    throw new TypeError('syncFieldOptions: non-default syncMode/conflictPolicy requires readCurrentOptions(field)')
+  }
   const synced = []
   const skipped = []
+  const held = []
 
   for (const field of fields) {
     const sourceKey = field.optionSource.key
@@ -73,9 +87,26 @@ async function syncFieldOptions({
       })
       continue
     }
+
+    let effectiveSet = set
+    if (!isDefaultMode) {
+      const current = (await readCurrentOptions(field)) || []
+      const sourceOptions = Array.isArray(set.options) ? set.options : []
+      // manual_confirm NEVER writes: collect values-free held evidence (counts only) of what would change.
+      if (conflictPolicy === 'manual_confirm') {
+        held.push({
+          field: field.id,
+          optionSource: { ...field.optionSource },
+          ...diffOptionCounts(current, sourceOptions, syncMode),
+        })
+        continue
+      }
+      effectiveSet = { ...set, options: mergeFieldOptions(current, sourceOptions, syncMode, conflictPolicy) }
+    }
+
     let propertyPatch
     try {
-      propertyPatch = buildPropertyPatch(field, set)
+      propertyPatch = buildPropertyPatch(field, effectiveSet)
       await provisioning.patchObjectFieldProperty({
         projectId,
         objectId: targetObjectId,
@@ -88,17 +119,86 @@ async function syncFieldOptions({
     synced.push({
       field: field.id,
       optionSource: { ...field.optionSource },
-      set,
+      set: effectiveSet,
     })
   }
 
-  if (synced.length === 0) {
+  // A manual_confirm preview (held > 0) is a valid no-write outcome, not "nothing synced".
+  if (synced.length === 0 && held.length === 0) {
     throw errorFactory.noFieldsSynced({ targetObjectId, skipped })
   }
 
-  return { synced, skipped }
+  return { synced, skipped, held }
+}
+
+// FOS-2b: merge current + source options per syncMode × conflictPolicy. Pure function (no I/O).
+// - append: keep all current, add new-from-source (NOTHING removed).
+// - disable_missing: source set + current-not-in-source marked disabled (NEVER removed/deleted).
+// - replace (only reached with a non-default conflictPolicy): source set; current-not-in-source
+//   dropped (replace semantics). (replace + update_from_source never reaches here — fast path.)
+// conflictPolicy for overlapping values: keep_existing preserves the CURRENT option's fields
+// (human label/color/etc.); update_from_source takes the source option.
+function mergeFieldOptions(current, source, syncMode, conflictPolicy) {
+  const cur = Array.isArray(current) ? current : []
+  const src = Array.isArray(source) ? source : []
+  const curByValue = new Map(cur.map((o) => [o.value, o]))
+  const srcByValue = new Map(src.map((o) => [o.value, o]))
+  const resolveOverlap = (c, s) => (conflictPolicy === 'keep_existing' ? { ...c } : { ...s })
+
+  if (syncMode === 'append') {
+    const out = []
+    const seen = new Set()
+    for (const c of cur) {
+      const s = srcByValue.get(c.value)
+      out.push(s ? resolveOverlap(c, s) : { ...c })
+      seen.add(c.value)
+    }
+    for (const s of src) {
+      if (!seen.has(s.value)) out.push({ ...s })
+    }
+    return out
+  }
+
+  if (syncMode === 'disable_missing') {
+    const out = []
+    const seen = new Set()
+    for (const s of src) {
+      const c = curByValue.get(s.value)
+      out.push(c ? resolveOverlap(c, s) : { ...s })
+      seen.add(s.value)
+    }
+    for (const c of cur) {
+      if (!seen.has(c.value)) out.push({ ...c, disabled: true }) // disable, NEVER delete
+    }
+    return out
+  }
+
+  // replace with a non-default conflictPolicy (e.g. replace + keep_existing).
+  return src.map((s) => {
+    const c = curByValue.get(s.value)
+    return c ? resolveOverlap(c, s) : { ...s }
+  })
+}
+
+// FOS-2b: values-free diff counts for manual_confirm held evidence (counts only — no values/labels).
+function diffOptionCounts(current, source, syncMode) {
+  const curValues = new Set((Array.isArray(current) ? current : []).map((o) => o.value))
+  const srcValues = new Set((Array.isArray(source) ? source : []).map((o) => o.value))
+  let wouldAdd = 0
+  let wouldUpdate = 0
+  let wouldDisable = 0
+  for (const v of srcValues) {
+    if (curValues.has(v)) wouldUpdate += 1
+    else wouldAdd += 1
+  }
+  if (syncMode === 'disable_missing') {
+    for (const v of curValues) if (!srcValues.has(v)) wouldDisable += 1
+  }
+  return { wouldAdd, wouldUpdate, wouldDisable }
 }
 
 module.exports = {
   syncFieldOptions,
+  mergeFieldOptions,
+  diffOptionCounts,
 }

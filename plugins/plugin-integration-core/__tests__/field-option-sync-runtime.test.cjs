@@ -7,7 +7,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const { syncFieldOptions } = require(path.join(__dirname, '..', 'lib', 'field-option-sync-runtime.cjs'))
+const { syncFieldOptions, mergeFieldOptions } = require(path.join(__dirname, '..', 'lib', 'field-option-sync-runtime.cjs'))
 
 // ZERO-DRIFT STRUCTURAL LOCK: the stock-prep option-sync module MUST route through this kernel and
 // MUST NOT carry its own patch loop / patch call (else it would be a parallel copy that could drift
@@ -253,7 +253,119 @@ async function main() {
     'incomplete errorFactory throws',
   )
 
-  console.log('field-option-sync-runtime: kernel loop/skip/patch/error-if-none + guards tests passed')
+  // ==== FOS-2b sync-mode runtime — owner-gated LOCKS ====
+
+  // LOCK 1 — NO DELETE: disable_missing marks current-not-in-source as disabled, NEVER drops it.
+  {
+    const merged = mergeFieldOptions(
+      [{ value: 'a' }, { value: 'b' }],
+      [{ value: 'a' }],
+      'disable_missing',
+      'update_from_source',
+    )
+    const b = merged.find((o) => o.value === 'b')
+    assert.ok(b, 'disable_missing KEEPS the missing option (no delete)')
+    assert.equal(b.disabled, true, 'missing option is DISABLED, not removed')
+    assert.equal(merged.length, 2, 'no option dropped')
+    // append also never removes
+    const app = mergeFieldOptions([{ value: 'a' }], [{ value: 'b' }], 'append', 'update_from_source')
+    assert.deepEqual(app.map((o) => o.value).sort(), ['a', 'b'], 'append unions current + source (nothing removed)')
+  }
+
+  // conflictPolicy on overlap: keep_existing preserves CURRENT (human) fields; update_from_source takes source.
+  {
+    const keep = mergeFieldOptions([{ value: 'a', label: 'Human' }], [{ value: 'a', label: 'Source' }], 'append', 'keep_existing')
+    assert.equal(keep.find((o) => o.value === 'a').label, 'Human', 'keep_existing preserves the human label')
+    const upd = mergeFieldOptions([{ value: 'a', label: 'Human' }], [{ value: 'a', label: 'Source' }], 'append', 'update_from_source')
+    assert.equal(upd.find((o) => o.value === 'a').label, 'Source', 'update_from_source overwrites from source')
+  }
+
+  // LOCK 2 — NO SILENT WRITE: manual_confirm patches NOTHING; returns values-free held evidence.
+  {
+    const provisioning = createProvisioning()
+    const { synced, held } = await syncFieldOptions({
+      provisioning,
+      projectId: 'tenant_1:integration-core',
+      targetObjectId: 'obj_demo',
+      optionFields: [OPTION_FIELDS[0]],
+      optionSets: { material_type: { options: [{ value: 'x' }, { value: 'y' }] } },
+      buildPropertyPatch,
+      resolveSkipReason,
+      errorFactory: makeErrorFactory(),
+      syncMode: 'replace',
+      conflictPolicy: 'manual_confirm',
+      readCurrentOptions: async () => [{ value: 'x' }],
+    })
+    assert.equal(provisioning.calls.length, 0, 'manual_confirm makes ZERO patch calls (no silent write)')
+    assert.equal(synced.length, 0, 'manual_confirm syncs nothing')
+    assert.equal(held.length, 1, 'manual_confirm returns a held preview')
+    assert.equal(held[0].wouldAdd, 1, 'held: y would be added')
+    assert.equal(held[0].wouldUpdate, 1, 'held: x would be updated')
+    assert.equal(/"x"|"y"/.test(JSON.stringify(held[0])), false, 'held evidence is values-free (no option values)')
+  }
+
+  // LOCK 3 — REPLACE ZERO-DRIFT: default mode does NOT read current and patches the RAW set byte-identically.
+  {
+    const provisioning = createProvisioning()
+    let reads = 0
+    await syncFieldOptions({
+      provisioning,
+      projectId: 'tenant_1:integration-core',
+      targetObjectId: 'obj_demo',
+      optionFields: [OPTION_FIELDS[0]],
+      optionSets: { material_type: { options: [{ value: 'a' }, { value: 'b' }] } },
+      buildPropertyPatch,
+      resolveSkipReason,
+      errorFactory: makeErrorFactory(),
+      // defaults: replace + update_from_source
+      readCurrentOptions: async () => { reads += 1; return [{ value: 'zzz' }] },
+    })
+    assert.equal(reads, 0, 'replace+update_from_source does NOT read current options (fast path)')
+    assert.deepEqual(
+      provisioning.calls[0].propertyPatch.options,
+      [{ value: 'a' }, { value: 'b' }],
+      'patches the RAW source set (byte-identical — zero-drift)',
+    )
+  }
+
+  // disable_missing through the kernel: the merged effective set (incl. the kept-disabled option) is patched.
+  {
+    const provisioning = createProvisioning()
+    await syncFieldOptions({
+      provisioning,
+      projectId: 'tenant_1:integration-core',
+      targetObjectId: 'obj_demo',
+      optionFields: [OPTION_FIELDS[0]],
+      optionSets: { material_type: { options: [{ value: 'a' }] } },
+      buildPropertyPatch,
+      resolveSkipReason,
+      errorFactory: makeErrorFactory(),
+      syncMode: 'disable_missing',
+      conflictPolicy: 'update_from_source',
+      readCurrentOptions: async () => [{ value: 'a' }, { value: 'b' }],
+    })
+    const patched = provisioning.calls[0].propertyPatch.options.map((o) => o.value)
+    assert.deepEqual(patched, ['a', 'b'], 'disable_missing patches a + b (b KEPT, not deleted)')
+  }
+
+  // fail-closed: a non-default mode without readCurrentOptions throws (cannot merge blind).
+  await assert.rejects(
+    () => syncFieldOptions({
+      provisioning: createProvisioning(),
+      projectId: 'p',
+      targetObjectId: 'o',
+      optionFields: [OPTION_FIELDS[0]],
+      optionSets: { material_type: { options: [] } },
+      buildPropertyPatch,
+      resolveSkipReason,
+      errorFactory: makeErrorFactory(),
+      syncMode: 'append',
+    }),
+    /requires readCurrentOptions/,
+    'non-default mode without readCurrentOptions fails closed',
+  )
+
+  console.log('field-option-sync-runtime: kernel loop/skip/patch/error-if-none + guards + FOS-2b sync-mode locks tests passed')
 }
 
 main().catch((error) => {
