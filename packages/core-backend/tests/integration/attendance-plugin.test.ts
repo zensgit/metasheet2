@@ -14893,4 +14893,71 @@ attendanceIntegrationDescribe(
     }
   })
 
+  // #7 销假 §5 authority — RBAC ENFORCED (the main flow above runs RBAC_BYPASS=true, which short-circuits
+  // canAccessOtherUsers). canAccessOtherUsers = admin OR attendance:approve; a read/write-only user fails it.
+  it('#7 销假 §5 authority — a non-admin/non-approver cannot cancel another user\'s leave (403)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const adminU = `attendance-l7auth-admin-${runSuffix}`
+    const otherU = `attendance-l7auth-other-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const createdRequestIds: string[] = []
+    try {
+      process.env.RBAC_BYPASS = 'false'
+      await pool.query(
+        `INSERT INTO permissions (code, name, description) VALUES
+           ('attendance:read','Attendance Read','r'),('attendance:write','Attendance Write','w'),
+           ('attendance:approve','Attendance Approve','a'),('attendance:admin','Attendance Admin','adm')
+         ON CONFLICT (code) DO NOTHING`,
+      )
+      // admin = read/write/admin (creates the type + owns a request); other = read/write only
+      // (passes withPermission('attendance:write') but fails canAccessOtherUsers → 403 on someone else's request)
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code) VALUES
+           ($1,'attendance:read'),($1,'attendance:write'),($1,'attendance:admin'),
+           ($2,'attendance:read'),($2,'attendance:write')
+         ON CONFLICT DO NOTHING`,
+        [adminU, otherU],
+      )
+      const tokenFor = async (uid: string, perms: string) =>
+        ((await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=user&perms=${perms}`)).body as { token?: string } | undefined)?.token
+      const adminToken = await tokenFor(adminU, 'attendance:read,attendance:write,attendance:admin')
+      const otherToken = await tokenFor(otherU, 'attendance:read,attendance:write')
+      if (!adminToken || !otherToken) return
+      const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
+
+      const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr(adminToken), body: JSON.stringify({ code: 'comp_time', name: `Comp Time Auth ${runSuffix}`, paid: false, requiresApproval: true }) })
+      expect([201, 409]).toContain(ltRes.status)
+      let leaveTypeId = (ltRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!leaveTypeId) {
+        const list = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=true`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        leaveTypeId = ((list.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []).find(i => i.code === 'comp_time')?.id
+      }
+      expect(leaveTypeId).toBeTruthy()
+
+      // admin owns a leave request (pending is enough — the authority gate fires before any reverse)
+      const reqRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr(adminToken), body: JSON.stringify({ workDate: '2026-09-25', requestType: 'leave', leaveTypeId, minutes: 60 }) })
+      expect(reqRes.status).toBe(201)
+      const reqId = (reqRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
+      createdRequestIds.push(reqId)
+
+      // other (read/write, NOT admin/approve) cancels admin's request → 403, request untouched
+      const forbidden = await requestJson(`${baseUrl}/api/attendance/requests/${reqId}/cancel`, { method: 'POST', headers: hdr(otherToken), body: JSON.stringify({ comment: 'not mine' }) })
+      expect(forbidden.status).toBe(403)
+      const row = (await pool.query('SELECT status FROM attendance_requests WHERE id = $1', [reqId])).rows[0] as { status: string } | undefined
+      expect(row?.status).toBe('pending')
+    } finally {
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[adminU, otherU]]).catch(() => undefined)
+      if (createdRequestIds.length > 0) {
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+      }
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
 })
