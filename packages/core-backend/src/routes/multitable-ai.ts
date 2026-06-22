@@ -943,6 +943,10 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       const runId = `aibulk_${randomUUID()}`
       const rows: Array<{ recordId: string; version: number; proposed: string; masked: boolean; writable: boolean }> = []
       const skipped: Array<{ recordId: string; reason: string }> = []
+      // CHARGED but NOT confirmable (provider responded WITH usage but errored, or the
+      // run-cache write failed). Distinct from `skipped` (UNCHARGED). B-2 must never
+      // treat a `failures` row as committable — there is no usable cached output.
+      const failures: Array<{ recordId: string; reason: string }> = []
       let settledCost = 0
       let paused = false
 
@@ -984,13 +988,26 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         )
 
         if (outcome.kind === 'charged') {
+          // The CHARGE stands regardless of what follows — runShortcutCore already
+          // settled provider usage into the ledger (provider spend is real).
           const usageTokens = outcome.usage.promptTokens + outcome.usage.completionTokens
           const costUsd = outcome.result.estimatedCostUsd
           settledCost += costUsd
-          const proposed = outcome.result.ok ? (outcome.result.text ?? '') : ''
-          // Persist the cached output (B-2 reads this). The CHARGE is already in
-          // the usage ledger via runShortcutCore's settle — the cache is the
-          // output store, never the charge ledger.
+
+          // `charged` ALSO covers provider_error-WITH-usage (runShortcutCore: the
+          // provider billed but produced no usable output). That row is CHARGED but
+          // NOT confirmable — never cache an empty/failed output, never return it as
+          // writable (B-2 commits ONLY real cached outputs). Pause: a provider
+          // erroring mid-batch must not keep spending on subsequent rows.
+          if (!outcome.result.ok) {
+            failures.push({ recordId, reason: 'provider_error_charged' })
+            paused = true
+            break
+          }
+
+          const proposed = outcome.result.text ?? ''
+          // Persist the cached output — B-2 commits ONLY from this. The cache is the
+          // OUTPUT store, never the charge ledger (the charge already settled above).
           const cacheRow: BulkPreviewCacheRow = {
             runId,
             actorId: access.userId,
@@ -1002,12 +1019,21 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
             usageTokens,
             costUsd,
           }
+          let cached = false
           try {
             await insertBulkPreviewCacheRow(ledgerQuery, cacheRow)
+            cached = true
           } catch (err) {
-            // Cache insert is best-effort vs the already-booked charge — never
-            // un-charge / never 500 a run whose provider spend already settled.
-            console.error('[multitable-ai] bulk-preview cache insert failed (best effort):', err)
+            console.error('[multitable-ai] bulk-preview cache insert failed (fail-closed for this row):', err)
+          }
+          if (!cached) {
+            // FAIL-CLOSED (#3019 persistent-run-cache lock): the row is CHARGED
+            // (provider spend is real) but has NO cached output for B-2 to commit,
+            // so it must NOT be a confirmable row. Pause — a cache outage would
+            // otherwise charge every subsequent row un-confirmably.
+            failures.push({ recordId, reason: 'cache_failed_after_generation' })
+            paused = true
+            break
           }
           rows.push({ recordId, version: captured.version, proposed, masked, writable: true })
           continue
@@ -1041,6 +1067,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         runId,
         rows,
         skipped,
+        failures,
         settledCost,
         capped: paused,
       })

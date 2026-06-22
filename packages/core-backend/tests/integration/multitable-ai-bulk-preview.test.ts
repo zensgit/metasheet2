@@ -76,6 +76,8 @@ let stubUsage = { input_tokens: 20, output_tokens: 10 }
 let fetchCallCount = 0
 /** When true the provider stub returns a NON-200 with no usage = the genuine generation_failed_before_usage path. */
 let providerErrorMode = false
+/** When true the stub returns NON-200 but WITH usage = provider_error-WITH-usage → core 'charged' + !ok (charged-failure). */
+let providerErrorWithUsageMode = false
 const capturedBodies: string[] = []
 const savedEnv = new Map<string, string | undefined>()
 
@@ -89,6 +91,11 @@ const fetchStub = (async (_url: unknown, init?: unknown) => {
     // Provider FAILURE with NO usage → AiCompletionResult.status='provider_error',
     // usage=null → the core's generation_failed_before_usage (UNCHARGED) path.
     return new Response(JSON.stringify({ error: 'upstream boom' }), { status: 500, headers: { 'content-type': 'application/json' } })
+  }
+  if (providerErrorWithUsageMode) {
+    // NON-200 but the body carries usage → extractUsageFromBody finds it + !response.ok
+    // → providerError(usage) → core 'charged' + !result.ok (a CHARGED failure, not a success).
+    return new Response(JSON.stringify({ error: 'billed but failed', usage: { ...stubUsage } }), { status: 500, headers: { 'content-type': 'application/json' } })
   }
   return new Response(
     JSON.stringify({ content: [{ type: 'text', text: 'AI OUT' }], usage: { ...stubUsage } }),
@@ -209,6 +216,7 @@ describeIfDatabase('B-1 AI bulk-preview (real DB)', () => {
     currentUser = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
     stubUsage = { input_tokens: 20, output_tokens: 10 }
     providerErrorMode = false
+    providerErrorWithUsageMode = false
     // Reset per-test caps (a low cap leaking forward would turn later tests red).
     process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP = savedEnv.get('MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP') ?? ''
     process.env.MULTITABLE_AI_TENANT_WEEKLY_TOKEN_CAP = savedEnv.get('MULTITABLE_AI_TENANT_WEEKLY_TOKEN_CAP') ?? ''
@@ -337,6 +345,58 @@ describeIfDatabase('B-1 AI bulk-preview (real DB)', () => {
     expect(await ledgerTokenSum()).toBe(0)
   })
 
+  test('charge: provider_error WITH usage → CHARGED, NO cache row, NO writable row (charged-failure)', async () => {
+    await q(
+      `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code) VALUES ($1,'user',$2,$3)`,
+      [SHEET_ID, ACTOR, 'multitable:write-own'],
+    )
+    stubUsage = { input_tokens: 30, output_tokens: 12 }
+    providerErrorWithUsageMode = true // provider billed usage but returned an error → charged + !ok
+
+    const E1 = `rec_b1_e1_${TS}`
+    await seedRecord(E1, { [FLD_SRC]: 'billed but failed' }, ACTOR)
+
+    const res = await bulkReq({ fieldId: FLD_TARGET, scope: 'sheet' })
+    expect(res.status).toBe(200)
+    // NOT a confirmable/writable row, and NOT in `skipped` (it WAS charged).
+    expect((res.body.rows as unknown[]).length).toBe(0)
+    expect(res.body.failures).toContainEqual({ recordId: E1, reason: 'provider_error_charged' })
+
+    // CHARGED: provider spend is real — the ledger booked the usage even with no output.
+    expect(fetchCallCount).toBe(1)
+    expect(await ledgerTokenSum()).toBe(30 + 12)
+    // NO cached output → B-2 can never confirm it.
+    expect((await cacheRows(res.body.runId as string)).length).toBe(0)
+  })
+
+  test('cache insert failure → CHARGED but fail-closed (cache_failed_after_generation), NO confirmable row', async () => {
+    await q(
+      `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code) VALUES ($1,'user',$2,$3)`,
+      [SHEET_ID, ACTOR, 'multitable:write-own'],
+    )
+    stubUsage = { input_tokens: 25, output_tokens: 11 }
+
+    const F1 = `rec_b1_cachefail_${TS}`
+    await seedRecord(F1, { [FLD_SRC]: 'generates ok but the cache write breaks' }, ACTOR)
+
+    // Force a GENUINE cache INSERT failure: rename the cache table away for the run.
+    await q(`ALTER TABLE ${AI_BULK_PREVIEW_CACHE_TABLE} RENAME TO ${AI_BULK_PREVIEW_CACHE_TABLE}_bak`)
+    try {
+      const res = await bulkReq({ fieldId: FLD_TARGET, scope: 'sheet' })
+      expect(res.status).toBe(200)
+      // Provider succeeded + billed, but the cache write failed → FAIL-CLOSED:
+      // NOT a writable/confirmable row; recorded as a CHARGED failure.
+      expect((res.body.rows as unknown[]).length).toBe(0)
+      expect(res.body.failures).toContainEqual({ recordId: F1, reason: 'cache_failed_after_generation' })
+      // CHARGED: the provider was called + billed despite the cache failure (ledger table is NOT renamed).
+      expect(fetchCallCount).toBe(1)
+      expect(await ledgerTokenSum()).toBe(25 + 11)
+    } finally {
+      // ALWAYS restore the table so subsequent tests + reset hooks work.
+      await q(`ALTER TABLE ${AI_BULK_PREVIEW_CACHE_TABLE}_bak RENAME TO ${AI_BULK_PREVIEW_CACHE_TABLE}`)
+    }
+  })
+
   // ── Test 3: cap → 400 + quota-insufficient → refuse-zero ──────────────────
   test('D3-A over-cap → 400 BULK_SCOPE_TOO_LARGE, nothing generated', async () => {
     process.env.MULTITABLE_AI_BULK_MAX_ROWS = '2'
@@ -438,6 +498,6 @@ describeIfDatabase('B-1 AI bulk-preview (real DB)', () => {
     await seedRecord(`rec_b1_shape_${TS}`, { [FLD_SRC]: 'x' }, ACTOR)
     const res = await bulkReq({ fieldId: FLD_TARGET, scope: 'sheet' })
     expect(res.status).toBe(200)
-    expect(Object.keys(res.body).sort()).toEqual(['capped', 'rows', 'runId', 'settledCost', 'skipped'])
+    expect(Object.keys(res.body).sort()).toEqual(['capped', 'failures', 'rows', 'runId', 'settledCost', 'skipped'])
   })
 })
