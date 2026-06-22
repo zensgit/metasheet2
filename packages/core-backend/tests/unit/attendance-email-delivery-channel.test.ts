@@ -37,14 +37,18 @@ const MESSAGE: AttendanceDeliveryMessage = {
 
 function makeChannel(opts: {
   email?: string | null
+  inOrg?: boolean
   queryThrows?: boolean
   sendImpl?: () => Promise<unknown>
   env?: NodeJS.ProcessEnv
 }) {
   const sendMail = vi.fn(opts.sendImpl ?? (async () => ({ messageId: 'ok' })))
   const transport: EmailDeliveryTransport = { sendMail }
-  const query = vi.fn(async () => {
+  // Mock the ORG-SCOPED query: a row is returned only when the recipient is an active member of the
+  // delivery's org (inOrg !== false). Mirrors the real SQL JOIN on user_orgs (org-membership gate).
+  const query = vi.fn(async (_sql: string, _params?: unknown[]) => {
     if (opts.queryThrows) throw new Error('db connection lost')
+    if (opts.inOrg === false) return { rows: [] as Array<{ email: string | null }> }
     return { rows: [{ email: opts.email === undefined ? 'user@example.com' : opts.email }] }
   })
   const channel = new EmailAttendanceDeliveryChannel({
@@ -56,10 +60,12 @@ function makeChannel(opts: {
 }
 
 describe('EmailAttendanceDeliveryChannel.send', () => {
-  it('reached + sent → ok:true; sends shared content to the resolved users.email', async () => {
-    const { channel, sendMail } = makeChannel({ email: 'user@example.com' })
+  it('reached + sent → ok:true; org-scoped lookup; sends shared content to the resolved users.email', async () => {
+    const { channel, sendMail, query } = makeChannel({ email: 'user@example.com' })
     const result = await channel.send(MESSAGE)
     expect(result).toEqual({ ok: true })
+    // recipient lookup is scoped to the delivery org: params = [recipientUserId, orgId]
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('user_orgs'), [MESSAGE.recipientUserId, MESSAGE.orgId])
     expect(sendMail).toHaveBeenCalledTimes(1)
     const sent = sendMail.mock.calls[0][0] as Record<string, string>
     expect(sent.to).toBe('user@example.com')
@@ -68,12 +74,20 @@ describe('EmailAttendanceDeliveryChannel.send', () => {
     expect(sent.text).toBe('You have an unscheduled shift today.') // buildDeliveryContent
   })
 
-  it('user has no email → permanent (non-retryable), nothing sent', async () => {
+  it('SECURITY: recipient NOT an active member of the delivery org → permanent, nothing sent (no cross-tenant email)', async () => {
+    const { channel, sendMail } = makeChannel({ email: 'user@example.com', inOrg: false })
+    const result = await channel.send(MESSAGE)
+    expect(result).toMatchObject({ ok: false, retryable: false })
+    expect((result as { error: string }).error).toContain('email_recipient_unresolved')
+    expect(sendMail).not.toHaveBeenCalled()
+  })
+
+  it('user resolvable in org but has no email → permanent (non-retryable), nothing sent', async () => {
     const { channel, sendMail } = makeChannel({ email: null })
     const result = await channel.send(MESSAGE)
     expect(result.ok).toBe(false)
     expect(result).toMatchObject({ ok: false, retryable: false })
-    expect((result as { error: string }).error).toContain('email_recipient_missing')
+    expect((result as { error: string }).error).toContain('email_recipient_unresolved')
     expect(sendMail).not.toHaveBeenCalled()
   })
 

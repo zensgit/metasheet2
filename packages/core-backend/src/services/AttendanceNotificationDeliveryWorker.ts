@@ -603,20 +603,27 @@ export class EmailAttendanceDeliveryChannel implements AttendanceDeliveryChannel
   }
 
   async send(message: AttendanceDeliveryMessage): Promise<AttendanceDeliveryChannelResult> {
-    // 1. Resolve recipient email from users.email (recipientUserId is a user id). A lookup failure is
-    //    transient (retryable); a user with NO email is permanent (non-retryable → dead-letter, no spin).
+    // 1. Resolve recipient email — STRICTLY scoped to the delivery's org (tenant boundary). The user
+    //    must be active AND an active member of message.orgId. Email is EXTERNAL egress, so this is
+    //    fail-closed: the producer / deliveries table does not prove recipient↔org membership, so a
+    //    bare `users.id` lookup could send cross-tenant. No matching active org-member row → permanent
+    //    (non-retryable), do NOT send. A lookup error is transient (retryable); no row (missing email /
+    //    inactive user / not a member of this org) is permanent (dead-letter, no spin).
     let email: string
     try {
       const { rows } = await this.query<{ email: string | null }>(
-        'SELECT email FROM users WHERE id = $1',
-        [message.recipientUserId],
+        `SELECT u.email
+           FROM users u
+           JOIN user_orgs uo ON uo.user_id = u.id AND uo.org_id = $2 AND uo.is_active = true
+          WHERE u.id = $1 AND u.is_active = true`,
+        [message.recipientUserId, message.orgId],
       )
       email = (rows[0]?.email ?? '').trim()
     } catch (error) {
       return { ok: false, retryable: true, error: `email_recipient_lookup_failed: ${normalizeEmailErrorText(error, 'recipient lookup failed', this.env)}` }
     }
     if (!email) {
-      return { ok: false, retryable: false, error: 'email_recipient_missing: user has no email address' }
+      return { ok: false, retryable: false, error: 'email_recipient_unresolved: no active org-member email for this recipient in the delivery org' }
     }
 
     // 2. Resolve SMTP config. resolveEmailSmtpTransportConfig throws when transport is not smtp-mode or
