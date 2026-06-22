@@ -164,6 +164,27 @@ export function resolveApprovalAssignees(
         })
         break
       }
+      case 'manager_at_level': {
+        // Resolve to a SINGLE level of the requester's management chain (the
+        // `source.level`-th manager, level 1 = direct manager), frozen in the
+        // snapshot. Self-exclusion drops a hop resolving to the requester; an empty
+        // result (chain shorter than `level`) falls through to emptyAssigneePolicy.
+        // Authoring N nodes at levels 1..N composes sequential 逐级 approval (B1).
+        // managerChainIds is DENSE — resolveManagerChain (ApprovalDirectoryOrg) walks
+        // THROUGH unlinked/self rungs at snapshot-build (pushes only linked, non-self
+        // ids), so chain[level-1] is the level-th *linked* manager. The design's
+        // "positional pick" and "skip-unlinked walk" reconcile here: the walk already
+        // happened at build. A null rung (defensive, never produced by the builder)
+        // resolves that level to empty via normalizeId — positional, no compaction.
+        const requesterId = normalizeId(options.requesterSnapshot?.id)
+        const rawChain = options.requesterSnapshot?.managerChainIds
+        const chain = Array.isArray(rawChain) ? rawChain : []
+        const managerId = normalizeId(chain[source.level - 1])
+        if (managerId && managerId !== requesterId) {
+          pushResolved('user', managerId, source, sourceIndex)
+        }
+        break
+      }
       case 'form_field_user': {
         assertFormUserSource(source, options.formSchema, options.nodeKey)
         const assigneeId = resolveFormUserValue(options.formSnapshot[source.fieldId])

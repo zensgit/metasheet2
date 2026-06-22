@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { query } from '../../src/db/pg'
 import { resolveApprovalRequesterOrgRelations } from '../../src/services/ApprovalDirectoryOrg'
+import { runtimeGraphUsesManagerChain } from '../../src/services/ApprovalProductService'
+import { resolveApprovalAssignees } from '../../src/services/ApprovalAssigneeResolver'
+import type { RuntimeGraph } from '../../src/types/approval-product'
 
 /**
  * continuous_managers chain walk — REAL DB. The unit test
@@ -84,6 +87,30 @@ describeIfDatabase('continuous_managers chain walk (real DB)', () => {
     const rel = await resolveApprovalRequesterOrgRelations(U_R, queryFn, { includeManagerChain: true })
     expect(rel.managerChainIds).toEqual([U_M]) // exactly one level; level-2 finds no leader → stops
     expect(rel.managerId).toBe(U_M) // chain[0] agrees with the shipped direct-manager resolution
+  })
+
+  it('B1 end-to-end: a manager_at_level template bakes the chain (scanner gate) and resolves the level-1 manager', async () => {
+    // Regression for the bake-gate bug: prove the FULL B1 path on the real org —
+    // (1) the scanner sees manager_at_level so createApproval sets includeManagerChain,
+    // (2) the chain bakes into the snapshot, (3) the resolver picks the level's manager.
+    const runtimeGraph = {
+      nodes: [{ key: 'approval_1', type: 'approval', config: { assigneeSources: [{ kind: 'manager_at_level', level: 1 }] } }],
+    } as unknown as RuntimeGraph
+    expect(runtimeGraphUsesManagerChain(runtimeGraph)).toBe(true)
+
+    const rel = await resolveApprovalRequesterOrgRelations(U_R, queryFn, { includeManagerChain: true })
+    expect(rel.managerChainIds).toEqual([U_M])
+
+    const resolved = resolveApprovalAssignees({
+      nodeKey: 'approval_1',
+      sourceStep: 1,
+      config: { assigneeSources: [{ kind: 'manager_at_level', level: 1 }] },
+      formSnapshot: {},
+      requesterSnapshot: { id: U_R, managerChainIds: rel.managerChainIds },
+    })
+    expect(resolved).toEqual([
+      { assignmentType: 'user', assigneeId: U_M, nodeKey: 'approval_1', sourceStep: 1, metadata: { resolvedFrom: { kind: 'manager_at_level', sourceIndex: 0 } } },
+    ])
   })
 
   it('does not bake the chain when includeManagerChain is off (only the direct manager)', async () => {
