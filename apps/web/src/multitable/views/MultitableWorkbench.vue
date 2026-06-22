@@ -388,6 +388,17 @@
       @confirm="onExportDialogConfirm"
       @cancel="exportDialogVisible = false"
     />
+    <RestorePreviewDialog
+      :visible="restorePreview.visible"
+      :loading="restorePreview.loading"
+      :changes="restorePreview.changes"
+      :schema-drift="restorePreview.schemaDrift"
+      :executable="restorePreview.executable"
+      :field-name="restorePreviewFieldName"
+      :is-zh="isZh"
+      @confirm="onConfirmRestore"
+      @cancel="onCancelRestore"
+    />
     <MetaLinkPicker
       :visible="linkPickerVisible"
       :field="linkPickerField"
@@ -562,6 +573,8 @@ import MetaViewTabBar from '../components/MetaViewTabBar.vue'
 import MetaToolbar from '../components/MetaToolbar.vue'
 import MetaGridTable from '../components/MetaGridTable.vue'
 import MetaExportDialog, { type ExportConfirmPayload } from '../components/MetaExportDialog.vue'
+import RestorePreviewDialog from '../components/RestorePreviewDialog.vue'
+import type { RestorePreviewChange } from '../api/client'
 import MetaFormView from '../components/MetaFormView.vue'
 import MetaRecordDrawer from '../components/MetaRecordDrawer.vue'
 import MetaNotificationBell from '../components/MetaNotificationBell.vue'
@@ -1835,24 +1848,65 @@ async function onToggleRecordLock(payload: { recordId: string; locked: boolean }
 // confirm + API call + refresh (mirrors onToggleRecordLock). The backend error carries `.code`
 // (VERSION_CONFLICT / VERSION_EXPIRED / RESTORE_UNSUPPORTED / SNAPSHOT_UNAVAILABLE / SCHEMA_DRIFT /
 // RESTORE_FORBIDDEN); we surface error.message (already localized server-side) with a static fallback.
-async function onRestoreRecordVersion(payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] }) {
-  const sheetId = workbench.activeSheetId.value
-  if (!sheetId) return
+// T6-3: full-record restore goes through preview→confirm→execute (the T6-2 chain); the panel shows what would
+// change before the actor commits, and a schema-drift conflict blocks it. Per-field (column-level) restore keeps
+// the existing direct path (the T6 identity binds the full-record diff; per-field-through-preview is a follow-up).
+const restorePreview = ref<{
+  visible: boolean
+  loading: boolean
+  changes: RestorePreviewChange[]
+  schemaDrift: boolean
+  executable: boolean
+  identity: string | null
+  payload: { recordId: string; targetVersion: number; expectedVersion: number } | null
+}>({ visible: false, loading: false, changes: [], schemaDrift: false, executable: false, identity: null, payload: null })
+
+const restorePreviewFieldName = (fieldId: string): string => scopedAllFields.value.find((f) => f.id === fieldId)?.name ?? fieldId
+
+async function restoreFieldsDirect(sheetId: string, payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] }) {
   if (!window.confirm(recordLabel('record.restoreConfirm', isZh.value))) return
   try {
-    const result = await workbench.client.restoreRecordVersion(
-      sheetId,
-      payload.recordId,
-      payload.targetVersion,
-      payload.expectedVersion,
-      payload.fieldIds,
-    )
+    const result = await workbench.client.restoreRecordVersion(sheetId, payload.recordId, payload.targetVersion, payload.expectedVersion, payload.fieldIds)
     showSuccess(recordLabel(result.noop ? 'record.restoreNoop' : 'record.restoreSuccess', isZh.value))
     await grid.loadViewData(grid.page.value.offset)
     if (selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
   } catch (error) {
     showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
   }
+}
+
+async function onRestoreRecordVersion(payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] }) {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return
+  if (payload.fieldIds && payload.fieldIds.length > 0) { await restoreFieldsDirect(sheetId, payload); return }
+  restorePreview.value = { visible: true, loading: true, changes: [], schemaDrift: false, executable: false, identity: null, payload: { recordId: payload.recordId, targetVersion: payload.targetVersion, expectedVersion: payload.expectedVersion } }
+  try {
+    const pv = await workbench.client.restorePreviewRecord(sheetId, payload.recordId, payload.targetVersion)
+    restorePreview.value = { ...restorePreview.value, loading: false, changes: pv.changes, schemaDrift: pv.schemaDrift, executable: pv.previewIdentity != null, identity: pv.previewIdentity }
+  } catch (error) {
+    restorePreview.value = { ...restorePreview.value, visible: false }
+    showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
+  }
+}
+
+async function onConfirmRestore() {
+  const sheetId = workbench.activeSheetId.value
+  const state = restorePreview.value
+  if (!sheetId || !state.payload || !state.identity) { restorePreview.value = { ...state, visible: false }; return }
+  const { recordId, targetVersion, expectedVersion } = state.payload
+  restorePreview.value = { ...state, visible: false }
+  try {
+    const result = await workbench.client.restoreExecuteRecord(sheetId, recordId, targetVersion, expectedVersion, state.identity)
+    showSuccess(recordLabel(result.noop ? 'record.restoreNoop' : 'record.restoreSuccess', isZh.value))
+    await grid.loadViewData(grid.page.value.offset)
+    if (selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
+  } catch (error) {
+    showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
+  }
+}
+
+function onCancelRestore() {
+  restorePreview.value = { ...restorePreview.value, visible: false }
 }
 
 async function onReloadConflict() {

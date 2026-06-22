@@ -959,6 +959,21 @@ export interface RestoreRecordResult {
   skippedFieldIds: string[]
 }
 
+// T6: a record-version restore PREVIEW (read-only) — the masked diff a restore would apply, plus the
+// preview identity the execute consumes. `previewIdentity` is null when not executable (schema drift).
+export interface RestorePreviewChange {
+  fieldId: string
+  op: 'set' | 'unset'
+  value: unknown
+}
+export interface RestorePreviewResult {
+  changes: RestorePreviewChange[]
+  visibleAffectedFieldCount: number
+  schemaDrift: boolean
+  targetVersion: number
+  previewIdentity: string | null
+}
+
 export interface AiShortcutPreviewData {
   status: 'succeeded'
   action: 'preview'
@@ -1676,6 +1691,27 @@ export class MultitableApiClient {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       },
+    )
+    return this.parseJson<RestoreRecordResult>(res)
+  }
+
+  // T6-2 chain: preview what a record-version restore WOULD change (read-only, masked), returning the identity
+  // the execute consumes. Pair with restoreExecuteRecord — never restore from the FE without showing the preview.
+  async restorePreviewRecord(sheetId: string, recordId: string, targetVersion: number): Promise<RestorePreviewResult> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/restore-preview`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetVersion }) },
+    )
+    return this.parseJson<RestorePreviewResult>(res)
+  }
+
+  // Execute a previewed restore, carrying the previewIdentity from restorePreviewRecord (SR-3: the server
+  // confirms execution matches the preview). Writes a forward revision; row-deny / field-gate / version are
+  // re-checked server-side.
+  async restoreExecuteRecord(sheetId: string, recordId: string, targetVersion: number, expectedVersion: number, previewIdentity: string): Promise<RestoreRecordResult> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/restore-execute`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetVersion, expectedVersion, previewIdentity }) },
     )
     return this.parseJson<RestoreRecordResult>(res)
   }
