@@ -38,24 +38,33 @@ second AI subsystem.**
 ### D1 — Preview ↔ write ↔ charge-once (the architecture-defining fork)
 "Preview diff," "cost caps," and "confirm write" are one mechanism, not three. Choose:
 
-- **D1-A (recommended): preview generates real values per row, charged once, cached.** Preview calls the provider
-  for every in-scope row, persists the proposed outputs server-side (keyed by run-id + recordId + the row
-  `version` they were generated against), and the diff shows the **true** proposed value per row. Confirm-write
-  **persists the cached outputs — no second provider call.** Reservations for rows the actor does **not** confirm,
-  or that failed to generate, are **released back** to the per-tenant quota. Cost is incurred exactly once, at
-  preview. Trade-off: previewing a 5k-row column is expensive and may be abandoned → mitigated by D3 row-cap + D4
-  pre-check.
+- **D1-A (recommended): preview generates the real value per row AND charges at generation; confirm only writes.**
+  Preview calls the provider for every in-scope row, **settles usage against the per-tenant quota for each
+  provider-called row** (the existing per-record discipline — provider spend is real), persists the proposed
+  outputs server-side (the **run cache**, keyed by run-id + recordId + the row `version` generated against), and
+  the diff shows the **true** proposed value. Confirm-write **persists the cached outputs — no second provider
+  call, no second charge.** **A provider-called row is NEVER released** — not on un-confirm, not on stale, not on
+  write-conflict. A user who previews, reads the outputs, then abandons confirm has *still* consumed the provider
+  and the quota — this **closes the preview-abandon quota-bypass**. **Only rows the provider never reached are
+  uncharged:** pre-gate skipped (no perm / wrong type), scope over-cap rejected, rate-limited *before* the call,
+  and `generation_failed_before_usage` (no usage returned). The two failure words are distinct:
+  `generation_failed_before_usage` = uncharged; `write_failed_after_generation` = **charged** (the output was
+  produced). UI copy: *"Preview consumes quota; confirm only writes the cached outputs."* Trade-off: previewing a
+  5k-row column really spends → bounded by the D3 row-cap + D4 pre-check, so a preview can't quietly burn a
+  column's worth of quota.
 - **D1-B: preview is a sample + token estimate** (cheap), generation happens at confirm-write. Weaker review (the
   diff is illustrative, not the actual values); confirm-write is where the real spend + real outputs land.
 
-The whole cost-cap and double-charge story hinges on D1. Recommend **D1-A** (true review is the point of the
-feature; charge-once + release makes the cap math honest). A stale row (its `version` changed between preview and
-confirm) is **dropped from the write** with a per-row "stale — re-preview" outcome (never write a value generated
-against different source data).
+The whole cost-cap story hinges on D1. Recommend **D1-A**: charge at generation, never release a provider-called
+row — total charged usage then equals the provider calls actually made, with **no abandon-to-evade path**. A stale
+row (its `version` changed between preview and confirm) is **dropped from the write** with a per-row "stale —
+re-preview" outcome (never write a value generated against shifted source data) — but it **stays charged**, since
+the provider was already called for it at preview.
 
 ### D2 — Batch scope
-- **D2-A (recommended): the view's filtered + visible set** — consistent with the #3010 export semantic just
-  shipped (the reviewer cared about exactly this distinction). "Fill this column" means the rows the view shows.
+- **D2-A (recommended): the view's filtered + visible set, server-resolved** — the FULL record set the view's
+  filter/sort resolves to **server-side, NOT the currently-loaded grid page** (exactly the #3010 export semantic).
+  "Fill this column" means every row in the filtered view, on-page or not.
 - **D2-B: whole sheet** (ignores the view filter). Available, but must be labeled as such, not the default.
 
 ### D3 — Execution model + how 429 composes
@@ -69,10 +78,12 @@ A whole column of slow, rate-limited provider calls cannot be a naïve synchrono
 
 ### D4 — Cost caps
 Before generating, estimate `rows × per-row-est-tokens` and **pre-check against the per-tenant daily/weekly token
-cap** (reuse `ai-provider-readiness`); refuse the whole run with `AI_BULK_QUOTA_INSUFFICIENT` if it can't fit
-(no partial pre-charge surprise). Then reserve-then-settle **per row** (the existing primitive) during preview;
-**release** reservations for unconfirmed/failed/stale rows (D1-A). One bulk run never exceeds the standing
-per-tenant cap.
+cap** (reuse `ai-provider-readiness`); refuse the whole run with `AI_BULK_QUOTA_INSUFFICIENT` if it can't fit.
+Then reserve-then-settle **per row** during preview (the existing primitive). **A settled (provider-called) row
+stays charged** — the only reservations released are for rows the provider never reached (pre-gate skipped,
+over-cap, rate-limited-before-call, `generation_failed_before_usage`). Confirm vs abandon does **not** change the
+charge. One bulk run never exceeds the standing per-tenant cap, and **total charged usage == provider calls made**
+(no abandon-to-evade).
 
 ### D5 — Permission scoping covers the DIFF, not just the write (fail-first leak gate)
 Every row independently passes the **same gates** the single-record run applies: record-read, sheet
@@ -87,26 +98,37 @@ writable, some denied, one field-readonly) — same discipline as the button/exp
 Explicit confirm step (the actor sees the diff, then confirms). The write is **per-row independent** through
 `patchRecords` with each row's captured `expectedVersion`: some rows commit, some fail (version_conflict / lock /
 field-forbidden / validation). The response is a **per-row outcome list** (`written | skipped_no_perm |
-stale_reprev | write_conflict | provider_error`), counts, and total settled cost. **Charge-once invariant
-(§2.5 of the per-record lock): a row whose value was generated is charged even if its write later fails** — the
-provider spend is real; `finalize` re-settles status keeping usage. No all-or-nothing rollback (a 200-row write
-is not one transaction); the outcome list is the contract.
+stale_reprev | write_conflict | write_failed_after_generation | generation_failed_before_usage`), counts, and
+total settled cost. **Charge invariant (per-record §2.5): any row the provider was called for is charged — full
+stop — whether it is written, write-conflicted, abandoned (un-confirmed), or dropped as stale.** The only
+uncharged outcomes are `skipped_no_perm` / over-cap / rate-limited-before-call / `generation_failed_before_usage`
+(no usage returned). `finalize` re-settles status keeping usage. No all-or-nothing rollback (a 200-row write is
+not one transaction); the outcome list is the contract.
 
 ## 3. Proposed surface (illustrative — ratify the shape, not the code)
 
 - `POST /sheets/:id/ai/shortcut/bulk-preview` → body `{ fieldId, scope: 'view'|'sheet', viewId?, recordIds? }`
-  → resolves the in-scope readable+writable rows (D5), pre-checks cap (D4), generates per row (D1-A), returns
-  `{ runId, rows: [{ recordId, version, proposed, masked?, writable }], skipped: [...], estCost, settledCost }`.
-- `POST /sheets/:id/ai/shortcut/bulk-commit` → body `{ runId, recordIds: [confirmed], expectedVersions }`
-  → persists cached outputs for confirmed+non-stale rows via `patchRecords`, releases the rest, returns the
-  per-row outcome list (D6). `runId` is short-lived (cached outputs expire; a TTL line in the impl).
+  → resolves the in-scope readable+writable rows (D5; server-side full filtered set per D2), pre-checks cap (D4),
+  generates + **charges** per provider-called row (D1-A), writes the run cache, returns
+  `{ runId, rows: [{ recordId, version, proposed, masked?, writable }], skipped: [...], settledCost }`.
+- `POST /sheets/:id/ai/shortcut/bulk-commit` → body `{ runId, recordIds: [confirmed] }`
+  → persists the **cached** outputs for confirmed + non-stale rows via `patchRecords` (no provider call, no new
+  charge), returns the per-row outcome list (D6). Abandoned / stale rows are simply not written — **already
+  charged at preview, never released.**
+- **Run cache — persistent, NOT in-memory** (so a confirm survives a restart and is always explainable): one row
+  per `(runId, recordId)` = `{ runId, actorId, sheetId, fieldId, recordId, previewVersion, proposedValue,
+  usageTokens, costUsd, createdAt, expiresAt }`. `bulk-commit` reads it; a short `expiresAt` TTL garbage-collects
+  abandoned runs. The **charge is booked in the existing usage ledger at preview**, independent of cache expiry —
+  GC'ing an abandoned run never un-charges it.
 
 ## 4. Invariants (locks)
 
 - **Build-on:** reuse kinds, per-kind prompt templates, `ai-provider-client`, readiness/quota, the per-record gate
   sequence, and `patchRecords`. No raw-SQL write. No second AI subsystem.
-- **Charge-once:** generated → charged once at preview; confirm persists cached outputs (no re-call); unconfirmed/
-  failed/stale reservations released. Generated-but-write-failed rows stay charged (provider spend is real).
+- **Charge-on-generation, never released:** any provider-called row is charged once at preview and **stays
+  charged** — un-confirm, stale, and write-conflict do NOT release it (this closes the preview-abandon quota
+  bypass). Confirm persists the cached outputs with no second call/charge. Only provider-never-reached rows
+  (`skipped_no_perm` / over-cap / rate-limited-before-call / `generation_failed_before_usage`) are uncharged.
 - **Masked diff:** the review never shows a value derived from source fields the viewer can't read.
 - **Per-row gates + per-row outcomes:** every row passes the single-record gates; partial success is the contract,
   not a failure; no all-or-nothing rollback.
@@ -117,10 +139,12 @@ is not one transaction); the outcome list is the contract.
 ## 5. Staged TODO (each ring a separate explicit opt-in)
 
 - 🔒 **B-0 — ratify D1–D6** (this doc). Gate: owner answers each decision. No code until then.
-- ⬜ **B-1 — bulk-preview backend** (D1-A generate-cached + D4 cap pre-check + D5 per-row gates + masked diff) +
-  real-DB leak gate over a mixed-permission batch + charge-once/release goldens.
-- ⬜ **B-2 — bulk-commit backend** (cached-output persist via `patchRecords`, per-row outcomes, stale-drop,
-  release-unconfirmed) + partial-success + version-conflict goldens.
+- ⬜ **B-1 — bulk-preview backend** (D1-A generate-cached-and-charge + D4 cap pre-check + D5 per-row gates +
+  masked diff + persistent run cache) + real-DB leak gate over a mixed-permission batch + **charge-on-generation
+  goldens** (provider-called stays charged; only provider-never-reached uncharged).
+- ⬜ **B-2 — bulk-commit backend** (cached-output persist via `patchRecords`, per-row outcomes, stale-drop;
+  abandoned/stale rows stay charged — **NOT released**) + partial-success + version-conflict goldens + a
+  **preview-abandon-does-not-release-quota** golden (the bypass test).
 - ⬜ **B-3 — frontend review-before-write UI** (column/selection trigger → diff table → confirm → outcome
   summary), reusing the `useAiShortcut` 429/quota/blocked handling + the i18n module extension points.
 - 🔒 **B-4 — async job + progress (D3-B)** — deferred ring; only if v1 row-cap proves insufficient.
