@@ -987,7 +987,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       }
 
       // ── PER-ROW generation (D1-A charge-on-generation) over the gated set ───────────
-      const rows: Array<{ recordId: string; version: number; proposed: string; masked: boolean; writable: boolean }> = []
+      const rows: Array<{ recordId: string; version: number; currentValue: string | null; proposed: string; masked: boolean; writable: boolean }> = []
       let settledCost = 0
       let paused = false
 
@@ -1053,7 +1053,13 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
             paused = true
             break
           }
-          rows.push({ recordId, version: captured.version, proposed, masked, writable: true })
+          // currentValue = the target field's value the writer is about to overwrite,
+          // read server-side from THIS record (never grid-page-dependent) so the review
+          // diff is truthful for EVERY row, on-page or not. The writer passed the target
+          // field's write+visible gate, so they may read it (no extra mask needed).
+          const currentRaw = captured.data[fieldId]
+          const currentValue = typeof currentRaw === 'string' ? currentRaw : currentRaw == null ? null : String(currentRaw)
+          rows.push({ recordId, version: captured.version, currentValue, proposed, masked, writable: true })
           continue
         }
 

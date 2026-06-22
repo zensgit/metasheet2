@@ -19,6 +19,13 @@ export type MetaApiErrorLabelKey =
   | 'error.aiUnsafeInput'
   | 'error.aiProviderError'
   | 'error.aiVersionConflict'
+  // AI BULK fill state copy (B-3) — bulk-specific error codes keyed on
+  // error.code, distinct from the per-record codes above.
+  | 'error.aiBulkQuotaInsufficient'
+  | 'error.aiBulkScopeTooLarge'
+  | 'error.aiBulkViewFilterUnsupported'
+  | 'error.aiBulkInlineConfigRejected'
+  | 'error.aiBulkFieldForbidden'
 
 const META_API_ERROR_LABELS: Record<MetaApiErrorLabelKey, LocaleText> = {
   'error.forbidden': { en: 'Insufficient permissions', zh: '权限不足' },
@@ -35,6 +42,28 @@ const META_API_ERROR_LABELS: Record<MetaApiErrorLabelKey, LocaleText> = {
   // Shared recovery copy for BOTH the 409 write conflict AND the local-version
   // drift guard (A3 §2.2: same refresh recovery copy).
   'error.aiVersionConflict': { en: 'The record changed during the AI run. Refresh and retry.', zh: '记录已被他人更新，请刷新后重试' },
+  // AI bulk fill error copy (B-3). These are whole-run refusals — nothing was
+  // generated and nothing was charged.
+  'error.aiBulkQuotaInsufficient': {
+    en: 'This bulk run would exceed the remaining AI quota — nothing was generated. Reduce the row count or try later.',
+    zh: '本次批量填充会超出剩余 AI 配额，未生成任何内容。请减少行数或稍后重试。',
+  },
+  'error.aiBulkScopeTooLarge': {
+    en: 'Too many rows to fill at once. Narrow the view filter or select fewer rows, then try again.',
+    zh: '一次填充的行数过多。请收窄视图筛选或选择更少的行后重试。',
+  },
+  'error.aiBulkViewFilterUnsupported': {
+    en: 'This view filters on a computed (lookup/rollup/formula) field, which bulk fill cannot resolve yet. Narrow the view to non-computed filters, or select rows explicitly.',
+    zh: '该视图按计算字段（lookup/rollup/公式）筛选，批量填充暂不支持。请改用非计算字段筛选，或显式选择行。',
+  },
+  'error.aiBulkInlineConfigRejected': {
+    en: 'Bulk fill runs only the saved AI config on this field. Save the field configuration first.',
+    zh: '批量填充仅执行该字段已保存的 AI 配置，请先保存字段配置。',
+  },
+  'error.aiBulkFieldForbidden': {
+    en: 'This field is not editable, so it cannot be bulk-filled.',
+    zh: '该字段不可编辑，无法进行批量填充。',
+  },
 }
 
 export const META_API_ERROR_LABEL_KEYS = Object.freeze(
@@ -85,4 +114,28 @@ export function aiShortcutErrorMessage(code: string | undefined, isZh: boolean):
 /** RATE_LIMITED countdown suffix (the seconds value is numeric data, interpolated raw). */
 export function aiRetryCountdown(seconds: number, isZh: boolean): string {
   return isZh ? `${seconds} 秒后可重试` : `Retry in ${seconds}s`
+}
+
+// --- AI bulk fill error copy (B-3) ---
+
+// Bulk-specific error codes. Codes SHARED with the per-record path (RATE_LIMITED,
+// AI_BLOCKED, AI_QUOTA_EXHAUSTED, AI_PROVIDER_ERROR, AI_UNSAFE_INPUT) delegate to
+// aiShortcutErrorMessage so copy is not duplicated.
+const AI_BULK_ERROR_KEY_BY_CODE: Record<string, MetaApiErrorLabelKey> = {
+  AI_BULK_QUOTA_INSUFFICIENT: 'error.aiBulkQuotaInsufficient',
+  BULK_SCOPE_TOO_LARGE: 'error.aiBulkScopeTooLarge',
+  AI_BULK_VIEW_FILTER_UNSUPPORTED: 'error.aiBulkViewFilterUnsupported',
+  AI_INLINE_CONFIG_REJECTED: 'error.aiBulkInlineConfigRejected',
+  FIELD_FORBIDDEN: 'error.aiBulkFieldForbidden',
+}
+
+/**
+ * UI copy for an AI bulk-fill error code, or null when the code is unknown
+ * (callers fall back to the raw backend message). Tries the bulk-specific map
+ * first, then the shared per-record AI codes (RATE_LIMITED / AI_BLOCKED / …).
+ */
+export function aiBulkErrorMessage(code: string | undefined, isZh: boolean): string | null {
+  const key = code ? AI_BULK_ERROR_KEY_BY_CODE[code] : undefined
+  if (key) return metaApiErrorLabel(key, isZh)
+  return aiShortcutErrorMessage(code, isZh)
 }
