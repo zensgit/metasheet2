@@ -7543,6 +7543,14 @@ export function univerMetaRouter(): Router {
       if (currentRes.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
       }
+      // SR-2 row-deny (closing a legacy bypass): this route predates the row-level read-deny gate, so a sheet
+      // editor row-read-denied on this record could restore (write) data they cannot read — bypassing the deny
+      // that the history surfaces and restore-execute enforce. Apply the SAME loadDeniedRecordIds seam: denied →
+      // 404 (no-oracle), admin bypasses. Inert when the per-sheet flag is off (the 34 existing goldens are flag-off).
+      if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))) {
+        const denied = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        if (denied.has(recordId)) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      }
       const currentRow = currentRes.rows[0] as { version?: unknown; data?: unknown }
       const currentVersion = Number(currentRow.version ?? 0)
       // Concurrency pre-check BEFORE the no-op branch: a stale caller must get a conflict, never noop.
