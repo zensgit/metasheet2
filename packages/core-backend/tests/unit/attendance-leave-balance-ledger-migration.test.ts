@@ -46,3 +46,28 @@ describe('④ C1 attendance leave-balance ledger migration', () => {
     expect(src).toContain("event_type IN ('deduct', 'expire', 'revoke') AND delta_minutes < 0")
   })
 })
+
+// #7 leave cancellation / 销假 (design-lock #3034): a separate migration admits event_type='reverse' (δ>0)
+// into the events-ledger constraints. DB-free source-guard mirroring the C1 pattern above; the real-DB
+// enforcement + the reverse LOGIC are covered by the attendance integration suite (cancel-reversal flow).
+describe('#7 leave-balance reverse event_type migration', () => {
+  const REVERSE_MIGRATION = resolve(
+    __dirname,
+    '../../src/db/migrations/zzzz20260622150000_add_leave_balance_reverse_event_type.ts',
+  )
+  const reverseSrc = readFileSync(REVERSE_MIGRATION, 'utf8')
+
+  it('extends event_type to admit reverse (drop + re-add the immutable CHECK)', () => {
+    expect(reverseSrc).toContain("event_type IN ('grant', 'deduct', 'expire', 'revoke', 'reverse')")
+    expect(reverseSrc).toContain('DROP CONSTRAINT IF EXISTS chk_attendance_leave_balance_events_event_type')
+  })
+
+  it('puts reverse on the POSITIVE delta branch (reverse restores → δ>0)', () => {
+    expect(reverseSrc).toContain("event_type IN ('grant', 'reverse') AND delta_minutes > 0")
+    expect(reverseSrc).toContain("event_type IN ('deduct', 'expire', 'revoke') AND delta_minutes < 0")
+  })
+
+  it('down() reverts to the pre-#7 constraints (no reverse)', () => {
+    expect(reverseSrc).toMatch(/export async function down[\s\S]*event_type IN \('grant', 'deduct', 'expire', 'revoke'\)\)/)
+  })
+})

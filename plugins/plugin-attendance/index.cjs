@@ -15400,6 +15400,66 @@ async function deductCompTimeBalance(trx, { orgId, userId, requestId, minutes })
   })
 }
 
+// #7 leave cancellation / 销假 (design-lock #3034): reverse the balance a leave's approval deducted, when
+// that approved leave is later cancelled. Keyed on the request's own deduct events (source_id = requestId,
+// event_type = 'deduct'), so it reverses WHATEVER was deducted — annual_leave AND comp_time_leave both
+// deduct with source_id = requestId — mirroring each deduct event's source_type onto its reverse. Manual
+// adjustments use an adjustmentId (not a requestId), so they never collide. §3b idempotency: a prior
+// 'reverse' for this requestId → no-op. §3a expired-lot: a lot whose expires_at has passed is NOT
+// resurrected; its portion stays unrecoverable and remains queryable as (Σdeduct − Σreverse) for the
+// requestId, so it is never silently mis-accounted. Restores remaining_minutes (capped at the lot's
+// original amount_minutes) and flips an 'exhausted' lot back to 'active'. Never touches an 'expired' lot.
+async function reverseLeaveBalanceDeduction(trx, { orgId, userId, requestId }) {
+  const already = await trx.query(
+    `SELECT 1 FROM attendance_leave_balance_events
+      WHERE org_id = $1 AND user_id = $2 AND source_id = $3 AND event_type = 'reverse' LIMIT 1`,
+    [orgId, userId, requestId]
+  )
+  if (already.length > 0) return { reversed: 0, lots: 0, unrecoverableExpired: 0, alreadyReversed: true }
+
+  const deductRows = await trx.query(
+    `SELECT e.balance_id, e.delta_minutes, e.source_type,
+            b.remaining_minutes, b.amount_minutes, b.status,
+            (b.expires_at IS NOT NULL AND b.expires_at <= now()) AS expired
+       FROM attendance_leave_balance_events e
+       JOIN attendance_leave_balances b ON b.id = e.balance_id
+      WHERE e.org_id = $1 AND e.user_id = $2 AND e.source_id = $3 AND e.event_type = 'deduct'
+      FOR UPDATE OF b`,
+    [orgId, userId, requestId]
+  )
+
+  let reversed = 0
+  let unrecoverableExpired = 0
+  let lotsTouched = 0
+  for (const row of deductRows) {
+    const deducted = -Number(row.delta_minutes) // deduct delta is negative → positive restore amount
+    if (deducted <= 0) continue
+    if (row.expired === true || row.status === 'expired') {
+      unrecoverableExpired += deducted
+      continue
+    }
+    const headroom = Number(row.amount_minutes) - Number(row.remaining_minutes)
+    const restore = Math.min(deducted, headroom)
+    if (restore <= 0) continue
+    const newRemaining = Number(row.remaining_minutes) + restore
+    await trx.query(
+      `UPDATE attendance_leave_balances
+          SET remaining_minutes = $1, status = 'active', updated_at = now()
+        WHERE id = $2`,
+      [newRemaining, row.balance_id]
+    )
+    await trx.query(
+      `INSERT INTO attendance_leave_balance_events
+         (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+       VALUES ($1, $2, $3, 'reverse', $4, $5, $6)`,
+      [orgId, userId, row.balance_id, restore, row.source_type, requestId]
+    )
+    reversed += restore
+    lotsTouched += 1
+  }
+  return { reversed, lots: lotsTouched, unrecoverableExpired, alreadyReversed: false }
+}
+
 // 年假/法定假 L3 (owner design-lock 2026-06-15): convert an annual leave request's duration into STANDARD-DAY
 // deduction minutes. The request model is a single workDate + metadata.minutes (defaulted from the leave type's
 // defaultMinutesPerDay); v1 is single-day only (multi-day/cross-day annual = future). requestedUnits =
@@ -17942,6 +18002,9 @@ async function isApproverAllowed(db, userId, step, logger) {
 }
 
 module.exports = {
+  __attendanceLeaveCancellationForTests: {
+    reverseLeaveBalanceDeduction,
+  },
   __attendanceImportForTests: {
     buildUnresolvedRowUserWarning,
     collectRowUserIdentityValues,
@@ -25590,7 +25653,12 @@ module.exports = {
           }
 
           const requestRow = requestRows[0]
-          if (requestRow.status !== 'pending') {
+          // #7 (design-lock #3034): a leave may be cancelled AFTER approval (→ reverse its deducted balance
+          // below). The status machine is loosened ONLY for request_type='leave'; every other request type
+          // (shift_swap / schedule_dispatch / …) stays pending-only, unchanged.
+          const isApprovedLeaveCancellation =
+            requestRow.status === 'approved' && requestRow.request_type === 'leave'
+          if (requestRow.status !== 'pending' && !isApprovedLeaveCancellation) {
             throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
           }
           const requestOrgId = requestRow.org_id ?? DEFAULT_ORG_ID
@@ -25661,11 +25729,25 @@ module.exports = {
             await closeScheduleDispatchRequest(trx, requestOrgId, requestId)
           }
 
+          // #7 (design-lock #3034): cancelling an APPROVED leave reverses whatever balance its approval
+          // deducted (annual_leave / comp_time_leave), in the SAME txn. Symmetric + safe for any approved
+          // leave: if nothing was deducted (e.g. annual policy off → no deduct events for this requestId),
+          // the reverse is a no-op. Idempotent inside (a re-cancel finds the existing 'reverse' → no-op).
+          let reversal = null
+          if (isApprovedLeaveCancellation) {
+            reversal = await reverseLeaveBalanceDeduction(trx, {
+              orgId: requestOrgId,
+              userId: requestRow.user_id,
+              requestId,
+            })
+          }
+
           return {
             requestId,
             status: 'cancelled',
             orgId: requestOrgId,
             userId: requestRow.user_id,
+            reversal,
           }
         })
 
