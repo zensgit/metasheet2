@@ -16,6 +16,10 @@ const {
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
 } = require('./stock-preparation-table-actions.cjs')
+// FOS-2: the loop / skip / patch / error-if-none semantics live in the shared kernel. This module
+// is now a thin wrapper that supplies stock-prep's exact patch body, skip vocabulary, and error
+// factory — so stock-prep behavior is byte-identical and provably routes through the kernel.
+const { syncFieldOptions } = require('./field-option-sync-runtime.cjs')
 
 const REQUIRED_PERMISSION = 'admin'
 const MAX_OPTIONS_PER_FIELD = 200
@@ -335,65 +339,56 @@ async function syncStockPreparationOptions(input = {}) {
       targetObjectId: template.objectId,
     })
   }
-  const synced = []
-  const skipped = []
-  for (const field of templateOptionFields(template)) {
-    const sourceKey = field.optionSource.key
-    const set = optionSets[sourceKey]
-    if (!set) {
-      skipped.push({
-        field: field.id,
+  // FOS-2: delegate the loop / skip / patch / error-if-none to the shared kernel. The patch body,
+  // skip vocabulary, and error codes below are stock-prep's exact behavior — moving them into the
+  // kernel's callbacks keeps the wire byte-identical while routing through the single runtime.
+  const { synced: syncedRaw, skipped } = await syncFieldOptions({
+    provisioning,
+    projectId,
+    targetObjectId: template.objectId,
+    optionFields: templateOptionFields(template),
+    optionSets,
+    buildPropertyPatch: (field, set) => ({
+      options: set.options.map((option) => {
+        const out = { value: option.value }
+        if (option.label) out.label = option.label
+        if (option.color) out.color = option.color
+        if (option.disabled) out.disabled = true
+        return out
+      }),
+      stockPreparation: {
         optionSource: { ...field.optionSource },
-        reason: field.optionSource.type === 'config_info' ? 'config_info_not_supplied' : 'contract_not_available',
-      })
-      continue
-    }
-    try {
-      await provisioning.patchObjectFieldProperty({
-        projectId,
-        objectId: template.objectId,
-        fieldId: field.id,
-        propertyPatch: {
-          options: set.options.map((option) => {
-            const out = { value: option.value }
-            if (option.label) out.label = option.label
-            if (option.color) out.color = option.color
-            if (option.disabled) out.disabled = true
-            return out
-          }),
-          stockPreparation: {
-            optionSource: { ...field.optionSource },
-            optionSync: {
-              sourceType: field.optionSource.type,
-              sourceKey,
-              optionCount: set.options.length,
-              actionBindingCount: set.actionBindings.length,
-            },
-            optionActionBindings: set.actionBindings,
-          },
+        optionSync: {
+          sourceType: field.optionSource.type,
+          sourceKey: field.optionSource.key,
+          optionCount: set.options.length,
+          actionBindingCount: set.actionBindings.length,
         },
-      })
-    } catch (error) {
-      throw new StockPreparationOptionSyncError(422, 'OPTION_SYNC_FIELD_PATCH_FAILED', 'failed to patch stock-preparation option field metadata', {
-        field: field.id,
-        sourceKey,
-        errorCode: (error && (error.code || error.name)) || 'FIELD_PATCH_FAILED',
-      })
-    }
-    synced.push({
-      field: field.id,
-      optionSource: { ...field.optionSource },
-      optionCount: set.options.length,
-      actionBindingCount: set.actionBindings.length,
-    })
-  }
-
-  if (synced.length === 0) {
-    throw new StockPreparationOptionSyncError(422, 'OPTION_SYNC_NO_FIELDS', 'no stock-preparation option fields were synchronized', {
-      targetObjectId: template.objectId,
-      skipped: skipped.map((entry) => ({ field: entry.field, reason: entry.reason })),
-    })
-  }
+        optionActionBindings: set.actionBindings,
+      },
+    }),
+    resolveSkipReason: (field) =>
+      field.optionSource.type === 'config_info' ? 'config_info_not_supplied' : 'contract_not_available',
+    errorFactory: {
+      patchFailed: ({ field, sourceKey, error }) =>
+        new StockPreparationOptionSyncError(422, 'OPTION_SYNC_FIELD_PATCH_FAILED', 'failed to patch stock-preparation option field metadata', {
+          field,
+          sourceKey,
+          errorCode: (error && (error.code || error.name)) || 'FIELD_PATCH_FAILED',
+        }),
+      noFieldsSynced: ({ targetObjectId, skipped: skippedEntries }) =>
+        new StockPreparationOptionSyncError(422, 'OPTION_SYNC_NO_FIELDS', 'no stock-preparation option fields were synchronized', {
+          targetObjectId,
+          skipped: skippedEntries.map((entry) => ({ field: entry.field, reason: entry.reason })),
+        }),
+    },
+  })
+  const synced = syncedRaw.map((entry) => ({
+    field: entry.field,
+    optionSource: entry.optionSource,
+    optionCount: entry.set.options.length,
+    actionBindingCount: entry.set.actionBindings.length,
+  }))
 
   return {
     ok: true,
