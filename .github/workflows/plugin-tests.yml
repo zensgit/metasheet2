@@ -297,6 +297,7 @@ jobs:
             tests/integration/approval-postgate-acceptance.api.test.ts \
             tests/integration/dept-head-sync-plumbing.test.ts \
             tests/integration/approval-manager-chain.db.test.ts \
+            tests/integration/approval-delegation-seam.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
