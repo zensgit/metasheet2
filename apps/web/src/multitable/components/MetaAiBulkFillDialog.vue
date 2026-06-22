@@ -262,7 +262,7 @@
               data-test="ai-bulk-confirm"
               @click="onConfirm"
             >
-              {{ ctrl.state.phase === 'committing' ? l('aibulk.committing') : confirmLabel }}
+              {{ confirmLabel }}
             </button>
           </template>
 
