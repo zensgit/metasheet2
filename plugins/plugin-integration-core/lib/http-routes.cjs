@@ -135,6 +135,9 @@ const {
   syncStockPreparationOptions,
   optionSetsFromInput,
 } = require('./stock-preparation-option-sync.cjs')
+// FOS-4: canonical stock-prep objectId — readiness is bound per TARGET, so any preset targeting this
+// table (v1 replace + the disable-missing prove-the-path preset) reuses the canonical readiness check.
+const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
 // FOS-2: generic field-option-sync route — resolve a FOS preset (FOS-1 catalog), validate operator
 // option sets against the preset's source keys, and patch each mapped field's options + generic
 // `fieldOptionSync` metadata through the SAME kernel stock-prep uses (no parallel write path).
@@ -2099,11 +2102,13 @@ function createHandlers(services, options = {}) {
       const provisioning = getFieldOptionSyncProvisioning()
       const optionFields = fieldOptionSyncKernelFields(preset)
 
-      // FOS-2: readiness gate, bound per preset. The stock-preparation preset targets the canonical
-      // stock-prep table, so it reuses that table's readiness inspection — parity with the stock-prep
-      // route: never patch an unprovisioned target (avoids a partial patch / opaque FIELD_PATCH_FAILED).
-      // Fail closed for any preset without a readiness binding (additional presets are gated to FOS-4).
-      if (preset.presetId === 'preset.stock-preparation.v1') {
+      // FOS-4: readiness gate bound per TARGET (not per preset id). Any preset targeting the canonical
+      // stock-prep table reuses that table's readiness inspection — so BOTH the v1 (replace) preset and
+      // the disable-missing prove-the-path preset are covered without enumerating preset ids. Parity with
+      // the stock-prep route: never patch an unprovisioned target (avoids a partial patch / opaque
+      // FIELD_PATCH_FAILED). Presets targeting a DIFFERENT table still fail closed until they declare
+      // their own readiness binding (a later slice).
+      if (preset.targetTable === STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId) {
         const readiness = await inspectStockPreparationCanonicalTarget({ context, projectId: input.projectId, permission: 'admin' })
         if (readiness.ready !== true) {
           throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_TARGET_NOT_READY', 'field-option-sync target is not ready', {
@@ -2112,8 +2117,9 @@ function createHandlers(services, options = {}) {
           })
         }
       } else {
-        throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_PRESET_NO_READINESS', 'preset has no readiness binding (additional presets are gated to FOS-4)', {
+        throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_PRESET_NO_READINESS', 'preset target has no readiness binding (presets for other tables are gated to a later slice)', {
           presetId: preset.presetId,
+          targetObjectId: preset.targetTable,
         })
       }
 
