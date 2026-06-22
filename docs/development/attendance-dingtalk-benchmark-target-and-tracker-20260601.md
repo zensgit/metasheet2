@@ -133,6 +133,34 @@
 - 默认 **OFF**、org opt-in；snapshot v1 + manual adjustment 必备；工龄默认 `cumulative_service`（需 `cumulativeServiceStartDate` 字段，`hire_date` 仅 `company_tenure`）；结转默认次年末（org-tz 边界，**产品默认非法定**）。
 - MUST = 运行时强制 + 反向测试 + 1 条 staging 联调（同 §1）。default tier preset 依据《职工带薪年休假条例》（国务院令第514号）+《企业职工带薪年休假实施办法》（人社部令第1号）。
 
+## 0.5 2026-06-21 钉钉手册复核：承诺核对 + 可借鉴候选
+
+> 复核源：当前 `origin/main@085ce92b` 的本账本、`development-completion-plan-and-verification-20260618.md`、公式 TODO、advanced-scheduling benchmark TODO；对标素材为本地 `alidocs-admin-manual-package`（downloadedAt `2026-05-27T09:25:54.972Z`）与既有钉钉手册复核。结论：**当前已授权的考勤开发承诺没有未完成项**；下面列出的都是 **future gated candidates**，不是欠账，也不自动开工。详细研究 companion 见 #3014（`docs/research/dingtalk-attendance-benchmark-refresh-v3-20260621.md`）；本 §0.5 是 canonical tracker addendum。
+
+### 承诺核对
+
+| 检查面 | 当前口径 |
+|---|---|
+| H2/H2+/C5/年假 | 本账本 §0.1/§0.2/§0.3/§0.4 均已 staging-proven ✅；§2 当前 tracker 内列入本阶段的考勤对标目标全部 ✅。 |
+| 公式 / 报表字段 TODO | `attendance-dingtalk-formula-todo-20260515.md` 已全部 `[x]`；旧的 slot placeholder 口径已被 multi-punch ingest-persist 点亮。 |
+| 高级排班 benchmark TODO | `attendance-advanced-scheduling-benchmark-todo-20260521.md` 是 2026-05-21 历史 benchmark/roadmap；当前完成状态以本账本为准，不能把该文件早期的 `Missing` / `Not started` 读成现时承诺。 |
+| 历史回填段落 | 旧的 🟡 / pending 文字保留为 point-in-time 回填；当前状态看每节头部表格与最新 closeout 行。 |
+
+### 可借鉴候选（需另起 owner opt-in + design-lock）
+
+| 候选 | 钉钉手册启发 | 当前建议 |
+|---|---|---|
+| B1 通知渠道扩展（email first） | 钉钉一类产品的提醒价值来自多渠道覆盖与可达性，而不只是有一条内部 outbox。 | 第一波可并行候选之一：在 C5 delivery seam 上新增 `email_smtp` channel + 后续 producer routing；已由 #3017/#3018 开始，但仍需按各自 review gate 收口。 |
+| B2 员工自助统一入口 | 移动端/员工端把打卡、外勤、补卡、请假、余额、审批入口聚合，减少员工找入口成本。 | 第一波可并行候选之一：我们已有 web/admin/self-service 面，但 employee application hub / punch home / balance+exception card 仍可作为 UX 目标；需独立前端设计。 |
+| B3 补卡规则 + 异常处理台 | 钉钉把缺卡、迟到、早退、补卡次数/时限/审批流做成日常运营入口。 | 第一波可并行候选之一：补卡 quota、申请窗口、异常批处理、审批链与记录回写都需设计锁；不从现有 correction route 直接扩。 |
+| B4 报表运营台 | 自定义报表、部门/人员/时间维度、导出与周期运营是管理员高频面。 | 我们字段/公式/summary 已足，但“报表定义、负责人、订阅/推送、导出记录”仍可单独成线；不混入薪资引擎。 |
+| B5 假期类型泛化 | 钉钉有多假种、配额、批量初始化/调整、到期等运营面。 | 当前 `annual` + `comp_time` 已闭环；病假/婚假/事假配额、批量余额初始化、假种策略模板是下一层泛化，不属于年假 v1 欠账。 |
+| B6 多时区考勤报表 | 跨地区组织需要按 org/user timezone 解释日期边界。 | 仅在海外/跨时区客户拉动时开；必须先 design-lock 日期边界、报表汇总与 scheduler 时区口径。 |
+| R1 原生/硬件/防作弊/人脸/拍照/Wi-Fi/Bluetooth/考勤机 | 钉钉依赖原生 app、设备与风控资源。 | 继续按 §1 OUT 红线：走集成/原生壳/硬件伙伴，不在 web 产品里自研。 |
+| R2 算薪引擎 | 钉钉与薪资、绩效、导出链路强绑定。 | 继续作为 SaaS/ERP 集成，不把 MetaSheet attendance 变成完整 payroll engine。 |
+
+**执行纪律**：B1–B6/R1–R2 都不是“未完成承诺”。若 owner 点名其中任一项，先写 design-lock 明确 runtime 口径、数据边界、反向测试与 staging smoke，再拆 slice 开工。B1/B2/B3 是可并行的第一波候选池；具体优先级以 owner 对 #3014 / 本账本的拍板为准。
+
 ---
 
 ## 1. H2 目标档位（产品负责人 2026-06-01 最终版）

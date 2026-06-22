@@ -6,6 +6,11 @@ Source focus: DingTalk handbook advanced scheduling pages under
 `https://alidocs.dingtalk.com/i/p/Y7kmbokZp3pgGLq2/docs/...`, read from the
 left-hand "考勤高级版" menu and the visible right-hand detail pages.
 
+> **Historical note (2026-06-21):** this file is an early benchmark/roadmap snapshot. The current attendance commitment
+> tracker is `attendance-dingtalk-benchmark-target-and-tracker-20260601.md`; it records the later shipped state for
+> multi-shift day, publishing/drafts, temporary shifts, swap, small organization, dispatch/multisite, C5, and annual
+> leave. Treat the `Missing` / `Not started` labels below as the 2026-05-21 baseline, not as current open commitments.
+
 ## Status Update - 2026-05-22
 
 This roadmap is now partially landed, but the write-path portions remain locked:

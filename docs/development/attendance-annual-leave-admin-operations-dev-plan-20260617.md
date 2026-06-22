@@ -1,6 +1,6 @@
 # L5c — Annual-leave admin operations UI · development plan (gated TODO-checklist)
 
-**Status:** ✅ **BUILT + MERGED — SUPERSEDED (2026-06-18 backfill).** This plan's build is complete on `origin/main`: impl **#2830** (the new `annualLeaveOperations` admin section + 3 operation cards + in-DOM confirm/result panels + failure-code mapper + 201-line regression suite + dev-verification MD `attendance-annual-leave-admin-operations-dev-verification-20260617.md`), policy-off fix **#2834** (all three cards disabled when policy off), closeout-MD corrections **#2835/#2844**. The design-lock (#2795) and L6 staging runbook (#2796) remain the authority / downstream gate. **The build-step boxes below were flipped to ✅ to reflect merged reality; only the L6 staging smoke (marked 🔒, §7 / G1) remains as an owner-run gate.** Retained as history.
+**Status:** ✅ **BUILT + MERGED — SUPERSEDED (2026-06-21 backfill).** This plan's build is complete on `origin/main`: impl **#2830** (the new `annualLeaveOperations` admin section + 3 operation cards + in-DOM confirm/result panels + failure-code mapper + 201-line regression suite + dev-verification MD `attendance-annual-leave-admin-operations-dev-verification-20260617.md`), policy-off fix **#2834** (all three cards disabled when policy off), closeout-MD corrections **#2835/#2844**. The design-lock (#2795) and L6 staging runbook (#2796) remain the authority / downstream evidence trail, and the downstream L6 staging smoke has since **passed** (2026-06-21, recorded in the main tracker §0.4 / closeout #2997). **The build-step boxes below were flipped to ✅ to reflect merged reality; G1 is now closed as ✅, not an outstanding owner-run gate.** Retained as history.
 
 **One-line scope:** put the three existing **balance-mutating** annual-leave endpoints behind buttons inside **one** new admin nav section, in **one** PR, with the five locked dimensions (preview / confirm / idempotency / failure-code / permission-audit) instantiated three times — **without flattening the three different back-ends**.
 
@@ -209,14 +209,14 @@ Per the L0–L4 precedent, **happy-path adversarial passes miss codebase-fit and
 
 ## 6. L5c dev + verification closeout MD — ✅ (final L5c deliverable, AFTER the build)
 
-After all three cards land and CI is green, write an **L5c development + verification closeout** `docs/development/attendance-annual-leave-admin-operations-dev-verification-<date>.md` recording: the per-card 口径 as built, the exact state refs/handlers/selectors shipped, the local-vitest + `vue-tsc -b` evidence, the anchor-nav 29→30 diff, notes of each card's preview→confirm→result flow, and an explicit **L6-readiness handoff** (what the staging smoke can now drive). **Scope note:** this is the **L5c slice** closeout, **not** the whole annual-leave engine's final capstone — the engine track (§0.4) only flips to ✅ after the **L6 staging smoke** passes. This MD is described here but is **NOT produced by this planning step** — it is the closing checklist item of the build.
+After all three cards land and CI is green, write an **L5c development + verification closeout** `docs/development/attendance-annual-leave-admin-operations-dev-verification-<date>.md` recording: the per-card 口径 as built, the exact state refs/handlers/selectors shipped, the local-vitest + `vue-tsc -b` evidence, the anchor-nav 29→30 diff, notes of each card's preview→confirm→result flow, and an explicit **L6-readiness handoff** (what the staging smoke can now drive). **Scope note:** this is the **L5c slice** closeout, **not** the whole annual-leave engine's final capstone; the engine track (§0.4) flipped to ✅ only after the separate **L6 staging smoke** passed on 2026-06-21. This MD is described here but is **NOT produced by this planning step** — it is the closing checklist item of the build.
 
 ---
 
 ## 7. Dependencies / gates
 
 - **Upstream: ✅ UNBLOCKED.** Design-lock merged (`619fab564`); L5a (balance read) + L5b (policy config) on `main`; the three endpoints exist and are verified. Build branch fresh off `origin/main`.
-- **🔒 Downstream (owner-run, NOT parallel): L6 staging smoke.** The L6 runbook is merged but **depends on L5c being merged + deployed** — it smokes the *buttons*. It is genuinely sequential, not parallel, because (a) it drives the three operation endpoints **through the UI** and (b) it must additionally exercise the **L1 year-end reaper** path `packages/core-backend/src/services/AttendanceExpiryService.ts` (lots with `expires_at <= now()` reaped + `annual_leave_expiry` event) by advancing time / triggering the scheduler — not just the plugin routes. L6 is owner-run on a **disposable single-member org** with a **staging-realm `attendance:admin` JWT** (a prod token 401s on staging), asserts **residue=0**, and is out of L5c scope. **Do not start L6 until L5c is merged and deployed.**
+- **✅ Downstream closed (owner-run): L6 staging smoke.** This was a real downstream gate, not parallel: it depended on L5c being merged + deployed, drove the three operation endpoints **through the UI**, and additionally exercised the **L1 year-end reaper** path `packages/core-backend/src/services/AttendanceExpiryService.ts` (lots with `expires_at <= now()` reaped + `annual_leave_expiry` event) rather than only plugin routes. The owner-run L6 smoke passed on 2026-06-21 with residue=0 and is recorded in the main tracker §0.4; this section is retained to show why L6 was gated after L5c.
 
 ---
 
@@ -247,7 +247,7 @@ After all three cards land and CI is green, write an **L5c development + verific
 | R6 | **policy-enabled gate over-reaches** (hard client block layered on server contract for adjust/backfill) | Low | Med | gate is informational hint for adjust/backfill; load-bearing only for accrual |
 | R7 | **`vue-tsc --noEmit` false-green** on a cross-file union | Low | Med | mandate `vue-tsc -b` in §4 |
 | R8 | **window.confirm reused** (not in-DOM; can't show a structured preview/restatement — unfit for this confirm flow) | Low | Med | §2.4 in-DOM `role="dialog"` confirm panel with restatement table + stable selector |
-| R9 | **L6 started before L5c merged/deployed** | Low | Med | §7 marks L6 🔒 downstream; do not run until merged+deployed |
+| R9 | **L6 started before L5c merged/deployed** | Low | Med | §7 marked L6 downstream; closed by the 2026-06-21 L6 PASS after L5c was merged/deployed |
 
 ---
 
@@ -288,10 +288,10 @@ After all three cards land and CI is green, write an **L5c development + verific
 **Review + close**
 - 🔒 R1 — adversarial sub-agent review per card (flatten / RBAC / failure-surface / idempotency-legibility / test-honesty) — gated on each card local-green
 - ✅ R2 — owner-review-fix rounds folded, re-verified
-- ✅ M1 — L5c dev+verification CLOSEOUT MD (built 口径 + evidence + L6-readiness handoff; NOT the whole-engine capstone — engine ✅ awaits L6)
+- ✅ M1 — L5c dev+verification CLOSEOUT MD (built 口径 + evidence + L6-readiness handoff; NOT the whole-engine capstone — engine ✅ came after the separate L6 smoke)
 
 **Dependencies**
 - ✅ G0 — upstream unblocked (design-lock merged, L5a/L5b on main, endpoints verified)
-- 🔒 G1 — **L6 staging smoke (owner-run, downstream): DEPENDS on L5c merged + deployed; also drives the L1 reaper (`AttendanceExpiryService`); residue=0; staging-realm JWT + disposable single-member org. NOT parallel — do not start until L5c ships.**
+- ✅ G1 — **L6 staging smoke (owner-run, downstream): PASSED 2026-06-21**; it depended on L5c merged + deployed, drove the L1 reaper (`AttendanceExpiryService`), used a staging-realm JWT + disposable single-member org, and closed with residue=0.
 
 Plan authority: `docs/development/attendance-annual-leave-admin-operations-design-lock-20260617.md` (拍板 A/B/C + the 5 dimensions). All file:symbol targets verified against `origin/main` @ `619fab564`.
