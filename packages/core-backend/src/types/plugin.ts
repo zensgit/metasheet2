@@ -418,6 +418,19 @@ export interface MultitableProvisioningAPI {
     property: Record<string, unknown>
     order: number
   }>
+  // FOS-2b-pre: read-only — returns a field's current property (incl. select options), or null if absent.
+  getObjectField(input: {
+    projectId: string
+    objectId: string
+    fieldId: string
+  }): Promise<{
+    id: string
+    sheetId: string
+    name: string
+    type: MultitableProvisioningFieldType
+    property: Record<string, unknown>
+    order: number
+  } | null>
 }
 
 export interface MultitableRecordsAPI {
