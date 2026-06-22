@@ -3846,6 +3846,154 @@ async function testStockPreparationOptionSyncRoute() {
   assert.equal(res.body.error.code, 'OPTION_SYNC_EXECUTABLE_REJECTED')
 }
 
+async function testFieldOptionsSyncRoute() {
+  const STOCK_PREP_PRESET_ID = 'preset.stock-preparation.v1'
+  const provisioning = createStockPreparationTargetProvisioningApi({ sheetExists: true })
+  const records = createTableActionRecordsApi()
+  const { routes, registered } = mountRoutes(createMockServices().services, {
+    provisioningApi: provisioning.api,
+    recordsApi: records.recordsApi,
+  })
+
+  assert.ok(
+    registered.includes('POST /api/integration/field-options/sync'),
+    'generic field-option-sync route registered',
+  )
+
+  // non-admin → 403, no provisioning reached
+  let res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: WRITE_USER,
+    body: { presetId: STOCK_PREP_PRESET_ID, optionSets: { material_type: [{ value: 'plate' }] } },
+  })
+  assert.equal(res.statusCode, 403, 'write user cannot run generic field-option-sync')
+  assert.equal(findCalls(provisioning.calls, 'patchObjectFieldProperty').length, 0)
+
+  // happy path: each supplied + mapped field patched with generic fieldOptionSync metadata
+  res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: {
+      presetId: STOCK_PREP_PRESET_ID,
+      optionSets: {
+        material_type: [{ value: 'plate', label: 'Plate' }, { value: 'bar', enabled: false }],
+        blank_type: [{ value: 'casting', label: 'Casting' }],
+      },
+    },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.target.presetId, STOCK_PREP_PRESET_ID)
+  assert.equal(res.body.data.target.targetTable, 'plm_stock_preparation_main')
+  assert.equal(res.body.data.target.fieldCount, 2, 'two supplied fields synced')
+
+  const patches = findCalls(provisioning.calls, 'patchObjectFieldProperty')
+  assert.equal(patches.length, 2, 'generic route patches only supplied + mapped fields')
+  const materialPatch = patches.find((call) => call[1].fieldId === 'materialType')
+  assert.ok(materialPatch, 'materialType (mapped from material_type) patched')
+  // The generic route sends preset.targetTable verbatim as objectId. FOS-2 corrected the FOS-1
+  // preset.targetTable to the REAL stock-prep objectId 'plm_stock_preparation_main' (= STOCK_PREPARATION_
+  // MAIN_TABLE_TEMPLATE.objectId; the host hashes objectId→sheetId, so it MUST match or it targets a
+  // nonexistent sheet). Readiness is gated above (FIELD_OPTION_SYNC_TARGET_NOT_READY) before any patch.
+  assert.equal(materialPatch[1].objectId, 'plm_stock_preparation_main', 'generic route targets the real stock-prep objectId (preset.targetTable corrected in FOS-2)')
+  assert.deepEqual(materialPatch[1].propertyPatch.options, [
+    { value: 'plate', label: 'Plate' },
+    { value: 'bar', disabled: true },
+  ])
+  // GENERIC metadata key — NOT stockPreparation.
+  assert.deepEqual(materialPatch[1].propertyPatch.fieldOptionSync, {
+    presetId: STOCK_PREP_PRESET_ID,
+    sourceKey: 'material_type',
+    optionCount: 2,
+  })
+  assert.equal('stockPreparation' in materialPatch[1].propertyPatch, false, 'generic route does not write stock-prep metadata')
+
+  // values-free evidence
+  const evidenceText = JSON.stringify(res.body.data.evidence)
+  assert.ok(evidenceText.includes('material_type'), 'evidence includes source key')
+  assert.equal(evidenceText.includes('plate'), false, 'evidence hides option values')
+  assert.equal(evidenceText.includes('Casting'), false, 'evidence hides option labels')
+  assert.equal(evidenceText.includes('sheet_stock'), false, 'evidence hides sheet id')
+  assert.equal(records.calls.length, 0, 'generic route never uses records API')
+
+  // unknown presetId → 422
+  res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: { presetId: 'preset.does-not-exist.v9', optionSets: { material_type: [{ value: 'plate' }] } },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'FIELD_OPTION_SYNC_PRESET_UNKNOWN')
+
+  // option-set key not declared by the preset → 422
+  res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: { presetId: STOCK_PREP_PRESET_ID, optionSets: { materiel_type_typo: [{ value: 'plate' }] } },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'FIELD_OPTION_SYNC_UNKNOWN_SOURCE')
+
+  // missing presetId → 400 (closed allowlist + required field)
+  res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: { optionSets: { material_type: [{ value: 'plate' }] } },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'FIELD_OPTION_SYNC_REQUEST_INVALID')
+
+  // unsupported body field → 400 (closed allowlist)
+  res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: { presetId: STOCK_PREP_PRESET_ID, sql: 'select 1' },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'FIELD_OPTION_SYNC_REQUEST_INVALID')
+
+  // executable-shaped option value rejected (reused per-option safety) → 422
+  res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: {
+      presetId: STOCK_PREP_PRESET_ID,
+      optionSets: { material_type: [{ value: 'plate', script: 'rm -rf /' }] },
+    },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'OPTION_SYNC_EXECUTABLE_REJECTED')
+
+  // secret-shaped option value rejected → 422
+  res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: {
+      presetId: STOCK_PREP_PRESET_ID,
+      optionSets: { material_type: [{ value: '[redacted-secret-id]' }] },
+    },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'OPTION_SYNC_CONFIG_INVALID')
+
+  // action bindings fail closed on the generic route (stock-prep-only concept) → 422.
+  // Even a VALID predefined actionId is rejected, not silently dropped.
+  const patchCountBeforeActionReject = findCalls(provisioning.calls, 'patchObjectFieldProperty').length
+  res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: {
+      presetId: STOCK_PREP_PRESET_ID,
+      optionSets: { material_type: [{ value: 'plate', actionBindings: [{ actionId: PLM_STOCK_PREPARATION_ACTION_ID }] }] },
+    },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'FIELD_OPTION_SYNC_ACTIONS_NOT_SUPPORTED')
+  assert.equal(
+    findCalls(provisioning.calls, 'patchObjectFieldProperty').length,
+    patchCountBeforeActionReject,
+    'rejected action-binding request does not patch',
+  )
+
+  // nothing mapped supplied → no-fields-synced 422 (kernel error-if-none via generic factory)
+  res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: { presetId: STOCK_PREP_PRESET_ID, optionSets: {} },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'FIELD_OPTION_SYNC_NO_FIELDS')
+}
+
 async function testTableActionRoutes() {
   const adapterCalls = []
   const records = createTableActionRecordsApi()
@@ -4936,6 +5084,7 @@ async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testStockPreparationTargetProvisioningRoutes()
   await testStockPreparationOptionSyncRoute()
+  await testFieldOptionsSyncRoute()
   await testTableActionRoutes()
   await testLargeBomBackgroundExpansionJobRoutes()
   await testLargeBomBackgroundExpansionJobsSurviveDurableRouteRemount()

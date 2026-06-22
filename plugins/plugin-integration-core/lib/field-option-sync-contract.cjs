@@ -151,7 +151,7 @@ const FIELD_OPTION_SYNC_PRESETS = Object.freeze([
     sourceKind: 'static-preset', // operator-supplied config + built-in contract defaults; no external source binding
     sourceObjectOrTable: 'operator-config',
     targetKind: TARGET_KIND,
-    targetTable: 'stock_preparation_main', // canonical own-sheet stock-prep table (schema ref)
+    targetTable: 'plm_stock_preparation_main', // canonical own-sheet stock-prep objectId (must match STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId — host hashes objectId→sheetId)
     optionFields: Object.freeze([
       Object.freeze({ valueField: 'material_type', targetField: 'materialType', targetFieldType: 'single_select' }),
       Object.freeze({ valueField: 'blank_type', targetField: 'blankType', targetFieldType: 'single_select' }),
