@@ -24,7 +24,7 @@
 
 | # | 候选 | v2（06-14）旧态 | **当前实证（fresh，2026-06-21）** | 文件级并行性 |
 |---|---|---|---|---|
-| 1 | 年假/法定假额度引擎 | 头条候选（年假仅标签） | **✅ DONE** — L0–L5c + `/me` 自助余额卡；grant-lot ledger（`attendance_leave_balances`+events）+ accrual + 跨年 `expires_at` + 审批扣减全落 | —（已落） |
+| 1 | 年假/法定假额度引擎 | 头条候选（年假仅标签） | **✅ DONE（L0–L6 staging-proven）** — L0–L5c build + `/me` 自助余额卡 + **L6 staging smoke PASS**；grant-lot ledger（`attendance_leave_balances`+events）+ accrual + 跨年 `expires_at` + 审批扣减全落 | —（已闭环） |
 | 2 | 员工自助统一工作台 | PARTIAL（「我的余额」缺） | **PARTIAL**（缺口缩小）— 自助余额卡已落（`attendance__grid--selfservice` / `data-selfservice-card="annual-balance"` 消费 `/me`）；但 6 类申请（请假/加班/补卡/外出/调休/换班）仍分散 ≥3 surface：quick-draft 只接 `leave`+`overtime`；`outdoor_punch`(外出) 后端有类型但**无员工表单**；调休仅是 leave 子类型；换班是**并列**独立面（`isShiftSwapRequest` 块），未折叠进申请中心 | **前端为主 + 1 隔离 route**（`/leave-balances/me`）；不动核心 → 文件不相交 |
 | 3 | 通知渠道扩展 | seam 已建，仅钉钉 | **PARTIAL** — adapter seam 干净：`interface AttendanceDeliveryChannel { send() }` + name→channel 注册 + env 工厂 `createAttendanceDeliveryChannelsFromEnv`；已有 `DingTalk*` + `DeterministicFake*` 两实现，已 wire 进 `AttendanceScheduler`。**无 email/SMS/WeCom**。⚠ 另有 `NotificationService.ts` 的 `Email/Webhook/Feishu` 实现 **是另一套接口**（approval/breach 用），不可直接复用，需各自实现 `AttendanceDeliveryChannel` | **唯一文件级独立** — 新文件 + `createAttendanceDeliveryChannelsFromEnv` 1 行注册；不碰 index.cjs/records/报表 |
 | 4 | 补卡结构化 + 规则强约束 | generic adjusted（无流/约束） | **PARTIAL** — `REQUEST_TYPES` 有 `missed_check_in/missed_check_out/time_correction`（补卡原语），走 generic `/requests`→审批；但 `补卡` 仅作报表字段（`correction_count` = `status==='adjusted'?1:0` 透传），**无专用补卡 event 写入、无 次数/时限/类型 约束**（quota/window grep 0） | **半独立** — 动 `/punch`+`/requests` 局部，与 #5/#6/#8 热区无重叠 |
