@@ -1532,19 +1532,22 @@ function getApprovalNodeConfig(runtimeGraph: RuntimeGraph, nodeKey: string): App
 }
 
 /**
- * True when any approval node's assignee sources include a `continuous_managers`
- * source. Used at create time to decide whether to walk the (more expensive)
- * management chain into the requester snapshot — keeping the extra per-hop
- * directory queries off every approval that does not use the source. `kind` is
- * read structurally so this works before the kind is added to the typed union.
+ * True when any approval node's assignee sources include a management-chain source
+ * (`continuous_managers` or `manager_at_level`). Used at create time to decide
+ * whether to walk the (more expensive) management chain into the requester snapshot
+ * — keeping the extra per-hop directory queries off every approval that does not use
+ * such a source. `kind` is read structurally so this works before the kind is added
+ * to the typed union.
  */
-export function runtimeGraphUsesContinuousManagers(runtimeGraph: RuntimeGraph): boolean {
+export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolean {
   return runtimeGraph.nodes.some((node) => {
     if (node.type !== 'approval') return false
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) return false
-    return sources.some((source) => isRecord(source) && source.kind === 'continuous_managers')
+    return sources.some(
+      (source) => isRecord(source) && (source.kind === 'continuous_managers' || source.kind === 'manager_at_level'),
+    )
   })
 }
 
@@ -2629,11 +2632,11 @@ export class ApprovalProductService {
     // payload. READ-ONLY (directory_* SELECTs only) and best-effort: a directory
     // read failure must never block create, so an unresolved lookup just omits the
     // fields. direct_manager / dept_head read managerId / deptHeadId; the chain is
-    // walked only when the published graph uses continuous_managers (so the extra
-    // per-hop queries stay off every approval). Absence falls through to the node's
-    // emptyAssigneePolicy.
+    // walked only when the published graph uses a management-chain source
+    // (continuous_managers or manager_at_level) — so the extra per-hop queries stay
+    // off every approval. Absence falls through to the node's emptyAssigneePolicy.
     const runtimeGraph = asRuntimeGraph(bundle.publishedDefinition.runtime_graph)
-    const needsManagerChain = runtimeGraphUsesContinuousManagers(runtimeGraph)
+    const needsManagerChain = runtimeGraphUsesManagerChain(runtimeGraph)
     let orgRelations: ApprovalRequesterOrgRelations = {}
     try {
       orgRelations = await resolveApprovalRequesterOrgRelations(actor.userId, pool.query.bind(pool), {

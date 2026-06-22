@@ -5,7 +5,7 @@ import {
   DEFAULT_MAX_MANAGER_CHAIN_LEVELS,
   MANAGER_CHAIN_LEVELS_HARD_CEILING,
 } from '../../src/services/ApprovalDirectoryOrg'
-import { runtimeGraphUsesContinuousManagers } from '../../src/services/ApprovalProductService'
+import { runtimeGraphUsesManagerChain } from '../../src/services/ApprovalProductService'
 import type { RuntimeGraph } from '../../src/types/approval-product'
 
 /**
@@ -185,21 +185,34 @@ describe('manager-chain walk (resolveApprovalRequesterOrgRelations + includeMana
   })
 })
 
-describe('runtimeGraphUsesContinuousManagers (conditional-bake scanner)', () => {
+describe('runtimeGraphUsesManagerChain (conditional-bake scanner)', () => {
   const graph = (sources: unknown): RuntimeGraph =>
     ({ nodes: [{ key: 'n1', type: 'approval', config: { assigneeSources: sources } }] }) as unknown as RuntimeGraph
 
   it('detects a continuous_managers source on an approval node', () => {
-    expect(runtimeGraphUsesContinuousManagers(graph([{ kind: 'continuous_managers', levels: 2 }]))).toBe(true)
+    expect(runtimeGraphUsesManagerChain(graph([{ kind: 'continuous_managers', levels: 2 }]))).toBe(true)
+  })
+
+  // Regression (the bug this rename fixes): a manager_at_level-only template MUST
+  // trigger the chain bake. Before the fix the scanner only saw continuous_managers,
+  // so createApproval skipped includeManagerChain, the resolver saw an empty chain,
+  // and every B1 node fell to emptyAssigneePolicy — breaking B1's happy path.
+  it('detects a manager_at_level source on an approval node (B1 bake gate)', () => {
+    expect(runtimeGraphUsesManagerChain(graph([{ kind: 'manager_at_level', level: 1 }]))).toBe(true)
+    expect(runtimeGraphUsesManagerChain(graph([{ kind: 'manager_at_level', level: 3 }]))).toBe(true)
+  })
+
+  it('detects manager_at_level mixed with non-chain sources', () => {
+    expect(runtimeGraphUsesManagerChain(graph([{ kind: 'requester' }, { kind: 'manager_at_level', level: 2 }]))).toBe(true)
   })
 
   it('returns false when only other source kinds are present', () => {
-    expect(runtimeGraphUsesContinuousManagers(graph([{ kind: 'direct_manager' }, { kind: 'static_user', userIds: ['x'] }]))).toBe(false)
+    expect(runtimeGraphUsesManagerChain(graph([{ kind: 'direct_manager' }, { kind: 'static_user', userIds: ['x'] }]))).toBe(false)
   })
 
   it('returns false for nodes without assignee sources or non-approval nodes', () => {
-    expect(runtimeGraphUsesContinuousManagers({ nodes: [{ key: 'c', type: 'condition', config: {} }] } as unknown as RuntimeGraph)).toBe(false)
-    expect(runtimeGraphUsesContinuousManagers({ nodes: [] } as unknown as RuntimeGraph)).toBe(false)
+    expect(runtimeGraphUsesManagerChain({ nodes: [{ key: 'c', type: 'condition', config: {} }] } as unknown as RuntimeGraph)).toBe(false)
+    expect(runtimeGraphUsesManagerChain({ nodes: [] } as unknown as RuntimeGraph)).toBe(false)
   })
 })
 
