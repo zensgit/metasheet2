@@ -14,7 +14,9 @@ param(
   [string]$RestartService = '1',
   [string]$StagingRoot = '',
   [string]$DependencyRefreshTimeoutSec = '1800',
-  [string]$DependencyRefreshHeartbeatSec = '60'
+  [string]$DependencyRefreshHeartbeatSec = '60',
+  [string]$HealthcheckAttempts = '12',
+  [string]$HealthcheckDelaySec = '5'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -511,7 +513,7 @@ function Expand-PackageArchive {
   throw "Unsupported package extension (expected .zip, .tgz, or .tar.gz): $ArchivePath"
 }
 
-function Invoke-Healthcheck {
+function Invoke-HealthcheckOnce {
   param([string]$Url)
 
   try {
@@ -521,6 +523,41 @@ function Invoke-Healthcheck {
   catch {
     return $false
   }
+}
+
+function Invoke-Healthcheck {
+  param(
+    [string[]]$Urls,
+    [int]$Attempts,
+    [int]$DelaySec
+  )
+
+  if ($null -eq $Urls -or $Urls.Count -eq 0) {
+    throw 'Healthcheck URLs must not be empty'
+  }
+  if ($Attempts -lt 1) {
+    throw 'HealthcheckAttempts must be a positive integer'
+  }
+  if ($DelaySec -lt 1) {
+    throw 'HealthcheckDelaySec must be a positive integer'
+  }
+
+  for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+    foreach ($url in $Urls) {
+      Write-Info "Healthcheck attempt ${attempt}/${Attempts}: $url"
+      if (Invoke-HealthcheckOnce -Url $url) {
+        Write-Info "Healthcheck OK ($url)"
+        return $true
+      }
+    }
+
+    if ($attempt -lt $Attempts -and $DelaySec -gt 0) {
+      Write-Info "Healthcheck not ready; retrying in ${DelaySec}s"
+      Start-Sleep -Seconds $DelaySec
+    }
+  }
+
+  return $false
 }
 
 $resolvedRoot = Resolve-NormalizedPath -Candidate $RootDir -Label 'RootDir'
@@ -654,10 +691,11 @@ try {
   if ($RunHealthcheck -ne '0') {
     $healthUrl = ($BaseUrl.TrimEnd('/')) + '/health'
     $pluginsUrl = ($ApiBase.TrimEnd('/')) + '/plugins'
-    if (-not (Invoke-Healthcheck -Url $healthUrl) -and -not (Invoke-Healthcheck -Url $pluginsUrl)) {
+    $healthcheckAttemptsValue = Convert-PositiveInt -Value $HealthcheckAttempts -Label 'HealthcheckAttempts'
+    $healthcheckDelayValue = Convert-PositiveInt -Value $HealthcheckDelaySec -Label 'HealthcheckDelaySec'
+    if (-not (Invoke-Healthcheck -Urls @($healthUrl, $pluginsUrl) -Attempts $healthcheckAttemptsValue -DelaySec $healthcheckDelayValue)) {
       throw "Healthcheck failed for $healthUrl and $pluginsUrl"
     }
-    Write-Info "Healthcheck OK ($healthUrl or $pluginsUrl)"
   }
 
   Write-Info "Package deploy complete"
