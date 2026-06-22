@@ -38,7 +38,10 @@ offers an action the server would refuse.
 
 T6-1 (identity contract #3016) + T6-2 (scoped execute + schema-drift #3023/`4203c165`) + `/restore` row-deny
 closure (#3026) + T6-3 (this FE panel) = the ratified T6 staging is done; all three restore surfaces (preview /
-execute / legacy `/restore`) enforce row-deny; the FE only restores through preview→execute.
+execute / legacy `/restore`) enforce row-deny. **Full-record FE restore goes through preview→execute; per-field
+(column-subset) restore remains on the legacy `/restore` — now protected by row-deny (#3026) — and
+per-field-through-preview is a named follow-up below** (`MultitableWorkbench.onRestoreRecordVersion` routes a
+`fieldIds` payload to the direct path; `MetaRecordDrawer` emits `fieldIds` for a field subset).
 
 Named follow-ups (each a separate opt-in): per-field restore through the preview chain; batch / multi-record /
 field-subset restore (a `scope` claim on the identity); unify the three diff copies behind one helper (the P3).
