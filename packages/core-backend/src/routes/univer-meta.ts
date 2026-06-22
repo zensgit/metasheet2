@@ -73,6 +73,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
+import { hashPreviewChanges, mintRestorePreviewIdentity, verifyRestorePreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
   HistoryAuditGrantError,
@@ -7453,7 +7454,22 @@ export function univerMetaRouter(): Router {
       const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
       const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
       const visibleChanges = changes.filter((c) => allowed.has(c.fieldId))
-      return res.json({ ok: true, data: { changes: visibleChanges, visibleAffectedFieldCount: visibleChanges.length, schemaDrift, targetVersion: previewTargetVersion } })
+      // T6-2: mint a preview identity binding this MASKED diff (what the actor saw) so a later restore-execute can
+      // confirm execution matches this preview (SR-3). Reveal-free by construction (this route has no reveal path).
+      // NOT executable under schema drift: a snapshot field deleted from the current schema can't be faithfully
+      // reproduced, so an executable identity would let execute SILENTLY partial-restore the surviving fields.
+      // Withhold the identity (FE must surface the drift); execute also re-checks and rejects (defense in depth).
+      const previewIdentity = schemaDrift
+        ? null
+        : mintRestorePreviewIdentity({
+            sheetId,
+            recordId,
+            targetVersion: previewTargetVersion,
+            strategy: 'revert',
+            changesHash: hashPreviewChanges(visibleChanges),
+            actorId: access.userId,
+          })
+      return res.json({ ok: true, data: { changes: visibleChanges, visibleAffectedFieldCount: visibleChanges.length, schemaDrift, targetVersion: previewTargetVersion, previewIdentity } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -7718,6 +7734,140 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] record restore failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to restore record' } })
+    }
+  })
+
+  // Global History — T6-2: scoped restore EXECUTE (the first write). Consumes a T6-1 preview identity and
+  // performs a single-record record-version restore (v1 scope-lock: the identity binds one record). Distinct
+  // from the direct `/restore` route so the identity is REQUIRED by construction (SR-3) and the shipped restore
+  // path is untouched. Re-runs the CURRENT permissions at execute (never trusts the preview's verdict): row-deny
+  // (the NEW SR-2 surface) + field write gate + expectedVersion (the latter two via the canonical patchRecords
+  // spine). The forward revision (source='restore') is transactional + idempotent (a replay recomputes an empty
+  // diff → changesHash mismatch → reject; and expectedVersion moved → 409). Reveal-free by construction: the
+  // verified diff is the MASKED set the actor saw at preview, so a reveal grant can never enter the writable set.
+  router.post('/sheets/:sheetId/records/:recordId/restore-execute', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!sheetId || !recordId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and recordId are required' } })
+    const exParsed = z.object({
+      targetVersion: z.number().int().positive(),
+      expectedVersion: z.number().int().nonnegative(),
+      previewIdentity: z.string().min(1),
+    }).safeParse(req.body)
+    if (!exParsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: exParsed.error.message } })
+    const { targetVersion, expectedVersion, previewIdentity } = exParsed.data
+    const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
+    const NON_RESTORABLE = new Set(['formula', 'lookup', 'rollup', 'link', 'attachment', 'button', 'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy'])
+    const sameVal = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+    const sameLinks = (a: string[], b: string[]): boolean => a.length === b.length && [...a].sort().join(' ') === [...b].sort().join(' ')
+    try {
+      const pool = poolManager.get()
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (!capabilities.canEditRecord) return sendForbidden(res)
+
+      const currentRes = await pool.query('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
+      if (currentRes.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      const currentRow = currentRes.rows[0] as { version?: unknown; data?: unknown }
+      const currentVersion = Number(currentRow.version ?? 0)
+      // SR-2 row-deny (NEW vs /restore): sheet-edit capability and per-record row-read-deny are orthogonal, so a
+      // sheet editor can be read-denied on this record — restoring it would write data they cannot read. Denied
+      // → 404 (the same no-oracle shape as a missing record). Admin bypasses, parity with the read surfaces.
+      if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))) {
+        const denied = await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        if (denied.has(recordId)) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      }
+      if (expectedVersion !== currentVersion) {
+        return res.status(409).json({ ok: false, error: { code: 'VERSION_CONFLICT', message: `Record is at version ${currentVersion}, expected ${expectedVersion}` } })
+      }
+      const currentData = asRec(currentRow.data)
+
+      const revRes = await pool.query(`SELECT action, snapshot FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2 AND version = $3 ORDER BY created_at DESC`, [sheetId, recordId, targetVersion])
+      const revRows = revRes.rows as Array<{ action?: unknown; snapshot?: unknown }>
+      if (revRows.length === 0) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: `No revision at version ${targetVersion}` } })
+      const targetRev = revRows.find((r) => r.action !== 'delete')
+      if (!targetRev) return res.status(422).json({ ok: false, error: { code: 'RESTORE_UNSUPPORTED', message: `Version ${targetVersion} is a delete revision; undelete is not supported in this slice` } })
+      if (targetRev.snapshot === null || targetRev.snapshot === undefined) return res.status(422).json({ ok: false, error: { code: 'SNAPSHOT_UNAVAILABLE', message: `Revision ${targetVersion} has no stored snapshot` } })
+      const targetSnapshot = asRec(targetRev.snapshot)
+
+      const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
+      if (!patchContext) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById } = patchContext
+      const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
+
+      // Schema drift: a snapshot field absent from the current schema can't be faithfully reproduced. The preview
+      // withholds an executable identity on drift, but execute MUST re-check (a drifted execute would silently
+      // partial-restore only the surviving fields) — reject before any write, matching /restore's SCHEMA_DRIFT.
+      for (const fid of Object.keys(targetSnapshot)) {
+        if (!fieldById.has(fid)) return res.status(422).json({ ok: false, error: { code: 'SCHEMA_DRIFT', message: `Field ${fid} in revision ${targetVersion} no longer exists in the current schema` } })
+      }
+
+      // The faithful set ∪ unset diff (same shape as /restore + T5-2's preview), then MASK to the actor's allowed
+      // fields — this masked set is exactly what T5-2's preview hashed into the identity (3rd copy of the diff;
+      // the end-to-end preview→execute golden is the drift guard, unifying the copies is a follow-up P3).
+      const diff: RecordChange[] = []
+      for (const [fid, guard] of fieldById.entries()) {
+        if (rawTypeById.get(fid) === 'button') continue
+        const inSnap = Object.prototype.hasOwnProperty.call(targetSnapshot, fid)
+        const inCur = Object.prototype.hasOwnProperty.call(currentData, fid)
+        if (guard.type === 'link') {
+          const target = inSnap ? normalizeLinkIds(targetSnapshot[fid]) : []
+          if (!sameLinks(normalizeLinkIds(currentData[fid]), target)) diff.push({ recordId, fieldId: fid, value: target, expectedVersion: currentVersion, op: 'set' })
+          continue
+        }
+        if (NON_RESTORABLE.has(guard.type)) continue
+        if (inSnap) {
+          if (!sameVal(currentData[fid], targetSnapshot[fid])) diff.push({ recordId, fieldId: fid, value: targetSnapshot[fid], expectedVersion: currentVersion, op: 'set' })
+        } else if (inCur) {
+          diff.push({ recordId, fieldId: fid, value: null, expectedVersion: currentVersion, op: 'unset' })
+        }
+      }
+      const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+      const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
+      const maskedDiff = diff.filter((c) => allowed.has(c.fieldId))
+
+      // Verify the identity against claims recomputed FRESH from the current masked diff (execution matches the
+      // preview). A stale diff (data / permissions moved) re-hashes differently → mismatch → reject → re-preview.
+      const recomputedHash = hashPreviewChanges(maskedDiff.map((c) => ({ fieldId: c.fieldId, op: c.op, value: c.value })))
+      const verdict = verifyRestorePreviewIdentity(previewIdentity, { sheetId, recordId, targetVersion, strategy: 'revert', changesHash: recomputedHash, actorId: access.userId })
+      if (!verdict.valid) {
+        const status = verdict.reason === 'expired' ? 410 : 409
+        return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Preview identity rejected (${verdict.reason})` } })
+      }
+
+      if (maskedDiff.length === 0) return res.json({ ok: true, data: { recordId, newVersion: currentVersion, noop: true, restoredFieldIds: [] } })
+      const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
+      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
+      if (yjsInvalidator) recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
+      try {
+        const result = await recordWriteService.patchRecords({
+          sheetId,
+          changesByRecord: new Map([[recordId, maskedDiff]]),
+          actorId: getRequestActorId(req),
+          fields,
+          visiblePropertyFields: readableEchoFields,
+          visiblePropertyFieldIds: readableEchoFieldIds,
+          attachmentFields,
+          fieldById,
+          capabilities,
+          sheetScope,
+          access,
+          source: 'restore',
+        })
+        const newVersion = result.updated.find((u) => u.recordId === recordId)?.version ?? currentVersion + 1
+        return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds: maskedDiff.map((c) => c.fieldId) } })
+      } catch (err) {
+        if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) return res.status(409).json({ ok: false, error: { code: 'VERSION_CONFLICT', message: (err as Error).message } })
+        if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: (err as Error).message } })
+        if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: (err as Error).message } })
+        throw err
+      }
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] restore-execute failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to execute restore' } })
     }
   })
 
