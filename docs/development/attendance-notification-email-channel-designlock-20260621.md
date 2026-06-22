@@ -36,10 +36,13 @@ elsewhere (build + adversarially test the channel, then wire the producer).
 
 - **Name**: `EMAIL_SMTP_CHANNEL_NAME = 'email_smtp'` (a new channel-name constant beside the existing work-notification channel's, in `AttendanceNotificationDeliveryWorker.ts`).
 - **Impl**: `class EmailAttendanceDeliveryChannel implements AttendanceDeliveryChannel`. `send(message)`:
-  1. **Resolve recipient email** from `message.recipientUserId` (⚑ **input to confirm in S1**: the canonical
-     email source for a user id — `users.email` / a directory table / org membership. Mirror how the
-     existing work-notification channel's recipient-resolution queries `directory_account_links`. If no email →
-     `{ ok:false, retryable:false, error:'no recipient email' }` — non-retryable, dead-letters, never spins.)
+  1. **Resolve recipient email — PINNED (S1, #3018): `users.email` scoped to the delivery org.** The query
+     is `users u JOIN user_orgs uo ON uo.user_id=u.id AND uo.org_id = message.orgId AND uo.is_active WHERE
+     u.id = message.recipientUserId AND u.is_active`. This is the **tenant boundary** (email is external
+     egress; the deliveries table does not prove recipient↔org membership, so a bare `users.id` lookup could
+     send cross-tenant). **Fail-closed**: no active org-member row (inactive / not a member of this org /
+     no email) → `{ ok:false, retryable:false }`, do NOT send — dead-letters, never spins. (A DB lookup
+     *error* is `retryable:true`.)
   2. **Build subject/body** from `message.payload` via the existing `buildDeliveryTitle`/`buildDeliveryContent`
      helpers (shared with the in-app channel — one content source, no per-channel drift).
   3. **Send** via the existing `EmailSmtpTransport` (nodemailer wrapper) using the
