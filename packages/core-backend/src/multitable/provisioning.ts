@@ -405,6 +405,40 @@ export async function patchObjectFieldProperty(
   }
 }
 
+export type GetObjectFieldInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  fieldId: string
+}
+
+// FOS-2b-pre: read-only getter for a provisioned field's CURRENT property (including a select field's
+// `options`). SELECT only — no write, no sanitize/merge. Returns null when the field does not exist
+// (caller decides). Mirrors the read half of patchObjectFieldProperty; field-option-sync merge modes
+// (append / disable_missing / keep_existing) read current options through this before patching.
+export async function getObjectField(
+  input: GetObjectFieldInput,
+): Promise<MultitableProvisioningField | null> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const physicalFieldId = getObjectFieldId(input.projectId, input.objectId, input.fieldId)
+  const existing = await input.query(
+    `SELECT id, sheet_id, name, type, property, "order"
+     FROM meta_fields
+     WHERE sheet_id = $1 AND id = $2`,
+    [sheetId, physicalFieldId],
+  )
+  const row = (existing.rows as any[])[0]
+  if (!row) return null
+  return {
+    id: String(row.id),
+    sheetId: String(row.sheet_id),
+    name: String(row.name),
+    type: String(row.type) as MultitableProvisioningFieldType,
+    property: normalizeJson(row.property),
+    order: Number(row.order ?? 0),
+  }
+}
+
 export async function ensureView(
   input: EnsureViewInput,
 ): Promise<MultitableProvisioningView> {
