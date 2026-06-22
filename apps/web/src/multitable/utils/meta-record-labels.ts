@@ -43,6 +43,9 @@ export type MetaRecordLabelKey =
   // --- Layer 1 record-level restore (Slice 3) ---
   | 'record.restore' | 'record.restoreTitle' | 'record.restoreConfirm'
   | 'record.restoreSuccess' | 'record.restoreNoop' | 'record.errorRestore'
+  | 'record.restorePreviewTitle' | 'record.restorePreviewWillChange' | 'record.restorePreviewNoChanges'
+  | 'record.restorePreviewConflict' | 'record.restorePreviewExecute' | 'record.restorePreviewCancel'
+  | 'record.restorePreviewLoading' | 'record.restorePreviewSet' | 'record.restorePreviewUnset'
   // FE-owned static fallback strings (the `error?.message ?? l(...)`
   // pattern from T3A2). Backend error.message remains raw when present.
   | 'record.errorHistoryLoad' | 'record.errorWatchLoad' | 'record.errorWatchUpdate'
@@ -108,6 +111,15 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.restoreConfirm': { en: 'Restore this record to the selected version? This creates a new version; it does not erase history.', zh: '将记录恢复到所选版本？这会生成一条新版本，不会抹除历史。' },
   'record.restoreSuccess': { en: 'Restored', zh: '已恢复' },
   'record.restoreNoop': { en: 'Already at this version', zh: '已是该版本' },
+  'record.restorePreviewTitle': { en: 'Review restore', zh: '确认恢复' },
+  'record.restorePreviewWillChange': { en: 'These fields will change:', zh: '以下字段将被修改：' },
+  'record.restorePreviewNoChanges': { en: 'Nothing would change — the record already matches this version.', zh: '没有变化 — 记录已与该版本一致。' },
+  'record.restorePreviewConflict': { en: 'Cannot restore: the schema changed since this version (a field no longer exists). Restore is blocked to avoid a partial result.', zh: '无法恢复：该版本之后表结构已变化（某字段已不存在）。为避免部分恢复，已阻止。' },
+  'record.restorePreviewExecute': { en: 'Restore', zh: '恢复' },
+  'record.restorePreviewCancel': { en: 'Cancel', zh: '取消' },
+  'record.restorePreviewLoading': { en: 'Loading preview…', zh: '正在加载预览…' },
+  'record.restorePreviewSet': { en: 'set', zh: '设为' },
+  'record.restorePreviewUnset': { en: 'clear', zh: '清空' },
   'record.errorRestore': { en: 'Restore failed', zh: '恢复失败' },
   'record.errorHistoryLoad': { en: 'Failed to load history', zh: '加载历史失败' },
   'record.errorWatchLoad': { en: 'Failed to load watch status', zh: '加载关注状态失败' },
