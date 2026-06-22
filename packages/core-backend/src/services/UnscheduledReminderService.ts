@@ -1,5 +1,6 @@
 import { query as defaultQuery } from '../db/pg'
 import { Logger } from '../core/logger'
+import { resolveAttendanceDefaultDeliveryChannel } from './AttendanceNotificationDeliveryWorker'
 
 /**
  * ⑤ Unscheduled-shift reminder job (design-lock attendance-unscheduled-reminder-design-lock-20260604).
@@ -53,7 +54,10 @@ const MIN_LOOKAHEAD_DAYS = 1
 const MAX_LOOKAHEAD_DAYS = 14
 const REMINDER_TYPE = 'unscheduled'
 const SOURCE_TYPE = 'unscheduled_reminder'
-const DELIVERY_CHANNEL = 'dingtalk_work_notification'
+// S2: the producer stamps each outbox row with the deployment's default delivery channel
+// (ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL), defaulting to the in-app work-notification channel —
+// unchanged until configured. Allowlist-validated inside the resolver, so it is safe to interpolate.
+const DELIVERY_CHANNEL = resolveAttendanceDefaultDeliveryChannel()
 const INACTIVE_RECIPIENT_ERROR = 'recipient_inactive_or_missing'
 // Must equal the plugin predicate's ATTENDANCE_SCHEDULE_OPEN_END_DATE (index.cjs) — parity-locked by the
 // integration test that compares scanCandidates() to isUserScheduledForDate().

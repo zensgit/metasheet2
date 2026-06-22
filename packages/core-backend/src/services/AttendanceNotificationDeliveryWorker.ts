@@ -107,6 +107,32 @@ const MAX_LEASE_MS = 10 * 60_000
 export const DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME = 'dingtalk_work_notification'
 export const EMAIL_SMTP_CHANNEL_NAME = 'email_smtp'
 
+/**
+ * Channel names a producer may assign to a NEW outbox row — these MUST be names the worker's channel
+ * registry can route (see createAttendanceDeliveryChannelsFromEnv). This set is ALSO the SQL-injection
+ * guard: resolveAttendanceDefaultDeliveryChannel interpolates its result into the producer SQL, so only
+ * an allowlisted constant may ever reach the query.
+ */
+const ROUTABLE_DEFAULT_DELIVERY_CHANNELS: ReadonlySet<string> = new Set([
+  DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME,
+  EMAIL_SMTP_CHANNEL_NAME,
+])
+
+/**
+ * The default delivery channel a producer stamps onto a NEW outbox row. S2 v1 = one deployment-wide
+ * default via `ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL`, **defaulting to the in-app work-notification
+ * channel** — behavior is unchanged until an operator configures it. The value is allowlist-validated
+ * (unrecognized / empty → the default) so an arbitrary env value can never be interpolated into the
+ * producer SQL. Per-org / per-recipient routing is the design-lock §3 follow-up (a producer would
+ * consult an org/recipient preference before falling back to this default).
+ */
+export function resolveAttendanceDefaultDeliveryChannel(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = (env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL ?? '').trim()
+  return ROUTABLE_DEFAULT_DELIVERY_CHANNELS.has(configured)
+    ? configured
+    : DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME
+}
+
 export function clampDeliveryBatchSize(value: number | undefined): number {
   const n = Number(value)
   if (!Number.isFinite(n)) return DEFAULT_BATCH_SIZE

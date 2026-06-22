@@ -9,6 +9,7 @@ import {
   EMAIL_SMTP_CHANNEL_NAME,
   DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME,
   createAttendanceDeliveryChannelsFromEnv,
+  resolveAttendanceDefaultDeliveryChannel,
   type EmailDeliveryTransport,
   type AttendanceDeliveryMessage,
 } from '../../src/services/AttendanceNotificationDeliveryWorker'
@@ -186,5 +187,25 @@ describe('createAttendanceDeliveryChannelsFromEnv — email env-gate', () => {
     const names = channels.map((c) => c.name)
     expect(names).toContain(EMAIL_SMTP_CHANNEL_NAME)
     expect(names).toContain(DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME)
+  })
+})
+
+describe('resolveAttendanceDefaultDeliveryChannel — producer default routing (S2)', () => {
+  it('no env → defaults to the in-app work-notification channel (behavior unchanged)', () => {
+    expect(resolveAttendanceDefaultDeliveryChannel({} as NodeJS.ProcessEnv)).toBe(DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME)
+  })
+
+  it('configured to email_smtp → producers stamp email', () => {
+    expect(resolveAttendanceDefaultDeliveryChannel({ ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL: EMAIL_SMTP_CHANNEL_NAME } as NodeJS.ProcessEnv)).toBe(EMAIL_SMTP_CHANNEL_NAME)
+  })
+
+  it('configured to the in-app channel explicitly → in-app', () => {
+    expect(resolveAttendanceDefaultDeliveryChannel({ ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL: DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME } as NodeJS.ProcessEnv)).toBe(DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME)
+  })
+
+  it('unrecognized / empty / injection-shaped value → falls back to default (allowlist guard prevents arbitrary SQL interpolation)', () => {
+    expect(resolveAttendanceDefaultDeliveryChannel({ ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL: 'sms' } as NodeJS.ProcessEnv)).toBe(DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME)
+    expect(resolveAttendanceDefaultDeliveryChannel({ ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL: '' } as NodeJS.ProcessEnv)).toBe(DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME)
+    expect(resolveAttendanceDefaultDeliveryChannel({ ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL: "email_smtp'; DROP TABLE x;--" } as NodeJS.ProcessEnv)).toBe(DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME)
   })
 })
