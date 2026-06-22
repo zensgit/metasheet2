@@ -2146,12 +2146,26 @@ function createHandlers(services, options = {}) {
       // color/order/label/disabled, dedup, max-options). Throws OPTION_SYNC_* (422, values-free).
       const optionSets = optionSetsFromInput(input.optionSets)
 
-      const { synced, skipped } = await syncFieldOptions({
+      const { synced, skipped, held } = await syncFieldOptions({
         provisioning,
         projectId: input.projectId,
         targetObjectId: preset.targetTable,
         optionFields,
         optionSets,
+        // FOS-2b: drive the preset's sync semantics. replace + update_from_source = the FOS-2 fast path
+        // (no read, no merge). Other modes read current options via the (read-only) getObjectField.
+        syncMode: preset.syncMode,
+        conflictPolicy: preset.conflictPolicy,
+        readCurrentOptions: async (field) => {
+          const current = await provisioning.getObjectField({
+            projectId: input.projectId,
+            objectId: preset.targetTable,
+            fieldId: field.id,
+          })
+          return current && current.property && Array.isArray(current.property.options)
+            ? current.property.options
+            : []
+        },
         buildPropertyPatch: (field, set) => ({
           options: set.options.map((option) => {
             const out = { value: option.value }
@@ -2185,12 +2199,17 @@ function createHandlers(services, options = {}) {
 
       return sendOk(res, {
         ok: true,
+        // FOS-2b: manual_confirm produces a values-free preview (held) and writes NOTHING.
+        held: held.length > 0,
         target: {
           presetId: preset.presetId,
           targetTable: preset.targetTable,
           fieldCount: synced.length,
+          heldFieldCount: held.length,
         },
         evidence: summarizeFieldOptionSyncEvidence({ preset, synced, skipped }),
+        // held entries are values-free: { field, optionSource:{key,type}, wouldAdd, wouldUpdate, wouldDisable }
+        heldEvidence: held,
       })
     },
 
