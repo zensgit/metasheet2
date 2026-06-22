@@ -120,6 +120,52 @@ describe('ApprovalAssigneeResolver', () => {
       .toEqual([cmEntry('m2'), cmEntry('m3')])
   })
 
+  // manager_at_level (Reading B / B1) — resolves a SINGLE level of the snapshot
+  // managerChainIds (chain[level-1]); N authored nodes at levels 1..N = 顺序逐级.
+  function resolveManagerAtLevel(level: number, requesterSnapshot: Record<string, unknown> | null) {
+    return resolveApprovalAssignees({
+      nodeKey: 'review',
+      sourceStep: 2,
+      config: { assigneeSources: [{ kind: 'manager_at_level', level }] },
+      formSnapshot: {},
+      requesterSnapshot,
+    })
+  }
+
+  const malEntry = (assigneeId: string) => ({
+    assignmentType: 'user', assigneeId, nodeKey: 'review', sourceStep: 2,
+    metadata: { resolvedFrom: { kind: 'manager_at_level', sourceIndex: 0 } },
+  })
+
+  it('resolves manager_at_level to the single chain manager at that 1-based level', () => {
+    expect(resolveManagerAtLevel(1, { id: 'requester-1', managerChainIds: ['m1', 'm2', 'm3'] }))
+      .toEqual([malEntry('m1')])
+    expect(resolveManagerAtLevel(3, { id: 'requester-1', managerChainIds: ['m1', 'm2', 'm3'] }))
+      .toEqual([malEntry('m3')])
+  })
+
+  it('resolves manager_at_level to empty when the chain is shorter than the level (→ emptyAssigneePolicy)', () => {
+    expect(resolveManagerAtLevel(4, { id: 'requester-1', managerChainIds: ['m1', 'm2'] })).toEqual([])
+    expect(resolveManagerAtLevel(2, { id: 'requester-1' })).toEqual([])
+    expect(resolveManagerAtLevel(2, null)).toEqual([])
+  })
+
+  it('self-excludes manager_at_level when the picked level resolves to the requester', () => {
+    expect(resolveManagerAtLevel(1, { id: 'requester-1', managerChainIds: ['requester-1', 'm2'] })).toEqual([])
+    expect(resolveManagerAtLevel(2, { id: 'requester-1', managerChainIds: ['requester-1', 'm2'] })).toEqual([malEntry('m2')])
+  })
+
+  // Density-contract pin: the production snapshot is DENSE (resolveManagerChain in
+  // ApprovalDirectoryOrg pushes only linked, non-self ids — it walks THROUGH unlinked
+  // rungs), so positional chain[level-1] = the level-th linked manager. This pins the
+  // defensive behavior if a null/'' rung ever reached the resolver: that level resolves
+  // empty (positional, no compaction), and a later dense level is unaffected.
+  it('manager_at_level treats a null/empty rung positionally (dense-snapshot contract)', () => {
+    expect(resolveManagerAtLevel(2, { id: 'requester-1', managerChainIds: ['m1', null as never, 'm3'] })).toEqual([])
+    expect(resolveManagerAtLevel(1, { id: 'requester-1', managerChainIds: ['m1', null as never, 'm3'] })).toEqual([malEntry('m1')])
+    expect(resolveManagerAtLevel(3, { id: 'requester-1', managerChainIds: ['m1', null as never, 'm3'] })).toEqual([malEntry('m3')])
+  })
+
   it('resolves requester and static sources with source metadata', () => {
     expect(resolve({
       assigneeSources: [

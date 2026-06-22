@@ -18,8 +18,9 @@
  *     crosses an automation boundary.
  *   - It is NOT a resolver kind. The `direct_manager` / `dept_head` assignee-source
  *     kinds are now LIVE in `ApprovalAssigneeResolver` and consume the snapshot
- *     fields this module bakes (`managerId` / `deptHeadId`); `continuous_managers`
- *     remains future/DESIGN-ONLY. Either way this module's sole job is unchanged:
+ *     fields this module bakes (`managerId` / `deptHeadId`); the `managerChainIds`
+ *     chain is consumed by the LIVE `continuous_managers` and `manager_at_level`
+ *     kinds. Either way this module's sole job is unchanged:
  *     snapshot plumbing — it populates those fields and does not resolve assignees
  *     itself.
  *
@@ -56,10 +57,11 @@ export interface ApprovalRequesterOrgRelations {
    * the requester is flagged leader of their own dept, `managerId` may be the
    * requester (harmless; the resolver drops it) while this chain skips past it.
    * Only populated when the caller opts in via `includeManagerChain` (i.e. a
-   * published graph actually uses the `continuous_managers` source). Cycle-guarded
-   * and capped at `MAX_MANAGER_CHAIN_LEVELS`; unlinked hops are walked through but
-   * not included. Read by the `continuous_managers` assignee-source kind (which
-   * slices it to its own `levels`). Omitted when the chain resolves empty.
+   * published graph uses a management-chain source — `continuous_managers` or
+   * `manager_at_level`). Cycle-guarded and capped at `MAX_MANAGER_CHAIN_LEVELS`;
+   * unlinked hops are walked through but not included (so the array is DENSE).
+   * Read by `continuous_managers` (slices it to its own `levels`) and
+   * `manager_at_level` (picks the single id at `level - 1`). Omitted when empty.
    */
   managerChainIds?: string[]
 }
@@ -235,9 +237,9 @@ export async function resolveApprovalRequesterOrgRelations(
 
   // 4) Manager chain (opt-in): walk leader_in_dept hop-by-hop up the org tree,
   //    starting from the requester. Only runs when the caller opts in — i.e. a
-  //    published graph actually uses `continuous_managers` — so the per-hop
-  //    queries are NOT added to every approval. Same point-in-time + self-exclusion
-  //    posture as the direct manager above.
+  //    published graph uses a management-chain source (`continuous_managers` or
+  //    `manager_at_level`) — so the per-hop queries are NOT added to every approval.
+  //    Same point-in-time + self-exclusion posture as the direct manager above.
   if (options.includeManagerChain) {
     const chain = await resolveManagerChain(
       integrationId,
