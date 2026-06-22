@@ -473,6 +473,29 @@ describeIfDatabase('B-2 AI bulk-commit (real DB)', () => {
     expect(fetchCallCount).toBe(0)
   })
 
+  // ── Owner gate: a cache row belongs to the actor who previewed it ──────────
+  test('owner gate: ACTOR_B cannot commit ACTOR_A cached output (cross-actor) → not_in_cache, field unchanged', async () => {
+    // ACTOR_A previewed record R and cached the output — generated under ACTOR_A's
+    // source-field read permissions (it can encode source content ACTOR_B can't read).
+    // ACTOR_B has BROAD write (canEditRecord on R, like the locked test) AND the runId,
+    // so the ONLY thing that must stop the commit is the cache OWNER gate.
+    const runId = `aibulk_b2_xactor_${TS}`
+    const R = `rec_b2_xactor_${TS}`
+    await seedRecord(R, { [FLD_SRC]: 'src', [FLD_TARGET]: 'UNCHANGED' }, ACTOR)
+    await seedCacheRow({ runId, recordId: R, actorId: ACTOR, proposedValue: 'ACTOR_A ONLY OUTPUT', previewVersion: 1 })
+
+    // Switch to ACTOR_B (broad multitable:write → canEditRecord on R).
+    currentUser = { id: OTHER, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+    const res = await commitReq({ runId, recordIds: [R] })
+    expect(res.status).toBe(200)
+    // Owner gate drops ACTOR_A's cache for ACTOR_B → not_in_cache (NOT written; and NOT
+    // skipped_no_perm, since the gate filters the cache BEFORE the per-row re-gate).
+    expect(res.body.outcomes).toEqual([{ recordId: R, outcome: 'not_in_cache' }])
+    expect(await recordValue(R)).toBe('UNCHANGED') // ACTOR_A's output never landed
+    expect(await recordVersion(R)).toBe(1)
+    expect(fetchCallCount).toBe(0)
+  })
+
   // ── Cross-sheet runId guard + double-commit self-guard + shape pin ─────────
   test('cross-sheet guard: a cache row whose sheet_id differs from the URL sheet is NOT committed (not_in_cache)', async () => {
     await grantOwnWrite()

@@ -1185,6 +1185,12 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       const cacheByRecordId = new Map<string, (typeof cacheRows)[number]>()
       for (const row of cacheRows) {
         if (row.sheetId !== sheetId) continue
+        // OWNER gate (fail-closed): the cached output was generated under the ORIGINAL
+        // actor's source-field read permissions, so ONLY that actor may commit it. A
+        // different user — even one with canEditRecord on this sheet who has the runId —
+        // gets `not_in_cache`, never another actor's preview output (which can encode
+        // source-field content THAT committer cannot read).
+        if (row.actorId !== access.userId) continue
         const expiresMs = Date.parse(row.expiresAt)
         if (Number.isFinite(expiresMs) && expiresMs <= nowMs) continue // expired → not_in_cache
         // PK is (run_id, record_id) so at most one live row per recordId.
