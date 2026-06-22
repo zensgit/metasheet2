@@ -22,6 +22,27 @@ test('Windows apply helper bootstraps SYSTEM-safe tool PATH and resolves pnpm fr
   assert.match(script, /\$pnpmPath = \$pnpmInstallPath/)
 })
 
+test('Windows apply helper retries post-PM2 healthcheck during warmup and remains fail-closed', () => {
+  const script = readScript('scripts/ops/multitable-onprem-apply-package.ps1')
+
+  assert.match(script, /\[string\]\$HealthcheckAttempts = '12'/)
+  assert.match(script, /\[string\]\$HealthcheckDelaySec = '5'/)
+  assert.match(script, /function Invoke-HealthcheckOnce/)
+  assert.match(script, /function Invoke-Healthcheck/)
+  assert.match(script, /for \(\$attempt = 1; \$attempt -le \$Attempts; \$attempt\+\+\)/)
+  assert.match(script, /foreach \(\$url in \$Urls\)/)
+  assert.match(script, /Invoke-HealthcheckOnce -Url \$url/)
+  assert.match(script, /Start-Sleep -Seconds \$DelaySec/)
+  assert.match(script, /return \$false/)
+  assert.match(script, /Convert-PositiveInt -Value \$HealthcheckAttempts -Label 'HealthcheckAttempts'/)
+  assert.match(script, /Convert-PositiveInt -Value \$HealthcheckDelaySec -Label 'HealthcheckDelaySec'/)
+  assert.match(script, /Invoke-Healthcheck -Urls @\(\$healthUrl, \$pluginsUrl\) -Attempts \$healthcheckAttemptsValue -DelaySec \$healthcheckDelayValue/)
+  assert.match(script, /throw "Healthcheck failed for \$healthUrl and \$pluginsUrl"/)
+
+  const oldSingleProbe = /if \(-not \(Invoke-Healthcheck -Url \$healthUrl\) -and -not \(Invoke-Healthcheck -Url \$pluginsUrl\)\)/
+  assert.doesNotMatch(script, oldSingleProbe)
+})
+
 test('PM2 startup helper initializes SYSTEM profile env before invoking PM2', () => {
   const script = readScript('scripts/ops/attendance-onprem-start-pm2.ps1')
 
