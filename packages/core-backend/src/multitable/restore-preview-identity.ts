@@ -12,10 +12,12 @@ import { resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
  * are T6-2).
  *
  * SCOPE LOCK (v1): this identity binds a SINGLE record-version restore — `{ sheetId, recordId, targetVersion }`.
- * It deliberately does NOT express a batch / multi-record / field-subset scope. T6-2 v1 must therefore execute
- * a single-record record-version restore ONLY; a batch / fan-out restore identity is a later slice that adds a
- * `scope` claim (kind + recordIds/fieldIds/batchId) and binds a scope canonical hash. Do not read this v1
- * identity as authorizing a wider scope just because `changesHash` matches.
+ * A FIELD SUBSET of that record-version is NOT a separate scope — it is represented by the filtered `changesHash`:
+ * preview + execute both filter the masked diff to the selected `fieldIds` and hash the FILTERED result, so a
+ * different selection yields a different hash and cannot be replayed (the selection is folded into the hash, never
+ * trusted as a side input). What this identity deliberately does NOT express is a MULTI-RECORD / batch / PIT
+ * scope; that is a later slice that adds a `scope` claim (kind + recordIds/batchId) and binds a scope canonical
+ * hash. Do not read this v1 identity as authorizing a MULTI-RECORD scope just because `changesHash` matches.
  *
  * Stateless (JWT/HS256, same primitive as invite-tokens): signature defeats tampering, `exp` bounds the window,
  * and `changesHash` defeats stale replay (if the data — or the actor's field permissions — moved since preview,

@@ -1697,10 +1697,14 @@ export class MultitableApiClient {
 
   // T6-2 chain: preview what a record-version restore WOULD change (read-only, masked), returning the identity
   // the execute consumes. Pair with restoreExecuteRecord — never restore from the FE without showing the preview.
-  async restorePreviewRecord(sheetId: string, recordId: string, targetVersion: number): Promise<RestorePreviewResult> {
+  async restorePreviewRecord(sheetId: string, recordId: string, targetVersion: number, fieldIds?: string[]): Promise<RestorePreviewResult> {
+    // fieldIds (optional) = a per-field (column-subset) preview; omitted = full-record. The server filters the
+    // masked diff to the selection before hashing, so the identity binds exactly this subset.
+    const body: { targetVersion: number; fieldIds?: string[] } = { targetVersion }
+    if (fieldIds && fieldIds.length > 0) body.fieldIds = fieldIds
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/restore-preview`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetVersion }) },
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
     )
     return this.parseJson<RestorePreviewResult>(res)
   }
@@ -1708,10 +1712,13 @@ export class MultitableApiClient {
   // Execute a previewed restore, carrying the previewIdentity from restorePreviewRecord (SR-3: the server
   // confirms execution matches the preview). Writes a forward revision; row-deny / field-gate / version are
   // re-checked server-side.
-  async restoreExecuteRecord(sheetId: string, recordId: string, targetVersion: number, expectedVersion: number, previewIdentity: string): Promise<RestoreRecordResult> {
+  async restoreExecuteRecord(sheetId: string, recordId: string, targetVersion: number, expectedVersion: number, previewIdentity: string, fieldIds?: string[]): Promise<RestoreRecordResult> {
+    // fieldIds must match the selection the identity was minted for (the server re-filters + re-hashes).
+    const body: { targetVersion: number; expectedVersion: number; previewIdentity: string; fieldIds?: string[] } = { targetVersion, expectedVersion, previewIdentity }
+    if (fieldIds && fieldIds.length > 0) body.fieldIds = fieldIds
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/restore-execute`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetVersion, expectedVersion, previewIdentity }) },
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
     )
     return this.parseJson<RestoreRecordResult>(res)
   }
