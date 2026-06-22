@@ -96,7 +96,49 @@ Stock-preparation remains the compatibility anchor because it already proves:
 - predefined action binding allowlist;
 - no business-row write and no external write.
 
-## 6. UX Direction
+## 6. Current Stock-Preparation Grounding
+
+The current stock-preparation option-sync implementation is the compatibility
+anchor for the generic model. It already behaves like a narrow, metadata-only
+field-option sync:
+
+- `syncStockPreparationOptions(input)` patches MetaSheet field metadata through
+  the scoped provisioning API; it does not write business rows, read PLM, call
+  K3, or accept browser-provided SQL/JavaScript/handler bodies;
+- the target is the canonical own-sheet stock-preparation table, not an
+  external adapter target;
+- access is admin-gated, the request shape is allowlisted, and executable keys,
+  secret-shaped strings, and unresolved placeholders are rejected;
+- evidence is values-free: field/source keys, option counts,
+  action-binding counts, status/error codes, and skip reasons are allowed;
+  option values, labels, source payloads, sheet ids, field ids, credentials,
+  tokens, connection strings, raw SQL, and stack traces with values are not;
+- the per-option normalizer is already mostly generic:
+  `value`, optional `label`, `color` in `#RRGGBB` form, enabled/disabled state,
+  optional `order`, and allowlisted `actionBindings`;
+- the stock-preparation-specific pieces are the target table, field-to-sourceKey
+  mapping, and action allowlist.
+
+Current behavior is full `replace`: the source option set becomes the field's
+option set. `append`, `disable_missing`, option-level `conflictPolicy`,
+scheduled triggers, grouping/category fields, and dry-run/preview are not
+implemented today and must stay behind later FOS slices.
+
+## 7. Owner Decisions Before FOS-1
+
+These defaults are the recommended v1 decisions. Changing any of them should be
+an explicit owner call before FOS-1 implementation starts.
+
+| Decision | Recommended v1 | Rationale |
+| --- | --- | --- |
+| Preset storage | Frozen reference-catalog constants | Matches the values-free S3-3 reference-template pattern, avoids a migration, and keeps FOS decoupled from S3 pipeline templates. Persisted custom presets can be a later opt-in. |
+| `syncMode` default | `replace` | Mirrors the existing stock-preparation behavior and gives a zero-drift compatibility anchor. |
+| `disable_missing` semantics | Disable only, never physically delete | Preserves history and human-added options; deletion semantics need their own review. |
+| `conflictPolicy` default | `update_from_source` | Mirrors today's full metadata refresh. `keep_existing` and `manual_confirm` require new runtime behavior and tests. |
+| `triggerMode` | `manual` only | Scheduled or after-source-refresh triggers need separate gates and observability. |
+| Route naming | Add `POST /api/integration/field-options/sync`; keep the stock-preparation route as an alias/forwarder | Lets the generic capability become first-class without breaking existing clients/tests. |
+
+## 8. UX Direction
 
 The generic workbench surface should present:
 
@@ -118,7 +160,7 @@ estimatedChanges=count-only
 Business-specific wording belongs in the preset label, helper text, or evidence
 summary, not in the primary Data Factory action name.
 
-## 7. Safety Locks
+## 9. Safety Locks
 
 Every implementation slice must preserve these locks:
 
@@ -148,7 +190,7 @@ counts, sync modes, and status/error codes. Evidence must not include option
 values, labels, source row payloads, credentials, tokens, connection strings,
 sheet ids, field ids, raw SQL, or stack traces with values.
 
-## 8. Compatibility and Migration
+## 10. Compatibility and Migration
 
 The current stock-preparation route remains the compatibility path until a
 generic runtime route exists and is verified. Do not delete or silently change it
@@ -162,7 +204,7 @@ The migration should be staged:
 3. switch UI wording to the generic command;
 4. optionally retire stock-specific service names only after tests prove parity.
 
-## 9. Slice Plan
+## 11. Slice Plan
 
 ### FOS-0 - Design lock
 
@@ -171,22 +213,42 @@ criteria. No runtime/UI changes.
 
 ### FOS-1 - Backend contract, stock preset only
 
-Add a generic normalizer/contract and route shape for field-option sync, but only
-map the existing stock-preparation preset. No new free-form source support.
+Add a generic `field-option-sync` normalizer/contract and values-free preset
+catalog constants, with stock-preparation as the first preset. This slice is
+lock-safe and does not wire runtime or UI behavior.
 
 Acceptance:
 
 - existing stock-preparation C6 behavior remains unchanged;
-- generic request cannot carry SQL/JS/URL/function body/payload;
-- non-admin fails closed;
+- preset definitions cannot carry SQL/JS/URL/function body/payload;
 - evidence is values-free;
-- backend tests prove the preset path and stock-specific route cannot drift.
+- enum fields are strict for `sourceKind`, `syncMode`, `conflictPolicy`, and
+  `triggerMode`;
+- the stock-preparation preset is values-free and zero-drift-compatible with
+  today's implementation.
 
-### FOS-2 - UI generic surface
+### FOS-2 - Runtime generalization
+
+Refactor stock-preparation option sync into a generic FOS kernel parameterized by
+target object, field-to-sourceKey mapping, sync mode, conflict policy, and action
+allowlist. Add the generic route and keep the existing stock-preparation route as
+a compatibility alias/forwarder.
+
+Acceptance:
+
+- existing stock-preparation tests remain green and prove zero drift;
+- generic route cannot carry SQL/JS/URL/function body/payload;
+- non-admin fails closed;
+- `replace` behavior matches today's stock-preparation behavior;
+- any newly enabled `append`, `disable_missing`, or `conflictPolicy` behavior is
+  covered by negative controls;
+- evidence remains values-free.
+
+### FOS-3 - UI generic surface
 
 Rename the primary visible action to `Sync options` / `Refresh field options` and
-show stock preparation as a preset. Keep the old route behind the preset until
-FOS-1 is fully verified.
+show stock preparation as a preset. Business-specific labels remain in the preset
+name and details, not the top-level Data Factory command.
 
 Acceptance:
 
@@ -196,13 +258,16 @@ Acceptance:
 - no credential or source-row value appears in DOM evidence;
 - request body stays scope-limited and values-free.
 
-### FOS-3 - Additional preset authoring
+### FOS-4 - Additional preset authoring
 
 Allow admin-reviewed creation of additional option-sync presets. This is the
 first slice that may introduce new source/target configurations beyond the stock
 preset, so it needs its own review and negative controls.
 
-## 10. Acceptance Criteria for #3020
+Scheduled or after-source-refresh triggers are separate demand-gated work and
+must not ride on FOS-1/FOS-2/FOS-3.
+
+## 12. Acceptance Criteria for #3020
 
 ```text
 dataFactoryDoesNotExposeOnlyBusinessSpecificOptionSync=true
@@ -216,4 +281,5 @@ valuesFreeEvidence=true
 ```
 
 FOS-0 only satisfies the design portion of these criteria. Runtime satisfaction
-requires FOS-1/FOS-2/FOS-3.
+requires FOS-1/FOS-2/FOS-3, and additional preset authoring remains gated behind
+FOS-4 or later.
