@@ -58,7 +58,11 @@ import { eventBus } from '../integration/events/event-bus'
 import { createRateLimiter } from '../middleware/rate-limiter'
 import { ensureRecordWriteAllowed, resolveSheetCapabilities, resolveSheetReadableCapabilities } from '../multitable/permission-service'
 import { loadFieldsForSheet, tryResolveView } from '../multitable/loaders'
-import { insertBulkPreviewCacheRow, type BulkPreviewCacheRow } from '../services/ai-bulk-preview-cache'
+import {
+  insertBulkPreviewCacheRow,
+  readBulkPreviewCacheRows,
+  type BulkPreviewCacheRow,
+} from '../services/ai-bulk-preview-cache'
 
 /**
  * Multitable AI routes — A1 readiness (M1b) + A2 shortcut preview/run (M2).
@@ -1088,6 +1092,216 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
     } catch (err) {
       console.error('[multitable-ai] bulk-preview failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to run AI bulk preview' } })
+    }
+  })
+
+  /**
+   * B-2 — AI bulk-COMMIT (INTERNAL, not in OpenAPI). The WRITE step of the
+   * review-before-write flow: persist the CACHED proposed values (generated +
+   * already CHARGED at B-1 preview) for the rows the user confirmed. Second impl
+   * ring of the ratified design lock (§3 + D6):
+   * docs/development/multitable-ai-bulk-fill-review-before-write-designlock-20260621.md
+   *
+   * Body: { runId, recordIds: [confirmed] }. fieldId/sheetId come from the cache
+   * rows + URL (NOT the body) — a run targets exactly one field.
+   *
+   * LOCKED criteria (each → a real-DB golden):
+   *  1. Commit ONLY cached rows. The write set = cache rows (readBulkPreviewCacheRows)
+   *     whose recordId ∈ confirmed recordIds. A confirmed recordId with NO cache
+   *     entry → `not_in_cache`, NEVER written. NEVER re-generate / call the provider.
+   *  2. A non-cached / B-1 `failures[]` row → `not_in_cache` (there is no value to write).
+   *  3. expectedVersion stale-drop. The write rides the CACHED `previewVersion`
+   *     (anti-TOCTOU) into patchRecords; ServiceVersionConflictError → `stale_reprev`.
+   *  4. Abandoned previews stay charged — release NOTHING. Commit does ZERO ledger
+   *     writes (charge settled at B-1); a cached row NOT in the confirmed list is
+   *     simply not written. Reuse is patchRecords ONLY — never the reserve/settle
+   *     core — so the ledger token-sum is UNCHANGED by a commit.
+   *  5. Per-row partial outcomes (no all-or-nothing rollback): each confirmed
+   *     recordId gets exactly one outcome ∈ {written, stale_reprev, write_conflict,
+   *     not_in_cache, skipped_no_perm}. patchRecords is called ONCE PER record
+   *     (single-entry Map), each in its own try/catch.
+   *  6. Re-gate AT COMMIT (perms can change after preview): every cached row must
+   *     STILL pass record-read (requireRecordReadable) + sheet canEditRecord +
+   *     layer-3 field-permission (visible/readOnly) + ensureRecordWriteAllowed —
+   *     a row unwritable NOW → `skipped_no_perm`, never written. The write ALSO
+   *     goes through patchRecords (which re-enforces lock/version in-transaction).
+   *
+   * The EXACT cached `proposedValue` is written (B-1 stored it verbatim). A short
+   * TTL applies: a cache row past `expiresAt` (an abandoned/expired run) is
+   * treated as `not_in_cache` (no value to commit). Per-recordId outcome
+   * precedence: not_in_cache (no entry / expired) → skipped_no_perm (a commit-time
+   * gate fails) → patchRecords outcome (written / stale_reprev / write_conflict).
+   * An unknown / fully-expired runId yields all-`not_in_cache` at 200 (never 404).
+   */
+  router.post('/sheets/:sheetId/ai/shortcut/bulk-commit', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const schema = z.object({
+      runId: z.string().min(1).max(100),
+      recordIds: z.array(z.string().min(1).max(50)).min(1).max(5000),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!sheetId || !parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: !sheetId ? 'sheetId is required' : parsed.error?.message } })
+    }
+    const { runId, recordIds } = parsed.data
+
+    // Burst rate limit ONCE at entry (per-HTTP-request guard, bulk-preview parity).
+    // Commit issues NO provider call, but it is still a privileged batch endpoint.
+    if ((await applyBurstLimiter(burstLimiter, req, res)) === 'limited') {
+      return
+    }
+
+    type CommitOutcome = 'written' | 'stale_reprev' | 'write_conflict' | 'not_in_cache' | 'skipped_no_perm'
+    const outcomes: Array<{ recordId: string; outcome: CommitOutcome }> = []
+
+    try {
+      const pool = poolManager.get() as unknown as PoolLike
+      const query = pool.query.bind(pool) as QueryFn
+
+      // ── SHEET-LEVEL gates (ONCE, hoisted; bulk-preview parity) ────────────────
+      const { access, capabilities, sheetScope } = await resolveSheetReadableCapabilities(req, query, sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
+      }
+      if (!capabilities.canRead) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      if (!capabilities.canEditRecord) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+
+      const patchContext = await buildRecordPatchContext(req, query, sheetId, access, capabilities)
+      if (!patchContext) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+
+      // ── Cache = THE ONLY source of values to write (criterion 1) ──────────────
+      // Read the run's cache once; index by recordId. A row past its TTL is treated
+      // as absent (criterion: expired run == not_in_cache). A cache row whose
+      // sheet_id does NOT match the URL sheet is dropped (cross-sheet runId guard).
+      const ledgerQuery = pool.query.bind(pool) as AiUsageQueryFn
+      const cacheRows = await readBulkPreviewCacheRows(ledgerQuery, runId)
+      const nowMs = Date.now()
+      const cacheByRecordId = new Map<string, (typeof cacheRows)[number]>()
+      for (const row of cacheRows) {
+        if (row.sheetId !== sheetId) continue
+        const expiresMs = Date.parse(row.expiresAt)
+        if (Number.isFinite(expiresMs) && expiresMs <= nowMs) continue // expired → not_in_cache
+        // PK is (run_id, record_id) so at most one live row per recordId.
+        cacheByRecordId.set(row.recordId, row)
+      }
+
+      // ── PER-ROW commit over the CONFIRMED set (deduped, order preserved) ───────
+      // Each confirmed recordId gets EXACTLY ONE outcome (criterion 5). Precedence:
+      // not_in_cache → skipped_no_perm (commit-time re-gate) → patchRecords outcome.
+      const seen = new Set<string>()
+      for (const recordId of recordIds) {
+        if (seen.has(recordId)) continue
+        seen.add(recordId)
+
+        const cached = cacheByRecordId.get(recordId)
+        if (!cached) {
+          // No cached value (never generated, a B-1 `failures[]` row, or expired) →
+          // NOTHING to write. Criteria 1 + 2.
+          outcomes.push({ recordId, outcome: 'not_in_cache' })
+          continue
+        }
+
+        // Re-gate AT COMMIT (criterion 6) — perms may have changed since preview.
+        // 6a) Row-level read gate (read-denied / vanished now → skipped_no_perm).
+        const readable = await requireRecordReadable(req, query, sheetId, recordId)
+        if ('status' in readable) {
+          outcomes.push({ recordId, outcome: 'skipped_no_perm' })
+          continue
+        }
+        // 6b) Layer-3 field-permission on the CACHED target field (the run's field).
+        //     patchRecords does NOT execute field_permissions on writes (#2106 F3),
+        //     so this pre-check IS that layer's enforcement point — mirror the run path.
+        const targetPermission = patchContext.fieldPermissions[cached.fieldId]
+        if (!targetPermission || targetPermission.visible === false || targetPermission.readOnly === true) {
+          outcomes.push({ recordId, outcome: 'skipped_no_perm' })
+          continue
+        }
+        // 6c) Read the record ONCE for the WRITE gate — createdBy (own-write scope)
+        //     + existence. NB: the version used for the conflict check is the CACHED
+        //     previewVersion (anti-TOCTOU), NOT this freshly-read one.
+        const current = await readRecordOnce(query, sheetId, recordId)
+        if (!current) {
+          // Record vanished after preview → re-gate fails (nothing writable).
+          outcomes.push({ recordId, outcome: 'skipped_no_perm' })
+          continue
+        }
+        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, current.createdBy, 'edit')) {
+          outcomes.push({ recordId, outcome: 'skipped_no_perm' })
+          continue
+        }
+
+        // ── Land the EXACT cached value through the AUTHORITATIVE write path ──────
+        // RecordWriteService.patchRecords (NEVER raw SQL), SAME post-commit Yjs
+        // invalidation wiring as POST /patch and the per-record run. ONE record per
+        // call (single-entry Map → no all-or-nothing rollback across rows). The
+        // CACHED previewVersion rides in as expectedVersion (criterion 3).
+        const recordWriteService = new RecordWriteService(pool, eventBus, createRecordWriteHelpers(req, pool))
+        const invalidator = getYjsInvalidatorForRoutes()
+        if (invalidator) {
+          recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(invalidator)])
+        }
+
+        try {
+          await recordWriteService.patchRecords({
+            sheetId,
+            changesByRecord: new Map([
+              [recordId, [{ fieldId: cached.fieldId, value: cached.proposedValue, expectedVersion: cached.previewVersion }]],
+            ]),
+            actorId: access.userId || null,
+            fields: patchContext.fields,
+            visiblePropertyFields: patchContext.readableEchoFields,
+            visiblePropertyFieldIds: patchContext.readableEchoFieldIds,
+            attachmentFields: patchContext.attachmentFields,
+            fieldById: patchContext.fieldById,
+            capabilities,
+            sheetScope,
+            access,
+          })
+          outcomes.push({ recordId, outcome: 'written' })
+        } catch (err) {
+          // NO ledger writes here (criterion 4): the charge settled at B-1 preview.
+          if (err instanceof ServiceVersionConflictError) {
+            // The record shifted since the preview was generated — DROP it, never
+            // overwrite against data the user did not review (criterion 3).
+            outcomes.push({ recordId, outcome: 'stale_reprev' })
+            continue
+          }
+          // Everything else patchRecords can throw at commit — a locked record
+          // (ServiceValidationError 'Record is locked', the record-lock guard fires
+          // BEFORE the version check), a now-forbidden field, a vanished record, a
+          // validation failure, or any unexpected error — is a per-row write
+          // conflict. Never all-or-nothing: record it and keep going.
+          if (
+            err instanceof ServiceValidationError ||
+            err instanceof ServiceFieldForbiddenError ||
+            err instanceof ServiceNotFoundError
+          ) {
+            outcomes.push({ recordId, outcome: 'write_conflict' })
+            continue
+          }
+          console.error('[multitable-ai] bulk-commit row write failed:', err)
+          outcomes.push({ recordId, outcome: 'write_conflict' })
+        }
+      }
+
+      const counts = outcomes.reduce<Record<CommitOutcome, number>>(
+        (acc, { outcome }) => {
+          acc[outcome] += 1
+          return acc
+        },
+        { written: 0, stale_reprev: 0, write_conflict: 0, not_in_cache: 0, skipped_no_perm: 0 },
+      )
+
+      return res.json({ outcomes, counts })
+    } catch (err) {
+      console.error('[multitable-ai] bulk-commit failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to commit AI bulk preview' } })
     }
   })
 
