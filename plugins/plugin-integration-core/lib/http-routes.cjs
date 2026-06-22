@@ -42,6 +42,8 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/target/readiness', 'stockPreparationTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/target/ensure', 'stockPreparationTargetEnsure'],
   ['POST', '/api/integration/stock-preparation/options/sync', 'stockPreparationOptionsSync'],
+  // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
+  ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
   ['GET', '/api/integration/templates', 'templatesList'],
   ['POST', '/api/integration/templates', 'templatesUpsert'],
   // S3-3: read-only reference-template catalog. MUST precede '/templates/:id' so ':id' can't capture 'references'.
@@ -131,7 +133,16 @@ const {
 const {
   StockPreparationOptionSyncError,
   syncStockPreparationOptions,
+  optionSetsFromInput,
 } = require('./stock-preparation-option-sync.cjs')
+// FOS-2: generic field-option-sync route — resolve a FOS preset (FOS-1 catalog), validate operator
+// option sets against the preset's source keys, and patch each mapped field's options + generic
+// `fieldOptionSync` metadata through the SAME kernel stock-prep uses (no parallel write path).
+const { syncFieldOptions } = require('./field-option-sync-runtime.cjs')
+const {
+  FieldOptionSyncContractError,
+  listFieldOptionSyncPresets,
+} = require('./field-option-sync-contract.cjs')
 
 class HttpRouteError extends Error {
   constructor(status, code, message, details = {}) {
@@ -407,6 +418,15 @@ const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
   'optionSources',
   'configInfo',
 ])
+// FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
+// catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
+const VALID_FIELD_OPTION_SYNC_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'presetId',
+  'optionSets',
+])
 
 function normalizeTableActionBody(body = {}, allowedKeys = VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS) {
   if (!isPlainObject(body)) {
@@ -567,6 +587,78 @@ function stockPreparationOptionSyncInput(req, rawInput = {}) {
     workspaceId: input.workspaceId,
     projectId,
     optionSets: input.optionSets,
+  }
+}
+
+function normalizeFieldOptionSyncRequest(input = {}) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, 'FIELD_OPTION_SYNC_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!VALID_FIELD_OPTION_SYNC_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'FIELD_OPTION_SYNC_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  const presetId = firstString(input.presetId)
+  if (!presetId) {
+    throw new HttpRouteError(400, 'FIELD_OPTION_SYNC_REQUEST_INVALID', 'presetId is required', { field: 'presetId' })
+  }
+  return {
+    tenantId: firstString(input.tenantId),
+    workspaceId: firstString(input.workspaceId),
+    projectId: firstString(input.projectId),
+    presetId,
+    optionSets: isPlainObject(input.optionSets) ? input.optionSets : {},
+  }
+}
+
+function fieldOptionSyncInput(req, rawInput = {}) {
+  const input = normalizeFieldOptionSyncRequest(rawInput)
+  const tenantId = resolveTenantId(req, input)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    projectId,
+    presetId: input.presetId,
+    optionSets: input.optionSets,
+  }
+}
+
+// FOS-2: resolve a FOS preset from the FOS-1 catalog by presetId (422 on unknown). Returns the
+// validated, deep-copied preset (values-free by FOS-1 construction).
+function resolveFieldOptionSyncPreset(presetId) {
+  const preset = listFieldOptionSyncPresets().find((entry) => entry.presetId === presetId)
+  if (!preset) {
+    throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_PRESET_UNKNOWN', 'field-option-sync preset is not in the catalog', { presetId })
+  }
+  return preset
+}
+
+// FOS-2: project preset optionFields ({valueField=sourceKey, targetField=field id}) into the kernel's
+// optionFields shape ([{ id, optionSource:{ key, type } }]). type is the FOS source kind (metadata only).
+function fieldOptionSyncKernelFields(preset) {
+  return preset.optionFields.map((field) => ({
+    id: field.targetField,
+    optionSource: { key: field.valueField, type: preset.sourceKind },
+  }))
+}
+
+// FOS-2: values-free per-field evidence for the generic route (no option values/labels, no sheetId).
+function summarizeFieldOptionSyncEvidence({ preset, synced, skipped }) {
+  return {
+    presetId: preset.presetId,
+    targetTable: preset.targetTable,
+    fields: synced.map((entry) => ({
+      field: entry.field,
+      sourceKey: entry.optionSource.key,
+      optionCount: entry.set.options.length,
+    })),
+    skipped: skipped.map((entry) => ({
+      field: entry.field,
+      sourceKey: entry.optionSource.key,
+      reason: entry.reason,
+    })),
   }
 }
 
@@ -1218,6 +1310,19 @@ function createHandlers(services, options = {}) {
       throw new HttpRouteError(501, 'TABLE_ACTION_RECORDS_API_UNAVAILABLE', 'multitable records API is not available')
     }
     return records
+  }
+
+  // FOS-2: scoped multitable provisioning API for the generic field-option-sync route. Same dep the
+  // stock-prep option-sync path uses (context.api.multitable.provisioning); we only need the
+  // metadata-patch method here.
+  function getFieldOptionSyncProvisioning() {
+    const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+    if (!provisioning || typeof provisioning.patchObjectFieldProperty !== 'function') {
+      throw new HttpRouteError(503, 'FIELD_OPTION_SYNC_API_UNAVAILABLE', 'field-option-sync requires multitable.provisioning patchObjectFieldProperty API', {
+        requiredMethods: ['patchObjectFieldProperty'],
+      })
+    }
+    return provisioning
   }
 
   async function loadTableActionSourceAdapter(req, action, options = {}) {
@@ -1981,6 +2086,112 @@ function createHandlers(services, options = {}) {
         optionSets: input.optionSets,
       })
       return sendOk(res, result)
+    },
+
+    // FOS-2: generic, preset-driven field-option-sync. Admin-gated; resolves a FOS preset from the
+    // FOS-1 catalog; validates operator option sets against the preset's source keys; patches each
+    // mapped field's options + generic `fieldOptionSync` metadata through the SAME kernel stock-prep
+    // uses. Metadata-only (no business-row write, no external system, no K3); values-free evidence.
+    async fieldOptionsSync(req, res) {
+      requireAccess(req, 'admin')
+      const input = fieldOptionSyncInput(req, requestBody(req))
+      const preset = resolveFieldOptionSyncPreset(input.presetId)
+      const provisioning = getFieldOptionSyncProvisioning()
+      const optionFields = fieldOptionSyncKernelFields(preset)
+
+      // FOS-2: readiness gate, bound per preset. The stock-preparation preset targets the canonical
+      // stock-prep table, so it reuses that table's readiness inspection — parity with the stock-prep
+      // route: never patch an unprovisioned target (avoids a partial patch / opaque FIELD_PATCH_FAILED).
+      // Fail closed for any preset without a readiness binding (additional presets are gated to FOS-4).
+      if (preset.presetId === 'preset.stock-preparation.v1') {
+        const readiness = await inspectStockPreparationCanonicalTarget({ context, projectId: input.projectId, permission: 'admin' })
+        if (readiness.ready !== true) {
+          throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_TARGET_NOT_READY', 'field-option-sync target is not ready', {
+            presetId: preset.presetId,
+            targetObjectId: preset.targetTable,
+          })
+        }
+      } else {
+        throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_PRESET_NO_READINESS', 'preset has no readiness binding (additional presets are gated to FOS-4)', {
+          presetId: preset.presetId,
+        })
+      }
+
+      // Reject any operator option-set key the preset does not declare (mirrors stock-prep).
+      const allowedSourceKeys = new Set(optionFields.map((field) => field.optionSource.key))
+      const unknownSourceKey = Object.keys(input.optionSets).find((key) => !allowedSourceKeys.has(key))
+      if (unknownSourceKey) {
+        throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_UNKNOWN_SOURCE', 'option set source key is not declared by the preset', {
+          presetId: preset.presetId,
+          sourceKey: unknownSourceKey,
+        })
+      }
+
+      // Fail closed on action bindings: actions are a stock-prep-specific concept (predefined action
+      // allowlist + dry-run gating). The generic route writes option metadata only, so it rejects
+      // them rather than silently dropping them through the shared per-option normalizer.
+      for (const [sourceKey, rawOptions] of Object.entries(input.optionSets)) {
+        if (!Array.isArray(rawOptions)) continue
+        const carriesActions = rawOptions.some((option) =>
+          isPlainObject(option) && (Array.isArray(option.actionBindings) || Array.isArray(option.actions)))
+        if (carriesActions) {
+          throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_ACTIONS_NOT_SUPPORTED', 'generic field-option-sync does not support action bindings', {
+            presetId: preset.presetId,
+            sourceKey,
+          })
+        }
+      }
+
+      // Reuse the per-option safety normalization (executable-key / secret / placeholder rejection,
+      // color/order/label/disabled, dedup, max-options). Throws OPTION_SYNC_* (422, values-free).
+      const optionSets = optionSetsFromInput(input.optionSets)
+
+      const { synced, skipped } = await syncFieldOptions({
+        provisioning,
+        projectId: input.projectId,
+        targetObjectId: preset.targetTable,
+        optionFields,
+        optionSets,
+        buildPropertyPatch: (field, set) => ({
+          options: set.options.map((option) => {
+            const out = { value: option.value }
+            if (option.label) out.label = option.label
+            if (option.color) out.color = option.color
+            if (option.disabled) out.disabled = true
+            return out
+          }),
+          fieldOptionSync: {
+            presetId: preset.presetId,
+            sourceKey: field.optionSource.key,
+            optionCount: set.options.length,
+          },
+        }),
+        resolveSkipReason: () => 'source_not_supplied',
+        errorFactory: {
+          patchFailed: ({ field, sourceKey, error }) =>
+            new HttpRouteError(422, 'FIELD_OPTION_SYNC_FIELD_PATCH_FAILED', 'failed to patch field option metadata', {
+              presetId: preset.presetId,
+              field,
+              sourceKey,
+              errorCode: (error && (error.code || error.name)) || 'FIELD_PATCH_FAILED',
+            }),
+          noFieldsSynced: ({ skipped: skippedEntries }) =>
+            new HttpRouteError(422, 'FIELD_OPTION_SYNC_NO_FIELDS', 'no preset option fields were synchronized', {
+              presetId: preset.presetId,
+              skipped: skippedEntries.map((entry) => ({ field: entry.field, reason: entry.reason })),
+            }),
+        },
+      })
+
+      return sendOk(res, {
+        ok: true,
+        target: {
+          presetId: preset.presetId,
+          targetTable: preset.targetTable,
+          fieldCount: synced.length,
+        },
+        evidence: summarizeFieldOptionSyncEvidence({ preset, synced, skipped }),
+      })
     },
 
     async templatesPreview(req, res) {
