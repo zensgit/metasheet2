@@ -596,4 +596,24 @@ describeIfDatabase('B-1 AI bulk-preview (real DB)', () => {
     expect(res.status).toBe(200)
     expect(Object.keys(res.body).sort()).toEqual(['capped', 'failures', 'rows', 'runId', 'settledCost', 'skipped'])
   })
+
+  test('currentValue: each row reports the record’s REAL target value (truthful diff, server-read, not grid-page)', async () => {
+    await q(
+      `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code) VALUES ($1,'user',$2,$3)`,
+      [SHEET_ID, ACTOR, 'multitable:write-own'],
+    )
+    // The target field already holds a value — the preview MUST report it as currentValue so the
+    // review diff is truthful. The server reads it per-row, so it is never grid-page dependent (the
+    // bug this guards: an off-page row showing a false "(empty)" current value → overwrite under a lie).
+    const R = `rec_b1_curval_${TS}`
+    await seedRecord(R, { [FLD_SRC]: 'src', [FLD_TARGET]: 'EXISTING TARGET VALUE' }, ACTOR)
+    const REMPTY = `rec_b1_curval_empty_${TS}`
+    await seedRecord(REMPTY, { [FLD_SRC]: 'src2' }, ACTOR) // FLD_TARGET unset → currentValue null
+
+    const res = await bulkReq({ fieldId: FLD_TARGET, scope: 'sheet' })
+    expect(res.status).toBe(200)
+    const byId = new Map((res.body.rows as Array<{ recordId: string; currentValue: string | null }>).map((r) => [r.recordId, r.currentValue]))
+    expect(byId.get(R)).toBe('EXISTING TARGET VALUE') // real current value, never ''
+    expect(byId.get(REMPTY)).toBeNull() // genuinely empty → null, distinct from a non-empty value
+  })
 })
