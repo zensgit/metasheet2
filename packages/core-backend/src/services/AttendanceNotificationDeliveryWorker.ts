@@ -12,6 +12,13 @@ import {
 import {
   readDingTalkMessageConfigFromRuntime,
 } from '../integrations/dingtalk/work-notification-settings'
+import nodemailer from 'nodemailer'
+import {
+  resolveEmailSmtpTransportConfig,
+  resolveEmailTransportReadiness,
+  redactEmailTransportText,
+  type EmailSmtpTransportConfig,
+} from './email-transport-readiness'
 
 /**
  * C5-2 delivery worker.
@@ -98,6 +105,7 @@ const MAX_BATCH_SIZE = 200
 const MIN_LEASE_MS = 5_000
 const MAX_LEASE_MS = 10 * 60_000
 export const DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME = 'dingtalk_work_notification'
+export const EMAIL_SMTP_CHANNEL_NAME = 'email_smtp'
 
 export function clampDeliveryBatchSize(value: number | undefined): number {
   const n = Number(value)
@@ -135,13 +143,27 @@ export class DeterministicFakeAttendanceDeliveryChannel implements AttendanceDel
 }
 
 export function createAttendanceDeliveryChannelsFromEnv(env: NodeJS.ProcessEnv = process.env): AttendanceDeliveryChannel[] {
+  // Accumulate every enabled channel (the worker routes each delivery row by `row.channel` name, so
+  // channels coexist). Each is independently env-gated + default-off.
+  const channels: AttendanceDeliveryChannel[] = []
   if (env.ATTENDANCE_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED === 'true') {
-    return [new DingTalkAttendanceDeliveryChannel()]
+    channels.push(new DingTalkAttendanceDeliveryChannel())
+  } else if (env.ATTENDANCE_NOTIFICATION_FAKE_CHANNEL_ENABLED === 'true') {
+    // Fake registers ONLY when the real in-app channel is not enabled (preserve real-over-fake
+    // precedence; both gates accidentally on → real wins). Email below is a distinct channel and
+    // coexists with whichever in-app channel is active (the worker routes by `row.channel` name).
+    channels.push(new DeterministicFakeAttendanceDeliveryChannel())
   }
-  if (env.ATTENDANCE_NOTIFICATION_FAKE_CHANNEL_ENABLED === 'true') {
-    return [new DeterministicFakeAttendanceDeliveryChannel()]
+  // Email: register ONLY when explicitly enabled AND SMTP transport is actually configured+ready
+  // (else an at-least-once retry would spin against an unconfigured transport — register-nothing instead).
+  if (
+    env.ATTENDANCE_NOTIFICATION_EMAIL_ENABLED === 'true' &&
+    resolveEmailTransportReadiness(env).mode === 'smtp' &&
+    resolveEmailTransportReadiness(env).ok
+  ) {
+    channels.push(new EmailAttendanceDeliveryChannel({ env }))
   }
-  return []
+  return channels
 }
 
 interface DingTalkRecipientRow {
@@ -533,4 +555,129 @@ function classifyDingTalkSendError(error: unknown): AttendanceDeliveryChannelRes
     retryable: true,
     error: `dingtalk_send_failed: ${normalizeErrorText(error, 'DingTalk send failed')}`,
   }
+}
+
+// ── Email (SMTP) delivery channel ───────────────────────────────────────────────
+// A second AttendanceDeliveryChannel beside the in-app work-notification channel. Sends the SAME
+// delivery content over SMTP, reusing the app's existing email transport config + readiness. Env-gated
+// + default-off (see createAttendanceDeliveryChannelsFromEnv). Recipient email resolved from users.email.
+
+export interface EmailDeliveryTransport {
+  sendMail(options: {
+    from: string
+    to: string
+    subject: string
+    text: string
+    headers?: Record<string, string>
+  }): Promise<unknown>
+}
+
+export interface EmailAttendanceDeliveryChannelOptions {
+  query?: AttendanceNotificationDeliveryQuery
+  env?: NodeJS.ProcessEnv
+  createTransport?: (config: EmailSmtpTransportConfig) => EmailDeliveryTransport
+}
+
+function defaultEmailTransportFactory(config: EmailSmtpTransportConfig): EmailDeliveryTransport {
+  return nodemailer.createTransport({
+    host: config.host,
+    port: config.port,
+    secure: config.secure,
+    auth: { user: config.authUser, pass: config.authPass },
+    connectionTimeout: config.connectionTimeoutMs,
+    greetingTimeout: config.greetingTimeoutMs,
+  }) as unknown as EmailDeliveryTransport
+}
+
+export class EmailAttendanceDeliveryChannel implements AttendanceDeliveryChannel {
+  readonly name = EMAIL_SMTP_CHANNEL_NAME
+  private readonly query: AttendanceNotificationDeliveryQuery
+  private readonly env: NodeJS.ProcessEnv
+  private readonly createTransport: (config: EmailSmtpTransportConfig) => EmailDeliveryTransport
+  private transport: EmailDeliveryTransport | null = null
+
+  constructor(options: EmailAttendanceDeliveryChannelOptions = {}) {
+    this.query = options.query ?? (defaultQuery as AttendanceNotificationDeliveryQuery)
+    this.env = options.env ?? process.env
+    this.createTransport = options.createTransport ?? defaultEmailTransportFactory
+  }
+
+  async send(message: AttendanceDeliveryMessage): Promise<AttendanceDeliveryChannelResult> {
+    // 1. Resolve recipient email from users.email (recipientUserId is a user id). A lookup failure is
+    //    transient (retryable); a user with NO email is permanent (non-retryable → dead-letter, no spin).
+    let email: string
+    try {
+      const { rows } = await this.query<{ email: string | null }>(
+        'SELECT email FROM users WHERE id = $1',
+        [message.recipientUserId],
+      )
+      email = (rows[0]?.email ?? '').trim()
+    } catch (error) {
+      return { ok: false, retryable: true, error: `email_recipient_lookup_failed: ${normalizeEmailErrorText(error, 'recipient lookup failed', this.env)}` }
+    }
+    if (!email) {
+      return { ok: false, retryable: false, error: 'email_recipient_missing: user has no email address' }
+    }
+
+    // 2. Resolve SMTP config. resolveEmailSmtpTransportConfig throws when transport is not smtp-mode or
+    //    readiness is blocked → a permanent config error (non-retryable).
+    let config: EmailSmtpTransportConfig
+    try {
+      config = resolveEmailSmtpTransportConfig(this.env)
+    } catch (error) {
+      return { ok: false, retryable: false, error: `email_smtp_config_unavailable: ${normalizeEmailErrorText(error, 'SMTP config unavailable', this.env)}` }
+    }
+
+    // 3. Send. Subject/body come from the SHARED content helpers (one content source; no per-channel drift).
+    try {
+      const transport = this.transport ?? this.createTransport(config)
+      this.transport = transport
+      await transport.sendMail({
+        from: config.from,
+        to: email,
+        subject: buildDeliveryTitle(message),
+        text: buildDeliveryContent(message),
+        headers: {
+          'X-MetaSheet-Notification-Channel': EMAIL_SMTP_CHANNEL_NAME,
+          'X-MetaSheet-Notification-Source': message.sourceType,
+        },
+      })
+      return { ok: true }
+    } catch (error) {
+      return classifyEmailSendError(error, this.env)
+    }
+  }
+}
+
+function normalizeEmailErrorText(error: unknown, fallback: string, env: NodeJS.ProcessEnv = process.env): string {
+  const raw = error instanceof Error ? error.message : String(error ?? '')
+  // Scrub the configured SMTP host/user/password/from + token/password patterns — the password could
+  // otherwise surface verbatim in an SMTP transport error string written to the delivery record.
+  const text = redactEmailTransportText(raw.trim() || fallback, env)
+  return text.length > 240 ? `${text.slice(0, 237)}...` : text
+}
+
+function classifyEmailSendError(error: unknown, env: NodeJS.ProcessEnv = process.env): AttendanceDeliveryChannelResult {
+  const responseCode =
+    typeof (error as { responseCode?: unknown } | null)?.responseCode === 'number'
+      ? (error as { responseCode: number }).responseCode
+      : null
+  const code =
+    typeof (error as { code?: unknown } | null)?.code === 'string'
+      ? (error as { code: string }).code.toUpperCase()
+      : ''
+  let retryable: boolean
+  if (responseCode !== null) {
+    // SMTP reply codes: 4xx = transient (greylist / rate / try-later) → retry; 5xx = permanent → dead-letter.
+    retryable = responseCode >= 400 && responseCode < 500
+  } else if (/^(ECONNREFUSED|ETIMEDOUT|ESOCKET|ECONNRESET|ENOTFOUND|EDNS|ECONNECTION|ETLS|EHOSTUNREACH|EPIPE)$/.test(code)) {
+    retryable = true
+  } else if (/^(EAUTH|EENVELOPE|EMESSAGE)$/.test(code)) {
+    retryable = false
+  } else {
+    // Unknown failure: retry (bounded by the worker's max-attempts → dead-letter); never silently drop.
+    retryable = true
+  }
+  const suffix = responseCode !== null ? `_${responseCode}` : code ? `_${code.toLowerCase()}` : ''
+  return { ok: false, retryable, error: `email_send_failed${suffix}: ${normalizeEmailErrorText(error, 'email send failed', env)}` }
 }
