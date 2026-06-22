@@ -4265,14 +4265,19 @@ describe('IntegrationWorkbenchView', () => {
     expect(evidence).not.toContain('dry-token')
   })
 
-  it('C6: lets admins sync stock-preparation options and predefined action bindings without client scope or payload fields', async () => {
+  it('C6/FOS-3: routes optionSets carrying action bindings to the legacy stock-preparation route without client scope or payload fields', async () => {
     localStorage.setItem('user_permissions', JSON.stringify(['integration:admin']))
     const syncBodies: Array<Record<string, unknown>> = []
+    const genericBodies: Array<Record<string, unknown>> = []
     apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url === '/api/integration/adapters') return jsonResponse([])
       if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
       if (url === '/api/integration/staging/descriptors') return jsonResponse([])
       if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/field-options/sync') {
+        genericBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({ ok: true, target: { fieldCount: 0 }, evidence: {} })
+      }
       if (url === '/api/integration/stock-preparation/options/sync') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
         syncBodies.push(body)
@@ -4304,8 +4309,11 @@ describe('IntegrationWorkbenchView', () => {
     app.mount(container)
     await flushUi(12)
 
-    expect(container.querySelector('[data-testid="stock-option-sync-panel"]')?.textContent).toContain('备料选项同步')
+    // FOS-3: panel is generalized to 字段选项同步 with the stock-preparation preset selected by default.
+    expect(container.querySelector('[data-testid="stock-option-sync-panel"] h3')?.textContent).toContain('字段选项同步')
     expect(container.querySelector('[data-testid="stock-option-sync-boundary"]')?.textContent).toContain('不接受 SQL/JS/URL/function body')
+    const presetSelect = container.querySelector('[data-testid="field-options-preset"]') as HTMLSelectElement
+    expect(presetSelect.value).toBe('preset.stock-preparation.v1')
     const textarea = container.querySelector('[data-testid="stock-option-sync-json"]') as HTMLTextAreaElement
     textarea.value = JSON.stringify({
       optionSets: {
@@ -4319,11 +4327,13 @@ describe('IntegrationWorkbenchView', () => {
     textarea.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
 
-    const syncButton = container.querySelector('[data-testid="stock-option-sync-run"]') as HTMLButtonElement
+    const syncButton = container.querySelector('[data-testid="field-options-sync-run"]') as HTMLButtonElement
     expect(syncButton.disabled).toBe(false)
     syncButton.click()
     await flushUi(10)
 
+    // action bindings → legacy route only; the generic route must NOT be hit.
+    expect(genericBodies).toHaveLength(0)
     expect(syncBodies).toHaveLength(1)
     expect(syncBodies[0]).toEqual({
       tenantId: 'default',
@@ -4341,9 +4351,155 @@ describe('IntegrationWorkbenchView', () => {
     expect(syncBodies[0]).not.toHaveProperty('target')
     expect(syncBodies[0]).not.toHaveProperty('plan')
     expect(syncBodies[0]).not.toHaveProperty('payload')
+    expect(syncBodies[0]).not.toHaveProperty('presetId')
+    // dual-route is not silent: the compat path is indicated in the DOM.
+    expect(container.querySelector('[data-testid="field-options-sync-path"]')?.textContent).toContain('stock-preparation compatibility path')
     const evidence = container.querySelector('[data-testid="stock-option-sync-evidence"]')?.textContent || ''
     expect(evidence).toContain('material_type')
     expect(evidence).not.toContain('plate')
     expect(evidence).not.toContain('Plate')
+  })
+
+  it('FOS-3: routes pure option sets to the generic /field-options/sync route with the resolved presetId', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:admin']))
+    const syncBodies: Array<Record<string, unknown>> = []
+    const genericBodies: Array<Record<string, unknown>> = []
+    const genericUrls: string[] = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/stock-preparation/options/sync') {
+        syncBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({ ok: true, target: { fieldCount: 1 }, evidence: {} })
+      }
+      if (url === '/api/integration/field-options/sync') {
+        genericUrls.push(url)
+        genericBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({
+          ok: true,
+          target: { presetId: 'preset.stock-preparation.v1', targetTable: 'plm_stock_preparation_main', fieldCount: 1 },
+          evidence: {
+            presetId: 'preset.stock-preparation.v1',
+            targetTable: 'plm_stock_preparation_main',
+            fields: [
+              { field: 'materialType', sourceKey: 'material_type', optionCount: 1 },
+            ],
+            skipped: [],
+          },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(12)
+
+    const textarea = container.querySelector('[data-testid="stock-option-sync-json"]') as HTMLTextAreaElement
+    textarea.value = JSON.stringify({
+      optionSets: {
+        material_type: [{ value: 'plate', label: 'Plate' }],
+      },
+    })
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const syncButton = container.querySelector('[data-testid="field-options-sync-run"]') as HTMLButtonElement
+    expect(syncButton.disabled).toBe(false)
+    syncButton.click()
+    await flushUi(10)
+
+    // pure options → generic route only; legacy stock-preparation route must NOT be hit.
+    expect(syncBodies).toHaveLength(0)
+    expect(genericUrls).toEqual(['/api/integration/field-options/sync'])
+    expect(genericBodies).toHaveLength(1)
+    expect(genericBodies[0]).toMatchObject({
+      tenantId: 'default',
+      workspaceId: null,
+      presetId: 'preset.stock-preparation.v1',
+      optionSets: {
+        material_type: [{ value: 'plate', label: 'Plate' }],
+      },
+    })
+    // dual-route is not silent: the generic path is indicated in the DOM.
+    expect(container.querySelector('[data-testid="field-options-sync-path"]')?.textContent).toContain('generic field-option-sync')
+    expect(container.querySelector('[data-testid="field-options-sync-path"]')?.textContent).toContain('preset.stock-preparation.v1')
+    // evidence is values-free: only field/source ids + counts, never option values.
+    const evidence = container.querySelector('[data-testid="stock-option-sync-evidence"]')?.textContent || ''
+    expect(evidence).toContain('material_type')
+    expect(evidence).toContain('materialType')
+    expect(evidence).not.toContain('plate')
+    expect(evidence).not.toContain('Plate')
+  })
+
+  it('FOS-3: routes legacy alias payloads (optionSources/configInfo) to the stock-preparation route, not the generic route', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:admin']))
+    const syncBodies: Array<Record<string, unknown>> = []
+    const genericBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/field-options/sync') {
+        genericBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({ ok: true, target: { fieldCount: 0 }, evidence: {} })
+      }
+      if (url === '/api/integration/stock-preparation/options/sync') {
+        syncBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({ ok: true, target: { fieldCount: 1 }, evidence: { fields: [{ field: 'materialType' }], skipped: [] } })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(12)
+
+    const textarea = container.querySelector('[data-testid="stock-option-sync-json"]') as HTMLTextAreaElement
+    // legacy alias key, pure options (no action bindings): the generic route's allowlist would
+    // reject optionSources, so this must take the stock-preparation compatibility path.
+    textarea.value = JSON.stringify({
+      optionSources: {
+        material_type: [{ value: 'plate', label: 'Plate' }],
+      },
+    })
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const syncButton = container.querySelector('[data-testid="field-options-sync-run"]') as HTMLButtonElement
+    syncButton.click()
+    await flushUi(10)
+
+    expect(genericBodies).toHaveLength(0)
+    expect(syncBodies).toHaveLength(1)
+    expect(syncBodies[0]).toEqual({
+      tenantId: 'default',
+      workspaceId: null,
+      optionSources: {
+        material_type: [{ value: 'plate', label: 'Plate' }],
+      },
+    })
+    expect(container.querySelector('[data-testid="field-options-sync-path"]')?.textContent).toContain('stock-preparation compatibility path')
   })
 })

@@ -1,5 +1,6 @@
 import { query as defaultQuery } from '../db/pg'
 import { Logger } from '../core/logger'
+import { resolveAttendanceDefaultDeliveryChannel } from './AttendanceNotificationDeliveryWorker'
 
 /**
  * C5-1b comp-time expiry reminder producer.
@@ -48,7 +49,10 @@ const DEFAULT_LOOKAHEAD_DAYS = 7
 const MIN_LOOKAHEAD_DAYS = 1
 const MAX_LOOKAHEAD_DAYS = 30
 const SOURCE_TYPE = 'comp_time_expiry_reminder'
-const DELIVERY_CHANNEL = 'dingtalk_work_notification'
+// S2: the producer stamps each outbox row with the deployment's default delivery channel
+// (ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL), defaulting to the in-app work-notification channel —
+// unchanged until configured. Allowlist-validated inside the resolver, so it is safe to interpolate.
+const DELIVERY_CHANNEL = resolveAttendanceDefaultDeliveryChannel()
 const INACTIVE_RECIPIENT_ERROR = 'recipient_inactive_or_missing'
 
 export function clampCompTimeExpiryReminderLookaheadDays(value: number | undefined): number {

@@ -1261,6 +1261,32 @@ export async function syncIntegrationStockPreparationOptions(
   return parseIntegrationResponse<IntegrationStockPreparationOptionSyncResult>(response)
 }
 
+// FOS-2/FOS-3: generic, preset-driven field-option-sync. Resolves a FOS-1 preset by presetId and
+// patches the mapped fields' option metadata only (no business-row write, no external system,
+// no action bindings — actions remain the stock-prep-specific route). The server is admin-gated and
+// returns values-free evidence. Mirrors the stock-prep payload shape sans action bindings.
+export interface IntegrationFieldOptionSyncPayload extends IntegrationScope {
+  projectId?: string | null
+  optionSets?: Record<string, unknown>
+}
+
+export interface IntegrationFieldOptionSyncResult {
+  ok?: boolean
+  target?: Record<string, unknown>
+  evidence?: Record<string, unknown>
+}
+
+export async function syncIntegrationFieldOptions(
+  presetId: string,
+  payload: IntegrationFieldOptionSyncPayload,
+): Promise<IntegrationFieldOptionSyncResult> {
+  const response = await apiFetch('/api/integration/field-options/sync', {
+    method: 'POST',
+    body: JSON.stringify({ ...payload, presetId }),
+  })
+  return parseIntegrationResponse<IntegrationFieldOptionSyncResult>(response)
+}
+
 // Only 'open' letters are replayable — the server enforces the same, but the UI
 // must not even offer replay for replayed/discarded letters (a second live ERP
 // write). Keep this in lock-step with the backend guard in pipeline-runner.cjs.

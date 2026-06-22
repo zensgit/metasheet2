@@ -74,6 +74,7 @@ import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 import { hashPreviewChanges, mintRestorePreviewIdentity, verifyRestorePreviewIdentity } from '../multitable/restore-preview-identity'
+import { computeRecordRestoreDiff } from '../multitable/record-restore-diff'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
   HistoryAuditGrantError,
@@ -7429,26 +7430,10 @@ export function univerMetaRouter(): Router {
       for (const fid of Object.keys(targetSnapshot)) if (!previewCtx.fieldById.has(fid)) { schemaDrift = true; break }
 
       // Mirror of the restore route's set ∪ unset diff (scalar) + link-as-report. Helpers mirror restore (P3 dup).
-      const NON_RESTORABLE = new Set(['formula', 'lookup', 'rollup', 'link', 'attachment', 'button', 'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy'])
-      const sameVal = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
-      const sameLinks = (a: string[], b: string[]): boolean => a.length === b.length && [...a].sort().join(' ') === [...b].sort().join(' ')
-      const changes: Array<{ fieldId: string; op: 'set' | 'unset'; value: unknown }> = []
-      for (const [fid, guard] of previewCtx.fieldById.entries()) {
-        if (rawTypeById.get(fid) === 'button') continue
-        const inSnap = Object.prototype.hasOwnProperty.call(targetSnapshot, fid)
-        const inCur = Object.prototype.hasOwnProperty.call(currentData, fid)
-        if (guard.type === 'link') {
-          const target = inSnap ? normalizeLinkIds(targetSnapshot[fid]) : []
-          if (!sameLinks(normalizeLinkIds(currentData[fid]), target)) changes.push({ fieldId: fid, op: 'set', value: target })
-          continue
-        }
-        if (NON_RESTORABLE.has(guard.type)) continue
-        if (inSnap) {
-          if (!sameVal(currentData[fid], targetSnapshot[fid])) changes.push({ fieldId: fid, op: 'set', value: targetSnapshot[fid] })
-        } else if (inCur) {
-          changes.push({ fieldId: fid, op: 'unset', value: null })
-        }
-      }
+      // T6 P3 unify: the canonical raw diff (shared computeRecordRestoreDiff). The preview projects it to
+      // {fieldId,op,value} for the changesHash + masking; recordId/expectedVersion are dropped (preview writes nothing).
+      const changes = computeRecordRestoreDiff({ fieldById: previewCtx.fieldById, rawTypeById, targetSnapshot, currentData, recordId, currentVersion: 0, normalizeLinkIds })
+        .map((c) => ({ fieldId: c.fieldId, op: (c.op ?? 'set') as 'set' | 'unset', value: c.value }))
       // PV-2 mask: filter the diff to the actor's allowed fields (visible ∧ field_permissions, taint-dropped),
       // so a hidden field that WOULD change never appears in the preview — the SAME chain as history detail.
       const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
@@ -7511,21 +7496,6 @@ export function univerMetaRouter(): Router {
     // excluded; `button` is the no-value trigger (also caught by raw type below). `link` is listed as a
     // defensive backstop, but link fields never reach this check — they are handled by a dedicated SET
     // path (Slice 2a) above the scalar branch, which re-syncs meta_links + the mirror through the spine.
-    const NON_RESTORABLE_TYPES = new Set([
-      'formula', 'lookup', 'rollup', 'link', 'attachment', 'button',
-      'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy',
-    ])
-    const isRestorableType = (t: string): boolean => !NON_RESTORABLE_TYPES.has(t)
-    const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
-    // Link state is authoritative in meta_links, which is an unordered SET — so a pure reorder of the
-    // data-mirror id array is NOT a meaningful change and must not emit a spurious SET (version bump +
-    // data reorder while meta_links is unchanged). Compare link ids order-insensitively.
-    const sameLinkSet = (a: string[], b: string[]): boolean => {
-      if (a.length !== b.length) return false
-      const sa = [...a].sort()
-      const sb = [...b].sort()
-      return sa.every((v, i) => v === sb[i])
-    }
 
     try {
       const pool = poolManager.get()
@@ -7625,35 +7595,9 @@ export function univerMetaRouter(): Router {
       }
 
       // Faithful set ∪ unset diff over restorable fields.
-      const diff: RecordChange[] = []
-      for (const [fid, guard] of fieldById.entries()) {
-        if (rawTypeById.get(fid) === 'button') continue // no-value trigger (mapFieldType folds it to 'string')
-        const inSnap = Object.prototype.hasOwnProperty.call(targetSnapshot, fid)
-        const inCur = Object.prototype.hasOwnProperty.call(currentData, fid)
-        // Slice 2a — link fields: restore the snapshot's link id array (or [] when absent at version N)
-        // as a SET routed through patchRecords, which re-syncs meta_links + the twoWay mirror fan-out.
-        // NEVER a data-`unset` (that touches only the data mirror and would desync the join table).
-        // Only emit when the id set actually differs (preserves no-op). The link config (guard.link)
-        // drives the spine's meta_links sync; a snapshot referencing a now-deleted foreign record is
-        // rejected fail-closed by the spine's link-target validation (VALIDATION_ERROR). Use the CANONICAL
-        // normalizeLinkIds (handles legacy `'["a","b"]'` / `'a,b'` / trim / dedup) so a legacy-shaped
-        // snapshot or current value is parsed identically to the write path, not mis-read as one id.
-        if (guard.type === 'link') {
-          const target = inSnap ? normalizeLinkIds(targetSnapshot[fid]) : []
-          if (!sameLinkSet(normalizeLinkIds(currentData[fid]), target)) {
-            diff.push({ recordId, fieldId: fid, value: target, expectedVersion: currentVersion, op: 'set' })
-          }
-          continue
-        }
-        if (!isRestorableType(guard.type)) continue
-        if (inSnap) {
-          if (!sameValue(currentData[fid], targetSnapshot[fid])) {
-            diff.push({ recordId, fieldId: fid, value: targetSnapshot[fid], expectedVersion: currentVersion, op: 'set' })
-          }
-        } else if (inCur) {
-          diff.push({ recordId, fieldId: fid, value: null, expectedVersion: currentVersion, op: 'unset' })
-        }
-      }
+      // T6 P3 unify: the canonical raw diff (shared computeRecordRestoreDiff). Masking / gate / schema-drift /
+      // expectedVersion stay below in this route — the helper only produces the raw diff.
+      const diff = computeRecordRestoreDiff({ fieldById, rawTypeById, targetSnapshot, currentData, recordId, currentVersion, normalizeLinkIds })
 
       // Per-field (column-level) restore: when the caller passes `fieldIds`, restrict the diff to that
       // selection. The atomic gate below then runs over only the selected subset — so a user can restore
@@ -7765,9 +7709,6 @@ export function univerMetaRouter(): Router {
     if (!exParsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: exParsed.error.message } })
     const { targetVersion, expectedVersion, previewIdentity } = exParsed.data
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
-    const NON_RESTORABLE = new Set(['formula', 'lookup', 'rollup', 'link', 'attachment', 'button', 'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy'])
-    const sameVal = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
-    const sameLinks = (a: string[], b: string[]): boolean => a.length === b.length && [...a].sort().join(' ') === [...b].sort().join(' ')
     try {
       const pool = poolManager.get()
       const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
@@ -7813,23 +7754,9 @@ export function univerMetaRouter(): Router {
       // The faithful set ∪ unset diff (same shape as /restore + T5-2's preview), then MASK to the actor's allowed
       // fields — this masked set is exactly what T5-2's preview hashed into the identity (3rd copy of the diff;
       // the end-to-end preview→execute golden is the drift guard, unifying the copies is a follow-up P3).
-      const diff: RecordChange[] = []
-      for (const [fid, guard] of fieldById.entries()) {
-        if (rawTypeById.get(fid) === 'button') continue
-        const inSnap = Object.prototype.hasOwnProperty.call(targetSnapshot, fid)
-        const inCur = Object.prototype.hasOwnProperty.call(currentData, fid)
-        if (guard.type === 'link') {
-          const target = inSnap ? normalizeLinkIds(targetSnapshot[fid]) : []
-          if (!sameLinks(normalizeLinkIds(currentData[fid]), target)) diff.push({ recordId, fieldId: fid, value: target, expectedVersion: currentVersion, op: 'set' })
-          continue
-        }
-        if (NON_RESTORABLE.has(guard.type)) continue
-        if (inSnap) {
-          if (!sameVal(currentData[fid], targetSnapshot[fid])) diff.push({ recordId, fieldId: fid, value: targetSnapshot[fid], expectedVersion: currentVersion, op: 'set' })
-        } else if (inCur) {
-          diff.push({ recordId, fieldId: fid, value: null, expectedVersion: currentVersion, op: 'unset' })
-        }
-      }
+      // T6 P3 unify: the canonical raw diff (shared computeRecordRestoreDiff). Masking / gate / schema-drift /
+      // expectedVersion stay below in this route — the helper only produces the raw diff.
+      const diff = computeRecordRestoreDiff({ fieldById, rawTypeById, targetSnapshot, currentData, recordId, currentVersion, normalizeLinkIds })
       const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
       const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
       const maskedDiff = diff.filter((c) => allowed.has(c.fieldId))
