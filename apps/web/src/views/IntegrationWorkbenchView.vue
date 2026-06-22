@@ -1005,11 +1005,19 @@
       <div v-if="auth.hasPermission('integration:admin')" class="integration-workbench__table-action" data-testid="stock-option-sync-panel">
         <div class="integration-workbench__panel-head">
           <div>
-            <h3>备料选项同步</h3>
-            <p>管理员同步 select/dropdown 选项，并可把选项绑定到后端白名单里的预定义动作。</p>
+            <h3>字段选项同步</h3>
+            <p>管理员按预设把 select/dropdown 字段选项元数据写入对应字段；只改字段定义，不写业务行。</p>
           </div>
           <span class="integration-workbench__badge">admin · metadata-only</span>
         </div>
+        <label class="integration-workbench__inline-field">
+          <span>同步预设</span>
+          <select v-model="fieldOptionSyncPresetId" data-testid="field-options-preset">
+            <option v-for="preset in fieldOptionSyncPresets" :key="preset.presetId" :value="preset.presetId">
+              {{ preset.label }}
+            </option>
+          </select>
+        </label>
         <label>
           <span>optionSets JSON</span>
           <textarea
@@ -1020,19 +1028,26 @@
           />
         </label>
         <p class="integration-workbench__hint" data-testid="stock-option-sync-boundary">
-          这里只写字段选项和 optionActionBindings 元数据；不执行动作，不接受 SQL/JS/URL/function body，不写 PLM/K3/业务行。
+          这里只写字段选项元数据；不执行动作，不接受 SQL/JS/URL/function body，不写 PLM/K3/业务行。带 actionBindings 的选项走备料兼容路径（动作绑定泛化待 FOS-4）。
         </p>
         <div class="integration-workbench__actions">
           <button
             type="button"
             class="integration-workbench__button"
-            data-testid="stock-option-sync-run"
+            data-testid="field-options-sync-run"
             :disabled="!stockPreparationOptionSyncCanRun"
-            @click="syncStockPreparationOptions"
+            @click="syncFieldOptions"
           >
-            {{ syncingStockPreparationOptions ? '同步中' : '同步备料选项' }}
+            {{ syncingStockPreparationOptions ? '同步中' : '同步字段选项' }}
           </button>
         </div>
+        <p
+          v-if="fieldOptionSyncPathNote"
+          class="integration-workbench__hint"
+          data-testid="field-options-sync-path"
+        >
+          {{ fieldOptionSyncPathNote }}
+        </p>
         <pre v-if="stockPreparationOptionSyncEvidenceText" data-testid="stock-option-sync-evidence">{{ stockPreparationOptionSyncEvidenceText }}</pre>
       </div>
 
@@ -1352,6 +1367,7 @@ import {
   summarizeFieldProvenance,
   saveIntegrationTableActionConflictPolicies,
   syncIntegrationStockPreparationOptions,
+  syncIntegrationFieldOptions,
   testExternalSystemConnection,
   upsertWorkbenchExternalSystem,
   upsertIntegrationPipeline,
@@ -2551,6 +2567,17 @@ const tableActionEvidenceText = computed(() => {
   const evidence = tableActionApplyResult.value?.evidence || tableActionDryRunResult.value?.evidence
   return evidence ? JSON.stringify(evidence, null, 2) : ''
 })
+// FOS-3: the field-option-sync presets resolve a FOS-1 preset on the generic
+// /api/integration/field-options/sync route. Only the stock-preparation preset is
+// wired today (additional presets are gated to FOS-4); hardcoding the single option
+// keeps FOS-3 minimal while the picker UI is the generalization seam.
+const fieldOptionSyncPresets = [
+  { presetId: 'preset.stock-preparation.v1', label: '备料选项同步 / Stock Preparation' },
+] as const
+const fieldOptionSyncPresetId = ref<string>(fieldOptionSyncPresets[0].presetId)
+// FOS-3: which route the last submit took. Surfaced as a DOM note so the dual-route
+// dispatch is never silent — actionBindings keep the stock-prep compatibility path.
+const fieldOptionSyncPathNote = ref('')
 const stockPreparationOptionSyncPlaceholder = JSON.stringify({
   optionSets: {
     material_type: [
@@ -4332,21 +4359,64 @@ function buildStockPreparationOptionSyncPayload(): Record<string, unknown> {
   return { optionSets: record }
 }
 
-async function syncStockPreparationOptions(): Promise<void> {
+// FOS-3: detect option entries that carry action bindings. This is a SUPERSET of the
+// generic route's reject condition (http-routes.cjs: per-option `actionBindings`/`actions`
+// arrays), using key-presence so nothing the generic route would 422 ever reaches it —
+// such payloads are routed to the stock-prep compatibility path instead. Scans the
+// NORMALIZED optionSets map's option arrays (top-level keys are field/source ids).
+function payloadCarriesActionBindings(payload: Record<string, unknown>): boolean {
+  const optionSets = payload.optionSets
+  if (!optionSets || typeof optionSets !== 'object' || Array.isArray(optionSets)) return false
+  for (const rawOptions of Object.values(optionSets as Record<string, unknown>)) {
+    if (!Array.isArray(rawOptions)) continue
+    if (rawOptions.some((option) =>
+      Boolean(option) && typeof option === 'object' && !Array.isArray(option)
+      && ('actionBindings' in (option as Record<string, unknown>) || 'actions' in (option as Record<string, unknown>)))) {
+      return true
+    }
+  }
+  return false
+}
+
+async function syncFieldOptions(): Promise<void> {
   if (!auth.hasPermission('integration:admin')) {
-    setStatus('只有管理员可以同步备料选项。', 'error')
+    setStatus('只有管理员可以同步字段选项。', 'error')
     return
   }
   syncingStockPreparationOptions.value = true
   stockPreparationOptionSyncResult.value = null
+  fieldOptionSyncPathNote.value = ''
   try {
-    const result = await syncIntegrationStockPreparationOptions({
+    const payload = buildStockPreparationOptionSyncPayload()
+    // Route to the legacy stock-preparation route when the payload carries action bindings OR
+    // uses the legacy alias keys (optionSources/configInfo). The generic route's request allowlist
+    // accepts only a pure { optionSets } shape, so those alias payloads — which the stock-prep route
+    // still supports — must not reach the generic route (it would 400 and break existing usage).
+    const usesLegacyAliases = 'optionSources' in payload || 'configInfo' in payload
+    if (payloadCarriesActionBindings(payload) || usesLegacyAliases) {
+      // action bindings / legacy aliases → existing stock-preparation route (options + predefined
+      // actions preserved unchanged). Body kept byte-identical to the legacy capability.
+      const result = await syncIntegrationStockPreparationOptions({
+        ...currentScope(),
+        ...payload,
+      })
+      stockPreparationOptionSyncResult.value = result
+      fieldOptionSyncPathNote.value = 'action bindings → stock-preparation compatibility path（动作绑定/兼容字段走备料兼容路径）'
+      const fieldCount = Number(result.target?.fieldCount || 0)
+      setStatus(`字段选项同步完成（备料兼容路径）：${fieldCount} 个字段已更新。`, 'success')
+      return
+    }
+    // pure options → generic preset-driven field-option-sync route.
+    const projectId = typeof payload.projectId === 'string' ? payload.projectId : undefined
+    const result = await syncIntegrationFieldOptions(fieldOptionSyncPresetId.value, {
       ...currentScope(),
-      ...buildStockPreparationOptionSyncPayload(),
+      optionSets: payload.optionSets as Record<string, unknown> | undefined,
+      ...(projectId ? { projectId } : {}),
     })
     stockPreparationOptionSyncResult.value = result
+    fieldOptionSyncPathNote.value = `generic field-option-sync → ${fieldOptionSyncPresetId.value}（通用字段选项路径）`
     const fieldCount = Number(result.target?.fieldCount || 0)
-    setStatus(`备料选项同步完成：${fieldCount} 个字段已更新。`, 'success')
+    setStatus(`字段选项同步完成：${fieldCount} 个字段已更新。`, 'success')
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), 'error')
   } finally {
