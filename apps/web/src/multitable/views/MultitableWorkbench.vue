@@ -441,7 +441,6 @@
       :selected-record-ids="[...exportSelectedRecordIds]"
       :field-name="bulkFillFieldName"
       :record-name="bulkFillRecordName"
-      :current-value-for="bulkFillCurrentValue"
       :is-zh="isZh"
       @close="onBulkFillClose"
     />
@@ -750,14 +749,6 @@ function bulkFillRecordName(recordId: string): string {
   const primaryFieldId = grid.visibleFields.value.find((f) => f.type === 'string' || f.type === 'longText')?.id
   const label = primaryFieldId ? row.data[primaryFieldId] : undefined
   return typeof label === 'string' && label.trim().length > 0 ? label : recordId
-}
-function bulkFillCurrentValue(recordId: string): string {
-  const fieldId = aiBulkFillFieldId.value
-  if (!fieldId) return ''
-  const row = grid.rows.value.find((r) => r.id === recordId)
-  const value = row?.data[fieldId]
-  if (value === null || value === undefined) return ''
-  return typeof value === 'string' ? value : JSON.stringify(value)
 }
 
 // B1-b: run a button field's configured action against one record. Per-cell

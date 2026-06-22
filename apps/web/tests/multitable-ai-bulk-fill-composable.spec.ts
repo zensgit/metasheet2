@@ -25,8 +25,8 @@ import { useAiBulkFill } from '../src/multitable/composables/useAiBulkFill'
 const PREVIEW_WIRE: AiBulkPreviewData = {
   runId: 'aibulk_run1',
   rows: [
-    { recordId: 'rec_ok', version: 3, proposed: 'CLEAN OUT', masked: false, writable: true },
-    { recordId: 'rec_masked', version: 5, proposed: 'PARTIAL OUT', masked: true, writable: true },
+    { recordId: 'rec_ok', version: 3, currentValue: 'old', proposed: 'CLEAN OUT', masked: false, writable: true },
+    { recordId: 'rec_masked', version: 5, currentValue: null, proposed: 'PARTIAL OUT', masked: true, writable: true },
   ],
   skipped: [{ recordId: 'rec_noperm', reason: 'skipped_no_perm' }],
   failures: [{ recordId: 'rec_err', reason: 'provider_error_charged' }],
@@ -73,7 +73,7 @@ describe('aiBulkPreview / aiBulkCommit client wire shape', () => {
 
     // FIXTURE-DRIFT GUARD: the top-level key set the FE consumes must not drift.
     expect(Object.keys(data).sort()).toEqual(['capped', 'failures', 'rows', 'runId', 'settledCost', 'skipped'])
-    expect(Object.keys(data.rows[0]).sort()).toEqual(['masked', 'proposed', 'recordId', 'version', 'writable'])
+    expect(Object.keys(data.rows[0]).sort()).toEqual(['currentValue', 'masked', 'proposed', 'recordId', 'version', 'writable'])
     expect(Object.keys(data.skipped[0]).sort()).toEqual(['reason', 'recordId'])
     expect(Object.keys(data.failures[0]).sort()).toEqual(['reason', 'recordId'])
     expect(data.rows[1].masked).toBe(true)

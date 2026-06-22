@@ -1038,6 +1038,10 @@ export interface AiBulkPreviewInput {
 export interface AiBulkPreviewRow {
   recordId: string
   version: number
+  /** The target field's CURRENT value (server-read from the record, never grid-page
+   *  dependent) — the value this preview would overwrite. `null` = genuinely empty.
+   *  Render `null`/'' distinctly; it is the truthful left side of the review diff. */
+  currentValue: string | null
   proposed: string
   masked: boolean
   writable: boolean

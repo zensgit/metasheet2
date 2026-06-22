@@ -122,7 +122,7 @@
                       />
                     </td>
                     <td class="ai-bulk__cell-record">{{ recordName(row.recordId) }}</td>
-                    <td class="ai-bulk__cell-current">{{ currentValue(row.recordId) }}</td>
+                    <td class="ai-bulk__cell-current">{{ displayCurrent(row.currentValue) }}</td>
                     <td class="ai-bulk__cell-proposed">{{ row.proposed }}</td>
                     <td class="ai-bulk__cell-state">
                       <span
@@ -317,8 +317,6 @@ const props = defineProps<{
   fieldName: (fieldId: string) => string
   /** Resolve a record id → a short display label (e.g. primary-field value). */
   recordName: (recordId: string) => string
-  /** Resolve a record id → its CURRENT value for the target field (the diff "before"). */
-  currentValueFor: (recordId: string) => string
   isZh: boolean
 }>()
 
@@ -368,9 +366,10 @@ const allExpired = computed(() => {
 function recordName(recordId: string): string {
   return props.recordName(recordId)
 }
-function currentValue(recordId: string): string {
-  const v = props.currentValueFor(recordId)
-  return v === '' ? l('aibulk.currentEmpty') : v
+function displayCurrent(value: string | null): string {
+  // null/'' = genuinely empty (server-confirmed). The value is server-read per row,
+  // so it's truthful for off-page rows too — no false "(empty)" for unloaded rows.
+  return value === null || value === '' ? l('aibulk.currentEmpty') : value
 }
 function skippedReason(reason: string): string {
   return aiBulkSkippedReason(reason, props.isZh)

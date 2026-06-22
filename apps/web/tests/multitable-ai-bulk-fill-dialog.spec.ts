@@ -25,8 +25,8 @@ import { useLocale } from '../src/composables/useLocale'
 const PREVIEW_WIRE: AiBulkPreviewData = {
   runId: 'aibulk_run1',
   rows: [
-    { recordId: 'rec_ok', version: 3, proposed: 'CLEAN OUT', masked: false, writable: true },
-    { recordId: 'rec_masked', version: 5, proposed: 'PARTIAL OUT', masked: true, writable: true },
+    { recordId: 'rec_ok', version: 3, currentValue: 'old', proposed: 'CLEAN OUT', masked: false, writable: true },
+    { recordId: 'rec_masked', version: 5, currentValue: null, proposed: 'PARTIAL OUT', masked: true, writable: true },
   ],
   skipped: [
     { recordId: 'rec_noperm', reason: 'skipped_no_perm' },
@@ -70,7 +70,6 @@ function mountDialog(fetchFn: (input: string, init?: RequestInit) => Promise<Res
         selectedRecordIds: [],
         fieldName: (id: string) => (id === 'fld_t' ? 'Summary' : id),
         recordName: (id: string) => id,
-        currentValueFor: (id: string) => (id === 'rec_ok' ? 'old' : ''),
         isZh: false,
       })
     },
