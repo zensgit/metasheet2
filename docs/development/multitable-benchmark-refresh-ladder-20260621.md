@@ -5,6 +5,36 @@
 > ladder materially **over-counted the remaining gaps** — three of its "gaps" are already shipped. Verify
 > each lane against main before building.
 
+---
+
+## ⚠ RECONCILIATION — 2026-06-21 (post-#3005, AUTHORITATIVE — read this, not §1–§3)
+
+The §1–§3 body below is the **as-of-#3005 snapshot** and is now superseded by this banner. Since #3005, the
+following all shipped to `origin/main`; treat THIS as the current parity ledger:
+
+- **#3006** A4 required-IF → SHIPPED (was the §3 "A4-rIF" gap).
+- **#3007** B4 dashboard-level filtering → SHIPPED (was the §3 "B4" gap).
+- **#3009** dashboard cross-filtering → SHIPPED (was the §3 "B4 cross-filtering" gap).
+- **#3010** filter-respecting export → SHIPPED, **supersedes #3003 (now CLOSED)** — export respects the view's
+  row filter + sort; the §1 "Open held #3003" item and the §3 "Export filtered-view" gap are RESOLVED.
+- **#3011** formula-editor exposure of the relation functions (RELSUMIF/…/RELVALUES) → SHIPPED.
+- **#3008** A1 grid virtualization (windowing + infinite-scroll activation, FUNCTIONAL) → SHIPPED (was the §3
+  "decision-gated A1"; built — the windowing fix needed no perf-baseline prereq).
+- Also verified already-shipped (NOT gaps): the button side-effect arc (update_record / send_notification /
+  send_webhook), the cross-base link UI (#2611), and the row-level read-deny foundation. **Five staleness
+  traps total** — the §1/§3 "remaining gaps" list is stale; do NOT build from it.
+
+**Genuine remaining frontier (all decision-gated or parallel-owned — verified against origin/main):**
+- **#6 AI field** — needs a provider / model / cost decision.
+- **#7 external-source sync UI** — needs connector + auth decisions (which systems, how they authenticate).
+- **#5 row-level rule engine** — read-deny foundation shipped; evolving in parallel; security-sensitive.
+- **#9 Time Machine write-slice** — XL; owned by the parallel global-history session.
+
+**Net:** the multitable is at/near Feishu parity for everything buildable without a product decision. The
+B1-S1 `send_notification` line in §3 is also stale (it shipped). Next round: start from this banner.
+
+---
+
 ## 1. Shipped since the 20260615 ladder
 
 - **Filter-by-link** — filter records by a linked-record's display value, permission-safe (denied link →
@@ -18,7 +48,7 @@
   filtered column (server min/max via `/view-aggregate?statsFields`), stats gated on the masked aggregate
   field set (a denied numeric column returns no min/max — leak-gate proven).
 
-**Open, held on a decision:** **#3003** export "all rows" — fixes the 50-row client-page data-loss (routes
+**[RESOLVED via #3010 — see the top RECONCILIATION banner.]** ~~Open, held on a decision:~~ **#3003** export "all rows" — fixes the 50-row client-page data-loss (routes
 through the mask-preserving full-sheet route; field+taint mask proven for xlsx+csv). Held on a product call:
 "all rows" currently = the **entire sheet**, not the **view-filtered** subset (route applies view
 hidden-fields but not the row filter). Options on the PR: (A) respect the view filter, (B) relabel "entire
@@ -34,7 +64,7 @@ The 20260615 ladder listed these as gaps; they are **already shipped** — do no
 
 Lesson (now 3×): the audit drifts faster than the code; **verify each candidate lane against main before building** — blind ladder-building has wasted-build risk.
 
-## 3. Genuine remaining gaps
+## 3. Genuine remaining gaps  *(SUPERSEDED — see the top RECONCILIATION banner; #3006–#3011 shipped these)*
 
 **Ungated / buildable now (small):**
 - **A4-rIF** conditional-required (`required-IF`) — a field required only when a condition holds; reuse the existing field-visibility-rule condition vocabulary + the form's submit validation. Small, FE-led.

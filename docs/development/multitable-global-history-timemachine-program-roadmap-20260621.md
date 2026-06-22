@@ -23,12 +23,13 @@ requested artifact, not gating.
 - **T5-1 — as-of-time-T reconstructor** (`record-reconstructor.ts`): `reconstructRecordsAtT` — the pure-read
   primitive (LOCK-9 delete-aware + LOCK-11 deterministic). The shared root; pinned FIRST with 7 real-DB goldens
   incl. the delete-at-T pin. **BUILT.**
-- **T5-2 — restore-preview endpoint** (read-only diff over T5-1): the T5 design-lock #2985 (PV-1..PV-7). Computes
-  what a restore WOULD change, writes nothing. Builds on the pinned T5-1.
+- **T5-2 — restore-preview endpoint** (record-version restore-preview): the T5 design-lock #2985 (PV-1..PV-7).
+  Computes what restoring a record to `targetVersion` WOULD change, masked to the actor's fields, writes nothing.
+  Reconstructor-based as-of-T preview (over T5-1) deferred as a follow-up — matches §4 D2 (record-version first).
 - **T7 — point-in-time read-only view**: the reconstructor projected over a sheet with LOCK-3 masking + pagination
   ("open the table as of T, read-only"). Builds on the pinned T5-1; de-risks T8.
 
-All three share T5-1's exact contract — **parallelize the leaves (T5-2, T7), never the shared root.**
+T7 builds on T5-1's exact as-of-T contract; T5-2 v1 is record-version-based (the as-of-T reconstructor preview is the deferred follow-up). **Parallelize the leaves (T5-2, T7), never the shared root.**
 
 ## 3. Design-locked now (write / destructive — the 设计 deliverable, NOT built)
 
@@ -52,7 +53,7 @@ All three share T5-1's exact contract — **parallelize the leaves (T5-2, T7), n
 ## 5. Execution order (dependency-correct)
 
 1. ✅ T5-1 reconstructor (root, pinned).
-2. ▶ T5-2 preview + T7 PIT-view (parallel leaves off the pinned T5-1).
+2. ▶ T5-2 preview (record-version) + T7 PIT-view (off the pinned T5-1) — parallel leaves.
 3. ✅ T6 / T8 / T9 design-locks (this docs set — the 设计 deliverable).
 4. ⏸ T6/T8/T9 runtime — each gated on its ratification; **not started**.
 

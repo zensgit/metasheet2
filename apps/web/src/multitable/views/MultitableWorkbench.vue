@@ -3111,9 +3111,9 @@ function onGridSelectionChange(recordIds: string[]) {
 //     The route cursor-paginates the FULL sheet and re-applies the SAME
 //     field_permissions + view-hidden + §2a.3 formula-taint mask AFTER the
 //     fieldIds selection (selection narrows within the permitted set, never
-//     widens). NOTE: "all rows" = the full sheet, NOT the view-filtered subset
-//     (the route applies view HIDDEN-FIELDS but not the view's row filter/sort);
-//     view-filtered export is a follow-up.
+//     widens). NOTE: "all rows" exports the view's FULL set respecting the view's
+//     row filter + sort + hidden-fields (#3010) — the entire (filtered) view, not
+//     just the loaded page; a view with no filter exports the full sheet.
 //   - "selected rows" → stays CLIENT-SIDE over grid.rows. Those rows are the
 //     /view response, already field-permission AND §2a.3-taint masked at read
 //     time (univer-meta.ts GET /view: filterRecordDataByFieldIds over the
