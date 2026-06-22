@@ -46,6 +46,7 @@ import {
   ensureObject as ensureMultitableObject,
   ensureView as ensureMultitableView,
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
+  getObjectField as getProvisionedObjectField,
   type MultitableProvisioningQueryFn,
 } from './multitable/provisioning'
 import {
@@ -499,6 +500,21 @@ export class MetaSheetServer {
                 propertyPatch,
               })
             })
+          },
+          getObjectField: async ({ projectId, objectId, fieldId }) => {
+            // Read-only — a plain pooled query (no transaction needed for a SELECT).
+            const readQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+                rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                  ? (result as { rowCount: number }).rowCount
+                  : undefined,
+              }
+            }
+            return getProvisionedObjectField({ query: readQuery, projectId, objectId, fieldId })
           },
         },
         records: {

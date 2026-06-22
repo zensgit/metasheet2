@@ -225,6 +225,16 @@ export function createPluginScopedMultitableApi(
         })
         return multitable.provisioning.patchObjectFieldProperty(input)
       },
+      getObjectField: async (input) => {
+        // Read-only, but same project/object scope enforcement as the patch path.
+        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        await hooks.assertObjectScope?.({
+          pluginName,
+          projectId: input.projectId,
+          objectId: input.objectId,
+        })
+        return multitable.provisioning.getObjectField(input)
+      },
     },
     records: {
       listRecords: async (input) => {
