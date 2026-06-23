@@ -29,12 +29,29 @@
   opens read-only" tests updated for the changed cc/condition/parallel behaviour (now
   save-preserving, graph read-only); the attachment / extra-key fail-closed tests stay green.
 
-## Phase G-2 — condition editor (🔒 until G-1)
-- 🔒 Author condition `branches` (rules `{fieldId, operator, value}` + `conjunction`) +
-  `defaultEdgeKey`; build the full graph; FE validation preview (branch needs an edgeKey;
-  rule fieldId must reference a form field). Backend `normalizeApprovalGraph` stays arbiter.
+## Phase G-2 — condition editor (✅ shipped)
+- ✅ Author condition `branches` LOGIC (each branch's `rules` `{fieldId, operator, value}` add/remove
+  + `conjunction` and/or) and the node `defaultEdgeKey`, in a structured editable panel
+  (`TemplateAuthoringView` condition rows reuse Element Plus selects/inputs). Branch/edge TOPOLOGY
+  (which branches exist, their edgeKeys/targets) is NOT editable — that is a later slice. parallel /
+  cc stay READ-ONLY summaries (G-3 / G-4). The whole structured render was already there from G-1.
+- ✅ Edit model: `TemplateAuthoringDraft.conditionEdits: Record<nodeKey, ConditionNodeEdit>`, seeded
+  1:1 from `preservedGraph`'s condition nodes (`conditionEditsFromGraph`). On save,
+  `buildApprovalGraph` calls `applyConditionEditsToGraph(preservedGraph, conditionEdits)` — returns a
+  COPY of the graph with ONLY each condition node's `config` rebuilt from the edits; every other node
+  + the full edge list are deep-cloned byte-for-byte. Pure logic in `approvals/conditionEdit.ts` (no
+  `.vue` import — runs under the vitest gate).
+- ✅ Topology-preservation tests (the gate): edit a rule/conjunction/defaultEdgeKey → only the one
+  condition node config changes, all other nodes + ALL edges byte-identical (deepEqual asserted);
+  an UNTOUCHED condition graph (with and without branch conjunctions) round-trips byte-identical (no
+  spurious seed diffs); parallel/cc graphs unaffected (still byte-identical-preserved). Validation
+  preview: rule `fieldId` must reference a form field; `defaultEdgeKey` (when set) must be an
+  OUTGOING edge of the node (the fall-through edge — runtime resolves it via the graph edge list, NOT
+  a branch edgeKey). `apps/web/tests/approval-template-authoring-condition-edit.test.ts` (wired into
+  `approval-web-guard.yml`). Backend `normalizeApprovalGraph` stays the sole arbiter (FE never
+  relaxes it). G-1 round-trip + `approvalTemplateAuthoring.spec` stay green.
 
-## Phase G-3 — parallel editor (🔒 until G-2)
+## Phase G-3 — parallel editor (🔒 — G-2 done; needs its own opt-in)
 - 🔒 Author parallel `branches` + `joinNodeKey` (v1 `joinMode='all'`); preview enforces the
   backend rules (no nested parallel, no cross-branch assignee dupes) before save.
 

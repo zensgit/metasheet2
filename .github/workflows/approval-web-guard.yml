@@ -17,6 +17,7 @@ name: Approval Web Guard
 on:
   pull_request:
     paths:
+      - 'apps/web/src/approvals/conditionEdit.ts'
       - 'apps/web/src/approvals/detailField.ts'
       - 'apps/web/src/approvals/templateAuthoring.ts'
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
@@ -25,10 +26,12 @@ on:
       - 'apps/web/tests/approval-detail-field.test.ts'
       - 'apps/web/tests/approval-template-authoring-detail.test.ts'
       - 'apps/web/tests/approval-template-authoring-graph-preserve.test.ts'
+      - 'apps/web/tests/approval-template-authoring-condition-edit.test.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
     paths:
+      - 'apps/web/src/approvals/conditionEdit.ts'
       - 'apps/web/src/approvals/detailField.ts'
       - 'apps/web/src/approvals/templateAuthoring.ts'
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
@@ -37,6 +40,7 @@ on:
       - 'apps/web/tests/approval-detail-field.test.ts'
       - 'apps/web/tests/approval-template-authoring-detail.test.ts'
       - 'apps/web/tests/approval-template-authoring-graph-preserve.test.ts'
+      - 'apps/web/tests/approval-template-authoring-condition-edit.test.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -84,4 +88,7 @@ jobs:
         # detail emit/round-trip + validateTemplateDraft detail branch.
         # G-1 complex-graph load-preserve: anti-flatten round-trip (condition/parallel/cc save
         # byte-identical) + isComplexApprovalGraph + graphReadOnlyReason vs unsupportedReason split.
-        run: pnpm --filter @metasheet/web exec vitest run approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve --reporter=dot
+        # G-2 condition editor: topology-preserving edit (rule/conjunction/defaultEdgeKey change →
+        # only the condition node config changes; all other nodes + edges byte-identical; parallel/cc
+        # untouched) + seeding round-trip + validation preview (fieldId / outgoing default edge).
+        run: pnpm --filter @metasheet/web exec vitest run approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit --reporter=dot
