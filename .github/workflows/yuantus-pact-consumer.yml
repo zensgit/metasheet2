@@ -81,15 +81,19 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest run tests/unit/plm-adapter-yuantus.test.ts --reporter=dot
 
       - name: Publish consumer pact to broker (advisory, Phase A)
-        # Auto-gate Phase A: runs ONLY when ops has provisioned the broker secret; non-blocking.
-        # Strictly additive (test:contract above is unchanged). UNVERIFIED until a live PactFlow
-        # instance + secrets exist — see the Yuantus dev & verification MD runbook.
-        if: ${{ secrets.PACT_BROKER_BASE_URL != '' }}
+        # Auto-gate Phase A: a SHELL guard (below) skips this until ops provisions the broker secret —
+        # NOT a step `if:` (the `secrets` context is unavailable to `steps.if`, so it would skip even
+        # after the secret is set). Non-blocking; strictly additive (test:contract above is unchanged).
+        # UNVERIFIED until a live PactFlow instance + secrets exist — see the Yuantus dev & verification MD.
         continue-on-error: true
         env:
           PACT_BROKER_BASE_URL: ${{ secrets.PACT_BROKER_BASE_URL }}
           PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
         run: |
+          if [ -z "${PACT_BROKER_BASE_URL:-}" ]; then
+            echo "[pact-broker] PACT_BROKER_BASE_URL not set — skipping advisory publish."
+            exit 0
+          fi
           curl -fsSL https://raw.githubusercontent.com/pact-foundation/pact-ruby-standalone/master/install.sh | bash
           export PATH="$PWD/pact/bin:$PATH"
           pact-broker publish packages/core-backend/tests/contract/pacts/metasheet2-yuantus-plm.json \
