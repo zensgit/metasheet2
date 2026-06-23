@@ -401,4 +401,21 @@ describe('MultitableWorkbench BATCH-restore handler wiring (bulk → preview →
     expect(workbenchMock.client.restoreBatchExecute).not.toHaveBeenCalled() // incomplete expectedVersions never sent
     expect(showErrorSpy).toHaveBeenCalledTimes(1)
   })
+
+  it('out-of-order Advanced previews: a stale earlier-version response never overwrites the latest (seq guard)', async () => {
+    const onBulkRestore = await mountAndGetBulkRestore()
+    await onBulkRestore(['A', 'B', 'C']); await flushUi() // initial v1 preview (default mock)
+    // race: v3 deferred, v4 resolves first → v3's late response must be dropped.
+    let resolveV3!: (v: unknown) => void
+    workbenchMock.client.restoreBatchPreview
+      .mockReturnValueOnce(new Promise((r) => { resolveV3 = r as (v: unknown) => void }))
+      .mockResolvedValueOnce({ records: [{ recordId: 'C', status: 'restorable', previewVersion: 5 }], scope: ['C'], restorableCount: 1, skippedCount: 0, targetVersion: 4, previewIdentity: 'tok_v4' })
+    await (capturedBatchDialogAttrs!.onPreviewVersion as (v: number) => void)(3)
+    await (capturedBatchDialogAttrs!.onPreviewVersion as (v: number) => void)(4); await flushUi() // v4 applies
+    resolveV3({ records: [{ recordId: 'A', status: 'restorable', previewVersion: 2 }, { recordId: 'B', status: 'restorable', previewVersion: 3 }], scope: ['A', 'B'], restorableCount: 2, skippedCount: 0, targetVersion: 3, previewIdentity: 'tok_v3' })
+    await flushUi() // the stale v3 now resolves — must be dropped, not overwrite v4
+    await (capturedBatchDialogAttrs!.onConfirm as () => void)(); await flushUi()
+    // confirm executes the v4 scope + identity, NOT the stale v3 (['A','B'] / tok_v3)
+    expect(workbenchMock.client.restoreBatchExecute).toHaveBeenCalledWith('sheet_orders', ['C'], 4, { C: 5 }, 'tok_v4')
+  })
 })

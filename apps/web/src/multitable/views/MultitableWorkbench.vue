@@ -1995,14 +1995,20 @@ const batchRecordLabel = (recordId: string): string => {
   return val != null && val !== '' ? String(val) : recordId
 }
 
+// Monotonic token: rapid Advanced version-switching (v3 → v4) can resolve out of order — only the LAST request's
+// response may land, or a slow v3 could overwrite v4's preview (wrong diff shown / identity mismatch at confirm).
+let batchPreviewSeq = 0
 async function runBatchPreview(version: number) {
   const sheetId = workbench.activeSheetId.value
   if (!sheetId) return
+  const seq = ++batchPreviewSeq
   batchRestore.value = { ...batchRestore.value, loading: true, targetVersion: version }
   try {
     const pv = await workbench.client.restoreBatchPreview(sheetId, batchRestore.value.recordIds, version)
+    if (seq !== batchPreviewSeq) return // a newer preview superseded this one → drop the stale response
     batchRestore.value = { ...batchRestore.value, loading: false, phase: 'preview', records: pv.records, scope: pv.scope, restorableCount: pv.restorableCount, skippedCount: pv.skippedCount, executable: pv.previewIdentity != null, identity: pv.previewIdentity }
   } catch (error) {
+    if (seq !== batchPreviewSeq) return // stale failure too — don't tear down a newer preview
     batchRestore.value = { ...batchRestore.value, visible: false }
     showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
   }
@@ -2024,8 +2030,9 @@ async function onConfirmBatchRestore() {
   if (!sheetId || !state.identity || state.scope.length === 0) { batchRestore.value = { ...state, visible: false }; return }
   const expectedVersions = buildBatchExpectedVersions(state.records, state.scope) // wire-drift guard
   // [P3] FE fail-closed: if any scope record lacks a previewVersion, expectedVersions would be incomplete and the
-  // server would 400 — surface a re-preview rather than that opaque error. (Can't happen with current BS-2, which
-  // always returns previewVersion for a restorable record; defensive against a future wire change.)
+  // server would 400 — block the execute and show a restore error (the user re-opens batch restore to retry) rather
+  // than sending incomplete expectedVersions. (Can't happen with current BS-2, which always returns previewVersion
+  // for a restorable record; defensive against a future wire change.)
   if (Object.keys(expectedVersions).length !== state.scope.length) {
     batchRestore.value = { ...state, visible: false }
     showError(recordLabel('record.errorRestore', isZh.value))
