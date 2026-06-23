@@ -15422,7 +15422,7 @@ async function reverseLeaveBalanceDeduction(trx, { orgId, userId, requestId }) {
             b.remaining_minutes, b.amount_minutes, b.status,
             (b.expires_at IS NOT NULL AND b.expires_at <= now()) AS expired
        FROM attendance_leave_balance_events e
-       JOIN attendance_leave_balances b ON b.id = e.balance_id
+       JOIN attendance_leave_balances b ON b.id = e.balance_id AND b.org_id = e.org_id AND b.user_id = e.user_id
       WHERE e.org_id = $1 AND e.user_id = $2 AND e.source_id = $3 AND e.event_type = 'deduct'
       FOR UPDATE OF b`,
     [orgId, userId, requestId]

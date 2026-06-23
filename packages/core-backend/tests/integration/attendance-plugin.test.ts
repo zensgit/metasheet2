@@ -14893,6 +14893,83 @@ attendanceIntegrationDescribe(
     }
   })
 
+  // #7 销假 §P2 (owner review of #3044) — the reverse mutation must be org/user-consistent like the read path.
+  // The FK only ties balance_id; it does NOT enforce that an event's org/user match the LOT owner. So a
+  // corrupt/malicious deduct event (right org+user+source_id, but balance_id pointing at ANOTHER user's lot)
+  // must be IGNORED by reverse — else it would restore minutes into a stranger's lot.
+  it('#7 销假 §P2 — reverse ignores a same-org/user deduct event whose LOT belongs to another user (no cross-user restore)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-l7x-${runSuffix}`
+    const otherId = `attendance-l7x-other-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const createdRequestIds: string[] = []
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) return
+      const hdr = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+
+      const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr, body: JSON.stringify({ code: 'comp_time', name: `Comp Time L7x ${runSuffix}`, paid: false, requiresApproval: true }) })
+      expect([201, 409]).toContain(ltRes.status)
+      let leaveTypeId = (ltRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!leaveTypeId) {
+        const list = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=true`, { headers: { Authorization: `Bearer ${token}` } })
+        const items = (list.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []
+        leaveTypeId = items.find(i => i.code === 'comp_time')?.id
+      }
+      expect(leaveTypeId).toBeTruthy()
+
+      const insertLot = async (uid: string, amount: number, remaining: number, tag: string) => (await pool.query(
+        `INSERT INTO attendance_leave_balances
+           (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, expires_at)
+         VALUES ('default', $1, 'comp_time', $2, $3, 'overtime_conversion', $4, 'active', '2026-01-01', NULL) RETURNING id`,
+        [uid, amount, remaining, `l7x:${runSuffix}:${tag}`],
+      )).rows[0].id as string
+      const lotRow = async (id: string) => (await pool.query('SELECT remaining_minutes, status FROM attendance_leave_balances WHERE id = $1', [id])).rows[0] as { remaining_minutes: number; status: string }
+
+      // userId's legit deduct: grant 240, approve a 120 leave → remaining 120 + a real deduct event (user→own lot).
+      const ownLot = await insertLot(userId, 240, 240, 'own')
+      const createRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr, body: JSON.stringify({ workDate: '2026-09-20', requestType: 'leave', leaveTypeId, minutes: 120 }) })
+      expect(createRes.status).toBe(201)
+      const req = (createRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
+      createdRequestIds.push(req)
+      expect((await requestJson(`${baseUrl}/api/attendance/requests/${req}/approve`, { method: 'POST', headers: hdr, body: JSON.stringify({ comment: 'ok' }) })).status).toBe(200)
+      expect(await lotRow(ownLot)).toMatchObject({ remaining_minutes: 120 })
+
+      // ANOTHER user's lot with headroom (amount 500, remaining 100 → 400 a buggy restore could fill).
+      const otherLot = await insertLot(otherId, 500, 100, 'other')
+      // CORRUPT deduct: org+user+source_id all match the reverse query, but balance_id points at otherLot.
+      await pool.query(
+        `INSERT INTO attendance_leave_balance_events (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+         VALUES ('default', $1, $2, 'deduct', -200, 'comp_time_leave', $3)`,
+        [userId, otherLot, req],
+      )
+
+      // cancel → reverse for (default, userId, req): ONLY the legit 120 (own lot) reverses; the corrupt 200 is ignored.
+      const cancelRes = await requestJson(`${baseUrl}/api/attendance/requests/${req}/cancel`, { method: 'POST', headers: hdr, body: JSON.stringify({ comment: 'withdraw' }) })
+      expect(cancelRes.status, cancelRes.raw).toBe(200)
+      expect((cancelRes.body as { data?: { reversal?: { reversed?: number } } } | undefined)?.data?.reversal?.reversed).toBe(120)
+      expect(await lotRow(ownLot)).toMatchObject({ remaining_minutes: 240, status: 'active' }) // own lot restored
+      expect(await lotRow(otherLot)).toMatchObject({ remaining_minutes: 100, status: 'active' }) // stranger's lot UNTOUCHED
+      const otherReverse = (await pool.query(`SELECT 1 FROM attendance_leave_balance_events WHERE balance_id = $1 AND event_type = 'reverse'`, [otherLot])).rows
+      expect(otherReverse).toHaveLength(0) // no reverse event written against the other user's lot
+    } finally {
+      for (const uid of [userId, otherId]) {
+        await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id = $1', [uid]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [uid]).catch(() => undefined)
+      }
+      if (createdRequestIds.length > 0) await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   // #7 销假 §5 authority — RBAC ENFORCED (the main flow above runs RBAC_BYPASS=true, which short-circuits
   // canAccessOtherUsers). canAccessOtherUsers = admin OR attendance:approve; a read/write-only user fails it.
   it('#7 销假 §5 authority — a non-admin/non-approver cannot cancel another user\'s leave (403)', async () => {
