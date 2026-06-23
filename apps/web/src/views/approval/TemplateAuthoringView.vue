@@ -50,6 +50,18 @@
       data-testid="approval-template-unsupported-alert"
     />
 
+    <!-- G-1: a complex graph is preserved, not unsupported — informational, save stays enabled. -->
+    <el-alert
+      v-if="!unsupportedReason && graphReadOnlyMessage"
+      :title="graphReadOnlyMessage"
+      description="表单与基本信息可编辑；审批流程以只读结构展示，保存时原样保留。复杂节点的可视化编辑将在后续版本提供。"
+      type="info"
+      show-icon
+      :closable="false"
+      class="template-authoring__alert"
+      data-testid="approval-template-graph-readonly-alert"
+    />
+
     <el-alert
       v-if="loadError || validationErrors.length"
       :title="loadError || '请修正后再保存'"
@@ -341,8 +353,9 @@
       <el-card class="template-authoring__panel" shadow="never">
         <template #header>
           <div class="template-authoring__panel-header">
-            <strong>审批步骤</strong>
+            <strong>{{ graphReadOnly ? '审批流程（只读）' : '审批步骤' }}</strong>
             <el-button
+              v-if="!graphReadOnly"
               size="small"
               :disabled="readOnly"
               data-testid="approval-template-add-step"
@@ -354,8 +367,32 @@
           </div>
         </template>
 
+        <!-- G-1: read-only structured render of a preserved complex graph. Covers ALL three
+             complex node types (condition / parallel / cc) plus approval, so nothing renders as a
+             bare "unsupported" — authors see the flow they are preserving. No editing yet (G-2+). -->
+        <div v-if="graphReadOnly" data-testid="approval-graph-readonly-list">
+          <div
+            v-for="node in graphPreviewNodes"
+            :key="node.key"
+            class="template-authoring__item"
+            data-testid="approval-graph-node-row"
+          >
+            <div class="template-authoring__item-toolbar">
+              <strong>{{ node.name || node.key }}</strong>
+              <span class="template-authoring__node-type" :data-node-type="node.type">
+                {{ nodeTypeLabel(node.type) }}
+              </span>
+            </div>
+            <ul v-if="nodeConfigSummary(node).length" class="template-authoring__node-summary">
+              <li v-for="(line, lineIndex) in nodeConfigSummary(node)" :key="lineIndex">{{ line }}</li>
+            </ul>
+            <div v-else class="template-authoring__hint">（无可编辑配置）</div>
+          </div>
+        </div>
+
         <div
           v-for="(step, index) in draft.steps"
+          v-show="!graphReadOnly"
           :key="step.localId"
           class="template-authoring__item"
           data-testid="approval-template-step-row"
@@ -528,6 +565,7 @@ import {
   createEmptyTemplateDraft,
   DETAIL_LEAF_FIELD_TYPES,
   draftFromTemplate,
+  graphReadOnlyReason,
   parseIdsText,
   unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
@@ -535,6 +573,13 @@ import {
   type FieldAuthoringDraft,
   type TemplateAuthoringDraft,
 } from '../../approvals/templateAuthoring'
+import type {
+  ApprovalAssigneeSource,
+  ApprovalNode,
+  CcNodeConfig,
+  ConditionNodeConfig,
+  ParallelNodeConfig,
+} from '../../types/approval'
 import { useApprovalDirectory } from '../../approvals/useApprovalDirectory'
 
 const route = useRoute()
@@ -547,12 +592,87 @@ const publishing = ref(false)
 const loadError = ref<string | null>(null)
 const validationErrors = ref<string[]>([])
 const unsupportedReason = ref<string | null>(null)
+// G-1: a COMPLEX (condition/parallel/cc/non-linear) graph renders read-only but is NOT
+// unsupported — the form/metadata stay editable and save preserves the graph verbatim.
+const graphReadOnlyMessage = ref<string | null>(null)
 const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
 
 const templateId = computed(() => typeof route.params.id === 'string' ? route.params.id : '')
 const isEditMode = computed(() => templateId.value.length > 0)
+// Truly-unsupported (attachment field / unknown node / extra config keys) locks the WHOLE form.
 const readOnly = computed(() => !canManageTemplates.value || Boolean(unsupportedReason.value))
+// A complex graph is shown via the read-only structured node list (`graphPreviewNodes`); the
+// linear steps editor is hidden. The graph is preserved on save, so this does NOT disable save.
+const graphReadOnly = computed(() => Boolean(graphReadOnlyMessage.value))
 const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value)
+
+// G-1 read-only structured render of a preserved complex graph: a per-node summary of the
+// config the v1 editor doesn't yet author, so authors can SEE the flow they're preserving.
+const graphPreviewNodes = computed<ApprovalNode[]>(() => draft.value.preservedGraph?.nodes ?? [])
+
+const NODE_TYPE_LABELS: Record<string, string> = {
+  start: '发起',
+  approval: '审批',
+  cc: '抄送',
+  condition: '条件分支',
+  parallel: '并行分支',
+  end: '结束',
+}
+function nodeTypeLabel(type: string): string {
+  return NODE_TYPE_LABELS[type] ?? type
+}
+
+function assigneeSourceSummary(source: ApprovalAssigneeSource): string {
+  switch (source.kind) {
+    case 'static_user': return `指定用户：${source.userIds.join('、') || '（无）'}`
+    case 'static_role': return `指定角色：${source.roleIds.join('、') || '（无）'}`
+    case 'requester': return '发起人'
+    case 'form_field_user': return `表单用户字段：${source.fieldId}`
+    case 'direct_manager': return '直属上级'
+    case 'dept_head': return '部门主管'
+    case 'continuous_managers': return `连续多级上级（${source.levels} 级）`
+    case 'manager_at_level': return `指定层级上级（第 ${source.level} 级）`
+    default: return JSON.stringify(source)
+  }
+}
+
+// One read-only descriptor per node config, covering ALL three complex types (condition / parallel
+// / cc) plus approval — so no type silently renders as "unsupported". Returns `[]` for nodes
+// without summarisable config (start/end).
+function nodeConfigSummary(node: ApprovalNode): string[] {
+  const config = node.config as Record<string, unknown>
+  if (node.type === 'condition') {
+    const cfg = config as unknown as ConditionNodeConfig
+    const lines = (cfg.branches ?? []).map((branch) => {
+      const rules = (branch.rules ?? [])
+        .map((rule) => `${rule.fieldId} ${rule.operator}${rule.value === undefined ? '' : ` ${JSON.stringify(rule.value)}`}`)
+        .join(` ${branch.conjunction ?? 'and'} `)
+      return `分支 → ${branch.edgeKey}：${rules || '（无规则）'}`
+    })
+    if (cfg.defaultEdgeKey) lines.push(`默认分支 → ${cfg.defaultEdgeKey}`)
+    return lines
+  }
+  if (node.type === 'parallel') {
+    const cfg = config as unknown as ParallelNodeConfig
+    return [
+      `并行分支：${(cfg.branches ?? []).join('、') || '（无）'}`,
+      `汇聚节点：${cfg.joinNodeKey ?? '（无）'}`,
+      `汇聚模式：${cfg.joinMode ?? '（无）'}`,
+    ]
+  }
+  if (node.type === 'cc') {
+    const cfg = config as unknown as CcNodeConfig
+    return [
+      `抄送类型：${cfg.targetType === 'role' ? '角色' : '用户'}`,
+      `抄送对象：${(cfg.targetIds ?? []).join('、') || '（无）'}`,
+    ]
+  }
+  if (node.type === 'approval') {
+    const sources = Array.isArray(config.assigneeSources) ? config.assigneeSources as ApprovalAssigneeSource[] : []
+    return sources.map((source) => `审批人：${assigneeSourceSummary(source)}`)
+  }
+  return []
+}
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
 const formSchemaPreview = computed(() => JSON.stringify(buildFormSchema(draft.value), null, 2))
 const approvalGraphPreview = computed(() => JSON.stringify(buildApprovalGraph(draft.value), null, 2))
@@ -674,6 +794,7 @@ async function loadTemplateForEdit() {
   if (!isEditMode.value) {
     draft.value = createEmptyTemplateDraft()
     unsupportedReason.value = null
+    graphReadOnlyMessage.value = null
     return
   }
   loading.value = true
@@ -681,6 +802,7 @@ async function loadTemplateForEdit() {
   try {
     const template = await getTemplate(templateId.value)
     unsupportedReason.value = unsupportedTemplateAuthoringReason(template)
+    graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
     syncAllStepOptions()
   } catch (error: any) {
@@ -707,11 +829,13 @@ async function persistDraft() {
       const updated = await updateTemplate(draft.value.templateId, buildUpdateTemplatePayload(draft.value))
       draft.value = draftFromTemplate(updated)
       unsupportedReason.value = unsupportedTemplateAuthoringReason(updated)
+      graphReadOnlyMessage.value = graphReadOnlyReason(updated)
       return updated
     }
     const created = await createTemplate(buildCreateTemplatePayload(draft.value))
     draft.value = draftFromTemplate(created)
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
+    graphReadOnlyMessage.value = graphReadOnlyReason(created)
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
   } catch (error: any) {
@@ -876,6 +1000,22 @@ onMounted(() => {
 
 .template-authoring__item-toolbar {
   margin-bottom: 12px;
+}
+
+.template-authoring__node-type {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--el-fill-color-light, #f5f7fa);
+  color: var(--el-text-color-secondary, #606266);
+}
+
+.template-authoring__node-summary {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--el-text-color-regular, #606266);
 }
 
 .template-authoring__error-list {

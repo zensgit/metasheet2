@@ -24,6 +24,7 @@ on:
       - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
       - 'apps/web/tests/approval-detail-field.test.ts'
       - 'apps/web/tests/approval-template-authoring-detail.test.ts'
+      - 'apps/web/tests/approval-template-authoring-graph-preserve.test.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -35,6 +36,7 @@ on:
       - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
       - 'apps/web/tests/approval-detail-field.test.ts'
       - 'apps/web/tests/approval-template-authoring-detail.test.ts'
+      - 'apps/web/tests/approval-template-authoring-graph-preserve.test.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -80,4 +82,6 @@ jobs:
         # detail/sub-form (明细) FE helpers: frozen-schema row render + fill-row seeding +
         # column-draft validation (mirrors backend normalizeDetailFieldParts) + buildFormSchema
         # detail emit/round-trip + validateTemplateDraft detail branch.
-        run: pnpm --filter @metasheet/web exec vitest run approval-detail-field approval-template-authoring-detail --reporter=dot
+        # G-1 complex-graph load-preserve: anti-flatten round-trip (condition/parallel/cc save
+        # byte-identical) + isComplexApprovalGraph + graphReadOnlyReason vs unsupportedReason split.
+        run: pnpm --filter @metasheet/web exec vitest run approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve --reporter=dot

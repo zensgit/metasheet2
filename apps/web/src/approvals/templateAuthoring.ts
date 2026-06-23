@@ -113,9 +113,29 @@ export interface TemplateAuthoringDraft {
   allowRevoke: boolean
   fields: FieldAuthoringDraft[]
   steps: ApprovalStepDraft[]
+  // G-1 anti-flatten keystone: a COMPLEX graph (any cc/condition/parallel node, or any
+  // non-linear shape) is captured here verbatim at hydrate and emitted UNCHANGED by
+  // `buildApprovalGraph` — the linear `steps` projection is NEVER applied to it, so save can
+  // not drop/reorder complex nodes/edges/config. `undefined` for plain linear templates (which
+  // keep the editable `steps` round-trip). The graph editor (G-2+) replaces this pass-through.
+  preservedGraph?: ApprovalGraph
 }
 
-const UNSUPPORTED_GRAPH_NODE_TYPES = new Set(['cc', 'condition', 'parallel'])
+// Complex node types the v1 LINEAR steps editor can't author. They are NOT "unsupported" — a
+// graph containing them is load-preserved verbatim (read-only graph view), never flattened.
+const COMPLEX_GRAPH_NODE_TYPES = new Set(['cc', 'condition', 'parallel'])
+
+/**
+ * True when a graph can't be edited through the linear `steps` model and so must be
+ * preserved verbatim: any `cc` / `condition` / `parallel` node is present, OR the topology is
+ * not a single linear start→approval*→end chain (`orderedLinearNodes` returns null). This is the
+ * G-1 anti-flatten gate — its truth means `draftFromTemplate` captures `preservedGraph` and the
+ * view renders the graph read-only.
+ */
+export function isComplexApprovalGraph(graph: ApprovalGraph): boolean {
+  if (graph.nodes.some((node) => COMPLEX_GRAPH_NODE_TYPES.has(node.type))) return true
+  return orderedLinearNodes(graph) === null
+}
 
 function nextLocalId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`
@@ -377,24 +397,59 @@ function orderedLinearNodes(graph: ApprovalGraph): ApprovalGraph['nodes'] | null
   return ordered
 }
 
+// The full set of node types the runtime recognises. A node whose type is outside this set is
+// genuinely un-authorable (data corruption / a newer schema) → the whole template stays read-only
+// and save is blocked, never flattened. `cc`/`condition`/`parallel` ARE recognised (G-1
+// load-preserves them) and are deliberately included here.
+const RECOGNISED_GRAPH_NODE_TYPES = new Set([
+  'start',
+  'approval',
+  'cc',
+  'condition',
+  'parallel',
+  'end',
+])
+
+/**
+ * Reason the WHOLE template must open read-only with SAVE DISABLED (truly-unsupported, distinct
+ * from a complex-but-save-preserving graph — see `graphReadOnlyReason`). Returns a message for:
+ *  - an un-authorable FIELD type (e.g. `attachment`), or
+ *  - a node carrying EXTRA keys beyond key/type/name/config, or a node whose `type` is not
+ *    recognised by the runtime, or
+ *  - (LINEAR graphs only) an approval node whose `config` has keys/sources the linear editor
+ *    can't represent — for COMPLEX graphs this is skipped because the graph is preserved verbatim
+ *    rather than projected to `steps`.
+ * Returns `null` when the template is editable OR complex-but-preservable.
+ */
 export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDetailDTO): string | null {
   const unsupportedField = template.formSchema.fields.find((field) => !isAuthorableFieldType(field.type))
   if (unsupportedField) {
     return `包含暂不支持编辑的字段类型：${unsupportedField.label || unsupportedField.id} (${unsupportedField.type})`
   }
 
+  // A node carrying extra keys, or an unrecognised node type, is genuinely un-authorable and
+  // blocks save. NOTE: cc/condition/parallel are RECOGNISED (load-preserved) and do NOT trip
+  // this — they are surfaced read-only via `graphReadOnlyReason`, never flattened.
   const unknownNode = template.approvalGraph.nodes.find((node) => {
     const nodeKeys = Object.keys(node as unknown as Record<string, unknown>)
     return nodeKeys.some((key) => !['key', 'type', 'name', 'config'].includes(key))
-      || UNSUPPORTED_GRAPH_NODE_TYPES.has(node.type)
-      || !['start', 'approval', 'end'].includes(node.type)
+      || !RECOGNISED_GRAPH_NODE_TYPES.has(node.type)
   })
   if (unknownNode) {
     return `包含暂不支持编辑的审批节点：${unknownNode.name || unknownNode.key} (${unknownNode.type})`
   }
 
+  // Complex graphs (cc/condition/parallel or non-linear) are load-preserved verbatim — the linear
+  // `steps` projection (and its per-approval-node config allowlist below) does NOT apply, so they
+  // are never "unsupported" here. They open read-only via `graphReadOnlyReason` and save unchanged.
+  if (isComplexApprovalGraph(template.approvalGraph)) {
+    return null
+  }
+
   const ordered = orderedLinearNodes(template.approvalGraph)
   if (!ordered) {
+    // Unreachable in practice (a non-linear graph is already complex above), but keeps the
+    // linear path total: an unexpected non-linear shape stays read-only rather than projecting.
     return '审批流程不是 MVP 支持的线性结构'
   }
 
@@ -425,14 +480,38 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
   return null
 }
 
+/**
+ * G-1 — reason the GRAPH (not the whole template) must render READ-ONLY: the graph is complex
+ * (any cc/condition/parallel node, or non-linear) so the v1 linear `steps` editor can't author
+ * it. Distinct from `unsupportedTemplateAuthoringReason`: a complex graph is NOT unsupported — the
+ * form/metadata stay EDITABLE and SAVE stays enabled (it preserves the graph verbatim via
+ * `draftFromTemplate`→`preservedGraph`→`buildApprovalGraph`). Returns `null` for a linear graph
+ * (the steps editor is live) and for a truly-unsupported template (that path is fully read-only
+ * via `unsupportedTemplateAuthoringReason`; the graph view never opens). The G-2+ editors will
+ * narrow this to only genuinely-unrepresentable constructs.
+ */
+export function graphReadOnlyReason(template: ApprovalTemplateDetailDTO): string | null {
+  if (unsupportedTemplateAuthoringReason(template)) return null
+  if (!isComplexApprovalGraph(template.approvalGraph)) return null
+  return '该审批流程包含条件 / 并行 / 抄送等复杂节点，当前版本以只读结构展示，保存时原样保留，不会被改写。'
+}
+
 export function draftFromTemplate(template: ApprovalTemplateDetailDTO): TemplateAuthoringDraft {
+  // G-1 anti-flatten keystone: a complex graph is captured VERBATIM and never projected to the
+  // linear `steps` model. `buildApprovalGraph` re-emits it byte-identical, so load→save can not
+  // drop or reorder its cc/condition/parallel nodes/edges/config.
+  const complex = isComplexApprovalGraph(template.approvalGraph)
   const ordered = orderedLinearNodes(template.approvalGraph) ?? template.approvalGraph.nodes
   const fields = template.formSchema.fields
     .map(fieldDraftFromField)
     .filter((field): field is FieldAuthoringDraft => field !== null)
-  const steps = ordered
-    .map(stepDraftFromApprovalNode)
-    .filter((step): step is ApprovalStepDraft => step !== null)
+  // Skip the approval-only step projection for complex graphs — they round-trip via
+  // `preservedGraph`, and projecting would discard the non-approval nodes (the flatten risk).
+  const steps = complex
+    ? []
+    : ordered
+        .map(stepDraftFromApprovalNode)
+        .filter((step): step is ApprovalStepDraft => step !== null)
 
   return {
     templateId: template.id,
@@ -444,8 +523,11 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
     visibilityIdsText: formatIds(template.visibilityScope?.ids),
     slaHoursText: template.slaHours == null ? '' : String(template.slaHours),
     allowRevoke: true,
+    ...(complex ? { preservedGraph: template.approvalGraph } : {}),
     fields: fields.length > 0 ? fields : [createEmptyFieldDraft(1)],
-    steps: steps.length > 0 ? steps : [createEmptyStepDraft(1)],
+    // A complex graph round-trips via `preservedGraph` and has no editable steps — keep
+    // `steps: []` (no phantom step). Linear drafts seed an empty step for the editor.
+    steps: complex ? steps : (steps.length > 0 ? steps : [createEmptyStepDraft(1)]),
   }
 }
 
@@ -551,6 +633,12 @@ function buildStepConfig(step: ApprovalStepDraft): ApprovalNodeConfig {
 }
 
 export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph {
+  // G-1 anti-flatten keystone: a preserved complex graph is emitted UNCHANGED — no rebuild from
+  // `steps`, so its cc/condition/parallel nodes/edges/config survive save byte-identical. Only
+  // linear drafts (no `preservedGraph`) take the start→approval*→end build below.
+  if (draft.preservedGraph) {
+    return draft.preservedGraph
+  }
   const approvalNodes = draft.steps.map((step, index) => ({
     key: `approval_${index + 1}`,
     type: 'approval' as const,
@@ -666,7 +754,9 @@ export function validateTemplateDraft(
     cycleState.set(fieldId, 2)
   }
   visibilityDeps.forEach((_dependsOn, fieldId) => visitVisibility(fieldId))
-  if (draft.steps.length === 0) errors.push('至少需要一个审批步骤')
+  // A complex graph (preservedGraph) carries no editable steps — the step requirement only
+  // applies to linear drafts that build their graph from `steps`.
+  if (!draft.preservedGraph && draft.steps.length === 0) errors.push('至少需要一个审批步骤')
   const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
   draft.steps.forEach((step, index) => {
     const label = step.name.trim() || `审批步骤 ${index + 1}`
