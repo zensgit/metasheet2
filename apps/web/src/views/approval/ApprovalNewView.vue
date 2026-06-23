@@ -148,6 +148,137 @@
               <el-option label="王五" value="user_3" />
             </el-select>
 
+            <!-- detail / sub-form (明细): editable rows × leaf-column cells. `formData[field.id]`
+                 is an array of row objects keyed by sub-field id; each cell reuses the matching
+                 leaf editor. Respects minRows/maxRows (add disabled at maxRows; remove disabled
+                 at minRows). The backend re-validates row count / required / per-cell types. -->
+            <div v-else-if="field.type === 'detail'" class="approval-new__detail">
+              <el-table
+                :data="detailRows(field.id)"
+                border
+                size="small"
+                class="approval-new__detail-table"
+              >
+                <el-table-column
+                  v-for="column in (field.columns || [])"
+                  :key="column.id"
+                  :label="column.label"
+                  :prop="column.id"
+                >
+                  <template #header>
+                    {{ column.label }}<span v-if="column.required" class="approval-new__detail-required">*</span>
+                  </template>
+                  <template #default="{ row }">
+                    <!-- per-row sub-field visibility (design-lock §4): a cell whose
+                         column.visibilityRule is false for THIS row renders nothing and is pruned
+                         from the submit payload by the same evaluation. -->
+                    <template v-if="isDetailCellVisible(column, row)">
+                    <el-input
+                      v-if="column.type === 'text'"
+                      v-model="row[column.id]"
+                      :placeholder="column.placeholder || column.label"
+                    />
+                    <el-input
+                      v-else-if="column.type === 'textarea'"
+                      v-model="row[column.id]"
+                      type="textarea"
+                      :rows="2"
+                      :placeholder="column.placeholder || column.label"
+                    />
+                    <el-input-number
+                      v-else-if="column.type === 'number'"
+                      v-model="row[column.id]"
+                      :controls="false"
+                      style="width: 100%"
+                    />
+                    <el-date-picker
+                      v-else-if="column.type === 'date'"
+                      v-model="row[column.id]"
+                      type="date"
+                      :placeholder="column.label"
+                      style="width: 100%"
+                    />
+                    <el-date-picker
+                      v-else-if="column.type === 'datetime'"
+                      v-model="row[column.id]"
+                      type="datetime"
+                      :placeholder="column.label"
+                      style="width: 100%"
+                    />
+                    <el-select
+                      v-else-if="column.type === 'select'"
+                      v-model="row[column.id]"
+                      :placeholder="column.label"
+                      style="width: 100%"
+                    >
+                      <el-option
+                        v-for="opt in (column.options || [])"
+                        :key="opt.value"
+                        :label="opt.label"
+                        :value="opt.value"
+                      />
+                    </el-select>
+                    <el-select
+                      v-else-if="column.type === 'multi-select'"
+                      v-model="row[column.id]"
+                      multiple
+                      :placeholder="column.label"
+                      style="width: 100%"
+                    >
+                      <el-option
+                        v-for="opt in (column.options || [])"
+                        :key="opt.value"
+                        :label="opt.label"
+                        :value="opt.value"
+                      />
+                    </el-select>
+                    <el-select
+                      v-else-if="column.type === 'user'"
+                      v-model="row[column.id]"
+                      placeholder="选择用户"
+                      filterable
+                      style="width: 100%"
+                    >
+                      <el-option label="张三" value="user_1" />
+                      <el-option label="李四" value="user_2" />
+                      <el-option label="王五" value="user_3" />
+                    </el-select>
+                    <el-input v-else v-model="row[column.id]" :placeholder="column.label" />
+                    </template>
+                  </template>
+                </el-table-column>
+                <el-table-column label="操作" width="80" align="center">
+                  <template #default="{ $index }">
+                    <el-button
+                      type="danger"
+                      link
+                      :disabled="!canRemoveDetailRow(field)"
+                      @click="removeDetailRow(field.id, $index)"
+                    >
+                      删除
+                    </el-button>
+                  </template>
+                </el-table-column>
+                <template #empty>
+                  <span class="approval-new__detail-empty">暂无明细行，请点击下方“添加一行”</span>
+                </template>
+              </el-table>
+              <div class="approval-new__detail-actions">
+                <el-button
+                  type="primary"
+                  plain
+                  size="small"
+                  :disabled="!canAddDetailRow(field)"
+                  @click="addDetailRow(field)"
+                >
+                  添加一行
+                </el-button>
+                <span v-if="detailRowsHint(field)" class="approval-new__detail-hint">
+                  {{ detailRowsHint(field) }}
+                </span>
+              </div>
+            </div>
+
             <!-- attachment (drag upload) -->
             <el-upload
               v-else-if="field.type === 'attachment'"
@@ -198,13 +329,16 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ArrowLeft, Search, UploadFilled } from '@element-plus/icons-vue'
+import type { FormField } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
+import { getVisibleFormFields } from '../../approvals/fieldVisibility'
 import {
-  getVisibleFormFields,
-  pruneHiddenFormData,
-} from '../../approvals/fieldVisibility'
+  createEmptyDetailRow,
+  pruneHiddenFormDataWithDetail,
+  visibleDetailColumnsForRow,
+} from '../../approvals/detailField'
 
 const route = useRoute()
 const router = useRouter()
@@ -237,6 +371,62 @@ function handleFileChange(fieldId: string, file: any) {
   formData[fieldId] = file?.raw ?? null
 }
 
+// ---------------------------------------------------------------------------
+// detail / sub-form (明细) fill helpers — `formData[field.id]` is the row array.
+// ---------------------------------------------------------------------------
+function detailRows(fieldId: string): Array<Record<string, unknown>> {
+  const value = formData[fieldId]
+  return Array.isArray(value) ? (value as Array<Record<string, unknown>>) : []
+}
+
+// Per-row sub-field visibility (design-lock §4): is `column` visible for THIS row? The cell editor
+// renders only when true; the same evaluation (visibleDetailColumnsForRow → pruneHiddenDetailRow)
+// drops the cell from the submit payload, so hidden cells are never sent.
+function isDetailCellVisible(column: FormField, row: Record<string, unknown>): boolean {
+  // No rule on the whole detail group's columns → keep the original loop's behavior (visible).
+  if (!column.visibilityRule) return true
+  return visibleDetailColumnsForRow(currentDetailColumns(column), row).some((c) => c.id === column.id)
+}
+
+// The sibling sub-fields a per-row rule may reference — the columns of the detail field this
+// `column` belongs to. Resolved from the live template (the fill-time schema source).
+function currentDetailColumns(column: FormField): FormField[] {
+  for (const field of template.value?.formSchema.fields ?? []) {
+    if (field.type === 'detail' && (field.columns ?? []).some((c) => c.id === column.id)) {
+      return field.columns ?? []
+    }
+  }
+  return [column]
+}
+
+function addDetailRow(field: FormField): void {
+  if (!canAddDetailRow(field)) return
+  if (!Array.isArray(formData[field.id])) formData[field.id] = []
+  ;(formData[field.id] as Array<Record<string, unknown>>).push(createEmptyDetailRow(field.columns))
+}
+
+function removeDetailRow(fieldId: string, index: number): void {
+  const rows = formData[fieldId]
+  if (Array.isArray(rows)) rows.splice(index, 1)
+}
+
+function canAddDetailRow(field: FormField): boolean {
+  if (typeof field.maxRows !== 'number') return true
+  return detailRows(field.id).length < field.maxRows
+}
+
+function canRemoveDetailRow(field: FormField): boolean {
+  const minRows = typeof field.minRows === 'number' ? field.minRows : 0
+  return detailRows(field.id).length > minRows
+}
+
+function detailRowsHint(field: FormField): string {
+  const parts: string[] = []
+  if (typeof field.minRows === 'number') parts.push(`至少 ${field.minRows} 行`)
+  if (typeof field.maxRows === 'number') parts.push(`最多 ${field.maxRows} 行`)
+  return parts.join(' · ')
+}
+
 function goBack() {
   router.back()
 }
@@ -262,7 +452,7 @@ async function handleSubmit() {
   try {
     const result = await approvalStore.submitApproval({
       templateId,
-      formData: template.value ? pruneHiddenFormData(template.value.formSchema, formData) : { ...formData },
+      formData: template.value ? pruneHiddenFormDataWithDetail(template.value.formSchema, formData) : { ...formData },
     })
     ElMessage.success('审批已提交')
     router.push({ name: 'approval-detail', params: { id: result.id } })
@@ -279,7 +469,8 @@ onMounted(async () => {
     for (const field of template.value.formSchema.fields) {
       if (field.defaultValue !== undefined) {
         formData[field.id] = field.defaultValue
-      } else if (field.type === 'multi-select') {
+      } else if (field.type === 'multi-select' || field.type === 'detail') {
+        // detail value is an array of row objects; seed empty so the fill table binds an array.
         formData[field.id] = []
       } else {
         formData[field.id] = undefined
@@ -300,7 +491,7 @@ function syncVisibleFormState() {
     if (formData[field.id] === undefined) {
       if (field.defaultValue !== undefined) {
         formData[field.id] = field.defaultValue
-      } else if (field.type === 'multi-select') {
+      } else if (field.type === 'multi-select' || field.type === 'detail') {
         formData[field.id] = []
       }
     }
@@ -385,5 +576,31 @@ watch([visibleFieldIds, template], () => {
 .approval-new__submit {
   margin-top: 8px;
   margin-bottom: 0;
+}
+
+.approval-new__detail {
+  width: 100%;
+}
+
+.approval-new__detail-table {
+  width: 100%;
+}
+
+.approval-new__detail-required {
+  color: var(--el-color-danger, #f56c6c);
+  margin-left: 2px;
+}
+
+.approval-new__detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.approval-new__detail-hint,
+.approval-new__detail-empty {
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #909399);
 }
 </style>

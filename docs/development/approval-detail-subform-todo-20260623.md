@@ -37,17 +37,34 @@
 - ➡️ Read path surfaces the **frozen** detail columns — folded into **C-3** (the renderer consumes
   them; exposing columns without a renderer is untestable/unused).
 
-## Phase C-3 — UI (🔒 until C-2 merged; the form-schema stability point for complex-graph node UI)
-- 🔒 Template author: configure detail `columns` (reuse leaf-field authoring +
-  `AUTHORABLE_FIELD_TYPES`) in `TemplateAuthoringView.vue`.
-- 🔒 Fill view: `detail → DetailTable` editable branch in `ApprovalNewView.vue` (add/remove
-  row; per-cell leaf editor; inline validation; per-row visibility).
-- 🔒 Read path (moved from C-2): expose the **frozen** detail `columns` on the instance read
-  (the version's `form_schema` or a projected `detailColumns` on the read DTO) so the detail
-  view renders from the frozen schema, not the live template (closes design-lock Fact B).
-- 🔒 Detail view: read-only `DetailTable` in `ApprovalDetailView.vue` driven by frozen columns
-  (replaces the `formatFieldValue` JSON-stringify fallback for `detail`).
-- 🔒 FE tests: author round-trip, fill validation, render-from-frozen-snapshot.
+## Phase C-3 — UI (the form-schema stability point for complex-graph node UI)
+### C-3a — read-path ✅ (shipped #3090, squash c330dfb03)
+- ✅ Read path: the instance read DTO `UnifiedApprovalDTO` now carries `formSchema?: FormSchema | null`,
+  resolved from the instance's pinned **frozen** template version (`getApproval` reads
+  `approval_template_versions.form_schema`) so the detail view renders against frozen columns, not
+  the live template (closes design-lock Fact B). Real-DB read round-trip test.
+### C-3b — author + fill + detail view ✅ (this PR)
+- ✅ Template author: configure detail `columns` (reuse leaf-field authoring + `AUTHORABLE_FIELD_TYPES`,
+  which now includes `detail`; sub-field type restricted to `DETAIL_LEAF_FIELD_TYPES` so the picker
+  can never offer `detail`) + minRows/maxRows inputs in `TemplateAuthoringView.vue`. `buildFormSchema`
+  emits `columns`/`minRows`/`maxRows` (and deletes them when a field is no longer a `detail`);
+  `draftFromTemplate` hydrates them (round-trip). `validateTemplateDraft` mirrors the backend
+  `normalizeDetailFieldParts` reject-set client-side (non-empty leaf-only unique-id columns, no
+  nesting, minRows ≤ maxRows non-negative ints).
+- ✅ Fill view: `detail` editable `el-table` branch in `ApprovalNewView.vue` (add/remove row;
+  per-cell leaf editor per column type; respects minRows/maxRows — add disabled at maxRows, remove
+  disabled at minRows). `formData[field.id]` is the row array (init `[]`); only DEFINED column keys
+  are emitted (no unknown sub-keys); backend re-validates row count / required / per-cell types.
+- ✅ Detail view: read-only `el-table` in `ApprovalDetailView.vue` driven by the FROZEN
+  `approval.formSchema` columns (replaces the `formatFieldValue` JSON-stringify fallback for
+  `detail`; falls back to stringify when formSchema/columns absent or value is not an array).
+- ✅ Pure (Element-Plus-free) logic extracted to `approvals/detailField.ts` (frozen-schema render,
+  fill-row seeding, column-draft validation, round-trip) so it is vitest-testable without Element Plus.
+- ✅ FE tests (36): `approval-detail-field.test.ts` (25 — render-from-frozen-snapshot, leaf guard,
+  fill seeding, column validation, round-trip) + `approval-template-authoring-detail.test.ts` (11 —
+  buildFormSchema detail emit/delete, validateTemplateDraft detail branch, draftFromTemplate hydrate).
+  Wired into CI via `approval-web-guard.yml` (the main gate runs only core-backend vitest + a web
+  build, so without this guard the FE specs would never run).
 
 ## Phase C-4 — cross-row summary sub-field (🔒 OPTIONAL — only if owner-decision (d) = v1 must)
 - 🔒 Read-only computed cell (e.g. `sum(items[].price)`) — a leaf "summary" sub-field; design

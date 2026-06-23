@@ -75,7 +75,28 @@
               class="approval-detail__field"
             >
               <span class="approval-detail__label">{{ String(key) }}</span>
-              <span>{{ formatFieldValue(value) }}</span>
+              <!-- detail / sub-form (明细): render the frozen rows × columns as a read-only
+                   table driven by the instance's FROZEN formSchema columns (never the live
+                   template). Falls back to the stringify rendering when the field is not a
+                   usable detail or the value is not an array. -->
+              <el-table
+                v-if="detailTables[String(key)]"
+                :data="detailTables[String(key)].rows"
+                border
+                size="small"
+                class="approval-detail__detail-table"
+              >
+                <el-table-column
+                  v-for="column in detailTables[String(key)].columns"
+                  :key="column.id"
+                  :label="column.label"
+                >
+                  <template #default="{ row }">
+                    {{ formatFieldValue(row.cells[column.id]) }}
+                  </template>
+                </el-table-column>
+              </el-table>
+              <span v-else>{{ formatFieldValue(value) }}</span>
             </div>
           </div>
           <el-empty v-else description="暂无表单数据" :image-size="80" />
@@ -535,6 +556,11 @@ import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { markApprovalRead, remindApproval } from '../../approvals/api'
+import {
+  buildDetailRowsForDisplay,
+  findDetailFieldInSchema,
+  type DetailDisplayTable,
+} from '../../approvals/detailField'
 
 const route = useRoute()
 const router = useRouter()
@@ -543,6 +569,25 @@ const templateStore = useApprovalTemplateStore()
 const { canAct } = useApprovalPermissions()
 
 const approval = computed(() => store.activeApproval)
+
+// Read-only detail (明细) tables, keyed by snapshot field id. Built from the instance's FROZEN
+// formSchema (C-3a read-path) so a later column rename/reorder on the live template never
+// mis-renders frozen rows. A key is present only when the field is a `detail` carrying
+// `columns` AND its snapshot value is an array; everything else falls back to stringify.
+const detailTables = computed<Record<string, DetailDisplayTable>>(() => {
+  const snapshot = approval.value?.formSnapshot
+  const formSchema = approval.value?.formSchema
+  if (!snapshot || !formSchema) return {}
+  const result: Record<string, DetailDisplayTable> = {}
+  for (const [key, value] of Object.entries(snapshot)) {
+    const detailField = findDetailFieldInSchema(formSchema, key)
+    if (!detailField) continue
+    const table = buildDetailRowsForDisplay(detailField, value)
+    if (table) result[key] = table
+  }
+  return result
+})
+
 const isRequester = computed(() => {
   // Simple heuristic: mock current user as 'user_1'
   return approval.value?.requester?.id === 'user_1'
@@ -1066,6 +1111,10 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.approval-detail__detail-table {
+  margin-top: 4px;
 }
 
 .approval-detail__timeline-content {
