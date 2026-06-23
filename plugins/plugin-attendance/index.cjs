@@ -7515,6 +7515,13 @@ function normalizeRuleOverride(value) {
     earlyGraceMinutes: Number.isFinite(Number(override.earlyGraceMinutes))
       ? Math.max(0, Number(override.earlyGraceMinutes))
       : undefined,
+    // #5 RT-1a: per-group lateness tier thresholds carry through the override merge (now persisted).
+    severeLateThresholdMinutes: Number.isFinite(Number(override.severeLateThresholdMinutes))
+      ? Math.max(0, Number(override.severeLateThresholdMinutes))
+      : undefined,
+    absenceLateThresholdMinutes: Number.isFinite(Number(override.absenceLateThresholdMinutes))
+      ? Math.max(0, Number(override.absenceLateThresholdMinutes))
+      : undefined,
     roundingMinutes: Number.isFinite(Number(override.roundingMinutes))
       ? Math.max(0, Number(override.roundingMinutes))
       : undefined,
@@ -7547,6 +7554,9 @@ function mapRuleRow(row) {
     workEndTime: row.work_end_time ?? DEFAULT_RULE.workEndTime,
     lateGraceMinutes: Number(row.late_grace_minutes ?? DEFAULT_RULE.lateGraceMinutes),
     earlyGraceMinutes: Number(row.early_grace_minutes ?? DEFAULT_RULE.earlyGraceMinutes),
+    // #5 RT-1a: per-group lateness tier thresholds (read the persisted column, fall back to the RT-1 default).
+    severeLateThresholdMinutes: Number(row.severe_late_threshold_minutes ?? DEFAULT_RULE.severeLateThresholdMinutes),
+    absenceLateThresholdMinutes: Number(row.absence_late_threshold_minutes ?? DEFAULT_RULE.absenceLateThresholdMinutes),
     roundingMinutes: Number(row.rounding_minutes ?? DEFAULT_RULE.roundingMinutes),
     workingDays: normalizeWorkingDays(row.working_days),
     isDefault: row.is_default ?? true,
@@ -12280,7 +12290,7 @@ async function loadDefaultRule(db, orgId) {
   try {
     const rows = await db.query(
       `SELECT id, name, timezone, work_start_time, work_end_time, late_grace_minutes,
-              early_grace_minutes, rounding_minutes, working_days, is_default, org_id
+              early_grace_minutes, severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default, org_id
        FROM attendance_rules
        WHERE is_default = true AND org_id = $1
        ORDER BY created_at DESC
@@ -12290,7 +12300,7 @@ async function loadDefaultRule(db, orgId) {
     if (!rows.length && targetOrg !== DEFAULT_ORG_ID) {
       const fallbackRows = await db.query(
         `SELECT id, name, timezone, work_start_time, work_end_time, late_grace_minutes,
-                early_grace_minutes, rounding_minutes, working_days, is_default, org_id
+                early_grace_minutes, severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default, org_id
          FROM attendance_rules
          WHERE is_default = true AND org_id = $1
          ORDER BY created_at DESC
@@ -18076,6 +18086,7 @@ module.exports = {
     buildAttendanceImportMultiPunchMeta,
     computeAttendanceRecordUpsertValues,
     computeLateTierCounts,
+    mapRuleRow,
     resolveAttendanceImportRawClient,
     buildAttendanceImportCopyQuery,
     attachAttendanceImportCopyStreamErrorSink,
@@ -27625,6 +27636,8 @@ module.exports = {
           workEndTime: z.string().optional(),
           lateGraceMinutes: z.number().int().min(0).optional(),
           earlyGraceMinutes: z.number().int().min(0).optional(),
+          severeLateThresholdMinutes: z.number().int().min(0).optional(),
+          absenceLateThresholdMinutes: z.number().int().min(0).optional(),
           roundingMinutes: z.number().int().min(0).optional(),
           workingDays: z.array(z.number().int().min(0).max(6)).optional(),
           orgId: z.string().optional(),
@@ -27643,8 +27656,25 @@ module.exports = {
           workEndTime: parsed.data.workEndTime ?? DEFAULT_RULE.workEndTime,
           lateGraceMinutes: parsed.data.lateGraceMinutes ?? DEFAULT_RULE.lateGraceMinutes,
           earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? DEFAULT_RULE.earlyGraceMinutes,
+          severeLateThresholdMinutes: parsed.data.severeLateThresholdMinutes ?? DEFAULT_RULE.severeLateThresholdMinutes,
+          absenceLateThresholdMinutes: parsed.data.absenceLateThresholdMinutes ?? DEFAULT_RULE.absenceLateThresholdMinutes,
           roundingMinutes: parsed.data.roundingMinutes ?? DEFAULT_RULE.roundingMinutes,
           workingDays: parsed.data.workingDays ?? DEFAULT_RULE.workingDays,
+        }
+
+        // #5 RT-1a normalizer (design-lock §2, the #1776 enum-strict rule): Zod already rejected
+        // non-integers / negatives; now reject incoherent tiers on the RESOLVED payload so a partial
+        // update can't persist an out-of-order rule. absence-late ≥ severe-late ≥ grace.
+        if (!(payload.absenceLateThresholdMinutes >= payload.severeLateThresholdMinutes
+              && payload.severeLateThresholdMinutes >= payload.lateGraceMinutes)) {
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'absenceLateThresholdMinutes ≥ severeLateThresholdMinutes ≥ lateGraceMinutes is required.',
+            },
+          })
+          return
         }
 
         const orgId = getOrgId(req)
@@ -27654,8 +27684,8 @@ module.exports = {
 
             const rows = await trx.query(
               `INSERT INTO attendance_rules
-               (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes, rounding_minutes, working_days, is_default)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, true)
+               (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes, severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, true)
                RETURNING *`,
               [
                 randomUUID(),
@@ -27666,6 +27696,8 @@ module.exports = {
                 payload.workEndTime,
                 payload.lateGraceMinutes,
                 payload.earlyGraceMinutes,
+                payload.severeLateThresholdMinutes,
+                payload.absenceLateThresholdMinutes,
                 payload.roundingMinutes,
                 JSON.stringify(payload.workingDays),
               ]
