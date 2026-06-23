@@ -7506,21 +7506,23 @@ export function univerMetaRouter(): Router {
       const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
       const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
       const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
-      // batch-load per-record live data + the target revision in 2 queries (not 2·N):
-      const liveById = new Map<string, Record<string, unknown>>()
-      for (const r of (await pool.query('SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2)', [sheetId, uniqueIds])).rows as Array<{ id: string; data: unknown }>) liveById.set(String(r.id), asRec(r.data))
+      // batch-load per-record live data + version + the target revision in 2 queries (not 2·N). The VERSION is the
+      // per-record optimistic-concurrency anchor bound into the scopeHash (#2) — the FE submits it back to BS-3.
+      const liveById = new Map<string, { version: number; data: Record<string, unknown> }>()
+      for (const r of (await pool.query('SELECT id, version, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2)', [sheetId, uniqueIds])).rows as Array<{ id: string; version: unknown; data: unknown }>) liveById.set(String(r.id), { version: Number(r.version ?? 0), data: asRec(r.data) })
       const revById = new Map<string, { action: string; snapshot: unknown }>()
       for (const r of (await pool.query('SELECT record_id, action, snapshot FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = ANY($2) AND version = $3', [sheetId, uniqueIds, targetVersion])).rows as Array<{ record_id: string; action: string; snapshot: unknown }>) {
         const prev = revById.get(String(r.record_id))
         if (!prev || (prev.action === 'delete' && r.action !== 'delete')) revById.set(String(r.record_id), { action: r.action, snapshot: r.snapshot }) // prefer a non-delete snapshot (as single-record)
       }
       const selSet = fieldIds ? new Set(fieldIds) : null
-      type Outcome = { recordId: string; status: 'restorable' | 'skipped'; changes?: Array<{ fieldId: string; op: 'set' | 'unset'; value: unknown }>; affectedFieldCount?: number; skipReason?: string }
+      type Outcome = { recordId: string; status: 'restorable' | 'skipped'; changes?: Array<{ fieldId: string; op: 'set' | 'unset'; value: unknown }>; affectedFieldCount?: number; previewVersion?: number; skipReason?: string }
       const outcomes: Outcome[] = []
-      const contributing: Array<{ recordId: string; changesHash: string }> = []
+      const contributing: Array<{ recordId: string; changesHash: string; version: number }> = []
       for (const recordId of uniqueIds) {
+        const live = liveById.get(recordId)
         // existence + row-deny share ONE 'unavailable' reason (no existence oracle, like the single route's 404)
-        if (!liveById.has(recordId) || deniedIds.has(recordId)) { outcomes.push({ recordId, status: 'skipped', skipReason: 'unavailable' }); continue }
+        if (!live || deniedIds.has(recordId)) { outcomes.push({ recordId, status: 'skipped', skipReason: 'unavailable' }); continue }
         const rev = revById.get(recordId)
         if (!rev) { outcomes.push({ recordId, status: 'skipped', skipReason: 'version_unavailable' }); continue }
         if (rev.action === 'delete') { outcomes.push({ recordId, status: 'skipped', skipReason: 'unsupported' }); continue } // undelete is a later slice
@@ -7529,13 +7531,15 @@ export function univerMetaRouter(): Router {
         let drift = false
         for (const fid of Object.keys(targetSnapshot)) if (!previewCtx.fieldById.has(fid)) { drift = true; break }
         if (drift) { outcomes.push({ recordId, status: 'skipped', skipReason: 'schema_drift' }); continue } // can't faithfully reproduce → not restorable
-        const raw = computeRecordRestoreDiff({ fieldById: previewCtx.fieldById, rawTypeById, targetSnapshot, currentData: liveById.get(recordId)!, recordId, currentVersion: 0, normalizeLinkIds })
+        const raw = computeRecordRestoreDiff({ fieldById: previewCtx.fieldById, rawTypeById, targetSnapshot, currentData: live.data, recordId, currentVersion: 0, normalizeLinkIds })
           .map((c) => ({ fieldId: c.fieldId, op: (c.op ?? 'set') as 'set' | 'unset', value: c.value }))
         const visible = raw.filter((c) => allowed.has(c.fieldId)) // PV-2 mask (visible ∧ field_permissions)
         const selected = selSet ? visible.filter((c) => selSet.has(c.fieldId)) : visible // per-field filter (mask-then-filter)
         if (selected.length === 0) { outcomes.push({ recordId, status: 'skipped', skipReason: 'no_change' }); continue } // nets zero → not in scope
-        outcomes.push({ recordId, status: 'restorable', changes: selected, affectedFieldCount: selected.length })
-        contributing.push({ recordId, changesHash: hashPreviewChanges(selected) })
+        // bind this record's CURRENT (preview-time) version into the scope + return it as previewVersion: the FE
+        // submits it back as expectedVersions[id], BS-3 folds the SUBMITTED value into the hash (#2 anti-bypass).
+        outcomes.push({ recordId, status: 'restorable', changes: selected, affectedFieldCount: selected.length, previewVersion: live.version })
+        contributing.push({ recordId, changesHash: hashPreviewChanges(selected), version: live.version })
       }
       // the scope = the RESTORABLE set only; identity null when empty (never a hashScope([]) executable token).
       const scopeIds = contributing.map((c) => c.recordId).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
@@ -7950,7 +7954,10 @@ export function univerMetaRouter(): Router {
       if (!capabilities.canEditRecord) return sendForbidden(res) // D5: gate on the RESTORE capability
       const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
       if (!patchContext) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById } = patchContext
+      // fieldPermissions = the SAME deriveFieldPermissions(layer-3) the legacy /restore gates with — `allowed` is a
+      // READ mask (visible), and patchRecords only enforces FIELD-DEFINITION readonly, so a per-subject visible-but-
+      // readOnly field must be gated HERE at the write (#1) or it would be written.
+      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions } = patchContext
       const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
       const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
       const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
@@ -7969,9 +7976,12 @@ export function univerMetaRouter(): Router {
       // Step 1: recompute each submitted record's FRESH masked+filtered diff ONCE — the SAME object feeds both the
       // hash and the write (within-execute write-set ≡ hashed-set). A non-computable record (missing / no-revision /
       // delete / drift / empty) is EXCLUDED → contributing shrinks → scopeHash diverges → whole-batch 409 below.
-      // expectedVersion = the FE's per-record version (the CAS base); it does NOT enter hashPreviewChanges, so it
-      // cannot game the hash. The diff is from FRESH data, so any data change diverges the hash (diff-level).
-      const contributing: Array<{ recordId: string; diff: RecordChange[]; changesHash: string }> = []
+      // The diff is from FRESH data, so any data change diverges the hash (diff-level). The per-record version FOLDED
+      // into the scopeHash is the CLIENT-SUBMITTED expectedVersions[id] (#2): a client that submits the CURRENT
+      // version to slip past the CAS instead diverges the hash → 409; an honest client submits the preview-time
+      // version → hash matches → the in-transaction CAS still fires against the actual current version. The SAME
+      // submitted value also drives the CAS via computeRecordRestoreDiff's currentVersion → RecordChange.expectedVersion.
+      const contributing: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }> = []
       for (const recordId of uniqueIds) {
         const live = liveById.get(recordId); const rev = revById.get(recordId)
         if (!live || !rev || rev.action === 'delete' || rev.snapshot === null || rev.snapshot === undefined) continue
@@ -7983,14 +7993,14 @@ export function univerMetaRouter(): Router {
         const masked = diff.filter((c) => allowed.has(c.fieldId)) // PV-2 mask
         const selected = selSet ? masked.filter((c) => selSet.has(c.fieldId)) : masked // per-field filter (mask-then-filter)
         if (selected.length === 0) continue // nets zero → excluded
-        contributing.push({ recordId, diff: selected, changesHash: hashPreviewChanges(selected.map((c) => ({ fieldId: c.fieldId, op: c.op, value: c.value }))) })
+        contributing.push({ recordId, diff: selected, changesHash: hashPreviewChanges(selected.map((c) => ({ fieldId: c.fieldId, op: c.op, value: c.value }))), version: expectedVersions[recordId] })
       }
       // Step 2: verify the scoped identity over the recomputed contributing set BEFORE any write. all-noop:
       // contributing=[] → hashScope([]) ≠ any real identity → 409, never a 200 noop short-circuit (the BS [P2] rule).
       const scopeIds = contributing.map((c) => c.recordId) // already sorted (uniqueIds was sorted; contributing preserves order)
       const verdict = verifyScopedRestorePreviewIdentity(previewIdentity, {
         sheetId, scope: { kind: 'records', recordIds: scopeIds }, targetVersion, strategy: 'revert',
-        scopeHash: hashScope(contributing.map((c) => ({ recordId: c.recordId, changesHash: c.changesHash }))), actorId: access.userId,
+        scopeHash: hashScope(contributing.map((c) => ({ recordId: c.recordId, changesHash: c.changesHash, version: c.version }))), actorId: access.userId,
       })
       if (!verdict.valid) {
         const status = verdict.reason === 'expired' ? 410 : 409
@@ -8007,6 +8017,18 @@ export function univerMetaRouter(): Router {
       for (const c of contributing) {
         // fresh per-record row-deny re-check (the rare deny-added-since-preview edge) → partial-skip, no oracle leak
         if (deniedIds.has(c.recordId)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'denied' }); continue }
+        // #1 layer-3 per-subject WRITE gate (the EXACT derive the legacy /restore gates with): a field that is
+        // hidden / field-definition-readOnly (static) OR per-subject visible=false / read_only=true (layer-3) must
+        // not be written. patchRecords enforces only the static axis, so a visible-but-readOnly field would slip
+        // through — gate the WHOLE record here (skip:forbidden, PARTIAL), the others proceed.
+        const hasForbidden = c.diff.some((ch) => {
+          const guard = fieldById.get(ch.fieldId)
+          const perm = fieldPermissions[ch.fieldId]
+          const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
+          const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+          return !staticOk || !layer3Ok
+        })
+        if (hasForbidden) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
         try {
           const result = await recordWriteService.patchRecords({
             sheetId, changesByRecord: new Map([[c.recordId, c.diff]]), actorId: getRequestActorId(req),

@@ -179,6 +179,36 @@ describeIfDatabase('multitable scoped restore batch-execute — BS-3 (real DB)',
     expect((await recordRow(B))?.data?.[NAME]).toBe('a')
   })
 
+  test('#1 layer-3 write gate: a VISIBLE+readOnly field in a record diff → that record skipped(forbidden), others restored', async () => {
+    // SALARY: visible=true, read_only=true for the actor (per-subject layer-3 write-deny — patchRecords does NOT
+    // enforce this; only the route can). A is the only record whose diff still touches SALARY.
+    await q(`INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,'user',$3,true,true) ON CONFLICT DO NOTHING`, [SHEET, SALARY, ACTOR])
+    await q('UPDATE meta_records SET data = $2::jsonb WHERE id = $1', [B, JSON.stringify({ [NAME]: 'b', [SALARY]: 100 })]) // B,C already at v1 SALARY → only NAME changes (writable)
+    await q('UPDATE meta_records SET data = $2::jsonb WHERE id = $1', [C, JSON.stringify({ [NAME]: 'b', [SALARY]: 100 })])
+    const { token } = await freshIdentity([A, B, C]) // SALARY is VISIBLE so it is in A's previewed diff + the scopeHash
+    const res = await batchExecute([A, B, C], { [A]: 2, [B]: 2, [C]: 2 }, token)
+    expect(res.status).toBe(200)
+    const byId = Object.fromEntries((res.body?.data?.records ?? []).map((r: { recordId: string }) => [r.recordId, r]))
+    expect(byId[A].skipReason).toBe('forbidden') // A's diff hits the readOnly SALARY → WHOLE record skipped
+    expect(byId[B].status).toBe('restored')
+    expect(byId[C].status).toBe('restored')
+    expect((await recordRow(A))?.data?.[SALARY]).toBe(200) // the readOnly field was NOT written
+    expect((await recordRow(A))?.data?.[NAME]).toBe('b') // and A is NOT partially restored (whole-record skip)
+  })
+
+  test('#2 version-tamper: submitting the CURRENT version (not the preview version) to slip past the CAS → 409, no write', async () => {
+    const { token } = await freshIdentity([A, B, C]) // preview binds B at version 2
+    // B edited THEN reverted: data identical (diff unchanged → changesHash matches) but version moved to 4.
+    await q('UPDATE meta_records SET data = $2::jsonb, version = 3 WHERE id = $1', [B, JSON.stringify({ [NAME]: 'x', [SALARY]: 1 })])
+    await q('UPDATE meta_records SET data = $2::jsonb, version = 4 WHERE id = $1', [B, JSON.stringify({ [NAME]: 'b', [SALARY]: 200 })])
+    // a tampering client submits B's CURRENT version (4) to make the CAS pass — but the version is FOLDED into the
+    // scopeHash, so submitted {B:4} ≠ the bound {B:2} → hash diverges → whole-batch 409 (the bypass is closed).
+    const res = await batchExecute([A, B, C], { [A]: 2, [B]: 4, [C]: 2 }, token)
+    expect(res.status).toBe(409)
+    expect((await recordRow(A))?.version).toBe(2) // nothing written
+    expect((await recordRow(C))?.version).toBe(2)
+  })
+
   test('BS-7 keystone: executing a SUBSET of the token scope → 409 (the scopeHash binds the exact set)', async () => {
     const { token, scope } = await freshIdentity([A, B, C])
     expect(scope).toEqual([A, B, C].sort())
