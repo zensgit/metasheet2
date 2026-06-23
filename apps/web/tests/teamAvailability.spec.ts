@@ -12,8 +12,17 @@ import {
   type TeamAvailabilityResponse,
 } from '../src/services/attendance/teamAvailability'
 import { useTeamAvailability } from '../src/views/attendance/useTeamAvailability'
+import { createApp, nextTick } from 'vue'
+import AttendanceTeamAvailabilitySection from '../src/views/attendance/AttendanceTeamAvailabilitySection.vue'
 
 const apiFetchMock = vi.mocked(apiFetch)
+
+async function flushUi(cycles = 8): Promise<void> {
+  for (let i = 0; i < cycles; i += 1) {
+    await Promise.resolve()
+    await nextTick()
+  }
+}
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -98,5 +107,67 @@ describe('useTeamAvailability — clear-on-failure invariant (403/404/failure cl
     await ta.load('ghost', '2026-09-21', '2026-09-21')
     expect(ta.data.value).toBeNull()
     expect(ta.errorStatus.value).toBe(404)
+  })
+})
+
+describe('AttendanceTeamAvailabilitySection — RENDER (the owner-enumerated §3c vitest criterion)', () => {
+  beforeEach(() => apiFetchMock.mockReset())
+
+  function mountSection() {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    // ZH locale so the rendered tooltip is the §3c "待审批，未生效".
+    const app = createApp(AttendanceTeamAvailabilitySection, { tr: (_en: string, zh: string) => zh })
+    app.mount(container)
+    const fillForm = () => {
+      for (const [sel, value] of [['#attendance-ta-group', 'grp_1'], ['#attendance-ta-from', '2026-09-21'], ['#attendance-ta-to', '2026-09-21']] as const) {
+        const el = container.querySelector(sel) as HTMLInputElement
+        el.value = value
+        el.dispatchEvent(new Event('input'))
+      }
+    }
+    const clickLoad = () => (container.querySelector('.attendance__btn--primary') as HTMLButtonElement).click()
+    return { container, app, fillForm, clickLoad }
+  }
+
+  it('a mocked pending_leave item renders a PROVISIONAL matrix cell carrying the "待审批，未生效" tooltip; scheduled does not', async () => {
+    const { container, app, fillForm, clickLoad } = mountSection()
+    await flushUi()
+    fillForm()
+    await flushUi()
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, okPayload())) // u1 pending_leave + u2 scheduled
+    clickLoad()
+    await flushUi()
+
+    const matrix = container.querySelector('[data-attendance-team-availability-matrix]')
+    expect(matrix, 'matrix renders after a successful load').toBeTruthy()
+    const provisional = matrix!.querySelectorAll('.attendance-ta__chip--provisional')
+    expect(provisional.length).toBe(1) // ONLY the pending_leave member's cell is provisional
+    expect((provisional[0] as HTMLElement).getAttribute('title')).toContain('待审批，未生效')
+    // 1 date × 2 members = 2 state cells; exactly one provisional → the scheduled cell is NOT provisional.
+    expect(matrix!.querySelectorAll('.attendance-ta__chip:not(.attendance-ta__chip--none)').length).toBe(2)
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('a failed (404) load clears the rendered table — no stale matrix, error shown', async () => {
+    const { container, app, fillForm, clickLoad } = mountSection()
+    await flushUi()
+    fillForm()
+    await flushUi()
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, okPayload()))
+    clickLoad()
+    await flushUi()
+    expect(container.querySelector('[data-attendance-team-availability-matrix]')).toBeTruthy()
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(404, { ok: false, error: { code: 'NOT_FOUND', message: 'gone' } }))
+    clickLoad()
+    await flushUi()
+    expect(container.querySelector('[data-attendance-team-availability-matrix]')).toBeNull()
+    expect(container.querySelector('[data-attendance-team-availability-error]')).toBeTruthy()
+
+    app.unmount()
+    container.remove()
   })
 })
