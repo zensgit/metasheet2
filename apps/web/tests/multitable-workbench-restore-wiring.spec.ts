@@ -13,9 +13,12 @@ import { computed, createApp, defineComponent, h, nextTick, ref, type App as Vue
 const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
 
-// Capture the real listeners/props the workbench passes to MetaRecordDrawer + RestorePreviewDialog.
+// Capture the real listeners/props the workbench passes to MetaRecordDrawer + RestorePreviewDialog + (BS-4) the
+// MetaGridTable bulk bar + the RestoreBatchDialog.
 let capturedDrawerAttrs: Record<string, unknown> | null = null
 let capturedDialogAttrs: Record<string, unknown> | null = null
+let capturedGridAttrs: Record<string, unknown> | null = null
+let capturedBatchDialogAttrs: Record<string, unknown> | null = null
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -60,7 +63,17 @@ vi.mock('../src/multitable/import/bulk-import', () => ({ bulkImportRecords: vi.f
 
 vi.mock('../src/multitable/components/MetaViewTabBar.vue', () => ({ default: stubComponent('MetaViewTabBar') }))
 vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
-vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({ default: stubComponent('MetaGridTable') }))
+// Capturing stub for the grid — records the @bulk-restore listener (onBulkRestoreRequest), the BS-4 entry point.
+vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
+  default: defineComponent({
+    name: 'MetaGridTable',
+    inheritAttrs: false,
+    setup(_props, { attrs }) {
+      capturedGridAttrs = attrs as Record<string, unknown>
+      return () => h('div', { 'data-stub-MetaGridTable': 'true' })
+    },
+  }),
+}))
 vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubComponent('MetaFormView') }))
 // Capturing stub for the drawer under wiring test — records the real listeners.
 vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
@@ -82,6 +95,17 @@ vi.mock('../src/multitable/components/RestorePreviewDialog.vue', () => ({
     setup(_props, { attrs }) {
       capturedDialogAttrs = attrs as Record<string, unknown>
       return () => h('div', { 'data-stub-RestorePreviewDialog': 'true' })
+    },
+  }),
+}))
+// Capturing stub for the BS-4 batch panel — records visible/executable + the @preview-version/@confirm listeners.
+vi.mock('../src/multitable/components/RestoreBatchDialog.vue', () => ({
+  default: defineComponent({
+    name: 'RestoreBatchDialog',
+    inheritAttrs: false,
+    setup(_props, { attrs }) {
+      capturedBatchDialogAttrs = attrs as Record<string, unknown>
+      return () => h('div', { 'data-stub-RestoreBatchDialog': 'true' })
     },
   }),
 }))
@@ -130,6 +154,9 @@ function createWorkbenchMock() {
       // The functions under test (the slice-2 chain):
       restorePreviewRecord: vi.fn().mockResolvedValue({ ...PREVIEW_OK }),
       restoreExecuteRecord: vi.fn().mockResolvedValue({ recordId: 'rec_42', newVersion: 6, noop: false, restoredFieldIds: ['fld_title'] }),
+      // BS-4 batch chain: preview returns a RESTORABLE scope [A,C] (B skipped) + per-record previewVersion; execute echoes a result.
+      restoreBatchPreview: vi.fn().mockResolvedValue({ records: [{ recordId: 'A', status: 'restorable', previewVersion: 2 }, { recordId: 'B', status: 'skipped', skipReason: 'no_change' }, { recordId: 'C', status: 'restorable', previewVersion: 5 }], scope: ['A', 'C'], restorableCount: 2, skippedCount: 1, targetVersion: 1, previewIdentity: 'tok_batch' }),
+      restoreBatchExecute: vi.fn().mockResolvedValue({ records: [{ recordId: 'A', status: 'restored', newVersion: 3 }, { recordId: 'C', status: 'restored', newVersion: 6 }], restoredCount: 2, skippedCount: 0, targetVersion: 1 }),
     },
     sheets: ref([{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]),
     fields: ref([{ id: 'fld_title', name: 'Title', type: 'string' }]),
@@ -287,5 +314,91 @@ describe('MultitableWorkbench record-restore handler wiring (preview→execute, 
     expect(showErrorSpy.mock.calls[0][0]).toBe('Record is at version 6, expected 5')
     expect(gridMock.loadViewData).not.toHaveBeenCalled()
     expect(showSuccessSpy).not.toHaveBeenCalled()
+  })
+})
+
+// BS-4: the REAL workbench batch wire — the lock the helper + dialog specs don't provide. Mounts the workbench,
+// captures the grid's @bulk-restore + the batch dialog's @preview-version/@confirm, and asserts the EXACT client
+// call chain (so a future edit that executes the original selected ids, or builds expectedVersions from the wrong
+// list, or drifts the identity position, fails here).
+describe('MultitableWorkbench BATCH-restore handler wiring (bulk → preview → confirm → execute)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    workbenchMock = createWorkbenchMock()
+    gridMock = createGridMock()
+    capturedGridAttrs = null
+    capturedBatchDialogAttrs = null
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null; container = null
+    showErrorSpy.mockReset(); showSuccessSpy.mockReset()
+    vi.unstubAllGlobals(); vi.clearAllMocks()
+  })
+
+  async function mountAndGetBulkRestore(): Promise<(ids: string[]) => Promise<void> | void> {
+    const Host = defineComponent({ setup() { return () => h(MultitableWorkbench as Component) } })
+    app = createApp(Host)
+    app.mount(container!)
+    await flushUi()
+    expect(capturedGridAttrs).not.toBeNull()
+    const onBulkRestore = capturedGridAttrs!.onBulkRestore as (ids: string[]) => Promise<void> | void
+    expect(typeof onBulkRestore).toBe('function')
+    return onBulkRestore
+  }
+
+  it('locks the chain: preview(SELECTED, v1) → advanced re-preview(SELECTED, N) → execute(SCOPE, expectedVersions-from-previewVersion, identity)', async () => {
+    const onBulkRestore = await mountAndGetBulkRestore()
+    // 1. bulk restore previews the ORIGINAL selected ids at v1 (default revert-to-original).
+    await onBulkRestore(['A', 'B', 'C']); await flushUi()
+    expect(workbenchMock.client.restoreBatchPreview).toHaveBeenCalledWith('sheet_orders', ['A', 'B', 'C'], 1)
+    expect(capturedBatchDialogAttrs!.visible).toBe(true)
+    expect(capturedBatchDialogAttrs!.executable).toBe(true)
+    // 2. Advanced re-preview uses the target version N + the SAME original selected ids (not the scope).
+    await (capturedBatchDialogAttrs!.onPreviewVersion as (v: number) => void)(3); await flushUi()
+    expect(workbenchMock.client.restoreBatchPreview).toHaveBeenLastCalledWith('sheet_orders', ['A', 'B', 'C'], 3)
+    // 3. confirm executes over the preview's SCOPE (['A','C']) — NOT the selected ids; expectedVersions are exactly
+    //    each restorable record's previewVersion ({A:2,C:5}); targetVersion is the re-previewed 3; identity is the
+    //    5th positional arg. A reorder/wrong-source on ANY of these fails here.
+    await (capturedBatchDialogAttrs!.onConfirm as () => void)(); await flushUi()
+    expect(workbenchMock.client.restoreBatchExecute).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.restoreBatchExecute).toHaveBeenCalledWith('sheet_orders', ['A', 'C'], 3, { A: 2, C: 5 }, 'tok_batch')
+    expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+    expect(gridMock.loadViewData).toHaveBeenCalled()
+  })
+
+  it('confirm NEVER executes the original selected ids — the skipped record B is excluded (scope-not-selection lock)', async () => {
+    const onBulkRestore = await mountAndGetBulkRestore()
+    await onBulkRestore(['A', 'B', 'C']); await flushUi()
+    await (capturedBatchDialogAttrs!.onConfirm as () => void)(); await flushUi()
+    const call = (workbenchMock.client.restoreBatchExecute as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[1]).toEqual(['A', 'C']) // the scope, not ['A','B','C']
+    expect(call[1]).not.toContain('B') // the skipped record is never written
+    expect(call[3]).toEqual({ A: 2, C: 5 }) // expectedVersions has no B either
+  })
+
+  it('a non-executable preview (empty restorable scope → previewIdentity null) cannot execute even if confirm is forced', async () => {
+    workbenchMock.client.restoreBatchPreview.mockResolvedValueOnce({ records: [{ recordId: 'A', status: 'skipped', skipReason: 'no_change' }], scope: [], restorableCount: 0, skippedCount: 1, targetVersion: 1, previewIdentity: null })
+    const onBulkRestore = await mountAndGetBulkRestore()
+    await onBulkRestore(['A']); await flushUi()
+    expect(capturedBatchDialogAttrs!.executable).toBe(false)
+    await (capturedBatchDialogAttrs!.onConfirm as () => void)(); await flushUi()
+    expect(workbenchMock.client.restoreBatchExecute).not.toHaveBeenCalled()
+  })
+
+  it('[P3] FE fail-closed: a scope record missing previewVersion blocks execute (incomplete expectedVersions never sent)', async () => {
+    // executable (identity present) but a restorable scope record has NO previewVersion → expectedVersions would be
+    // incomplete → the FE guard blocks the execute (rather than letting the server 400).
+    workbenchMock.client.restoreBatchPreview.mockResolvedValueOnce({ records: [{ recordId: 'A', status: 'restorable' }], scope: ['A'], restorableCount: 1, skippedCount: 0, targetVersion: 1, previewIdentity: 'tok_batch' })
+    const onBulkRestore = await mountAndGetBulkRestore()
+    await onBulkRestore(['A']); await flushUi()
+    await (capturedBatchDialogAttrs!.onConfirm as () => void)(); await flushUi()
+    expect(workbenchMock.client.restoreBatchExecute).not.toHaveBeenCalled() // incomplete expectedVersions never sent
+    expect(showErrorSpy).toHaveBeenCalledTimes(1)
   })
 })

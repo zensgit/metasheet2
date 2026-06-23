@@ -2023,6 +2023,14 @@ async function onConfirmBatchRestore() {
   const state = batchRestore.value
   if (!sheetId || !state.identity || state.scope.length === 0) { batchRestore.value = { ...state, visible: false }; return }
   const expectedVersions = buildBatchExpectedVersions(state.records, state.scope) // wire-drift guard
+  // [P3] FE fail-closed: if any scope record lacks a previewVersion, expectedVersions would be incomplete and the
+  // server would 400 — surface a re-preview rather than that opaque error. (Can't happen with current BS-2, which
+  // always returns previewVersion for a restorable record; defensive against a future wire change.)
+  if (Object.keys(expectedVersions).length !== state.scope.length) {
+    batchRestore.value = { ...state, visible: false }
+    showError(recordLabel('record.errorRestore', isZh.value))
+    return
+  }
   batchRestore.value = { ...state, loading: true }
   try {
     const result = await workbench.client.restoreBatchExecute(sheetId, state.scope, state.targetVersion, expectedVersions, state.identity)
