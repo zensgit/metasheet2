@@ -27,6 +27,7 @@ import {
 import { publishApprovalCountsUpdate } from '../services/approval-realtime'
 import { searchDirectoryUsers, listDirectoryRoles } from '../services/approval-directory'
 import { isDatabaseSchemaError } from '../utils/database-errors'
+import { createDelegation, listDelegations, disableDelegation, updateDelegation } from '../services/ApprovalDelegationConfig'
 
 const logger = new Logger('ApprovalsRouter')
 const MAX_APPROVAL_PAGE_SIZE = 200
@@ -670,6 +671,65 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         'APPROVAL_CREATE_FAILED',
         'Failed to create approval request',
       )
+    }
+  })
+
+  // 委托设置 (delegation config) — ADMIN-managed (approval-templates:manage). An admin
+  // configures delegations for any user: the delegator is a chosen field and the list
+  // shows 委托人 + 被委托人. v1: one active row per (delegator, scope target).
+  r.get('/api/approval-delegations', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+    try {
+      const delegatorUserId = typeof req.query.delegatorUserId === 'string' ? req.query.delegatorUserId : undefined
+      res.json({ data: await listDelegations(pool.query.bind(pool), { delegatorUserId }) })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DELEGATION_LIST_FAILED', 'Failed to list delegations')
+    }
+  })
+
+  r.post('/api/approval-delegations', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>
+      const created = await createDelegation(pool.query.bind(pool), {
+        delegatorUserId: typeof body.delegatorUserId === 'string' ? body.delegatorUserId : '',
+        delegateeUserId: typeof body.delegateeUserId === 'string' ? body.delegateeUserId : '',
+        scope: (typeof body.scope === 'string' ? body.scope : '') as 'all' | 'template',
+        scopeTemplateId: typeof body.scopeTemplateId === 'string' ? body.scopeTemplateId : null,
+        startAt: typeof body.startAt === 'string' ? body.startAt : '',
+        endAt: typeof body.endAt === 'string' ? body.endAt : '',
+      })
+      res.status(201).json({ data: created })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DELEGATION_CREATE_FAILED', 'Failed to create delegation')
+    }
+  })
+
+  r.patch('/api/approval-delegations/:id', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+    try {
+      const id = typeof req.params.id === 'string' ? req.params.id : ''
+      const body = (req.body ?? {}) as Record<string, unknown>
+      const updated = await updateDelegation(pool.query.bind(pool), id, {
+        delegateeUserId: typeof body.delegateeUserId === 'string' ? body.delegateeUserId : undefined,
+        scope: typeof body.scope === 'string' ? (body.scope as 'all' | 'template') : undefined,
+        scopeTemplateId: body.scopeTemplateId === null ? null : typeof body.scopeTemplateId === 'string' ? body.scopeTemplateId : undefined,
+        startAt: typeof body.startAt === 'string' ? body.startAt : undefined,
+        endAt: typeof body.endAt === 'string' ? body.endAt : undefined,
+        active: typeof body.active === 'boolean' ? body.active : undefined,
+      })
+      if (!updated) return res.status(404).json(approvalErrorResponse('APPROVAL_DELEGATION_NOT_FOUND', 'Delegation not found'))
+      res.json({ data: updated })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DELEGATION_UPDATE_FAILED', 'Failed to update delegation')
+    }
+  })
+
+  r.delete('/api/approval-delegations/:id', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+    try {
+      const id = typeof req.params.id === 'string' ? req.params.id : ''
+      const disabled = await disableDelegation(pool.query.bind(pool), id)
+      if (!disabled) return res.status(404).json(approvalErrorResponse('APPROVAL_DELEGATION_NOT_FOUND', 'Delegation not found or already inactive'))
+      res.json({ data: { id, disabled: true } })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DELEGATION_DISABLE_FAILED', 'Failed to disable delegation')
     }
   })
 

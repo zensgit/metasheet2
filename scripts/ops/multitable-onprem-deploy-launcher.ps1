@@ -105,16 +105,35 @@ function Expand-StagingArchive {
 function Resolve-StagedPackageRoot {
   param([string]$Stage)
 
-  $children = Get-ChildItem -LiteralPath $Stage -Directory -ErrorAction Stop
-  if ($null -eq $children -or @($children).Count -lt 1) {
-    throw "No package root directory found inside staging extraction at $Stage"
+  $stageItem = Get-Item -LiteralPath $Stage -ErrorAction Stop
+  $candidates = @()
+  if (
+    (Test-Path -LiteralPath (Join-Path $stageItem.FullName 'pnpm-lock.yaml')) -and
+    (Test-Path -LiteralPath (Join-Path $stageItem.FullName 'PACKAGE-METADATA.json')) -and
+    (Test-Path -LiteralPath (Join-Path $stageItem.FullName 'scripts\ops\multitable-onprem-apply-package.ps1'))
+  ) {
+    $candidates += $stageItem
   }
+  $candidates += @(
+    Get-ChildItem -LiteralPath $Stage -Directory -Recurse -ErrorAction Stop |
+      Where-Object {
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'pnpm-lock.yaml')) -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'PACKAGE-METADATA.json')) -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'scripts\ops\multitable-onprem-apply-package.ps1'))
+      }
+  )
 
-  $preferred = @($children) | Where-Object { $_.Name -like 'metasheet-multitable-onprem-*' } | Select-Object -First 1
-  if ($null -ne $preferred) {
-    return $preferred.FullName
+  if ($candidates.Count -lt 1) {
+    throw "No package root with pnpm-lock.yaml / PACKAGE-METADATA.json / apply helper markers found inside staging extraction at $Stage"
   }
-  return @($children)[0].FullName
+  if ($candidates.Count -eq 1) {
+    return $candidates[0].FullName
+  }
+  $preferred = @($candidates) | Where-Object { $_.Name -like 'metasheet-multitable-onprem-*' }
+  if (@($preferred).Count -eq 1) {
+    return @($preferred)[0].FullName
+  }
+  throw "Ambiguous package roots inside staging extraction at ${Stage}: $(@($candidates | ForEach-Object { $_.FullName }) -join '; ')"
 }
 
 $resolvedArchive = Resolve-LauncherPath -Candidate $PackageArchive -Label 'PackageArchive'

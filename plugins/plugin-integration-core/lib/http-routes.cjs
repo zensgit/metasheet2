@@ -41,6 +41,8 @@ const ROUTES = [
   ['DELETE', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesDelete'],
   ['GET', '/api/integration/stock-preparation/target/readiness', 'stockPreparationTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/target/ensure', 'stockPreparationTargetEnsure'],
+  ['GET', '/api/integration/stock-preparation/sandbox-target/readiness', 'stockPreparationSandboxTargetReadiness'],
+  ['POST', '/api/integration/stock-preparation/sandbox-target/ensure', 'stockPreparationSandboxTargetEnsure'],
   ['POST', '/api/integration/stock-preparation/options/sync', 'stockPreparationOptionsSync'],
   // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
   ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
@@ -97,11 +99,13 @@ const {
   StockPreparationTableActionError,
   __internals: tableActionInternals,
   applyStockPreparationAction,
+  assertStockPrepApplySandboxAllowed,
   assertStockPreparationTargetReady,
   createStockPreparationTableActionRegistry,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
   normalizeActionParameters,
+  resolveStockPrepApplySandboxPolicy,
 } = require('./stock-preparation-table-actions.cjs')
 const {
   assertAuthoritativeLargeBomExpansion,
@@ -127,8 +131,11 @@ const {
   duplicateExpandedKeyDiagnosticsForRows,
 } = require('./stock-preparation-conflict-planner.cjs')
 const {
+  StockPreparationTargetProvisioningError,
   inspectStockPreparationCanonicalTarget,
   ensureStockPreparationCanonicalTarget,
+  inspectStockPreparationSandboxTarget,
+  ensureStockPreparationSandboxTarget,
 } = require('./stock-preparation-target-provisioning.cjs')
 const {
   StockPreparationOptionSyncError,
@@ -146,6 +153,9 @@ const {
   FieldOptionSyncContractError,
   listFieldOptionSyncPresets,
 } = require('./field-option-sync-contract.cjs')
+// FOS-4b-2: validate action-binding REFERENCES (registry ∩ preset.permittedActionIds) for the dry-run path.
+// Used ONLY in dryRun mode — no apply/write/execution (that's a later, separately-gated sub-slice).
+const { normalizeFieldOptionActionBinding } = require('./field-option-action-registry.cjs')
 
 class HttpRouteError extends Error {
   constructor(status, code, message, details = {}) {
@@ -413,6 +423,7 @@ const VALID_C6_WRITE_APPLY_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'conf
 const VALID_TEMPLATE_INSTANTIATE_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'targetSystemId', 'sourceSystemId', 'pipelineName'])
 const VALID_C6_WRITE_APPLY_CONFIRM_KEYS = new Set(['dryRunToken'])
 const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId'])
+const VALID_STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId', 'objectId', 'label'])
 const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
   'tenantId',
   'workspaceId',
@@ -429,6 +440,7 @@ const VALID_FIELD_OPTION_SYNC_REQUEST_KEYS = new Set([
   'projectId',
   'presetId',
   'optionSets',
+  'dryRun', // FOS-4b-2: dry-run-only mode (validate + preview, NO write). Required to carry action bindings.
 ])
 
 function normalizeTableActionBody(body = {}, allowedKeys = VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS) {
@@ -564,6 +576,39 @@ function stockPreparationTargetInput(req, rawInput = {}) {
   }
 }
 
+function normalizeStockPreparationSandboxTargetRequest(input = {}) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!VALID_STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    tenantId: firstString(input.tenantId),
+    workspaceId: firstString(input.workspaceId),
+    projectId: firstString(input.projectId),
+    baseId: firstString(input.baseId),
+    objectId: firstString(input.objectId),
+    label: firstString(input.label),
+  }
+}
+
+function stockPreparationSandboxTargetInput(req, rawInput = {}) {
+  const input = normalizeStockPreparationSandboxTargetRequest(rawInput)
+  const tenantId = resolveTenantId(req, input)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    projectId,
+    baseId: input.baseId,
+    objectId: input.objectId,
+    label: input.label,
+  }
+}
+
 function normalizeStockPreparationOptionSyncRequest(input = {}) {
   if (!isPlainObject(input)) {
     throw new HttpRouteError(400, 'STOCK_PREPARATION_OPTION_SYNC_REQUEST_INVALID', 'request must be an object')
@@ -612,6 +657,7 @@ function normalizeFieldOptionSyncRequest(input = {}) {
     projectId: firstString(input.projectId),
     presetId,
     optionSets: isPlainObject(input.optionSets) ? input.optionSets : {},
+    dryRun: input.dryRun === true,
   }
 }
 
@@ -625,6 +671,7 @@ function fieldOptionSyncInput(req, rawInput = {}) {
     projectId,
     presetId: input.presetId,
     optionSets: input.optionSets,
+    dryRun: input.dryRun === true,
   }
 }
 
@@ -645,6 +692,21 @@ function fieldOptionSyncKernelFields(preset) {
     id: field.targetField,
     optionSource: { key: field.valueField, type: preset.sourceKind },
   }))
+}
+
+// FOS-4b-2: strip action bindings from option sets before the (option-only) normalizer. Action bindings
+// are validated separately via the FOS-4b-1 registry; this keeps the option normalizer free of them.
+function stripActionBindingsFromOptionSets(optionSets) {
+  const out = {}
+  for (const [key, value] of Object.entries(optionSets)) {
+    if (!Array.isArray(value)) { out[key] = value; continue }
+    out[key] = value.map((option) => {
+      if (!isPlainObject(option)) return option
+      const { actionBindings, actions, ...rest } = option
+      return rest
+    })
+  }
+  return out
 }
 
 // FOS-2: values-free per-field evidence for the generic route (no option values/labels, no sheetId).
@@ -672,6 +734,42 @@ function publicStockPreparationTargetResult(result) {
     targetBinding: result.target ? cloneJson(result.target) : null,
     evidence: result.evidence,
   }
+}
+
+function publicStockPreparationSandboxTargetResult(result) {
+  return {
+    ready: result.ready === true,
+    mode: result.mode,
+    targetBindingAvailable: result.target != null,
+    evidence: result.evidence,
+  }
+}
+
+function sandboxTargetRouteError(error) {
+  if (error instanceof HttpRouteError) return error
+  if (error instanceof StockPreparationTargetProvisioningError) {
+    const code = error.code || 'TARGET_SANDBOX_PROVISIONING_FAILED'
+    if (
+      code === 'TARGET_SANDBOX_OBJECT_ID_INVALID' ||
+      code === 'TARGET_PROVISIONING_CONFIG_INVALID' ||
+      code === 'TARGET_PROVISIONING_PERMISSION_DENIED' ||
+      code === 'TARGET_PROVISIONING_API_UNAVAILABLE' ||
+      code === 'TARGET_SCHEMA_INCOMPLETE'
+    ) {
+      return new HttpRouteError(
+        Number.isInteger(error.status) ? error.status : 422,
+        code,
+        error.message || 'sandbox stock-preparation target provisioning failed',
+        error.details || {},
+      )
+    }
+  }
+  return new HttpRouteError(
+    503,
+    'TARGET_SANDBOX_PROVISIONING_FAILED',
+    'sandbox stock-preparation target provisioning failed',
+    { reason: 'provisioning_failed' },
+  )
 }
 
 function largeBomExpansionOptionsForAction(action = {}) {
@@ -1845,6 +1943,9 @@ function createHandlers(services, options = {}) {
         recordsApi: getMultitableRecordsApi(),
         tokenStore: context.storage,
         policyStore: context.storage,
+        // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
+        // Absent (e.g. prod default) → undefined → apply fail-closed.
+        sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
       }))
     },
 
@@ -1996,6 +2097,10 @@ function createHandlers(services, options = {}) {
         applyJobId: firstString(requestParams(req).applyJobId),
       })
       assertApplyJobMatchesExpansion(pendingJob, jobId)
+      // FOS-4b-3 P0 sandbox gate: the large-BOM checkpoint apply funnels through here. Gate the job's
+      // target (objectId-bearing) before any write — fail-closed when no sandbox config/env, and the prod
+      // canonical is always rejected. Same guard/resolver as the small-BOM apply path.
+      assertStockPrepApplySandboxAllowed(pendingJob.target, resolveStockPrepApplySandboxPolicy(context.config))
       const scopedRecordsApi = createTargetScopedRecordsApi(getMultitableRecordsApi(), pendingJob.target)
       const job = await runLargeBomCheckpointApplyJobChunk({
         storage: context.storage,
@@ -2079,6 +2184,41 @@ function createHandlers(services, options = {}) {
       return sendOk(res, publicStockPreparationTargetResult(result), result.mode === 'canonical_create' ? 201 : 200)
     },
 
+    async stockPreparationSandboxTargetReadiness(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationSandboxTargetInput(req, requestQuery(req))
+      try {
+        const result = await inspectStockPreparationSandboxTarget({
+          context,
+          projectId: input.projectId,
+          objectId: input.objectId,
+          label: input.label,
+          permission: 'admin',
+        })
+        return sendOk(res, publicStockPreparationSandboxTargetResult(result))
+      } catch (error) {
+        throw sandboxTargetRouteError(error)
+      }
+    },
+
+    async stockPreparationSandboxTargetEnsure(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationSandboxTargetInput(req, requestBody(req))
+      try {
+        const result = await ensureStockPreparationSandboxTarget({
+          context,
+          projectId: input.projectId,
+          baseId: input.baseId,
+          objectId: input.objectId,
+          label: input.label,
+          permission: 'admin',
+        })
+        return sendOk(res, publicStockPreparationSandboxTargetResult(result), result.mode === 'sandbox_create' ? 201 : 200)
+      } catch (error) {
+        throw sandboxTargetRouteError(error)
+      }
+    },
+
     async stockPreparationOptionsSync(req, res) {
       requireAccess(req, 'admin')
       const input = stockPreparationOptionSyncInput(req, requestBody(req))
@@ -2133,24 +2273,71 @@ function createHandlers(services, options = {}) {
         })
       }
 
-      // Fail closed on action bindings: actions are a stock-prep-specific concept (predefined action
-      // allowlist + dry-run gating). The generic route writes option metadata only, so it rejects
-      // them rather than silently dropping them through the shared per-option normalizer.
+      // FOS-4b-2: action bindings are DRY-RUN-ONLY. The generic route accepts them ONLY when dryRun:true,
+      // and even then NOTHING is written or executed — each binding is validated as a REFERENCE against the
+      // registry ∩ preset.permittedActionIds (FOS-4b-1) and previewed. Apply/execute is a separate, later,
+      // owner-gated sub-slice. Non-dry-run + action bindings → fail-closed (no write).
+      const actionBindingPreview = []
       for (const [sourceKey, rawOptions] of Object.entries(input.optionSets)) {
         if (!Array.isArray(rawOptions)) continue
-        const carriesActions = rawOptions.some((option) =>
-          isPlainObject(option) && (Array.isArray(option.actionBindings) || Array.isArray(option.actions)))
-        if (carriesActions) {
-          throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_ACTIONS_NOT_SUPPORTED', 'generic field-option-sync does not support action bindings', {
-            presetId: preset.presetId,
-            sourceKey,
-          })
+        for (const option of rawOptions) {
+          if (!isPlainObject(option)) continue
+          const bindings = Array.isArray(option.actionBindings)
+            ? option.actionBindings
+            : (Array.isArray(option.actions) ? option.actions : null)
+          if (!bindings || bindings.length === 0) continue
+          if (!input.dryRun) {
+            throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_ACTIONS_DRY_RUN_ONLY', 'action bindings are dry-run-only (set dryRun:true); apply is not yet enabled', {
+              presetId: preset.presetId,
+              sourceKey,
+            })
+          }
+          for (const binding of bindings) {
+            // validates registry-membership + preset-permission + param allowlist; throws (fail-closed) on any miss.
+            const normalized = normalizeFieldOptionActionBinding(binding, {
+              field: `${sourceKey}.actionBindings`,
+              permittedActionIds: preset.permittedActionIds,
+            })
+            actionBindingPreview.push({
+              sourceKey,
+              actionId: normalized.actionId,
+              kind: normalized.kind,
+              requiresDryRun: normalized.requiresDryRun,
+              requiredPermission: normalized.requiredPermission,
+              parameterBindingCount: Object.keys(normalized.parameterBindings).length,
+            })
+          }
         }
       }
 
       // Reuse the per-option safety normalization (executable-key / secret / placeholder rejection,
       // color/order/label/disabled, dedup, max-options). Throws OPTION_SYNC_* (422, values-free).
-      const optionSets = optionSetsFromInput(input.optionSets)
+      // dry-run strips action bindings first (actions are validated above via the FOS-4b-1 registry, not
+      // the stock-prep path); non-dry-run uses the raw input unchanged (zero-drift).
+      const optionSets = optionSetsFromInput(
+        input.dryRun ? stripActionBindingsFromOptionSets(input.optionSets) : input.optionSets,
+      )
+
+      // FOS-4b-2: dry-run mode validates everything (options above + action references) and PREVIEWS what
+      // WOULD sync — writing NOTHING (no patchObjectFieldProperty). Apply is a separate gated sub-slice.
+      if (input.dryRun) {
+        return sendOk(res, {
+          ok: true,
+          dryRun: true,
+          written: false,
+          target: { presetId: preset.presetId, targetTable: preset.targetTable },
+          preview: {
+            fields: optionFields
+              .filter((field) => optionSets[field.optionSource.key])
+              .map((field) => ({
+                field: field.id,
+                sourceKey: field.optionSource.key,
+                optionCount: optionSets[field.optionSource.key].options.length,
+              })),
+            actionBindings: actionBindingPreview, // values-free: actionId/kind/gating/param-count only
+          },
+        })
+      }
 
       const { synced, skipped, held } = await syncFieldOptions({
         provisioning,

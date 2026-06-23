@@ -10609,6 +10609,147 @@ attendanceIntegrationDescribe(
     expect(lastOutAtIso.startsWith(`${workDate}T18:00:00`)).toBe(true)
   })
 
+  it('#5 report tiering — severe-late / absence-late tiers are self-calculated and round-trip through the records report (real DB)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    // collision-free future year; a Monday (workday) + the next day (Tuesday, workday).
+    const year = 3600 + (Number.parseInt(runSuffix.slice(-4), 36) % 1000)
+    const firstOfOctober = new Date(Date.UTC(year, 9, 1))
+    const monday = new Date(firstOfOctober)
+    while (monday.getUTCDay() !== 1) monday.setUTCDate(monday.getUTCDate() + 1)
+    const severeDate = monday.toISOString().slice(0, 10)
+    const absenceObj = new Date(monday)
+    absenceObj.setUTCDate(monday.getUTCDate() + 1)
+    const absenceDate = absenceObj.toISOString().slice(0, 10)
+    const userId = `attendance-rt1-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+
+      // Default rule: 09:00 start, 10-min grace, severe 30 / absence 60 (over the grace window).
+      //   09:45 → 35 min late  (≥ severe 30, < absence 60) → severe-late only.
+      //   10:30 → 80 min late  (≥ absence 60)              → severe + absence (tiers nest).
+      const importPayload = {
+        userId,
+        rows: [
+          { workDate: severeDate, fields: { firstInAt: `${severeDate}T09:45:00Z`, lastOutAt: `${severeDate}T18:00:00Z` } },
+          { workDate: absenceDate, fields: { firstInAt: `${absenceDate}T10:30:00Z`, lastOutAt: `${absenceDate}T18:00:00Z` } },
+        ],
+        mode: 'override',
+      }
+      const importRes = await requestJson(`${baseUrl}/api/attendance/import`, { method: 'POST', headers, body: JSON.stringify(importPayload) })
+      expect(importRes.status, importRes.raw).toBe(200)
+      expect(Number((importRes.body as { data?: { imported?: number } } | undefined)?.data?.imported ?? 0)).toBeGreaterThanOrEqual(2)
+
+      const recordsRes = await requestJson(
+        `${baseUrl}/api/attendance/records?userId=${encodeURIComponent(userId)}&from=${severeDate}&to=${absenceDate}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      expect(recordsRes.status).toBe(200)
+      const items = (recordsRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+      const byDate = (d: string) => items.find((r) => String(r?.work_date || '').slice(0, 10) === d)
+
+      // severe-only record: late_count proves the report plumbing; severe=1 proves self-calc; absence=0 proves the boundary.
+      const severe = byDate(severeDate)
+      expect(severe, 'severe-late record present').toBeTruthy()
+      expect(Number(severe?.late_minutes)).toBe(35)
+      const severeRv = (severe?.report_values ?? {}) as Record<string, unknown>
+      expect(Number(severeRv.late_count ?? -1)).toBe(1)
+      expect(Number(severeRv.severe_late_count ?? -1)).toBe(1)
+      expect(Number(severeRv.severe_late_duration ?? -1)).toBe(35)
+      expect(Number(severeRv.absence_late_count ?? -1)).toBe(0)
+
+      // absence-level record: both tiers fire (nested).
+      const absence = byDate(absenceDate)
+      expect(absence, 'absence-late record present').toBeTruthy()
+      expect(Number(absence?.late_minutes)).toBe(80)
+      const absenceRv = (absence?.report_values ?? {}) as Record<string, unknown>
+      expect(Number(absenceRv.severe_late_count ?? -1)).toBe(1)
+      expect(Number(absenceRv.absence_late_count ?? -1)).toBe(1)
+    } finally {
+      await pool.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => {})
+      await pool.end().catch(() => {})
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+  })
+
+  it('#5 RT-1a — per-group thresholds are configurable end-to-end + the normalizer rejects incoherent input (real DB)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const orgId = `rt1a-org-${runSuffix}` // isolated org — never pollutes the shared default rule
+    const year = 3600 + (Number.parseInt(runSuffix.slice(-4), 36) % 1000)
+    const firstOfOctober = new Date(Date.UTC(year, 9, 1))
+    const monday = new Date(firstOfOctober)
+    while (monday.getUTCDay() !== 1) monday.setUTCDate(monday.getUTCDate() + 1)
+    const workDate = monday.toISOString().slice(0, 10)
+    const userId = `attendance-rt1a-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+      const orgHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'x-org-id': orgId }
+      const putRule = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/rules/default`, {
+        method: 'PUT', headers: orgHeaders, body: JSON.stringify({ orgId, ...body }),
+      })
+
+      // Normalizer (design-lock §2 / the #1776 enum-strict rule) — reject BEFORE any persistence:
+      const ordered = { workStartTime: '09:00', workEndTime: '18:00', lateGraceMinutes: 10 }
+      expect((await putRule({ ...ordered, severeLateThresholdMinutes: 50, absenceLateThresholdMinutes: 20 })).status).toBe(400) // absence < severe
+      expect((await putRule({ lateGraceMinutes: 30, severeLateThresholdMinutes: 20, absenceLateThresholdMinutes: 60 })).status).toBe(400) // severe < grace
+      expect((await putRule({ ...ordered, severeLateThresholdMinutes: 15.5 })).status).toBe(400) // non-integer (Zod)
+      expect((await putRule({ ...ordered, severeLateThresholdMinutes: -5 })).status).toBe(400) // negative (Zod)
+
+      // Valid custom rule: severe 15 / absence 40 (ordered, ≥ grace 10).
+      const okRes = await putRule({ ...ordered, severeLateThresholdMinutes: 15, absenceLateThresholdMinutes: 40 })
+      expect(okRes.status, okRes.raw).toBe(200)
+      const ruleData = (okRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
+      expect(Number(ruleData.severeLateThresholdMinutes)).toBe(15) // RETURNING * → mapRuleRow surfaces it
+      expect(Number(ruleData.absenceLateThresholdMinutes)).toBe(40)
+
+      // Import a 20-min-late record (09:30): 20 ≥ custom 15 → severe; would be 0 at the RT-1 default 30.
+      const importRes = await requestJson(`${baseUrl}/api/attendance/import`, {
+        method: 'POST', headers: orgHeaders,
+        body: JSON.stringify({ userId, mode: 'override', rows: [{ workDate, fields: { firstInAt: `${workDate}T09:30:00Z`, lastOutAt: `${workDate}T18:00:00Z` } }] }),
+      })
+      expect(importRes.status, importRes.raw).toBe(200)
+
+      const recordsRes = await requestJson(
+        `${baseUrl}/api/attendance/records?userId=${encodeURIComponent(userId)}&from=${workDate}&to=${workDate}`,
+        { headers: { Authorization: `Bearer ${token}`, 'x-org-id': orgId } },
+      )
+      expect(recordsRes.status).toBe(200)
+      const items = (recordsRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+      const record = items.find((r) => String(r?.work_date || '').slice(0, 10) === workDate)
+      expect(record, 'record present').toBeTruthy()
+      expect(Number(record?.late_minutes)).toBe(20)
+      const rv = (record?.report_values ?? {}) as Record<string, unknown>
+      // the per-group threshold flowed through loadDefaultRule → mapRuleRow → computeLateTierCounts:
+      expect(Number(rv.severe_late_count ?? -1)).toBe(1) // 20 ≥ custom 15 (would be 0 at the default 30)
+      expect(Number(rv.absence_late_count ?? -1)).toBe(0) // 20 < custom 40
+    } finally {
+      await pool.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => {})
+      await pool.query('DELETE FROM attendance_rules WHERE org_id = $1', [orgId]).catch(() => {})
+      await pool.end().catch(() => {})
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+  })
+
   it('exposes workday context for holiday overrides and shift schedules on attendance records', async () => {
     if (!baseUrl) return
 
@@ -13651,6 +13792,150 @@ attendanceIntegrationDescribe(
     expect(code).toBe('EXPIRED')
   })
 
+  it('#6 TA-1 — pending leave surfaces as a display-only pending_leave overlay behind includePending (real DB)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const year = 3600 + (Number.parseInt(runSuffix.slice(-4), 36) % 1000)
+    const firstOfOctober = new Date(Date.UTC(year, 9, 1))
+    const monday = new Date(firstOfOctober)
+    while (monday.getUTCDay() !== 1) monday.setUTCDate(monday.getUTCDate() + 1)
+    const workDate = monday.toISOString().slice(0, 10)
+    const userId = `attendance-ta1-${runSuffix}`
+    const requestId = randomUUID()
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+      const auth = { Authorization: `Bearer ${token}` }
+
+      // a PENDING leave request (never approved) for the user on workDate
+      await pool.query(
+        `INSERT INTO attendance_requests (id, org_id, user_id, work_date, request_type, status, metadata)
+         VALUES ($1, 'default', $2, $3, 'leave', 'pending', '{}'::jsonb)`,
+        [requestId, userId, workDate],
+      )
+
+      const calUrl = (extra: string) => `${baseUrl}/api/attendance/effective-calendar?userId=${encodeURIComponent(userId)}&from=${workDate}&to=${workDate}${extra}`
+      const pendingOverlaysFor = (body: any) => {
+        const items = (body?.data?.items ?? []) as any[]
+        const item = items.find((it) => String(it?.date || '').slice(0, 10) === workDate)
+        return ((item?.overlays ?? []) as Array<Record<string, unknown>>).filter((o) => o.kind === 'pending_leave')
+      }
+
+      // includePending=true → the pending_leave overlay is present, distinct + provisional
+      const withPendingRes = await requestJson(calUrl('&includePending=true'), { headers: auth })
+      expect(withPendingRes.status).toBe(200)
+      const pendingOverlays = pendingOverlaysFor(withPendingRes.body)
+      expect(pendingOverlays.length).toBe(1)
+      expect(pendingOverlays[0]?.refId).toBe(requestId)
+      expect(pendingOverlays[0]?.status).toBe('pending')
+      expect(pendingOverlays[0]?.provisional).toBe(true)
+
+      // default (no includePending) → NO pending_leave overlay. This is the call the record-compute path
+      // uses, so proving it here proves pending never reaches records (the display-only invariant).
+      const defaultRes = await requestJson(calUrl(''), { headers: auth })
+      expect(defaultRes.status).toBe(200)
+      expect(pendingOverlaysFor(defaultRes.body).length).toBe(0)
+
+      // corroboration: a pending leave is not a fact — no attendance_record exists for that date.
+      const recRes = await requestJson(`${baseUrl}/api/attendance/records?userId=${encodeURIComponent(userId)}&from=${workDate}&to=${workDate}`, { headers: auth })
+      expect(recRes.status).toBe(200)
+      const recItems = (recRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+      expect(recItems.find((r) => String(r?.work_date || '').slice(0, 10) === workDate)).toBeFalsy()
+    } finally {
+      await pool.query('DELETE FROM attendance_requests WHERE id = $1', [requestId]).catch(() => {})
+      await pool.end().catch(() => {})
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+  })
+
+  it('#6 TA-2 — team-availability: pending leave is a distinct tentative state still counted in availableFormal (§3a), group-scope gated (§3b), group-only (§3e) (real DB)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const year = 3600 + (Number.parseInt(runSuffix.slice(-4), 36) % 1000)
+    const firstOfOctober = new Date(Date.UTC(year, 9, 1))
+    const monday = new Date(firstOfOctober)
+    while (monday.getUTCDay() !== 1) monday.setUTCDate(monday.getUTCDate() + 1)
+    const workDate = monday.toISOString().slice(0, 10)
+    const m1 = `att-ta2-pending-${runSuffix}`
+    const m2 = `att-ta2-sched-${runSuffix}`
+    const outsider = `att-ta2-outsider-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const reqId = randomUUID()
+    let groupId: string | undefined
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(m1)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) return
+      const auth = { Authorization: `Bearer ${token}` }
+
+      const groupRows = await pool.query<{ id: string }>(
+        `INSERT INTO attendance_groups (org_id, name, code, timezone) VALUES ('default', $1, $2, 'UTC') RETURNING id`,
+        [`TA2 ${runSuffix}`, `ta2-${runSuffix}`],
+      )
+      groupId = String(groupRows.rows[0].id)
+      await pool.query(
+        `INSERT INTO attendance_group_members (org_id, group_id, user_id) VALUES ('default', $1, $2), ('default', $1, $3)`,
+        [groupId, m1, m2],
+      )
+      // a PENDING leave for m1 on workDate (never approved)
+      await pool.query(
+        `INSERT INTO attendance_requests (id, org_id, user_id, work_date, request_type, status, metadata) VALUES ($1, 'default', $2, $3, 'leave', 'pending', '{}'::jsonb)`,
+        [reqId, m1, workDate],
+      )
+
+      // (1) §3e group-only: missing groupId → 400
+      expect((await requestJson(`${baseUrl}/api/attendance/team-availability?from=${workDate}&to=${workDate}`, { headers: auth })).status).toBe(400)
+
+      // (2) happy path: m1 = pending_leave (distinct); m2 unaffected; §3a availableFormal still counts m1.
+      const res = await requestJson(`${baseUrl}/api/attendance/team-availability?groupId=${groupId}&from=${workDate}&to=${workDate}`, { headers: auth })
+      expect(res.status, res.raw).toBe(200)
+      const data = (res.body as { data?: { items?: any[]; summary?: any[] } } | undefined)?.data
+      const items = data?.items ?? []
+      const stateOf = (uid: string) => items.find((it) => it.userId === uid && String(it.date).slice(0, 10) === workDate)?.state
+      expect(stateOf(m1)).toBe('pending_leave')
+      expect(['scheduled', 'rest', 'unscheduled']).toContain(stateOf(m2)) // m2 NOT affected by m1's pending request
+      const day = (data?.summary ?? []).find((s) => String(s.date).slice(0, 10) === workDate)
+      expect(day?.pendingLeaveTentative).toBe(1)
+      expect(day?.approvedLeave).toBe(0) // pending is NOT approved
+      // §3a: the pending member is still in the formal available headcount (availableFormal = scheduled + pending).
+      expect(day?.availableFormal).toBe((day?.scheduled ?? 0) + 1)
+
+      // (2.5) P2 (owner review): admin + a valid-UUID but NON-EXISTENT group → 404, not a misleading 200 empty.
+      const ghostRes = await requestJson(`${baseUrl}/api/attendance/team-availability?groupId=${randomUUID()}&from=${workDate}&to=${workDate}`, { headers: auth })
+      expect(ghostRes.status).toBe(404)
+
+      // (3) §3b scope gate: an outsider (non-admin, not a group manager) → 403
+      process.env.RBAC_BYPASS = 'false'
+      const outsiderTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(outsider)}&roles=employee&perms=attendance:read`)
+      const outsiderToken = (outsiderTokenRes.body as { token?: string } | undefined)?.token
+      if (outsiderToken) {
+        const forbidden = await requestJson(`${baseUrl}/api/attendance/team-availability?groupId=${groupId}&from=${workDate}&to=${workDate}`, { headers: { Authorization: `Bearer ${outsiderToken}` } })
+        expect(forbidden.status).toBe(403)
+      }
+    } finally {
+      await pool.query('DELETE FROM attendance_requests WHERE id = $1', [reqId]).catch(() => undefined)
+      if (groupId) {
+        await pool.query('DELETE FROM attendance_group_members WHERE group_id = $1', [groupId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_groups WHERE id = $1', [groupId]).catch(() => undefined)
+      }
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('effective-calendar §6.1 baseline equals resolveWorkContext for rule + holiday rows', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -14785,6 +15070,255 @@ attendanceIntegrationDescribe(
       await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[adminId, readOnlyId]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_notification_deliveries WHERE org_id = $1`, [orgId]).catch(() => undefined)
       await pool.end()
+    }
+  })
+
+  // #7 销假 (design-lock #3034) — §5 real-DB matrix: approve → deduct → cancel → reverse, idempotency, §3a expired.
+  it('#7 销假 — cancelling an APPROVED comp_time leave reverses the deducted balance; idempotent; expired lot not resurrected', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-l7-${runSuffix}`
+    const userExp = `attendance-l7-exp-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const createdRequestIds: string[] = []
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenFor = async (uid: string) => {
+        const r = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+        return (r.body as { token?: string } | undefined)?.token
+      }
+      const token = await tokenFor(userId)
+      const tokenExp = await tokenFor(userExp)
+      if (!token || !tokenExp) return
+      const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
+
+      // comp_time leave type (explicit code='comp_time'; idempotent across reruns → 409 then look up)
+      const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr(token), body: JSON.stringify({ code: 'comp_time', name: `Comp Time L7 ${runSuffix}`, paid: false, requiresApproval: true }) })
+      expect([201, 409]).toContain(ltRes.status)
+      let leaveTypeId = (ltRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!leaveTypeId) {
+        const list = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=true`, { headers: { Authorization: `Bearer ${token}` } })
+        const items = (list.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []
+        leaveTypeId = items.find(i => i.code === 'comp_time')?.id
+      }
+      expect(leaveTypeId).toBeTruthy()
+
+      const insertLot = async (uid: string, amount: number, tag: string) => (await pool.query(
+        `INSERT INTO attendance_leave_balances
+           (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, expires_at)
+         VALUES ('default', $1, 'comp_time', $2, $2, 'overtime_conversion', $3, 'active', '2026-01-01', NULL) RETURNING id`,
+        [uid, amount, `l7:${runSuffix}:${tag}`],
+      )).rows[0].id as string
+      const createLeave = async (t: string, uid: string, minutes: number) => {
+        const r = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr(t), body: JSON.stringify({ workDate: '2026-09-20', requestType: 'leave', leaveTypeId, minutes }) })
+        expect(r.status).toBe(201)
+        const id = (r.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
+        createdRequestIds.push(id)
+        return id
+      }
+      const approve = (t: string, id: string) => requestJson(`${baseUrl}/api/attendance/requests/${id}/approve`, { method: 'POST', headers: hdr(t), body: JSON.stringify({ comment: 'ok' }) })
+      const cancel = (t: string, id: string) => requestJson(`${baseUrl}/api/attendance/requests/${id}/cancel`, { method: 'POST', headers: hdr(t), body: JSON.stringify({ comment: 'withdraw' }) })
+      const lotRow = async (id: string) => (await pool.query('SELECT remaining_minutes, status FROM attendance_leave_balances WHERE id = $1', [id])).rows[0] as { remaining_minutes: number; status: string }
+      const events = async (lotId: string, reqId: string) => (await pool.query(
+        `SELECT event_type, delta_minutes, source_type FROM attendance_leave_balance_events
+           WHERE balance_id = $1 AND source_id = $2 ORDER BY delta_minutes ASC`,
+        [lotId, reqId],
+      )).rows as { event_type: string; delta_minutes: number; source_type: string }[]
+
+      // (1) approve → deduct
+      const lot = await insertLot(userId, 240, 'ok')
+      const req = await createLeave(token, userId, 120)
+      expect((await approve(token, req)).status).toBe(200)
+      expect(await lotRow(lot)).toMatchObject({ remaining_minutes: 120, status: 'active' })
+      expect(await events(lot, req)).toEqual([{ event_type: 'deduct', delta_minutes: -120, source_type: 'comp_time_leave' }])
+
+      // (2) cancel the APPROVED leave → reverse (restored; reverse event mirrors comp_time_leave)
+      const cancelRes = await cancel(token, req)
+      expect(cancelRes.status).toBe(200)
+      expect((cancelRes.body as { data?: { reversal?: { reversed?: number } } } | undefined)?.data?.reversal?.reversed).toBe(120)
+      expect(await lotRow(lot)).toMatchObject({ remaining_minutes: 240, status: 'active' })
+      expect(await events(lot, req)).toEqual([
+        { event_type: 'deduct', delta_minutes: -120, source_type: 'comp_time_leave' },
+        { event_type: 'reverse', delta_minutes: 120, source_type: 'comp_time_leave' },
+      ])
+
+      // (3) §3b idempotency: a 2nd cancel is rejected (already cancelled); balance + events unchanged
+      expect((await cancel(token, req)).status).toBe(400)
+      expect(await lotRow(lot)).toMatchObject({ remaining_minutes: 240 })
+      expect(await events(lot, req)).toHaveLength(2)
+
+      // (4) §3a expired lot: deduct, then expire the lot → cancel does NOT restore it; reverse=0, unrecoverable surfaced
+      const lotE = await insertLot(userExp, 120, 'exp')
+      const reqE = await createLeave(tokenExp, userExp, 120)
+      expect((await approve(tokenExp, reqE)).status).toBe(200)
+      expect(await lotRow(lotE)).toMatchObject({ remaining_minutes: 0, status: 'exhausted' })
+      await pool.query(`UPDATE attendance_leave_balances SET expires_at = '2000-01-01', status = 'expired' WHERE id = $1`, [lotE])
+      const cancelE = await cancel(tokenExp, reqE)
+      expect(cancelE.status).toBe(200)
+      const reversalE = (cancelE.body as { data?: { reversal?: { reversed?: number; unrecoverableExpired?: number } } } | undefined)?.data?.reversal
+      expect(reversalE?.reversed).toBe(0)
+      expect(reversalE?.unrecoverableExpired).toBe(120)
+      // not resurrected (still expired, remaining 0) + no reverse event written for the expired portion
+      expect(await lotRow(lotE)).toMatchObject({ remaining_minutes: 0, status: 'expired' })
+      expect((await events(lotE, reqE)).filter(e => e.event_type === 'reverse')).toHaveLength(0)
+    } finally {
+      for (const uid of [userId, userExp]) {
+        await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id = $1', [uid]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [uid]).catch(() => undefined)
+      }
+      if (createdRequestIds.length > 0) {
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+      }
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
+  // #7 销假 §P2 (owner review of #3044) — the reverse mutation must be org/user-consistent like the read path.
+  // The FK only ties balance_id; it does NOT enforce that an event's org/user match the LOT owner. So a
+  // corrupt/malicious deduct event (right org+user+source_id, but balance_id pointing at ANOTHER user's lot)
+  // must be IGNORED by reverse — else it would restore minutes into a stranger's lot.
+  it('#7 销假 §P2 — reverse ignores a same-org/user deduct event whose LOT belongs to another user (no cross-user restore)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-l7x-${runSuffix}`
+    const otherId = `attendance-l7x-other-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const createdRequestIds: string[] = []
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) return
+      const hdr = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+
+      const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr, body: JSON.stringify({ code: 'comp_time', name: `Comp Time L7x ${runSuffix}`, paid: false, requiresApproval: true }) })
+      expect([201, 409]).toContain(ltRes.status)
+      let leaveTypeId = (ltRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!leaveTypeId) {
+        const list = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=true`, { headers: { Authorization: `Bearer ${token}` } })
+        const items = (list.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []
+        leaveTypeId = items.find(i => i.code === 'comp_time')?.id
+      }
+      expect(leaveTypeId).toBeTruthy()
+
+      const insertLot = async (uid: string, amount: number, remaining: number, tag: string) => (await pool.query(
+        `INSERT INTO attendance_leave_balances
+           (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, expires_at)
+         VALUES ('default', $1, 'comp_time', $2, $3, 'overtime_conversion', $4, 'active', '2026-01-01', NULL) RETURNING id`,
+        [uid, amount, remaining, `l7x:${runSuffix}:${tag}`],
+      )).rows[0].id as string
+      const lotRow = async (id: string) => (await pool.query('SELECT remaining_minutes, status FROM attendance_leave_balances WHERE id = $1', [id])).rows[0] as { remaining_minutes: number; status: string }
+
+      // userId's legit deduct: grant 240, approve a 120 leave → remaining 120 + a real deduct event (user→own lot).
+      const ownLot = await insertLot(userId, 240, 240, 'own')
+      const createRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr, body: JSON.stringify({ workDate: '2026-09-20', requestType: 'leave', leaveTypeId, minutes: 120 }) })
+      expect(createRes.status).toBe(201)
+      const req = (createRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
+      createdRequestIds.push(req)
+      expect((await requestJson(`${baseUrl}/api/attendance/requests/${req}/approve`, { method: 'POST', headers: hdr, body: JSON.stringify({ comment: 'ok' }) })).status).toBe(200)
+      expect(await lotRow(ownLot)).toMatchObject({ remaining_minutes: 120 })
+
+      // ANOTHER user's lot with headroom (amount 500, remaining 100 → 400 a buggy restore could fill).
+      const otherLot = await insertLot(otherId, 500, 100, 'other')
+      // CORRUPT deduct: org+user+source_id all match the reverse query, but balance_id points at otherLot.
+      await pool.query(
+        `INSERT INTO attendance_leave_balance_events (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+         VALUES ('default', $1, $2, 'deduct', -200, 'comp_time_leave', $3)`,
+        [userId, otherLot, req],
+      )
+
+      // cancel → reverse for (default, userId, req): ONLY the legit 120 (own lot) reverses; the corrupt 200 is ignored.
+      const cancelRes = await requestJson(`${baseUrl}/api/attendance/requests/${req}/cancel`, { method: 'POST', headers: hdr, body: JSON.stringify({ comment: 'withdraw' }) })
+      expect(cancelRes.status, cancelRes.raw).toBe(200)
+      expect((cancelRes.body as { data?: { reversal?: { reversed?: number } } } | undefined)?.data?.reversal?.reversed).toBe(120)
+      expect(await lotRow(ownLot)).toMatchObject({ remaining_minutes: 240, status: 'active' }) // own lot restored
+      expect(await lotRow(otherLot)).toMatchObject({ remaining_minutes: 100, status: 'active' }) // stranger's lot UNTOUCHED
+      const otherReverse = (await pool.query(`SELECT 1 FROM attendance_leave_balance_events WHERE balance_id = $1 AND event_type = 'reverse'`, [otherLot])).rows
+      expect(otherReverse).toHaveLength(0) // no reverse event written against the other user's lot
+    } finally {
+      for (const uid of [userId, otherId]) {
+        await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id = $1', [uid]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [uid]).catch(() => undefined)
+      }
+      if (createdRequestIds.length > 0) await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
+  // #7 销假 §5 authority — RBAC ENFORCED (the main flow above runs RBAC_BYPASS=true, which short-circuits
+  // canAccessOtherUsers). canAccessOtherUsers = admin OR attendance:approve; a read/write-only user fails it.
+  it('#7 销假 §5 authority — a non-admin/non-approver cannot cancel another user\'s leave (403)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const adminU = `attendance-l7auth-admin-${runSuffix}`
+    const otherU = `attendance-l7auth-other-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const createdRequestIds: string[] = []
+    try {
+      process.env.RBAC_BYPASS = 'false'
+      await pool.query(
+        `INSERT INTO permissions (code, name, description) VALUES
+           ('attendance:read','Attendance Read','r'),('attendance:write','Attendance Write','w'),
+           ('attendance:approve','Attendance Approve','a'),('attendance:admin','Attendance Admin','adm')
+         ON CONFLICT (code) DO NOTHING`,
+      )
+      // admin = read/write/admin (creates the type + owns a request); other = read/write only
+      // (passes withPermission('attendance:write') but fails canAccessOtherUsers → 403 on someone else's request)
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code) VALUES
+           ($1,'attendance:read'),($1,'attendance:write'),($1,'attendance:admin'),
+           ($2,'attendance:read'),($2,'attendance:write')
+         ON CONFLICT DO NOTHING`,
+        [adminU, otherU],
+      )
+      const tokenFor = async (uid: string, perms: string) =>
+        ((await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=user&perms=${perms}`)).body as { token?: string } | undefined)?.token
+      const adminToken = await tokenFor(adminU, 'attendance:read,attendance:write,attendance:admin')
+      const otherToken = await tokenFor(otherU, 'attendance:read,attendance:write')
+      if (!adminToken || !otherToken) return
+      const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
+
+      const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr(adminToken), body: JSON.stringify({ code: 'comp_time', name: `Comp Time Auth ${runSuffix}`, paid: false, requiresApproval: true }) })
+      expect([201, 409]).toContain(ltRes.status)
+      let leaveTypeId = (ltRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!leaveTypeId) {
+        const list = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=true`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        leaveTypeId = ((list.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []).find(i => i.code === 'comp_time')?.id
+      }
+      expect(leaveTypeId).toBeTruthy()
+
+      // admin owns a leave request (pending is enough — the authority gate fires before any reverse)
+      const reqRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr(adminToken), body: JSON.stringify({ workDate: '2026-09-25', requestType: 'leave', leaveTypeId, minutes: 60 }) })
+      expect(reqRes.status).toBe(201)
+      const reqId = (reqRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
+      createdRequestIds.push(reqId)
+
+      // other (read/write, NOT admin/approve) cancels admin's request → 403, request untouched
+      const forbidden = await requestJson(`${baseUrl}/api/attendance/requests/${reqId}/cancel`, { method: 'POST', headers: hdr(otherToken), body: JSON.stringify({ comment: 'not mine' }) })
+      expect(forbidden.status).toBe(403)
+      const row = (await pool.query('SELECT status FROM attendance_requests WHERE id = $1', [reqId])).rows[0] as { status: string } | undefined
+      expect(row?.status).toBe('pending')
+    } finally {
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[adminU, otherU]]).catch(() => undefined)
+      if (createdRequestIds.length > 0) {
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+      }
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
     }
   })
 

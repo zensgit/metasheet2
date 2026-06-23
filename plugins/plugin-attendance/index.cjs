@@ -20,9 +20,41 @@ const DEFAULT_RULE = {
   workEndTime: '18:00',
   lateGraceMinutes: 10,
   earlyGraceMinutes: 10,
+  // #5 report tiering (design-lock #3055): lateness tiers above the grace window. severe ≤ absence.
+  severeLateThresholdMinutes: 30,
+  absenceLateThresholdMinutes: 60,
   roundingMinutes: 5,
   workingDays: [1, 2, 3, 4, 5],
   isDefault: true,
+}
+
+// #5 report tiering (design-lock #3055): derive severe-late / absence-late tier counts from the
+// (post-override) lateMinutes and the rule thresholds, so the report metrics are SELF-CALCULATED instead
+// of trusted from record meta (the prior summary.* passthrough). v1 thresholds come from DEFAULT_RULE
+// (severe 30 / absence 60); per-group persistence + a write-side enum-strict normalizer (absence ≥ severe ≥
+// grace reject) land in RT-1a (needs a rule-table migration — attendance_rules is typed columns).
+// Tiers are NESTED — an absence-level record is always also severe-late, mirroring late_count counting
+// every late day: late ⊇ severe ⊇ absence. We ENFORCE the nesting here (effectiveAbsence = max(absence,
+// severe)) so incoherent config can never yield absence-without-severe; a threshold of 0 DISABLES that
+// tier (preserved through the max). Pure function — unit-tested; the single write is in
+// computeAttendanceRecordUpsertValues, into the record meta the report fields already read.
+function computeLateTierCounts(lateMinutes, rule) {
+  const lm = Math.max(0, Math.floor(Number(lateMinutes) || 0))
+  const severe = Number.isFinite(Number(rule?.severeLateThresholdMinutes))
+    ? Math.max(0, Number(rule.severeLateThresholdMinutes))
+    : DEFAULT_RULE.severeLateThresholdMinutes
+  const absenceConfigured = Number.isFinite(Number(rule?.absenceLateThresholdMinutes))
+    ? Math.max(0, Number(rule.absenceLateThresholdMinutes))
+    : DEFAULT_RULE.absenceLateThresholdMinutes
+  // Enforce nesting without resurrecting a disabled (0) absence tier.
+  const effectiveAbsence = absenceConfigured > 0 ? Math.max(absenceConfigured, severe) : 0
+  const severeLateCount = severe > 0 && lm >= severe ? 1 : 0
+  const absenceLateCount = effectiveAbsence > 0 && lm >= effectiveAbsence ? 1 : 0
+  return {
+    severeLateCount,
+    severeLateMinutes: severeLateCount ? lm : 0,
+    absenceLateCount,
+  }
 }
 const DEFAULT_SHIFT = {
   orgId: DEFAULT_ORG_ID,
@@ -7483,6 +7515,13 @@ function normalizeRuleOverride(value) {
     earlyGraceMinutes: Number.isFinite(Number(override.earlyGraceMinutes))
       ? Math.max(0, Number(override.earlyGraceMinutes))
       : undefined,
+    // #5 RT-1a: per-group lateness tier thresholds carry through the override merge (now persisted).
+    severeLateThresholdMinutes: Number.isFinite(Number(override.severeLateThresholdMinutes))
+      ? Math.max(0, Number(override.severeLateThresholdMinutes))
+      : undefined,
+    absenceLateThresholdMinutes: Number.isFinite(Number(override.absenceLateThresholdMinutes))
+      ? Math.max(0, Number(override.absenceLateThresholdMinutes))
+      : undefined,
     roundingMinutes: Number.isFinite(Number(override.roundingMinutes))
       ? Math.max(0, Number(override.roundingMinutes))
       : undefined,
@@ -7515,6 +7554,9 @@ function mapRuleRow(row) {
     workEndTime: row.work_end_time ?? DEFAULT_RULE.workEndTime,
     lateGraceMinutes: Number(row.late_grace_minutes ?? DEFAULT_RULE.lateGraceMinutes),
     earlyGraceMinutes: Number(row.early_grace_minutes ?? DEFAULT_RULE.earlyGraceMinutes),
+    // #5 RT-1a: per-group lateness tier thresholds (read the persisted column, fall back to the RT-1 default).
+    severeLateThresholdMinutes: Number(row.severe_late_threshold_minutes ?? DEFAULT_RULE.severeLateThresholdMinutes),
+    absenceLateThresholdMinutes: Number(row.absence_late_threshold_minutes ?? DEFAULT_RULE.absenceLateThresholdMinutes),
     roundingMinutes: Number(row.rounding_minutes ?? DEFAULT_RULE.roundingMinutes),
     workingDays: normalizeWorkingDays(row.working_days),
     isDefault: row.is_default ?? true,
@@ -12248,7 +12290,7 @@ async function loadDefaultRule(db, orgId) {
   try {
     const rows = await db.query(
       `SELECT id, name, timezone, work_start_time, work_end_time, late_grace_minutes,
-              early_grace_minutes, rounding_minutes, working_days, is_default, org_id
+              early_grace_minutes, severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default, org_id
        FROM attendance_rules
        WHERE is_default = true AND org_id = $1
        ORDER BY created_at DESC
@@ -12258,7 +12300,7 @@ async function loadDefaultRule(db, orgId) {
     if (!rows.length && targetOrg !== DEFAULT_ORG_ID) {
       const fallbackRows = await db.query(
         `SELECT id, name, timezone, work_start_time, work_end_time, late_grace_minutes,
-                early_grace_minutes, rounding_minutes, working_days, is_default, org_id
+                early_grace_minutes, severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default, org_id
          FROM attendance_rules
          WHERE is_default = true AND org_id = $1
          ORDER BY created_at DESC
@@ -12899,6 +12941,39 @@ async function loadApprovedRequestsForOverlay(db, orgId, userId, fromDate, toDat
          AND request_type = ANY($5::text[])
        ORDER BY work_date ASC, created_at ASC NULLS LAST, id ASC`,
       [userId, targetOrg, fromDate, toDate, CALENDAR_OVERLAY_REQUEST_TYPES]
+    )
+    return rows.map((row) => ({
+      id: row.id,
+      requestType: row.request_type,
+      workDate: normalizeDateOnly(row.work_date) ?? row.work_date,
+      status: row.status,
+      metadata: normalizeMetadata(row.metadata),
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
+    }))
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return []
+    throw error
+  }
+}
+
+// #6 TA-1: pending-leave overlay loader — mirrors loadApprovedRequestsForOverlay but for status='pending'
+// and LEAVE only (pending overtime does not make a person "off"). Display-only; the caller adds these as
+// a distinct `pending_leave` kind. A pending row disappears here the instant the request is rejected or
+// approved (it derives live from request status — no stored pending-calendar state).
+async function loadPendingLeaveRequestsForOverlay(db, orgId, userId, fromDate, toDate) {
+  if (!userId || !fromDate || !toDate) return []
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  try {
+    const rows = await db.query(
+      `SELECT id, request_type, work_date, status, metadata, created_at
+       FROM attendance_requests
+       WHERE user_id = $1
+         AND org_id = $2
+         AND work_date BETWEEN $3 AND $4
+         AND status = 'pending'
+         AND request_type = 'leave'
+       ORDER BY work_date ASC, created_at ASC NULLS LAST, id ASC`,
+      [userId, targetOrg, fromDate, toDate]
     )
     return rows.map((row) => ({
       id: row.id,
@@ -14044,6 +14119,9 @@ async function resolveEffectiveCalendar(db, args) {
   let rotationByUser = new Map()
   let rotationShiftsById = new Map()
   let overlays = []
+  // #6 TA-1: pending-leave overlay (display-only). Loaded ONLY when args.includePending === true;
+  // every other caller (incl. the record-compute path) leaves it empty, so pending never reaches records.
+  let pendingOverlays = []
   let groupContext = null
   let groupRule = null
 
@@ -14054,6 +14132,9 @@ async function resolveEffectiveCalendar(db, args) {
     rotationByUser = rotationPrefetch.assignmentsByUser
     rotationShiftsById = rotationPrefetch.shiftsById
     overlays = await loadApprovedRequestsForOverlay(db, orgId, args.userId, from, to)
+    if (args.includePending === true) {
+      pendingOverlays = await loadPendingLeaveRequestsForOverlay(db, orgId, args.userId, from, to)
+    }
   } else if (mode === 'groupId') {
     groupContext = await loadAttendanceGroupByIdOrCode(db, orgId, args.groupId)
     if (!groupContext) throw new Error('NOT_FOUND:group')
@@ -14112,6 +14193,23 @@ async function resolveEffectiveCalendar(db, args) {
       minutes,
       status: row.status,
       refId: row.id,
+    })
+  }
+
+  // #6 TA-1: append pending-leave overlays AFTER the approved ones (empty unless includePending).
+  // Distinct kind 'pending_leave' + provisional flag so display can mark them tentative and any
+  // record/write consumer can filter them out — they are never a fact (mirror the taint-skip discipline).
+  for (const row of pendingOverlays) {
+    const key = row.workDate
+    if (!key) continue
+    if (!overlaysByDate.has(key)) overlaysByDate.set(key, [])
+    overlaysByDate.get(key).push({
+      kind: 'pending_leave',
+      source: 'attendance_requests',
+      requestType: row.requestType,
+      status: 'pending',
+      refId: row.id,
+      provisional: true,
     })
   }
 
@@ -15400,6 +15498,71 @@ async function deductCompTimeBalance(trx, { orgId, userId, requestId, minutes })
   })
 }
 
+// #7 leave cancellation / 销假 (design-lock #3034): reverse the balance a leave's approval deducted, when
+// that approved leave is later cancelled. Keyed on the request's own deduct events (source_id = requestId,
+// event_type = 'deduct'), so it reverses WHATEVER was deducted — annual_leave AND comp_time_leave both
+// deduct with source_id = requestId — mirroring each deduct event's source_type onto its reverse. Manual
+// adjustments use an adjustmentId (not a requestId), so they never collide. §3b idempotency: a prior
+// 'reverse' for this requestId → no-op. §3a expired-lot: a lot whose expires_at has passed is NOT
+// resurrected; its portion stays unrecoverable and remains queryable as (Σdeduct − Σreverse) for the
+// requestId, so it is never silently mis-accounted. Restores remaining_minutes (capped at the lot's
+// original amount_minutes) and flips an 'exhausted' lot back to 'active'. Never touches an 'expired' lot.
+async function reverseLeaveBalanceDeduction(trx, { orgId, userId, requestId }) {
+  const already = await trx.query(
+    `SELECT 1 FROM attendance_leave_balance_events
+      WHERE org_id = $1 AND user_id = $2 AND source_id = $3 AND event_type = 'reverse' LIMIT 1`,
+    [orgId, userId, requestId]
+  )
+  if (already.length > 0) return { reversed: 0, lots: 0, unrecoverableExpired: 0, alreadyReversed: true }
+
+  const deductRows = await trx.query(
+    `SELECT e.balance_id, e.delta_minutes, e.source_type,
+            b.remaining_minutes, b.amount_minutes, b.status,
+            (b.expires_at IS NOT NULL AND b.expires_at <= now()) AS expired
+       FROM attendance_leave_balance_events e
+       JOIN attendance_leave_balances b ON b.id = e.balance_id AND b.org_id = e.org_id AND b.user_id = e.user_id
+      WHERE e.org_id = $1 AND e.user_id = $2 AND e.source_id = $3 AND e.event_type = 'deduct'
+      FOR UPDATE OF b`,
+    [orgId, userId, requestId]
+  )
+
+  let reversed = 0
+  let unrecoverableExpired = 0
+  let lotsTouched = 0
+  for (const row of deductRows) {
+    const deducted = -Number(row.delta_minutes) // deduct delta is negative → positive restore amount
+    if (deducted <= 0) continue
+    if (row.expired === true || row.status === 'expired') {
+      // §3a: an expired lot is NOT resurrected. No reverse event is written for this portion, so it stays
+      // durably auditable as (Σdeduct − Σreverse) for this source_id over the immutable events ledger — the
+      // deduct event remains, unmatched by a reverse. The response surfaces `unrecoverableExpired` for
+      // immediate visibility; the ledger derivation is the durable record (the events table has no note
+      // column, and a zero/marker event would violate the delta-sign CHECK).
+      unrecoverableExpired += deducted
+      continue
+    }
+    const headroom = Number(row.amount_minutes) - Number(row.remaining_minutes)
+    const restore = Math.min(deducted, headroom)
+    if (restore <= 0) continue
+    const newRemaining = Number(row.remaining_minutes) + restore
+    await trx.query(
+      `UPDATE attendance_leave_balances
+          SET remaining_minutes = $1, status = 'active', updated_at = now()
+        WHERE id = $2`,
+      [newRemaining, row.balance_id]
+    )
+    await trx.query(
+      `INSERT INTO attendance_leave_balance_events
+         (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+       VALUES ($1, $2, $3, 'reverse', $4, $5, $6)`,
+      [orgId, userId, row.balance_id, restore, row.source_type, requestId]
+    )
+    reversed += restore
+    lotsTouched += 1
+  }
+  return { reversed, lots: lotsTouched, unrecoverableExpired, alreadyReversed: false }
+}
+
 // 年假/法定假 L3 (owner design-lock 2026-06-15): convert an annual leave request's duration into STANDARD-DAY
 // deduction minutes. The request model is a single workDate + metadata.minutes (defaulted from the leave type's
 // defaultMinutesPerDay); v1 is single-day only (multi-day/cross-day annual = future). requestedUnits =
@@ -16361,6 +16524,16 @@ function computeAttendanceRecordUpsertValues(options) {
       finalMetrics.status = overrideMetrics.status.trim()
     }
   }
+  // #5 report tiering (design-lock #3055): write the (post-override) lateness tiers into the record meta
+  // the report fields already read (severe_late_count / severe_late_minutes / absence_late_count). Computed
+  // from the EFFECTIVE lateMinutes (so a manual lateMinutes override re-tiers) + the per-group rule
+  // thresholds. Legacy records that predate this never carry these keys → the report fallback reads 0,
+  // unchanged (no history restatement).
+  const lateTiers = computeLateTierCounts(finalMetrics.lateMinutes, rule)
+  finalMeta.severe_late_count = lateTiers.severeLateCount
+  finalMeta.severe_late_minutes = lateTiers.severeLateMinutes
+  finalMeta.absence_late_count = lateTiers.absenceLateCount
+
   const status = statusOverride ?? finalMetrics.status
 
   return {
@@ -17942,6 +18115,9 @@ async function isApproverAllowed(db, userId, step, logger) {
 }
 
 module.exports = {
+  __attendanceLeaveCancellationForTests: {
+    reverseLeaveBalanceDeduction,
+  },
   __attendanceImportForTests: {
     buildUnresolvedRowUserWarning,
     collectRowUserIdentityValues,
@@ -18033,6 +18209,8 @@ module.exports = {
     attendanceReportRecordRowKey,
     buildAttendanceImportMultiPunchMeta,
     computeAttendanceRecordUpsertValues,
+    computeLateTierCounts,
+    mapRuleRow,
     resolveAttendanceImportRawClient,
     buildAttendanceImportCopyQuery,
     attachAttendanceImportCopyStreamErrorSink,
@@ -25590,7 +25768,12 @@ module.exports = {
           }
 
           const requestRow = requestRows[0]
-          if (requestRow.status !== 'pending') {
+          // #7 (design-lock #3034): a leave may be cancelled AFTER approval (→ reverse its deducted balance
+          // below). The status machine is loosened ONLY for request_type='leave'; every other request type
+          // (shift_swap / schedule_dispatch / …) stays pending-only, unchanged.
+          const isApprovedLeaveCancellation =
+            requestRow.status === 'approved' && requestRow.request_type === 'leave'
+          if (requestRow.status !== 'pending' && !isApprovedLeaveCancellation) {
             throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
           }
           const requestOrgId = requestRow.org_id ?? DEFAULT_ORG_ID
@@ -25661,11 +25844,25 @@ module.exports = {
             await closeScheduleDispatchRequest(trx, requestOrgId, requestId)
           }
 
+          // #7 (design-lock #3034): cancelling an APPROVED leave reverses whatever balance its approval
+          // deducted (annual_leave / comp_time_leave), in the SAME txn. Symmetric + safe for any approved
+          // leave: if nothing was deducted (e.g. annual policy off → no deduct events for this requestId),
+          // the reverse is a no-op. Idempotent inside (a re-cancel finds the existing 'reverse' → no-op).
+          let reversal = null
+          if (isApprovedLeaveCancellation) {
+            reversal = await reverseLeaveBalanceDeduction(trx, {
+              orgId: requestOrgId,
+              userId: requestRow.user_id,
+              requestId,
+            })
+          }
+
           return {
             requestId,
             status: 'cancelled',
             orgId: requestOrgId,
             userId: requestRow.user_id,
+            reversal,
           }
         })
 
@@ -27582,6 +27779,8 @@ module.exports = {
           workEndTime: z.string().optional(),
           lateGraceMinutes: z.number().int().min(0).optional(),
           earlyGraceMinutes: z.number().int().min(0).optional(),
+          severeLateThresholdMinutes: z.number().int().min(0).optional(),
+          absenceLateThresholdMinutes: z.number().int().min(0).optional(),
           roundingMinutes: z.number().int().min(0).optional(),
           workingDays: z.array(z.number().int().min(0).max(6)).optional(),
           orgId: z.string().optional(),
@@ -27600,8 +27799,25 @@ module.exports = {
           workEndTime: parsed.data.workEndTime ?? DEFAULT_RULE.workEndTime,
           lateGraceMinutes: parsed.data.lateGraceMinutes ?? DEFAULT_RULE.lateGraceMinutes,
           earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? DEFAULT_RULE.earlyGraceMinutes,
+          severeLateThresholdMinutes: parsed.data.severeLateThresholdMinutes ?? DEFAULT_RULE.severeLateThresholdMinutes,
+          absenceLateThresholdMinutes: parsed.data.absenceLateThresholdMinutes ?? DEFAULT_RULE.absenceLateThresholdMinutes,
           roundingMinutes: parsed.data.roundingMinutes ?? DEFAULT_RULE.roundingMinutes,
           workingDays: parsed.data.workingDays ?? DEFAULT_RULE.workingDays,
+        }
+
+        // #5 RT-1a normalizer (design-lock §2, the #1776 enum-strict rule): Zod already rejected
+        // non-integers / negatives; now reject incoherent tiers on the RESOLVED payload so a partial
+        // update can't persist an out-of-order rule. absence-late ≥ severe-late ≥ grace.
+        if (!(payload.absenceLateThresholdMinutes >= payload.severeLateThresholdMinutes
+              && payload.severeLateThresholdMinutes >= payload.lateGraceMinutes)) {
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'absenceLateThresholdMinutes ≥ severeLateThresholdMinutes ≥ lateGraceMinutes is required.',
+            },
+          })
+          return
         }
 
         const orgId = getOrgId(req)
@@ -27611,8 +27827,8 @@ module.exports = {
 
             const rows = await trx.query(
               `INSERT INTO attendance_rules
-               (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes, rounding_minutes, working_days, is_default)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, true)
+               (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes, severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, true)
                RETURNING *`,
               [
                 randomUUID(),
@@ -27623,6 +27839,8 @@ module.exports = {
                 payload.workEndTime,
                 payload.lateGraceMinutes,
                 payload.earlyGraceMinutes,
+                payload.severeLateThresholdMinutes,
+                payload.absenceLateThresholdMinutes,
                 payload.roundingMinutes,
                 JSON.stringify(payload.workingDays),
               ]
@@ -36702,6 +36920,131 @@ module.exports = {
     )
 
     // RFC §5: read-only effective calendar.
+    // #6 TA-2 (design-lock #3056): team-availability — for a group + date range, each member's per-date
+    // state aggregated from resolveEffectiveCalendar(includePending). §3e v1 group-only (groupId required);
+    // §3b scope-gated to group owner/sub-owner/admin; §3a pending leave is a DISTINCT tentative state, never
+    // folded into approved nor subtracted from the scheduled/available count. Provisional UI marking = TA-3.
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/team-availability',
+      withPermission('attendance:read', async (req, res) => {
+        const groupId = normalizeUuidString(typeof req.query.groupId === 'string' ? req.query.groupId.trim() : '')
+        if (!groupId) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"groupId" is required (v1 is group-only).' } })
+          return
+        }
+        const fromRaw = typeof req.query.from === 'string' ? req.query.from.trim() : ''
+        const toRaw = typeof req.query.to === 'string' ? req.query.to.trim() : ''
+        if (!fromRaw || !toRaw) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" and "to" are required (YYYY-MM-DD).' } })
+          return
+        }
+        const from = normalizeDateOnlyStrict(fromRaw)
+        const to = normalizeDateOnlyStrict(toRaw)
+        if (!from || !to) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "from"/"to" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        if (from > to) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" must be on or before "to".' } })
+          return
+        }
+        const rangeDays = diffDays(from, to) + 1
+        if (rangeDays > 366) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Range must be <= 366 days.' } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const actorId = getUserId(req)
+        if (!actorId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+        // §3b: scope gate — admin OR manages this group (owner/sub-owner). RBAC_BYPASS short-circuits (tests).
+        try {
+          if (process.env.RBAC_BYPASS !== 'true'
+            && !(await hasAttendanceAdminAccess(actorId))
+            && !(await userManagesAttendanceGroup(orgId, groupId, actorId))) {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this group' } })
+            return
+          }
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance group manager tables missing' } })
+            return
+          }
+          throw error
+        }
+
+        try {
+          // P2 (owner review of #3087): a valid-UUID but non-existent/deleted group must 404, NOT a misleading
+          // 200 with members:0 (which disguises "wrong/deleted group" as "everyone empty"). Checked AFTER the
+          // scope gate so an unauthorized caller still gets 403 first (no existence leak to non-managers).
+          const group = await loadAttendanceGroupByIdOrCode(db, orgId, groupId)
+          if (!group) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Attendance group not found' } })
+            return
+          }
+          const memberRows = await db.query(
+            `SELECT DISTINCT user_id FROM attendance_group_members WHERE org_id = $1 AND group_id = $2 ORDER BY user_id ASC`,
+            [orgId, groupId],
+          )
+          const members = memberRows.map((r) => String(r.user_id ?? '').trim()).filter(Boolean)
+          // bound the per-member×date work (resolver + schedule probe per cell) for a v1 read surface.
+          if (members.length * rangeDays > 6000) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Too many members×days for one request (v1 cap 6000); narrow the range.' } })
+            return
+          }
+
+          const items = []
+          for (const memberId of members) {
+            const calendar = await resolveEffectiveCalendar(db, { orgId, userId: memberId, from, to, includePending: true })
+            for (const dayItem of (Array.isArray(calendar?.items) ? calendar.items : [])) {
+              const overlays = Array.isArray(dayItem?.overlays) ? dayItem.overlays : []
+              let state
+              if (overlays.some((o) => o && o.kind === 'personal_leave')) {
+                state = 'approved_leave' // a fact; precedence over pending
+              } else if (overlays.some((o) => o && o.kind === 'pending_leave')) {
+                state = 'pending_leave' // §3a: distinct tentative state, never folded into approved
+              } else if (!(await isUserScheduledForDate(db, orgId, memberId, dayItem.date))) {
+                state = 'unscheduled'
+              } else if (dayItem?.effective?.isWorkingDay === true) {
+                state = 'scheduled'
+              } else {
+                state = 'rest'
+              }
+              items.push({ date: dayItem.date, userId: memberId, state })
+            }
+          }
+
+          // §3a: per-date summary — pending in a SEPARATE tentative bucket; the available (scheduled) count is
+          // never reduced by pending. Only approved leave leaves the scheduled count.
+          const summaryByDate = new Map()
+          for (const it of items) {
+            if (!summaryByDate.has(it.date)) summaryByDate.set(it.date, { date: it.date, scheduled: 0, rest: 0, approvedLeave: 0, pendingLeaveTentative: 0, unscheduled: 0 })
+            const s = summaryByDate.get(it.date)
+            if (it.state === 'scheduled') s.scheduled += 1
+            else if (it.state === 'rest') s.rest += 1
+            else if (it.state === 'approved_leave') s.approvedLeave += 1
+            else if (it.state === 'pending_leave') s.pendingLeaveTentative += 1
+            else if (it.state === 'unscheduled') s.unscheduled += 1
+          }
+
+          // §3a: availableFormal counts scheduled AND pending-leave members — pending does NOT reduce the
+          // formal available headcount (its leave isn't approved); only approved leave leaves availability.
+          const summary = Array.from(summaryByDate.values()).map((s) => ({ ...s, availableFormal: s.scheduled + s.pendingLeaveTentative }))
+          res.json({ ok: true, data: { groupId, range: { from, to }, members: members.length, items, summary } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance effective calendar tables missing' } })
+            return
+          }
+          throw error
+        }
+      }),
+    )
+
     // Validation is inline (does NOT reuse resolveAttendanceDateRange, which
     // silently defaults missing from/to to a 30-day window). from/to MUST be
     // provided and the inclusive range MUST be <= 366 days.
@@ -36715,6 +37058,9 @@ module.exports = {
         const groupIdRaw = typeof req.query.groupId === 'string' ? req.query.groupId.trim() : ''
         const orgOnlyRaw = typeof req.query.orgOnly === 'string' ? req.query.orgOnly.trim().toLowerCase() : ''
         const orgOnly = orgOnlyRaw === 'true' || orgOnlyRaw === '1'
+        // #6 TA-1: opt-in pending-leave overlay (display-only). Default off → byte-identical to today.
+        const includePendingRaw = typeof req.query.includePending === 'string' ? req.query.includePending.trim().toLowerCase() : ''
+        const includePending = includePendingRaw === 'true' || includePendingRaw === '1'
 
         if (!fromRaw || !toRaw) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" and "to" are required (YYYY-MM-DD).' } })
@@ -36778,6 +37124,7 @@ module.exports = {
             userId: userIdRaw || undefined,
             groupId: groupIdRaw || undefined,
             orgOnly: orgOnly === true ? true : undefined,
+            includePending: includePending === true ? true : undefined,
             logger,
           })
           res.json({ ok: true, data: result })

@@ -1162,6 +1162,138 @@ describe('ApprovalProductService', () => {
     expect(pgState.client.release).toHaveBeenCalledTimes(1)
   })
 
+  describe('detail / sub-form (明细) field contract (C-1 author-time validation)', () => {
+    // assertFormSchema runs BEFORE pool.connect(), so reject cases throw without any query mock.
+    const wrap = (field: Record<string, unknown>, extra: Record<string, unknown>[] = []) => ({
+      key: 'detail-tpl',
+      name: 'Detail Tpl',
+      visibilityScope: { type: 'all', ids: [] },
+      formSchema: { fields: [field, ...extra] },
+      approvalGraph: buildRuntimeGraph(),
+    })
+    const create = async (request: unknown) => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      return new ApprovalProductService().createTemplate(request as never)
+    }
+
+    it('rejects a detail field with empty columns', async () => {
+      await expect(create(wrap({ id: 'items', type: 'detail', label: '明细', columns: [] })))
+        .rejects.toThrow(/columns must be a non-empty array/)
+    })
+
+    it('rejects a detail nested inside a detail (one level only)', async () => {
+      await expect(create(wrap({
+        id: 'items', type: 'detail', label: '明细',
+        columns: [{ id: 'sub', type: 'detail', label: 'sub', columns: [{ id: 'x', type: 'text', label: 'x' }] }],
+      }))).rejects.toThrow(/detail cannot be nested inside a detail group/)
+    })
+
+    it('rejects an unknown sub-field type', async () => {
+      await expect(create(wrap({
+        id: 'items', type: 'detail', label: '明细', columns: [{ id: 'x', type: 'bogus', label: 'x' }],
+      }))).rejects.toThrow(/type is invalid/)
+    })
+
+    it('rejects duplicate sub-field ids within a group', async () => {
+      await expect(create(wrap({
+        id: 'items', type: 'detail', label: '明细',
+        columns: [{ id: 'x', type: 'text', label: 'x' }, { id: 'x', type: 'number', label: 'x2' }],
+      }))).rejects.toThrow(/ids must be unique within the detail group/)
+    })
+
+    it('rejects minRows > maxRows', async () => {
+      await expect(create(wrap({
+        id: 'items', type: 'detail', label: '明细', minRows: 5, maxRows: 2,
+        columns: [{ id: 'x', type: 'text', label: 'x' }],
+      }))).rejects.toThrow(/minRows must be <= maxRows/)
+    })
+
+    it('rejects a negative row bound', async () => {
+      await expect(create(wrap({
+        id: 'items', type: 'detail', label: '明细', minRows: -1,
+        columns: [{ id: 'x', type: 'text', label: 'x' }],
+      }))).rejects.toThrow(/minRows must be a non-negative integer/)
+    })
+
+    it('rejects detail-only keys (columns) on a non-detail field', async () => {
+      await expect(create(wrap({ id: 'x', type: 'text', label: 'x', columns: [{ id: 'y', type: 'text', label: 'y' }] })))
+        .rejects.toThrow(/only valid on a detail field/)
+    })
+
+    it('rejects a top-level visibilityRule targeting a detail field', async () => {
+      await expect(create(wrap(
+        { id: 'items', type: 'detail', label: '明细', columns: [{ id: 'product', type: 'text', label: '品名' }] },
+        [{ id: 'note', type: 'text', label: 'note', visibilityRule: { fieldId: 'items', operator: 'notEmpty' } }],
+      ))).rejects.toThrow(/cannot reference a detail field/)
+    })
+
+    it('rejects a sub-field visibilityRule referencing a top-level (cross-scope) field', async () => {
+      await expect(create(wrap({
+        id: 'items', type: 'detail', label: '明细',
+        columns: [
+          { id: 'product', type: 'text', label: '品名' },
+          { id: 'note', type: 'text', label: 'note', visibilityRule: { fieldId: 'topLevelOnly', operator: 'notEmpty' } },
+        ],
+      }))).rejects.toThrow(/must reference an existing field/)
+    })
+
+    it('rejects a form_field_user assignee source pointing at a detail sub-field (sources stay top-level)', async () => {
+      // `approver` is a user-typed SUB-FIELD of `items`, not a top-level field — the assignee
+      // validator resolves form_field_user.fieldId against top-level fields only, so it rejects.
+      const request = {
+        key: 'detail-assignee',
+        name: 'Detail Assignee',
+        visibilityScope: { type: 'all', ids: [] },
+        formSchema: { fields: [{ id: 'items', type: 'detail', label: '明细', columns: [{ id: 'approver', type: 'user', label: '审批人' }] }] },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            { key: 'approval_1', type: 'approval', config: { assigneeSources: [{ kind: 'form_field_user', fieldId: 'approver' }] } },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+            { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+          ],
+          policy: { allowRevoke: true },
+        },
+      }
+      await expect(create(request)).rejects.toThrow(/must reference a user field/)
+    })
+
+    it('accepts a valid detail and round-trips columns / minRows / maxRows + a sibling sub-field rule', async () => {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('INSERT INTO approval_templates')) {
+          return { rows: [{ id: 'tpl-d', key: String(params?.[0]), name: String(params?.[1]), description: null, category: null, visibility_scope: JSON.parse(String(params?.[4])), sla_hours: null, status: 'draft', active_version_id: null, latest_version_id: null, created_at: new Date('2026-04-11T00:00:00.000Z'), updated_at: new Date('2026-04-11T00:00:00.000Z') }], rowCount: 1 }
+        }
+        if (s.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [{ id: 'ver-d', template_id: 'tpl-d', version: 1, status: 'draft', form_schema: JSON.parse(String(params?.[1])), approval_graph: JSON.parse(String(params?.[2])), created_at: new Date('2026-04-11T00:00:00.000Z'), updated_at: new Date('2026-04-11T00:00:00.000Z') }], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_templates')) {
+          return { rows: [{ id: 'tpl-d', key: 'detail-tpl', name: 'Detail Tpl', description: null, category: null, visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft', active_version_id: 'ver-d', latest_version_id: 'ver-d', created_at: new Date('2026-04-11T00:00:00.000Z'), updated_at: new Date('2026-04-11T00:00:00.000Z') }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+
+      const result = await create(wrap({
+        id: 'items', type: 'detail', label: '明细', required: true, minRows: 1, maxRows: 50,
+        columns: [
+          { id: 'product', type: 'text', label: '品名', required: true },
+          { id: 'qty', type: 'number', label: '数量', required: true },
+          { id: 'note', type: 'text', label: '备注', visibilityRule: { fieldId: 'product', operator: 'notEmpty' } },
+        ],
+      }))
+      const field = result.formSchema.fields[0]
+      expect(field.type).toBe('detail')
+      expect(field.minRows).toBe(1)
+      expect(field.maxRows).toBe(50)
+      expect(field.columns?.map((column) => column.id)).toEqual(['product', 'qty', 'note'])
+      expect(field.columns?.[2].visibilityRule).toEqual({ fieldId: 'product', operator: 'notEmpty' })
+    })
+  })
+
   it('accepts authoring-MVP form-field-user assignee sources when creating a template', async () => {
     const request = {
       key: 'expense-authoring',
@@ -1724,6 +1856,9 @@ describe('ApprovalProductService', () => {
       }
       if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
         return { rows: [buildInstanceRow({ status: 'approved', current_node_key: null })], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT form_schema FROM approval_template_versions WHERE id = $1')) {
+        return { rows: [{ form_schema: { fields: [] } }], rowCount: 1 }
       }
       if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
         return { rows: [], rowCount: 0 }

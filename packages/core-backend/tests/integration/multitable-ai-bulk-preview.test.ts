@@ -68,6 +68,7 @@ const AI_ENV_KEYS = [
   'MULTITABLE_AI_ACCOUNT_DAILY_USD_CAP',
   'MULTITABLE_AI_CONFIRM_LIVE_REQUESTS',
   'MULTITABLE_AI_BULK_MAX_ROWS',
+  'MULTITABLE_AI_BULK_JOB_MAX_ROWS',
 ] as const
 
 let app: Express
@@ -198,6 +199,7 @@ describeIfDatabase('B-1 AI bulk-preview (real DB)', () => {
   afterAll(async () => {
     await q(`DELETE FROM ${AI_USAGE_LEDGER_TABLE} WHERE sheet_id = $1`, [SHEET_ID]).catch(() => {})
     await q(`DELETE FROM ${AI_BULK_PREVIEW_CACHE_TABLE} WHERE sheet_id = $1`, [SHEET_ID]).catch(() => {})
+    await q(`DELETE FROM multitable_ai_bulk_job WHERE sheet_id = $1`, [SHEET_ID]).catch(() => {})
     await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM record_permissions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
@@ -225,6 +227,7 @@ describeIfDatabase('B-1 AI bulk-preview (real DB)', () => {
     if (!process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP) delete process.env.MULTITABLE_AI_TENANT_DAILY_TOKEN_CAP
     if (!process.env.MULTITABLE_AI_TENANT_WEEKLY_TOKEN_CAP) delete process.env.MULTITABLE_AI_TENANT_WEEKLY_TOKEN_CAP
     delete process.env.MULTITABLE_AI_BULK_MAX_ROWS
+    delete process.env.MULTITABLE_AI_BULK_JOB_MAX_ROWS
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_views WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM record_permissions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
@@ -400,8 +403,15 @@ describeIfDatabase('B-1 AI bulk-preview (real DB)', () => {
   })
 
   // ── Test 3: cap → 400 + quota-insufficient → refuse-zero ──────────────────
-  test('D3-A over-cap → 400 BULK_SCOPE_TOO_LARGE, nothing generated', async () => {
-    process.env.MULTITABLE_AI_BULK_MAX_ROWS = '2'
+  // CHANGED for B-4 (BJ-8): the inline cap no longer 400s — over the INLINE cap
+  // (but ≤ the async JOB cap) now routes to an async job ({ jobId }); only over the
+  // JOB cap 400s. So this asserts the 400 against MULTITABLE_AI_BULK_JOB_MAX_ROWS,
+  // and a companion assertion below covers the inline-cap → job routing.
+  test('over async JOB cap → 400 BULK_SCOPE_TOO_LARGE, nothing generated', async () => {
+    // Inline cap 1 (so 3 rows route past the inline path) + job cap 2 (so 3 rows
+    // exceed the async ceiling) → 400, the only remaining BULK_SCOPE_TOO_LARGE case.
+    process.env.MULTITABLE_AI_BULK_MAX_ROWS = '1'
+    process.env.MULTITABLE_AI_BULK_JOB_MAX_ROWS = '2'
     for (let i = 0; i < 3; i += 1) await seedRecord(`rec_b1_cap${i}_${TS}`, { [FLD_SRC]: `r${i}` }, ACTOR)
 
     const res = await bulkReq({ fieldId: FLD_TARGET, scope: 'sheet' })
@@ -411,6 +421,25 @@ describeIfDatabase('B-1 AI bulk-preview (real DB)', () => {
     expect(res.body.error.cap).toBe(2)
     expect(fetchCallCount).toBe(0) // generated nothing
     expect(await ledgerTokenSum()).toBe(0)
+  })
+
+  test('over INLINE cap but ≤ JOB cap → async job ({ jobId }), no inline generation', async () => {
+    // 3 generatable rows, inline cap 2 → routes to a job; the job is NOT run here
+    // (the generate phase is exercised by the B-4 job suite), so the synchronous
+    // response is just { jobId } with ZERO inline provider calls / charges.
+    process.env.MULTITABLE_AI_BULK_MAX_ROWS = '2'
+    for (let i = 0; i < 3; i += 1) await seedRecord(`rec_b1_route${i}_${TS}`, { [FLD_SRC]: `r${i}` }, ACTOR)
+
+    const res = await bulkReq({ fieldId: FLD_TARGET, scope: 'sheet' })
+    expect(res.status).toBe(200)
+    expect(typeof res.body.jobId).toBe('string')
+    expect(res.body.jobId).toMatch(/^aibulkjob_/)
+    expect(res.body.rows).toBeUndefined() // NOT an inline preview response
+    expect(fetchCallCount).toBe(0) // nothing generated synchronously
+    expect(await ledgerTokenSum()).toBe(0)
+    // Clean up the job rows this test created (the B-1 suite doesn't manage job tables).
+    await q(`DELETE FROM multitable_ai_bulk_job_rows WHERE job_id = $1`, [res.body.jobId]).catch(() => {})
+    await q(`DELETE FROM multitable_ai_bulk_job WHERE job_id = $1`, [res.body.jobId]).catch(() => {})
   })
 
   test('D4 quota-insufficient → AI_BULK_QUOTA_INSUFFICIENT, generates nothing', async () => {

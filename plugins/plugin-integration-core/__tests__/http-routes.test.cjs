@@ -3705,6 +3705,14 @@ async function testStockPreparationTargetProvisioningRoutes() {
     registered.includes('POST /api/integration/stock-preparation/target/ensure'),
     'stock-preparation target ensure route registered',
   )
+  assert.ok(
+    registered.includes('GET /api/integration/stock-preparation/sandbox-target/readiness'),
+    'stock-preparation sandbox target readiness route registered',
+  )
+  assert.ok(
+    registered.includes('POST /api/integration/stock-preparation/sandbox-target/ensure'),
+    'stock-preparation sandbox target ensure route registered',
+  )
 
   let res = await invoke(routes, 'GET', '/api/integration/stock-preparation/target/readiness', {
     user: WRITE_USER,
@@ -3720,6 +3728,40 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'STOCK_PREPARATION_TARGET_REQUEST_INVALID')
   assert.equal(provisioning.calls.length, 0, 'client-supplied sheetId/permission is rejected before provisioning')
+
+  res = await invoke(routes, 'GET', '/api/integration/stock-preparation/sandbox-target/readiness', {
+    user: WRITE_USER,
+    query: { projectId: 'tenant_1:integration-core', objectId: 'plm_stock_preparation_sandbox_validation' },
+  })
+  assert.equal(res.statusCode, 403, 'write user cannot inspect sandbox target readiness')
+  assert.equal(provisioning.calls.length, 0, 'non-admin sandbox request does not reach provisioning API')
+
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/sandbox-target/ensure', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      baseId: 'base_stock',
+      objectId: 'plm_stock_preparation_sandbox_validation',
+      sheetId: 'evil_sheet',
+      permission: 'admin',
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_INVALID')
+  assert.equal(provisioning.calls.length, 0, 'sandbox client-supplied sheetId/permission is rejected before provisioning')
+
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/sandbox-target/ensure', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      baseId: 'base_stock',
+      objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
+    },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'TARGET_SANDBOX_OBJECT_ID_INVALID')
+  assert.equal(res.body.error.details.reason, 'prod_canonical')
+  assert.equal(provisioning.calls.length, 0, 'canonical objectId is rejected before sandbox provisioning')
 
   res = await invoke(routes, 'GET', '/api/integration/stock-preparation/target/readiness', {
     user: ADMIN_USER,
@@ -3789,6 +3831,73 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.deepEqual(res.body.error.details.missingFields, ['path'])
   assert.equal(JSON.stringify(res.body.error).includes('sheet_stock_canonical_private'), false, 'incomplete error hides sheet id')
   assert.equal(findCalls(incomplete.calls, 'ensureObject').length, 0, 'incomplete existing target is not repaired in place')
+
+  const sandboxObjectId = 'plm_stock_preparation_sandbox_validation'
+  const sandboxProvisioning = createStockPreparationTargetProvisioningApi()
+  const sandboxMount = mountRoutes(createMockServices().services, {
+    provisioningApi: sandboxProvisioning.api,
+    recordsApi: createTableActionRecordsApi().recordsApi,
+  })
+  res = await invoke(sandboxMount.routes, 'POST', '/api/integration/stock-preparation/sandbox-target/ensure', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      baseId: 'base_stock',
+      objectId: sandboxObjectId,
+      label: 'Sandbox Stock Preparation',
+    },
+  })
+  assertOkResponse(res, 201)
+  assert.equal(res.body.data.ready, true)
+  assert.equal(res.body.data.mode, 'sandbox_create')
+  assert.equal(res.body.data.targetBindingAvailable, true)
+  assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'targetBinding'), false, 'sandbox route never exposes target binding')
+  assert.equal(res.body.data.evidence.fieldMapMode, 'sandbox')
+  assert.equal(res.body.data.evidence.target.fieldIdMapEmpty, false)
+  assert.ok(res.body.data.evidence.objectIdHash, 'sandbox route returns object hash evidence')
+  assert.equal(JSON.stringify(res.body.data).includes(sandboxObjectId), false, 'sandbox route response hides object id')
+  assert.equal(JSON.stringify(res.body.data).includes('sheet_stock_canonical_created'), false, 'sandbox route response hides sheet id')
+  const sandboxEnsureCall = findCalls(sandboxProvisioning.calls, 'ensureObject')[0]
+  assert.equal(sandboxEnsureCall[1].projectId, 'tenant_1:integration-core')
+  assert.equal(sandboxEnsureCall[1].baseId, 'base_stock')
+  assert.equal(sandboxEnsureCall[1].descriptor.id, sandboxObjectId)
+  assert.notEqual(sandboxEnsureCall[1].descriptor.id, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)
+  assert.deepEqual(
+    sandboxEnsureCall[1].descriptor.fields.map((field) => field.id),
+    STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id),
+    'sandbox ensure descriptor keeps the stock-prep manifest fields',
+  )
+
+  const leakySandbox = createStockPreparationTargetProvisioningApi()
+  leakySandbox.api.ensureObject = async (input) => {
+    leakySandbox.calls.push(['ensureObject', clone(input)])
+    const err = new Error(`cannot provision ${input.descriptor.id} in sheet_sandbox_private`)
+    err.status = 500
+    err.code = 'HOST_PROVISIONING_FAILED'
+    err.details = {
+      objectId: input.descriptor.id,
+      sheetId: 'sheet_sandbox_private',
+    }
+    throw err
+  }
+  const leakyMount = mountRoutes(createMockServices().services, {
+    provisioningApi: leakySandbox.api,
+    recordsApi: createTableActionRecordsApi().recordsApi,
+  })
+  res = await invoke(leakyMount.routes, 'POST', '/api/integration/stock-preparation/sandbox-target/ensure', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      baseId: 'base_stock',
+      objectId: sandboxObjectId,
+    },
+  })
+  assert.equal(res.statusCode, 503)
+  assert.equal(res.body.error.code, 'TARGET_SANDBOX_PROVISIONING_FAILED')
+  assert.equal(res.body.error.message, 'sandbox stock-preparation target provisioning failed')
+  assert.equal(res.body.error.details.reason, 'provisioning_failed')
+  assert.equal(JSON.stringify(res.body).includes(sandboxObjectId), false, 'sandbox host error response hides object id')
+  assert.equal(JSON.stringify(res.body).includes('sheet_sandbox_private'), false, 'sandbox host error response hides sheet id')
 }
 
 async function testStockPreparationOptionSyncRoute() {
@@ -4035,8 +4144,8 @@ async function testFieldOptionsSyncRoute() {
   assert.equal(res.statusCode, 422)
   assert.equal(res.body.error.code, 'OPTION_SYNC_CONFIG_INVALID')
 
-  // action bindings fail closed on the generic route (stock-prep-only concept) → 422.
-  // Even a VALID predefined actionId is rejected, not silently dropped.
+  // FOS-4b-2: action bindings are DRY-RUN-ONLY. Non-dry-run + action bindings → fail-closed (apply not
+  // enabled), no patch — even a VALID predefined actionId.
   const patchCountBeforeActionReject = findCalls(provisioning.calls, 'patchObjectFieldProperty').length
   res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
     user: ADMIN_USER,
@@ -4046,12 +4155,45 @@ async function testFieldOptionsSyncRoute() {
     },
   })
   assert.equal(res.statusCode, 422)
-  assert.equal(res.body.error.code, 'FIELD_OPTION_SYNC_ACTIONS_NOT_SUPPORTED')
+  assert.equal(res.body.error.code, 'FIELD_OPTION_SYNC_ACTIONS_DRY_RUN_ONLY')
   assert.equal(
     findCalls(provisioning.calls, 'patchObjectFieldProperty').length,
     patchCountBeforeActionReject,
-    'rejected action-binding request does not patch',
+    'non-dry-run action-binding request does not patch',
   )
+
+  // FOS-4b-2 dry-run path: dryRun + a permitted action (with-actions preset) → values-free preview, NO write.
+  const patchCountBeforeDryRun = findCalls(provisioning.calls, 'patchObjectFieldProperty').length
+  res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: {
+      presetId: 'preset.stock-preparation.with-actions.v1',
+      dryRun: true,
+      optionSets: { material_type: [{ value: 'plate', actionBindings: [{ actionId: PLM_STOCK_PREPARATION_ACTION_ID, parameterBindings: { projectNo: 'projectNo' } }] }] },
+    },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.dryRun, true)
+  assert.equal(res.body.data.written, false, 'dry-run writes nothing')
+  assert.equal(findCalls(provisioning.calls, 'patchObjectFieldProperty').length, patchCountBeforeDryRun, 'dry-run issues ZERO patch calls')
+  assert.equal(res.body.data.preview.actionBindings.length, 1, 'dry-run previews the validated action binding')
+  assert.equal(res.body.data.preview.actionBindings[0].actionId, PLM_STOCK_PREPARATION_ACTION_ID)
+  assert.equal(res.body.data.preview.actionBindings[0].requiresDryRun, true, 'gating copied from the registry')
+  assert.equal(res.body.data.preview.actionBindings[0].parameterBindingCount, 1, 'param COUNT only, not values')
+  assert.equal(JSON.stringify(res.body.data.preview).includes('projectNo'), false, 'preview is values-free (no param keys/values)')
+
+  // dryRun + an action NOT permitted by the preset (v1 permits none) → fail-closed, no write.
+  const patchCountBeforeDenied = findCalls(provisioning.calls, 'patchObjectFieldProperty').length
+  res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: {
+      presetId: STOCK_PREP_PRESET_ID,
+      dryRun: true,
+      optionSets: { material_type: [{ value: 'plate', actionBindings: [{ actionId: PLM_STOCK_PREPARATION_ACTION_ID }] }] },
+    },
+  })
+  assert.equal(res.statusCode, 422, 'dry-run with an action the preset does not permit fails closed')
+  assert.equal(findCalls(provisioning.calls, 'patchObjectFieldProperty').length, patchCountBeforeDenied, 'denied dry-run issues no patch')
 
   // nothing mapped supplied → no-fields-synced 422 (kernel error-if-none via generic factory)
   res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
@@ -4092,6 +4234,8 @@ async function testTableActionRoutes() {
     recordsApi: records.recordsApi,
     config: {
       stockPreparationTableActions: [tableActionConfig()],
+      // FOS-4b-3 P0 sandbox gate: enable sandbox apply for the test target (non-canonical).
+      stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
     },
   })
 
@@ -4169,6 +4313,25 @@ async function testTableActionRoutes() {
   assert.equal(createCall[1].sheetId, 'sheet_stock_configured', 'apply writes only the configured target sheet')
   assert.equal(JSON.stringify(res.body.data.evidence).includes('P-001'), false, 'apply evidence is values-free')
   assert.equal(JSON.stringify(res.body.data.evidence).includes('A-001'), false, 'apply evidence hides component code')
+
+  // FOS-4b-3 P0 wiring: a mount WITHOUT sandbox config/env fails apply closed BEFORE the token check.
+  const createsBefore = records.calls.filter((call) => call[0] === 'createRecord').length
+  const gated = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    config: { stockPreparationTableActions: [tableActionConfig()] }, // no stockPrepApplySandbox, no env
+  })
+  const gatedApply = await invoke(gated.routes, 'POST', '/api/integration/table-actions/:actionId/apply', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' }, confirm: { dryRunToken: 'unused-token' } },
+  })
+  assert.equal(gatedApply.statusCode, 403, 'apply fail-closed when no sandbox config/env (prod default)')
+  assert.equal(gatedApply.body.error.code, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'route wires config/env → P0 gate before the token check')
+  assert.equal(
+    records.calls.filter((call) => call[0] === 'createRecord').length,
+    createsBefore,
+    'gated apply wrote nothing (P0 gate fires before any write)',
+  )
 }
 
 async function testLargeBomBackgroundExpansionJobRoutes() {
@@ -4199,6 +4362,9 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   })
   const config = {
     stockPreparationTableActions: [tableActionConfig()],
+    // FOS-4b-3 P0 sandbox gate: enable sandbox apply for the test target so the large-BOM apply-job run
+    // passes the route gate (the gate fires first otherwise).
+    stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
   }
   let mount = mountRoutes(services, {
     recordsApi: records.recordsApi,
@@ -4446,6 +4612,26 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'apply-job run rejects browser-supplied sheet scope')
 
+  // FOS-4b-3 P0: a mount WITHOUT sandbox config/env fails the large-BOM apply run closed BEFORE any write
+  // (the gate fires before the checkpoint run, so the job is untouched and the real run below still works).
+  const writesBeforeGatedRun = records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length
+  const ungatedMount = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    storage,
+    config: { stockPreparationTableActions: [tableActionConfig()] }, // no stockPrepApplySandbox, no env
+  })
+  const gatedRun = await invoke(ungatedMount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assert.equal(gatedRun.statusCode, 403, 'large-BOM apply run fail-closed without sandbox config (the bypass is closed)')
+  assert.equal(gatedRun.body.error.code, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'large-BOM route wires config → P0 sandbox gate')
+  assert.equal(
+    records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length,
+    writesBeforeGatedRun,
+    'gated large-BOM run wrote nothing (P0 gate fires before the checkpoint write)',
+  )
+
   res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', {
     user: WRITE_USER,
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
@@ -4631,6 +4817,9 @@ async function testTableActionConflictPolicyRoutes() {
     storage,
     config: {
       stockPreparationTableActions: [tableActionConfig()],
+      // FOS-4b-3 P0 sandbox gate: enable sandbox apply for the test target so conflict-policy applies
+      // reach the token/conflict logic (the gate fires first otherwise).
+      stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
     },
   })
 

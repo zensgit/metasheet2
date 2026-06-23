@@ -34,10 +34,10 @@ The bulk-fill maps onto the resumable model exactly, so `suspended` carries the 
 
 ```
 queued
-  → running        (generate + charge + cache per provider-bound row; emit progress)
-  → suspended      (suspend_reason = manual_task: AWAITING REVIEW — the column is generated & cached)
-  → [user reviews the cached diff, confirms a subset]
-  → running        (commit the confirmed cached rows via bulk-commit, chunked)
+  → running        (generate + charge + write each provider-bound row to job-rows; emit progress)
+  → suspended      (suspend_reason = manual_task: AWAITING REVIEW — the column is generated into job-rows)
+  → [user reviews the job-rows diff, confirms a subset]
+  → running        (commit the confirmed job-rows via the per-record write discipline, chunked)
   → resolved       (per-row outcome summary)
 ```
 Branches: quota limit mid-generate → `suspended(manual_task)` + `quota_paused` (partial reviewable; ungenerated
@@ -87,9 +87,13 @@ release (charge-on-generation). The actor may still review + commit what was gen
 
 ### BJ-5 — Crash-safety: persisted partial is committable; no auto-resume in v1
 **Lock:** each row's resolution is written to **`multitable_ai_bulk_job_rows` as it is produced** (durable), so a
-crashed/restarted job loses no work — its `generated` rows stay reviewable + committable, its `pending` rows are
-visibly un-generated; the job header is marked `errored`. **Deferred:** auto-resuming *generation* after a crash
-(the workflow model supports resume, but v1 leaves the partial reviewable/committable instead).
+crashed job loses no work — its `generated` rows stay reviewable + committable, its `pending` rows are visibly
+un-generated. **Slice 1 scope:** an IN-PROCESS worker exception (after the queued→running claim) is caught by
+`runJob`, which marks the header `errored` — a committable terminal state — without clobbering the generated rows
+(real-DB golden: "BJ-5 crash → errored"). **Deferred to a B-4 follow-up:** (a) reconciling a HARD process restart —
+the in-memory queue + plan registry are gone, so `runJob` is never re-invoked and a job left `queued`/`running`
+stays active until a startup/poll sweep marks stale jobs `errored`/`rejected`; (b) auto-resuming *generation* after
+a crash (the workflow model supports resume, but v1 leaves the partial reviewable/committable instead).
 
 ### BJ-6 — Async cap (higher than the inline 200)
 **Lock:** `MULTITABLE_AI_BULK_JOB_MAX_ROWS` (default 5000, aligned to the server view-load clamp). Over it →
@@ -140,7 +144,7 @@ gate-before-cap/quota · computed-filter → 422 · cache stores the exact value
   (queued→running→suspended→running→resolved); charge-on-generation at scale + ledger delta == provider calls;
   **quota-pause → `suspended(manual_task)` + `quota_paused`, generated rows charged & committable, remainder
   `pending_not_generated` & uncharged**; cancel keeps generated charged+committable; **per-row job-rows survive a
-  simulated restart / cancel / quota-pause with `state` / `skipped` / `failure` / `current_value` intact**
+  simulated in-process crash / cancel / quota-pause with `state` / `skipped` / `failure` / `current_value` intact**
   (BJ-9 durability — the keystone); the paginated `…/rows` returns truthful per-row state ordered by `ordinal`;
   a different-scope start → `409 ACTIVE_JOB_EXISTS` (BJ-7); per-actor one-job concurrency; async cap → 400; the
   carried invariants (owner gate / stale-drop / re-gate) per commit chunk + the durable aggregate outcome.

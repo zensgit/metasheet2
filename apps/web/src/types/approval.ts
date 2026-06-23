@@ -36,6 +36,7 @@ export type FormFieldType =
   | 'multi-select'
   | 'user'
   | 'attachment'
+  | 'detail'
 
 export interface ApprovalNode {
   key: string
@@ -150,6 +151,12 @@ export interface FormField {
   options?: FormOption[]
   props?: Record<string, unknown>
   visibilityRule?: FormFieldVisibilityRule
+  // detail / sub-form (明细/子表单) — present only when type === 'detail'. `columns` is the
+  // ordered row schema of LEAF sub-fields (no nested `detail`); a `detail` value is an array
+  // of row objects keyed by sub-field id.
+  columns?: FormField[]
+  minRows?: number
+  maxRows?: number
 }
 
 export interface FormSchema {
@@ -202,6 +209,9 @@ export interface UnifiedApprovalDTO {
   publishedDefinitionId?: string | null
   requestNo?: string | null
   formSnapshot?: Record<string, unknown> | null
+  // Frozen form schema from the instance's pinned template version (detail `columns` included),
+  // so the detail view renders rows from the FROZEN schema, not the live template.
+  formSchema?: FormSchema | null
   currentNodeKey?: string | null
   /**
    * Parallel gateway (并行分支) — surfaced only when the instance is inside

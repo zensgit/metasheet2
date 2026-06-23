@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export COPYFILE_DISABLE=1
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/output/releases/multitable-onprem}"
 INSTALL_DEPS="${INSTALL_DEPS:-0}"
@@ -228,6 +230,33 @@ function prune_node_modules() {
   while IFS= read -r -d '' path; do
     rm -rf "$path"
   done < <(find "$root" -name node_modules -prune -print0)
+}
+
+function assert_no_macos_metadata_entries() {
+  local archive="$1"
+  local archive_type="$2"
+  local label="$3"
+  local matches
+  case "$archive_type" in
+    tgz)
+      matches="$(tar -tzf "$archive" | LC_ALL=C grep -E '(^|/)(\._[^/]+|__MACOSX)(/|$)' | head -20 || true)"
+      ;;
+    zip)
+      if command -v zipinfo >/dev/null 2>&1; then
+        matches="$(zipinfo -1 "$archive" | LC_ALL=C grep -E '(^|/)(\._[^/]+|__MACOSX)(/|$)' | head -20 || true)"
+      elif command -v unzip >/dev/null 2>&1; then
+        matches="$(unzip -Z -1 "$archive" | LC_ALL=C grep -E '(^|/)(\._[^/]+|__MACOSX)(/|$)' | head -20 || true)"
+      else
+        die "zipinfo or unzip is required to inspect zip package entries"
+      fi
+      ;;
+    *)
+      die "Unknown archive type for macOS metadata check: ${archive_type}"
+      ;;
+  esac
+  if [[ -n "$matches" ]]; then
+    die "${label} must not contain macOS AppleDouble/resource-fork metadata entries. First entries: ${matches//$'\n'/, }"
+  fi
 }
 
 function write_windows_entrypoints() {
@@ -594,8 +623,11 @@ Windows staging root:
 EOF
 
 run rm -f "$ARCHIVE_TGZ_TMP_PATH" "$ARCHIVE_ZIP_TMP_PATH" "$ARCHIVE_TGZ_SHA_TMP_PATH" "$ARCHIVE_ZIP_SHA_TMP_PATH" "$METADATA_JSON_TMP_PATH"
-run tar -czf "$ARCHIVE_TGZ_TMP_PATH" -C "$BUILD_ROOT" "$PACKAGE_NAME"
-run bash -lc "cd \"$BUILD_ROOT\" && zip -qr \"$ARCHIVE_ZIP_TMP_PATH\" \"$PACKAGE_NAME\""
+find "$PACKAGE_ROOT" \( -name '._*' -o -name '__MACOSX' \) -prune -exec rm -rf {} +
+run env COPYFILE_DISABLE=1 tar --no-xattrs -czf "$ARCHIVE_TGZ_TMP_PATH" -C "$BUILD_ROOT" "$PACKAGE_NAME"
+run bash -lc "cd \"$BUILD_ROOT\" && COPYFILE_DISABLE=1 zip -X -qr \"$ARCHIVE_ZIP_TMP_PATH\" \"$PACKAGE_NAME\""
+assert_no_macos_metadata_entries "$ARCHIVE_TGZ_TMP_PATH" tgz "tgz package"
+assert_no_macos_metadata_entries "$ARCHIVE_ZIP_TMP_PATH" zip "zip package"
 write_sha_file "$ARCHIVE_TGZ_TMP_PATH"
 write_sha_file "$ARCHIVE_ZIP_TMP_PATH"
 

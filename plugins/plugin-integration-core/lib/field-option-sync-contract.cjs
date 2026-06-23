@@ -205,6 +205,24 @@ const FIELD_OPTION_SYNC_PRESETS = Object.freeze([
     conflictPolicy: 'update_from_source',
     triggerMode: 'manual',
   }),
+  // FOS-4b-2 (action dry-run path): a preset that PERMITS the registered stock-prep predefined action,
+  // so the generic route's action-binding DRY-RUN path is reachable (validate + preview, NO write/execute;
+  // apply is a later gated sub-slice). Same stock-prep table; values-free.
+  Object.freeze({
+    presetId: 'preset.stock-preparation.with-actions.v1',
+    label: 'Stock-preparation option sync (with predefined actions)',
+    sourceKind: 'static-preset',
+    sourceObjectOrTable: 'operator-config',
+    targetKind: TARGET_KIND,
+    targetTable: 'plm_stock_preparation_main',
+    optionFields: Object.freeze([
+      Object.freeze({ valueField: 'material_type', targetField: 'materialType', targetFieldType: 'single_select' }),
+    ]),
+    syncMode: 'replace',
+    conflictPolicy: 'update_from_source',
+    triggerMode: 'manual',
+    permittedActionIds: Object.freeze(['plm.stock-preparation.pull-bom.v1']), // ∈ FOS-4b-1 registry
+  }),
 ])
 
 // Returns deep, validated copies of the catalog (asserts values-free first; never mutates the frozen consts).

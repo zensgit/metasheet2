@@ -273,7 +273,15 @@ const FORM_FIELD_TYPES = new Set([
   'multi-select',
   'user',
   'attachment',
+  'detail',
 ])
+
+// Leaf sub-field types allowed inside a `detail` group's columns (everything except `detail`
+// itself — one nesting level only). `attachment` is permitted at the type/contract layer;
+// the authoring UI (C-3) governs which are offered.
+const DETAIL_LEAF_FIELD_TYPES = new Set(
+  [...FORM_FIELD_TYPES].filter((type) => type !== 'detail'),
+)
 
 const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end'])
 const CONDITION_OPERATORS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'isEmpty'])
@@ -451,6 +459,9 @@ function validateApprovalAssigneeSourcesAgainstFormSchema(
   formSchema: FormSchema,
   context: ValidationContext,
 ): void {
+  // Top-level fields only — detail sub-fields are intentionally NOT resolvable here, so a
+  // form_field_user source can never point at a sub-field (a sub-field has N row-values and
+  // would be ambiguous as a single approver). See approval-detail-subform-design-lock §1.
   const fieldById = new Map(formSchema.fields.map((field) => [field.id, field]))
   approvalGraph.nodes.forEach((node) => {
     if (node.type !== 'approval') return
@@ -497,6 +508,7 @@ function normalizeFormField(
   value: unknown,
   index: number,
   context: ValidationContext,
+  nested = false,
 ): FormSchema['fields'][number] {
   if (!isRecord(value)) {
     failValidation(context, `formSchema.fields[${index}] must be an object`)
@@ -534,6 +546,7 @@ function normalizeFormField(
   }
 
   const visibilityRule = normalizeFormFieldVisibilityRule(value.visibilityRule, index, context)
+  const detail = normalizeDetailFieldParts(value, index, context, nested)
 
   return {
     id: value.id.trim(),
@@ -552,7 +565,61 @@ function normalizeFormField(
       : {}),
     ...(isRecord(value.props) ? { props: { ...value.props } } : {}),
     ...(visibilityRule ? { visibilityRule } : {}),
+    ...detail,
   } as FormSchema['fields'][number]
+}
+
+// detail / sub-form (明细/子表单) author-time validation. Returns the normalized
+// columns/minRows/maxRows for a `detail` field, or {} for a non-detail field. Rejects: a
+// nested detail (one level only), a non-detail field carrying detail-only keys, an empty or
+// non-array `columns`, a non-leaf / unknown sub-field type, duplicate sub-field ids, and
+// minRows/maxRows that are not non-negative integers with minRows <= maxRows.
+function normalizeDetailFieldParts(
+  value: Record<string, unknown>,
+  index: number,
+  context: ValidationContext,
+  nested: boolean,
+): Pick<FormSchema['fields'][number], 'columns' | 'minRows' | 'maxRows'> {
+  if (value.type !== 'detail') {
+    if (value.columns !== undefined || value.minRows !== undefined || value.maxRows !== undefined) {
+      failValidation(context, `formSchema.fields[${index}].columns/minRows/maxRows are only valid on a detail field`)
+    }
+    return {}
+  }
+  if (nested) {
+    failValidation(context, `formSchema.fields[${index}] of type detail cannot be nested inside a detail group`)
+  }
+  if (!Array.isArray(value.columns) || value.columns.length === 0) {
+    failValidation(context, `formSchema.fields[${index}].columns must be a non-empty array for a detail field`)
+  }
+  const columns = value.columns.map((column, columnIndex) => {
+    const normalized = normalizeFormField(column, columnIndex, context, true)
+    if (!DETAIL_LEAF_FIELD_TYPES.has(normalized.type)) {
+      failValidation(context, `formSchema.fields[${index}].columns[${columnIndex}].type is not a valid leaf sub-field`)
+    }
+    return normalized
+  })
+  if (new Set(columns.map((column) => column.id)).size !== columns.length) {
+    failValidation(context, `formSchema.fields[${index}].columns ids must be unique within the detail group`)
+  }
+  const minRows = normalizeOptionalRowBound(value.minRows, `formSchema.fields[${index}].minRows`, context)
+  const maxRows = normalizeOptionalRowBound(value.maxRows, `formSchema.fields[${index}].maxRows`, context)
+  if (minRows !== undefined && maxRows !== undefined && minRows > maxRows) {
+    failValidation(context, `formSchema.fields[${index}].minRows must be <= maxRows`)
+  }
+  return {
+    columns,
+    ...(minRows !== undefined ? { minRows } : {}),
+    ...(maxRows !== undefined ? { maxRows } : {}),
+  }
+}
+
+function normalizeOptionalRowBound(value: unknown, path: string, context: ValidationContext): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    failValidation(context, `${path} must be a non-negative integer`)
+  }
+  return value
 }
 
 function assertFormSchema(value: unknown, context: ValidationContext = REQUEST_VALIDATION_CONTEXT): FormSchema {
@@ -635,7 +702,8 @@ function validateFormFieldVisibilityRules(
     const rule = field.visibilityRule
     if (!rule) return
 
-    if (!fieldMap.has(rule.fieldId)) {
+    const target = fieldMap.get(rule.fieldId)
+    if (!target) {
       failValidation(
         context,
         `formSchema.fields[${index}].visibilityRule.fieldId must reference an existing field`,
@@ -643,6 +711,12 @@ function validateFormFieldVisibilityRules(
     }
     if (rule.fieldId === field.id) {
       failValidation(context, `formSchema.fields[${index}].visibilityRule cannot reference itself`)
+    }
+    if (target.type === 'detail') {
+      failValidation(
+        context,
+        `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a detail field (its value is a list)`,
+      )
     }
   })
 
@@ -664,6 +738,15 @@ function validateFormFieldVisibilityRules(
   }
 
   fields.forEach((field) => visit(field.id, []))
+
+  // Sub-field visibility rules are validated WITHIN their detail group: a sub-field rule may
+  // only reference a sibling sub-field (same row), never a top-level field — the recursive
+  // call's field map is the group's columns, so a cross-scope fieldId fails "existing field".
+  fields.forEach((field) => {
+    if (field.type === 'detail' && field.columns && field.columns.length > 0) {
+      validateFormFieldVisibilityRules(field.columns, context)
+    }
+  })
 }
 
 /**
@@ -1107,6 +1190,7 @@ function toApprovalTemplateVersionDetailDTO(bundle: TemplateBundle): ApprovalTem
 function toUnifiedApprovalDTO(
   row: ApprovalInstanceRow,
   assignments: ApprovalAssignmentDTO[],
+  frozenFormSchema?: FormSchema | null,
 ): UnifiedApprovalDTO {
   // Surface `currentNodeKeys` when the instance is inside a parallel region so
   // consumers (frontend timeline, callers checking `.length > 1`) can detect
@@ -1138,6 +1222,9 @@ function toUnifiedApprovalDTO(
     publishedDefinitionId: row.published_definition_id,
     requestNo: row.request_no,
     formSnapshot: toNullableRecord(row.form_snapshot),
+    // Frozen form schema (incl. detail `columns`) from the instance's pinned template version,
+    // so consumers render detail rows from the FROZEN schema, not the live template (Fact B).
+    ...(frozenFormSchema ? { formSchema: frozenFormSchema } : {}),
     currentNodeKey: row.current_node_key,
     ...(currentNodeKeys ? { currentNodeKeys } : {}),
     assignments,
@@ -3864,6 +3951,17 @@ export class ApprovalProductService {
       [id],
     )
 
+    // Resolve the FROZEN form schema from the instance's pinned template version so detail
+    // columns travel with the instance read (the live template may have changed since).
+    let frozenFormSchema: FormSchema | null = null
+    if (row.template_version_id) {
+      const versionResult = await pool.query<{ form_schema: Record<string, unknown> }>(
+        `SELECT form_schema FROM approval_template_versions WHERE id = $1`,
+        [row.template_version_id],
+      )
+      if (versionResult.rows[0]) frozenFormSchema = asFormSchema(versionResult.rows[0].form_schema)
+    }
+
     return toUnifiedApprovalDTO(
       row,
       assignmentsResult.rows.map((assignment) => ({
@@ -3875,6 +3973,7 @@ export class ApprovalProductService {
         isActive: assignment.is_active,
         metadata: assignment.metadata || {},
       })),
+      frozenFormSchema,
     )
   }
 

@@ -16,10 +16,23 @@ import type {
   CreateApprovalTemplateRequest,
   UpdateApprovalTemplateRequest,
 } from '../types/approval'
+import {
+  buildDetailColumns,
+  detailColumnDraftsFromField,
+  validateDetailColumnsDraft,
+  type DetailColumnDraft,
+} from './detailField'
+
+export type { DetailColumnDraft } from './detailField'
+export { createEmptyDetailColumnDraft, DETAIL_LEAF_FIELD_TYPES } from './detailField'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
 
+// Top-level authorable field types: the 8 leaf scalar types plus `detail` (repeatable
+// line-items group). `attachment` is intentionally excluded (not authorable in v1); `detail`
+// is top-level-only — its sub-fields are restricted to the leaf set (`DETAIL_LEAF_FIELD_TYPES`)
+// and may never themselves be `detail` (one nesting level).
 export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'text',
   'textarea',
@@ -29,6 +42,7 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'select',
   'multi-select',
   'user',
+  'detail',
 ]
 
 /**
@@ -51,6 +65,11 @@ export interface FieldAuthoringDraft {
   placeholder: string
   optionsText: string
   visibility: FieldVisibilityDraft
+  // detail / sub-form authoring — meaningful only when `type === 'detail'`. `columns` is the
+  // editable sub-field list; `minRowsText`/`maxRowsText` are raw text inputs ('' = unset).
+  detailColumns: DetailColumnDraft[]
+  minRowsText: string
+  maxRowsText: string
   original?: FormField
 }
 
@@ -112,6 +131,9 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     placeholder: '',
     optionsText: '',
     visibility: emptyVisibilityDraft(),
+    detailColumns: [],
+    minRowsText: '',
+    maxRowsText: '',
   }
 }
 
@@ -229,6 +251,9 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
     placeholder: field.placeholder ?? '',
     optionsText: formatOptionsText(field.options),
     visibility: visibilityDraftFromRule(field.visibilityRule),
+    detailColumns: field.type === 'detail' ? detailColumnDraftsFromField(field) : [],
+    minRowsText: field.type === 'detail' && field.minRows != null ? String(field.minRows) : '',
+    maxRowsText: field.type === 'detail' && field.maxRows != null ? String(field.maxRows) : '',
     original: field,
   }
 }
@@ -444,6 +469,23 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
       } else {
         delete next.options
       }
+      // detail / sub-form: emit `columns` + optional `minRows`/`maxRows` from the sub-field
+      // editor, or delete all three so a field changed away from `detail` does not carry stale
+      // detail keys resurrected from the `original` spread (mirrors the options omit discipline;
+      // the backend rejects detail-only keys on a non-detail field).
+      if (field.type === 'detail') {
+        next.columns = buildDetailColumns(field.detailColumns)
+        const minRows = field.minRowsText.trim()
+        const maxRows = field.maxRowsText.trim()
+        if (minRows) next.minRows = Number(minRows)
+        else delete next.minRows
+        if (maxRows) next.maxRows = Number(maxRows)
+        else delete next.maxRows
+      } else {
+        delete next.columns
+        delete next.minRows
+        delete next.maxRows
+      }
       // Editor is authoritative for visibilityRule: emit the built rule, or
       // delete it so a cleared rule is not resurrected from the `original` spread.
       const visibilityRule = buildVisibilityRule(field.visibility)
@@ -568,6 +610,18 @@ export function validateTemplateDraft(
       if (options.some((option) => !option.label.trim() || !option.value.trim())) {
         errors.push(`字段 ${field.label || field.id} 的选项 label/value 不能为空`)
       }
+    }
+    // detail / sub-form: mirror the backend `normalizeDetailFieldParts` reject-set client-side
+    // (non-empty leaf-only unique-id columns, no nesting, minRows <= maxRows non-negative ints).
+    if (field.type === 'detail') {
+      errors.push(
+        ...validateDetailColumnsDraft(
+          field.label.trim() || field.id.trim(),
+          field.detailColumns,
+          field.minRowsText,
+          field.maxRowsText,
+        ),
+      )
     }
   })
   // Mirror the server visibility-rule reject-set (normalizeFormFieldVisibilityRule +
