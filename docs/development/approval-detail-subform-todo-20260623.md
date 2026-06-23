@@ -24,22 +24,27 @@
 - ➡️ Frozen-columns READ shape (§5) folded into **C-2** (the instance read-DTO change *is* the
   runtime read path; the type-level contract — `columns` on the frozen formSchema — ships here).
 
-## Phase C-2 — runtime (🔒 until C-1 merged)
-- 🔒 Submit-time row validation: extend `validateApprovalFormData`/`validateFieldType`/
-  `validateFieldConstraints` to recurse into rows (array → row count → required cells → per-cell
-  leaf validation; unknown sub-keys fail-closed; row-addressed error messages).
-- 🔒 Freeze the row array into `form_snapshot` (no new column).
-- 🔒 Per-row `visibilityRule`: extend `pruneHiddenFormData` to drop hidden cells per row
-  **on write** (never frozen). No read-time masking.
-- 🔒 Read path surfaces the **frozen** detail columns from the template version (close Fact B).
-- 🔒 Real-DB tests: submit→freeze→read round-trip; required-row reject (400);
-  hidden-cell pruned-not-frozen; frozen-columns-survive-template-change.
+## Phase C-2 — runtime ✅ (shipped; submit-time validation + per-row prune + freeze; not the read/UI)
+- ✅ Submit-time row validation: `validateApprovalFormData` gains a `detail` branch →
+  `validateDetailFieldValue` (array → minRows/maxRows → per-row required + leaf
+  `validateFieldType`/`validateFieldConstraints`; row-addressed `items[i].cell` messages).
+- ✅ Freeze: the row array rides `form_snapshot` (no new column) via the existing createApproval path.
+- ✅ Per-row `visibilityRule`: `pruneHiddenFormData` drops hidden + unknown cells per row on
+  write (recurses the same prune over each row). No read-time masking.
+- ✅ Real-DB round-trip (`approval-detail-subform.db.test.ts`, wired into the approval PG lane +
+  vitest no-DB exclude): columns JSONB round-trip on the version; submit→validate→prune→freeze
+  into form_snapshot; invalid-row 400. + 8 unit tests. Whole approval lane green (10 files / 49).
+- ➡️ Read path surfaces the **frozen** detail columns — folded into **C-3** (the renderer consumes
+  them; exposing columns without a renderer is untestable/unused).
 
 ## Phase C-3 — UI (🔒 until C-2 merged; the form-schema stability point for complex-graph node UI)
 - 🔒 Template author: configure detail `columns` (reuse leaf-field authoring +
   `AUTHORABLE_FIELD_TYPES`) in `TemplateAuthoringView.vue`.
 - 🔒 Fill view: `detail → DetailTable` editable branch in `ApprovalNewView.vue` (add/remove
   row; per-cell leaf editor; inline validation; per-row visibility).
+- 🔒 Read path (moved from C-2): expose the **frozen** detail `columns` on the instance read
+  (the version's `form_schema` or a projected `detailColumns` on the read DTO) so the detail
+  view renders from the frozen schema, not the live template (closes design-lock Fact B).
 - 🔒 Detail view: read-only `DetailTable` in `ApprovalDetailView.vue` driven by frozen columns
   (replaces the `formatFieldValue` JSON-stringify fallback for `detail`).
 - 🔒 FE tests: author round-trip, fill validation, render-from-frozen-snapshot.
