@@ -657,7 +657,9 @@ async function dryRunStockPreparationAction(input = {}) {
 // FIRST thing apply does (before token consume / dry-run / write). Production apply = separate FOS-4b-3-prod
 // owner gate. Error is values-free (only a coarse reason).
 function assertStockPrepApplySandboxAllowed(target, sandboxPolicy) {
-  const objectId = (target && (optionalString(target.objectId) || optionalString(target.sheetId))) || null
+  // Mirror the writer's target identity: objectId defaults to the prod canonical when unset, so a target
+  // missing objectId is treated as canonical (and rejected) rather than slipping through on sheetId.
+  const objectId = (target && optionalString(target.objectId)) || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
   // Defense-in-depth: the prod canonical target is never appliable on the sandbox path, regardless of policy.
   if (objectId === STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId) {
     throw new StockPreparationTableActionError(403, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'apply is sandbox-only; the production canonical stock-prep target is not appliable (production apply is a separate owner gate)', { reason: 'prod_canonical' })
@@ -667,7 +669,7 @@ function assertStockPrepApplySandboxAllowed(target, sandboxPolicy) {
     throw new StockPreparationTableActionError(403, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'apply is sandbox-only; sandbox mode is not enabled', { reason: 'sandbox_disabled' })
   }
   const allowed = Array.isArray(policy.allowedTargetObjectIds) ? policy.allowedTargetObjectIds : []
-  if (!objectId || !allowed.includes(objectId)) {
+  if (!allowed.includes(objectId)) {
     throw new StockPreparationTableActionError(403, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'apply target is not in the sandbox allowlist', { reason: 'target_not_allowlisted' })
   }
 }

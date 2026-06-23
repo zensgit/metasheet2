@@ -4253,6 +4253,9 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   })
   const config = {
     stockPreparationTableActions: [tableActionConfig()],
+    // FOS-4b-3 P0 sandbox gate: enable sandbox apply for the test target so the large-BOM apply-job run
+    // passes the route gate (the gate fires first otherwise).
+    stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
   }
   let mount = mountRoutes(services, {
     recordsApi: records.recordsApi,
@@ -4499,6 +4502,26 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   })
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'apply-job run rejects browser-supplied sheet scope')
+
+  // FOS-4b-3 P0: a mount WITHOUT sandbox config/env fails the large-BOM apply run closed BEFORE any write
+  // (the gate fires before the checkpoint run, so the job is untouched and the real run below still works).
+  const writesBeforeGatedRun = records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length
+  const ungatedMount = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    storage,
+    config: { stockPreparationTableActions: [tableActionConfig()] }, // no stockPrepApplySandbox, no env
+  })
+  const gatedRun = await invoke(ungatedMount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assert.equal(gatedRun.statusCode, 403, 'large-BOM apply run fail-closed without sandbox config (the bypass is closed)')
+  assert.equal(gatedRun.body.error.code, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'large-BOM route wires config → P0 sandbox gate')
+  assert.equal(
+    records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length,
+    writesBeforeGatedRun,
+    'gated large-BOM run wrote nothing (P0 gate fires before the checkpoint write)',
+  )
 
   res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', {
     user: WRITE_USER,
