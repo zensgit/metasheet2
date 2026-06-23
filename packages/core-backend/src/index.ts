@@ -32,6 +32,8 @@ import type {
 } from './types/plugin'
 import type { User } from './auth/AuthService'
 import { poolManager } from './integration/db/connection-pool'
+import { reconcileOrphanedBulkJobs } from './services/ai-bulk-job-service'
+import type { AiUsageQueryFn } from './services/ai-usage-ledger'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
@@ -2169,6 +2171,20 @@ export class MetaSheetServer {
       )
     } catch (e) {
       this.logger.error('AI usage ledger retention scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // B-4 BJ-5 follow-up: reconcile ORPHANED AI bulk-fill jobs at boot. A hard
+    // restart drops the in-process worker + plan registry, so a job left
+    // `queued`/`running` can never progress yet keeps blocking a fresh start for
+    // its (actor, sheet, field) scope (the BJ-7 active-job index) until expires_at
+    // GC. Flip the stale ones to `errored`. The UPDATE is idempotent and
+    // age-guarded, so it is safe to run on every instance (no leader election).
+    try {
+      const bulkPool = poolManager.get()
+      const reconciled = await reconcileOrphanedBulkJobs(bulkPool.query.bind(bulkPool) as AiUsageQueryFn)
+      this.logger.info(`AI bulk-fill orphaned-job reconcile: ${reconciled} job(s) marked errored`)
+    } catch (e) {
+      this.logger.error('AI bulk-fill orphaned-job reconcile failed; continuing in degraded mode', e as Error)
     }
 
     // 加载插件并启动 HTTP 服务
