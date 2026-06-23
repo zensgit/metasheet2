@@ -43,6 +43,40 @@ test('Windows apply helper retries post-PM2 healthcheck during warmup and remain
   assert.doesNotMatch(script, oldSingleProbe)
 })
 
+test('Windows apply helper resolves extracted package root by package markers, not first child directory', () => {
+  const script = readScript('scripts/ops/multitable-onprem-apply-package.ps1')
+
+  assert.match(script, /function Test-OnPremPackageRoot/)
+  assert.match(script, /function Resolve-ExtractedPackageRoot/)
+  assert.match(script, /pnpm-lock\.yaml/)
+  assert.match(script, /PACKAGE-METADATA\.json/)
+  assert.match(script, /scripts\\ops\\multitable-onprem-apply-package\.ps1/)
+  assert.match(script, /Failed to locate extracted package root/)
+  assert.match(script, /Ambiguous extracted package roots/)
+  assert.match(script, /Extracted package root: \$packageRoot/)
+  assert.doesNotMatch(
+    script,
+    /Get-ChildItem -LiteralPath \$extractRoot -Directory\s*\|\s*Select-Object -First 1/,
+    'the extracted root must not be chosen by first child directory',
+  )
+})
+
+test('Windows deploy launcher resolves staged package root by package markers, not first child directory', () => {
+  const script = readScript('scripts/ops/multitable-onprem-deploy-launcher.ps1')
+
+  assert.match(script, /function Resolve-StagedPackageRoot/)
+  assert.match(script, /pnpm-lock\.yaml/)
+  assert.match(script, /PACKAGE-METADATA\.json/)
+  assert.match(script, /scripts\\ops\\multitable-onprem-apply-package\.ps1/)
+  assert.match(script, /No package root with pnpm-lock\.yaml \/ PACKAGE-METADATA\.json \/ apply helper markers/)
+  assert.match(script, /Ambiguous package roots inside staging extraction/)
+  assert.doesNotMatch(
+    script,
+    /Get-ChildItem -LiteralPath \$Stage -Directory[^\n]*\n[^\n]*Select-Object -First 1/,
+    'the staged root must not be chosen by first child directory',
+  )
+})
+
 test('PM2 startup helper initializes SYSTEM profile env before invoking PM2', () => {
   const script = readScript('scripts/ops/attendance-onprem-start-pm2.ps1')
 
