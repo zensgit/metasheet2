@@ -235,7 +235,7 @@ if [[ "${CONFIRM_DELETE}" != "true" ]]; then
   die "Refusing to delete without CONFIRM_DELETE=true"
 fi
 
-size_kb_cmd="find \"${target_path}\" -type f -mtime +${mtime_threshold} -exec du -k {} + 2>/dev/null | awk '{s+=$1} END {print s+0}'"
+size_kb_cmd="find \"${target_path}\" -type f -mtime +${mtime_threshold} -exec du -k {} + 2>/dev/null | awk '{s+=\$1} END {print s+0}'"
 stale_kb_total="$(run_cmd "$size_kb_cmd" | tail -n 1 | tr -d '[:space:]' || true)"
 if ! is_integer "$stale_kb_total"; then
   die "Failed to compute stale_kb_total"

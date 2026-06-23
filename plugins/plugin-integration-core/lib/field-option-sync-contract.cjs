@@ -15,6 +15,10 @@
 // conflictPolicy = update_from_source; triggerMode = manual). Owner may redirect before FOS-2.
 
 const { scrubSecretStringValue } = require('./payload-redaction.cjs')
+// FOS-4b-1: a preset may declare a permitted SUBSET of registered predefined actions. Importing the
+// registry here is contract-validation only (enum-strict ∈ registry) — it does NOT wire action execution
+// into any route (the generic route still fail-closes on actions; execution = FOS-4b-2, held).
+const { isRegisteredActionId } = require('./field-option-action-registry.cjs')
 
 class FieldOptionSyncContractError extends Error {
   constructor(message, details = {}) {
@@ -139,7 +143,26 @@ function normalizeFieldOptionSyncPreset(input) {
     syncMode: enumValue(input.syncMode, SYNC_MODES, 'syncMode', DEFAULT_SYNC_MODE),
     conflictPolicy: enumValue(input.conflictPolicy, CONFLICT_POLICIES, 'conflictPolicy', DEFAULT_CONFLICT_POLICY),
     triggerMode: enumValue(input.triggerMode, TRIGGER_MODES, 'triggerMode', DEFAULT_TRIGGER_MODE),
+    // FOS-4b-1: permitted SUBSET of registered predefined actions (default []). Enum-strict ∈ registry;
+    // a preset cannot list an unregistered action. Contract only — execution is FOS-4b-2 (held).
+    permittedActionIds: normalizePermittedActionIds(input.permittedActionIds),
   }
+}
+
+// FOS-4b-1: validate a preset's permittedActionIds — each MUST be a registered predefined action.
+function normalizePermittedActionIds(input) {
+  if (input === undefined || input === null) return []
+  if (!Array.isArray(input)) {
+    throw new FieldOptionSyncContractError('permittedActionIds must be an array', { field: 'permittedActionIds' })
+  }
+  return input.map((actionId, index) => {
+    if (!isRegisteredActionId(actionId)) {
+      throw new FieldOptionSyncContractError(`permittedActionIds[${index}] is not a registered predefined action`, {
+        field: 'permittedActionIds', actionId,
+      })
+    }
+    return actionId
+  })
 }
 
 // ---- Preset catalog: values-free constants. Stock-preparation = first preset / compatibility anchor. ----
@@ -161,6 +184,44 @@ const FIELD_OPTION_SYNC_PRESETS = Object.freeze([
     syncMode: 'replace', // §7 + zero-drift with current stock-prep behavior
     conflictPolicy: 'update_from_source', // §7
     triggerMode: 'manual', // §7
+  }),
+  // FOS-4 (prove-the-path): a 2nd reference preset on the SAME stock-prep canonical table, differing
+  // ONLY by a non-default syncMode (disable_missing). Purpose is not product-surface expansion — it
+  // proves: the catalog carries a 2nd preset, the per-preset readiness binding works, the generic
+  // route truly reaches getObjectField, and disable_missing only DISABLES (never deletes) in the real
+  // route (HTTP wire-test, closing the P2 caveat). Real domain presets / authoring remain FOS-4+.
+  Object.freeze({
+    presetId: 'preset.stock-preparation.disable-missing.v1',
+    label: 'Stock-preparation option sync (disable-missing)',
+    sourceKind: 'static-preset',
+    sourceObjectOrTable: 'operator-config',
+    targetKind: TARGET_KIND,
+    targetTable: 'plm_stock_preparation_main', // same canonical own-sheet target as the v1 preset
+    optionFields: Object.freeze([
+      Object.freeze({ valueField: 'material_type', targetField: 'materialType', targetFieldType: 'single_select' }),
+      Object.freeze({ valueField: 'blank_type', targetField: 'blankType', targetFieldType: 'single_select' }),
+    ]),
+    syncMode: 'disable_missing', // the non-default mode being proven end-to-end
+    conflictPolicy: 'update_from_source',
+    triggerMode: 'manual',
+  }),
+  // FOS-4b-2 (action dry-run path): a preset that PERMITS the registered stock-prep predefined action,
+  // so the generic route's action-binding DRY-RUN path is reachable (validate + preview, NO write/execute;
+  // apply is a later gated sub-slice). Same stock-prep table; values-free.
+  Object.freeze({
+    presetId: 'preset.stock-preparation.with-actions.v1',
+    label: 'Stock-preparation option sync (with predefined actions)',
+    sourceKind: 'static-preset',
+    sourceObjectOrTable: 'operator-config',
+    targetKind: TARGET_KIND,
+    targetTable: 'plm_stock_preparation_main',
+    optionFields: Object.freeze([
+      Object.freeze({ valueField: 'material_type', targetField: 'materialType', targetFieldType: 'single_select' }),
+    ]),
+    syncMode: 'replace',
+    conflictPolicy: 'update_from_source',
+    triggerMode: 'manual',
+    permittedActionIds: Object.freeze(['plm.stock-preparation.pull-bom.v1']), // ∈ FOS-4b-1 registry
   }),
 ])
 

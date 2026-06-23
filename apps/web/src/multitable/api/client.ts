@@ -1016,6 +1016,94 @@ export interface AiSuggestFormulaData {
   model: string | null
 }
 
+// AI BULK fill — review-before-write (B-1/B-2 backend, B-3 frontend). These
+// mirror the EXACT bulk-preview / bulk-commit wire 1:1
+// (packages/core-backend/src/routes/multitable-ai.ts bulk-preview return ~1084
+// + bulk-commit return ~1307). Do NOT reshape: the truthful-status UI depends
+// on every distinct state surviving the wire (fixture-drift rule).
+export interface AiBulkPreviewInput {
+  fieldId: string
+  scope: 'view' | 'sheet'
+  viewId?: string
+  recordIds?: string[]
+}
+
+/**
+ * A CONFIRMABLE preview row (it has a real cached `proposed` value to write).
+ * `masked: true` flags that the proposal was generated from a REDUCED context
+ * (a source field the viewer cannot read was dropped) — still confirmable, just
+ * "may be incomplete". `version` rides into commit as the anti-TOCTOU expected
+ * version. `writable` is always true for a row that reaches `rows[]`.
+ */
+export interface AiBulkPreviewRow {
+  recordId: string
+  version: number
+  /** The target field's CURRENT value (server-read from the record, never grid-page
+   *  dependent) — the value this preview would overwrite. `null` = genuinely empty.
+   *  Render `null`/'' distinctly; it is the truthful left side of the review diff. */
+  currentValue: string | null
+  proposed: string
+  masked: boolean
+  writable: boolean
+}
+
+/**
+ * A row the provider was NEVER called for → UNCHARGED, NOT confirmable. `reason`
+ * is heterogeneous: `skipped_no_perm` (not writable — needs a perm change),
+ * `rate_limited_before_call` / `blocked_before_call` (transient — a re-run may
+ * reach it), `generation_failed_before_usage` (provider failed, no usage),
+ * `unsafe_input` (secret-shaped content, not sent).
+ */
+export interface AiBulkPreviewSkipped {
+  recordId: string
+  reason: string
+}
+
+/**
+ * A row the provider WAS called for but which produced no committable output →
+ * CHARGED (consumed quota) yet NOT confirmable. `reason`: `provider_error_charged`
+ * (billed but errored) / `cache_failed_after_generation` (output lost before
+ * cache). Must NEVER be selectable for commit (no value to write).
+ */
+export interface AiBulkPreviewFailure {
+  recordId: string
+  reason: string
+}
+
+export interface AiBulkPreviewData {
+  runId: string
+  rows: AiBulkPreviewRow[]
+  skipped: AiBulkPreviewSkipped[]
+  failures: AiBulkPreviewFailure[]
+  /** Total settled provider cost (USD) for THIS preview — already charged; shown for cost honesty. */
+  settledCost: number
+  /**
+   * true → the batch BROKE EARLY (provider/cache error or quota/blocked/
+   * rate-limit hit mid-loop): the preview is PARTIAL, remaining in-scope rows
+   * were not reached. NOT the over-cap path (that is a 400 BULK_SCOPE_TOO_LARGE
+   * which never returns rows). The backend deliberately returns NO total, so the
+   * UI signals incompleteness without a count (hidden-row oracle guard).
+   */
+  capped: boolean
+}
+
+export type AiBulkCommitOutcome =
+  | 'written'
+  | 'stale_reprev'
+  | 'write_conflict'
+  | 'not_in_cache'
+  | 'skipped_no_perm'
+
+export interface AiBulkCommitRowOutcome {
+  recordId: string
+  outcome: AiBulkCommitOutcome
+}
+
+export interface AiBulkCommitData {
+  outcomes: AiBulkCommitRowOutcome[]
+  counts: Record<AiBulkCommitOutcome, number>
+}
+
 export interface AiUsageSummary {
   callerDayTokens: number
   callerWeekTokens: number
@@ -1504,6 +1592,42 @@ export class MultitableApiClient {
     return this.parseJson(res)
   }
 
+  // AI BULK preview (B-1) — generate + CHARGE + cache the proposed values for
+  // the in-scope readable+writable rows, behind a review-before-write step.
+  // Executes ONLY the persisted field.property.aiShortcut config (backend 400s
+  // any inline config). scope:'view' resolves the FULL server-side filtered set
+  // (NOT the loaded page); viewId is required for scope:'view'. The response
+  // separates confirmable rows / uncharged skipped / CHARGED non-confirmable
+  // failures / settled cost / a partial (capped) flag — preserved verbatim.
+  async aiBulkPreview(sheetId: string, input: AiBulkPreviewInput): Promise<AiBulkPreviewData> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/ai/shortcut/bulk-preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fieldId: input.fieldId,
+        scope: input.scope,
+        ...(input.viewId ? { viewId: input.viewId } : {}),
+        ...(input.recordIds && input.recordIds.length > 0 ? { recordIds: input.recordIds } : {}),
+      }),
+    })
+    return this.parseJson(res)
+  }
+
+  // AI BULK commit (B-2) — WRITE the CACHED outputs (already generated + charged
+  // at preview) for the confirmed rows. NO provider call, NO new charge: a
+  // cached row not in `recordIds` is simply not written (stays charged — never
+  // released). Returns the per-row outcome list + counts; a row may come back
+  // stale_reprev / write_conflict / skipped_no_perm / not_in_cache even though
+  // it was confirmable at preview (commit re-gates against the live record).
+  async aiBulkCommit(sheetId: string, input: { runId: string; recordIds: string[] }): Promise<AiBulkCommitData> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/ai/shortcut/bulk-commit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ runId: input.runId, recordIds: input.recordIds }),
+    })
+    return this.parseJson(res)
+  }
+
   // Admin usage summary (flat single-object response, readiness-route
   // precedent). 403 for non-admins — callers cache the probe per session.
   async aiUsageSummary(): Promise<AiUsageSummary> {
@@ -1697,10 +1821,14 @@ export class MultitableApiClient {
 
   // T6-2 chain: preview what a record-version restore WOULD change (read-only, masked), returning the identity
   // the execute consumes. Pair with restoreExecuteRecord — never restore from the FE without showing the preview.
-  async restorePreviewRecord(sheetId: string, recordId: string, targetVersion: number): Promise<RestorePreviewResult> {
+  async restorePreviewRecord(sheetId: string, recordId: string, targetVersion: number, fieldIds?: string[]): Promise<RestorePreviewResult> {
+    // fieldIds (optional) = a per-field (column-subset) preview; omitted = full-record. The server filters the
+    // masked diff to the selection before hashing, so the identity binds exactly this subset.
+    const body: { targetVersion: number; fieldIds?: string[] } = { targetVersion }
+    if (fieldIds && fieldIds.length > 0) body.fieldIds = fieldIds
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/restore-preview`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetVersion }) },
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
     )
     return this.parseJson<RestorePreviewResult>(res)
   }
@@ -1708,10 +1836,13 @@ export class MultitableApiClient {
   // Execute a previewed restore, carrying the previewIdentity from restorePreviewRecord (SR-3: the server
   // confirms execution matches the preview). Writes a forward revision; row-deny / field-gate / version are
   // re-checked server-side.
-  async restoreExecuteRecord(sheetId: string, recordId: string, targetVersion: number, expectedVersion: number, previewIdentity: string): Promise<RestoreRecordResult> {
+  async restoreExecuteRecord(sheetId: string, recordId: string, targetVersion: number, expectedVersion: number, previewIdentity: string, fieldIds?: string[]): Promise<RestoreRecordResult> {
+    // fieldIds must match the selection the identity was minted for (the server re-filters + re-hashes).
+    const body: { targetVersion: number; expectedVersion: number; previewIdentity: string; fieldIds?: string[] } = { targetVersion, expectedVersion, previewIdentity }
+    if (fieldIds && fieldIds.length > 0) body.fieldIds = fieldIds
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/records/${encodeURIComponent(recordId)}/restore-execute`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetVersion, expectedVersion, previewIdentity }) },
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
     )
     return this.parseJson<RestoreRecordResult>(res)
   }

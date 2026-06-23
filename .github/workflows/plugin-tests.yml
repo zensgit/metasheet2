@@ -212,6 +212,8 @@ jobs:
             tests/integration/multitable-pit-view-realdb.test.ts \
             tests/integration/multitable-restore-preview-realdb.test.ts \
             tests/integration/multitable-restore-execute-realdb.test.ts \
+            tests/integration/multitable-restore-per-field-realdb.test.ts \
+            tests/integration/multitable-restore-batch-preview-realdb.test.ts \
             tests/integration/yjs-scalar-seed-realdb.test.ts \
             tests/integration/yjs-scalar-flush-realdb.test.ts \
             tests/integration/yjs-scalar-strdate-migration-realdb.test.ts \
@@ -272,6 +274,7 @@ jobs:
             tests/integration/multitable-webhook-retry-tick.test.ts \
             tests/integration/multitable-ai-shortcut-run.test.ts \
             tests/integration/multitable-ai-bulk-preview.test.ts \
+            tests/integration/multitable-ai-bulk-commit.test.ts \
             tests/integration/multitable-ai-ledger-retention.test.ts \
             tests/integration/multitable-ai-suggest-formula.test.ts \
             tests/integration/data-source-c3-keyset-realdb.test.ts \
@@ -296,6 +299,8 @@ jobs:
             tests/integration/approval-postgate-acceptance.api.test.ts \
             tests/integration/dept-head-sync-plumbing.test.ts \
             tests/integration/approval-manager-chain.db.test.ts \
+            tests/integration/approval-delegation-seam.db.test.ts \
+            tests/integration/approval-delegation-api.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)

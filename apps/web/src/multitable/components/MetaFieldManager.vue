@@ -704,6 +704,20 @@
                 <div v-if="aiPreviewTokensText" class="meta-field-mgr__hint">{{ aiPreviewTokensText }}</div>
               </div>
             </div>
+            <!-- B-3: AI bulk-fill (whole-column) trigger — runs the PERSISTED config across the view. -->
+            <div v-if="aiBulkFillVisible" class="meta-field-mgr__ai-bulk" data-test="ai-bulk-fill-trigger-row">
+              <button
+                type="button"
+                class="meta-field-mgr__dryrun-btn"
+                :disabled="!aiBulkFillEnabled"
+                :title="aiBulkFillDisabledHint || aiBulkFillTriggerTitle"
+                data-test="ai-bulk-fill-trigger"
+                @click="onBulkFill"
+              >
+                {{ aiBulkFillTriggerLabel }}
+              </button>
+              <div v-if="aiBulkFillDisabledHint" class="meta-field-mgr__hint" data-test="ai-bulk-fill-disabled-hint">{{ aiBulkFillDisabledHint }}</div>
+            </div>
           </template>
           <!-- §2.4 admin usage card (automation stats-card styling family; hidden after a cached 403 probe) -->
           <div v-if="aiUsageSummary" class="meta-field-mgr__ai-usage" data-test="ai-usage-card">
@@ -829,6 +843,7 @@ import {
 } from '../utils/meta-manager-labels'
 import { aiTokensConsumed, fieldTypeLabel } from '../utils/meta-core-labels'
 import { aiShortcutErrorMessage } from '../utils/meta-api-error-labels'
+import { aiBulkLabel } from '../utils/meta-ai-bulk-labels'
 import {
   AI_SHORTCUT_COMPUTED_SOURCE_TYPES,
   AI_SHORTCUT_KINDS,
@@ -1000,6 +1015,10 @@ const emit = defineEmits<{
   (e: 'update-field', fieldId: string, input: { name?: string; order?: number; type?: string; property?: Record<string, unknown> }): void
   (e: 'delete-field', fieldId: string): void
   (e: 'update:dirty', dirty: boolean): void
+  // B-3: open the AI bulk-fill (whole-column) review-before-write dialog for a
+  // field that has a PERSISTED aiShortcut. The Workbench owns the dialog +
+  // scope (it knows the active view + grid selection).
+  (e: 'bulk-fill', payload: { fieldId: string }): void
 }>()
 
 const { isZh } = useLocale()
@@ -2163,6 +2182,33 @@ function safeParseBaseline(raw: string): { aiShortcut?: unknown } | null {
   } catch {
     return null
   }
+}
+
+// --- B-3: AI bulk-fill (whole-column) trigger gating ---
+// The bulk run executes ONLY the PERSISTED aiShortcut (the backend 400s inline
+// config), so the trigger reflects what is SAVED, not the draft:
+//  - a persisted aiShortcut must exist on the field being edited, AND
+//  - there must be no unsaved aiShortcut edits (otherwise the user would
+//    preview a different config than what runs).
+const aiBulkPersistedConfig = computed(() => {
+  const baseline = safeParseBaseline(fieldConfigBaseline.value)
+  const cfg = baseline?.aiShortcut
+  return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : null
+})
+const aiBulkFillVisible = computed(
+  () => Boolean(configTarget.value) && aiShortcutSectionVisible.value && aiBulkPersistedConfig.value !== null,
+)
+const aiBulkFillEnabled = computed(() => aiBulkFillVisible.value && !aiShortcutDirty.value)
+const aiBulkFillTriggerLabel = computed(() => aiBulkLabel('aibulk.trigger', isZh.value))
+const aiBulkFillTriggerTitle = computed(() => aiBulkLabel('aibulk.triggerAria', isZh.value))
+const aiBulkFillDisabledHint = computed(() => {
+  if (!aiBulkFillVisible.value) return aiBulkLabel('aibulk.triggerNeedsConfig', isZh.value)
+  if (aiShortcutDirty.value) return aiBulkLabel('aibulk.triggerDirtyConfig', isZh.value)
+  return ''
+})
+function onBulkFill(): void {
+  if (!aiBulkFillEnabled.value || !configTarget.value) return
+  emit('bulk-fill', { fieldId: configTarget.value.id })
 }
 
 // --- A3 §2.1: config-time preview ("用当前记录预览", inline DRAFT config) ---

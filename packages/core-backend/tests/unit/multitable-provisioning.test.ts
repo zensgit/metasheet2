@@ -8,6 +8,7 @@ import {
   ensureView,
   findObjectSheet,
   patchObjectFieldProperty,
+  getObjectField,
   resolveObjectFieldIds,
   type MultitableProvisioningQueryFn,
 } from '../../src/multitable/provisioning'
@@ -387,6 +388,55 @@ describe('multitable provisioning helper', () => {
       }),
     ).rejects.toThrow('Unsafe field property patch key')
     expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+  })
+
+  it('FOS-2b-pre: getObjectField reads current field property (incl. options) read-only; null when absent', async () => {
+    const { query, fields } = createQuery()
+
+    await ensureObject({
+      query,
+      projectId: 'tenant_7:fos',
+      descriptor: {
+        id: 'catalog',
+        name: 'Catalog',
+        fields: [
+          {
+            id: 'kind',
+            name: 'Kind',
+            type: 'select',
+            options: ['a', 'b'],
+            property: { stockPreparation: { ownership: 'human_preserved' } },
+          },
+        ],
+      },
+    })
+
+    const stored = fields.find((field) => field.name === 'Kind')
+    expect(stored).toBeTruthy()
+    const before = JSON.parse(JSON.stringify(fields))
+
+    const got = await getObjectField({
+      query,
+      projectId: 'tenant_7:fos',
+      objectId: 'catalog',
+      fieldId: 'kind',
+    })
+    // reads the CURRENT stored property, including the select options
+    expect(got).not.toBeNull()
+    expect(got?.property).toEqual(stored?.property)
+    expect((got?.property as { options?: unknown[] }).options?.length).toBe(2)
+
+    // read-only: the stored fields are byte-identical after the read (no UPDATE)
+    expect(fields).toEqual(before)
+
+    // missing field → null (read-only: caller decides; does NOT throw, unlike patch)
+    const missing = await getObjectField({
+      query,
+      projectId: 'tenant_7:fos',
+      objectId: 'catalog',
+      fieldId: 'doesNotExist',
+    })
+    expect(missing).toBeNull()
   })
 
   it('ensures one view with deterministic id and normalized config', async () => {

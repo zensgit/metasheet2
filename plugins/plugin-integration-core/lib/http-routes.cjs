@@ -135,6 +135,9 @@ const {
   syncStockPreparationOptions,
   optionSetsFromInput,
 } = require('./stock-preparation-option-sync.cjs')
+// FOS-4: canonical stock-prep objectId — readiness is bound per TARGET, so any preset targeting this
+// table (v1 replace + the disable-missing prove-the-path preset) reuses the canonical readiness check.
+const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
 // FOS-2: generic field-option-sync route — resolve a FOS preset (FOS-1 catalog), validate operator
 // option sets against the preset's source keys, and patch each mapped field's options + generic
 // `fieldOptionSync` metadata through the SAME kernel stock-prep uses (no parallel write path).
@@ -143,6 +146,9 @@ const {
   FieldOptionSyncContractError,
   listFieldOptionSyncPresets,
 } = require('./field-option-sync-contract.cjs')
+// FOS-4b-2: validate action-binding REFERENCES (registry ∩ preset.permittedActionIds) for the dry-run path.
+// Used ONLY in dryRun mode — no apply/write/execution (that's a later, separately-gated sub-slice).
+const { normalizeFieldOptionActionBinding } = require('./field-option-action-registry.cjs')
 
 class HttpRouteError extends Error {
   constructor(status, code, message, details = {}) {
@@ -426,6 +432,7 @@ const VALID_FIELD_OPTION_SYNC_REQUEST_KEYS = new Set([
   'projectId',
   'presetId',
   'optionSets',
+  'dryRun', // FOS-4b-2: dry-run-only mode (validate + preview, NO write). Required to carry action bindings.
 ])
 
 function normalizeTableActionBody(body = {}, allowedKeys = VALID_TABLE_ACTION_DRY_RUN_BODY_KEYS) {
@@ -609,6 +616,7 @@ function normalizeFieldOptionSyncRequest(input = {}) {
     projectId: firstString(input.projectId),
     presetId,
     optionSets: isPlainObject(input.optionSets) ? input.optionSets : {},
+    dryRun: input.dryRun === true,
   }
 }
 
@@ -622,6 +630,7 @@ function fieldOptionSyncInput(req, rawInput = {}) {
     projectId,
     presetId: input.presetId,
     optionSets: input.optionSets,
+    dryRun: input.dryRun === true,
   }
 }
 
@@ -642,6 +651,21 @@ function fieldOptionSyncKernelFields(preset) {
     id: field.targetField,
     optionSource: { key: field.valueField, type: preset.sourceKind },
   }))
+}
+
+// FOS-4b-2: strip action bindings from option sets before the (option-only) normalizer. Action bindings
+// are validated separately via the FOS-4b-1 registry; this keeps the option normalizer free of them.
+function stripActionBindingsFromOptionSets(optionSets) {
+  const out = {}
+  for (const [key, value] of Object.entries(optionSets)) {
+    if (!Array.isArray(value)) { out[key] = value; continue }
+    out[key] = value.map((option) => {
+      if (!isPlainObject(option)) return option
+      const { actionBindings, actions, ...rest } = option
+      return rest
+    })
+  }
+  return out
 }
 
 // FOS-2: values-free per-field evidence for the generic route (no option values/labels, no sheetId).
@@ -2099,11 +2123,13 @@ function createHandlers(services, options = {}) {
       const provisioning = getFieldOptionSyncProvisioning()
       const optionFields = fieldOptionSyncKernelFields(preset)
 
-      // FOS-2: readiness gate, bound per preset. The stock-preparation preset targets the canonical
-      // stock-prep table, so it reuses that table's readiness inspection — parity with the stock-prep
-      // route: never patch an unprovisioned target (avoids a partial patch / opaque FIELD_PATCH_FAILED).
-      // Fail closed for any preset without a readiness binding (additional presets are gated to FOS-4).
-      if (preset.presetId === 'preset.stock-preparation.v1') {
+      // FOS-4: readiness gate bound per TARGET (not per preset id). Any preset targeting the canonical
+      // stock-prep table reuses that table's readiness inspection — so BOTH the v1 (replace) preset and
+      // the disable-missing prove-the-path preset are covered without enumerating preset ids. Parity with
+      // the stock-prep route: never patch an unprovisioned target (avoids a partial patch / opaque
+      // FIELD_PATCH_FAILED). Presets targeting a DIFFERENT table still fail closed until they declare
+      // their own readiness binding (a later slice).
+      if (preset.targetTable === STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId) {
         const readiness = await inspectStockPreparationCanonicalTarget({ context, projectId: input.projectId, permission: 'admin' })
         if (readiness.ready !== true) {
           throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_TARGET_NOT_READY', 'field-option-sync target is not ready', {
@@ -2112,8 +2138,9 @@ function createHandlers(services, options = {}) {
           })
         }
       } else {
-        throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_PRESET_NO_READINESS', 'preset has no readiness binding (additional presets are gated to FOS-4)', {
+        throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_PRESET_NO_READINESS', 'preset target has no readiness binding (presets for other tables are gated to a later slice)', {
           presetId: preset.presetId,
+          targetObjectId: preset.targetTable,
         })
       }
 
@@ -2127,31 +2154,92 @@ function createHandlers(services, options = {}) {
         })
       }
 
-      // Fail closed on action bindings: actions are a stock-prep-specific concept (predefined action
-      // allowlist + dry-run gating). The generic route writes option metadata only, so it rejects
-      // them rather than silently dropping them through the shared per-option normalizer.
+      // FOS-4b-2: action bindings are DRY-RUN-ONLY. The generic route accepts them ONLY when dryRun:true,
+      // and even then NOTHING is written or executed — each binding is validated as a REFERENCE against the
+      // registry ∩ preset.permittedActionIds (FOS-4b-1) and previewed. Apply/execute is a separate, later,
+      // owner-gated sub-slice. Non-dry-run + action bindings → fail-closed (no write).
+      const actionBindingPreview = []
       for (const [sourceKey, rawOptions] of Object.entries(input.optionSets)) {
         if (!Array.isArray(rawOptions)) continue
-        const carriesActions = rawOptions.some((option) =>
-          isPlainObject(option) && (Array.isArray(option.actionBindings) || Array.isArray(option.actions)))
-        if (carriesActions) {
-          throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_ACTIONS_NOT_SUPPORTED', 'generic field-option-sync does not support action bindings', {
-            presetId: preset.presetId,
-            sourceKey,
-          })
+        for (const option of rawOptions) {
+          if (!isPlainObject(option)) continue
+          const bindings = Array.isArray(option.actionBindings)
+            ? option.actionBindings
+            : (Array.isArray(option.actions) ? option.actions : null)
+          if (!bindings || bindings.length === 0) continue
+          if (!input.dryRun) {
+            throw new HttpRouteError(422, 'FIELD_OPTION_SYNC_ACTIONS_DRY_RUN_ONLY', 'action bindings are dry-run-only (set dryRun:true); apply is not yet enabled', {
+              presetId: preset.presetId,
+              sourceKey,
+            })
+          }
+          for (const binding of bindings) {
+            // validates registry-membership + preset-permission + param allowlist; throws (fail-closed) on any miss.
+            const normalized = normalizeFieldOptionActionBinding(binding, {
+              field: `${sourceKey}.actionBindings`,
+              permittedActionIds: preset.permittedActionIds,
+            })
+            actionBindingPreview.push({
+              sourceKey,
+              actionId: normalized.actionId,
+              kind: normalized.kind,
+              requiresDryRun: normalized.requiresDryRun,
+              requiredPermission: normalized.requiredPermission,
+              parameterBindingCount: Object.keys(normalized.parameterBindings).length,
+            })
+          }
         }
       }
 
       // Reuse the per-option safety normalization (executable-key / secret / placeholder rejection,
       // color/order/label/disabled, dedup, max-options). Throws OPTION_SYNC_* (422, values-free).
-      const optionSets = optionSetsFromInput(input.optionSets)
+      // dry-run strips action bindings first (actions are validated above via the FOS-4b-1 registry, not
+      // the stock-prep path); non-dry-run uses the raw input unchanged (zero-drift).
+      const optionSets = optionSetsFromInput(
+        input.dryRun ? stripActionBindingsFromOptionSets(input.optionSets) : input.optionSets,
+      )
 
-      const { synced, skipped } = await syncFieldOptions({
+      // FOS-4b-2: dry-run mode validates everything (options above + action references) and PREVIEWS what
+      // WOULD sync — writing NOTHING (no patchObjectFieldProperty). Apply is a separate gated sub-slice.
+      if (input.dryRun) {
+        return sendOk(res, {
+          ok: true,
+          dryRun: true,
+          written: false,
+          target: { presetId: preset.presetId, targetTable: preset.targetTable },
+          preview: {
+            fields: optionFields
+              .filter((field) => optionSets[field.optionSource.key])
+              .map((field) => ({
+                field: field.id,
+                sourceKey: field.optionSource.key,
+                optionCount: optionSets[field.optionSource.key].options.length,
+              })),
+            actionBindings: actionBindingPreview, // values-free: actionId/kind/gating/param-count only
+          },
+        })
+      }
+
+      const { synced, skipped, held } = await syncFieldOptions({
         provisioning,
         projectId: input.projectId,
         targetObjectId: preset.targetTable,
         optionFields,
         optionSets,
+        // FOS-2b: drive the preset's sync semantics. replace + update_from_source = the FOS-2 fast path
+        // (no read, no merge). Other modes read current options via the (read-only) getObjectField.
+        syncMode: preset.syncMode,
+        conflictPolicy: preset.conflictPolicy,
+        readCurrentOptions: async (field) => {
+          const current = await provisioning.getObjectField({
+            projectId: input.projectId,
+            objectId: preset.targetTable,
+            fieldId: field.id,
+          })
+          return current && current.property && Array.isArray(current.property.options)
+            ? current.property.options
+            : []
+        },
         buildPropertyPatch: (field, set) => ({
           options: set.options.map((option) => {
             const out = { value: option.value }
@@ -2185,12 +2273,17 @@ function createHandlers(services, options = {}) {
 
       return sendOk(res, {
         ok: true,
+        // FOS-2b: manual_confirm produces a values-free preview (held) and writes NOTHING.
+        held: held.length > 0,
         target: {
           presetId: preset.presetId,
           targetTable: preset.targetTable,
           fieldCount: synced.length,
+          heldFieldCount: held.length,
         },
         evidence: summarizeFieldOptionSyncEvidence({ preset, synced, skipped }),
+        // held entries are values-free: { field, optionSource:{key,type}, wouldAdd, wouldUpdate, wouldDisable }
+        heldEvidence: held,
       })
     },
 

@@ -47,9 +47,10 @@ describe('approval admin jump migration and bootstrap sync', () => {
   it('T-bootstrap keeps approval_schema_bootstrap action check aligned with add_sign/reduce_sign (P1-B)', async () => {
     const source = await fs.readFile(BOOTSTRAP_PATH, 'utf8')
 
-    // Lane D (P1-B 加签/减签) bumped the bootstrap: the action CHECK now also
-    // permits add_sign/reduce_sign, mirroring migration zzzz20260616130000.
-    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260616-p1b-add-reduce-sign-action'")
+    // The delegation runtime added approval_delegations to the bootstrap and bumped the
+    // version; the action CHECK still permits add_sign/reduce_sign (Lane D / migration
+    // zzzz20260616130000).
+    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260622-delegations'")
     expect(source).toContain("'remind', 'jump', 'add_sign', 'reduce_sign'")
   })
 

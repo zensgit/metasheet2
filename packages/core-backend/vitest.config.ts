@@ -27,6 +27,8 @@ export default defineConfig({
       'tests/integration/approval-postgate-acceptance.api.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
+      'tests/integration/approval-delegation-seam.db.test.ts',
+      'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-pack1a-lifecycle.api.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',

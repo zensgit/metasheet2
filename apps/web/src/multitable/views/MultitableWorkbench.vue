@@ -430,7 +430,19 @@
       :list-foreign-sheets-fn="listForeignSheetsForFieldFn"
       :list-foreign-fields-fn="listForeignFieldsForFieldFn"
       @update:dirty="fieldManagerDirty = $event"
+      @bulk-fill="onFieldManagerBulkFill"
       @close="showFieldManager = false" @create-field="onCreateField" @update-field="onUpdateField" @delete-field="onDeleteField"
+    />
+    <MetaAiBulkFillDialog
+      :visible="aiBulkFillVisible"
+      :controller="aiBulkFill"
+      :field-id="aiBulkFillFieldId"
+      :view-id="workbench.activeViewId.value"
+      :selected-record-ids="[...exportSelectedRecordIds]"
+      :field-name="bulkFillFieldName"
+      :record-name="bulkFillRecordName"
+      :is-zh="isZh"
+      @close="onBulkFillClose"
     />
     <MetaViewManager
       :visible="showViewManager" :views="workbench.views.value" :fields="propertyVisibleWorkbenchFields" :sheet-id="workbench.activeSheetId.value"
@@ -583,6 +595,7 @@ import MetaLinkPicker from '../components/MetaLinkPicker.vue'
 import MetaPersonPicker from '../components/MetaPersonPicker.vue'
 import MetaTemplateCard from '../components/MetaTemplateCard.vue'
 import MetaFieldManager from '../components/MetaFieldManager.vue'
+import MetaAiBulkFillDialog from '../components/MetaAiBulkFillDialog.vue'
 import MetaViewManager from '../components/MetaViewManager.vue'
 import TrashModal from '../components/TrashModal.vue'
 import HistoryCenterModal from '../components/HistoryCenterModal.vue'
@@ -623,6 +636,7 @@ import {
   mergeGroupCollapse,
 } from '../utils/view-display-prefs'
 import { useAiShortcut } from '../composables/useAiShortcut'
+import { useAiBulkFill } from '../composables/useAiBulkFill'
 import type { AiShortcutConfigInput } from '../api/client'
 import { buildFieldScaleMap, buildRecordFormattingMap, decideScaleStatsRefetch, extractRulesFromConfig, extractScaleRulesFromConfig, scaleStatsFieldIds, type FieldScaleServerStats } from '../utils/conditional-formatting'
 import {
@@ -700,6 +714,41 @@ function onAiRunField(field: MetaField) {
 
 function onGridAiRun(recordId: string, field: MetaField) {
   void aiShortcut.run(recordId, field.id)
+}
+
+// --- B-3: AI bulk-fill (whole-column) review-before-write ---
+// Separate state machine from useAiShortcut (its in-flight guard is keyed per
+// recordId; bulk is per-run). The Workbench owns the dialog so it can supply the
+// active view + grid selection scope and the record/field display resolvers.
+const aiBulkFill = useAiBulkFill({
+  client: workbench.client,
+  sheetId: () => workbench.activeSheetId.value,
+})
+const aiBulkFillVisible = ref(false)
+const aiBulkFillFieldId = ref<string>('')
+
+// MetaFieldManager emits bulk-fill for a field that has a PERSISTED aiShortcut.
+function onFieldManagerBulkFill(payload: { fieldId: string }) {
+  aiBulkFill.reset()
+  aiBulkFillFieldId.value = payload.fieldId
+  aiBulkFillVisible.value = true
+}
+function onBulkFillClose() {
+  aiBulkFillVisible.value = false
+  aiBulkFillFieldId.value = ''
+}
+
+// Display resolvers for the diff table (the dialog is presentation-only).
+function bulkFillFieldName(fieldId: string): string {
+  return grid.fields.value.find((field) => field.id === fieldId)?.name ?? fieldId
+}
+function bulkFillRecordName(recordId: string): string {
+  const row = grid.rows.value.find((r) => r.id === recordId)
+  if (!row) return recordId
+  // Prefer the first readable text field's value as a human label; fall back to the id.
+  const primaryFieldId = grid.visibleFields.value.find((f) => f.type === 'string' || f.type === 'longText')?.id
+  const label = primaryFieldId ? row.data[primaryFieldId] : undefined
+  return typeof label === 'string' && label.trim().length > 0 ? label : recordId
 }
 
 // B1-b: run a button field's configured action against one record. Per-cell
@@ -875,6 +924,8 @@ const deepLinkedRecordCommentsScope = ref<MetaCommentsScope | null>(null)
 const deepLinkedRecordFieldPermissions = ref<Record<string, MetaFieldPermission>>({})
 const deepLinkedRecordViewPermissions = ref<Record<string, MetaViewPermission>>({})
 const deepLinkedRecordRowActions = ref<MetaRowActions | null>(null)
+// declared up-front (before effectiveFieldPermissions/scopedAllFields that read it) to avoid a TDZ on eager eval.
+const deepLinkedRecord = ref<MetaRecord | null>(null)
 const standaloneFormFieldPermissions = ref<Record<string, MetaFieldPermission>>({})
 const standaloneFormViewPermissions = ref<Record<string, MetaViewPermission>>({})
 const standaloneFormRowActions = ref<MetaRowActions | null>(null)
@@ -1848,9 +1899,9 @@ async function onToggleRecordLock(payload: { recordId: string; locked: boolean }
 // confirm + API call + refresh (mirrors onToggleRecordLock). The backend error carries `.code`
 // (VERSION_CONFLICT / VERSION_EXPIRED / RESTORE_UNSUPPORTED / SNAPSHOT_UNAVAILABLE / SCHEMA_DRIFT /
 // RESTORE_FORBIDDEN); we surface error.message (already localized server-side) with a static fallback.
-// T6-3: full-record restore goes through preview→confirm→execute (the T6-2 chain); the panel shows what would
-// change before the actor commits, and a schema-drift conflict blocks it. Per-field (column-level) restore keeps
-// the existing direct path (the T6 identity binds the full-record diff; per-field-through-preview is a follow-up).
+// T6: BOTH full-record and per-field (column-subset) restore go through preview→confirm→execute; the panel shows
+// what would change before the actor commits, and a schema-drift conflict blocks it. fieldIds is carried through
+// so the preview + identity bind exactly the selected subset (the legacy direct /restore fallback was removed).
 const restorePreview = ref<{
   visible: boolean
   loading: boolean
@@ -1858,30 +1909,19 @@ const restorePreview = ref<{
   schemaDrift: boolean
   executable: boolean
   identity: string | null
-  payload: { recordId: string; targetVersion: number; expectedVersion: number } | null
+  payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] } | null
 }>({ visible: false, loading: false, changes: [], schemaDrift: false, executable: false, identity: null, payload: null })
 
 const restorePreviewFieldName = (fieldId: string): string => scopedAllFields.value.find((f) => f.id === fieldId)?.name ?? fieldId
 
-async function restoreFieldsDirect(sheetId: string, payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] }) {
-  if (!window.confirm(recordLabel('record.restoreConfirm', isZh.value))) return
-  try {
-    const result = await workbench.client.restoreRecordVersion(sheetId, payload.recordId, payload.targetVersion, payload.expectedVersion, payload.fieldIds)
-    showSuccess(recordLabel(result.noop ? 'record.restoreNoop' : 'record.restoreSuccess', isZh.value))
-    await grid.loadViewData(grid.page.value.offset)
-    if (selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
-  } catch (error) {
-    showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
-  }
-}
-
 async function onRestoreRecordVersion(payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] }) {
   const sheetId = workbench.activeSheetId.value
   if (!sheetId) return
-  if (payload.fieldIds && payload.fieldIds.length > 0) { await restoreFieldsDirect(sheetId, payload); return }
-  restorePreview.value = { visible: true, loading: true, changes: [], schemaDrift: false, executable: false, identity: null, payload: { recordId: payload.recordId, targetVersion: payload.targetVersion, expectedVersion: payload.expectedVersion } }
+  // Full-record AND per-field (column-subset) both go through preview→confirm→execute now — fieldIds is carried
+  // through so the preview shows exactly the selected changes and the identity binds that filtered set.
+  restorePreview.value = { visible: true, loading: true, changes: [], schemaDrift: false, executable: false, identity: null, payload: { recordId: payload.recordId, targetVersion: payload.targetVersion, expectedVersion: payload.expectedVersion, fieldIds: payload.fieldIds } }
   try {
-    const pv = await workbench.client.restorePreviewRecord(sheetId, payload.recordId, payload.targetVersion)
+    const pv = await workbench.client.restorePreviewRecord(sheetId, payload.recordId, payload.targetVersion, payload.fieldIds)
     restorePreview.value = { ...restorePreview.value, loading: false, changes: pv.changes, schemaDrift: pv.schemaDrift, executable: pv.previewIdentity != null, identity: pv.previewIdentity }
   } catch (error) {
     restorePreview.value = { ...restorePreview.value, visible: false }
@@ -1893,10 +1933,10 @@ async function onConfirmRestore() {
   const sheetId = workbench.activeSheetId.value
   const state = restorePreview.value
   if (!sheetId || !state.payload || !state.identity) { restorePreview.value = { ...state, visible: false }; return }
-  const { recordId, targetVersion, expectedVersion } = state.payload
+  const { recordId, targetVersion, expectedVersion, fieldIds } = state.payload
   restorePreview.value = { ...state, visible: false }
   try {
-    const result = await workbench.client.restoreExecuteRecord(sheetId, recordId, targetVersion, expectedVersion, state.identity)
+    const result = await workbench.client.restoreExecuteRecord(sheetId, recordId, targetVersion, expectedVersion, state.identity, fieldIds)
     showSuccess(recordLabel(result.noop ? 'record.restoreNoop' : 'record.restoreSuccess', isZh.value))
     await grid.loadViewData(grid.page.value.offset)
     if (selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
@@ -3458,7 +3498,6 @@ async function onBulkEditApply(payload: { mode: 'set' | 'clear'; fieldId: string
 }
 
 // --- Deep-link record fetch (when record not in current page) ---
-const deepLinkedRecord = ref<MetaRecord | null>(null)
 
 async function resolveDeepLink(recordId: string, options?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
   // First check if it's in the current rows
