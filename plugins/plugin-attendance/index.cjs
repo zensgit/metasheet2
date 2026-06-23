@@ -20,9 +20,41 @@ const DEFAULT_RULE = {
   workEndTime: '18:00',
   lateGraceMinutes: 10,
   earlyGraceMinutes: 10,
+  // #5 report tiering (design-lock #3055): lateness tiers above the grace window. severe ≤ absence.
+  severeLateThresholdMinutes: 30,
+  absenceLateThresholdMinutes: 60,
   roundingMinutes: 5,
   workingDays: [1, 2, 3, 4, 5],
   isDefault: true,
+}
+
+// #5 report tiering (design-lock #3055): derive severe-late / absence-late tier counts from the
+// (post-override) lateMinutes and the rule thresholds, so the report metrics are SELF-CALCULATED instead
+// of trusted from record meta (the prior summary.* passthrough). v1 thresholds come from DEFAULT_RULE
+// (severe 30 / absence 60); per-group persistence + a write-side enum-strict normalizer (absence ≥ severe ≥
+// grace reject) land in RT-1a (needs a rule-table migration — attendance_rules is typed columns).
+// Tiers are NESTED — an absence-level record is always also severe-late, mirroring late_count counting
+// every late day: late ⊇ severe ⊇ absence. We ENFORCE the nesting here (effectiveAbsence = max(absence,
+// severe)) so incoherent config can never yield absence-without-severe; a threshold of 0 DISABLES that
+// tier (preserved through the max). Pure function — unit-tested; the single write is in
+// computeAttendanceRecordUpsertValues, into the record meta the report fields already read.
+function computeLateTierCounts(lateMinutes, rule) {
+  const lm = Math.max(0, Math.floor(Number(lateMinutes) || 0))
+  const severe = Number.isFinite(Number(rule?.severeLateThresholdMinutes))
+    ? Math.max(0, Number(rule.severeLateThresholdMinutes))
+    : DEFAULT_RULE.severeLateThresholdMinutes
+  const absenceConfigured = Number.isFinite(Number(rule?.absenceLateThresholdMinutes))
+    ? Math.max(0, Number(rule.absenceLateThresholdMinutes))
+    : DEFAULT_RULE.absenceLateThresholdMinutes
+  // Enforce nesting without resurrecting a disabled (0) absence tier.
+  const effectiveAbsence = absenceConfigured > 0 ? Math.max(absenceConfigured, severe) : 0
+  const severeLateCount = severe > 0 && lm >= severe ? 1 : 0
+  const absenceLateCount = effectiveAbsence > 0 && lm >= effectiveAbsence ? 1 : 0
+  return {
+    severeLateCount,
+    severeLateMinutes: severeLateCount ? lm : 0,
+    absenceLateCount,
+  }
 }
 const DEFAULT_SHIFT = {
   orgId: DEFAULT_ORG_ID,
@@ -16361,6 +16393,16 @@ function computeAttendanceRecordUpsertValues(options) {
       finalMetrics.status = overrideMetrics.status.trim()
     }
   }
+  // #5 report tiering (design-lock #3055): write the (post-override) lateness tiers into the record meta
+  // the report fields already read (severe_late_count / severe_late_minutes / absence_late_count). Computed
+  // from the EFFECTIVE lateMinutes (so a manual lateMinutes override re-tiers) + the per-group rule
+  // thresholds. Legacy records that predate this never carry these keys → the report fallback reads 0,
+  // unchanged (no history restatement).
+  const lateTiers = computeLateTierCounts(finalMetrics.lateMinutes, rule)
+  finalMeta.severe_late_count = lateTiers.severeLateCount
+  finalMeta.severe_late_minutes = lateTiers.severeLateMinutes
+  finalMeta.absence_late_count = lateTiers.absenceLateCount
+
   const status = statusOverride ?? finalMetrics.status
 
   return {
@@ -18033,6 +18075,7 @@ module.exports = {
     attendanceReportRecordRowKey,
     buildAttendanceImportMultiPunchMeta,
     computeAttendanceRecordUpsertValues,
+    computeLateTierCounts,
     resolveAttendanceImportRawClient,
     buildAttendanceImportCopyQuery,
     attachAttendanceImportCopyStreamErrorSink,
