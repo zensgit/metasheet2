@@ -144,7 +144,7 @@ gate-before-cap/quota · computed-filter → 422 · cache stores the exact value
   (queued→running→suspended→running→resolved); charge-on-generation at scale + ledger delta == provider calls;
   **quota-pause → `suspended(manual_task)` + `quota_paused`, generated rows charged & committable, remainder
   `pending_not_generated` & uncharged**; cancel keeps generated charged+committable; **per-row job-rows survive a
-  simulated restart / cancel / quota-pause with `state` / `skipped` / `failure` / `current_value` intact**
+  simulated in-process crash / cancel / quota-pause with `state` / `skipped` / `failure` / `current_value` intact**
   (BJ-9 durability — the keystone); the paginated `…/rows` returns truthful per-row state ordered by `ordinal`;
   a different-scope start → `409 ACTIVE_JOB_EXISTS` (BJ-7); per-actor one-job concurrency; async cap → 400; the
   carried invariants (owner gate / stale-drop / re-gate) per commit chunk + the durable aggregate outcome.
