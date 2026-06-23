@@ -513,6 +513,46 @@ function Expand-PackageArchive {
   throw "Unsupported package extension (expected .zip, .tgz, or .tar.gz): $ArchivePath"
 }
 
+function Test-OnPremPackageRoot {
+  param([string]$Candidate)
+
+  if ([string]::IsNullOrWhiteSpace($Candidate)) {
+    return $false
+  }
+  return (
+    (Test-Path -LiteralPath (Join-Path $Candidate 'pnpm-lock.yaml')) -and
+    (Test-Path -LiteralPath (Join-Path $Candidate 'PACKAGE-METADATA.json')) -and
+    (Test-Path -LiteralPath (Join-Path $Candidate 'scripts\ops\multitable-onprem-apply-package.ps1'))
+  )
+}
+
+function Resolve-ExtractedPackageRoot {
+  param([string]$ExtractRoot)
+
+  $rootItem = Get-Item -LiteralPath $ExtractRoot -ErrorAction Stop
+  $candidates = @()
+  if (Test-OnPremPackageRoot -Candidate $rootItem.FullName) {
+    $candidates += $rootItem
+  }
+  $candidates += @(
+    Get-ChildItem -LiteralPath $ExtractRoot -Directory -Recurse -ErrorAction Stop |
+      Where-Object { Test-OnPremPackageRoot -Candidate $_.FullName }
+  )
+
+  if ($candidates.Count -lt 1) {
+    throw "Failed to locate extracted package root under $ExtractRoot (missing pnpm-lock.yaml / PACKAGE-METADATA.json / apply helper markers)"
+  }
+  if ($candidates.Count -eq 1) {
+    return $candidates[0].FullName
+  }
+
+  $preferred = @($candidates) | Where-Object { $_.Name -like 'metasheet-multitable-onprem-*' }
+  if (@($preferred).Count -eq 1) {
+    return @($preferred)[0].FullName
+  }
+  throw "Ambiguous extracted package roots under ${ExtractRoot}: $(@($candidates | ForEach-Object { $_.FullName }) -join '; ')"
+}
+
 function Invoke-HealthcheckOnce {
   param([string]$Url)
 
@@ -595,12 +635,10 @@ try {
 
   Expand-PackageArchive -ArchivePath $resolvedArchive -TargetDir $extractRoot
 
-  $packageRoot = Get-ChildItem -LiteralPath $extractRoot -Directory | Select-Object -First 1
-  if (-not $packageRoot) {
-    throw "Failed to locate extracted package root in $extractRoot"
-  }
+  $packageRoot = Resolve-ExtractedPackageRoot -ExtractRoot $extractRoot
+  Write-Info "Extracted package root: $packageRoot"
 
-  foreach ($item in Get-ChildItem -LiteralPath $packageRoot.FullName -Force) {
+  foreach ($item in Get-ChildItem -LiteralPath $packageRoot -Force) {
     Copy-Item -LiteralPath $item.FullName -Destination $resolvedRoot -Recurse -Force
   }
 

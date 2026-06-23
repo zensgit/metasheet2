@@ -75,6 +75,18 @@ describeIfDatabase('multitable scoped restore execute — T6-2 (real DB)', () =>
     expect(await recordData(REC)).toMatchObject({ [NAME]: 'a', [SALARY]: 100 }) // restored to v1
   })
 
+  test('layer-3 write gate: a VISIBLE+readOnly field in the restore → 403 RESTORE_FORBIDDEN, nothing written', async () => {
+    // SALARY: visible=true, read_only=true for the actor (per-subject layer-3 write-deny). patchRecords does NOT
+    // enforce this; only the route can. SALARY is VISIBLE so it is in the previewed diff + the identity — the gate
+    // must reject the WRITE (parity with the legacy /restore + the BS-3 batch fan-out). Closes the shipped T6-2 gap.
+    await q(`INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,'user',$3,true,true) ON CONFLICT DO NOTHING`, [SHEET, SALARY, VIEWER])
+    const identity = (await preview(REC, { targetVersion: 1 })).body?.data?.previewIdentity as string
+    const ex = await execute(REC, { targetVersion: 1, expectedVersion: 2, previewIdentity: identity })
+    expect(ex.status).toBe(403)
+    expect(ex.body?.error?.code).toBe('RESTORE_FORBIDDEN')
+    expect(await recordData(REC)).toMatchObject({ [NAME]: 'b', [SALARY]: 200 }) // NOT restored — gated before any write
+  })
+
   test('identity required: a missing identity is 400; a tampered identity is rejected (the route enforces verify)', async () => {
     expect((await execute(REC, { targetVersion: 1, expectedVersion: 2 })).status).toBe(400) // missing
     const identity = (await preview(REC, { targetVersion: 1 })).body?.data?.previewIdentity as string
