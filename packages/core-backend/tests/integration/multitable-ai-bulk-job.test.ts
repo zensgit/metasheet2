@@ -571,6 +571,73 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
     expect(fetchCallCount).toBe(3)
   })
 
+  // ── CRASH → ERRORED (BJ-5: an unexpected worker exception does not strand the partial) ──
+  test('BJ-5 crash → errored: an unexpected worker exception after row 1 marks the header errored (NOT stuck running); row 1 stays generated+charged and COMMITS; the rest stay ungenerated', async () => {
+    const ids = [0, 1, 2].map((i) => `rec_b4_crash${i}_${TS}`)
+    for (const id of ids) await seedRecord(id, { [FLD_SRC]: `crash ${id}` }, ACTOR)
+
+    // A pool that throws on the 2nd per-row status read (readJobStatus) — i.e. at the TOP of
+    // row 2, AFTER row 1 is generated+charged but BEFORE row 2 is charged. Simulates an
+    // unexpected DB exception mid-generate; everything else delegates to the real pool.
+    const realPool = poolManager.get()
+    let statusReads = 0
+    const flakyPool = new Proxy(realPool as object, {
+      get(target, prop) {
+        if (prop === 'query') {
+          return (sql: string, params?: unknown[]) => {
+            if (typeof sql === 'string' && sql.includes(`SELECT status FROM ${AI_BULK_JOB_TABLE}`)) {
+              statusReads += 1
+              if (statusReads === 2) throw new Error('injected: worker crashed mid-generate')
+            }
+            return (target as { query: (s: string, p?: unknown[]) => unknown }).query(sql, params)
+          }
+        }
+        const value = Reflect.get(target, prop)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    const crashService = new BulkFillJobService({ pool: flakyPool as unknown as PoolLike, fetchFn: fetchStub })
+
+    const app2 = express()
+    app2.use(express.json())
+    app2.use((req, _res, next) => {
+      ;(req as Request & { user?: unknown }).user = currentUser
+      next()
+    })
+    app2.use('/api/multitable', univerMetaRouter())
+    app2.use('/api/multitable', createMultitableAiRoutes({ fetchFn: fetchStub, bulkJobService: crashService }))
+
+    const start = await request(app2)
+      .post(`/api/multitable/sheets/${SHEET_ID}/ai/shortcut/bulk-preview`)
+      .send({ fieldId: FLD_TARGET, scope: 'sheet' })
+    expect(start.status).toBe(200)
+    const jobId = start.body.jobId as string
+
+    // Drive the worker on the flaky pool — row 2's status read throws. runJob must NOT
+    // propagate; its outer catch marks the header errored (guarded on running).
+    await crashService.runJob(jobId)
+
+    // Header is `errored`, NOT stuck `running` — the design's crash outcome (BJ-5).
+    expect((await dbJobHeader(jobId))!.status).toBe('errored')
+
+    // Row 1 stayed generated + charged; rows 2 & 3 are visibly ungenerated (still pending, uncharged).
+    const rows = await dbJobRows(jobId)
+    const generated = rows.filter((r) => r.state === 'generated')
+    const pending = rows.filter((r) => r.state === 'pending')
+    expect(generated.length).toBe(1)
+    expect(Number(generated[0].usage_tokens)).toBe(30)
+    expect(pending.length).toBe(2)
+    expect(await ledgerTokenSum()).toBe(30) // only row 1 charged — the crash was before row 2's charge
+
+    // The crashed job's generated partial is COMMITTABLE (errored ∈ committable set): committing
+    // row 1 succeeds and writes the value, so the charged work is NOT stranded.
+    const commit = await commitJob(jobId, [String(generated[0].record_id)])
+    expect(commit.status).toBe(200)
+    expect(commit.body.state).toBe('resolved')
+    expect(commit.body.counts.committed).toBe(1)
+    expect(await recordValue(String(generated[0].record_id), FLD_TARGET)).toBe('AI OUT')
+  })
+
   // ── DURABILITY KEYSTONE (BJ-9) ─────────────────────────────────────────────
   test('DURABILITY keystone: per-row state / skipped / current_value survive (re-read straight from DB), ordered by ordinal', async () => {
     // Quota pause partway (same math as the quota-pause test): maxOutput 10 → per-row
