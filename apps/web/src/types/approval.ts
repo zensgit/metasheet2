@@ -36,6 +36,7 @@ export type FormFieldType =
   | 'multi-select'
   | 'user'
   | 'attachment'
+  | 'detail'
 
 export interface ApprovalNode {
   key: string
@@ -150,6 +151,12 @@ export interface FormField {
   options?: FormOption[]
   props?: Record<string, unknown>
   visibilityRule?: FormFieldVisibilityRule
+  // detail / sub-form (明细/子表单) — present only when type === 'detail'. `columns` is the
+  // ordered row schema of LEAF sub-fields (no nested `detail`); a `detail` value is an array
+  // of row objects keyed by sub-field id.
+  columns?: FormField[]
+  minRows?: number
+  maxRows?: number
 }
 
 export interface FormSchema {

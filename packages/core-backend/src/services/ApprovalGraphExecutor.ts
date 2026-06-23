@@ -260,8 +260,24 @@ export function pruneHiddenFormData(
   formData: Record<string, unknown>,
 ): Record<string, unknown> {
   const visibleFieldIds = getVisibleFormFieldIds(formSchema, formData)
+  const detailColumnsById = new Map(
+    formSchema.fields
+      .filter((field): field is FormField & { columns: FormField[] } => field.type === 'detail' && Array.isArray(field.columns))
+      .map((field) => [field.id, field.columns]),
+  )
   return Object.fromEntries(
-    Object.entries(formData).filter(([fieldId]) => visibleFieldIds.has(fieldId)),
+    Object.entries(formData)
+      .filter(([fieldId]) => visibleFieldIds.has(fieldId))
+      .map(([fieldId, value]) => {
+        const columns = detailColumnsById.get(fieldId)
+        if (columns && Array.isArray(value)) {
+          // detail: drop hidden / unknown cells per row (a sub-field visibilityRule is evaluated
+          // against that row), recursing through the same prune so behavior matches top-level.
+          const subSchema: FormSchema = { fields: columns }
+          return [fieldId, value.map((row) => (isRecord(row) ? pruneHiddenFormData(subSchema, row) : row))]
+        }
+        return [fieldId, value]
+      }),
   )
 }
 
@@ -432,6 +448,48 @@ function validateFieldConstraints(field: FormField, value: unknown): string[] {
   }
 }
 
+// Submit-time validation of a detail (明细) value: an array of row objects. Each row's cells
+// are validated against the frozen `columns` with the SAME leaf validators as top-level
+// fields; per-row `visibilityRule` decides which cells are required; messages are row-addressed
+// (`items[1].qty is required`). Unknown cells are dropped by pruneHiddenFormData before this
+// runs, matching the top-level prune-then-validate behavior.
+function validateDetailFieldValue(field: FormField, value: unknown): string[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) return [`${field.id} must be a list`]
+  const errors: string[] = []
+  if (field.minRows !== undefined && value.length < field.minRows) {
+    errors.push(`${field.id} requires at least ${field.minRows} row(s)`)
+  }
+  if (field.maxRows !== undefined && value.length > field.maxRows) {
+    errors.push(`${field.id} allows at most ${field.maxRows} row(s)`)
+  }
+  const columns = field.columns ?? []
+  const subSchema: FormSchema = { fields: columns }
+  value.forEach((row, rowIndex) => {
+    const prefix = `${field.id}[${rowIndex}]`
+    if (!isRecord(row)) {
+      errors.push(`${prefix} must be an object`)
+      return
+    }
+    const visibleSubIds = getVisibleFormFieldIds(subSchema, row)
+    for (const column of columns) {
+      if (!visibleSubIds.has(column.id)) continue
+      const cell = row[column.id]
+      if (column.required && isEmptyValue(cell)) {
+        errors.push(`${prefix}.${column.id} is required`)
+        continue
+      }
+      const typeError = validateFieldType(column, cell)
+      if (typeError) {
+        errors.push(`${prefix}.${typeError}`)
+        continue
+      }
+      errors.push(...validateFieldConstraints(column, cell).map((error) => `${prefix}.${error}`))
+    }
+  })
+  return errors
+}
+
 export function validateApprovalFormData(formSchema: FormSchema, formData: Record<string, unknown>): string[] {
   const errors: string[] = []
   const visibleFieldIds = getVisibleFormFieldIds(formSchema, formData)
@@ -443,6 +501,10 @@ export function validateApprovalFormData(formSchema: FormSchema, formData: Recor
     const value = formData[field.id]
     if (field.required && isEmptyValue(value)) {
       errors.push(`${field.id} is required`)
+      continue
+    }
+    if (field.type === 'detail') {
+      errors.push(...validateDetailFieldValue(field, value))
       continue
     }
     const typeError = validateFieldType(field, value)
