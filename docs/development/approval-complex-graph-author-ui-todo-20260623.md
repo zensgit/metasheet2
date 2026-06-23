@@ -84,9 +84,14 @@
   `approval-web-guard.yml`). Backend `normalizeApprovalGraph` stays the sole arbiter (FE never
   relaxes it). G-1 round-trip + G-2 + `approvalTemplateAuthoring.spec` stay green.
 
-## Phase G-4 — cc editor (🔒 until G-3 ratified)
-- 🔒 Author cc `targetType` + `targetIds` (reuse the approval user/role picker). **cc stays
-  READ-ONLY** until this phase is opted in.
+## Phase G-4 — cc editor + close-out ✅ (shipped; this PR)
+- ✅ cc `targetType` (user/role) + `targetIds` editable in TemplateAuthoringView; pure logic in
+  `ccEdit.ts` (`applyCcEditsToGraph` composes after condition + parallel — three disjoint passes,
+  every non-cc node + all edges byte-identical). Matches the backend cc rule (targetType ∈
+  {user,role}, non-empty targetIds). Close-out: all three complex node types now editable in one
+  structured view; the FE preview surfaces all three edit types; topology stays read-only.
+- ✅ 13 cc tests (topology-preservation + condition×cc compose + untouched round-trip + validation),
+  wired into approval-web-guard. The complex-graph author UI render+edit set is complete.
 
 ## Out of scope (v1 — reopen-only, see design-lock §7)
 - 🔒 Free-canvas / drag-edge editor · new node types · runtime/validator changes · nested

@@ -34,6 +34,12 @@ import {
   validateParallelEdits,
   type ParallelEdits,
 } from './parallelEdit'
+import {
+  applyCcEditsToGraph,
+  ccEditsFromGraph,
+  validateCcEdits,
+  type CcEdits,
+} from './ccEdit'
 
 export type { DetailColumnDraft } from './detailField'
 export { createEmptyDetailColumnDraft, DETAIL_LEAF_FIELD_TYPES } from './detailField'
@@ -47,6 +53,8 @@ export type {
 export { CONDITION_RULE_OPERATORS } from './conditionEdit'
 export type { ParallelEdits, ParallelNodeEdit } from './parallelEdit'
 export { PARALLEL_JOIN_MODES } from './parallelEdit'
+export type { CcEdits, CcNodeEdit } from './ccEdit'
+export { CC_TARGET_TYPES } from './ccEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
@@ -154,6 +162,9 @@ export interface TemplateAuthoringDraft {
   // with the condition edits onto a COPY of `preservedGraph`. Empty/absent for linear or
   // non-parallel complex graphs.
   parallelEdits?: ParallelEdits
+  // G-4 cc editor: editable targetType/targetIds for each `cc` node in `preservedGraph`, seeded
+  // 1:1. Topology (edges) + every non-cc node stay byte-identical. Empty {} when no cc node.
+  ccEdits?: CcEdits
 }
 
 // Complex node types the v1 LINEAR steps editor can't author. They are NOT "unsupported" — a
@@ -567,6 +578,7 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
           // G-3: seed the editable parallel joinMode from the preserved parallel nodes (1:1).
           // Empty {} when the complex graph has no parallel node (condition/cc-only).
           parallelEdits: parallelEditsFromGraph(template.approvalGraph),
+          ccEdits: ccEditsFromGraph(template.approvalGraph),
         }
       : {}),
     fields: fields.length > 0 ? fields : [createEmptyFieldDraft(1)],
@@ -680,15 +692,16 @@ function buildStepConfig(step: ApprovalStepDraft): ApprovalNodeConfig {
 export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph {
   // G-1/G-2/G-3 anti-flatten keystone: a preserved complex graph is NEVER rebuilt from `steps`, so
   // its cc/condition/parallel nodes/edges survive save. Two disjoint edit passes COMPOSE onto a COPY
-  // of the graph: G-2 (`applyConditionEditsToGraph`) replaces ONLY each condition node's config with
-  // the edited logic, then G-3 (`applyParallelEditsToGraph`) replaces ONLY each parallel node's
-  // `joinMode`. The passes touch disjoint node types and each deep-clones everything else, so both
-  // edits land while every other node + ALL edges (cc included — G-4 read-only) stay byte-identical;
-  // an untouched graph round-trips unchanged (both apply-fns reproduce the backend-normalised shape).
+  // of the graph: G-2 (`applyConditionEditsToGraph`) replaces ONLY each condition node's config, G-3
+  // (`applyParallelEditsToGraph`) replaces ONLY each parallel node's `joinMode`, and G-4
+  // (`applyCcEditsToGraph`) replaces ONLY each cc node's targetType/targetIds. The three passes touch
+  // disjoint node types and each deep-clones everything else, so all edits land while every other
+  // node + ALL edges stay byte-identical; an untouched graph round-trips unchanged.
   // Only linear drafts take the build below.
   if (draft.preservedGraph) {
     const withConditionEdits = applyConditionEditsToGraph(draft.preservedGraph, draft.conditionEdits ?? {})
-    return applyParallelEditsToGraph(withConditionEdits, draft.parallelEdits ?? {})
+    const withParallelEdits = applyParallelEditsToGraph(withConditionEdits, draft.parallelEdits ?? {})
+    return applyCcEditsToGraph(withParallelEdits, draft.ccEdits ?? {})
   }
   const approvalNodes = draft.steps.map((step, index) => ({
     key: `approval_${index + 1}`,
@@ -819,6 +832,9 @@ export function validateTemplateDraft(
   // UX-only — the backend `normalizeApprovalGraph` re-validates and is the final arbiter.
   if (draft.parallelEdits && Object.keys(draft.parallelEdits).length > 0) {
     errors.push(...validateParallelEdits(draft.parallelEdits))
+  }
+  if (draft.ccEdits && Object.keys(draft.ccEdits).length > 0) {
+    errors.push(...validateCcEdits(draft.ccEdits))
   }
   const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
   draft.steps.forEach((step, index) => {
