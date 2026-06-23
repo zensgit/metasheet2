@@ -31,7 +31,7 @@ test('yuantus pact consumer broker publish stays advisory and secret-guarded', (
   assert.match(raw, /Publish consumer pact to broker \(advisory, Phase A\)[\s\S]*continue-on-error: true/)
   assert.match(
     raw,
-    /env:\s*\n\s*PACT_BROKER_BASE_URL: \$\{\{ secrets\.PACT_BROKER_BASE_URL \}\}\s*\n\s*PACT_BROKER_TOKEN: \$\{\{ secrets\.PACT_BROKER_TOKEN \}\}/,
+    /env:\s*\n\s*PACT_BROKER_BASE_URL: \$\{\{ secrets\.PACT_BROKER_BASE_URL \}\}\s*\n\s*PACT_BROKER_TOKEN: \$\{\{ secrets\.PACT_BROKER_TOKEN \}\}\s*\n\s*PACT_BROKER_ERROR_ON_UNKNOWN_OPTION: "true"/,
   )
   assert.doesNotMatch(raw, /if:\s*\$\{\{\s*secrets\.PACT_BROKER_/)
   assert.match(
