@@ -499,11 +499,14 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
     const queryFn = q as unknown as AiUsageQueryFn
     const make = async (suffix: string, status: string) => {
       const jid = `aibulkjob_csm_${suffix}_${TS}`
+      // Distinct field_id per header: the BJ-7 active-job unique index is on
+      // (actor_id, sheet_id, field_id), so several ACTIVE headers (suspended/queued/
+      // running) for one target would collide — the matrix needs independent rows.
       await insertBulkJobHeader(queryFn, {
         jobId: jid,
         actorId: ACTOR,
         sheetId: SHEET_ID,
-        fieldId: FLD_TARGET,
+        fieldId: `${FLD_TARGET}_${suffix}`,
         scopeFingerprint: `fp_${suffix}`,
         total: 0,
       })
