@@ -1,6 +1,9 @@
 name: Yuantus Pact Consumer
 
 on:
+  # Manual activation is available after this workflow_dispatch-enabled workflow exists on
+  # the default branch. Before merge, use the pull_request rerun/push path after secrets
+  # are provisioned; the post-merge push:main run is what publishes the mainBranch pact.
   workflow_dispatch: {}
   pull_request:
     branches: [main]

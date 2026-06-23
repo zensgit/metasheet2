@@ -17,7 +17,9 @@ test('yuantus pact consumer broker publish stays advisory and secret-guarded', (
   const checkStep = raw.indexOf('Run Yuantus pact consumer checks')
   const publishStep = raw.indexOf('Publish consumer pact to broker (advisory, Phase A)')
 
-  assert.match(raw, /on:\s*\n\s*workflow_dispatch: \{\}/)
+  assert.match(raw, /workflow_dispatch: \{\}/)
+  assert.match(raw, /workflow_dispatch-enabled workflow exists on/)
+  assert.match(raw, /post-merge push:main run is what publishes the mainBranch pact/)
   assert.ok(checkStep >= 0, 'local consumer checks step must exist')
   assert.ok(publishStep > checkStep, 'broker publish must run only after local consumer checks')
   assert.match(raw, new RegExp(contractTestPath.replaceAll('/', '\\/'), 'g'))
