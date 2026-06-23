@@ -114,15 +114,20 @@ export interface ScopedRestorePreviewIdentityClaims {
 }
 
 /**
- * Canonical, ORDER-INVARIANT scope hash: binds the EXACT record set AND each record's per-record changesHash.
- * Sorted by recordId, each entry serialized as `[recordId, changesHash]` (D4). A record added/removed changes the
- * set → a different hash; a changed per-record diff → a different hash. This is what makes BS-7 hold — a scoped
- * identity for {A,B,C} cannot execute {A,B} or {A,B,C,D}, because the execute re-hashes the ACTUAL set and diverges.
+ * Canonical, ORDER-INVARIANT scope hash: binds the EXACT record set, each record's per-record changesHash, AND
+ * each record's per-record expected `version`. Sorted by recordId, each entry serialized as
+ * `[recordId, changesHash, version]` (D4). A record added/removed changes the set → a different hash; a changed
+ * per-record diff → a different hash; a changed per-record version → a different hash. This is what makes BS-7
+ * hold (a scoped identity for {A,B,C} cannot execute {A,B} or {A,B,C,D}) AND what binds the per-record
+ * optimistic-concurrency anchor: the version is FOLDED IN here at mint (BS-2) and re-folded at verify (BS-3) from
+ * the CLIENT-SUBMITTED expectedVersion — never trusted as free side-input — so a client that submits the current
+ * (rather than the preview-time) version to slip past the CAS instead diverges the hash and is rejected. Same
+ * filter-then-hash discipline that folds `fieldIds` into `changesHash`, applied to the version axis.
  */
-export function hashScope(perRecord: Array<{ recordId: string; changesHash: string }>): string {
+export function hashScope(perRecord: Array<{ recordId: string; changesHash: string; version: number }>): string {
   const canon = [...perRecord]
     .sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0))
-    .map((r) => JSON.stringify([r.recordId, r.changesHash]))
+    .map((r) => JSON.stringify([r.recordId, r.changesHash, r.version]))
   return createHash('sha256').update(JSON.stringify(canon)).digest('hex')
 }
 
