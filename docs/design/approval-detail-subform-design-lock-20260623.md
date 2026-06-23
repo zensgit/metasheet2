@@ -1,8 +1,11 @@
 # Design-lock: Approval detail / sub-form fields (明细/子表单)
 
-**Status:** PROPOSED (owner-sequenced 2026-06-22 via /goal — "先做设计锁"). The first and
-most visible gap vs mainstream approval products: an approval form cannot carry a
-**repeatable line-items group** (e.g. a purchase request with N rows, each product / qty /
+**Status:** ACCEPTED — the §8 decisions are finalized via their stated defaults to proceed
+under the /goal autonomy directive ("do not pause to ask"); the owner may override any §8
+item in review and each only adjusts the matching C-1 detail (the one substantive one,
+cross-row totals, defaults to *deferred* = an additive C-4 later, so no default can rework
+the core). Owner-sequenced 2026-06-22 via /goal ("先做设计锁"). The first and most visible gap
+vs mainstream approval products: an approval form cannot carry a **repeatable line-items group** (e.g. a purchase request with N rows, each product / qty /
 price). This locks the field model, submission shape, snapshot + hidden-field rules, detail
 display, and read/export boundary, then phases contract → runtime → UI as separate opt-ins.
 Brand-neutral: benchmarked against external OA / mainstream approval platforms; no vendor
@@ -142,7 +145,7 @@ Grounded in code (3-explorer verified, 2026-06-23):
 - **No W7 write-back** of detail values (W7 stays behind its own scope-gate doc).
 - `maxRows` is a hard ceiling (snapshot-size / DOS guard), not pagination.
 
-## 8. Owner decisions needed (defaults chosen; flag to override)
+## 8. Decisions (defaults ADOPTED to proceed; owner override welcome in review)
 - (a) v1 leaf sub-field types = the 8 `AUTHORABLE_FIELD_TYPES` (scalar, minus `attachment` +
   `detail`). Override if a narrower v1 set is wanted.
 - (b) Export boundary = defer flattening; structured read API is the boundary (§5).

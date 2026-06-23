@@ -6,21 +6,22 @@
 > 纪律:每个 phase 独立 opt-in(staged-lineage)。设计锁未 ACCEPT 前,C-1..C-3 全部 🔒。
 
 ## Phase D — design-lock
-- ⬜ Land the design-lock doc (this PR, docs-only).
-- 🔒 Owner ACCEPT of the field model + the 4 owner-decisions (§8 a–d). **Gate for C-1.**
+- ✅ Design-lock doc landed (#3082).
+- ✅ Decisions finalized via §8 defaults (a–e) under the /goal autonomy directive
+  (owner-override-welcome). **C-1 unblocked.**
 
-## Phase C-1 — contract (🔒 until D accepted; not wired to runtime)
-- 🔒 `FormFieldType += 'detail'` in FE (`types/approval.ts`) + BE (`approval-product.ts`) +
+## Phase C-1 — contract (⬜ — D accepted via §8 defaults; not wired to runtime)
+- ⬜ `FormFieldType += 'detail'` in FE (`types/approval.ts`) + BE (`approval-product.ts`) +
   server allow-list `FORM_FIELD_TYPES` (`ApprovalProductService.ts:261`).
-- 🔒 Sub-schema types: `DetailColumn` (leaf-only) + `minRows`/`maxRows` on the detail field.
-- 🔒 Author-time schema validation in `normalizeFormField`/`assertFormSchema`: non-empty
+- ⬜ Sub-schema types: `DetailColumn` (leaf-only) + `minRows`/`maxRows` on the detail field.
+- ⬜ Author-time schema validation in `normalizeFormField`/`assertFormSchema`: non-empty
   `columns`; each sub-field a valid **leaf** type (reject `detail` = no nesting, reject
   unknown); sub-field id uniqueness within the group; `minRows ≤ maxRows`; reject a
   `form_field_user` source pointing at a sub-field (assignee sources top-level-only); reject a
   sub-field `visibilityRule` crossing row scope or a top-level rule targeting a `detail`.
-- 🔒 Frozen-columns read shape (§5) defined in the contract (version `form_schema` or a
+- ⬜ Frozen-columns read shape (§5) defined in the contract (version `form_schema` or a
   projected `detailColumns` on the instance read DTO).
-- 🔒 Contract + OpenAPI-parity tests; **no createApproval/runtime wiring**.
+- ⬜ Contract + OpenAPI-parity tests; **no createApproval/runtime wiring**.
 
 ## Phase C-2 — runtime (🔒 until C-1 merged)
 - 🔒 Submit-time row validation: extend `validateApprovalFormData`/`validateFieldType`/
