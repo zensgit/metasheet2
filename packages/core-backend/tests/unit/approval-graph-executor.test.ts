@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ApprovalGraphExecutor, validateApprovalFormData } from '../../src/services/ApprovalGraphExecutor'
+import { ApprovalGraphExecutor, validateApprovalFormData, pruneHiddenFormData } from '../../src/services/ApprovalGraphExecutor'
 import type { FormSchema, RuntimeGraph } from '../../src/types/approval-product'
 
 describe('ApprovalGraphExecutor', () => {
@@ -937,5 +937,84 @@ describe('validateApprovalFormData', () => {
     }
     const executor = new ApprovalGraphExecutor(runtimeGraph, {})
     expect(executor.buildAddSignAssignments('approval_1', [], 'user-1')).toEqual([])
+  })
+})
+
+describe('validateApprovalFormData — detail (明细) rows (C-2)', () => {
+  const detailSchema: FormSchema = {
+    fields: [
+      {
+        id: 'items', type: 'detail', label: '明细', required: true, minRows: 1, maxRows: 3,
+        columns: [
+          { id: 'product', type: 'text', label: '品名', required: true },
+          { id: 'qty', type: 'number', label: '数量', required: true },
+          // required, but only visible (hence only required) when product === 'special'
+          { id: 'note', type: 'text', label: '备注', required: true, visibilityRule: { fieldId: 'product', operator: 'eq', value: 'special' } },
+        ],
+      },
+    ],
+  }
+
+  it('accepts valid rows', () => {
+    expect(validateApprovalFormData(detailSchema, { items: [{ product: 'A', qty: 2 }] })).toEqual([])
+  })
+
+  it('row-addresses a missing required cell', () => {
+    expect(validateApprovalFormData(detailSchema, { items: [{ product: 'A' }] })).toEqual(['items[0].qty is required'])
+  })
+
+  it('row-addresses a wrong cell type', () => {
+    expect(validateApprovalFormData(detailSchema, { items: [{ product: 'A', qty: 'two' }] })).toEqual(['items[0].qty must be a number'])
+  })
+
+  it('enforces maxRows (non-empty, too many)', () => {
+    expect(validateApprovalFormData(detailSchema, {
+      items: [{ product: 'a', qty: 1 }, { product: 'b', qty: 1 }, { product: 'c', qty: 1 }, { product: 'd', qty: 1 }],
+    })).toContain('items allows at most 3 row(s)')
+  })
+
+  it('enforces minRows (a non-empty array below the floor; an empty required detail is "required" instead)', () => {
+    // a required+empty detail is caught by the required check first (empty array = empty value)
+    expect(validateApprovalFormData(detailSchema, { items: [] })).toEqual(['items is required'])
+    // minRows is the meaningful floor for non-empty arrays: minRows 2, one row
+    const minSchema: FormSchema = { fields: [{ id: 'items', type: 'detail', label: '明细', minRows: 2, columns: [{ id: 'x', type: 'text', label: 'x' }] }] }
+    expect(validateApprovalFormData(minSchema, { items: [{ x: 'a' }] })).toContain('items requires at least 2 row(s)')
+  })
+
+  it('rejects a non-array detail value', () => {
+    expect(validateApprovalFormData(detailSchema, { items: 'nope' })).toEqual(['items must be a list'])
+  })
+
+  it('applies per-row visibility: a hidden required sub-field is not required, but required when visible', () => {
+    expect(validateApprovalFormData(detailSchema, { items: [{ product: 'A', qty: 1 }] })).toEqual([])
+    expect(validateApprovalFormData(detailSchema, { items: [{ product: 'special', qty: 1 }] })).toEqual(['items[0].note is required'])
+  })
+})
+
+describe('pruneHiddenFormData — detail (明细) per-row cells (C-2)', () => {
+  const schema: FormSchema = {
+    fields: [
+      {
+        id: 'items', type: 'detail', label: '明细',
+        columns: [
+          { id: 'product', type: 'text', label: '品名' },
+          { id: 'note', type: 'text', label: '备注', visibilityRule: { fieldId: 'product', operator: 'eq', value: 'special' } },
+        ],
+      },
+    ],
+  }
+
+  it('drops hidden cells per row and unknown sub-keys, keeps visible cells', () => {
+    expect(pruneHiddenFormData(schema, {
+      items: [
+        { product: 'A', note: 'drop-me', evil: 'x' },
+        { product: 'special', note: 'keep' },
+      ],
+    })).toEqual({
+      items: [
+        { product: 'A' },
+        { product: 'special', note: 'keep' },
+      ],
+    })
   })
 })

@@ -301,6 +301,7 @@ jobs:
             tests/integration/approval-manager-chain.db.test.ts \
             tests/integration/approval-delegation-seam.db.test.ts \
             tests/integration/approval-delegation-api.db.test.ts \
+            tests/integration/approval-detail-subform.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
