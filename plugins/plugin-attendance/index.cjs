@@ -12914,6 +12914,39 @@ async function loadApprovedRequestsForOverlay(db, orgId, userId, fromDate, toDat
   }
 }
 
+// #6 TA-1: pending-leave overlay loader — mirrors loadApprovedRequestsForOverlay but for status='pending'
+// and LEAVE only (pending overtime does not make a person "off"). Display-only; the caller adds these as
+// a distinct `pending_leave` kind. A pending row disappears here the instant the request is rejected or
+// approved (it derives live from request status — no stored pending-calendar state).
+async function loadPendingLeaveRequestsForOverlay(db, orgId, userId, fromDate, toDate) {
+  if (!userId || !fromDate || !toDate) return []
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  try {
+    const rows = await db.query(
+      `SELECT id, request_type, work_date, status, metadata, created_at
+       FROM attendance_requests
+       WHERE user_id = $1
+         AND org_id = $2
+         AND work_date BETWEEN $3 AND $4
+         AND status = 'pending'
+         AND request_type = 'leave'
+       ORDER BY work_date ASC, created_at ASC NULLS LAST, id ASC`,
+      [userId, targetOrg, fromDate, toDate]
+    )
+    return rows.map((row) => ({
+      id: row.id,
+      requestType: row.request_type,
+      workDate: normalizeDateOnly(row.work_date) ?? row.work_date,
+      status: row.status,
+      metadata: normalizeMetadata(row.metadata),
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
+    }))
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return []
+    throw error
+  }
+}
+
 // 未排班判定 — shared primitive for punch-policy S1 (unscheduled-punch) and the future unscheduled
 // reminder (design-lock #2203 §3). Returns true = the user IS scheduled for `date` OR the question
 // is not applicable; callers treat `!isUserScheduledForDate(...)` as "unscheduled".
@@ -14044,6 +14077,9 @@ async function resolveEffectiveCalendar(db, args) {
   let rotationByUser = new Map()
   let rotationShiftsById = new Map()
   let overlays = []
+  // #6 TA-1: pending-leave overlay (display-only). Loaded ONLY when args.includePending === true;
+  // every other caller (incl. the record-compute path) leaves it empty, so pending never reaches records.
+  let pendingOverlays = []
   let groupContext = null
   let groupRule = null
 
@@ -14054,6 +14090,9 @@ async function resolveEffectiveCalendar(db, args) {
     rotationByUser = rotationPrefetch.assignmentsByUser
     rotationShiftsById = rotationPrefetch.shiftsById
     overlays = await loadApprovedRequestsForOverlay(db, orgId, args.userId, from, to)
+    if (args.includePending === true) {
+      pendingOverlays = await loadPendingLeaveRequestsForOverlay(db, orgId, args.userId, from, to)
+    }
   } else if (mode === 'groupId') {
     groupContext = await loadAttendanceGroupByIdOrCode(db, orgId, args.groupId)
     if (!groupContext) throw new Error('NOT_FOUND:group')
@@ -14112,6 +14151,23 @@ async function resolveEffectiveCalendar(db, args) {
       minutes,
       status: row.status,
       refId: row.id,
+    })
+  }
+
+  // #6 TA-1: append pending-leave overlays AFTER the approved ones (empty unless includePending).
+  // Distinct kind 'pending_leave' + provisional flag so display can mark them tentative and any
+  // record/write consumer can filter them out — they are never a fact (mirror the taint-skip discipline).
+  for (const row of pendingOverlays) {
+    const key = row.workDate
+    if (!key) continue
+    if (!overlaysByDate.has(key)) overlaysByDate.set(key, [])
+    overlaysByDate.get(key).push({
+      kind: 'pending_leave',
+      source: 'attendance_requests',
+      requestType: row.requestType,
+      status: 'pending',
+      refId: row.id,
+      provisional: true,
     })
   }
 
@@ -36715,6 +36771,9 @@ module.exports = {
         const groupIdRaw = typeof req.query.groupId === 'string' ? req.query.groupId.trim() : ''
         const orgOnlyRaw = typeof req.query.orgOnly === 'string' ? req.query.orgOnly.trim().toLowerCase() : ''
         const orgOnly = orgOnlyRaw === 'true' || orgOnlyRaw === '1'
+        // #6 TA-1: opt-in pending-leave overlay (display-only). Default off → byte-identical to today.
+        const includePendingRaw = typeof req.query.includePending === 'string' ? req.query.includePending.trim().toLowerCase() : ''
+        const includePending = includePendingRaw === 'true' || includePendingRaw === '1'
 
         if (!fromRaw || !toRaw) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" and "to" are required (YYYY-MM-DD).' } })
@@ -36778,6 +36837,7 @@ module.exports = {
             userId: userIdRaw || undefined,
             groupId: groupIdRaw || undefined,
             orgOnly: orgOnly === true ? true : undefined,
+            includePending: includePending === true ? true : undefined,
             logger,
           })
           res.json({ ok: true, data: result })
