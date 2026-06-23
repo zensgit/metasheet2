@@ -34,10 +34,10 @@ The bulk-fill maps onto the resumable model exactly, so `suspended` carries the 
 
 ```
 queued
-  → running        (generate + charge + cache per provider-bound row; emit progress)
-  → suspended      (suspend_reason = manual_task: AWAITING REVIEW — the column is generated & cached)
-  → [user reviews the cached diff, confirms a subset]
-  → running        (commit the confirmed cached rows via bulk-commit, chunked)
+  → running        (generate + charge + write each provider-bound row to job-rows; emit progress)
+  → suspended      (suspend_reason = manual_task: AWAITING REVIEW — the column is generated into job-rows)
+  → [user reviews the job-rows diff, confirms a subset]
+  → running        (commit the confirmed job-rows via the per-record write discipline, chunked)
   → resolved       (per-row outcome summary)
 ```
 Branches: quota limit mid-generate → `suspended(manual_task)` + `quota_paused` (partial reviewable; ungenerated
