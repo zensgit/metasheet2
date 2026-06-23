@@ -6,22 +6,13 @@ import { redactString, redactValue } from '../multitable/automation-log-redact'
 import { resolveAiProviderReadiness } from '../services/ai-provider-readiness'
 import {
   AiProviderClient,
-  estimateAiCostUsd,
   type AiCompletionResult,
-  type AiUsage,
 } from '../services/ai-provider-client'
 import {
-  AI_USAGE_RESERVATION_GRACE_MS,
   conservativePromptTokenEstimate,
-  insertAiUsageLedgerEntry,
-  reserveAiUsage,
-  settleAiUsageReservation,
   sumAiUsageWindows,
-  type AiUsageAction,
-  type AiUsageLedgerEntry,
   type AiUsageLedgerStatus,
   type AiUsageQueryFn,
-  type AiUsageReservationResult,
 } from '../services/ai-usage-ledger'
 import {
   AI_SHORTCUT_TARGET_FIELD_TYPES,
@@ -48,7 +39,6 @@ import {
   RecordNotFoundError as ServiceNotFoundError,
   RecordValidationError as ServiceValidationError,
   VersionConflictError as ServiceVersionConflictError,
-  type ConnectionPool,
   type QueryFn,
 } from '../multitable/record-write-service'
 import { createYjsInvalidationPostCommitHook } from '../multitable/post-commit-hooks'
@@ -63,6 +53,30 @@ import {
   readBulkPreviewCacheRows,
   type BulkPreviewCacheRow,
 } from '../services/ai-bulk-preview-cache'
+import {
+  runShortcutCore,
+  type PoolLike,
+  type ShortcutRequestContext,
+} from '../services/ai-bulk-shared'
+import {
+  BulkFillJobService,
+  resolveBulkJobMaxRows,
+  resolveBulkInlineMaxRows,
+  computeScopeFingerprint,
+  findActiveBulkJob,
+  insertBulkJobHeader,
+  insertBulkJobRowsPending,
+  readBulkJobHeader,
+  readBulkJobRows,
+  readGeneratedRows,
+  countBulkJobRowsByState,
+  cancelBulkJob,
+  setHeaderRunning,
+  setHeaderAggregate,
+  setRowCommitOutcome,
+  type BulkJobRowSeed,
+} from '../services/ai-bulk-job-service'
+import type { QueueService } from '../types/plugin'
 
 /**
  * Multitable AI routes — A1 readiness (M1b) + A2 shortcut preview/run (M2).
@@ -108,39 +122,22 @@ import {
 export interface MultitableAiRouteDeps {
   /** Injected at construction (webhook-service precedent) — tests spy here; never a real provider call in CI. */
   fetchFn?: typeof fetch
+  /**
+   * Optional B-4 async-job service. When omitted, the routes build one with the
+   * same fetchFn but NO queue — the bulk-fill job's generate phase must then be
+   * driven directly (tests call `runJob`; production injects a service wired to a
+   * real QueueService so `enqueue` runs the worker out-of-band).
+   */
+  bulkJobService?: BulkFillJobService
+  /**
+   * Optional in-process queue (production wiring). When provided and no
+   * `bulkJobService` is injected, the lazily-built service registers its generate
+   * processor on this queue so `enqueue` runs `runJob` out-of-band — WITHOUT it the
+   * generate phase never executes in production. Omitted in tests (which drive
+   * `runJob` directly for determinism).
+   */
+  queue?: QueueService
 }
-
-type PoolLike = ConnectionPool & { query: QueryFn }
-
-interface ShortcutRequestContext {
-  pool: PoolLike
-  sheetId: string
-  /** null for sheet-scoped attempts (M4 suggest: NL→formula is field-authoring, not a record read). */
-  recordId: string | null
-  fieldId: string | null
-  action: AiUsageAction
-  userId: string
-}
-
-/**
- * Res-free per-attempt outcome of `runShortcutCore` (B-1). The discriminant is
- * the charge boundary: only `charged` consumed the provider (and the quota);
- * every other variant is provider-never-reached → UNCHARGED. `settle` is
- * present only on `charged` so a caller can re-settle the STATUS keeping usage
- * (e.g. a downstream write conflict) without re-charging.
- */
-type ShortcutCoreOutcome =
-  | { kind: 'unsafe_input'; message: string }
-  | { kind: 'blocked'; message: string }
-  | { kind: 'reserve_failed'; message: string }
-  | { kind: 'quota_exhausted'; reason: string }
-  | { kind: 'generation_failed_before_usage'; httpStatus: number; code: string; message: string }
-  | {
-      kind: 'charged'
-      result: AiCompletionResult
-      usage: AiUsage
-      settle: (status: AiUsageLedgerStatus, error?: string | null) => Promise<void>
-    }
 
 function sendStatus(
   res: Response,
@@ -171,19 +168,36 @@ function applyBurstLimiter(
   })
 }
 
-async function insertLedgerBestEffort(query: AiUsageQueryFn, entry: AiUsageLedgerEntry): Promise<void> {
-  try {
-    await insertAiUsageLedgerEntry(query, entry)
-  } catch (err) {
-    // Best-effort policy (§2.5): a committed write / an already-sent response
-    // must never be rolled back or failed because the ledger insert failed.
-    console.error('[multitable-ai] usage ledger insert failed (best effort):', err)
-  }
-}
-
 export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Router {
   const router = Router()
   const aiClient = new AiProviderClient({ ...(deps.fetchFn ? { fetchFn: deps.fetchFn } : {}) })
+
+  // B-4 async-job service: shared if injected (production wires a real queue),
+  // else a queue-less one over the SAME pool + fetchFn (the generate phase is then
+  // driven directly — tests call runJob). Lazily resolves the pool at first use so
+  // construction doesn't require an initialized poolManager.
+  let bulkJobServiceInstance: BulkFillJobService | undefined = deps.bulkJobService
+  const bulkJobService = {
+    get instance(): BulkFillJobService {
+      if (!bulkJobServiceInstance) {
+        bulkJobServiceInstance = new BulkFillJobService({
+          pool: poolManager.get() as unknown as PoolLike,
+          ...(deps.fetchFn ? { fetchFn: deps.fetchFn } : {}),
+          // Production passes a real queue → the service registers its generate
+          // processor and `enqueue` runs the worker out-of-band. No queue (tests) →
+          // `enqueue` is a no-op and the caller drives `runJob` directly.
+          ...(deps.queue ? { queue: deps.queue } : {}),
+        })
+      }
+      return bulkJobServiceInstance
+    },
+    registerPlan(jobId: string, plan: Parameters<BulkFillJobService['registerPlan']>[1]) {
+      this.instance.registerPlan(jobId, plan)
+    },
+    enqueue(jobId: string) {
+      return this.instance.enqueue(jobId)
+    },
+  }
 
   // E-10 burst cap resolves once at construction (caps are boot-time env);
   // keyed by the AUTHENTICATED user id (§2.5 subject key — never the
@@ -249,177 +263,6 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
   })
 
   /**
-   * RES-FREE reserve-then-settle CORE (review-fix F1) — the unit the bulk path
-   * reuses per row WITHOUT touching `res` (so a 200-row loop cannot double-send;
-   * the single-record `executeShortcut` below is now a thin wrapper over this).
-   *
-   * Gate order from "prompt assembled" onward: unsafe scan → double-confirm/
-   * readiness preflight (blocked: zero-token row, NO lock) → quota RESERVE (one
-   * SHORT advisory-locked tx: stale sweep → SUM incl. in_flight → insert the
-   * in_flight reservation) → provider call (NO lock / NO pooled connection
-   * held) → SETTLE the reservation to actual usage. Settles are best-effort
-   * (§2.5); a failing reserve fails closed.
-   *
-   * The BURST LIMITER is deliberately NOT here — it is a per-HTTP-request guard
-   * the caller applies ONCE (per-row bounding is the D3 row-cap + the D4 quota
-   * pre-check, never tenantBurstRpm self-tripping mid-batch).
-   *
-   * Returns a discriminated per-row outcome:
-   *  - `unsafe_input`                    — not sent, NO ledger row, UNCHARGED.
-   *  - `blocked`                         — preflight blocked: zero-token ledger row, UNCHARGED.
-   *  - `reserve_failed`                  — ledger unavailable, fail-closed, UNCHARGED (no row).
-   *  - `quota_exhausted`                 — reserve rejected, UNCHARGED (no row).
-   *  - `generation_failed_before_usage`  — provider blocked/errored with NO usage → settled to
-   *                                        zero usage, UNCHARGED (provider never produced output).
-   *  - `charged`                         — the provider returned (succeeded OR errored WITH usage);
-   *                                        settled to ACTUAL usage = CHARGED. `result` carries the
-   *                                        completion (text present only when `result.ok`); `settle`
-   *                                        re-settles the STATUS keeping usage (write failures etc.).
-   */
-  async function runShortcutCore(
-    ctx: ShortcutRequestContext,
-    prompt: string,
-  ): Promise<ShortcutCoreOutcome> {
-    const baseEntry = {
-      subjectKey: ctx.userId,
-      userId: ctx.userId,
-      sheetId: ctx.sheetId,
-      fieldId: ctx.fieldId,
-      recordId: ctx.recordId,
-      action: ctx.action,
-    } as const
-    const zeroUsage = { promptTokens: 0, completionTokens: 0 }
-    const query = ctx.pool.query.bind(ctx.pool) as AiUsageQueryFn
-
-    // unsafe_input pre-send scan (§2.4): the backend redactor exposes no
-    // detection surface, so detection derives from replace-and-compare — any
-    // rewrite means the assembled prompt carries secret-shaped content.
-    if (redactString(prompt) !== prompt) {
-      await insertLedgerBestEffort(query, {
-        ...baseEntry,
-        ...zeroUsage,
-        estimatedCostUsd: 0,
-        status: 'unsafe_input',
-      })
-      return {
-        kind: 'unsafe_input',
-        message: 'The assembled prompt contains secret-shaped content; the request was not sent.',
-      }
-    }
-
-    // Double-confirm / readiness / price preflight — `blocked` resolves BEFORE
-    // the reserve (zero-token row, no lock, zero outbound).
-    // complete() re-runs the same gates internally (defense in depth).
-    const pre = aiClient.preflight()
-    // `in`-guard (not `!pre.ok`): non-strict tsconfig, no boolean-discriminant narrowing.
-    if ('message' in pre) {
-      await insertLedgerBestEffort(query, {
-        ...baseEntry,
-        ...zeroUsage,
-        estimatedCostUsd: 0,
-        provider: pre.provider ?? null,
-        model: pre.model ?? null,
-        status: 'blocked',
-        error: pre.message,
-      })
-      return { kind: 'blocked', message: pre.message }
-    }
-
-    // Quota RESERVE — the advisory locks wrap ONLY this short check+insert
-    // transaction (F1: never across the provider call). The in_flight
-    // estimate (1 token/char prompt bound + the maxOutputTokens cap) counts
-    // against every concurrent reserve; overshoot is prevented while
-    // estimate ≥ actual (pessimistic for CJK, delta review NF-1) without
-    // serializing provider traffic. Settle writes actuals back.
-    let reservation: AiUsageReservationResult
-    try {
-      const estimatedUsage: AiUsage = {
-        promptTokens: conservativePromptTokenEstimate(prompt),
-        completionTokens: pre.caps.maxOutputTokens,
-      }
-      reservation = await reserveAiUsage(ctx.pool, {
-        ...baseEntry,
-        provider: pre.provider,
-        model: pre.model,
-        estimatedPromptTokens: estimatedUsage.promptTokens,
-        estimatedCompletionTokens: estimatedUsage.completionTokens,
-        estimatedCostUsd: estimateAiCostUsd(pre.price, estimatedUsage),
-        caps: {
-          tenantDailyTokenCap: pre.caps.tenantDailyTokenCap,
-          tenantWeeklyTokenCap: pre.caps.tenantWeeklyTokenCap,
-          accountDailyUsdCap: pre.caps.accountDailyUsdCap,
-        },
-        staleAfterMs: pre.caps.requestTimeoutMs + AI_USAGE_RESERVATION_GRACE_MS,
-      })
-    } catch (err) {
-      // Quota-reserve-time ledger unavailability → fail closed (§2.5).
-      console.error('[multitable-ai] quota reserve failed; failing closed:', err)
-      return { kind: 'reserve_failed', message: 'AI usage ledger is unavailable; request blocked (fail-closed).' }
-    }
-    if ('reason' in reservation) {
-      return { kind: 'quota_exhausted', reason: reservation.reason }
-    }
-    const reservationId = reservation.reservationId
-
-    // Provider call — NO lock held; a crash from here until settle leaves an
-    // in_flight row that a later reserve sweeps to zero-usage 'abandoned'.
-    const result = await aiClient.complete({ prompt })
-    const usage: AiUsage = result.usage ?? zeroUsage
-
-    // SETTLE (best-effort — never 500 a committed write / an already-sent
-    // response over a ledger UPDATE). Re-settling keeps the ACTUAL usage and
-    // only flips status/error (§2.5: the money was spent regardless).
-    const settle = async (status: AiUsageLedgerStatus, error?: string | null): Promise<void> => {
-      try {
-        await settleAiUsageReservation(query, reservationId, {
-          promptTokens: usage.promptTokens,
-          completionTokens: usage.completionTokens,
-          estimatedCostUsd: result.estimatedCostUsd,
-          provider: result.provider ?? null,
-          model: result.model ?? null,
-          durationMs: result.durationMs,
-          status,
-          error: error ?? null,
-        })
-      } catch (err) {
-        console.error('[multitable-ai] usage ledger settle failed (best effort):', err)
-      }
-    }
-
-    if (result.status === 'blocked') {
-      // Post-reserve blocked = the env raced between preflight and the call —
-      // settle to zero usage (result.usage is null on blocked). The provider
-      // never produced output → UNCHARGED (generation_failed_before_usage).
-      await settle('blocked', result.message ?? null)
-      return { kind: 'generation_failed_before_usage', httpStatus: 503, code: 'AI_BLOCKED', message: result.message ?? 'AI requests are not enabled for this deployment.' }
-    }
-
-    if (result.status === 'provider_error') {
-      // Charge invariant (§2.5): tokens are recorded WHENEVER the provider
-      // returned usage — the money is spent. A provider error with NO usage =
-      // generation_failed_before_usage (UNCHARGED, zero-token settle); a
-      // provider error WITH usage settles the ACTUAL tokens (CHARGED) — the
-      // output was produced even though the call surfaced an error.
-      await settle('provider_error', result.message ?? null)
-      if (result.usage) {
-        return { kind: 'charged', result: result as AiCompletionResult, usage, settle }
-      }
-      return { kind: 'generation_failed_before_usage', httpStatus: 502, code: 'AI_PROVIDER_ERROR', message: result.message ?? 'AI provider request failed.' }
-    }
-
-    // Settle to actual usage BEFORE any downstream write so the quota account
-    // reflects the real spend even if the write path crashes mid-flight. The
-    // provider was called and produced OUTPUT → CHARGED. NB: a 200 that omits a
-    // usage object is still a successful generation → CHARGED at zero tokens
-    // (token-sum invariant holds: 0 == 0). That is distinct from an
-    // error/blocked result with null usage above, which produced NO output and
-    // is generation_failed_before_usage (UNCHARGED). The discriminator is
-    // "output produced?", not "usage object present?".
-    await settle('succeeded')
-    return { kind: 'charged', result: result as AiCompletionResult & { ok: true }, usage, settle }
-  }
-
-  /**
    * Single-record thin wrapper over `runShortcutCore` (review-fix F1 gate
    * order preserved): burst limit (429 EARLY: NO lock, NO ledger row, the
    * limiter responds itself) → core → map the per-row outcome to `res` →
@@ -443,7 +286,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       return
     }
 
-    const outcome = await runShortcutCore(ctx, prompt)
+    const outcome = await runShortcutCore(aiClient, ctx, prompt)
     switch (outcome.kind) {
       case 'unsafe_input':
         return sendStatus(res, 422, 'unsafe_input', 'AI_UNSAFE_INPUT', outcome.message)
@@ -869,12 +712,17 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       const COMPUTED_FILTER_TYPES = new Set(['lookup', 'rollup', 'formula'])
 
       let filterNode: ReturnType<typeof parseMetaFilterInfo> = null
+      // BJ-7 scope fingerprint input: the view's persisted filter signature (a
+      // stable JSON of its filterInfo) so a re-start with the same view/filter
+      // resumes the same job and a changed filter is a distinct intent.
+      let filterSignature: string | null = null
       if (scope === 'view') {
         const view = await tryResolveView(query, viewId!, new Map())
         if (!view || view.sheetId !== sheetId) {
           return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
         }
         filterNode = parseMetaFilterInfo(view.filterInfo)
+        filterSignature = view.filterInfo == null ? '' : JSON.stringify(view.filterInfo)
       }
 
       const recordIdFilter = recordIds && recordIds.length > 0 ? new Set(recordIds) : null
@@ -916,6 +764,28 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       }
       const candidates = candidateIds.map((row) => row.id)
 
+      // ── BJ-7 active-job check BEFORE the expensive per-row gate loop ─────────────
+      // Compute the scope fingerprint (cheap) and look up an active job for this
+      // (actor, sheet, field). A MATCHING fingerprint → return that job's id
+      // (idempotent resume — never a duplicate generating run / double-charge),
+      // skipping the expensive resolution. A DIFFERENT fingerprint → 409 (a distinct
+      // intent is never silently attached to the old batch).
+      const scopeFingerprint = computeScopeFingerprint({ scope, viewId: viewId ?? null, filterSignature, recordIds: recordIds ?? null })
+      const activeJob = await findActiveBulkJob(ledgerQuery, access.userId, sheetId, fieldId)
+      if (activeJob) {
+        if (activeJob.scopeFingerprint === scopeFingerprint) {
+          return res.json({ jobId: activeJob.jobId })
+        }
+        return res.status(409).json({
+          ok: false,
+          error: {
+            code: 'ACTIVE_JOB_EXISTS',
+            message: 'An AI bulk-fill job for a different scope is already running for this field; review or cancel it before starting another.',
+            job: { jobId: activeJob.jobId, status: activeJob.status, total: activeJob.total, generated: activeJob.generated, quotaPaused: activeJob.quotaPaused },
+          },
+        })
+      }
+
       // ── D5 gates BEFORE D3/D4: only PROVIDER-BOUND rows count toward cap/quota ──
       // Build the generation set FIRST so a read-denied row is OMITTED (never counted →
       // no hidden-row oracle via total/400/429) and a not-writable row is skipped_no_perm
@@ -948,17 +818,81 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         generationCandidates.push({ recordId, version: captured.version, data: captured.data })
       }
 
-      // ── D3-A hard row cap on the PROVIDER-BOUND set (total = generatable rows, no leak) ──
-      const maxRows = (() => {
-        const raw = Number(process.env.MULTITABLE_AI_BULK_MAX_ROWS)
-        return Number.isInteger(raw) && raw > 0 ? raw : 200
-      })()
-      if (generationCandidates.length > maxRows) {
-        return res.status(400).json({
-          ok: false,
-          error: { code: 'BULK_SCOPE_TOO_LARGE', message: `Bulk scope resolves to ${generationCandidates.length} generatable rows, over the cap of ${maxRows}. Narrow the view/selection.`, total: generationCandidates.length, cap: maxRows },
-        })
+      // ── BJ-8 routing: > inline cap → async JOB (≤ job cap), else inline (UNCHANGED) ──
+      // The cap counts ONLY provider-bound rows (the locked B-1 invariant), so the
+      // routing decision rides on the same gated set. ≤ inline cap stays the v1
+      // synchronous path below (byte-identical). Over the inline cap → start a job
+      // (header + seeded job-rows + enqueue) and return { jobId }; over the JOB cap
+      // → 400 BULK_SCOPE_TOO_LARGE (no silent truncation).
+      const inlineMaxRows = resolveBulkInlineMaxRows()
+      if (generationCandidates.length > inlineMaxRows) {
+        const jobMaxRows = resolveBulkJobMaxRows()
+        if (generationCandidates.length > jobMaxRows) {
+          return res.status(400).json({
+            ok: false,
+            error: { code: 'BULK_SCOPE_TOO_LARGE', message: `Bulk scope resolves to ${generationCandidates.length} generatable rows, over the async job cap of ${jobMaxRows}. Narrow the view/selection.`, total: generationCandidates.length, cap: jobMaxRows },
+          })
+        }
+
+        // Build the per-row seeds (pending generatable + skipped_no_perm) and the
+        // in-process generation plan (the masked prompts — NEVER persisted: taint).
+        const jobId = `aibulkjob_${randomUUID()}`
+        const seeds: BulkJobRowSeed[] = []
+        const planRows: Array<{ recordId: string; prompt: string; version: number; masked: boolean }> = []
+        let ordinal = 0
+        for (const cand of generationCandidates) {
+          const prompt = assembleMaskedPrompt(config, patchContext, cand.data)
+          const readableSourceCount = config.sourceFieldIds.filter((id) => patchContext.readableEchoFieldIds.has(id)).length
+          const masked = readableSourceCount < configSourceCount
+          const currentRaw = cand.data[fieldId]
+          const currentValue = typeof currentRaw === 'string' ? currentRaw : currentRaw == null ? null : String(currentRaw)
+          seeds.push({ recordId: cand.recordId, ordinal, state: 'pending', currentValue })
+          planRows.push({ recordId: cand.recordId, prompt, version: cand.version, masked })
+          ordinal += 1
+        }
+        // skipped_no_perm rows are seeded as `state=skipped` (truthful review state),
+        // NOT counted toward `total` (the provider-bound denominator for progress).
+        for (const s of skipped) {
+          seeds.push({ recordId: s.recordId, ordinal, state: 'skipped', currentValue: null, reason: s.reason })
+          ordinal += 1
+        }
+
+        try {
+          // Insert the header FIRST — the partial UNIQUE active index enforces BJ-7
+          // (a concurrent different-scope double-start raises a unique violation we
+          // catch + resolve to the existing job). Then seed rows + register the plan.
+          await insertBulkJobHeader(ledgerQuery, {
+            jobId,
+            actorId: access.userId,
+            sheetId,
+            fieldId,
+            scopeFingerprint,
+            total: generationCandidates.length,
+          })
+        } catch (err) {
+          // Lost a concurrent-start race → return the now-active job (same fp) or 409.
+          const raced = await findActiveBulkJob(ledgerQuery, access.userId, sheetId, fieldId)
+          if (raced) {
+            if (raced.scopeFingerprint === scopeFingerprint) return res.json({ jobId: raced.jobId })
+            return res.status(409).json({
+              ok: false,
+              error: {
+                code: 'ACTIVE_JOB_EXISTS',
+                message: 'An AI bulk-fill job for a different scope is already running for this field; review or cancel it before starting another.',
+                job: { jobId: raced.jobId, status: raced.status, total: raced.total, generated: raced.generated, quotaPaused: raced.quotaPaused },
+              },
+            })
+          }
+          throw err
+        }
+        await insertBulkJobRowsPending(ledgerQuery, jobId, seeds)
+        bulkJobService.registerPlan(jobId, { actorId: access.userId, sheetId, fieldId, rows: planRows })
+        await bulkJobService.enqueue(jobId)
+        return res.json({ jobId })
       }
+      // ≤ inline cap from here: the v1 SYNCHRONOUS path, UNCHANGED. (The D3-A hard
+      // cap is now the BJ-8 routing decision above — over the inline cap routes to a
+      // job; over the job cap 400s — so no separate inline-cap 400 is reachable here.)
 
       // ── D4 pre-check on the PROVIDER-BOUND set: whole run must fit the per-tenant cap ──
       // Estimate generatable-rows × per-row tokens against the CALLER's daily/weekly
@@ -1001,6 +935,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         const masked = readableSourceCount < configSourceCount
 
         const outcome = await runShortcutCore(
+          aiClient,
           { pool, sheetId, recordId, fieldId, action: 'preview', userId: access.userId },
           prompt,
         )
@@ -1219,87 +1154,25 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
           continue
         }
 
-        // Re-gate AT COMMIT (criterion 6) — perms may have changed since preview.
-        // 6a) Row-level read gate (read-denied / vanished now → skipped_no_perm).
-        const readable = await requireRecordReadable(req, query, sheetId, recordId)
-        if ('status' in readable) {
-          outcomes.push({ recordId, outcome: 'skipped_no_perm' })
-          continue
-        }
-        // 6b) Layer-3 field-permission on the CACHED target field (the run's field).
-        //     patchRecords does NOT execute field_permissions on writes (#2106 F3),
-        //     so this pre-check IS that layer's enforcement point — mirror the run path.
-        const targetPermission = patchContext.fieldPermissions[cached.fieldId]
-        if (!targetPermission || targetPermission.visible === false || targetPermission.readOnly === true) {
-          outcomes.push({ recordId, outcome: 'skipped_no_perm' })
-          continue
-        }
-        // 6c) Read the record ONCE for the WRITE gate — createdBy (own-write scope)
-        //     + existence. NB: the version used for the conflict check is the CACHED
-        //     previewVersion (anti-TOCTOU), NOT this freshly-read one.
-        const current = await readRecordOnce(query, sheetId, recordId)
-        if (!current) {
-          // Record vanished after preview → re-gate fails (nothing writable).
-          outcomes.push({ recordId, outcome: 'skipped_no_perm' })
-          continue
-        }
-        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, current.createdBy, 'edit')) {
-          outcomes.push({ recordId, outcome: 'skipped_no_perm' })
-          continue
-        }
-
-        // ── Land the EXACT cached value through the AUTHORITATIVE write path ──────
-        // RecordWriteService.patchRecords (NEVER raw SQL), SAME post-commit Yjs
-        // invalidation wiring as POST /patch and the per-record run. ONE record per
-        // call (single-entry Map → no all-or-nothing rollback across rows). The
-        // CACHED previewVersion rides in as expectedVersion (criterion 3).
-        const recordWriteService = new RecordWriteService(pool, eventBus, createRecordWriteHelpers(req, pool))
-        const invalidator = getYjsInvalidatorForRoutes()
-        if (invalidator) {
-          recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(invalidator)])
-        }
-
-        try {
-          await recordWriteService.patchRecords({
-            sheetId,
-            changesByRecord: new Map([
-              [recordId, [{ fieldId: cached.fieldId, value: cached.proposedValue, expectedVersion: cached.previewVersion }]],
-            ]),
-            actorId: access.userId || null,
-            fields: patchContext.fields,
-            visiblePropertyFields: patchContext.readableEchoFields,
-            visiblePropertyFieldIds: patchContext.readableEchoFieldIds,
-            attachmentFields: patchContext.attachmentFields,
-            fieldById: patchContext.fieldById,
-            capabilities,
-            sheetScope,
-            access,
-          })
-          outcomes.push({ recordId, outcome: 'written' })
-        } catch (err) {
-          // NO ledger writes here (criterion 4): the charge settled at B-1 preview.
-          if (err instanceof ServiceVersionConflictError) {
-            // The record shifted since the preview was generated — DROP it, never
-            // overwrite against data the user did not review (criterion 3).
-            outcomes.push({ recordId, outcome: 'stale_reprev' })
-            continue
-          }
-          // Everything else patchRecords can throw at commit — a locked record
-          // (ServiceValidationError 'Record is locked', the record-lock guard fires
-          // BEFORE the version check), a now-forbidden field, a vanished record, a
-          // validation failure, or any unexpected error — is a per-row write
-          // conflict. Never all-or-nothing: record it and keep going.
-          if (
-            err instanceof ServiceValidationError ||
-            err instanceof ServiceFieldForbiddenError ||
-            err instanceof ServiceNotFoundError
-          ) {
-            outcomes.push({ recordId, outcome: 'write_conflict' })
-            continue
-          }
-          console.error('[multitable-ai] bulk-commit row write failed:', err)
-          outcomes.push({ recordId, outcome: 'write_conflict' })
-        }
+        // Re-gate AT COMMIT (criterion 6) + land the EXACT cached value through the
+        // shared per-record write discipline (criteria 3 + 5 + 6). The CACHED
+        // previewVersion rides in as expectedVersion (anti-TOCTOU). Identical code
+        // to the B-4 job commit phase — only the value/version SOURCE differs.
+        const outcome = await commitOneRecord({
+          req,
+          query,
+          pool,
+          patchContext,
+          capabilities,
+          sheetScope,
+          access,
+          sheetId,
+          recordId,
+          fieldId: cached.fieldId,
+          value: cached.proposedValue,
+          expectedVersion: cached.previewVersion,
+        })
+        outcomes.push({ recordId, outcome })
       }
 
       const counts = outcomes.reduce<Record<CommitOutcome, number>>(
@@ -1314,6 +1187,251 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
     } catch (err) {
       console.error('[multitable-ai] bulk-commit failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to commit AI bulk preview' } })
+    }
+  })
+
+  /**
+   * Resolve a bulk-fill job for the caller, enforcing the per-route gates shared
+   * by every job route: the job must EXIST, belong to the CALLER (BJ-7 owner
+   * gate — a job's generated outputs encode source content only its actor may
+   * read), and live on the URL sheet (cross-sheet jobId guard). Returns the
+   * header or sends the appropriate 401/403/404 and returns null.
+   */
+  async function resolveBulkJobForActor(
+    req: Request,
+    res: Response,
+    query: AiUsageQueryFn,
+    sheetId: string,
+    jobId: string,
+  ): Promise<Awaited<ReturnType<typeof readBulkJobHeader>>> {
+    const userId = resolveRequestUserKey(req)
+    if (!userId) {
+      res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
+      return null
+    }
+    const header = await readBulkJobHeader(query, jobId)
+    // Owner + cross-sheet checks collapse to 404 (never reveal another actor's /
+    // another sheet's job exists).
+    if (!header || header.actorId !== userId || header.sheetId !== sheetId) {
+      res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Bulk job not found: ${jobId}` } })
+      return null
+    }
+    return header
+  }
+
+  /**
+   * B-4 BJ-3 — POLL a bulk-fill job's progress. Actor + cross-sheet gated. Returns
+   * the durable header counters + per-state row counts + the commit aggregate.
+   */
+  router.get('/sheets/:sheetId/ai/shortcut/bulk-job/:jobId', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const jobId = typeof req.params.jobId === 'string' ? req.params.jobId.trim() : ''
+    if (!sheetId || !jobId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and jobId are required' } })
+    }
+    try {
+      const pool = poolManager.get() as unknown as PoolLike
+      const query = pool.query.bind(pool) as AiUsageQueryFn
+      const header = await resolveBulkJobForActor(req, res, query, sheetId, jobId)
+      if (!header) return
+      const counts = await countBulkJobRowsByState(query, jobId)
+      return res.json({
+        jobId: header.jobId,
+        state: header.status,
+        suspendReason: header.suspendReason,
+        total: header.total,
+        generated: header.generated,
+        skippedCount: counts.skipped,
+        failuresCount: counts.failure,
+        committedCount: counts.committed,
+        pendingNotGeneratedCount: counts.pending_not_generated,
+        settledCost: header.settledCost,
+        quotaPaused: header.quotaPaused,
+        aggregate: header.aggregate,
+      })
+    } catch (err) {
+      console.error('[multitable-ai] bulk-job poll failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to read bulk job' } })
+    }
+  })
+
+  /**
+   * B-4 BJ-9 — paginated review of a job's rows, ordered by ordinal. Actor +
+   * cross-sheet gated. Each row carries its durable diff (current_value /
+   * proposed / masked / reason) and state; confirmable = state === 'generated'.
+   */
+  router.get('/sheets/:sheetId/ai/shortcut/bulk-job/:jobId/rows', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const jobId = typeof req.params.jobId === 'string' ? req.params.jobId.trim() : ''
+    if (!sheetId || !jobId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and jobId are required' } })
+    }
+    const cursorRaw = typeof req.query.cursor === 'string' ? Number(req.query.cursor) : NaN
+    const cursor = Number.isFinite(cursorRaw) ? cursorRaw : null
+    const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : NaN
+    const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 100
+    try {
+      const pool = poolManager.get() as unknown as PoolLike
+      const query = pool.query.bind(pool) as AiUsageQueryFn
+      const header = await resolveBulkJobForActor(req, res, query, sheetId, jobId)
+      if (!header) return
+      const rows = await readBulkJobRows(query, jobId, cursor, limit)
+      const nextCursor = rows.length === limit ? rows[rows.length - 1]!.ordinal : null
+      return res.json({
+        rows: rows.map((r) => ({
+          recordId: r.recordId,
+          ordinal: r.ordinal,
+          state: r.state,
+          currentValue: r.currentValue,
+          proposed: r.proposedValue,
+          masked: r.masked,
+          reason: r.reason,
+        })),
+        nextCursor,
+      })
+    } catch (err) {
+      console.error('[multitable-ai] bulk-job rows failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to read bulk job rows' } })
+    }
+  })
+
+  /**
+   * B-4 BJ-4 — CANCEL a job. Actor + cross-sheet gated. The worker stops at the
+   * next row; rows already `generated` stay charged + committable; ungenerated
+   * rows → pending_not_generated (uncharged); the job → `rejected`. No release.
+   */
+  router.post('/sheets/:sheetId/ai/shortcut/bulk-job/:jobId/cancel', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const jobId = typeof req.params.jobId === 'string' ? req.params.jobId.trim() : ''
+    if (!sheetId || !jobId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and jobId are required' } })
+    }
+    try {
+      const pool = poolManager.get() as unknown as PoolLike
+      const query = pool.query.bind(pool) as AiUsageQueryFn
+      const header = await resolveBulkJobForActor(req, res, query, sheetId, jobId)
+      if (!header) return
+      const cancelled = await cancelBulkJob(query, jobId)
+      const after = await readBulkJobHeader(query, jobId)
+      return res.json({ jobId, cancelled, state: after?.status ?? header.status })
+    } catch (err) {
+      console.error('[multitable-ai] bulk-job cancel failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to cancel bulk job' } })
+    }
+  })
+
+  /**
+   * B-4 BJ-10 — COMMIT the confirmed subset of a job. The FE submits the
+   * confirmed `recordIds` ONCE; the BACKEND chunks the confirmed `generated`
+   * rows (≤ the inline cap per chunk) through the SHARED per-record write
+   * discipline (commitOneRecord — re-gate + expectedVersion stale-drop + per-actor
+   * owner gate, sourced from job-rows), writes each outcome back to job-rows, and
+   * stores the durable aggregate on the header (poll-readable).
+   */
+  router.post('/sheets/:sheetId/ai/shortcut/bulk-job/:jobId/commit', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const jobId = typeof req.params.jobId === 'string' ? req.params.jobId.trim() : ''
+    const schema = z.object({ recordIds: z.array(z.string().min(1).max(50)).min(1).max(5000) })
+    const parsed = schema.safeParse(req.body)
+    if (!sheetId || !jobId || !parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: !sheetId || !jobId ? 'sheetId and jobId are required' : parsed.error?.message } })
+    }
+    const confirmed = new Set(parsed.data.recordIds)
+
+    // Burst rate limit ONCE at entry (bulk-commit parity) — a privileged batch endpoint.
+    if ((await applyBurstLimiter(burstLimiter, req, res)) === 'limited') {
+      return
+    }
+
+    try {
+      const pool = poolManager.get() as unknown as PoolLike
+      const query = pool.query.bind(pool) as QueryFn
+      const ledgerQuery = pool.query.bind(pool) as AiUsageQueryFn
+
+      const header = await resolveBulkJobForActor(req, res, ledgerQuery, sheetId, jobId)
+      if (!header) return
+
+      // BJ-4/BJ-5: the job must be in a COMMITTABLE state — one where the worker is
+      // no longer mutating it. `suspended` = generated & awaiting review; `errored` =
+      // crashed mid-generate (BJ-5, persisted partial committable); `rejected` =
+      // cancelled (BJ-4, already-generated rows still committable). Reject `queued`/
+      // `running` (the worker is still generating — committing now would race it and
+      // write a partial) and `resolved` (already committed). 409 Conflict.
+      if (header.status !== 'suspended' && header.status !== 'errored' && header.status !== 'rejected') {
+        return res.status(409).json({
+          ok: false,
+          error: { code: 'BULK_JOB_NOT_COMMITTABLE', message: `Bulk job is not awaiting commit (status: ${header.status}).` },
+        })
+      }
+
+      // Sheet-level gates (bulk-commit parity) — the actor must STILL be able to
+      // write the sheet; the per-record re-gate inside commitOneRecord enforces the
+      // rest. resolveSheetReadableCapabilities resolves the caller's RBAC.
+      const { access, capabilities, sheetScope } = await resolveSheetReadableCapabilities(req, query, sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
+      }
+      if (!capabilities.canRead || !capabilities.canEditRecord) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      const patchContext = await buildRecordPatchContext(req, query, sheetId, access, capabilities)
+      if (!patchContext) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+
+      // The write set = the job's `generated` rows whose recordId was confirmed.
+      // A confirmed recordId NOT in the generated set is ignored (it has no value
+      // to write — skipped / failure / pending_not_generated rows are not confirmable).
+      const generatedRows = (await readGeneratedRows(ledgerQuery, jobId)).filter((r) => confirmed.has(r.recordId))
+
+      // BACKEND-owned chunking (BJ-10): ≤ the inline cap per chunk. The FE never loops.
+      const chunkSize = resolveBulkInlineMaxRows()
+      type JobCommitOutcome = 'committed' | 'stale_reprev' | 'write_conflict' | 'skipped_no_perm'
+      const counts: Record<JobCommitOutcome, number> = { committed: 0, stale_reprev: 0, write_conflict: 0, skipped_no_perm: 0 }
+
+      // Flip a COMMITTABLE job → running for the commit phase, GUARDED (clears
+      // suspend_reason). False = a concurrent commit already claimed it (or it left
+      // the committable set between the read above and here) → 409, no double-commit.
+      if (!(await setHeaderRunning(ledgerQuery, jobId))) {
+        return res.status(409).json({
+          ok: false,
+          error: { code: 'BULK_JOB_COMMIT_IN_PROGRESS', message: 'Another commit is already in progress for this job.' },
+        })
+      }
+
+      for (let i = 0; i < generatedRows.length; i += chunkSize) {
+        const chunk = generatedRows.slice(i, i + chunkSize)
+        for (const row of chunk) {
+          const written = await commitOneRecord({
+            req,
+            query,
+            pool,
+            patchContext,
+            capabilities,
+            sheetScope,
+            access,
+            sheetId,
+            recordId: row.recordId,
+            fieldId: header.fieldId,
+            value: row.proposedValue ?? '',
+            expectedVersion: row.previewVersion ?? 0,
+          })
+          // Map the B-2 vocabulary `written` → the job-rows terminal `committed`.
+          const outcome: JobCommitOutcome = written === 'written' ? 'committed' : written
+          counts[outcome] += 1
+          await setRowCommitOutcome(ledgerQuery, jobId, row.recordId, outcome)
+        }
+      }
+
+      // Durable aggregate on the header; the job resolves (terminal success — the
+      // generate+review+commit cycle is complete, even if some rows stale-dropped).
+      const aggregate = { confirmed: parsed.data.recordIds.length, attempted: generatedRows.length, counts }
+      await setHeaderAggregate(ledgerQuery, jobId, aggregate, 'resolved')
+
+      return res.json({ jobId, state: 'resolved', counts, attempted: generatedRows.length })
+    } catch (err) {
+      console.error('[multitable-ai] bulk-job commit failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to commit bulk job' } })
     }
   })
 
@@ -1423,6 +1541,103 @@ export function buildFormulaSuggestPrompt(instruction: string, fields: { id: str
     '',
     `User request: ${instruction}`,
   ].join('\n')
+}
+
+/** Per-record commit outcome (B-2 vocabulary; the job-commit phase maps `written`→`committed`). */
+export type RecordCommitOutcome = 'written' | 'stale_reprev' | 'write_conflict' | 'skipped_no_perm'
+
+/**
+ * Commit ONE confirmed value through the AUTHORITATIVE write path — the shared
+ * per-record write discipline used by BOTH `bulk-commit` (B-2, value from the
+ * inline preview cache) and the B-4 job commit phase (value from job-rows). The
+ * ONLY thing that differs between the two callers is the value + expectedVersion
+ * SOURCE; the re-gate sequence (read → layer-3 field-perm → own-write) and the
+ * patchRecords + outcome mapping are byte-identical (so a value the user did NOT
+ * review is never written, and perms are re-checked at commit — criteria 3 + 6).
+ *
+ * Re-gate AT COMMIT (perms may have changed since the preview/generation):
+ *  6a) record-read gate (read-denied / vanished → skipped_no_perm)
+ *  6b) layer-3 field-permission on the target field (patchRecords does NOT run
+ *      field_permissions on writes, #2106 F3 → this IS that enforcement point)
+ *  6c) own-write scope (createdBy) — then patchRecords (which re-enforces
+ *      lock/version in-transaction). The CACHED previewVersion rides in as
+ *      expectedVersion → a shifted record drops as `stale_reprev`.
+ */
+async function commitOneRecord(args: {
+  req: Request
+  query: QueryFn
+  pool: PoolLike
+  patchContext: RecordPatchRouteContext
+  capabilities: Awaited<ReturnType<typeof resolveSheetReadableCapabilities>>['capabilities']
+  sheetScope: Awaited<ReturnType<typeof resolveSheetReadableCapabilities>>['sheetScope']
+  access: Awaited<ReturnType<typeof resolveSheetReadableCapabilities>>['access']
+  sheetId: string
+  recordId: string
+  fieldId: string
+  value: string
+  expectedVersion: number
+}): Promise<RecordCommitOutcome> {
+  const { req, query, pool, patchContext, capabilities, sheetScope, access, sheetId, recordId, fieldId, value, expectedVersion } = args
+
+  // 6a) Row-level read gate.
+  const readable = await requireRecordReadable(req, query, sheetId, recordId)
+  if ('status' in readable) return 'skipped_no_perm'
+  // 6b) Layer-3 field-permission on the target field.
+  const targetPermission = patchContext.fieldPermissions[fieldId]
+  if (!targetPermission || targetPermission.visible === false || targetPermission.readOnly === true) {
+    return 'skipped_no_perm'
+  }
+  // 6c) Own-write scope (createdBy) + existence. The version used for the conflict
+  //     check is the CACHED expectedVersion (anti-TOCTOU), NOT this freshly-read one.
+  const current = await readRecordOnce(query, sheetId, recordId)
+  if (!current) return 'skipped_no_perm'
+  if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, current.createdBy, 'edit')) {
+    return 'skipped_no_perm'
+  }
+
+  // Land the EXACT value through RecordWriteService.patchRecords (NEVER raw SQL),
+  // SAME post-commit Yjs invalidation wiring as POST /patch. ONE record per call.
+  const recordWriteService = new RecordWriteService(pool, eventBus, createRecordWriteHelpers(req, pool))
+  const invalidator = getYjsInvalidatorForRoutes()
+  if (invalidator) {
+    recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(invalidator)])
+  }
+
+  try {
+    await recordWriteService.patchRecords({
+      sheetId,
+      changesByRecord: new Map([[recordId, [{ fieldId, value, expectedVersion }]]]),
+      actorId: access.userId || null,
+      fields: patchContext.fields,
+      visiblePropertyFields: patchContext.readableEchoFields,
+      visiblePropertyFieldIds: patchContext.readableEchoFieldIds,
+      attachmentFields: patchContext.attachmentFields,
+      fieldById: patchContext.fieldById,
+      capabilities,
+      sheetScope,
+      access,
+    })
+    return 'written'
+  } catch (err) {
+    // NO ledger writes here — the charge settled at generation time.
+    if (err instanceof ServiceVersionConflictError) {
+      // Record shifted since the value was generated — DROP it, never overwrite
+      // against data the user did not review.
+      return 'stale_reprev'
+    }
+    // Everything else patchRecords can throw at commit (a locked record, a
+    // now-forbidden field, a vanished record, a validation failure, or any
+    // unexpected error) is a per-row write conflict. Never all-or-nothing.
+    if (
+      err instanceof ServiceValidationError ||
+      err instanceof ServiceFieldForbiddenError ||
+      err instanceof ServiceNotFoundError
+    ) {
+      return 'write_conflict'
+    }
+    console.error('[multitable-ai] commit row write failed:', err)
+    return 'write_conflict'
+  }
 }
 
 function resolvePersistedShortcutConfig(
