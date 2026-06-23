@@ -99,7 +99,23 @@ async function main() {
   assert.equal(fresh[0].label, 'Stock-preparation option sync', 'catalog label not mutated by caller')
   assert.equal(fresh[0].optionFields.length, 4, 'catalog optionFields not mutated by caller')
 
-  console.log('✓ field-option-sync-contract: normalizer + enum-strict + required + values-free(non-vacuous) + catalog + deep-copy tests passed')
+  // --- FOS-4b-1: permittedActionIds (enum-strict ∈ registry; default []) ---
+  assert.deepEqual(normalizeFieldOptionSyncPreset(validPreset()).permittedActionIds, [], 'permittedActionIds defaults to []')
+  assert.deepEqual(
+    normalizeFieldOptionSyncPreset(validPreset({ permittedActionIds: ['plm.stock-preparation.pull-bom.v1'] })).permittedActionIds,
+    ['plm.stock-preparation.pull-bom.v1'],
+    'a registered predefined action is permitted',
+  )
+  assert.throws(
+    () => normalizeFieldOptionSyncPreset(validPreset({ permittedActionIds: ['evil.exec.v1'] })),
+    (e) => e instanceof FieldOptionSyncContractError && e.details.field === 'permittedActionIds',
+    'unregistered permittedActionId rejected (enum-strict ∈ registry)',
+  )
+  assert.throws(() => normalizeFieldOptionSyncPreset(validPreset({ permittedActionIds: 'x' })), /must be an array/, 'permittedActionIds must be an array')
+  // catalog presets bind no actions
+  assert.ok(listFieldOptionSyncPresets().every((p) => Array.isArray(p.permittedActionIds) && p.permittedActionIds.length === 0), 'catalog presets carry no action bindings')
+
+  console.log('✓ field-option-sync-contract: normalizer + enum-strict + required + values-free(non-vacuous) + catalog + deep-copy + permittedActionIds tests passed')
 }
 
 main().catch((e) => {
