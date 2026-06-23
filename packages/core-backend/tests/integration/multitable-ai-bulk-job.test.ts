@@ -30,7 +30,7 @@
  *
  * Wired into .github/workflows/plugin-tests.yml multitable real-DB explicit list.
  */
-import express, { type Express } from 'express'
+import express, { type Express, type Request } from 'express'
 import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
@@ -46,6 +46,7 @@ import {
   setHeaderRunning,
   insertBulkJobHeader,
 } from '../../src/services/ai-bulk-job-service'
+import { QueueServiceImpl } from '../../src/services/QueueService'
 import type { PoolLike } from '../../src/services/ai-bulk-shared'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -526,6 +527,48 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
       expect(await setHeaderRunning(queryFn, jid)).toBe(false)
       expect((await dbJobHeader(jid))!.status).toBe(s)
     }
+  })
+
+  // ── PRODUCTION WIRING (finding #1): the injected queue drives the worker out-of-band ──
+  test('production wiring: an injected queue runs the generate worker via enqueue (NO bulkJobService, runJob NEVER called directly) → suspended', async () => {
+    // An app wired EXACTLY like index.ts: a real QueueServiceImpl injected as `queue`,
+    // and NO bulkJobService. The lazily-built service registers its generate processor
+    // on this queue, so enqueue() must drain to runJob out-of-band — the exact path that
+    // finding #1 reported never executes in production. (Every other golden injects a
+    // queue-less bulkJobService and drives runJob by hand, so none exercise this.)
+    const queue = new QueueServiceImpl()
+    const app2 = express()
+    app2.use(express.json())
+    app2.use((req, _res, next) => {
+      ;(req as Request & { user?: unknown }).user = currentUser
+      next()
+    })
+    app2.use('/api/multitable', univerMetaRouter())
+    app2.use('/api/multitable', createMultitableAiRoutes({ fetchFn: fetchStub, queue }))
+
+    const ids = [0, 1, 2].map((i) => `rec_b4_wire${i}_${TS}`)
+    for (const id of ids) await seedRecord(id, { [FLD_SRC]: `wire ${id}` }, ACTOR)
+
+    const start = await request(app2)
+      .post(`/api/multitable/sheets/${SHEET_ID}/ai/shortcut/bulk-preview`)
+      .send({ fieldId: FLD_TARGET, scope: 'sheet' })
+    expect(start.status).toBe(200)
+    const jobId = start.body.jobId as string
+    expect(jobId).toMatch(/^aibulkjob_/)
+
+    // Do NOT call runJob — the queue alone must drive the generate phase. Poll the header
+    // until the out-of-band worker suspends it for review (proves enqueue→processor→runJob).
+    let state = ''
+    const deadline = Date.now() + 4000
+    while (Date.now() < deadline) {
+      state = String((await dbJobHeader(jobId))?.status ?? '')
+      if (state === 'suspended' || state === 'errored' || state === 'rejected') break
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    expect(state).toBe('suspended')
+    const header = await dbJobHeader(jobId)
+    expect(Number(header!.generated)).toBe(3)
+    expect(fetchCallCount).toBe(3)
   })
 
   // ── DURABILITY KEYSTONE (BJ-9) ─────────────────────────────────────────────
