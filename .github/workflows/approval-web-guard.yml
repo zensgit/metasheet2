@@ -19,6 +19,7 @@ on:
     paths:
       - 'apps/web/src/approvals/conditionEdit.ts'
       - 'apps/web/src/approvals/parallelEdit.ts'
+      - 'apps/web/src/approvals/ccEdit.ts'
       - 'apps/web/src/approvals/detailField.ts'
       - 'apps/web/src/approvals/templateAuthoring.ts'
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
@@ -29,12 +30,14 @@ on:
       - 'apps/web/tests/approval-template-authoring-graph-preserve.test.ts'
       - 'apps/web/tests/approval-template-authoring-condition-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-parallel-edit.test.ts'
+      - 'apps/web/tests/approval-template-authoring-cc-edit.test.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
     paths:
       - 'apps/web/src/approvals/conditionEdit.ts'
       - 'apps/web/src/approvals/parallelEdit.ts'
+      - 'apps/web/src/approvals/ccEdit.ts'
       - 'apps/web/src/approvals/detailField.ts'
       - 'apps/web/src/approvals/templateAuthoring.ts'
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
@@ -45,6 +48,7 @@ on:
       - 'apps/web/tests/approval-template-authoring-graph-preserve.test.ts'
       - 'apps/web/tests/approval-template-authoring-condition-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-parallel-edit.test.ts'
+      - 'apps/web/tests/approval-template-authoring-cc-edit.test.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -99,4 +103,4 @@ jobs:
         # changes; branches/joinNodeKey + all other nodes + edges byte-identical) + cross-phase
         # compose (condition G-2 + parallel G-3 both land) + seeding round-trip + validation preview
         # (joinMode in backend-accepted {'all','any'}; cc untouched / G-4).
-        run: pnpm --filter @metasheet/web exec vitest run approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit --reporter=dot
