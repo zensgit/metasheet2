@@ -1,21 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
 
-// Wire-drift lock for record restore (#2662). The drawer emits
-// `restore { recordId, targetVersion, expectedVersion }`; the workbench's
-// `onRestoreRecordVersion` handler is the ONLY untested link between that emit
-// and `client.restoreRecordVersion` — drawer-emit (meta-record-drawer-restore.spec)
-// and the client call (multitable-record-restore-client.spec) are covered, the
-// backend is covered by the restore integration matrix, but the handler that
-// threads the payload through (and confirm / success / noop / error / refresh)
-// was tested nowhere. This captures the real `@restore` listener the workbench
-// wires down and asserts the payload round-trips into the exact client args.
+// Wire-drift lock for record restore. The drawer emits `restore { recordId, targetVersion, expectedVersion[, fieldIds] }`;
+// the workbench's `onRestoreRecordVersion` is the ONLY untested link between that emit and the restore chain.
+//
+// Post slice-2 (#3042): full-record AND per-field both go through preview → confirm(panel) → execute — there is no
+// `window.confirm` and no direct `client.restoreRecordVersion` from this handler anymore. This spec asserts the
+// REAL contract: onRestore → `client.restorePreviewRecord(sheetId, recordId, targetVersion, fieldIds)` opens the
+// RestorePreviewDialog; confirming it → `client.restoreExecuteRecord(sheetId, recordId, targetVersion,
+// expectedVersion, previewIdentity, fieldIds)`; success → toast + grid refresh; cancel / no-identity → no execute.
 
 const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
 
-// Capture the real listeners/props the workbench passes to MetaRecordDrawer.
+// Capture the real listeners/props the workbench passes to MetaRecordDrawer + RestorePreviewDialog.
 let capturedDrawerAttrs: Record<string, unknown> | null = null
+let capturedDialogAttrs: Record<string, unknown> | null = null
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -62,7 +62,7 @@ vi.mock('../src/multitable/components/MetaViewTabBar.vue', () => ({ default: stu
 vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
 vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({ default: stubComponent('MetaGridTable') }))
 vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubComponent('MetaFormView') }))
-// Capturing stub for the component under wiring test — records the real listeners.
+// Capturing stub for the drawer under wiring test — records the real listeners.
 vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
   default: defineComponent({
     name: 'MetaRecordDrawer',
@@ -70,6 +70,18 @@ vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
     setup(_props, { attrs }) {
       capturedDrawerAttrs = attrs as Record<string, unknown>
       return () => h('div', { 'data-stub-MetaRecordDrawer': 'true' })
+    },
+  }),
+}))
+// Capturing stub for the restore confirm panel — records the props (visible/executable/changes) + the @confirm/@cancel
+// listeners. No props/emits declared, so everything falls through to attrs (same trick as the drawer stub).
+vi.mock('../src/multitable/components/RestorePreviewDialog.vue', () => ({
+  default: defineComponent({
+    name: 'RestorePreviewDialog',
+    inheritAttrs: false,
+    setup(_props, { attrs }) {
+      capturedDialogAttrs = attrs as Record<string, unknown>
+      return () => h('div', { 'data-stub-RestorePreviewDialog': 'true' })
     },
   }),
 }))
@@ -94,8 +106,13 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
 
-async function flushUi(cycles = 5): Promise<void> {
+async function flushUi(cycles = 6): Promise<void> {
   for (let i = 0; i < cycles; i += 1) { await Promise.resolve(); await nextTick() }
+}
+
+const PREVIEW_OK = {
+  changes: [{ fieldId: 'fld_title', op: 'set', value: 'old' }],
+  visibleAffectedFieldCount: 1, schemaDrift: false, targetVersion: 2, previewIdentity: 'tok_preview',
 }
 
 function createWorkbenchMock() {
@@ -110,8 +127,9 @@ function createWorkbenchMock() {
       loadFormContext: vi.fn(), getRecord: vi.fn(), createSheet: vi.fn(), createBase: vi.fn(),
       createField: vi.fn(), preparePersonField: vi.fn(), updateField: vi.fn(), deleteField: vi.fn(),
       createView: vi.fn(), deleteView: vi.fn(), patchRecords: vi.fn(), submitForm: vi.fn(), updateView: vi.fn(),
-      // The function under test:
-      restoreRecordVersion: vi.fn().mockResolvedValue({ recordId: 'rec_42', newVersion: 6, noop: false, restoredFieldIds: ['fld_title'], skippedFieldIds: [] }),
+      // The functions under test (the slice-2 chain):
+      restorePreviewRecord: vi.fn().mockResolvedValue({ ...PREVIEW_OK }),
+      restoreExecuteRecord: vi.fn().mockResolvedValue({ recordId: 'rec_42', newVersion: 6, noop: false, restoredFieldIds: ['fld_title'] }),
     },
     sheets: ref([{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]),
     fields: ref([{ id: 'fld_title', name: 'Title', type: 'string' }]),
@@ -136,7 +154,7 @@ function createGridMock() {
   return {
     fields: ref([]), rows: ref([]), loading: ref(false), currentPage: ref(1), totalPages: ref(1),
     page: ref({ offset: 0, limit: 50, total: 0, hasMore: false }), visibleFields: ref([]), sortRules: ref([]),
-    filterRules: ref([]), filterConjunction: ref('and'), canUndo: ref(false), canRedo: ref(false),
+    filterRules: ref([]), filterConjunction: ref('and'), filterGroups: ref([]), canLoadMore: ref(false), canUndo: ref(false), canRedo: ref(false),
     groupFieldId: ref<string | null>(null), groupFieldIds: ref([]), groupField: ref(null), groupFields: ref([]), hiddenFieldIds: ref<string[]>([]),
     columnWidths: ref<Record<string, number>>({}), linkSummaries: ref({}), personSummaries: ref({}), attachmentSummaries: ref({}),
     fieldPermissions: ref({}), viewPermission: ref(null), rowActions: ref(null), rowActionOverrides: ref({}),
@@ -150,19 +168,17 @@ function createGridMock() {
   }
 }
 
-type RestoreFn = (p: { recordId: string; targetVersion: number; expectedVersion: number }) => Promise<void>
+type RestoreFn = (p: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] }) => Promise<void>
 
-describe('MultitableWorkbench record-restore handler wiring (#2662)', () => {
+describe('MultitableWorkbench record-restore handler wiring (preview→execute, slice 2)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
-  let confirmSpy: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
     capturedDrawerAttrs = null
-    confirmSpy = vi.fn(() => true)
-    vi.stubGlobal('confirm', confirmSpy)
+    capturedDialogAttrs = null
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -185,62 +201,88 @@ describe('MultitableWorkbench record-restore handler wiring (#2662)', () => {
     expect(typeof onRestore).toBe('function')
     return onRestore
   }
+  const confirmDialog = async () => { await (capturedDialogAttrs!.onConfirm as () => void)(); await flushUi() }
+  const cancelDialog = async () => { await (capturedDialogAttrs!.onCancel as () => void)(); await flushUi() }
 
-  it('threads the emitted payload into client.restoreRecordVersion(sheetId, recordId, targetVersion, expectedVersion, fieldIds) — exact positions (wire-drift lock)', async () => {
+  it('full-record: onRestore opens a PREVIEW (restorePreviewRecord with fieldIds undefined), not a direct restore', async () => {
     const onRestore = await mountAndGetRestore()
     await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5 })
     await flushUi()
-    expect(workbenchMock.client.restoreRecordVersion).toHaveBeenCalledTimes(1)
-    // Active sheet from the workbench + the three payload fields, in order, + fieldIds (undefined for
-    // a full restore). A reorder (e.g. target/expected swapped) would silently corrupt restore — caught.
-    expect(workbenchMock.client.restoreRecordVersion).toHaveBeenCalledWith('sheet_orders', 'rec_42', 2, 5, undefined)
-    // success branch: toast + grid refresh
+    // The preview is the FIRST call — exact positions; a reorder (target/expected) would silently corrupt restore.
+    expect(workbenchMock.client.restorePreviewRecord).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.restorePreviewRecord).toHaveBeenCalledWith('sheet_orders', 'rec_42', 2, undefined)
+    // No write yet, and no legacy direct path.
+    expect(workbenchMock.client.restoreExecuteRecord).not.toHaveBeenCalled()
+    expect((workbenchMock.client as Record<string, unknown>).restoreRecordVersion).toBeUndefined()
+    // The confirm panel is shown + executable (the preview returned an identity).
+    expect(capturedDialogAttrs!.visible).toBe(true)
+    expect(capturedDialogAttrs!.executable).toBe(true)
+  })
+
+  it('per-field: the fieldIds selection is threaded into the preview', async () => {
+    const onRestore = await mountAndGetRestore()
+    await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5, fieldIds: ['fld_a', 'fld_b'] })
+    await flushUi()
+    expect(workbenchMock.client.restorePreviewRecord).toHaveBeenCalledWith('sheet_orders', 'rec_42', 2, ['fld_a', 'fld_b'])
+  })
+
+  it('confirming the panel executes via restoreExecuteRecord (identity + fieldIds, exact positions) + refresh', async () => {
+    const onRestore = await mountAndGetRestore()
+    await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5, fieldIds: ['fld_a', 'fld_b'] })
+    await flushUi()
+    await confirmDialog()
+    expect(workbenchMock.client.restoreExecuteRecord).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.restoreExecuteRecord).toHaveBeenCalledWith('sheet_orders', 'rec_42', 2, 5, 'tok_preview', ['fld_a', 'fld_b'])
     expect(showSuccessSpy).toHaveBeenCalledTimes(1)
     expect(showSuccessSpy.mock.calls[0][0]).toMatch(/Restored|已恢复/)
     expect(gridMock.loadViewData).toHaveBeenCalledWith(0)
     expect(showErrorSpy).not.toHaveBeenCalled()
   })
 
-  it('threads a per-field selection (fieldIds) through to the client (Arc1·S2)', async () => {
-    const onRestore = await mountAndGetRestore()
-    await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5, fieldIds: ['fld_a', 'fld_b'] })
-    await flushUi()
-    expect(workbenchMock.client.restoreRecordVersion).toHaveBeenCalledWith('sheet_orders', 'rec_42', 2, 5, ['fld_a', 'fld_b'])
-    expect(showSuccessSpy).toHaveBeenCalledTimes(1)
-  })
-
-  it('does nothing when the user cancels the confirm', async () => {
-    confirmSpy.mockReturnValue(false)
+  it('cancelling the panel writes nothing', async () => {
     const onRestore = await mountAndGetRestore()
     await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5 })
     await flushUi()
-    expect(workbenchMock.client.restoreRecordVersion).not.toHaveBeenCalled()
+    await cancelDialog()
+    expect(workbenchMock.client.restoreExecuteRecord).not.toHaveBeenCalled()
+    expect(capturedDialogAttrs!.visible).toBe(false)
     expect(showSuccessSpy).not.toHaveBeenCalled()
-    expect(showErrorSpy).not.toHaveBeenCalled()
   })
 
-  it('does nothing when there is no active sheet', async () => {
+  it('no active sheet → no preview', async () => {
     const onRestore = await mountAndGetRestore()
     workbenchMock.activeSheetId.value = null
     await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5 })
     await flushUi()
-    expect(workbenchMock.client.restoreRecordVersion).not.toHaveBeenCalled()
+    expect(workbenchMock.client.restorePreviewRecord).not.toHaveBeenCalled()
   })
 
-  it('surfaces the noop branch distinctly from a real restore', async () => {
-    workbenchMock.client.restoreRecordVersion.mockResolvedValueOnce({ recordId: 'rec_42', newVersion: 5, noop: true, restoredFieldIds: [], skippedFieldIds: [] })
+  it('a non-executable preview (schema drift → previewIdentity null) cannot execute even if confirm is forced', async () => {
+    workbenchMock.client.restorePreviewRecord.mockResolvedValueOnce({ ...PREVIEW_OK, schemaDrift: true, previewIdentity: null })
+    const onRestore = await mountAndGetRestore()
+    await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5 })
+    await flushUi()
+    expect(capturedDialogAttrs!.executable).toBe(false) // dialog blocks confirm; handler also guards on identity
+    await confirmDialog()
+    expect(workbenchMock.client.restoreExecuteRecord).not.toHaveBeenCalled()
+  })
+
+  it('the noop branch (execute → noop) is surfaced distinctly from a real restore', async () => {
+    workbenchMock.client.restoreExecuteRecord.mockResolvedValueOnce({ recordId: 'rec_42', newVersion: 5, noop: true, restoredFieldIds: [] })
     const onRestore = await mountAndGetRestore()
     await onRestore({ recordId: 'rec_42', targetVersion: 5, expectedVersion: 5 })
     await flushUi()
+    await confirmDialog()
     expect(showSuccessSpy).toHaveBeenCalledTimes(1)
     expect(showSuccessSpy.mock.calls[0][0]).toMatch(/Already at this version|已是该版本/)
   })
 
-  it('surfaces the backend error message (e.g. VERSION_CONFLICT) and does not refresh', async () => {
-    workbenchMock.client.restoreRecordVersion.mockRejectedValueOnce(new Error('Record is at version 6, expected 5'))
+  it('surfaces an execute error (e.g. VERSION_CONFLICT) and does not refresh', async () => {
+    workbenchMock.client.restoreExecuteRecord.mockRejectedValueOnce(new Error('Record is at version 6, expected 5'))
     const onRestore = await mountAndGetRestore()
     await onRestore({ recordId: 'rec_42', targetVersion: 2, expectedVersion: 5 })
     await flushUi()
+    await confirmDialog()
     expect(showErrorSpy).toHaveBeenCalledTimes(1)
     expect(showErrorSpy.mock.calls[0][0]).toBe('Record is at version 6, expected 5')
     expect(gridMock.loadViewData).not.toHaveBeenCalled()
