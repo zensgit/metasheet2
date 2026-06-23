@@ -31,9 +31,16 @@
  * per-row gate to make the cap decision anyway). The route seeds job-rows as
  * `pending` (+ ordinal + current_value) and enqueues; the worker generates from
  * the seeded pending rows, supplied the un-persistable (taint) prompt inputs via
- * an in-process plan registry keyed by jobId. A plan absent at run time (process
- * restarted after enqueue) → header `errored`, the persisted partial intact and
+ * an in-process plan registry keyed by jobId. If runJob runs with NO registered plan
+ * (an in-process plan loss) it marks the header `errored`, leaving the persisted partial
  * committable (BJ-5).
+ *
+ * SCOPE (Slice 1): crash coverage is the IN-PROCESS exception path — runJob wraps the
+ * worker body after the claim and maps any unexpected throw to `errored` (see runJob). A
+ * HARD process restart is NOT auto-reconciled here: the in-memory queue + plan registry are
+ * gone, so runJob is never re-invoked, and a job left `queued`/`running` stays active until
+ * reconciled. That startup/poll reconciliation (stale `queued`/`running` → `errored`) is a
+ * B-4 follow-up, not implemented in Slice 1.
  */
 
 import { randomUUID, createHash } from 'crypto'
@@ -419,8 +426,9 @@ async function suspendIfRunning(query: AiUsageQueryFn, jobId: string, quotaPause
 /**
  * Mark the job `errored` (BJ-5) — GUARDED on `running` so a concurrent cancel (→ rejected)
  * is never clobbered. Generated rows are untouched and stay committable (errored ∈ the
- * commit committable set). Used for the plan-absent restart case and any unexpected worker
- * crash after the queued→running claim.
+ * commit committable set). Used for the plan-absent case (an in-process plan loss) and any
+ * unexpected worker crash after the queued→running claim. (Does NOT cover a hard process
+ * restart — runJob is never re-invoked then; that reconciliation is a B-4 follow-up.)
  */
 async function markErroredIfRunning(query: AiUsageQueryFn, jobId: string): Promise<void> {
   await query(
@@ -474,9 +482,11 @@ export async function cancelBulkJob(query: AiUsageQueryFn, jobId: string): Promi
  * The route-resolved generation plan for ONE job — supplies the worker the
  * un-persistable (taint) prompt inputs. Held in an in-process registry keyed by
  * jobId; dropped at suspend/terminal (so ≤5000 rows' data is not retained through
- * a long review wait). A plan absent at run time = a process restart after
- * enqueue → the job is marked `errored` and the persisted partial stays
- * committable (BJ-5: no auto-resume of generation in v1).
+ * a long review wait). If runJob runs with NO registered plan (an in-process plan
+ * loss) the job is marked `errored` and the persisted partial stays committable
+ * (BJ-5: no auto-resume of generation in v1). A HARD process restart is NOT covered
+ * here — the queue + plans are gone, so runJob is never re-invoked; reconciling jobs
+ * left `queued`/`running` after a restart is a B-4 follow-up (startup/poll sweep).
  */
 export interface BulkJobGenerationPlan {
   actorId: string
@@ -574,8 +584,10 @@ export class BulkFillJobService {
   private async runGeneratePhase(query: AiUsageQueryFn, jobId: string): Promise<void> {
     const plan = this.plans.get(jobId)
     if (!plan) {
-      // Process restarted after enqueue (the in-memory plan is gone) → mark errored.
-      // The persisted partial (any seeded/generated rows) stays committable (BJ-5).
+      // runJob was invoked with NO registered plan (an in-process plan loss) → mark errored;
+      // the persisted partial (any seeded/generated rows) stays committable (BJ-5). NOTE: this
+      // does NOT fire on a hard process restart — the queue is empty then, so runJob is never
+      // re-invoked; reconciling stale queued/running jobs is a B-4 follow-up (startup/poll sweep).
       await markErroredIfRunning(query, jobId)
       return
     }

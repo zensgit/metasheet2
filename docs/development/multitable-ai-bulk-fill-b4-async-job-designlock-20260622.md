@@ -87,9 +87,13 @@ release (charge-on-generation). The actor may still review + commit what was gen
 
 ### BJ-5 — Crash-safety: persisted partial is committable; no auto-resume in v1
 **Lock:** each row's resolution is written to **`multitable_ai_bulk_job_rows` as it is produced** (durable), so a
-crashed/restarted job loses no work — its `generated` rows stay reviewable + committable, its `pending` rows are
-visibly un-generated; the job header is marked `errored`. **Deferred:** auto-resuming *generation* after a crash
-(the workflow model supports resume, but v1 leaves the partial reviewable/committable instead).
+crashed job loses no work — its `generated` rows stay reviewable + committable, its `pending` rows are visibly
+un-generated. **Slice 1 scope:** an IN-PROCESS worker exception (after the queued→running claim) is caught by
+`runJob`, which marks the header `errored` — a committable terminal state — without clobbering the generated rows
+(real-DB golden: "BJ-5 crash → errored"). **Deferred to a B-4 follow-up:** (a) reconciling a HARD process restart —
+the in-memory queue + plan registry are gone, so `runJob` is never re-invoked and a job left `queued`/`running`
+stays active until a startup/poll sweep marks stale jobs `errored`/`rejected`; (b) auto-resuming *generation* after
+a crash (the workflow model supports resume, but v1 leaves the partial reviewable/committable instead).
 
 ### BJ-6 — Async cap (higher than the inline 200)
 **Lock:** `MULTITABLE_AI_BULK_JOB_MAX_ROWS` (default 5000, aligned to the server view-load clamp). Over it →
