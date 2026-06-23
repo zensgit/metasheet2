@@ -23,7 +23,7 @@
 | **FOS-4b-1(action contract)** | 动作注册表 `FOS_PREDEFINED_ACTIONS` + preset `permittedActionIds`(enum-strict ∈ 注册表)+ normalizer(注册表∩permitted、param 白名单、gating 注册表所有、禁动作体)。**LOCK-SAFE 零执行**(generic route 仍 fail-closed;未接执行;stock-prep 零漂移) | ✅ done | #3066(`7a602a013`) |
 | **FOS-4b-2(action dry-run path)** | generic route `dryRun` 模式接受 actionId 引用 → 经 FOS-4b-1 注册表∩preset 校验 → values-free preview;**先不执行写**(preview 在 kernel 前 return → 零 patch / 零执行);非 dryRun + 动作 → fail-closed;pure-option 零漂移 | ✅ done(**owner ratified dry-run-only**)| #3072(`6f6ff921d`) |
 | FOS-4b-3-impl(sandbox apply gate)| P0 fail-closed sandbox 闸,守住 small+large-BOM 两条 apply 路径;server config / env(`STOCK_PREP_SANDBOX_MODE`+allowlist)开关;prod canonical 始终拒 | ✅ shipped(sandbox-only;owner ratified A;adversarial review APPROVE,large-BOM bypass 已闭)| 本 PR |
-| FOS-4b-3-prod(首笔生产 apply)| 解除 sandbox 限制、对 prod canonical 真实写 | 🔒 gated(独立 owner gate;sandbox-first 证完后)| — |
+| FOS-4b-3-prod(首笔生产 apply)| 解除 sandbox 限制、对 prod canonical 真实写 | 🔒 gated(独立 owner gate;**先过 sandbox validation runbook**,sandbox-first 证完后才提议)| `…fos-4b-3-sandbox-validation-runbook-20260623.md` |
 | FOS-4b 真实业务域 preset | stock-prep 表以外 source/target,各带自己的 readiness binding | 🔒 gated(需 named target) | 设计锁 §7.2 |
 | scheduled 触发 | scheduled / after_source_refresh | 🔒 gated(demand-gated,各带 gate + observability) | 设计锁 §11 |
 
