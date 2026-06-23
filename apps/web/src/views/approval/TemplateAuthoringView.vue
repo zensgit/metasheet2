@@ -51,11 +51,12 @@
     />
 
     <!-- G-1/G-2: a complex graph is preserved, not unsupported — informational, save stays enabled.
-         G-2 makes condition nodes editable; parallel / cc stay read-only (G-3 / G-4). -->
+         G-2 makes condition nodes editable; G-3 makes a parallel node's joinMode editable; cc stays
+         read-only (G-4). branches / join target / all edges are preserved topology. -->
     <el-alert
       v-if="!unsupportedReason && graphReadOnlyMessage"
       :title="graphReadOnlyMessage"
-      description="表单与基本信息可编辑；条件分支节点可编辑分支规则，并行 / 抄送节点暂以只读结构展示。未改动的节点与连线在保存时原样保留。"
+      description="表单与基本信息可编辑；条件分支节点可编辑分支规则，并行节点可编辑汇聚模式，抄送节点暂以只读结构展示。分支拓扑与连线在保存时原样保留。"
       type="info"
       show-icon
       :closable="false"
@@ -498,7 +499,39 @@
               </el-form-item>
             </div>
 
-            <!-- parallel / cc / approval — read-only summary (G-3 / G-4). -->
+            <!-- G-3: editable parallel node — `joinMode` ONLY (会签 all / 或签 any, both
+                 backend-accepted). `branches` (fork edges) + `joinNodeKey` are TOPOLOGY: shown
+                 read-only, preserved byte-for-byte on save. -->
+            <div
+              v-else-if="node.type === 'parallel' && parallelEditFor(node.key)"
+              class="template-authoring__parallel"
+              data-testid="approval-parallel-editor"
+              :data-parallel-node="node.key"
+            >
+              <el-form-item label="汇聚模式" class="template-authoring__parallel-join-mode">
+                <el-select
+                  v-model="parallelEditFor(node.key)!.joinMode"
+                  size="small"
+                  :disabled="readOnly"
+                  style="width: 240px"
+                  data-testid="approval-parallel-join-mode"
+                >
+                  <el-option
+                    v-for="mode in PARALLEL_JOIN_MODES"
+                    :key="mode"
+                    :label="parallelJoinModeLabel(mode)"
+                    :value="mode"
+                  />
+                </el-select>
+              </el-form-item>
+              <!-- branches + join target are preserved topology (not editable here). -->
+              <ul class="template-authoring__node-summary" data-testid="approval-parallel-topology">
+                <li>并行分支：{{ (node.config as ParallelNodeConfig).branches.join('、') || '（无）' }}</li>
+                <li>汇聚节点：{{ (node.config as ParallelNodeConfig).joinNodeKey || '（无）' }}</li>
+              </ul>
+            </div>
+
+            <!-- cc / approval — read-only summary (G-4). -->
             <template v-else>
               <ul v-if="nodeConfigSummary(node).length" class="template-authoring__node-summary">
                 <li v-for="(line, lineIndex) in nodeConfigSummary(node)" :key="lineIndex">{{ line }}</li>
@@ -688,12 +721,14 @@ import {
   unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
   CONDITION_RULE_OPERATORS,
+  PARALLEL_JOIN_MODES,
   type ApprovalStepDraft,
   type ConditionBranchEdit,
   type ConditionNodeEdit,
   type ConditionRuleEdit,
   type ConditionRuleOperator,
   type FieldAuthoringDraft,
+  type ParallelNodeEdit,
   type TemplateAuthoringDraft,
 } from '../../approvals/templateAuthoring'
 import type {
@@ -701,6 +736,7 @@ import type {
   ApprovalNode,
   CcNodeConfig,
   ConditionNodeConfig,
+  ParallelJoinMode,
   ParallelNodeConfig,
 } from '../../types/approval'
 import { useApprovalDirectory } from '../../approvals/useApprovalDirectory'
@@ -850,6 +886,24 @@ function conditionOutgoingEdgeKeys(nodeKey: string): string[] {
   return (draft.value.preservedGraph?.edges ?? [])
     .filter((edge) => edge.source === nodeKey)
     .map((edge) => edge.key)
+}
+
+// ── G-3 parallel editor (joinMode ONLY; branches / joinNodeKey are preserved topology, read-only) ──
+// The editable model lives on `draft.parallelEdits[nodeKey]`, seeded 1:1 from the preserved parallel
+// nodes. The select below mutates ONLY `joinMode`; `buildApprovalGraph` re-applies it onto a COPY of
+// the graph (branches/joinNodeKey + every non-parallel node + all edges untouched). Both 'all' and
+// 'any' are offered because the backend `normalizeApprovalGraph` accepts both (`PARALLEL_JOIN_MODES`
+// = {'all','any'}, joinMode written verbatim) and the runtime executes 'any' (first-wins).
+function parallelEditFor(nodeKey: string): ParallelNodeEdit | undefined {
+  return draft.value.parallelEdits?.[nodeKey]
+}
+
+const PARALLEL_JOIN_MODE_LABELS: Record<ParallelJoinMode, string> = {
+  all: '全部完成（会签）',
+  any: '任一完成（或签 / 抢占）',
+}
+function parallelJoinModeLabel(mode: ParallelJoinMode): string {
+  return PARALLEL_JOIN_MODE_LABELS[mode] ?? mode
 }
 
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
