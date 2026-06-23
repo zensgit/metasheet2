@@ -99,6 +99,27 @@ describeIfDatabase('multitable scoped restore batch-execute — BS-3 (real DB)',
     expect((restoreRevs.rows[0] as { n: number }).n).toBe(3)
   })
 
+  test('per-record ISOLATION: distinct snapshots → each record restores to ITS OWN v1 (no cross-record contamination)', async () => {
+    // the shared-fixture goldens would pass even if the code applied ONE record's diff to all three. Distinct v1
+    // snapshots make a recordId-mapping / contamination bug visible (the wire-vs-fixture-drift rule, record axis).
+    await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET])
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET])
+    const seedDistinct = async (id: string, v1name: string, v1salary: number) => {
+      await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,2)', [id, SHEET, JSON.stringify({ [NAME]: 'current', [SALARY]: 999 })])
+      await q(`INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at) VALUES (gen_random_uuid(), $1, $2, 1, 'create', 'rest', ARRAY[$3,$4]::text[], '{}'::jsonb, $5::jsonb, now())`, [SHEET, id, NAME, SALARY, JSON.stringify({ [NAME]: v1name, [SALARY]: v1salary })])
+      await q(`INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at) VALUES (gen_random_uuid(), $1, $2, 2, 'update', 'rest', ARRAY[$3,$4]::text[], '{}'::jsonb, $5::jsonb, now())`, [SHEET, id, NAME, SALARY, JSON.stringify({ [NAME]: 'current', [SALARY]: 999 })])
+    }
+    await seedDistinct(A, 'alpha', 100); await seedDistinct(B, 'beta', 200); await seedDistinct(C, 'gamma', 300)
+    const { token } = await freshIdentity([A, B, C])
+    const res = await batchExecute([A, B, C], { [A]: 2, [B]: 2, [C]: 2 }, token)
+    expect(res.status).toBe(200)
+    expect(res.body?.data?.restoredCount).toBe(3)
+    // each record landed on ITS OWN snapshot — not a shared one
+    expect((await recordRow(A))?.data).toEqual({ [NAME]: 'alpha', [SALARY]: 100 })
+    expect((await recordRow(B))?.data).toEqual({ [NAME]: 'beta', [SALARY]: 200 })
+    expect((await recordRow(C))?.data).toEqual({ [NAME]: 'gamma', [SALARY]: 300 })
+  })
+
   test('[P2] verify-before-write: a forged token over an all-noop set 4xxes, never a 200 noop short-circuit', async () => {
     // restore everything first → now all 3 are AT v1 (an execute targeting v1 nets zero for all → contributing empty)
     const { token } = await freshIdentity([A, B, C])
@@ -134,6 +155,9 @@ describeIfDatabase('multitable scoped restore batch-execute — BS-3 (real DB)',
     expect(byId[B].status).toBe('skipped')
     expect(byId[B].skipReason).toBe('conflict') // the in-transaction CAS caught the moved version
     expect((await recordRow(B))?.data?.[NAME]).toBe('b') // B untouched (still its current value, not rewound)
+    // the survivors were actually WRITTEN to v1 (not merely reported 'restored')
+    expect((await recordRow(A))?.data?.[NAME]).toBe('a')
+    expect((await recordRow(C))?.data?.[NAME]).toBe('a')
   })
 
   test('write-level denied: ONE record row-denied since preview → PARTIAL skip(denied), the others restored', async () => {
@@ -150,6 +174,9 @@ describeIfDatabase('multitable scoped restore batch-execute — BS-3 (real DB)',
     expect(byId[C].skipReason).toBe('denied') // skipped at the FRESH row-deny gate (the SR-2 fan-out surface)
     expect(res.body?.data?.restoredCount).toBe(2)
     expect((await recordRow(C))?.version).toBe(2) // C never written
+    // the survivors A,B were actually WRITTEN to v1 (not merely reported 'restored')
+    expect((await recordRow(A))?.data?.[NAME]).toBe('a')
+    expect((await recordRow(B))?.data?.[NAME]).toBe('a')
   })
 
   test('BS-7 keystone: executing a SUBSET of the token scope → 409 (the scopeHash binds the exact set)', async () => {
