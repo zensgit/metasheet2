@@ -17,6 +17,7 @@ const ADMIN = `del-admin-${TS}`
 const FROM = `del-from-${TS}`
 const TO = `del-to-${TS}`
 const MGR = `del-mgr-${TS}`
+const MGR_ROLE = `del-mgr-role-${TS}`
 
 async function canListen(): Promise<boolean> {
   return await new Promise((r) => {
@@ -51,9 +52,12 @@ describeIfDatabase('delegation (委托) config CRUD — real-DB API', () => {
   beforeAll(async () => {
     expect(await canListen()).toBe(true)
     await ensureApprovalSchemaReady()
-    // Seed the real RBAC chain for a least-privilege manager: rbacGuard walks
-    // user_permissions / namespace admission, not just the token claims, so the
-    // manage-only positive needs an actual grant (mirrors the W6 seam test seedUsers).
+    // Seed the real RBAC chain so a least-privilege (non-admin) manager reaches the routes.
+    // `approval-templates` is a namespace-admission-controlled resource, so
+    // userHasPermission / rbacGuard gate on isPermissionAllowedByNamespaceAdmission BEFORE
+    // any user_permissions grant is consulted — the manager needs (a) a role whose
+    // role_permissions put `approval-templates` in controlledNamespaces, and (b) an ENABLED
+    // user_namespace_admissions row for that namespace.
     const seedPool = poolManager.get()
     await seedPool.query(`INSERT INTO permissions (code, name, description) VALUES ('approval-templates:manage', 'Approval Templates Manage', 'delegation API test') ON CONFLICT (code) DO NOTHING`)
     await seedPool.query(
@@ -62,7 +66,14 @@ describeIfDatabase('delegation (委托) config CRUD — real-DB API', () => {
        ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
       [MGR, `${MGR}@example.test`],
     )
-    await seedPool.query(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approval-templates:manage') ON CONFLICT DO NOTHING`, [MGR])
+    await seedPool.query(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [MGR, MGR_ROLE])
+    await seedPool.query(`INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'approval-templates:manage') ON CONFLICT DO NOTHING`, [MGR_ROLE])
+    await seedPool.query(
+      `INSERT INTO user_namespace_admissions (user_id, namespace, enabled)
+       VALUES ($1, 'approval-templates', TRUE)
+       ON CONFLICT (user_id, namespace) DO UPDATE SET enabled = TRUE`,
+      [MGR],
+    )
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
     base = `http://127.0.0.1:${server.getAddress()!.port}`
@@ -84,7 +95,9 @@ describeIfDatabase('delegation (委托) config CRUD — real-DB API', () => {
         await pool.query(`DELETE FROM approval_templates WHERE id = ANY($1)`, [tids])
       }
       await pool.query(`DELETE FROM approval_delegations WHERE delegator_user_id LIKE $1`, [`%-${TS}`])
-      await pool.query(`DELETE FROM user_permissions WHERE user_id = $1`, [MGR])
+      await pool.query(`DELETE FROM user_namespace_admissions WHERE user_id = $1`, [MGR])
+      await pool.query(`DELETE FROM user_roles WHERE user_id = $1`, [MGR])
+      await pool.query(`DELETE FROM role_permissions WHERE role_id = $1`, [MGR_ROLE])
       await pool.query(`DELETE FROM users WHERE id = $1`, [MGR])
     } catch {
       /* best effort */
@@ -96,14 +109,18 @@ describeIfDatabase('delegation (委托) config CRUD — real-DB API', () => {
     expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
-  it('enforces approval-templates:manage on the routes (403 without it; manage-only is allowed)', async () => {
-    // a non-admin user WITHOUT approval-templates:manage → 403 on read AND write
+  // P2 boundary — NEGATIVE (the core regression guard: trips if a route loses its gate).
+  it('rejects a caller without approval-templates:manage (403 on GET + POST)', async () => {
     const reader = await tokWith(base, `del-reader-${TS}`, 'user', 'approvals:read')
     expect((await req(base, '/api/approval-delegations', reader)).status).toBe(403)
     expect(
       (await req(base, '/api/approval-delegations', reader, { method: 'POST', body: { delegatorUserId: `x-${TS}`, delegateeUserId: `y-${TS}`, scope: 'all', ...WINDOW } })).status,
     ).toBe(403)
-    // a non-admin user holding ONLY approval-templates:manage (not *:*) → allowed
+  })
+
+  // P2 boundary — POSITIVE (least-privilege, NOT admin *:*): a non-admin whose only grant is
+  // approval-templates:manage (via the seeded role + namespace admission) is admitted.
+  it('admits a non-admin holding only approval-templates:manage (200)', async () => {
     const manager = await tokWith(base, MGR, 'user', 'approval-templates:manage')
     expect((await req(base, '/api/approval-delegations', manager)).status).toBe(200)
   })
