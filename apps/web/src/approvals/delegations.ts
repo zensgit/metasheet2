@@ -1,6 +1,6 @@
 // Delegation (委托) config client — talks to /api/approval-delegations.
-// A user manages only their own delegations (the backend keys on the authenticated
-// actor as delegator), so no delegator field is sent from the client.
+// ADMIN-managed (approval-templates:manage): an admin configures delegations for any
+// user, so the create payload carries the chosen delegatorUserId.
 import { apiGet, apiPost, apiFetch } from '../utils/api'
 
 const USE_MOCK = import.meta.env.DEV || (globalThis as { __APPROVAL_MOCK__?: boolean }).__APPROVAL_MOCK__ === true

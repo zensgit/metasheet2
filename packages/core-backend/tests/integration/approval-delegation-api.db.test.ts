@@ -28,6 +28,10 @@ async function tok(base: string, userId: string): Promise<string> {
   const res = await fetch(`${base}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`)
   return ((await res.json()) as { token: string }).token
 }
+async function tokWith(base: string, userId: string, roles: string, perms: string): Promise<string> {
+  const res = await fetch(`${base}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=${encodeURIComponent(roles)}&perms=${encodeURIComponent(perms)}`)
+  return ((await res.json()) as { token: string }).token
+}
 async function req(base: string, path: string, token: string, opts: { method?: string; body?: unknown } = {}): Promise<Response> {
   return fetch(`${base}${path}`, {
     method: opts.method || 'GET',
@@ -75,6 +79,18 @@ describeIfDatabase('delegation (委托) config CRUD — real-DB API', () => {
 
   it('sentinel: DATABASE_URL is set', () => {
     expect(process.env.DATABASE_URL).toBeTruthy()
+  })
+
+  it('enforces approval-templates:manage on the routes (403 without it; manage-only is allowed)', async () => {
+    // a non-admin user WITHOUT approval-templates:manage → 403 on read AND write
+    const reader = await tokWith(base, `del-reader-${TS}`, 'user', 'approvals:read')
+    expect((await req(base, '/api/approval-delegations', reader)).status).toBe(403)
+    expect(
+      (await req(base, '/api/approval-delegations', reader, { method: 'POST', body: { delegatorUserId: `x-${TS}`, delegateeUserId: `y-${TS}`, scope: 'all', ...WINDOW } })).status,
+    ).toBe(403)
+    // a non-admin user holding ONLY approval-templates:manage (not *:*) → allowed
+    const manager = await tokWith(base, `del-mgr-${TS}`, 'user', 'approval-templates:manage')
+    expect((await req(base, '/api/approval-delegations', manager)).status).toBe(200)
   })
 
   it('creates → lists → conflicts → rejects self/template → disables', async () => {

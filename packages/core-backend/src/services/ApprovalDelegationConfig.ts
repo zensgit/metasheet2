@@ -1,11 +1,11 @@
 /**
  * Approval delegation (委托) — config CRUD (WRITE path).
  *
- * Manages rows in `approval_delegations` for the 委托设置 surface: a user creates,
- * lists, and disables their own time-boxed delegations. Kept separate from the
- * read-only resolve seam (ApprovalDelegations.ts) so the convergence-guarded
- * create-approval path stays write-free. Ownership is enforced by `delegator_user_id`
- * (a user manages only their own delegations).
+ * Manages rows in `approval_delegations` for the 委托设置 surface — ADMIN-managed (via
+ * approval-templates:manage at the route): an admin creates / lists / patches / disables
+ * time-boxed delegations for any user (the delegator is a chosen field). Kept separate
+ * from the read-only resolve seam (ApprovalDelegations.ts) so the convergence-guarded
+ * create-approval path stays write-free.
  */
 
 import { randomUUID } from 'node:crypto'
