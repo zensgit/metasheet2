@@ -50,11 +50,12 @@
       data-testid="approval-template-unsupported-alert"
     />
 
-    <!-- G-1: a complex graph is preserved, not unsupported — informational, save stays enabled. -->
+    <!-- G-1/G-2: a complex graph is preserved, not unsupported — informational, save stays enabled.
+         G-2 makes condition nodes editable; parallel / cc stay read-only (G-3 / G-4). -->
     <el-alert
       v-if="!unsupportedReason && graphReadOnlyMessage"
       :title="graphReadOnlyMessage"
-      description="表单与基本信息可编辑；审批流程以只读结构展示，保存时原样保留。复杂节点的可视化编辑将在后续版本提供。"
+      description="表单与基本信息可编辑；条件分支节点可编辑分支规则，并行 / 抄送节点暂以只读结构展示。未改动的节点与连线在保存时原样保留。"
       type="info"
       show-icon
       :closable="false"
@@ -353,7 +354,7 @@
       <el-card class="template-authoring__panel" shadow="never">
         <template #header>
           <div class="template-authoring__panel-header">
-            <strong>{{ graphReadOnly ? '审批流程（只读）' : '审批步骤' }}</strong>
+            <strong>{{ graphReadOnly ? '审批流程（结构）' : '审批步骤' }}</strong>
             <el-button
               v-if="!graphReadOnly"
               size="small"
@@ -367,9 +368,10 @@
           </div>
         </template>
 
-        <!-- G-1: read-only structured render of a preserved complex graph. Covers ALL three
-             complex node types (condition / parallel / cc) plus approval, so nothing renders as a
-             bare "unsupported" — authors see the flow they are preserving. No editing yet (G-2+). -->
+        <!-- G-1/G-2: structured render of a preserved complex graph. condition nodes are EDITABLE
+             (G-2 — branch rules / conjunction / default edge); parallel / cc / approval stay
+             READ-ONLY summaries (G-3 / G-4), and every non-condition node + all edges are preserved
+             byte-for-byte on save. Nothing renders as a bare "unsupported". -->
         <div v-if="graphReadOnly" data-testid="approval-graph-readonly-list">
           <div
             v-for="node in graphPreviewNodes"
@@ -383,10 +385,126 @@
                 {{ nodeTypeLabel(node.type) }}
               </span>
             </div>
-            <ul v-if="nodeConfigSummary(node).length" class="template-authoring__node-summary">
-              <li v-for="(line, lineIndex) in nodeConfigSummary(node)" :key="lineIndex">{{ line }}</li>
-            </ul>
-            <div v-else class="template-authoring__hint">（无可编辑配置）</div>
+
+            <!-- G-2: editable condition node (rules / conjunction / default fall-through edge).
+                 Topology (which branches exist, their edgeKeys/targets) is NOT editable here — only
+                 the matching LOGIC. Branch add/remove is a later slice. -->
+            <div
+              v-if="node.type === 'condition' && conditionEditFor(node.key)"
+              class="template-authoring__condition"
+              data-testid="approval-condition-editor"
+              :data-condition-node="node.key"
+            >
+              <div
+                v-for="branch in conditionEditFor(node.key)!.branches"
+                :key="branch.edgeKey"
+                class="template-authoring__condition-branch"
+                data-testid="approval-condition-branch"
+              >
+                <div class="template-authoring__condition-branch-head">
+                  <span>分支 → {{ branch.edgeKey }}</span>
+                  <el-select
+                    v-model="branch.conjunction"
+                    size="small"
+                    :disabled="readOnly"
+                    style="width: 110px"
+                    data-testid="approval-condition-conjunction"
+                  >
+                    <el-option label="全部满足 (AND)" value="and" />
+                    <el-option label="任一满足 (OR)" value="or" />
+                  </el-select>
+                </div>
+                <div
+                  v-for="(rule, ruleIndex) in branch.rules"
+                  :key="ruleIndex"
+                  class="template-authoring__condition-rule"
+                  data-testid="approval-condition-rule"
+                >
+                  <el-select
+                    v-model="rule.fieldId"
+                    size="small"
+                    filterable
+                    placeholder="字段"
+                    :disabled="readOnly"
+                    style="width: 160px"
+                    data-testid="approval-condition-rule-field"
+                  >
+                    <el-option
+                      v-for="field in conditionFieldOptions"
+                      :key="field.id"
+                      :label="field.label"
+                      :value="field.id"
+                    />
+                  </el-select>
+                  <el-select
+                    v-model="rule.operator"
+                    size="small"
+                    :disabled="readOnly"
+                    style="width: 120px"
+                    data-testid="approval-condition-rule-operator"
+                  >
+                    <el-option
+                      v-for="operator in CONDITION_RULE_OPERATORS"
+                      :key="operator"
+                      :label="conditionOperatorLabel(operator)"
+                      :value="operator"
+                    />
+                  </el-select>
+                  <el-input
+                    v-if="rule.operator !== 'isEmpty'"
+                    :model-value="conditionRuleValueText(rule)"
+                    size="small"
+                    placeholder="比较值"
+                    :disabled="readOnly"
+                    style="width: 160px"
+                    data-testid="approval-condition-rule-value"
+                    @update:model-value="(text: string) => setConditionRuleValue(rule, text)"
+                  />
+                  <el-button
+                    size="small"
+                    type="danger"
+                    :disabled="readOnly || branch.rules.length === 1"
+                    data-testid="approval-condition-rule-remove"
+                    @click="removeConditionRule(branch, ruleIndex)"
+                  >删除</el-button>
+                </div>
+                <el-button
+                  size="small"
+                  :disabled="readOnly"
+                  data-testid="approval-condition-rule-add"
+                  @click="addConditionRule(branch)"
+                >
+                  <el-icon><Plus /></el-icon>
+                  添加规则
+                </el-button>
+              </div>
+              <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
+                <el-select
+                  v-model="conditionEditFor(node.key)!.defaultEdgeKey"
+                  size="small"
+                  clearable
+                  :disabled="readOnly"
+                  style="width: 220px"
+                  placeholder="（无默认分支）"
+                  data-testid="approval-condition-default-edge"
+                >
+                  <el-option
+                    v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
+                    :key="edgeKey"
+                    :label="edgeKey"
+                    :value="edgeKey"
+                  />
+                </el-select>
+              </el-form-item>
+            </div>
+
+            <!-- parallel / cc / approval — read-only summary (G-3 / G-4). -->
+            <template v-else>
+              <ul v-if="nodeConfigSummary(node).length" class="template-authoring__node-summary">
+                <li v-for="(line, lineIndex) in nodeConfigSummary(node)" :key="lineIndex">{{ line }}</li>
+              </ul>
+              <div v-else class="template-authoring__hint">（无可编辑配置）</div>
+            </template>
           </div>
         </div>
 
@@ -569,7 +687,12 @@ import {
   parseIdsText,
   unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
+  CONDITION_RULE_OPERATORS,
   type ApprovalStepDraft,
+  type ConditionBranchEdit,
+  type ConditionNodeEdit,
+  type ConditionRuleEdit,
+  type ConditionRuleOperator,
   type FieldAuthoringDraft,
   type TemplateAuthoringDraft,
 } from '../../approvals/templateAuthoring'
@@ -673,6 +796,62 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
   }
   return []
 }
+
+// ── G-2 condition editor (logic-only; topology is preserved from `preservedGraph`) ──────────────
+// The editable model lives on `draft.conditionEdits[nodeKey]`, seeded 1:1 from the preserved
+// condition nodes. The controls below mutate ONLY rules / conjunction / defaultEdgeKey;
+// `buildApprovalGraph` re-applies them onto a COPY of the graph (all other nodes + edges untouched).
+function conditionEditFor(nodeKey: string): ConditionNodeEdit | undefined {
+  return draft.value.conditionEdits?.[nodeKey]
+}
+
+// Field options for a rule's fieldId picker — the draft's authorable form fields (id + label).
+const conditionFieldOptions = computed(() =>
+  draft.value.fields
+    .filter((field) => field.id.trim())
+    .map((field) => ({ id: field.id.trim(), label: field.label.trim() || field.id.trim() })),
+)
+
+const CONDITION_OPERATOR_LABELS: Record<ConditionRuleOperator, string> = {
+  eq: '等于',
+  neq: '不等于',
+  gt: '大于',
+  gte: '大于等于',
+  lt: '小于',
+  lte: '小于等于',
+  in: '包含于',
+  isEmpty: '为空',
+}
+function conditionOperatorLabel(operator: ConditionRuleOperator): string {
+  return CONDITION_OPERATOR_LABELS[operator] ?? operator
+}
+
+// The rule value is carried as `unknown` (round-trips a seeded value verbatim). The text input
+// reads/writes a string; `isEmpty` carries no value (handled in the template by hiding the input).
+function conditionRuleValueText(rule: ConditionRuleEdit): string {
+  if (rule.value === undefined || rule.value === null) return ''
+  return typeof rule.value === 'string' ? rule.value : String(rule.value)
+}
+function setConditionRuleValue(rule: ConditionRuleEdit, text: string): void {
+  rule.value = text === '' ? undefined : text
+}
+
+function addConditionRule(branch: ConditionBranchEdit): void {
+  branch.rules.push({ fieldId: '', operator: 'eq', value: undefined })
+}
+function removeConditionRule(branch: ConditionBranchEdit, ruleIndex: number): void {
+  if (branch.rules.length === 1) return
+  branch.rules.splice(ruleIndex, 1)
+}
+
+// Outgoing edge keys of a condition node (from the preserved graph) — the legal default fall-through
+// targets. Topology is read-only here, so these come straight from `preservedGraph.edges`.
+function conditionOutgoingEdgeKeys(nodeKey: string): string[] {
+  return (draft.value.preservedGraph?.edges ?? [])
+    .filter((edge) => edge.source === nodeKey)
+    .map((edge) => edge.key)
+}
+
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
 const formSchemaPreview = computed(() => JSON.stringify(buildFormSchema(draft.value), null, 2))
 const approvalGraphPreview = computed(() => JSON.stringify(buildApprovalGraph(draft.value), null, 2))
@@ -1016,6 +1195,40 @@ onMounted(() => {
   font-size: 13px;
   line-height: 1.7;
   color: var(--el-text-color-regular, #606266);
+}
+
+/* G-2 condition editor */
+.template-authoring__condition {
+  margin-top: 8px;
+}
+
+.template-authoring__condition-branch {
+  border: 1px dashed var(--el-border-color, #dcdfe6);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.template-authoring__condition-branch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--el-text-color-regular, #606266);
+}
+
+.template-authoring__condition-rule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.template-authoring__condition-default {
+  margin: 4px 0 0;
 }
 
 .template-authoring__error-list {

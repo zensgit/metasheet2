@@ -22,9 +22,23 @@ import {
   validateDetailColumnsDraft,
   type DetailColumnDraft,
 } from './detailField'
+import {
+  applyConditionEditsToGraph,
+  conditionEditsFromGraph,
+  validateConditionEdits,
+  type ConditionEdits,
+} from './conditionEdit'
 
 export type { DetailColumnDraft } from './detailField'
 export { createEmptyDetailColumnDraft, DETAIL_LEAF_FIELD_TYPES } from './detailField'
+export type {
+  ConditionEdits,
+  ConditionNodeEdit,
+  ConditionBranchEdit,
+  ConditionRuleEdit,
+  ConditionRuleOperator,
+} from './conditionEdit'
+export { CONDITION_RULE_OPERATORS } from './conditionEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
@@ -119,6 +133,12 @@ export interface TemplateAuthoringDraft {
   // not drop/reorder complex nodes/edges/config. `undefined` for plain linear templates (which
   // keep the editable `steps` round-trip). The graph editor (G-2+) replaces this pass-through.
   preservedGraph?: ApprovalGraph
+  // G-2 condition editor: editable LOGIC for each `condition` node in `preservedGraph`, keyed by
+  // node key (seeded 1:1 from the preserved condition nodes). Only a condition node's rules /
+  // conjunction / defaultEdgeKey are editable here; branch/edge TOPOLOGY and every non-condition
+  // node/edge stay byte-identical-preserved (G-1 floor). `buildApprovalGraph` applies these onto a
+  // COPY of `preservedGraph`. Empty/absent for linear or non-condition complex graphs.
+  conditionEdits?: ConditionEdits
 }
 
 // Complex node types the v1 LINEAR steps editor can't author. They are NOT "unsupported" — a
@@ -493,7 +513,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
 export function graphReadOnlyReason(template: ApprovalTemplateDetailDTO): string | null {
   if (unsupportedTemplateAuthoringReason(template)) return null
   if (!isComplexApprovalGraph(template.approvalGraph)) return null
-  return '该审批流程包含条件 / 并行 / 抄送等复杂节点，当前版本以只读结构展示，保存时原样保留，不会被改写。'
+  return '该审批流程包含复杂节点：条件分支可在下方编辑分支规则，并行 / 抄送节点以只读结构展示；未改动的节点与连线在保存时原样保留，不会被改写。'
 }
 
 export function draftFromTemplate(template: ApprovalTemplateDetailDTO): TemplateAuthoringDraft {
@@ -523,7 +543,14 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
     visibilityIdsText: formatIds(template.visibilityScope?.ids),
     slaHoursText: template.slaHours == null ? '' : String(template.slaHours),
     allowRevoke: true,
-    ...(complex ? { preservedGraph: template.approvalGraph } : {}),
+    ...(complex
+      ? {
+          preservedGraph: template.approvalGraph,
+          // G-2: seed the editable condition logic from the preserved condition nodes (1:1).
+          // Empty {} when the complex graph has no condition node (parallel/cc-only).
+          conditionEdits: conditionEditsFromGraph(template.approvalGraph),
+        }
+      : {}),
     fields: fields.length > 0 ? fields : [createEmptyFieldDraft(1)],
     // A complex graph round-trips via `preservedGraph` and has no editable steps — keep
     // `steps: []` (no phantom step). Linear drafts seed an empty step for the editor.
@@ -633,11 +660,14 @@ function buildStepConfig(step: ApprovalStepDraft): ApprovalNodeConfig {
 }
 
 export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph {
-  // G-1 anti-flatten keystone: a preserved complex graph is emitted UNCHANGED — no rebuild from
-  // `steps`, so its cc/condition/parallel nodes/edges/config survive save byte-identical. Only
-  // linear drafts (no `preservedGraph`) take the start→approval*→end build below.
+  // G-1/G-2 anti-flatten keystone: a preserved complex graph is NEVER rebuilt from `steps`, so its
+  // cc/condition/parallel nodes/edges survive save. G-2 replaces ONLY each condition node's config
+  // with the edited logic (rules / conjunction / defaultEdgeKey) onto a COPY of the graph — every
+  // other node and ALL edges stay byte-identical (an untouched graph round-trips unchanged because
+  // `applyConditionEditsToGraph` reproduces the backend-normalised condition shape). parallel/cc
+  // nodes are passed through verbatim (G-3/G-4). Only linear drafts take the build below.
   if (draft.preservedGraph) {
-    return draft.preservedGraph
+    return applyConditionEditsToGraph(draft.preservedGraph, draft.conditionEdits ?? {})
   }
   const approvalNodes = draft.steps.map((step, index) => ({
     key: `approval_${index + 1}`,
@@ -757,6 +787,13 @@ export function validateTemplateDraft(
   // A complex graph (preservedGraph) carries no editable steps — the step requirement only
   // applies to linear drafts that build their graph from `steps`.
   if (!draft.preservedGraph && draft.steps.length === 0) errors.push('至少需要一个审批步骤')
+  // G-2 condition-editor PREVIEW: rule fieldId must reference a form field, operator must be in the
+  // union, and defaultEdgeKey must be an OUTGOING edge of the condition node (the fall-through edge;
+  // checked against `preservedGraph`'s edges). UX-only — the backend `normalizeApprovalGraph`
+  // re-validates and is the final arbiter (we never relax it here).
+  if (draft.conditionEdits && Object.keys(draft.conditionEdits).length > 0) {
+    errors.push(...validateConditionEdits(draft.conditionEdits, buildFormSchema(draft), draft.preservedGraph))
+  }
   const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
   draft.steps.forEach((step, index) => {
     const label = step.name.trim() || `审批步骤 ${index + 1}`
