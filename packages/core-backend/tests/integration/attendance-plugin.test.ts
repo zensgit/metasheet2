@@ -10609,6 +10609,147 @@ attendanceIntegrationDescribe(
     expect(lastOutAtIso.startsWith(`${workDate}T18:00:00`)).toBe(true)
   })
 
+  it('#5 report tiering — severe-late / absence-late tiers are self-calculated and round-trip through the records report (real DB)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    // collision-free future year; a Monday (workday) + the next day (Tuesday, workday).
+    const year = 3600 + (Number.parseInt(runSuffix.slice(-4), 36) % 1000)
+    const firstOfOctober = new Date(Date.UTC(year, 9, 1))
+    const monday = new Date(firstOfOctober)
+    while (monday.getUTCDay() !== 1) monday.setUTCDate(monday.getUTCDate() + 1)
+    const severeDate = monday.toISOString().slice(0, 10)
+    const absenceObj = new Date(monday)
+    absenceObj.setUTCDate(monday.getUTCDate() + 1)
+    const absenceDate = absenceObj.toISOString().slice(0, 10)
+    const userId = `attendance-rt1-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+
+      // Default rule: 09:00 start, 10-min grace, severe 30 / absence 60 (over the grace window).
+      //   09:45 → 35 min late  (≥ severe 30, < absence 60) → severe-late only.
+      //   10:30 → 80 min late  (≥ absence 60)              → severe + absence (tiers nest).
+      const importPayload = {
+        userId,
+        rows: [
+          { workDate: severeDate, fields: { firstInAt: `${severeDate}T09:45:00Z`, lastOutAt: `${severeDate}T18:00:00Z` } },
+          { workDate: absenceDate, fields: { firstInAt: `${absenceDate}T10:30:00Z`, lastOutAt: `${absenceDate}T18:00:00Z` } },
+        ],
+        mode: 'override',
+      }
+      const importRes = await requestJson(`${baseUrl}/api/attendance/import`, { method: 'POST', headers, body: JSON.stringify(importPayload) })
+      expect(importRes.status, importRes.raw).toBe(200)
+      expect(Number((importRes.body as { data?: { imported?: number } } | undefined)?.data?.imported ?? 0)).toBeGreaterThanOrEqual(2)
+
+      const recordsRes = await requestJson(
+        `${baseUrl}/api/attendance/records?userId=${encodeURIComponent(userId)}&from=${severeDate}&to=${absenceDate}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      expect(recordsRes.status).toBe(200)
+      const items = (recordsRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+      const byDate = (d: string) => items.find((r) => String(r?.work_date || '').slice(0, 10) === d)
+
+      // severe-only record: late_count proves the report plumbing; severe=1 proves self-calc; absence=0 proves the boundary.
+      const severe = byDate(severeDate)
+      expect(severe, 'severe-late record present').toBeTruthy()
+      expect(Number(severe?.late_minutes)).toBe(35)
+      const severeRv = (severe?.report_values ?? {}) as Record<string, unknown>
+      expect(Number(severeRv.late_count ?? -1)).toBe(1)
+      expect(Number(severeRv.severe_late_count ?? -1)).toBe(1)
+      expect(Number(severeRv.severe_late_duration ?? -1)).toBe(35)
+      expect(Number(severeRv.absence_late_count ?? -1)).toBe(0)
+
+      // absence-level record: both tiers fire (nested).
+      const absence = byDate(absenceDate)
+      expect(absence, 'absence-late record present').toBeTruthy()
+      expect(Number(absence?.late_minutes)).toBe(80)
+      const absenceRv = (absence?.report_values ?? {}) as Record<string, unknown>
+      expect(Number(absenceRv.severe_late_count ?? -1)).toBe(1)
+      expect(Number(absenceRv.absence_late_count ?? -1)).toBe(1)
+    } finally {
+      await pool.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => {})
+      await pool.end().catch(() => {})
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+  })
+
+  it('#5 RT-1a — per-group thresholds are configurable end-to-end + the normalizer rejects incoherent input (real DB)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const orgId = `rt1a-org-${runSuffix}` // isolated org — never pollutes the shared default rule
+    const year = 3600 + (Number.parseInt(runSuffix.slice(-4), 36) % 1000)
+    const firstOfOctober = new Date(Date.UTC(year, 9, 1))
+    const monday = new Date(firstOfOctober)
+    while (monday.getUTCDay() !== 1) monday.setUTCDate(monday.getUTCDate() + 1)
+    const workDate = monday.toISOString().slice(0, 10)
+    const userId = `attendance-rt1a-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+      const orgHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'x-org-id': orgId }
+      const putRule = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/rules/default`, {
+        method: 'PUT', headers: orgHeaders, body: JSON.stringify({ orgId, ...body }),
+      })
+
+      // Normalizer (design-lock §2 / the #1776 enum-strict rule) — reject BEFORE any persistence:
+      const ordered = { workStartTime: '09:00', workEndTime: '18:00', lateGraceMinutes: 10 }
+      expect((await putRule({ ...ordered, severeLateThresholdMinutes: 50, absenceLateThresholdMinutes: 20 })).status).toBe(400) // absence < severe
+      expect((await putRule({ lateGraceMinutes: 30, severeLateThresholdMinutes: 20, absenceLateThresholdMinutes: 60 })).status).toBe(400) // severe < grace
+      expect((await putRule({ ...ordered, severeLateThresholdMinutes: 15.5 })).status).toBe(400) // non-integer (Zod)
+      expect((await putRule({ ...ordered, severeLateThresholdMinutes: -5 })).status).toBe(400) // negative (Zod)
+
+      // Valid custom rule: severe 15 / absence 40 (ordered, ≥ grace 10).
+      const okRes = await putRule({ ...ordered, severeLateThresholdMinutes: 15, absenceLateThresholdMinutes: 40 })
+      expect(okRes.status, okRes.raw).toBe(200)
+      const ruleData = (okRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
+      expect(Number(ruleData.severeLateThresholdMinutes)).toBe(15) // RETURNING * → mapRuleRow surfaces it
+      expect(Number(ruleData.absenceLateThresholdMinutes)).toBe(40)
+
+      // Import a 20-min-late record (09:30): 20 ≥ custom 15 → severe; would be 0 at the RT-1 default 30.
+      const importRes = await requestJson(`${baseUrl}/api/attendance/import`, {
+        method: 'POST', headers: orgHeaders,
+        body: JSON.stringify({ userId, mode: 'override', rows: [{ workDate, fields: { firstInAt: `${workDate}T09:30:00Z`, lastOutAt: `${workDate}T18:00:00Z` } }] }),
+      })
+      expect(importRes.status, importRes.raw).toBe(200)
+
+      const recordsRes = await requestJson(
+        `${baseUrl}/api/attendance/records?userId=${encodeURIComponent(userId)}&from=${workDate}&to=${workDate}`,
+        { headers: { Authorization: `Bearer ${token}`, 'x-org-id': orgId } },
+      )
+      expect(recordsRes.status).toBe(200)
+      const items = (recordsRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+      const record = items.find((r) => String(r?.work_date || '').slice(0, 10) === workDate)
+      expect(record, 'record present').toBeTruthy()
+      expect(Number(record?.late_minutes)).toBe(20)
+      const rv = (record?.report_values ?? {}) as Record<string, unknown>
+      // the per-group threshold flowed through loadDefaultRule → mapRuleRow → computeLateTierCounts:
+      expect(Number(rv.severe_late_count ?? -1)).toBe(1) // 20 ≥ custom 15 (would be 0 at the default 30)
+      expect(Number(rv.absence_late_count ?? -1)).toBe(0) // 20 < custom 40
+    } finally {
+      await pool.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => {})
+      await pool.query('DELETE FROM attendance_rules WHERE org_id = $1', [orgId]).catch(() => {})
+      await pool.end().catch(() => {})
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+  })
+
   it('exposes workday context for holiday overrides and shift schedules on attendance records', async () => {
     if (!baseUrl) return
 

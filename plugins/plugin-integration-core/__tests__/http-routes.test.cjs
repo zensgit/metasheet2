@@ -4035,8 +4035,8 @@ async function testFieldOptionsSyncRoute() {
   assert.equal(res.statusCode, 422)
   assert.equal(res.body.error.code, 'OPTION_SYNC_CONFIG_INVALID')
 
-  // action bindings fail closed on the generic route (stock-prep-only concept) → 422.
-  // Even a VALID predefined actionId is rejected, not silently dropped.
+  // FOS-4b-2: action bindings are DRY-RUN-ONLY. Non-dry-run + action bindings → fail-closed (apply not
+  // enabled), no patch — even a VALID predefined actionId.
   const patchCountBeforeActionReject = findCalls(provisioning.calls, 'patchObjectFieldProperty').length
   res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
     user: ADMIN_USER,
@@ -4046,12 +4046,45 @@ async function testFieldOptionsSyncRoute() {
     },
   })
   assert.equal(res.statusCode, 422)
-  assert.equal(res.body.error.code, 'FIELD_OPTION_SYNC_ACTIONS_NOT_SUPPORTED')
+  assert.equal(res.body.error.code, 'FIELD_OPTION_SYNC_ACTIONS_DRY_RUN_ONLY')
   assert.equal(
     findCalls(provisioning.calls, 'patchObjectFieldProperty').length,
     patchCountBeforeActionReject,
-    'rejected action-binding request does not patch',
+    'non-dry-run action-binding request does not patch',
   )
+
+  // FOS-4b-2 dry-run path: dryRun + a permitted action (with-actions preset) → values-free preview, NO write.
+  const patchCountBeforeDryRun = findCalls(provisioning.calls, 'patchObjectFieldProperty').length
+  res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: {
+      presetId: 'preset.stock-preparation.with-actions.v1',
+      dryRun: true,
+      optionSets: { material_type: [{ value: 'plate', actionBindings: [{ actionId: PLM_STOCK_PREPARATION_ACTION_ID, parameterBindings: { projectNo: 'projectNo' } }] }] },
+    },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.dryRun, true)
+  assert.equal(res.body.data.written, false, 'dry-run writes nothing')
+  assert.equal(findCalls(provisioning.calls, 'patchObjectFieldProperty').length, patchCountBeforeDryRun, 'dry-run issues ZERO patch calls')
+  assert.equal(res.body.data.preview.actionBindings.length, 1, 'dry-run previews the validated action binding')
+  assert.equal(res.body.data.preview.actionBindings[0].actionId, PLM_STOCK_PREPARATION_ACTION_ID)
+  assert.equal(res.body.data.preview.actionBindings[0].requiresDryRun, true, 'gating copied from the registry')
+  assert.equal(res.body.data.preview.actionBindings[0].parameterBindingCount, 1, 'param COUNT only, not values')
+  assert.equal(JSON.stringify(res.body.data.preview).includes('projectNo'), false, 'preview is values-free (no param keys/values)')
+
+  // dryRun + an action NOT permitted by the preset (v1 permits none) → fail-closed, no write.
+  const patchCountBeforeDenied = findCalls(provisioning.calls, 'patchObjectFieldProperty').length
+  res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {
+    user: ADMIN_USER,
+    body: {
+      presetId: STOCK_PREP_PRESET_ID,
+      dryRun: true,
+      optionSets: { material_type: [{ value: 'plate', actionBindings: [{ actionId: PLM_STOCK_PREPARATION_ACTION_ID }] }] },
+    },
+  })
+  assert.equal(res.statusCode, 422, 'dry-run with an action the preset does not permit fails closed')
+  assert.equal(findCalls(provisioning.calls, 'patchObjectFieldProperty').length, patchCountBeforeDenied, 'denied dry-run issues no patch')
 
   // nothing mapped supplied → no-fields-synced 422 (kernel error-if-none via generic factory)
   res = await invoke(routes, 'POST', '/api/integration/field-options/sync', {

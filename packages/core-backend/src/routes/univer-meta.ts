@@ -73,7 +73,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { hashPreviewChanges, mintRestorePreviewIdentity, verifyRestorePreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity } from '../multitable/restore-preview-identity'
 import { computeRecordRestoreDiff } from '../multitable/record-restore-diff'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
@@ -7468,6 +7468,100 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] restore-preview failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to preview restore' } })
+    }
+  })
+
+  // ── BS-2: SCOPED (multi-record) restore batch-preview ──────────────────────────────────────────────────────
+  // A fan-out of the single-record restore-preview over a record SET (consumes the BS-1 scoped identity). READ-ONLY:
+  // computes each record's masked+filtered diff, identifies the RESTORABLE scope (visible ∧ non-empty diff ∧
+  // non-drift), and mints a SCOPED identity binding hashScope over that set. Row-denied / missing / empty / drifting
+  // records are reported skipped-with-reason but NEVER enter the scopeHash and NEVER leak an existence oracle
+  // (denied + missing share one 'unavailable' reason, like the single route's 404). Writes nothing — the fan-out
+  // write is BS-3 (gated, separate owner opt-in). Identity is null when the restorable scope is empty: never a
+  // hashScope([]) executable token. The scopeHash binds the restorable set, so BS-3 can only execute THIS set.
+  router.post('/sheets/:sheetId/restore-batch-preview', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    const parsed = z.object({
+      targetVersion: z.number().int().positive(),
+      // BS-6: bounded + fail-closed (no silent truncation); an async path above the cap is a later slice.
+      recordIds: z.array(z.string().min(1)).min(1).max(100),
+      fieldIds: z.array(z.string().min(1)).min(1).optional(),
+    }).safeParse(req.body)
+    if (!parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    const { targetVersion, recordIds: requestedIds, fieldIds } = parsed.data
+    const uniqueIds = [...new Set(requestedIds)] // the scope is a SET (BS-1); order/dups irrelevant
+    try {
+      const pool = poolManager.get()
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (!capabilities.canEditRecord) return sendForbidden(res) // D5: gate on the RESTORE capability
+      const previewCtx = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
+      if (!previewCtx) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      // shared context hoisted out of the per-record loop (once per sheet+actor, not once per record):
+      const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
+        ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
+        : new Set<string>()
+      const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
+      const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+      const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
+      const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
+      // batch-load per-record live data + the target revision in 2 queries (not 2·N):
+      const liveById = new Map<string, Record<string, unknown>>()
+      for (const r of (await pool.query('SELECT id, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2)', [sheetId, uniqueIds])).rows as Array<{ id: string; data: unknown }>) liveById.set(String(r.id), asRec(r.data))
+      const revById = new Map<string, { action: string; snapshot: unknown }>()
+      for (const r of (await pool.query('SELECT record_id, action, snapshot FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = ANY($2) AND version = $3', [sheetId, uniqueIds, targetVersion])).rows as Array<{ record_id: string; action: string; snapshot: unknown }>) {
+        const prev = revById.get(String(r.record_id))
+        if (!prev || (prev.action === 'delete' && r.action !== 'delete')) revById.set(String(r.record_id), { action: r.action, snapshot: r.snapshot }) // prefer a non-delete snapshot (as single-record)
+      }
+      const selSet = fieldIds ? new Set(fieldIds) : null
+      type Outcome = { recordId: string; status: 'restorable' | 'skipped'; changes?: Array<{ fieldId: string; op: 'set' | 'unset'; value: unknown }>; affectedFieldCount?: number; skipReason?: string }
+      const outcomes: Outcome[] = []
+      const contributing: Array<{ recordId: string; changesHash: string }> = []
+      for (const recordId of uniqueIds) {
+        // existence + row-deny share ONE 'unavailable' reason (no existence oracle, like the single route's 404)
+        if (!liveById.has(recordId) || deniedIds.has(recordId)) { outcomes.push({ recordId, status: 'skipped', skipReason: 'unavailable' }); continue }
+        const rev = revById.get(recordId)
+        if (!rev) { outcomes.push({ recordId, status: 'skipped', skipReason: 'version_unavailable' }); continue }
+        if (rev.action === 'delete') { outcomes.push({ recordId, status: 'skipped', skipReason: 'unsupported' }); continue } // undelete is a later slice
+        if (rev.snapshot === null || rev.snapshot === undefined) { outcomes.push({ recordId, status: 'skipped', skipReason: 'snapshot_unavailable' }); continue }
+        const targetSnapshot = asRec(rev.snapshot)
+        let drift = false
+        for (const fid of Object.keys(targetSnapshot)) if (!previewCtx.fieldById.has(fid)) { drift = true; break }
+        if (drift) { outcomes.push({ recordId, status: 'skipped', skipReason: 'schema_drift' }); continue } // can't faithfully reproduce → not restorable
+        const raw = computeRecordRestoreDiff({ fieldById: previewCtx.fieldById, rawTypeById, targetSnapshot, currentData: liveById.get(recordId)!, recordId, currentVersion: 0, normalizeLinkIds })
+          .map((c) => ({ fieldId: c.fieldId, op: (c.op ?? 'set') as 'set' | 'unset', value: c.value }))
+        const visible = raw.filter((c) => allowed.has(c.fieldId)) // PV-2 mask (visible ∧ field_permissions)
+        const selected = selSet ? visible.filter((c) => selSet.has(c.fieldId)) : visible // per-field filter (mask-then-filter)
+        if (selected.length === 0) { outcomes.push({ recordId, status: 'skipped', skipReason: 'no_change' }); continue } // nets zero → not in scope
+        outcomes.push({ recordId, status: 'restorable', changes: selected, affectedFieldCount: selected.length })
+        contributing.push({ recordId, changesHash: hashPreviewChanges(selected) })
+      }
+      // the scope = the RESTORABLE set only; identity null when empty (never a hashScope([]) executable token).
+      const scopeIds = contributing.map((c) => c.recordId).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+      const previewIdentity = contributing.length === 0
+        ? null
+        : mintScopedRestorePreviewIdentity({
+            sheetId,
+            scope: { kind: 'records', recordIds: scopeIds },
+            targetVersion,
+            strategy: 'revert',
+            scopeHash: hashScope(contributing),
+            actorId: access.userId,
+          })
+      return res.json({ ok: true, data: {
+        records: outcomes,
+        scope: scopeIds,
+        restorableCount: contributing.length,
+        skippedCount: outcomes.length - contributing.length,
+        targetVersion,
+        previewIdentity,
+      } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] restore-batch-preview failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to preview batch restore' } })
     }
   })
 
