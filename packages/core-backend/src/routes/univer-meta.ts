@@ -7849,7 +7849,7 @@ export function univerMetaRouter(): Router {
 
       const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
       if (!patchContext) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById } = patchContext
+      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions } = patchContext
       const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
 
       // Schema drift: a snapshot field absent from the current schema can't be faithfully reproduced. The preview
@@ -7880,6 +7880,19 @@ export function univerMetaRouter(): Router {
       // identity for an empty diff, so a forged/arbitrary token 409s at the verify above; a success ALWAYS
       // consumes a valid preview identity, never an empty-selection bypass.
       if (selectedDiff.length === 0) return res.json({ ok: true, data: { recordId, newVersion: currentVersion, noop: true, restoredFieldIds: [] } })
+      // Layer-3 per-subject WRITE gate (parity with the legacy /restore + the BS-3 batch fan-out): `allowed` is a
+      // READ mask (visible) and patchRecords enforces only FIELD-DEFINITION readonly — so a per-subject
+      // visible-but-readOnly field would otherwise be written. Gate the selected diff on the SAME derive
+      // (fieldPermissions) and reject before any write. The field ids are NOT echoed (server-derived from the
+      // unmasked snapshot — echoing would leak hidden-field metadata), matching the legacy /restore's message.
+      const hasForbidden = selectedDiff.some((ch) => {
+        const guard = fieldById.get(ch.fieldId)
+        const perm = fieldPermissions[ch.fieldId]
+        const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
+        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        return !staticOk || !layer3Ok
+      })
+      if (hasForbidden) return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: 'Not permitted to restore one or more fields in this revision' } })
       const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
       const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
       if (yjsInvalidator) recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
