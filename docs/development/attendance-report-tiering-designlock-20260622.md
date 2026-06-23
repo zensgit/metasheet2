@@ -17,7 +17,7 @@ No change to how `lateMinutes` itself is computed; this only adds tiers on top o
 
 ## 2. Contract
 
-- **Rule fields** (per-group rule + the shift/rule template + the override resolver that already copies `lateGraceMinutes`): `severeLateThresholdMinutes`, `absenceLateThresholdMinutes` — non-negative integers, validated enum-strict (the #1776 rule: missing/non-integer/out-of-range → explicit normalizer reject, never a silent default), with `absenceLateThresholdMinutes ≥ severeLateThresholdMinutes ≥ lateGraceMinutes` enforced.
+- **Rule fields** (per-group rule + the override resolver that already copies `lateGraceMinutes`): `severeLateThresholdMinutes`, `absenceLateThresholdMinutes` — non-negative integers. **Strictness (the #1776 rule, scoped to *supplied* values):** a **supplied** non-integer / negative / out-of-order value is an **explicit reject** (`400`), never a silent default; an **omitted** field resolves to the **existing/default** value, because the write route is a whole-rule replace and a partial update must not be forced to restate every field (and no UI exists yet to send them). The ordering invariant `absenceLateThresholdMinutes ≥ severeLateThresholdMinutes ≥ lateGraceMinutes` is enforced on the **resolved** rule (after omissions fall back), so a partial update can't leave an incoherent rule. *(Reconciled 2026-06-22 with the RT-1a impl per owner review of #3070: omitted→default is the safer compatibility choice; only supplied-invalid rejects.)*
 - **Compute**: where `lateMinutes` is finalized, derive
   `severeLateCount = lateMinutes ≥ severeLateThreshold ? 1 : 0`,
   `severeLateMinutes = severeLateCount ? lateMinutes : 0`,
@@ -45,8 +45,9 @@ No change to how `lateMinutes` itself is computed; this only adds tiers on top o
 ## 5. Slices (mirror the plan's RT-0..RT-4)
 
 1. **RT-0 (this lock)** — thresholds, tiers, defaults, persist-vs-read, legacy compat, the round-trip landmine.
-2. **RT-1 settings + compute** — rule fields + normalizer (enum-strict) + the tier derivation at the late-compute site; persist onto the summary.
-3. **RT-2 report/export wiring** — the report fields read the computed tier (meta fallback for legacy) + the sync job; **the wire round-trip test**.
+2. **RT-1 compute** (shipped #3069) — the tier derivation at the record-upsert site; persist onto the record meta the report fields already read. Defaults 30/60.
+   - **RT-1a settings + normalizer** (shipped #3070) — rule fields (migration) + `mapRuleRow`/`loadDefaultRule` projection + the write-side enum-strict normalizer. *(Split out of RT-1: the normalizer guards a persisted field, so it travels with the persistence it validates.)*
+3. **RT-2 report/export wiring** — **satisfied by design**: the report-records sync reuses the same meta-reading projection (`buildAttendanceRecordReportExportItemAsync`), so the tier reaches the analyzed multitable for free. A dedicated sync round-trip test is nice-to-have, not blocking.
 4. **RT-3 admin UI + tooltip** — threshold config card + a 口径 tooltip (absorbs a v3 humanization slice: precise definitions).
 5. **RT-4 staging smoke** — change a threshold → severe/absence counts + summary + export move consistently; legacy record unchanged.
 
@@ -55,7 +56,7 @@ No change to how `lateMinutes` itself is computed; this only adds tiers on top o
 - threshold set so a known `lateMinutes` crosses severe but not absence → `severe_late_count=1, absence_late_count=0`, and the **export projection** carries the same (wire round-trip).
 - raise the absence threshold below `lateMinutes` → `absence_late_count` flips, deterministically.
 - legacy record carrying only `summary.severeLateCount` meta → still reads via the fallback, unchanged.
-- normalizer: non-integer / `absence < severe` / negative → explicit reject (no silent default).
+- normalizer: a **supplied** non-integer / negative / `absence < severe` / `severe < grace` value → explicit `400` reject (no silent default); an **omitted** field resolves to the existing/default value (the resolved rule still satisfies `absence ≥ severe ≥ grace`).
 - regression: basic `late_count` / `early_leave_count` / `lateMinutes` unchanged.
 
 ## 7. Governance
