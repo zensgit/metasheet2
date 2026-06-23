@@ -369,15 +369,6 @@ async function setHeaderProgress(query: AiUsageQueryFn, jobId: string, generated
   )
 }
 
-async function setHeaderStatus(query: AiUsageQueryFn, jobId: string, status: WorkflowJobStatus): Promise<void> {
-  // Non-suspend transition (the worker uses this only for `errored`); suspends go
-  // through the guarded `suspendIfRunning`. Any non-suspend status clears the reason.
-  await query(
-    `UPDATE ${AI_BULK_JOB_TABLE} SET status = $2, suspend_reason = NULL, updated_at = NOW() WHERE job_id = $1`,
-    [jobId, status],
-  )
-}
-
 /** Persist the durable commit aggregate on the header (BJ-10). Clears suspend_reason for a non-suspended status. */
 export async function setHeaderAggregate(query: AiUsageQueryFn, jobId: string, aggregate: unknown, status: WorkflowJobStatus): Promise<void> {
   const suspendReason: WorkflowJobSuspendReason | null = status === 'suspended' ? 'manual_task' : null
@@ -422,6 +413,20 @@ async function suspendIfRunning(query: AiUsageQueryFn, jobId: string, quotaPause
     `UPDATE ${AI_BULK_JOB_TABLE} SET status = 'suspended', suspend_reason = 'manual_task', quota_paused = $2, updated_at = NOW()
       WHERE job_id = $1 AND status = 'running'`,
     [jobId, quotaPaused],
+  )
+}
+
+/**
+ * Mark the job `errored` (BJ-5) — GUARDED on `running` so a concurrent cancel (→ rejected)
+ * is never clobbered. Generated rows are untouched and stay committable (errored ∈ the
+ * commit committable set). Used for the plan-absent restart case and any unexpected worker
+ * crash after the queued→running claim.
+ */
+async function markErroredIfRunning(query: AiUsageQueryFn, jobId: string): Promise<void> {
+  await query(
+    `UPDATE ${AI_BULK_JOB_TABLE} SET status = 'errored', suspend_reason = NULL, updated_at = NOW()
+      WHERE job_id = $1 AND status = 'running'`,
+    [jobId],
   )
 }
 
@@ -540,11 +545,38 @@ export class BulkFillJobService {
     )
     if ((claim.rowCount ?? 0) === 0) return
 
+    try {
+      await this.runGeneratePhase(query, jobId)
+    } catch (err) {
+      // BJ-5: an unexpected failure AFTER the claim (DB / provider / worker exception) must
+      // NOT leave the header stuck in `running` — commit rejects `running`, and the active-job
+      // unique index would block a new same-target job, stranding the charged partial. Mark
+      // errored (guarded on `running` so a concurrent cancel→rejected is not clobbered); the
+      // generated rows are untouched and stay committable (errored ∈ the commit committable set).
+      console.error(`[ai-bulk-job] runJob ${jobId} failed mid-generate; marking errored (BJ-5):`, err)
+      try {
+        await markErroredIfRunning(query, jobId)
+      } catch (markErr) {
+        console.error(`[ai-bulk-job] runJob ${jobId} could not be marked errored:`, markErr)
+      }
+    } finally {
+      this.plans.delete(jobId)
+    }
+  }
+
+  /**
+   * The generate phase, extracted so `runJob` can wrap it in ONE try/catch and map any
+   * unexpected failure to `errored` (BJ-5). The deliberate stop paths (cancel / quota /
+   * provider-error / blocked / complete) suspend the header and return normally; an
+   * UNHANDLED throw propagates to runJob, which marks the header errored without touching
+   * the already-generated rows. Plan cleanup is owned by runJob's `finally`.
+   */
+  private async runGeneratePhase(query: AiUsageQueryFn, jobId: string): Promise<void> {
     const plan = this.plans.get(jobId)
     if (!plan) {
       // Process restarted after enqueue (the in-memory plan is gone) → mark errored.
       // The persisted partial (any seeded/generated rows) stays committable (BJ-5).
-      await setHeaderStatus(query, jobId, 'errored')
+      await markErroredIfRunning(query, jobId)
       return
     }
 
@@ -558,7 +590,6 @@ export class BulkFillJobService {
       // stay `generated` (charged); the still-`pending` remainder was flipped to
       // `pending_not_generated` by the cancel.
       if ((await readJobStatus(query, jobId)) !== 'running') {
-        this.plans.delete(jobId)
         return
       }
 
@@ -582,7 +613,6 @@ export class BulkFillJobService {
           await markRemainingPendingNotGenerated(query, jobId)
           await setHeaderProgress(query, jobId, generated, settledCost)
           await suspendIfRunning(query, jobId)
-          this.plans.delete(jobId)
           return
         }
         const usageTokens = outcome.usage.promptTokens + outcome.usage.completionTokens
@@ -604,7 +634,6 @@ export class BulkFillJobService {
         await markRemainingPendingNotGenerated(query, jobId)
         await setHeaderProgress(query, jobId, generated, settledCost)
         await suspendIfRunning(query, jobId, true)
-        this.plans.delete(jobId)
         return
       }
 
@@ -614,7 +643,6 @@ export class BulkFillJobService {
         await markRemainingPendingNotGenerated(query, jobId)
         await setHeaderProgress(query, jobId, generated, settledCost)
         await suspendIfRunning(query, jobId)
-        this.plans.delete(jobId)
         return
       }
 
@@ -630,6 +658,5 @@ export class BulkFillJobService {
     // Guarded on `running` so a cancel landing during the final row is never overwritten.
     await setHeaderProgress(query, jobId, generated, settledCost)
     await suspendIfRunning(query, jobId)
-    this.plans.delete(jobId)
   }
 }
