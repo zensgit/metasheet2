@@ -21,6 +21,7 @@ export const ATTENDANCE_ADMIN_SECTION_IDS = {
   ruleTemplateLibrary: 'attendance-admin-rule-template-library',
   attendanceGroups: 'attendance-admin-groups',
   groupMembers: 'attendance-admin-group-members',
+  teamAvailability: 'attendance-admin-team-availability',
   import: 'attendance-admin-import',
   importBatches: 'attendance-admin-import-batches',
   reportFields: 'attendance-admin-report-fields',
@@ -174,6 +175,7 @@ export function useAttendanceAdminRail({
     { id: ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary, label: tr('Rule Template Library', '规则模板库') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups, label: tr('Attendance groups', '考勤组') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.groupMembers, label: tr('Group members', '分组成员') },
+    { id: ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability, label: tr('Team availability', '团队可用性') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.import, label: tr('Import', '导入') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.importBatches, label: tr('Import batches', '导入批次') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.reportFields, label: tr('Report fields', '统计字段') },
@@ -227,6 +229,7 @@ export function useAttendanceAdminRail({
       itemIds: [
         ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
         ATTENDANCE_ADMIN_SECTION_IDS.groupMembers,
+        ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability,
       ],
     },
     {
