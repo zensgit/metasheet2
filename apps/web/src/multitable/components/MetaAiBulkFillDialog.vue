@@ -180,6 +180,191 @@
             </section>
           </template>
 
+          <!-- ───────────────────────── Phase: polling (async job generating) ───────────────────────── -->
+          <template v-else-if="ctrl.state.phase === 'polling'">
+            <p class="ai-bulk__job-status" data-test="ai-bulk-job-status">
+              {{ ctrl.state.job && ctrl.state.job.state === 'running' ? l('aibulk.jobRunning') : l('aibulk.jobQueued') }}
+            </p>
+            <div
+              class="ai-bulk__progress"
+              role="progressbar"
+              :aria-label="l('aibulk.jobProgressAria')"
+              :aria-valuemin="0"
+              :aria-valuemax="job ? job.total : 0"
+              :aria-valuenow="job ? job.generated : 0"
+              data-test="ai-bulk-progress"
+            >
+              <div class="ai-bulk__progress-track">
+                <div class="ai-bulk__progress-fill" :style="{ width: jobProgressPct + '%' }"></div>
+              </div>
+              <div class="ai-bulk__progress-meta">
+                <span data-test="ai-bulk-progress-line">{{ jobProgress }}</span>
+                <span class="ai-bulk__cost" data-test="ai-bulk-cost">{{ costLine }}</span>
+              </div>
+            </div>
+            <p class="ai-bulk__quota-note ai-bulk__quota-note--compact" role="note">{{ l('aibulk.quotaNote') }}</p>
+          </template>
+
+          <!-- ───────────────────────── Phase: jobReview (async job awaiting commit) ───────────────────────── -->
+          <template v-else-if="ctrl.state.phase === 'jobReview'">
+            <!-- Cost + progress header (already charged). -->
+            <div class="ai-bulk__result-head">
+              <span class="ai-bulk__cost" data-test="ai-bulk-cost">{{ costLine }}</span>
+              <span class="ai-bulk__summary" data-test="ai-bulk-progress-line">{{ jobProgress }}</span>
+            </div>
+
+            <!-- Quota-paused banner — generation stopped on the per-tenant quota. -->
+            <p
+              v-if="ctrl.quotaPaused.value"
+              class="ai-bulk__alert ai-bulk__alert--warn"
+              role="alert"
+              data-test="ai-bulk-quota-paused"
+            >
+              {{ l('aibulk.jobQuotaPaused') }}
+            </p>
+
+            <!-- Terminal banner for a cancelled (rejected) / errored job. -->
+            <p
+              v-if="jobReviewBannerKey"
+              class="ai-bulk__alert ai-bulk__alert--warn"
+              role="alert"
+              data-test="ai-bulk-job-banner"
+            >
+              {{ l(jobReviewBannerKey) }}
+            </p>
+
+            <!-- Generated rows — the ONLY selectable rows (masked included, badged). -->
+            <template v-if="ctrl.jobGeneratedRows.value.length > 0">
+              <h4 class="ai-bulk__group-title">{{ l('aibulk.jobReviewHeading') }} ({{ ctrl.jobGeneratedRows.value.length }})</h4>
+              <table class="ai-bulk__table" data-test="ai-bulk-job-rows">
+                <thead>
+                  <tr>
+                    <th class="ai-bulk__col-select">
+                      <input
+                        type="checkbox"
+                        :aria-label="l('aibulk.selectAll')"
+                        :checked="ctrl.allConfirmableSelected.value"
+                        data-test="ai-bulk-job-select-all"
+                        @change="onToggleAll"
+                      />
+                    </th>
+                    <th>{{ l('aibulk.colRecord') }}</th>
+                    <th>{{ l('aibulk.colCurrent') }}</th>
+                    <th>{{ l('aibulk.colProposed') }}</th>
+                    <th>{{ l('aibulk.colJobState') }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="row in ctrl.jobGeneratedRows.value"
+                    :key="row.recordId"
+                    class="ai-bulk__row"
+                    :data-record-id="row.recordId"
+                    data-test="ai-bulk-job-row"
+                  >
+                    <td class="ai-bulk__col-select">
+                      <input
+                        type="checkbox"
+                        :aria-label="l('aibulk.colSelect')"
+                        :checked="ctrl.selected.value.has(row.recordId)"
+                        :data-record-id="row.recordId"
+                        data-test="ai-bulk-job-row-select"
+                        @change="ctrl.toggleRow(row.recordId)"
+                      />
+                    </td>
+                    <td class="ai-bulk__cell-record">{{ recordName(row.recordId) }}</td>
+                    <td class="ai-bulk__cell-current">{{ displayCurrent(row.currentValue) }}</td>
+                    <td class="ai-bulk__cell-proposed">{{ row.proposed }}</td>
+                    <td class="ai-bulk__cell-state">
+                      <span
+                        v-if="row.masked"
+                        class="ai-bulk__badge ai-bulk__badge--masked"
+                        :title="l('aibulk.badgeMaskedTitle')"
+                        data-test="ai-bulk-job-badge-masked"
+                      >{{ l('aibulk.badgeMasked') }}</span>
+                      <span
+                        v-else
+                        class="ai-bulk__badge ai-bulk__badge--ready"
+                        data-test="ai-bulk-job-badge-ready"
+                      >{{ l('aibulk.stateGenerated') }}</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </template>
+            <p v-else class="ai-bulk__empty" data-test="ai-bulk-job-empty">{{ l('aibulk.emptyConfirmable') }}</p>
+
+            <!-- Skipped — UNCHARGED, NON-selectable. -->
+            <section v-if="ctrl.jobSkippedRows.value.length > 0" class="ai-bulk__group" data-test="ai-bulk-job-skipped">
+              <h4 class="ai-bulk__group-title">{{ l('aibulk.skippedHeading') }} ({{ ctrl.jobSkippedRows.value.length }})</h4>
+              <p class="ai-bulk__group-note">{{ l('aibulk.skippedNote') }}</p>
+              <ul class="ai-bulk__group-list">
+                <li
+                  v-for="s in ctrl.jobSkippedRows.value"
+                  :key="s.recordId"
+                  class="ai-bulk__group-item"
+                  :data-record-id="s.recordId"
+                  data-test="ai-bulk-job-skipped-item"
+                >
+                  <span class="ai-bulk__group-record">{{ recordName(s.recordId) }}</span>
+                  <span class="ai-bulk__group-reason">{{ skippedReason(s.reason ?? '') }}</span>
+                </li>
+              </ul>
+            </section>
+
+            <!-- Failures — CHARGED but non-confirmable, NON-selectable. -->
+            <section v-if="ctrl.jobFailureRows.value.length > 0" class="ai-bulk__group ai-bulk__group--charged" data-test="ai-bulk-job-failures">
+              <h4 class="ai-bulk__group-title">{{ l('aibulk.failuresHeading') }} ({{ ctrl.jobFailureRows.value.length }})</h4>
+              <p class="ai-bulk__group-note">{{ l('aibulk.failuresNote') }}</p>
+              <ul class="ai-bulk__group-list">
+                <li
+                  v-for="f in ctrl.jobFailureRows.value"
+                  :key="f.recordId"
+                  class="ai-bulk__group-item"
+                  :data-record-id="f.recordId"
+                  data-test="ai-bulk-job-failure-item"
+                >
+                  <span class="ai-bulk__group-record">{{ recordName(f.recordId) }}</span>
+                  <span class="ai-bulk__group-reason">{{ failureReason(f.reason ?? '') }}</span>
+                </li>
+              </ul>
+            </section>
+
+            <!-- Pending-not-generated — never generated (cancelled before reach), UNCHARGED. -->
+            <section v-if="ctrl.jobPendingNotGeneratedRows.value.length > 0" class="ai-bulk__group" data-test="ai-bulk-job-pending">
+              <h4 class="ai-bulk__group-title">{{ l('aibulk.statePendingNotGenerated') }} ({{ ctrl.jobPendingNotGeneratedRows.value.length }})</h4>
+              <p class="ai-bulk__group-note">{{ l('aibulk.statePendingNotGeneratedNote') }}</p>
+              <ul class="ai-bulk__group-list">
+                <li
+                  v-for="p in ctrl.jobPendingNotGeneratedRows.value"
+                  :key="p.recordId"
+                  class="ai-bulk__group-item"
+                  :data-record-id="p.recordId"
+                  data-test="ai-bulk-job-pending-item"
+                >
+                  <span class="ai-bulk__group-record">{{ recordName(p.recordId) }}</span>
+                </li>
+              </ul>
+            </section>
+          </template>
+
+          <!-- ───────────────────────── Phase: jobCommitting / jobDone ───────────────────────── -->
+          <template v-else-if="ctrl.state.phase === 'jobCommitting' || ctrl.state.phase === 'jobDone'">
+            <div v-if="jobCommitData" class="ai-bulk__result-head">
+              <span class="ai-bulk__summary ai-bulk__summary--strong" data-test="ai-bulk-job-commit-summary">{{ jobCommitSummary }}</span>
+            </div>
+
+            <!-- Stale guidance: any row needs a re-preview. -->
+            <p
+              v-if="jobCommitData && jobHasStale"
+              class="ai-bulk__alert ai-bulk__alert--warn"
+              role="alert"
+              data-test="ai-bulk-job-stale-guidance"
+            >
+              {{ l('aibulk.outcomeStaleGuidance') }}
+            </p>
+          </template>
+
           <!-- ───────────────────────── Phase: committing / done ───────────────────────── -->
           <template v-else-if="ctrl.state.phase === 'committing' || ctrl.state.phase === 'done'">
             <div v-if="commitData" class="ai-bulk__result-head">
@@ -266,6 +451,45 @@
             </button>
           </template>
 
+          <!-- polling (async job generating): cancel generation -->
+          <template v-else-if="ctrl.state.phase === 'polling'">
+            <button
+              type="button"
+              class="ai-bulk__btn"
+              data-test="ai-bulk-job-cancel"
+              @click="onJobCancel"
+            >
+              {{ l('aibulk.jobCancel') }}
+            </button>
+          </template>
+
+          <!-- jobReview (async job awaiting commit): write selected -->
+          <template v-else-if="ctrl.state.phase === 'jobReview'">
+            <button type="button" class="ai-bulk__btn" @click="onClose">{{ l('aibulk.cancel') }}</button>
+            <button
+              type="button"
+              class="ai-bulk__btn ai-bulk__btn--primary"
+              :disabled="ctrl.busy.value || ctrl.selectedCount.value === 0"
+              data-test="ai-bulk-job-confirm"
+              @click="onJobConfirm"
+            >
+              {{ jobConfirmLabel }}
+            </button>
+          </template>
+
+          <!-- jobCommitting/jobDone: done -->
+          <template v-else-if="ctrl.state.phase === 'jobCommitting' || ctrl.state.phase === 'jobDone'">
+            <button
+              type="button"
+              class="ai-bulk__btn ai-bulk__btn--primary"
+              :disabled="ctrl.state.phase === 'jobCommitting'"
+              data-test="ai-bulk-job-done"
+              @click="onClose"
+            >
+              {{ ctrl.state.phase === 'jobCommitting' ? l('aibulk.jobCommitting') : l('aibulk.done') }}
+            </button>
+          </template>
+
           <!-- committing/done: done -->
           <template v-else>
             <button
@@ -294,6 +518,9 @@ import {
   aiBulkCommitSummary,
   aiBulkCostLine,
   aiBulkFailureReason,
+  aiBulkJobCommitSummary,
+  aiBulkJobOutcomeLabel,
+  aiBulkJobProgressLine,
   aiBulkLabel,
   aiBulkOutcomeLabel,
   aiBulkPreviewSummary,
@@ -353,6 +580,7 @@ const previewSummary = computed(() =>
   aiBulkPreviewSummary(ctrl.confirmableCount.value, ctrl.skipped.value.length, ctrl.failures.value.length, props.isZh),
 )
 const confirmLabel = computed(() => `${l('aibulk.confirm')} (${ctrl.selectedCount.value})`)
+const jobConfirmLabel = computed(() => `${l('aibulk.jobConfirm')} (${ctrl.selectedCount.value})`)
 
 const commitData = computed(() => ctrl.state.commit)
 const commitSummary = computed(() => (commitData.value ? aiBulkCommitSummary(commitData.value.counts, props.isZh) : ''))
@@ -362,6 +590,46 @@ const allExpired = computed(() => {
   if (!c || c.outcomes.length === 0) return false
   return c.outcomes.every((o) => o.outcome === 'not_in_cache')
 })
+
+// --- B-4 async job ---
+const job = computed(() => ctrl.state.job)
+const jobProgress = computed(() =>
+  job.value ? aiBulkJobProgressLine(job.value.generated, job.value.total, props.isZh) : '',
+)
+const jobProgressPct = computed(() => {
+  const j = job.value
+  if (!j || j.total <= 0) return 0
+  return Math.min(100, Math.round((j.generated / j.total) * 100))
+})
+/** Terminal banner for a committable-but-not-clean job (cancelled / errored). null = no banner. */
+const jobReviewBannerKey = computed<MetaAiBulkLabelKey | null>(() => {
+  switch (job.value?.state) {
+    case 'rejected':
+      return 'aibulk.jobCancelledNotice'
+    case 'errored':
+      return 'aibulk.jobErroredNotice'
+    default:
+      return null
+  }
+})
+const jobCommitData = computed(() => ctrl.state.jobCommit)
+const jobCommitSummary = computed(() =>
+  jobCommitData.value ? aiBulkJobCommitSummary(jobCommitData.value.counts, props.isZh) : '',
+)
+const jobHasStale = computed(() => (jobCommitData.value?.counts.stale_reprev ?? 0) > 0)
+function jobOutcomeLabel(outcome: string): string {
+  return aiBulkJobOutcomeLabel(outcome, props.isZh)
+}
+function jobOutcomeBadgeClass(outcome: string): string {
+  return outcome === 'committed' ? 'ai-bulk__badge--ready' : 'ai-bulk__badge--warn'
+}
+function onJobConfirm(): void {
+  if (ctrl.busy.value || ctrl.selectedCount.value === 0) return
+  void ctrl.commitJob()
+}
+function onJobCancel(): void {
+  void ctrl.cancelJob()
+}
 
 function recordName(recordId: string): string {
   return props.recordName(recordId)
@@ -502,6 +770,35 @@ function onClose(): void {
   background: transparent;
   padding: 0;
   color: #b45309;
+}
+.ai-bulk__job-status {
+  font-size: 13px;
+  color: #334155;
+  margin: 0;
+}
+.ai-bulk__progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ai-bulk__progress-track {
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.ai-bulk__progress-fill {
+  height: 100%;
+  background: #2563eb;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+.ai-bulk__progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: #475569;
 }
 .ai-bulk__alert {
   font-size: 13px;
