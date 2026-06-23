@@ -13792,6 +13792,70 @@ attendanceIntegrationDescribe(
     expect(code).toBe('EXPIRED')
   })
 
+  it('#6 TA-1 — pending leave surfaces as a display-only pending_leave overlay behind includePending (real DB)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const year = 3600 + (Number.parseInt(runSuffix.slice(-4), 36) % 1000)
+    const firstOfOctober = new Date(Date.UTC(year, 9, 1))
+    const monday = new Date(firstOfOctober)
+    while (monday.getUTCDay() !== 1) monday.setUTCDate(monday.getUTCDate() + 1)
+    const workDate = monday.toISOString().slice(0, 10)
+    const userId = `attendance-ta1-${runSuffix}`
+    const requestId = randomUUID()
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+      const auth = { Authorization: `Bearer ${token}` }
+
+      // a PENDING leave request (never approved) for the user on workDate
+      await pool.query(
+        `INSERT INTO attendance_requests (id, org_id, user_id, work_date, request_type, status, metadata)
+         VALUES ($1, 'default', $2, $3, 'leave', 'pending', '{}'::jsonb)`,
+        [requestId, userId, workDate],
+      )
+
+      const calUrl = (extra: string) => `${baseUrl}/api/attendance/effective-calendar?userId=${encodeURIComponent(userId)}&from=${workDate}&to=${workDate}${extra}`
+      const pendingOverlaysFor = (body: any) => {
+        const items = (body?.data?.items ?? []) as any[]
+        const item = items.find((it) => String(it?.date || '').slice(0, 10) === workDate)
+        return ((item?.overlays ?? []) as Array<Record<string, unknown>>).filter((o) => o.kind === 'pending_leave')
+      }
+
+      // includePending=true → the pending_leave overlay is present, distinct + provisional
+      const withPendingRes = await requestJson(calUrl('&includePending=true'), { headers: auth })
+      expect(withPendingRes.status).toBe(200)
+      const pendingOverlays = pendingOverlaysFor(withPendingRes.body)
+      expect(pendingOverlays.length).toBe(1)
+      expect(pendingOverlays[0]?.refId).toBe(requestId)
+      expect(pendingOverlays[0]?.status).toBe('pending')
+      expect(pendingOverlays[0]?.provisional).toBe(true)
+
+      // default (no includePending) → NO pending_leave overlay. This is the call the record-compute path
+      // uses, so proving it here proves pending never reaches records (the display-only invariant).
+      const defaultRes = await requestJson(calUrl(''), { headers: auth })
+      expect(defaultRes.status).toBe(200)
+      expect(pendingOverlaysFor(defaultRes.body).length).toBe(0)
+
+      // corroboration: a pending leave is not a fact — no attendance_record exists for that date.
+      const recRes = await requestJson(`${baseUrl}/api/attendance/records?userId=${encodeURIComponent(userId)}&from=${workDate}&to=${workDate}`, { headers: auth })
+      expect(recRes.status).toBe(200)
+      const recItems = (recRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+      expect(recItems.find((r) => String(r?.work_date || '').slice(0, 10) === workDate)).toBeFalsy()
+    } finally {
+      await pool.query('DELETE FROM attendance_requests WHERE id = $1', [requestId]).catch(() => {})
+      await pool.end().catch(() => {})
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+  })
+
   it('effective-calendar §6.1 baseline equals resolveWorkContext for rule + holiday rows', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
