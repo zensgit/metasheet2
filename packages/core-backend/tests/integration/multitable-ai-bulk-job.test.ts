@@ -37,8 +37,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { createMultitableAiRoutes } from '../../src/routes/multitable-ai'
-import { AI_USAGE_LEDGER_TABLE } from '../../src/services/ai-usage-ledger'
-import { BulkFillJobService, AI_BULK_JOB_TABLE, AI_BULK_JOB_ROWS_TABLE } from '../../src/services/ai-bulk-job-service'
+import { AI_USAGE_LEDGER_TABLE, type AiUsageQueryFn } from '../../src/services/ai-usage-ledger'
+import {
+  BulkFillJobService,
+  AI_BULK_JOB_TABLE,
+  AI_BULK_JOB_ROWS_TABLE,
+  cancelBulkJob,
+  setHeaderRunning,
+  insertBulkJobHeader,
+} from '../../src/services/ai-bulk-job-service'
 import type { PoolLike } from '../../src/services/ai-bulk-shared'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -79,6 +86,12 @@ let currentUser: { id: string; roles: string[]; perms: string[] } = { id: ACTOR,
 let stubUsage = { input_tokens: 20, output_tokens: 10 }
 let stubText = 'AI OUT'
 let fetchCallCount = 0
+/**
+ * Test seam: invoked inside fetchStub on every provider call (arg = the call number),
+ * letting a test inject an out-of-band event (e.g. a cancel) at a PRECISE row so the
+ * worker's per-row cooperation can be exercised deterministically. Reset between tests.
+ */
+let onFetchCall: ((callNumber: number) => void | Promise<void>) | null = null
 const capturedBodies: string[] = []
 const savedEnv = new Map<string, string | undefined>()
 
@@ -88,6 +101,7 @@ const fetchStub = (async (_url: unknown, init?: unknown) => {
   fetchCallCount += 1
   const body = (init as { body?: unknown } | undefined)?.body
   if (typeof body === 'string') capturedBodies.push(body)
+  if (onFetchCall) await onFetchCall(fetchCallCount)
   return new Response(
     JSON.stringify({ content: [{ type: 'text', text: stubText }], usage: { ...stubUsage } }),
     { status: 200, headers: { 'content-type': 'application/json' } },
@@ -150,6 +164,7 @@ async function resetSideEffects() {
   await q(`DELETE FROM ${AI_BULK_JOB_TABLE} WHERE sheet_id = $1`, [SHEET_ID]).catch(() => {})
   fetchCallCount = 0
   capturedBodies.length = 0
+  onFetchCall = null
 }
 
 /** Grant the actor own-write scope (writes records they created). */
@@ -397,6 +412,117 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
     const commit2 = await commitJob(jobId2, gen2.map((r) => String(r.record_id)))
     expect(commit2.status).toBe(200)
     expect(commit2.body.counts.committed).toBe(gen2.length)
+  })
+
+  // ── CANCEL MID-RUN (BJ-4: the worker stops at the next row; charge stays truthful) ──
+  test('cancel MID-RUN: the worker stops at the next row boundary; a row charged as the cancel lands reads `generated` (never pending_not_generated); header stays rejected', async () => {
+    // stubUsage default = 20+10 = 30 tokens / charged row.
+    const ids = [0, 1, 2, 3].map((i) => `rec_b4_mrc${i}_${TS}`)
+    for (const id of ids) await seedRecord(id, { [FLD_SRC]: `mrc ${id}` }, ACTOR)
+
+    const start = await bulkPreview({ fieldId: FLD_TARGET, scope: 'sheet' })
+    const jobId = start.body.jobId as string
+
+    // A cancel arrives DURING the 2nd row's generation — the worst-case race: the worker
+    // has reserved+charged row 2 but not yet recorded it `generated`, and the cancel flips
+    // every still-`pending` row (including row 2 at that instant) to pending_not_generated.
+    onFetchCall = async (n) => {
+      if (n === 2) await cancelBulkJob(q as unknown as AiUsageQueryFn, jobId)
+    }
+    await runJob(jobId)
+
+    const rows = await dbJobRows(jobId)
+    const generated = rows.filter((r) => r.state === 'generated')
+    const notGenerated = rows.filter((r) => r.state === 'pending_not_generated')
+
+    // Rows 1+2 were charged before the worker observed the cancel → BOTH read `generated`.
+    // markRowGenerated is UNCONDITIONAL, so row 2 (which the cancel momentarily flipped to
+    // pending_not_generated) is re-recorded as generated — never charged-but-shown-uncharged.
+    expect(generated.length).toBe(2)
+    expect(notGenerated.length).toBe(2)
+    // KEYSTONE invariant: no row is charged (usage_tokens > 0) yet shown pending_not_generated.
+    expect(rows.every((r) => r.state !== 'pending_not_generated' || Number(r.usage_tokens) === 0)).toBe(true)
+    for (const r of generated) expect(Number(r.usage_tokens)).toBe(30)
+    // Ledger token-sum == generated count × 30 — row 2's charge is counted as generated, not lost.
+    // (Were row 2 wrongly left pending_not_generated, the ledger would hold 60 while generated == 1.)
+    expect(await ledgerTokenSum()).toBe(generated.length * 30)
+
+    // The worker STOPPED at row 3 (the next boundary): exactly 2 provider calls, and it did
+    // NOT overwrite the cancel — the header stays `rejected` (BJ-4), not `suspended`.
+    expect(fetchCallCount).toBe(2)
+    const header = await dbJobHeader(jobId)
+    expect(header!.status).toBe('rejected')
+    expect(Number(header!.generated)).toBe(2)
+  })
+
+  // ── COMMIT STATE GUARD (BJ-4 / BJ-5) ────────────────────────────────────────
+  test('commit STATE GUARD: a queued/running (worker-active) job → 409 BULK_JOB_NOT_COMMITTABLE (no write, header unchanged, still runnable); a resolved job → 409 (no double-commit)', async () => {
+    const ids = [0, 1].map((i) => `rec_b4_csg${i}_${TS}`)
+    for (const id of ids) await seedRecord(id, { [FLD_SRC]: `csg ${id}` }, ACTOR)
+
+    const start = await bulkPreview({ fieldId: FLD_TARGET, scope: 'sheet' })
+    const jobId = start.body.jobId as string
+
+    // QUEUED — the worker has not generated yet → commit refused; header NOT flipped to running.
+    expect((await dbJobHeader(jobId))!.status).toBe('queued')
+    const onQueued = await commitJob(jobId, ids)
+    expect(onQueued.status).toBe(409)
+    expect(onQueued.body.error.code).toBe('BULK_JOB_NOT_COMMITTABLE')
+    expect((await dbJobHeader(jobId))!.status).toBe('queued') // unchanged — not corrupted to running
+
+    // RUNNING — the worker is mid-generate → commit refused (committing now would race it).
+    await q(`UPDATE ${AI_BULK_JOB_TABLE} SET status = 'running' WHERE job_id = $1`, [jobId])
+    const onRunning = await commitJob(jobId, ids)
+    expect(onRunning.status).toBe(409)
+    expect(onRunning.body.error.code).toBe('BULK_JOB_NOT_COMMITTABLE')
+
+    // Neither refused commit wrote anything.
+    for (const id of ids) expect(await recordValue(id, FLD_TARGET)).toBeNull()
+
+    // Not corrupted: restore queued → the worker runs → suspends → commit now succeeds.
+    await q(`UPDATE ${AI_BULK_JOB_TABLE} SET status = 'queued' WHERE job_id = $1`, [jobId])
+    await runJob(jobId)
+    expect((await dbJobHeader(jobId))!.status).toBe('suspended')
+    const ok = await commitJob(jobId, ids)
+    expect(ok.status).toBe(200)
+    expect(ok.body.state).toBe('resolved')
+    for (const id of ids) expect(await recordValue(id, FLD_TARGET)).toBe('AI OUT')
+
+    // RESOLVED — a second commit is refused (no double-commit).
+    const again = await commitJob(jobId, ids)
+    expect(again.status).toBe(409)
+    expect(again.body.error.code).toBe('BULK_JOB_NOT_COMMITTABLE')
+  })
+
+  // ── COMMITTABLE-SET MATRIX (the guarded commit-phase claim) ──────────────────
+  test('setHeaderRunning committable-set: {suspended,errored,rejected} claim (true → running); {queued,running,resolved} refuse (false, status unchanged)', async () => {
+    const queryFn = q as unknown as AiUsageQueryFn
+    const make = async (suffix: string, status: string) => {
+      const jid = `aibulkjob_csm_${suffix}_${TS}`
+      await insertBulkJobHeader(queryFn, {
+        jobId: jid,
+        actorId: ACTOR,
+        sheetId: SHEET_ID,
+        fieldId: FLD_TARGET,
+        scopeFingerprint: `fp_${suffix}`,
+        total: 0,
+      })
+      await q(`UPDATE ${AI_BULK_JOB_TABLE} SET status = $2 WHERE job_id = $1`, [jid, status])
+      return jid
+    }
+
+    // Committable (the worker is no longer mutating) → claims, returns true, → running.
+    for (const s of ['suspended', 'errored', 'rejected']) {
+      const jid = await make(`ok_${s}`, s)
+      expect(await setHeaderRunning(queryFn, jid)).toBe(true)
+      expect((await dbJobHeader(jid))!.status).toBe('running')
+    }
+    // Non-committable (worker active, or already committed) → refuses, returns false, unchanged.
+    for (const s of ['queued', 'running', 'resolved']) {
+      const jid = await make(`no_${s}`, s)
+      expect(await setHeaderRunning(queryFn, jid)).toBe(false)
+      expect((await dbJobHeader(jid))!.status).toBe(s)
+    }
   })
 
   // ── DURABILITY KEYSTONE (BJ-9) ─────────────────────────────────────────────
