@@ -23,6 +23,16 @@ describe('meta-api-error-labels', () => {
       'error.aiUnsafeInput',
       'error.aiProviderError',
       'error.aiVersionConflict',
+      // B-3 AI bulk-fill state copy — bulk-specific error codes.
+      'error.aiBulkQuotaInsufficient',
+      'error.aiBulkScopeTooLarge',
+      'error.aiBulkViewFilterUnsupported',
+      'error.aiBulkInlineConfigRejected',
+      'error.aiBulkFieldForbidden',
+      // B-4 AI bulk async-job lifecycle conflicts.
+      'error.aiBulkActiveJobExists',
+      'error.aiBulkJobNotCommittable',
+      'error.aiBulkJobCommitInProgress',
     ])
 
     for (const key of META_API_ERROR_LABEL_KEYS) {
