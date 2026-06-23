@@ -1857,6 +1857,9 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
         return { rows: [buildInstanceRow({ status: 'approved', current_node_key: null })], rowCount: 1 }
       }
+      if (statement.startsWith('SELECT form_schema FROM approval_template_versions WHERE id = $1')) {
+        return { rows: [{ form_schema: { fields: [] } }], rowCount: 1 }
+      }
       if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
         return { rows: [], rowCount: 0 }
       }
