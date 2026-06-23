@@ -41,6 +41,8 @@ const ROUTES = [
   ['DELETE', '/api/integration/table-actions/:actionId/conflict-policies', 'tableActionConflictPoliciesDelete'],
   ['GET', '/api/integration/stock-preparation/target/readiness', 'stockPreparationTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/target/ensure', 'stockPreparationTargetEnsure'],
+  ['GET', '/api/integration/stock-preparation/sandbox-target/readiness', 'stockPreparationSandboxTargetReadiness'],
+  ['POST', '/api/integration/stock-preparation/sandbox-target/ensure', 'stockPreparationSandboxTargetEnsure'],
   ['POST', '/api/integration/stock-preparation/options/sync', 'stockPreparationOptionsSync'],
   // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
   ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
@@ -129,8 +131,11 @@ const {
   duplicateExpandedKeyDiagnosticsForRows,
 } = require('./stock-preparation-conflict-planner.cjs')
 const {
+  StockPreparationTargetProvisioningError,
   inspectStockPreparationCanonicalTarget,
   ensureStockPreparationCanonicalTarget,
+  inspectStockPreparationSandboxTarget,
+  ensureStockPreparationSandboxTarget,
 } = require('./stock-preparation-target-provisioning.cjs')
 const {
   StockPreparationOptionSyncError,
@@ -418,6 +423,7 @@ const VALID_C6_WRITE_APPLY_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'conf
 const VALID_TEMPLATE_INSTANTIATE_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'targetSystemId', 'sourceSystemId', 'pipelineName'])
 const VALID_C6_WRITE_APPLY_CONFIRM_KEYS = new Set(['dryRunToken'])
 const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId'])
+const VALID_STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId', 'objectId', 'label'])
 const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
   'tenantId',
   'workspaceId',
@@ -570,6 +576,39 @@ function stockPreparationTargetInput(req, rawInput = {}) {
   }
 }
 
+function normalizeStockPreparationSandboxTargetRequest(input = {}) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!VALID_STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    tenantId: firstString(input.tenantId),
+    workspaceId: firstString(input.workspaceId),
+    projectId: firstString(input.projectId),
+    baseId: firstString(input.baseId),
+    objectId: firstString(input.objectId),
+    label: firstString(input.label),
+  }
+}
+
+function stockPreparationSandboxTargetInput(req, rawInput = {}) {
+  const input = normalizeStockPreparationSandboxTargetRequest(rawInput)
+  const tenantId = resolveTenantId(req, input)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    projectId,
+    baseId: input.baseId,
+    objectId: input.objectId,
+    label: input.label,
+  }
+}
+
 function normalizeStockPreparationOptionSyncRequest(input = {}) {
   if (!isPlainObject(input)) {
     throw new HttpRouteError(400, 'STOCK_PREPARATION_OPTION_SYNC_REQUEST_INVALID', 'request must be an object')
@@ -695,6 +734,42 @@ function publicStockPreparationTargetResult(result) {
     targetBinding: result.target ? cloneJson(result.target) : null,
     evidence: result.evidence,
   }
+}
+
+function publicStockPreparationSandboxTargetResult(result) {
+  return {
+    ready: result.ready === true,
+    mode: result.mode,
+    targetBindingAvailable: result.target != null,
+    evidence: result.evidence,
+  }
+}
+
+function sandboxTargetRouteError(error) {
+  if (error instanceof HttpRouteError) return error
+  if (error instanceof StockPreparationTargetProvisioningError) {
+    const code = error.code || 'TARGET_SANDBOX_PROVISIONING_FAILED'
+    if (
+      code === 'TARGET_SANDBOX_OBJECT_ID_INVALID' ||
+      code === 'TARGET_PROVISIONING_CONFIG_INVALID' ||
+      code === 'TARGET_PROVISIONING_PERMISSION_DENIED' ||
+      code === 'TARGET_PROVISIONING_API_UNAVAILABLE' ||
+      code === 'TARGET_SCHEMA_INCOMPLETE'
+    ) {
+      return new HttpRouteError(
+        Number.isInteger(error.status) ? error.status : 422,
+        code,
+        error.message || 'sandbox stock-preparation target provisioning failed',
+        error.details || {},
+      )
+    }
+  }
+  return new HttpRouteError(
+    503,
+    'TARGET_SANDBOX_PROVISIONING_FAILED',
+    'sandbox stock-preparation target provisioning failed',
+    { reason: 'provisioning_failed' },
+  )
 }
 
 function largeBomExpansionOptionsForAction(action = {}) {
@@ -2107,6 +2182,41 @@ function createHandlers(services, options = {}) {
         permission: 'admin',
       })
       return sendOk(res, publicStockPreparationTargetResult(result), result.mode === 'canonical_create' ? 201 : 200)
+    },
+
+    async stockPreparationSandboxTargetReadiness(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationSandboxTargetInput(req, requestQuery(req))
+      try {
+        const result = await inspectStockPreparationSandboxTarget({
+          context,
+          projectId: input.projectId,
+          objectId: input.objectId,
+          label: input.label,
+          permission: 'admin',
+        })
+        return sendOk(res, publicStockPreparationSandboxTargetResult(result))
+      } catch (error) {
+        throw sandboxTargetRouteError(error)
+      }
+    },
+
+    async stockPreparationSandboxTargetEnsure(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationSandboxTargetInput(req, requestBody(req))
+      try {
+        const result = await ensureStockPreparationSandboxTarget({
+          context,
+          projectId: input.projectId,
+          baseId: input.baseId,
+          objectId: input.objectId,
+          label: input.label,
+          permission: 'admin',
+        })
+        return sendOk(res, publicStockPreparationSandboxTargetResult(result), result.mode === 'sandbox_create' ? 201 : 200)
+      } catch (error) {
+        throw sandboxTargetRouteError(error)
+      }
     },
 
     async stockPreparationOptionsSync(req, res) {

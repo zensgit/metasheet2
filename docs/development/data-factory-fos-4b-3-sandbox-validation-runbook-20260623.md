@@ -19,6 +19,27 @@
 ☐ 记录沙箱 objectId(下面记为 <SANDBOX_OBJECT_ID>)与 sheetId(仅本地记录,证据中不外泄)
 ```
 
+### 1.1 如果沙箱目标表不存在
+
+> **不要**使用 `POST /api/integration/stock-preparation/target/ensure`。该 canonical ensure 入口只会创建/绑定
+> `plm_stock_preparation_main`,不是沙箱目标。缺沙箱表时,使用下面的 admin-only sandbox provisioning 入口。
+
+```text
+POST /api/integration/stock-preparation/sandbox-target/ensure
+{
+  "projectId": "<PROJECT_ID>",
+  "baseId": "<SANDBOX_BASE_ID>",
+  "objectId": "<SANDBOX_OBJECT_ID>",
+  "label": "<SANDBOX_LABEL>"
+}
+
+期望:
+☐ objectId ≠ plm_stock_preparation_main;若误传 canonical objectId → 422 TARGET_SANDBOX_OBJECT_ID_INVALID
+☐ 响应 mode = sandbox_create 或 sandbox_existing
+☐ 响应只返回 targetBindingAvailable + values-free evidence(objectIdHash / field counts / field names);不返回 targetBinding / sheetId / 明文 objectId
+☐ evidence 可贴 issue;明文 <SANDBOX_OBJECT_ID> / sheetId 仅本地记录,不要贴出
+```
+
 ## 2. Step 1 — 配置并验证 sandbox gate(开关 + fail-closed)
 
 ```text
