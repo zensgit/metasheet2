@@ -651,8 +651,50 @@ async function dryRunStockPreparationAction(input = {}) {
   }
 }
 
+// FOS-4b-3 (sandbox-only apply) — P0 gate. apply may run ONLY when sandbox mode is enabled AND the target
+// is in the sandbox allowlist, and NEVER against the production canonical stock-prep object. Fail-closed by
+// default: a missing/disabled policy, an unallowlisted target, or the prod canonical → 403. This is the
+// FIRST thing apply does (before token consume / dry-run / write). Production apply = separate FOS-4b-3-prod
+// owner gate. Error is values-free (only a coarse reason).
+function assertStockPrepApplySandboxAllowed(target, sandboxPolicy) {
+  const objectId = (target && (optionalString(target.objectId) || optionalString(target.sheetId))) || null
+  // Defense-in-depth: the prod canonical target is never appliable on the sandbox path, regardless of policy.
+  if (objectId === STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId) {
+    throw new StockPreparationTableActionError(403, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'apply is sandbox-only; the production canonical stock-prep target is not appliable (production apply is a separate owner gate)', { reason: 'prod_canonical' })
+  }
+  const policy = isPlainObject(sandboxPolicy) ? sandboxPolicy : {}
+  if (policy.enabled !== true) {
+    throw new StockPreparationTableActionError(403, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'apply is sandbox-only; sandbox mode is not enabled', { reason: 'sandbox_disabled' })
+  }
+  const allowed = Array.isArray(policy.allowedTargetObjectIds) ? policy.allowedTargetObjectIds : []
+  if (!objectId || !allowed.includes(objectId)) {
+    throw new StockPreparationTableActionError(403, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'apply target is not in the sandbox allowlist', { reason: 'target_not_allowlisted' })
+  }
+}
+
+// FOS-4b-3: resolve the sandbox policy from server config. Explicit config wins (config-file / tests);
+// otherwise the recommended env gate STOCK_PREP_SANDBOX_MODE=true + STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS
+// (comma-separated allowlist). Absent / mode!=='true' → undefined → apply fail-closed (gate rejects).
+function resolveStockPrepApplySandboxPolicy(config, env = process.env) {
+  if (config && isPlainObject(config.stockPrepApplySandbox)) {
+    return config.stockPrepApplySandbox
+  }
+  if (env && env.STOCK_PREP_SANDBOX_MODE === 'true') {
+    return {
+      enabled: true,
+      allowedTargetObjectIds: String(env.STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS || '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean),
+    }
+  }
+  return undefined
+}
+
 async function applyStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
+  // P0: sandbox gate FIRST — fail-closed before any token consume, dry-run recompute, or write.
+  assertStockPrepApplySandboxAllowed(action.target, input.sandboxPolicy)
   const parameters = normalizeActionParameters(input.parameters)
   const tokenRecord = await consumeDryRunToken(input.tokenStore, input.dryRunToken, {
     actionId: action.actionId,
@@ -723,8 +765,10 @@ module.exports = {
   TABLE_ACTION_KIND,
   StockPreparationTableActionError,
   applyStockPreparationAction,
+  assertStockPrepApplySandboxAllowed,
   assertStockPreparationTargetReady,
   createStockPreparationTableActionRegistry,
+  resolveStockPrepApplySandboxPolicy,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
   normalizeActionParameters,

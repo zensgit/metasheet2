@@ -102,6 +102,7 @@ const {
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
   normalizeActionParameters,
+  resolveStockPrepApplySandboxPolicy,
 } = require('./stock-preparation-table-actions.cjs')
 const {
   assertAuthoritativeLargeBomExpansion,
@@ -1866,6 +1867,9 @@ function createHandlers(services, options = {}) {
         recordsApi: getMultitableRecordsApi(),
         tokenStore: context.storage,
         policyStore: context.storage,
+        // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
+        // Absent (e.g. prod default) → undefined → apply fail-closed.
+        sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
       }))
     },
 

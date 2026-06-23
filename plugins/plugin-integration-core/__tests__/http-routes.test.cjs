@@ -4125,6 +4125,8 @@ async function testTableActionRoutes() {
     recordsApi: records.recordsApi,
     config: {
       stockPreparationTableActions: [tableActionConfig()],
+      // FOS-4b-3 P0 sandbox gate: enable sandbox apply for the test target (non-canonical).
+      stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
     },
   })
 
@@ -4202,6 +4204,25 @@ async function testTableActionRoutes() {
   assert.equal(createCall[1].sheetId, 'sheet_stock_configured', 'apply writes only the configured target sheet')
   assert.equal(JSON.stringify(res.body.data.evidence).includes('P-001'), false, 'apply evidence is values-free')
   assert.equal(JSON.stringify(res.body.data.evidence).includes('A-001'), false, 'apply evidence hides component code')
+
+  // FOS-4b-3 P0 wiring: a mount WITHOUT sandbox config/env fails apply closed BEFORE the token check.
+  const createsBefore = records.calls.filter((call) => call[0] === 'createRecord').length
+  const gated = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    config: { stockPreparationTableActions: [tableActionConfig()] }, // no stockPrepApplySandbox, no env
+  })
+  const gatedApply = await invoke(gated.routes, 'POST', '/api/integration/table-actions/:actionId/apply', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' }, confirm: { dryRunToken: 'unused-token' } },
+  })
+  assert.equal(gatedApply.statusCode, 403, 'apply fail-closed when no sandbox config/env (prod default)')
+  assert.equal(gatedApply.body.error.code, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'route wires config/env → P0 gate before the token check')
+  assert.equal(
+    records.calls.filter((call) => call[0] === 'createRecord').length,
+    createsBefore,
+    'gated apply wrote nothing (P0 gate fires before any write)',
+  )
 }
 
 async function testLargeBomBackgroundExpansionJobRoutes() {
@@ -4664,6 +4685,9 @@ async function testTableActionConflictPolicyRoutes() {
     storage,
     config: {
       stockPreparationTableActions: [tableActionConfig()],
+      // FOS-4b-3 P0 sandbox gate: enable sandbox apply for the test target so conflict-policy applies
+      // reach the token/conflict logic (the gate fires first otherwise).
+      stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
     },
   })
 
