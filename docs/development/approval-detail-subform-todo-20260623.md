@@ -10,18 +10,19 @@
 - ✅ Decisions finalized via §8 defaults (a–e) under the /goal autonomy directive
   (owner-override-welcome). **C-1 unblocked.**
 
-## Phase C-1 — contract (⬜ — D accepted via §8 defaults; not wired to runtime)
-- ⬜ `FormFieldType += 'detail'` in FE (`types/approval.ts`) + BE (`approval-product.ts`) +
-  server allow-list `FORM_FIELD_TYPES` (`ApprovalProductService.ts:261`).
-- ⬜ Sub-schema types: `DetailColumn` (leaf-only) + `minRows`/`maxRows` on the detail field.
-- ⬜ Author-time schema validation in `normalizeFormField`/`assertFormSchema`: non-empty
-  `columns`; each sub-field a valid **leaf** type (reject `detail` = no nesting, reject
-  unknown); sub-field id uniqueness within the group; `minRows ≤ maxRows`; reject a
-  `form_field_user` source pointing at a sub-field (assignee sources top-level-only); reject a
-  sub-field `visibilityRule` crossing row scope or a top-level rule targeting a `detail`.
-- ⬜ Frozen-columns read shape (§5) defined in the contract (version `form_schema` or a
-  projected `detailColumns` on the instance read DTO).
-- ⬜ Contract + OpenAPI-parity tests; **no createApproval/runtime wiring**.
+## Phase C-1 — contract ✅ (shipped; types + author-time validation + tests; not wired to runtime)
+- ✅ `FormFieldType += 'detail'` in FE (`types/approval.ts`) + BE (`approval-product.ts`) +
+  server allow-list `FORM_FIELD_TYPES` + derived `DETAIL_LEAF_FIELD_TYPES`.
+- ✅ Sub-schema: `columns?: FormField[]` (reused `FormField` for sub-fields) + `minRows?` / `maxRows?`.
+- ✅ Author-time validation (`normalizeFormField` / `assertFormSchema` /
+  `validateFormFieldVisibilityRules`): non-empty leaf-only columns (no nesting), unique sub-ids,
+  `minRows ≤ maxRows` (non-negative ints), detail-only keys rejected on a non-detail field,
+  top-level rule can't target a `detail`, sub-field rule stays in-group, and the
+  `form_field_user`-can't-target-a-sub-field invariant (locked by test + a code comment).
+- ✅ Contract tests (11) in `approval-product-service.test.ts` — 8 reject + assignee-source +
+  negative-bound + accept round-trip (columns / minRows / maxRows + sibling rule preserved).
+- ➡️ Frozen-columns READ shape (§5) folded into **C-2** (the instance read-DTO change *is* the
+  runtime read path; the type-level contract — `columns` on the frozen formSchema — ships here).
 
 ## Phase C-2 — runtime (🔒 until C-1 merged)
 - 🔒 Submit-time row validation: extend `validateApprovalFormData`/`validateFieldType`/
