@@ -94,6 +94,10 @@ jobs:
             echo "[pact-broker] PACT_BROKER_BASE_URL not set — skipping advisory publish."
             exit 0
           fi
+          if [ -z "${PACT_BROKER_TOKEN:-}" ]; then
+            echo "::error title=Pact broker token missing::PACT_BROKER_BASE_URL is set but PACT_BROKER_TOKEN is empty; broker publish is configured but invalid."
+            exit 1
+          fi
           curl -fsSL https://raw.githubusercontent.com/pact-foundation/pact-ruby-standalone/master/install.sh | bash
           export PATH="$PWD/pact/bin:$PATH"
           pact-broker publish packages/core-backend/tests/contract/pacts/metasheet2-yuantus-plm.json \
