@@ -161,6 +161,7 @@
                 <el-option label="单选" value="select" />
                 <el-option label="多选" value="multi-select" />
                 <el-option label="用户" value="user" />
+                <el-option label="明细（子表单）" value="detail" />
               </el-select>
             </el-form-item>
             <el-form-item label="占位文本">
@@ -181,6 +182,101 @@
                 :rows="3"
                 placeholder="每行一个选项，格式：显示名:值"
               />
+            </el-form-item>
+            <!-- detail / sub-form (明细) config: sub-field list editor + minRows/maxRows. Each
+                 sub-field is a LEAF type (no nested detail). Mirrors the backend column schema. -->
+            <el-form-item
+              v-if="field.type === 'detail'"
+              label="明细子字段"
+              class="template-authoring__wide"
+            >
+              <div class="template-authoring__detail" data-testid="approval-detail-config">
+                <el-table
+                  v-if="field.detailColumns.length > 0"
+                  :data="field.detailColumns"
+                  border
+                  size="small"
+                  class="template-authoring__detail-table"
+                >
+                  <el-table-column label="子字段 ID" min-width="120">
+                    <template #default="{ row }">
+                      <el-input v-model="row.id" :disabled="readOnly" placeholder="如 product" />
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="名称" min-width="120">
+                    <template #default="{ row }">
+                      <el-input v-model="row.label" :disabled="readOnly" placeholder="如 品名" />
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="类型" min-width="120">
+                    <template #default="{ row }">
+                      <el-select v-model="row.type" :disabled="readOnly" style="width: 100%">
+                        <el-option
+                          v-for="leaf in detailLeafTypeOptions"
+                          :key="leaf.value"
+                          :label="leaf.label"
+                          :value="leaf.value"
+                        />
+                      </el-select>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="必填" width="70" align="center">
+                    <template #default="{ row }">
+                      <el-checkbox v-model="row.required" :disabled="readOnly" />
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="选项" min-width="160">
+                    <template #default="{ row }">
+                      <el-input
+                        v-if="row.type === 'select' || row.type === 'multi-select'"
+                        v-model="row.optionsText"
+                        :disabled="readOnly"
+                        type="textarea"
+                        :rows="2"
+                        placeholder="每行一个：显示名:值"
+                      />
+                      <span v-else class="template-authoring__hint">—</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="70" align="center">
+                    <template #default="{ $index }">
+                      <el-button
+                        type="danger"
+                        link
+                        :disabled="readOnly"
+                        @click="removeDetailColumn(field, $index)"
+                      >
+                        删除
+                      </el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <div v-else class="template-authoring__hint">尚无子字段，请添加至少一个。</div>
+                <div class="template-authoring__detail-actions">
+                  <el-button
+                    size="small"
+                    type="primary"
+                    plain
+                    :disabled="readOnly"
+                    data-testid="approval-detail-add-column"
+                    @click="addDetailColumn(field)"
+                  >
+                    添加子字段
+                  </el-button>
+                  <el-input
+                    v-model="field.minRowsText"
+                    :disabled="readOnly"
+                    placeholder="最小行数"
+                    style="width: 120px"
+                  />
+                  <el-input
+                    v-model="field.maxRowsText"
+                    :disabled="readOnly"
+                    placeholder="最大行数"
+                    style="width: 120px"
+                  />
+                </div>
+              </div>
             </el-form-item>
             <el-form-item label="显隐规则" class="template-authoring__wide">
               <div class="template-authoring__visibility">
@@ -426,9 +522,11 @@ import {
   buildCreateTemplatePayload,
   buildFormSchema,
   buildUpdateTemplatePayload,
+  createEmptyDetailColumnDraft,
   createEmptyFieldDraft,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
+  DETAIL_LEAF_FIELD_TYPES,
   draftFromTemplate,
   parseIdsText,
   unsupportedTemplateAuthoringReason,
@@ -525,6 +623,31 @@ function removeField(index: number) {
 
 function moveField(index: number, delta: -1 | 1) {
   draft.value.fields = swap(draft.value.fields, index, delta) ?? draft.value.fields
+}
+
+// detail / sub-form (明细) sub-field authoring. Sub-fields are LEAF types only (no nested
+// `detail`), surfaced from the shared `DETAIL_LEAF_FIELD_TYPES` so the picker can never offer
+// `detail` — the one-nesting-level invariant the backend also enforces.
+const DETAIL_LEAF_TYPE_LABELS: Record<string, string> = {
+  text: '文本',
+  textarea: '多行文本',
+  number: '数字',
+  date: '日期',
+  datetime: '日期时间',
+  select: '单选',
+  'multi-select': '多选',
+  user: '用户',
+}
+const detailLeafTypeOptions = computed(() =>
+  DETAIL_LEAF_FIELD_TYPES.map((type) => ({ value: type, label: DETAIL_LEAF_TYPE_LABELS[type] ?? type })),
+)
+
+function addDetailColumn(field: FieldAuthoringDraft) {
+  field.detailColumns = [...field.detailColumns, createEmptyDetailColumnDraft(field.detailColumns.length + 1)]
+}
+
+function removeDetailColumn(field: FieldAuthoringDraft, index: number) {
+  field.detailColumns = field.detailColumns.filter((_, i) => i !== index)
 }
 
 // Visibility-rule depends-on options: other fields that have an id (excludes self).
@@ -723,6 +846,22 @@ onMounted(() => {
 
 .template-authoring__inline > .el-input {
   flex: 1;
+}
+
+.template-authoring__detail {
+  width: 100%;
+}
+
+.template-authoring__detail-table {
+  width: 100%;
+}
+
+.template-authoring__detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
 }
 
 .template-authoring__item {
