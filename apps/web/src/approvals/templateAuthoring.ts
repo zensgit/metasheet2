@@ -525,7 +525,9 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
     allowRevoke: true,
     ...(complex ? { preservedGraph: template.approvalGraph } : {}),
     fields: fields.length > 0 ? fields : [createEmptyFieldDraft(1)],
-    steps: steps.length > 0 ? steps : [createEmptyStepDraft(1)],
+    // A complex graph round-trips via `preservedGraph` and has no editable steps — keep
+    // `steps: []` (no phantom step). Linear drafts seed an empty step for the editor.
+    steps: complex ? steps : (steps.length > 0 ? steps : [createEmptyStepDraft(1)]),
   }
 }
 
@@ -752,7 +754,9 @@ export function validateTemplateDraft(
     cycleState.set(fieldId, 2)
   }
   visibilityDeps.forEach((_dependsOn, fieldId) => visitVisibility(fieldId))
-  if (draft.steps.length === 0) errors.push('至少需要一个审批步骤')
+  // A complex graph (preservedGraph) carries no editable steps — the step requirement only
+  // applies to linear drafts that build their graph from `steps`.
+  if (!draft.preservedGraph && draft.steps.length === 0) errors.push('至少需要一个审批步骤')
   const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
   draft.steps.forEach((step, index) => {
     const label = step.name.trim() || `审批步骤 ${index + 1}`
