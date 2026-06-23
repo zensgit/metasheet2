@@ -9,6 +9,7 @@ on:
       - 'packages/core-backend/tests/unit/plm-adapter-yuantus.test.ts'
       - 'packages/core-backend/package.json'
       - 'pnpm-lock.yaml'
+      - 'scripts/ops/yuantus-pact-consumer-broker-workflow-contract.test.mjs'
       - '.github/workflows/yuantus-pact-consumer.yml'
   push:
     branches: [main]
@@ -18,6 +19,7 @@ on:
       - 'packages/core-backend/tests/unit/plm-adapter-yuantus.test.ts'
       - 'packages/core-backend/package.json'
       - 'pnpm-lock.yaml'
+      - 'scripts/ops/yuantus-pact-consumer-broker-workflow-contract.test.mjs'
       - '.github/workflows/yuantus-pact-consumer.yml'
 
 permissions:
@@ -41,6 +43,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20.x
+
+      - name: Run pact broker workflow contract test
+        run: node --test scripts/ops/yuantus-pact-consumer-broker-workflow-contract.test.mjs
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

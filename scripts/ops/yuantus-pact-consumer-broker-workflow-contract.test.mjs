@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const workflowPath = '.github/workflows/yuantus-pact-consumer.yml'
+const contractTestPath = 'scripts/ops/yuantus-pact-consumer-broker-workflow-contract.test.mjs'
 
 function readWorkflow() {
   return readFileSync(path.join(repoRoot, workflowPath), 'utf8')
@@ -18,6 +19,11 @@ test('yuantus pact consumer broker publish stays advisory and secret-guarded', (
 
   assert.ok(checkStep >= 0, 'local consumer checks step must exist')
   assert.ok(publishStep > checkStep, 'broker publish must run only after local consumer checks')
+  assert.match(raw, new RegExp(contractTestPath.replaceAll('/', '\\/'), 'g'))
+  assert.match(
+    raw,
+    /Run pact broker workflow contract test[\s\S]*node --test scripts\/ops\/yuantus-pact-consumer-broker-workflow-contract\.test\.mjs/,
+  )
   assert.match(raw, /pnpm --filter @metasheet\/core-backend test:contract/)
   assert.match(raw, /Publish consumer pact to broker \(advisory, Phase A\)[\s\S]*continue-on-error: true/)
   assert.match(
