@@ -1190,6 +1190,7 @@ function toApprovalTemplateVersionDetailDTO(bundle: TemplateBundle): ApprovalTem
 function toUnifiedApprovalDTO(
   row: ApprovalInstanceRow,
   assignments: ApprovalAssignmentDTO[],
+  frozenFormSchema?: FormSchema | null,
 ): UnifiedApprovalDTO {
   // Surface `currentNodeKeys` when the instance is inside a parallel region so
   // consumers (frontend timeline, callers checking `.length > 1`) can detect
@@ -1221,6 +1222,9 @@ function toUnifiedApprovalDTO(
     publishedDefinitionId: row.published_definition_id,
     requestNo: row.request_no,
     formSnapshot: toNullableRecord(row.form_snapshot),
+    // Frozen form schema (incl. detail `columns`) from the instance's pinned template version,
+    // so consumers render detail rows from the FROZEN schema, not the live template (Fact B).
+    ...(frozenFormSchema ? { formSchema: frozenFormSchema } : {}),
     currentNodeKey: row.current_node_key,
     ...(currentNodeKeys ? { currentNodeKeys } : {}),
     assignments,
@@ -3947,6 +3951,17 @@ export class ApprovalProductService {
       [id],
     )
 
+    // Resolve the FROZEN form schema from the instance's pinned template version so detail
+    // columns travel with the instance read (the live template may have changed since).
+    let frozenFormSchema: FormSchema | null = null
+    if (row.template_version_id) {
+      const versionResult = await pool.query<{ form_schema: Record<string, unknown> }>(
+        `SELECT form_schema FROM approval_template_versions WHERE id = $1`,
+        [row.template_version_id],
+      )
+      if (versionResult.rows[0]) frozenFormSchema = asFormSchema(versionResult.rows[0].form_schema)
+    }
+
     return toUnifiedApprovalDTO(
       row,
       assignmentsResult.rows.map((assignment) => ({
@@ -3958,6 +3973,7 @@ export class ApprovalProductService {
         isActive: assignment.is_active,
         metadata: assignment.metadata || {},
       })),
+      frozenFormSchema,
     )
   }
 

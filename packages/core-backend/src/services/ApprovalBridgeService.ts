@@ -12,6 +12,7 @@ import {
   toPlatformApprovalBridgeRecord,
   type PlmApprovalBridgeSource,
 } from '../federation/plm-approval-bridge'
+import type { FormSchema } from '../types/approval-product'
 import type {
   ApprovalActionRequest,
   ApprovalAssignmentRow,
@@ -511,11 +512,22 @@ export class ApprovalBridgeService {
 
     const assignmentsByInstance = await this.loadAssignments([id])
     const runtimeGraphsByDefinition = await this.loadRuntimeGraphs([row.published_definition_id])
-    return toUnifiedDTO(
+    const dto = toUnifiedDTO(
       row,
       assignmentsByInstance.get(id) || [],
       row.published_definition_id ? runtimeGraphsByDefinition.get(row.published_definition_id) ?? null : null,
     )
+    // Attach the FROZEN form schema (detail `columns` included) from the instance's pinned
+    // template version so the read renders detail rows from the frozen schema (design-lock Fact B).
+    if (dto && row.template_version_id) {
+      const versionResult = await pool.query<{ form_schema: Record<string, unknown> }>(
+        `SELECT form_schema FROM approval_template_versions WHERE id = $1`,
+        [row.template_version_id],
+      )
+      const frozen = versionResult.rows[0]?.form_schema
+      if (frozen) dto.formSchema = frozen as unknown as FormSchema
+    }
+    return dto
   }
 
   async getApprovalHistory(id: string): Promise<UnifiedApprovalHistoryDTO[]> {
