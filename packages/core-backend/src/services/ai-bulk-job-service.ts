@@ -463,7 +463,10 @@ export async function reconcileOrphanedBulkJobs(
   query: AiUsageQueryFn,
   opts: { staleAfterMs?: number } = {},
 ): Promise<number> {
-  const staleAfterSeconds = Math.max(0, Math.round((opts.staleAfterMs ?? DEFAULT_BULK_JOB_RECONCILE_STALE_MS) / 1000))
+  const staleMs = opts.staleAfterMs ?? DEFAULT_BULK_JOB_RECONCILE_STALE_MS
+  // Floor at 30s: this is an exported helper, so guard against a misuse that passes
+  // a tiny/zero window and would reconcile a just-claimed, still-live job.
+  const staleAfterSeconds = Math.max(30, Math.round(staleMs / 1000))
   const res = await query(
     `UPDATE ${AI_BULK_JOB_TABLE}
         SET status = 'errored', suspend_reason = NULL, updated_at = NOW()
