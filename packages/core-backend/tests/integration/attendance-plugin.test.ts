@@ -14993,4 +14993,253 @@ attendanceIntegrationDescribe(
     }
   })
 
+  // #7 销假 (design-lock #3034) — §5 real-DB matrix: approve → deduct → cancel → reverse, idempotency, §3a expired.
+  it('#7 销假 — cancelling an APPROVED comp_time leave reverses the deducted balance; idempotent; expired lot not resurrected', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-l7-${runSuffix}`
+    const userExp = `attendance-l7-exp-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const createdRequestIds: string[] = []
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenFor = async (uid: string) => {
+        const r = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+        return (r.body as { token?: string } | undefined)?.token
+      }
+      const token = await tokenFor(userId)
+      const tokenExp = await tokenFor(userExp)
+      if (!token || !tokenExp) return
+      const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
+
+      // comp_time leave type (explicit code='comp_time'; idempotent across reruns → 409 then look up)
+      const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr(token), body: JSON.stringify({ code: 'comp_time', name: `Comp Time L7 ${runSuffix}`, paid: false, requiresApproval: true }) })
+      expect([201, 409]).toContain(ltRes.status)
+      let leaveTypeId = (ltRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!leaveTypeId) {
+        const list = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=true`, { headers: { Authorization: `Bearer ${token}` } })
+        const items = (list.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []
+        leaveTypeId = items.find(i => i.code === 'comp_time')?.id
+      }
+      expect(leaveTypeId).toBeTruthy()
+
+      const insertLot = async (uid: string, amount: number, tag: string) => (await pool.query(
+        `INSERT INTO attendance_leave_balances
+           (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, expires_at)
+         VALUES ('default', $1, 'comp_time', $2, $2, 'overtime_conversion', $3, 'active', '2026-01-01', NULL) RETURNING id`,
+        [uid, amount, `l7:${runSuffix}:${tag}`],
+      )).rows[0].id as string
+      const createLeave = async (t: string, uid: string, minutes: number) => {
+        const r = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr(t), body: JSON.stringify({ workDate: '2026-09-20', requestType: 'leave', leaveTypeId, minutes }) })
+        expect(r.status).toBe(201)
+        const id = (r.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
+        createdRequestIds.push(id)
+        return id
+      }
+      const approve = (t: string, id: string) => requestJson(`${baseUrl}/api/attendance/requests/${id}/approve`, { method: 'POST', headers: hdr(t), body: JSON.stringify({ comment: 'ok' }) })
+      const cancel = (t: string, id: string) => requestJson(`${baseUrl}/api/attendance/requests/${id}/cancel`, { method: 'POST', headers: hdr(t), body: JSON.stringify({ comment: 'withdraw' }) })
+      const lotRow = async (id: string) => (await pool.query('SELECT remaining_minutes, status FROM attendance_leave_balances WHERE id = $1', [id])).rows[0] as { remaining_minutes: number; status: string }
+      const events = async (lotId: string, reqId: string) => (await pool.query(
+        `SELECT event_type, delta_minutes, source_type FROM attendance_leave_balance_events
+           WHERE balance_id = $1 AND source_id = $2 ORDER BY delta_minutes ASC`,
+        [lotId, reqId],
+      )).rows as { event_type: string; delta_minutes: number; source_type: string }[]
+
+      // (1) approve → deduct
+      const lot = await insertLot(userId, 240, 'ok')
+      const req = await createLeave(token, userId, 120)
+      expect((await approve(token, req)).status).toBe(200)
+      expect(await lotRow(lot)).toMatchObject({ remaining_minutes: 120, status: 'active' })
+      expect(await events(lot, req)).toEqual([{ event_type: 'deduct', delta_minutes: -120, source_type: 'comp_time_leave' }])
+
+      // (2) cancel the APPROVED leave → reverse (restored; reverse event mirrors comp_time_leave)
+      const cancelRes = await cancel(token, req)
+      expect(cancelRes.status).toBe(200)
+      expect((cancelRes.body as { data?: { reversal?: { reversed?: number } } } | undefined)?.data?.reversal?.reversed).toBe(120)
+      expect(await lotRow(lot)).toMatchObject({ remaining_minutes: 240, status: 'active' })
+      expect(await events(lot, req)).toEqual([
+        { event_type: 'deduct', delta_minutes: -120, source_type: 'comp_time_leave' },
+        { event_type: 'reverse', delta_minutes: 120, source_type: 'comp_time_leave' },
+      ])
+
+      // (3) §3b idempotency: a 2nd cancel is rejected (already cancelled); balance + events unchanged
+      expect((await cancel(token, req)).status).toBe(400)
+      expect(await lotRow(lot)).toMatchObject({ remaining_minutes: 240 })
+      expect(await events(lot, req)).toHaveLength(2)
+
+      // (4) §3a expired lot: deduct, then expire the lot → cancel does NOT restore it; reverse=0, unrecoverable surfaced
+      const lotE = await insertLot(userExp, 120, 'exp')
+      const reqE = await createLeave(tokenExp, userExp, 120)
+      expect((await approve(tokenExp, reqE)).status).toBe(200)
+      expect(await lotRow(lotE)).toMatchObject({ remaining_minutes: 0, status: 'exhausted' })
+      await pool.query(`UPDATE attendance_leave_balances SET expires_at = '2000-01-01', status = 'expired' WHERE id = $1`, [lotE])
+      const cancelE = await cancel(tokenExp, reqE)
+      expect(cancelE.status).toBe(200)
+      const reversalE = (cancelE.body as { data?: { reversal?: { reversed?: number; unrecoverableExpired?: number } } } | undefined)?.data?.reversal
+      expect(reversalE?.reversed).toBe(0)
+      expect(reversalE?.unrecoverableExpired).toBe(120)
+      // not resurrected (still expired, remaining 0) + no reverse event written for the expired portion
+      expect(await lotRow(lotE)).toMatchObject({ remaining_minutes: 0, status: 'expired' })
+      expect((await events(lotE, reqE)).filter(e => e.event_type === 'reverse')).toHaveLength(0)
+    } finally {
+      for (const uid of [userId, userExp]) {
+        await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id = $1', [uid]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [uid]).catch(() => undefined)
+      }
+      if (createdRequestIds.length > 0) {
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+      }
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
+  // #7 销假 §P2 (owner review of #3044) — the reverse mutation must be org/user-consistent like the read path.
+  // The FK only ties balance_id; it does NOT enforce that an event's org/user match the LOT owner. So a
+  // corrupt/malicious deduct event (right org+user+source_id, but balance_id pointing at ANOTHER user's lot)
+  // must be IGNORED by reverse — else it would restore minutes into a stranger's lot.
+  it('#7 销假 §P2 — reverse ignores a same-org/user deduct event whose LOT belongs to another user (no cross-user restore)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-l7x-${runSuffix}`
+    const otherId = `attendance-l7x-other-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const createdRequestIds: string[] = []
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) return
+      const hdr = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+
+      const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr, body: JSON.stringify({ code: 'comp_time', name: `Comp Time L7x ${runSuffix}`, paid: false, requiresApproval: true }) })
+      expect([201, 409]).toContain(ltRes.status)
+      let leaveTypeId = (ltRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!leaveTypeId) {
+        const list = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=true`, { headers: { Authorization: `Bearer ${token}` } })
+        const items = (list.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []
+        leaveTypeId = items.find(i => i.code === 'comp_time')?.id
+      }
+      expect(leaveTypeId).toBeTruthy()
+
+      const insertLot = async (uid: string, amount: number, remaining: number, tag: string) => (await pool.query(
+        `INSERT INTO attendance_leave_balances
+           (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, expires_at)
+         VALUES ('default', $1, 'comp_time', $2, $3, 'overtime_conversion', $4, 'active', '2026-01-01', NULL) RETURNING id`,
+        [uid, amount, remaining, `l7x:${runSuffix}:${tag}`],
+      )).rows[0].id as string
+      const lotRow = async (id: string) => (await pool.query('SELECT remaining_minutes, status FROM attendance_leave_balances WHERE id = $1', [id])).rows[0] as { remaining_minutes: number; status: string }
+
+      // userId's legit deduct: grant 240, approve a 120 leave → remaining 120 + a real deduct event (user→own lot).
+      const ownLot = await insertLot(userId, 240, 240, 'own')
+      const createRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr, body: JSON.stringify({ workDate: '2026-09-20', requestType: 'leave', leaveTypeId, minutes: 120 }) })
+      expect(createRes.status).toBe(201)
+      const req = (createRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
+      createdRequestIds.push(req)
+      expect((await requestJson(`${baseUrl}/api/attendance/requests/${req}/approve`, { method: 'POST', headers: hdr, body: JSON.stringify({ comment: 'ok' }) })).status).toBe(200)
+      expect(await lotRow(ownLot)).toMatchObject({ remaining_minutes: 120 })
+
+      // ANOTHER user's lot with headroom (amount 500, remaining 100 → 400 a buggy restore could fill).
+      const otherLot = await insertLot(otherId, 500, 100, 'other')
+      // CORRUPT deduct: org+user+source_id all match the reverse query, but balance_id points at otherLot.
+      await pool.query(
+        `INSERT INTO attendance_leave_balance_events (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+         VALUES ('default', $1, $2, 'deduct', -200, 'comp_time_leave', $3)`,
+        [userId, otherLot, req],
+      )
+
+      // cancel → reverse for (default, userId, req): ONLY the legit 120 (own lot) reverses; the corrupt 200 is ignored.
+      const cancelRes = await requestJson(`${baseUrl}/api/attendance/requests/${req}/cancel`, { method: 'POST', headers: hdr, body: JSON.stringify({ comment: 'withdraw' }) })
+      expect(cancelRes.status, cancelRes.raw).toBe(200)
+      expect((cancelRes.body as { data?: { reversal?: { reversed?: number } } } | undefined)?.data?.reversal?.reversed).toBe(120)
+      expect(await lotRow(ownLot)).toMatchObject({ remaining_minutes: 240, status: 'active' }) // own lot restored
+      expect(await lotRow(otherLot)).toMatchObject({ remaining_minutes: 100, status: 'active' }) // stranger's lot UNTOUCHED
+      const otherReverse = (await pool.query(`SELECT 1 FROM attendance_leave_balance_events WHERE balance_id = $1 AND event_type = 'reverse'`, [otherLot])).rows
+      expect(otherReverse).toHaveLength(0) // no reverse event written against the other user's lot
+    } finally {
+      for (const uid of [userId, otherId]) {
+        await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id = $1', [uid]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [uid]).catch(() => undefined)
+      }
+      if (createdRequestIds.length > 0) await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
+  // #7 销假 §5 authority — RBAC ENFORCED (the main flow above runs RBAC_BYPASS=true, which short-circuits
+  // canAccessOtherUsers). canAccessOtherUsers = admin OR attendance:approve; a read/write-only user fails it.
+  it('#7 销假 §5 authority — a non-admin/non-approver cannot cancel another user\'s leave (403)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const adminU = `attendance-l7auth-admin-${runSuffix}`
+    const otherU = `attendance-l7auth-other-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const createdRequestIds: string[] = []
+    try {
+      process.env.RBAC_BYPASS = 'false'
+      await pool.query(
+        `INSERT INTO permissions (code, name, description) VALUES
+           ('attendance:read','Attendance Read','r'),('attendance:write','Attendance Write','w'),
+           ('attendance:approve','Attendance Approve','a'),('attendance:admin','Attendance Admin','adm')
+         ON CONFLICT (code) DO NOTHING`,
+      )
+      // admin = read/write/admin (creates the type + owns a request); other = read/write only
+      // (passes withPermission('attendance:write') but fails canAccessOtherUsers → 403 on someone else's request)
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code) VALUES
+           ($1,'attendance:read'),($1,'attendance:write'),($1,'attendance:admin'),
+           ($2,'attendance:read'),($2,'attendance:write')
+         ON CONFLICT DO NOTHING`,
+        [adminU, otherU],
+      )
+      const tokenFor = async (uid: string, perms: string) =>
+        ((await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=user&perms=${perms}`)).body as { token?: string } | undefined)?.token
+      const adminToken = await tokenFor(adminU, 'attendance:read,attendance:write,attendance:admin')
+      const otherToken = await tokenFor(otherU, 'attendance:read,attendance:write')
+      if (!adminToken || !otherToken) return
+      const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
+
+      const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr(adminToken), body: JSON.stringify({ code: 'comp_time', name: `Comp Time Auth ${runSuffix}`, paid: false, requiresApproval: true }) })
+      expect([201, 409]).toContain(ltRes.status)
+      let leaveTypeId = (ltRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!leaveTypeId) {
+        const list = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=true`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        leaveTypeId = ((list.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []).find(i => i.code === 'comp_time')?.id
+      }
+      expect(leaveTypeId).toBeTruthy()
+
+      // admin owns a leave request (pending is enough — the authority gate fires before any reverse)
+      const reqRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr(adminToken), body: JSON.stringify({ workDate: '2026-09-25', requestType: 'leave', leaveTypeId, minutes: 60 }) })
+      expect(reqRes.status).toBe(201)
+      const reqId = (reqRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
+      createdRequestIds.push(reqId)
+
+      // other (read/write, NOT admin/approve) cancels admin's request → 403, request untouched
+      const forbidden = await requestJson(`${baseUrl}/api/attendance/requests/${reqId}/cancel`, { method: 'POST', headers: hdr(otherToken), body: JSON.stringify({ comment: 'not mine' }) })
+      expect(forbidden.status).toBe(403)
+      const row = (await pool.query('SELECT status FROM attendance_requests WHERE id = $1', [reqId])).rows[0] as { status: string } | undefined
+      expect(row?.status).toBe('pending')
+    } finally {
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[adminU, otherU]]).catch(() => undefined)
+      if (createdRequestIds.length > 0) {
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+      }
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
 })
