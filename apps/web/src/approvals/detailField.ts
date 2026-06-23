@@ -234,6 +234,19 @@ export function visibleDetailColumnsForRow(
   return getVisibleFormFields({ fields: columns }, row ?? {})
 }
 
+// Per-cell live-hide decision for the fill table. Takes the OWNING detail field explicitly —
+// NOT a reverse-lookup by column.id, because sub-field ids are unique only WITHIN a group, so
+// two detail fields can both have a `note`/`kind` column. A cell is visible when its column has
+// no rule, or the row makes that column visible among ITS OWN group's columns.
+export function isDetailCellVisible(
+  detailField: FormField,
+  column: FormField,
+  row: Record<string, unknown>,
+): boolean {
+  if (!column.visibilityRule) return true
+  return visibleDetailColumnsForRow(detailField.columns, row).some((entry) => entry.id === column.id)
+}
+
 /**
  * Drop hidden cells (and any unknown keys) from a single detail row, keyed by the row's visible
  * sub-fields. Mirrors the backend per-row `pruneHiddenFormData` recursion so the FE pre-submit

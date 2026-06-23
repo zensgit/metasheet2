@@ -172,7 +172,7 @@
                     <!-- per-row sub-field visibility (design-lock §4): a cell whose
                          column.visibilityRule is false for THIS row renders nothing and is pruned
                          from the submit payload by the same evaluation. -->
-                    <template v-if="isDetailCellVisible(column, row)">
+                    <template v-if="isDetailCellVisible(field, column, row)">
                     <el-input
                       v-if="column.type === 'text'"
                       v-model="row[column.id]"
@@ -336,8 +336,8 @@ import { useApprovalPermissions } from '../../approvals/permissions'
 import { getVisibleFormFields } from '../../approvals/fieldVisibility'
 import {
   createEmptyDetailRow,
+  isDetailCellVisible,
   pruneHiddenFormDataWithDetail,
-  visibleDetailColumnsForRow,
 } from '../../approvals/detailField'
 
 const route = useRoute()
@@ -377,26 +377,6 @@ function handleFileChange(fieldId: string, file: any) {
 function detailRows(fieldId: string): Array<Record<string, unknown>> {
   const value = formData[fieldId]
   return Array.isArray(value) ? (value as Array<Record<string, unknown>>) : []
-}
-
-// Per-row sub-field visibility (design-lock §4): is `column` visible for THIS row? The cell editor
-// renders only when true; the same evaluation (visibleDetailColumnsForRow → pruneHiddenDetailRow)
-// drops the cell from the submit payload, so hidden cells are never sent.
-function isDetailCellVisible(column: FormField, row: Record<string, unknown>): boolean {
-  // No rule on the whole detail group's columns → keep the original loop's behavior (visible).
-  if (!column.visibilityRule) return true
-  return visibleDetailColumnsForRow(currentDetailColumns(column), row).some((c) => c.id === column.id)
-}
-
-// The sibling sub-fields a per-row rule may reference — the columns of the detail field this
-// `column` belongs to. Resolved from the live template (the fill-time schema source).
-function currentDetailColumns(column: FormField): FormField[] {
-  for (const field of template.value?.formSchema.fields ?? []) {
-    if (field.type === 'detail' && (field.columns ?? []).some((c) => c.id === column.id)) {
-      return field.columns ?? []
-    }
-  }
-  return [column]
 }
 
 function addDetailRow(field: FormField): void {

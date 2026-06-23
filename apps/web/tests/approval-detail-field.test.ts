@@ -8,6 +8,7 @@ import {
   detailColumnDraftsFromField,
   DETAIL_LEAF_FIELD_TYPES,
   findDetailFieldInSchema,
+  isDetailCellVisible,
   isDetailField,
   isDetailLeafFieldType,
   parseRowBound,
@@ -294,5 +295,36 @@ describe('detailField — per-row sub-field visibility (P2, design-lock §4)', (
     const pruned = pruneHiddenFormDataWithDetail(schema, { reason: 'hide', items: [{ kind: 'other', note: 'x' }] })
     expect(pruned).toEqual({ reason: 'hide' })
     expect(pruned).not.toHaveProperty('items')
+  })
+})
+
+describe('isDetailCellVisible — per-field (two detail groups may share a sub-field id)', () => {
+  const makeGroup = (id: string, noteVisibleWhen: string): FormField => ({
+    id,
+    type: 'detail',
+    label: id,
+    columns: [
+      { id: 'kind', type: 'select', label: 'kind', options: [{ label: 'X', value: 'x' }, { label: 'Y', value: 'y' }] },
+      { id: 'note', type: 'text', label: 'note', visibilityRule: { fieldId: 'kind', operator: 'eq', value: noteVisibleWhen } },
+    ],
+  })
+
+  it('judges a same-id sub-field by its OWN group, never a reverse-lookup across the template', () => {
+    const groupA = makeGroup('itemsA', 'x') // A.note visible when kind === 'x'
+    const groupB = makeGroup('itemsB', 'y') // B.note visible when kind === 'y'
+    const noteA = groupA.columns![1]
+    const noteB = groupB.columns![1]
+
+    expect(isDetailCellVisible(groupA, noteA, { kind: 'x' })).toBe(true)
+    expect(isDetailCellVisible(groupA, noteA, { kind: 'y' })).toBe(false)
+    // B.note shares the id 'note' with A.note, but must follow B's OWN rule (kind === 'y'),
+    // not A's (kind === 'x') — the bug the reverse-lookup helper would have produced.
+    expect(isDetailCellVisible(groupB, noteB, { kind: 'y' })).toBe(true)
+    expect(isDetailCellVisible(groupB, noteB, { kind: 'x' })).toBe(false)
+  })
+
+  it('a column without a visibilityRule is always visible', () => {
+    const group = makeGroup('items', 'x')
+    expect(isDetailCellVisible(group, group.columns![0], { kind: 'whatever' })).toBe(true)
   })
 })
