@@ -452,6 +452,11 @@ function applyStatus(counts, written) {
   return 'succeeded'
 }
 
+// SECURITY (FOS-4b-3): this is the single write chokepoint for stock-prep apply. The sandbox-only gate
+// (assertStockPrepApplySandboxAllowed, sandbox-only first version) is enforced at BOTH of this function's
+// callers BEFORE the write: applyStockPreparationAction (small-BOM, in-function) and the
+// tableActionLargeBomApplyJobRun route (large-BOM, at the route). ANY new caller of this function MUST
+// apply the same gate, or consolidate the gate here. Production apply = separate FOS-4b-3-prod owner gate.
 async function applyStockPreparationPlan(input = {}) {
   const permission = requireApplyPermission(input.permission)
   const plan = normalizePlan(input.plan)
