@@ -4125,6 +4125,8 @@ async function testTableActionRoutes() {
     recordsApi: records.recordsApi,
     config: {
       stockPreparationTableActions: [tableActionConfig()],
+      // FOS-4b-3 P0 sandbox gate: enable sandbox apply for the test target (non-canonical).
+      stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
     },
   })
 
@@ -4202,6 +4204,25 @@ async function testTableActionRoutes() {
   assert.equal(createCall[1].sheetId, 'sheet_stock_configured', 'apply writes only the configured target sheet')
   assert.equal(JSON.stringify(res.body.data.evidence).includes('P-001'), false, 'apply evidence is values-free')
   assert.equal(JSON.stringify(res.body.data.evidence).includes('A-001'), false, 'apply evidence hides component code')
+
+  // FOS-4b-3 P0 wiring: a mount WITHOUT sandbox config/env fails apply closed BEFORE the token check.
+  const createsBefore = records.calls.filter((call) => call[0] === 'createRecord').length
+  const gated = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    config: { stockPreparationTableActions: [tableActionConfig()] }, // no stockPrepApplySandbox, no env
+  })
+  const gatedApply = await invoke(gated.routes, 'POST', '/api/integration/table-actions/:actionId/apply', {
+    user: ADMIN_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' }, confirm: { dryRunToken: 'unused-token' } },
+  })
+  assert.equal(gatedApply.statusCode, 403, 'apply fail-closed when no sandbox config/env (prod default)')
+  assert.equal(gatedApply.body.error.code, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'route wires config/env → P0 gate before the token check')
+  assert.equal(
+    records.calls.filter((call) => call[0] === 'createRecord').length,
+    createsBefore,
+    'gated apply wrote nothing (P0 gate fires before any write)',
+  )
 }
 
 async function testLargeBomBackgroundExpansionJobRoutes() {
@@ -4232,6 +4253,9 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   })
   const config = {
     stockPreparationTableActions: [tableActionConfig()],
+    // FOS-4b-3 P0 sandbox gate: enable sandbox apply for the test target so the large-BOM apply-job run
+    // passes the route gate (the gate fires first otherwise).
+    stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
   }
   let mount = mountRoutes(services, {
     recordsApi: records.recordsApi,
@@ -4479,6 +4503,26 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'apply-job run rejects browser-supplied sheet scope')
 
+  // FOS-4b-3 P0: a mount WITHOUT sandbox config/env fails the large-BOM apply run closed BEFORE any write
+  // (the gate fires before the checkpoint run, so the job is untouched and the real run below still works).
+  const writesBeforeGatedRun = records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length
+  const ungatedMount = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    storage,
+    config: { stockPreparationTableActions: [tableActionConfig()] }, // no stockPrepApplySandbox, no env
+  })
+  const gatedRun = await invoke(ungatedMount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assert.equal(gatedRun.statusCode, 403, 'large-BOM apply run fail-closed without sandbox config (the bypass is closed)')
+  assert.equal(gatedRun.body.error.code, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'large-BOM route wires config → P0 sandbox gate')
+  assert.equal(
+    records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length,
+    writesBeforeGatedRun,
+    'gated large-BOM run wrote nothing (P0 gate fires before the checkpoint write)',
+  )
+
   res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', {
     user: WRITE_USER,
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
@@ -4664,6 +4708,9 @@ async function testTableActionConflictPolicyRoutes() {
     storage,
     config: {
       stockPreparationTableActions: [tableActionConfig()],
+      // FOS-4b-3 P0 sandbox gate: enable sandbox apply for the test target so conflict-policy applies
+      // reach the token/conflict logic (the gate fires first otherwise).
+      stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
     },
   })
 

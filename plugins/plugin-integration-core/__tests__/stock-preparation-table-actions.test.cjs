@@ -11,6 +11,8 @@ const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
   applyStockPreparationAction,
+  assertStockPrepApplySandboxAllowed,
+  resolveStockPrepApplySandboxPolicy,
   createStockPreparationTableActionRegistry,
   dryRunStockPreparationAction,
   normalizeStockPreparationActionConfig,
@@ -30,6 +32,11 @@ const {
 const PHYSICAL_FIELD_ID_MAP = Object.fromEntries(
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, `fld_${field.id}`]),
 )
+
+// FOS-4b-3 P0 sandbox gate: apply-logic tests run against the test target objectId 'stockPreparationMain',
+// so they must pass an explicit sandbox policy enabling it. (Gate negative controls are tested directly via
+// assertStockPrepApplySandboxAllowed below.)
+const SANDBOX_POLICY = { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] }
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
@@ -362,7 +369,7 @@ async function testTargetFieldMapIncompleteFailsBeforeReads() {
   assert.equal(records.calls.length, 0, 'dry-run target preflight fails before target reads')
 
   await assert.rejects(
-    () => applyStockPreparationAction({
+    () => applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
       action,
       parameters: { projectNo: 'P-001' },
       dryRunToken: 'not-used',
@@ -393,7 +400,7 @@ async function testApplyRequiresTokenRecomputesAndScopesTarget() {
   })
 
   await assert.rejects(
-    () => applyStockPreparationAction({
+    () => applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
       action,
       parameters: { projectNo: 'P-001' },
       sourceAdapter: source.adapter,
@@ -405,7 +412,7 @@ async function testApplyRequiresTokenRecomputesAndScopesTarget() {
     'apply cannot jump straight past dry-run',
   )
 
-  const result = await applyStockPreparationAction({
+  const result = await applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
     action,
     parameters: { projectNo: 'P-001' },
     dryRunToken: dryRun.dryRunToken,
@@ -424,7 +431,7 @@ async function testApplyRequiresTokenRecomputesAndScopesTarget() {
   assert.equal(JSON.stringify(result.evidence).includes('A-001'), false, 'apply evidence hides component code')
 
   await assert.rejects(
-    () => applyStockPreparationAction({
+    () => applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
       action,
       parameters: { projectNo: 'P-001' },
       dryRunToken: dryRun.dryRunToken,
@@ -491,7 +498,7 @@ async function testSavedKeepMultipleRowsPolicyRequiresFreshReviewAndAppliesResol
     },
   })
   await assert.rejects(
-    () => applyStockPreparationAction({
+    () => applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
       action,
       parameters: { projectNo: 'P-001' },
       dryRunToken: dryRun.dryRunToken,
@@ -525,7 +532,7 @@ async function testSavedKeepMultipleRowsPolicyRequiresFreshReviewAndAppliesResol
     plannedAt: '2026-06-07T09:00:30.000Z',
   })
   await assert.rejects(
-    () => applyStockPreparationAction({
+    () => applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
       action,
       parameters: { projectNo: 'P-001' },
       dryRunToken: unacknowledgedDryRun.dryRunToken,
@@ -548,7 +555,7 @@ async function testSavedKeepMultipleRowsPolicyRequiresFreshReviewAndAppliesResol
     policyStore: storage,
     plannedAt: '2026-06-07T09:01:00.000Z',
   })
-  const result = await applyStockPreparationAction({
+  const result = await applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
     action,
     parameters: { projectNo: 'P-001' },
     dryRunToken: reviewedDryRun.dryRunToken,
@@ -633,7 +640,7 @@ async function testSavedSourceCorrectionPolicyKeepsDuplicateHeldAndWritesNothing
   assert.equal(dryRun.evidence.plan.conflictPolicyReview.writeEffect, 'manual_confirm_held')
   assert.equal(dryRun.evidence.plan.conflictPolicyReview.selectedPolicies[0].writeEffect, 'manual_confirm_held')
 
-  const result = await applyStockPreparationAction({
+  const result = await applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
     action,
     parameters: { projectNo: 'P-001' },
     dryRunToken: dryRun.dryRunToken,
@@ -715,7 +722,7 @@ async function testLargeBomBoundedApplyRejectsMatchingTokenBeforeWrites() {
   })
 
   await assert.rejects(
-    () => applyStockPreparationAction({
+    () => applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
       action,
       parameters,
       dryRunToken: forgedMatchingToken,
@@ -772,7 +779,7 @@ async function testMissingChildBomDryRunBlocksApplyTokenAndWrites() {
   })
 
   await assert.rejects(
-    () => applyStockPreparationAction({
+    () => applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
       action,
       parameters,
       dryRunToken: forgedMatchingToken,
@@ -863,7 +870,7 @@ async function testApplyNormalizesNumericPlmDisplayFieldsBeforeCreate() {
     plannedAt: '2026-06-04T09:00:00.000Z',
   })
 
-  const result = await applyStockPreparationAction({
+  const result = await applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
     action,
     parameters: { projectNo: 'P-001' },
     dryRunToken: dryRun.dryRunToken,
@@ -916,7 +923,7 @@ async function testApplySurfacesTypedValuesFreeRowFailureDiagnostics() {
     plannedAt: '2026-06-04T09:00:00.000Z',
   })
 
-  const result = await applyStockPreparationAction({
+  const result = await applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
     action,
     parameters: { projectNo: 'P-001' },
     dryRunToken: dryRun.dryRunToken,
@@ -961,7 +968,7 @@ async function testApplyDetectsDataShiftAndManualConfirmHold() {
   })
 
   await assert.rejects(
-    () => applyStockPreparationAction({
+    () => applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
       action,
       parameters: { projectNo: 'P-001' },
       dryRunToken: dryRun.dryRunToken,
@@ -991,7 +998,7 @@ async function testApplyDetectsDataShiftAndManualConfirmHold() {
   })
   assert.equal(manualDryRun.status, 'manual_confirm_required')
   await assert.rejects(
-    () => applyStockPreparationAction({
+    () => applyStockPreparationAction({ sandboxPolicy: SANDBOX_POLICY,
       action,
       parameters: { projectNo: 'P-001' },
       dryRunToken: manualDryRun.dryRunToken,
@@ -1020,8 +1027,62 @@ async function main() {
   await testApplyNormalizesNumericPlmDisplayFieldsBeforeCreate()
   await testApplySurfacesTypedValuesFreeRowFailureDiagnostics()
   await testApplyDetectsDataShiftAndManualConfirmHold()
+  await testApplySandboxGateFailsClosed()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
+}
+
+async function testApplySandboxGateFailsClosed() {
+  // FOS-4b-3 P0 gate (assertStockPrepApplySandboxAllowed): fail-closed by default + canonical defense-in-depth.
+  const prodTarget = { sheetId: 'sheet_prod', objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId }
+  const sandboxTarget = { sheetId: 'sheet_sandbox', objectId: 'sandbox_stock_prep' }
+  const isGate = (e) => e instanceof StockPreparationTableActionError && e.status === 403 && e.code === 'STOCK_PREP_APPLY_SANDBOX_ONLY'
+
+  // (1) no policy → reject (fail-closed default)
+  assert.throws(() => assertStockPrepApplySandboxAllowed(sandboxTarget, undefined), isGate,
+    'apply with no sandbox policy must fail-closed')
+  // (2) policy disabled → reject
+  assert.throws(() => assertStockPrepApplySandboxAllowed(sandboxTarget, { enabled: false, allowedTargetObjectIds: ['sandbox_stock_prep'] }), isGate,
+    'apply with sandbox disabled must fail-closed')
+  // (3) target not in allowlist → reject
+  assert.throws(() => assertStockPrepApplySandboxAllowed(sandboxTarget, { enabled: true, allowedTargetObjectIds: ['other'] }), isGate,
+    'apply to a non-allowlisted target must fail-closed')
+  // (4) prod canonical → reject EVEN IF allowlisted (defense-in-depth)
+  assert.throws(
+    () => assertStockPrepApplySandboxAllowed(prodTarget, { enabled: true, allowedTargetObjectIds: [STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId] }),
+    (e) => isGate(e) && e.details.reason === 'prod_canonical',
+    'apply to the prod canonical must fail-closed even if allowlisted')
+  // (5) sandbox enabled + allowlisted + not canonical → passes
+  assert.doesNotThrow(
+    () => assertStockPrepApplySandboxAllowed(sandboxTarget, { enabled: true, allowedTargetObjectIds: ['sandbox_stock_prep'] }),
+    'sandbox-enabled allowlisted non-canonical target must pass')
+  // (6) values-free: gate error details carry only a coarse reason, never the sheetId/objectId
+  try {
+    assertStockPrepApplySandboxAllowed(sandboxTarget, undefined)
+    assert.fail('expected gate to throw')
+  } catch (e) {
+    if (!isGate(e)) throw e
+    const text = JSON.stringify(e.details || {})
+    assert.equal(text.includes('sheet_sandbox'), false, 'gate error must not expose sheetId')
+    assert.equal(text.includes('sandbox_stock_prep'), false, 'gate error must not expose objectId')
+  }
+
+  // resolveStockPrepApplySandboxPolicy: explicit config wins; env gate; fail-closed default.
+  const explicit = { enabled: true, allowedTargetObjectIds: ['x'] }
+  assert.deepEqual(resolveStockPrepApplySandboxPolicy({ stockPrepApplySandbox: explicit }, {}), explicit,
+    'explicit server config wins')
+  assert.equal(resolveStockPrepApplySandboxPolicy({}, {}), undefined,
+    'no config + no env → undefined (fail-closed)')
+  assert.equal(resolveStockPrepApplySandboxPolicy({}, { STOCK_PREP_SANDBOX_MODE: 'false' }), undefined,
+    'mode!==true → undefined (fail-closed)')
+  assert.deepEqual(
+    resolveStockPrepApplySandboxPolicy({}, { STOCK_PREP_SANDBOX_MODE: 'true', STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS: 'sandbox_a, sandbox_b' }),
+    { enabled: true, allowedTargetObjectIds: ['sandbox_a', 'sandbox_b'] },
+    'env gate resolves enabled + comma allowlist (trimmed)')
+  // end-to-end: env-resolved policy admits an allowlisted target, still rejects the prod canonical.
+  const envPolicy = resolveStockPrepApplySandboxPolicy({}, { STOCK_PREP_SANDBOX_MODE: 'true', STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS: 'sandbox_stock_prep' })
+  assert.doesNotThrow(() => assertStockPrepApplySandboxAllowed(sandboxTarget, envPolicy), 'env policy admits allowlisted sandbox target')
+  assert.throws(() => assertStockPrepApplySandboxAllowed(prodTarget, envPolicy), isGate, 'env policy still rejects prod canonical')
 }
 
 main().catch((err) => {
