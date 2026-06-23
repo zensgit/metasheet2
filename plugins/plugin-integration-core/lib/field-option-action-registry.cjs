@@ -98,11 +98,15 @@ function normalizeFieldOptionActionBinding(input, { field = 'actionBinding', per
   if (!Array.isArray(permittedActionIds) || !permittedActionIds.includes(actionId)) {
     throw new FieldOptionActionError(`${field}.actionId is not permitted by this preset`, { field: `${field}.actionId`, actionId })
   }
+  // The REAL guarantee is this fixed output ALLOWLIST: only these five fields are ever returned, so any
+  // unexpected input key (incl. case variants the FORBIDDEN_BINDING_KEYS denylist might miss) is dropped,
+  // never propagated. FORBIDDEN_BINDING_KEYS is defense-in-depth that fails LOUD (rejects), not the
+  // load-bearing control. Do NOT change this to map fields from raw input.
   return {
     actionId: action.actionId,
     kind: action.kind,
-    requiresDryRun: action.requiresDryRun, // registry-owned
-    requiredPermission: action.requiredPermission, // registry-owned
+    requiresDryRun: action.requiresDryRun, // registry-owned (never from request)
+    requiredPermission: action.requiredPermission, // registry-owned (never from request)
     parameterBindings: normalizeParameterBindings(input.parameterBindings, `${field}.parameterBindings`, action),
   }
 }
