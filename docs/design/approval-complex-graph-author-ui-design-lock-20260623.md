@@ -98,6 +98,14 @@ Grounded in code (explorer-verified 2026-06-23):
 - **No new node types**, no runtime changes, no `normalizeApprovalGraph` changes.
 - **No nested parallel**, no `joinMode='any'` authoring in v1 (validator/type say 'all') — both
   stay fail-closed read-only.
+  > **CORRECTION (G-3, 2026-06-23):** the parenthetical "(validator/type say 'all')" is **factually
+  > wrong**. The backend `normalizeApprovalGraph` ACCEPTS both — `PARALLEL_JOIN_MODES =
+  > new Set(['all', 'any'])` (`ApprovalProductService.ts:289`), validated at `:940`, written
+  > verbatim at `:948`; the FE/BE type union is `'all' | 'any'`; and the runtime executes `'any'`
+  > (first-wins, `:3691`). G-3 therefore makes `joinMode` editable with BOTH options (the mandatory
+  > pre-check found 'any' is not backend-rejected, so per the "UI must not produce backend-rejected
+  > graphs" rule there is no reason to withhold it). Nested parallel and editing
+  > branches/joinNodeKey topology REMAIN out of scope. Pending owner ratification — see the G-3 PR.
 - **No flatten, ever** — unsupported constructs stay read-only, never dropped.
 - **No W7** approval-result write-back (its own gated scope-doc, pending a concrete scenario).
 
@@ -106,5 +114,8 @@ Grounded in code (explorer-verified 2026-06-23):
   G-1 load-preserve foundation. Override to a narrower first set if wanted.
 - (b) Phasing order — default condition → parallel → cc (most-common-first). Confirm or reorder.
 - (c) `parallel.joinMode='any'` authoring = deferred (default; v1 'all' only). Confirm.
+  > **SUPERSEDED (G-3, 2026-06-23):** the deferral rested on the §7 premise that the validator/type
+  > only allow 'all', which the code disproves (set `{'all','any'}`, accepted + runtime-executed).
+  > G-3 ships both modes; this decision now needs owner ratification rather than confirmation.
 - (d) Whether G-1 (load-preserve + read-only structured render) ships before any editor, or is
   folded into G-2 — default = G-1 standalone (proves anti-flatten before editing).

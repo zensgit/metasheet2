@@ -28,6 +28,12 @@ import {
   validateConditionEdits,
   type ConditionEdits,
 } from './conditionEdit'
+import {
+  applyParallelEditsToGraph,
+  parallelEditsFromGraph,
+  validateParallelEdits,
+  type ParallelEdits,
+} from './parallelEdit'
 
 export type { DetailColumnDraft } from './detailField'
 export { createEmptyDetailColumnDraft, DETAIL_LEAF_FIELD_TYPES } from './detailField'
@@ -39,6 +45,8 @@ export type {
   ConditionRuleOperator,
 } from './conditionEdit'
 export { CONDITION_RULE_OPERATORS } from './conditionEdit'
+export type { ParallelEdits, ParallelNodeEdit } from './parallelEdit'
+export { PARALLEL_JOIN_MODES } from './parallelEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
@@ -139,6 +147,13 @@ export interface TemplateAuthoringDraft {
   // node/edge stay byte-identical-preserved (G-1 floor). `buildApprovalGraph` applies these onto a
   // COPY of `preservedGraph`. Empty/absent for linear or non-condition complex graphs.
   conditionEdits?: ConditionEdits
+  // G-3 parallel editor: editable `joinMode` for each `parallel` node in `preservedGraph`, keyed by
+  // node key (seeded 1:1 from the preserved parallel nodes). ONLY `joinMode` ('all' | 'any' — both
+  // backend-accepted, see `parallelEdit.ts`) is editable; `branches`/`joinNodeKey` are topology and
+  // every non-parallel node/edge stay byte-identical-preserved. `buildApprovalGraph` composes these
+  // with the condition edits onto a COPY of `preservedGraph`. Empty/absent for linear or
+  // non-parallel complex graphs.
+  parallelEdits?: ParallelEdits
 }
 
 // Complex node types the v1 LINEAR steps editor can't author. They are NOT "unsupported" — a
@@ -549,6 +564,9 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
           // G-2: seed the editable condition logic from the preserved condition nodes (1:1).
           // Empty {} when the complex graph has no condition node (parallel/cc-only).
           conditionEdits: conditionEditsFromGraph(template.approvalGraph),
+          // G-3: seed the editable parallel joinMode from the preserved parallel nodes (1:1).
+          // Empty {} when the complex graph has no parallel node (condition/cc-only).
+          parallelEdits: parallelEditsFromGraph(template.approvalGraph),
         }
       : {}),
     fields: fields.length > 0 ? fields : [createEmptyFieldDraft(1)],
@@ -660,14 +678,17 @@ function buildStepConfig(step: ApprovalStepDraft): ApprovalNodeConfig {
 }
 
 export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph {
-  // G-1/G-2 anti-flatten keystone: a preserved complex graph is NEVER rebuilt from `steps`, so its
-  // cc/condition/parallel nodes/edges survive save. G-2 replaces ONLY each condition node's config
-  // with the edited logic (rules / conjunction / defaultEdgeKey) onto a COPY of the graph — every
-  // other node and ALL edges stay byte-identical (an untouched graph round-trips unchanged because
-  // `applyConditionEditsToGraph` reproduces the backend-normalised condition shape). parallel/cc
-  // nodes are passed through verbatim (G-3/G-4). Only linear drafts take the build below.
+  // G-1/G-2/G-3 anti-flatten keystone: a preserved complex graph is NEVER rebuilt from `steps`, so
+  // its cc/condition/parallel nodes/edges survive save. Two disjoint edit passes COMPOSE onto a COPY
+  // of the graph: G-2 (`applyConditionEditsToGraph`) replaces ONLY each condition node's config with
+  // the edited logic, then G-3 (`applyParallelEditsToGraph`) replaces ONLY each parallel node's
+  // `joinMode`. The passes touch disjoint node types and each deep-clones everything else, so both
+  // edits land while every other node + ALL edges (cc included — G-4 read-only) stay byte-identical;
+  // an untouched graph round-trips unchanged (both apply-fns reproduce the backend-normalised shape).
+  // Only linear drafts take the build below.
   if (draft.preservedGraph) {
-    return applyConditionEditsToGraph(draft.preservedGraph, draft.conditionEdits ?? {})
+    const withConditionEdits = applyConditionEditsToGraph(draft.preservedGraph, draft.conditionEdits ?? {})
+    return applyParallelEditsToGraph(withConditionEdits, draft.parallelEdits ?? {})
   }
   const approvalNodes = draft.steps.map((step, index) => ({
     key: `approval_${index + 1}`,
@@ -793,6 +814,11 @@ export function validateTemplateDraft(
   // re-validates and is the final arbiter (we never relax it here).
   if (draft.conditionEdits && Object.keys(draft.conditionEdits).length > 0) {
     errors.push(...validateConditionEdits(draft.conditionEdits, buildFormSchema(draft), draft.preservedGraph))
+  }
+  // G-3 parallel-editor PREVIEW: joinMode must be in the backend-accepted set ('all' | 'any').
+  // UX-only — the backend `normalizeApprovalGraph` re-validates and is the final arbiter.
+  if (draft.parallelEdits && Object.keys(draft.parallelEdits).length > 0) {
+    errors.push(...validateParallelEdits(draft.parallelEdits))
   }
   const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
   draft.steps.forEach((step, index) => {
