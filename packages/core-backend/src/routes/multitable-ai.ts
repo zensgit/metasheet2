@@ -63,6 +63,24 @@ import {
   readBulkPreviewCacheRows,
   type BulkPreviewCacheRow,
 } from '../services/ai-bulk-preview-cache'
+import {
+  runShortcutCore,
+  type PoolLike,
+  type ShortcutRequestContext,
+} from '../services/ai-bulk-shared'
+import {
+  resolveBulkJobMaxRows,
+  resolveBulkInlineMaxRows,
+  computeScopeFingerprint,
+  findActiveBulkJob,
+  insertBulkJobHeader,
+  insertBulkJobRowsPending,
+  readBulkJobHeader,
+  readBulkJobRows,
+  countBulkJobRowsByState,
+  cancelBulkJob,
+  type BulkJobRowSeed,
+} from '../services/ai-bulk-job-service'
 
 /**
  * Multitable AI routes — A1 readiness (M1b) + A2 shortcut preview/run (M2).
@@ -110,38 +128,6 @@ export interface MultitableAiRouteDeps {
   fetchFn?: typeof fetch
 }
 
-type PoolLike = ConnectionPool & { query: QueryFn }
-
-interface ShortcutRequestContext {
-  pool: PoolLike
-  sheetId: string
-  /** null for sheet-scoped attempts (M4 suggest: NL→formula is field-authoring, not a record read). */
-  recordId: string | null
-  fieldId: string | null
-  action: AiUsageAction
-  userId: string
-}
-
-/**
- * Res-free per-attempt outcome of `runShortcutCore` (B-1). The discriminant is
- * the charge boundary: only `charged` consumed the provider (and the quota);
- * every other variant is provider-never-reached → UNCHARGED. `settle` is
- * present only on `charged` so a caller can re-settle the STATUS keeping usage
- * (e.g. a downstream write conflict) without re-charging.
- */
-type ShortcutCoreOutcome =
-  | { kind: 'unsafe_input'; message: string }
-  | { kind: 'blocked'; message: string }
-  | { kind: 'reserve_failed'; message: string }
-  | { kind: 'quota_exhausted'; reason: string }
-  | { kind: 'generation_failed_before_usage'; httpStatus: number; code: string; message: string }
-  | {
-      kind: 'charged'
-      result: AiCompletionResult
-      usage: AiUsage
-      settle: (status: AiUsageLedgerStatus, error?: string | null) => Promise<void>
-    }
-
 function sendStatus(
   res: Response,
   httpStatus: number,
@@ -169,16 +155,6 @@ function applyBurstLimiter(
     res.once('finish', () => resolve('limited'))
     limiter(req, res, () => resolve('pass'))
   })
-}
-
-async function insertLedgerBestEffort(query: AiUsageQueryFn, entry: AiUsageLedgerEntry): Promise<void> {
-  try {
-    await insertAiUsageLedgerEntry(query, entry)
-  } catch (err) {
-    // Best-effort policy (§2.5): a committed write / an already-sent response
-    // must never be rolled back or failed because the ledger insert failed.
-    console.error('[multitable-ai] usage ledger insert failed (best effort):', err)
-  }
 }
 
 export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Router {
@@ -249,177 +225,6 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
   })
 
   /**
-   * RES-FREE reserve-then-settle CORE (review-fix F1) — the unit the bulk path
-   * reuses per row WITHOUT touching `res` (so a 200-row loop cannot double-send;
-   * the single-record `executeShortcut` below is now a thin wrapper over this).
-   *
-   * Gate order from "prompt assembled" onward: unsafe scan → double-confirm/
-   * readiness preflight (blocked: zero-token row, NO lock) → quota RESERVE (one
-   * SHORT advisory-locked tx: stale sweep → SUM incl. in_flight → insert the
-   * in_flight reservation) → provider call (NO lock / NO pooled connection
-   * held) → SETTLE the reservation to actual usage. Settles are best-effort
-   * (§2.5); a failing reserve fails closed.
-   *
-   * The BURST LIMITER is deliberately NOT here — it is a per-HTTP-request guard
-   * the caller applies ONCE (per-row bounding is the D3 row-cap + the D4 quota
-   * pre-check, never tenantBurstRpm self-tripping mid-batch).
-   *
-   * Returns a discriminated per-row outcome:
-   *  - `unsafe_input`                    — not sent, NO ledger row, UNCHARGED.
-   *  - `blocked`                         — preflight blocked: zero-token ledger row, UNCHARGED.
-   *  - `reserve_failed`                  — ledger unavailable, fail-closed, UNCHARGED (no row).
-   *  - `quota_exhausted`                 — reserve rejected, UNCHARGED (no row).
-   *  - `generation_failed_before_usage`  — provider blocked/errored with NO usage → settled to
-   *                                        zero usage, UNCHARGED (provider never produced output).
-   *  - `charged`                         — the provider returned (succeeded OR errored WITH usage);
-   *                                        settled to ACTUAL usage = CHARGED. `result` carries the
-   *                                        completion (text present only when `result.ok`); `settle`
-   *                                        re-settles the STATUS keeping usage (write failures etc.).
-   */
-  async function runShortcutCore(
-    ctx: ShortcutRequestContext,
-    prompt: string,
-  ): Promise<ShortcutCoreOutcome> {
-    const baseEntry = {
-      subjectKey: ctx.userId,
-      userId: ctx.userId,
-      sheetId: ctx.sheetId,
-      fieldId: ctx.fieldId,
-      recordId: ctx.recordId,
-      action: ctx.action,
-    } as const
-    const zeroUsage = { promptTokens: 0, completionTokens: 0 }
-    const query = ctx.pool.query.bind(ctx.pool) as AiUsageQueryFn
-
-    // unsafe_input pre-send scan (§2.4): the backend redactor exposes no
-    // detection surface, so detection derives from replace-and-compare — any
-    // rewrite means the assembled prompt carries secret-shaped content.
-    if (redactString(prompt) !== prompt) {
-      await insertLedgerBestEffort(query, {
-        ...baseEntry,
-        ...zeroUsage,
-        estimatedCostUsd: 0,
-        status: 'unsafe_input',
-      })
-      return {
-        kind: 'unsafe_input',
-        message: 'The assembled prompt contains secret-shaped content; the request was not sent.',
-      }
-    }
-
-    // Double-confirm / readiness / price preflight — `blocked` resolves BEFORE
-    // the reserve (zero-token row, no lock, zero outbound).
-    // complete() re-runs the same gates internally (defense in depth).
-    const pre = aiClient.preflight()
-    // `in`-guard (not `!pre.ok`): non-strict tsconfig, no boolean-discriminant narrowing.
-    if ('message' in pre) {
-      await insertLedgerBestEffort(query, {
-        ...baseEntry,
-        ...zeroUsage,
-        estimatedCostUsd: 0,
-        provider: pre.provider ?? null,
-        model: pre.model ?? null,
-        status: 'blocked',
-        error: pre.message,
-      })
-      return { kind: 'blocked', message: pre.message }
-    }
-
-    // Quota RESERVE — the advisory locks wrap ONLY this short check+insert
-    // transaction (F1: never across the provider call). The in_flight
-    // estimate (1 token/char prompt bound + the maxOutputTokens cap) counts
-    // against every concurrent reserve; overshoot is prevented while
-    // estimate ≥ actual (pessimistic for CJK, delta review NF-1) without
-    // serializing provider traffic. Settle writes actuals back.
-    let reservation: AiUsageReservationResult
-    try {
-      const estimatedUsage: AiUsage = {
-        promptTokens: conservativePromptTokenEstimate(prompt),
-        completionTokens: pre.caps.maxOutputTokens,
-      }
-      reservation = await reserveAiUsage(ctx.pool, {
-        ...baseEntry,
-        provider: pre.provider,
-        model: pre.model,
-        estimatedPromptTokens: estimatedUsage.promptTokens,
-        estimatedCompletionTokens: estimatedUsage.completionTokens,
-        estimatedCostUsd: estimateAiCostUsd(pre.price, estimatedUsage),
-        caps: {
-          tenantDailyTokenCap: pre.caps.tenantDailyTokenCap,
-          tenantWeeklyTokenCap: pre.caps.tenantWeeklyTokenCap,
-          accountDailyUsdCap: pre.caps.accountDailyUsdCap,
-        },
-        staleAfterMs: pre.caps.requestTimeoutMs + AI_USAGE_RESERVATION_GRACE_MS,
-      })
-    } catch (err) {
-      // Quota-reserve-time ledger unavailability → fail closed (§2.5).
-      console.error('[multitable-ai] quota reserve failed; failing closed:', err)
-      return { kind: 'reserve_failed', message: 'AI usage ledger is unavailable; request blocked (fail-closed).' }
-    }
-    if ('reason' in reservation) {
-      return { kind: 'quota_exhausted', reason: reservation.reason }
-    }
-    const reservationId = reservation.reservationId
-
-    // Provider call — NO lock held; a crash from here until settle leaves an
-    // in_flight row that a later reserve sweeps to zero-usage 'abandoned'.
-    const result = await aiClient.complete({ prompt })
-    const usage: AiUsage = result.usage ?? zeroUsage
-
-    // SETTLE (best-effort — never 500 a committed write / an already-sent
-    // response over a ledger UPDATE). Re-settling keeps the ACTUAL usage and
-    // only flips status/error (§2.5: the money was spent regardless).
-    const settle = async (status: AiUsageLedgerStatus, error?: string | null): Promise<void> => {
-      try {
-        await settleAiUsageReservation(query, reservationId, {
-          promptTokens: usage.promptTokens,
-          completionTokens: usage.completionTokens,
-          estimatedCostUsd: result.estimatedCostUsd,
-          provider: result.provider ?? null,
-          model: result.model ?? null,
-          durationMs: result.durationMs,
-          status,
-          error: error ?? null,
-        })
-      } catch (err) {
-        console.error('[multitable-ai] usage ledger settle failed (best effort):', err)
-      }
-    }
-
-    if (result.status === 'blocked') {
-      // Post-reserve blocked = the env raced between preflight and the call —
-      // settle to zero usage (result.usage is null on blocked). The provider
-      // never produced output → UNCHARGED (generation_failed_before_usage).
-      await settle('blocked', result.message ?? null)
-      return { kind: 'generation_failed_before_usage', httpStatus: 503, code: 'AI_BLOCKED', message: result.message ?? 'AI requests are not enabled for this deployment.' }
-    }
-
-    if (result.status === 'provider_error') {
-      // Charge invariant (§2.5): tokens are recorded WHENEVER the provider
-      // returned usage — the money is spent. A provider error with NO usage =
-      // generation_failed_before_usage (UNCHARGED, zero-token settle); a
-      // provider error WITH usage settles the ACTUAL tokens (CHARGED) — the
-      // output was produced even though the call surfaced an error.
-      await settle('provider_error', result.message ?? null)
-      if (result.usage) {
-        return { kind: 'charged', result: result as AiCompletionResult, usage, settle }
-      }
-      return { kind: 'generation_failed_before_usage', httpStatus: 502, code: 'AI_PROVIDER_ERROR', message: result.message ?? 'AI provider request failed.' }
-    }
-
-    // Settle to actual usage BEFORE any downstream write so the quota account
-    // reflects the real spend even if the write path crashes mid-flight. The
-    // provider was called and produced OUTPUT → CHARGED. NB: a 200 that omits a
-    // usage object is still a successful generation → CHARGED at zero tokens
-    // (token-sum invariant holds: 0 == 0). That is distinct from an
-    // error/blocked result with null usage above, which produced NO output and
-    // is generation_failed_before_usage (UNCHARGED). The discriminator is
-    // "output produced?", not "usage object present?".
-    await settle('succeeded')
-    return { kind: 'charged', result: result as AiCompletionResult & { ok: true }, usage, settle }
-  }
-
-  /**
    * Single-record thin wrapper over `runShortcutCore` (review-fix F1 gate
    * order preserved): burst limit (429 EARLY: NO lock, NO ledger row, the
    * limiter responds itself) → core → map the per-row outcome to `res` →
@@ -443,7 +248,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       return
     }
 
-    const outcome = await runShortcutCore(ctx, prompt)
+    const outcome = await runShortcutCore(aiClient, ctx, prompt)
     switch (outcome.kind) {
       case 'unsafe_input':
         return sendStatus(res, 422, 'unsafe_input', 'AI_UNSAFE_INPUT', outcome.message)
@@ -1001,6 +806,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         const masked = readableSourceCount < configSourceCount
 
         const outcome = await runShortcutCore(
+          aiClient,
           { pool, sheetId, recordId, fieldId, action: 'preview', userId: access.userId },
           prompt,
         )
