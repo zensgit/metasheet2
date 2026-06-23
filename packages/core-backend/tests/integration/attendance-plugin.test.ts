@@ -13856,6 +13856,86 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('#6 TA-2 — team-availability: pending leave is a distinct tentative state still counted in availableFormal (§3a), group-scope gated (§3b), group-only (§3e) (real DB)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const year = 3600 + (Number.parseInt(runSuffix.slice(-4), 36) % 1000)
+    const firstOfOctober = new Date(Date.UTC(year, 9, 1))
+    const monday = new Date(firstOfOctober)
+    while (monday.getUTCDay() !== 1) monday.setUTCDate(monday.getUTCDate() + 1)
+    const workDate = monday.toISOString().slice(0, 10)
+    const m1 = `att-ta2-pending-${runSuffix}`
+    const m2 = `att-ta2-sched-${runSuffix}`
+    const outsider = `att-ta2-outsider-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const reqId = randomUUID()
+    let groupId: string | undefined
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(m1)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) return
+      const auth = { Authorization: `Bearer ${token}` }
+
+      const groupRows = await pool.query<{ id: string }>(
+        `INSERT INTO attendance_groups (org_id, name, code, timezone) VALUES ('default', $1, $2, 'UTC') RETURNING id`,
+        [`TA2 ${runSuffix}`, `ta2-${runSuffix}`],
+      )
+      groupId = String(groupRows.rows[0].id)
+      await pool.query(
+        `INSERT INTO attendance_group_members (org_id, group_id, user_id) VALUES ('default', $1, $2), ('default', $1, $3)`,
+        [groupId, m1, m2],
+      )
+      // a PENDING leave for m1 on workDate (never approved)
+      await pool.query(
+        `INSERT INTO attendance_requests (id, org_id, user_id, work_date, request_type, status, metadata) VALUES ($1, 'default', $2, $3, 'leave', 'pending', '{}'::jsonb)`,
+        [reqId, m1, workDate],
+      )
+
+      // (1) §3e group-only: missing groupId → 400
+      expect((await requestJson(`${baseUrl}/api/attendance/team-availability?from=${workDate}&to=${workDate}`, { headers: auth })).status).toBe(400)
+
+      // (2) happy path: m1 = pending_leave (distinct); m2 unaffected; §3a availableFormal still counts m1.
+      const res = await requestJson(`${baseUrl}/api/attendance/team-availability?groupId=${groupId}&from=${workDate}&to=${workDate}`, { headers: auth })
+      expect(res.status, res.raw).toBe(200)
+      const data = (res.body as { data?: { items?: any[]; summary?: any[] } } | undefined)?.data
+      const items = data?.items ?? []
+      const stateOf = (uid: string) => items.find((it) => it.userId === uid && String(it.date).slice(0, 10) === workDate)?.state
+      expect(stateOf(m1)).toBe('pending_leave')
+      expect(['scheduled', 'rest', 'unscheduled']).toContain(stateOf(m2)) // m2 NOT affected by m1's pending request
+      const day = (data?.summary ?? []).find((s) => String(s.date).slice(0, 10) === workDate)
+      expect(day?.pendingLeaveTentative).toBe(1)
+      expect(day?.approvedLeave).toBe(0) // pending is NOT approved
+      // §3a: the pending member is still in the formal available headcount (availableFormal = scheduled + pending).
+      expect(day?.availableFormal).toBe((day?.scheduled ?? 0) + 1)
+
+      // (2.5) P2 (owner review): admin + a valid-UUID but NON-EXISTENT group → 404, not a misleading 200 empty.
+      const ghostRes = await requestJson(`${baseUrl}/api/attendance/team-availability?groupId=${randomUUID()}&from=${workDate}&to=${workDate}`, { headers: auth })
+      expect(ghostRes.status).toBe(404)
+
+      // (3) §3b scope gate: an outsider (non-admin, not a group manager) → 403
+      process.env.RBAC_BYPASS = 'false'
+      const outsiderTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(outsider)}&roles=employee&perms=attendance:read`)
+      const outsiderToken = (outsiderTokenRes.body as { token?: string } | undefined)?.token
+      if (outsiderToken) {
+        const forbidden = await requestJson(`${baseUrl}/api/attendance/team-availability?groupId=${groupId}&from=${workDate}&to=${workDate}`, { headers: { Authorization: `Bearer ${outsiderToken}` } })
+        expect(forbidden.status).toBe(403)
+      }
+    } finally {
+      await pool.query('DELETE FROM attendance_requests WHERE id = $1', [reqId]).catch(() => undefined)
+      if (groupId) {
+        await pool.query('DELETE FROM attendance_group_members WHERE group_id = $1', [groupId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_groups WHERE id = $1', [groupId]).catch(() => undefined)
+      }
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('effective-calendar §6.1 baseline equals resolveWorkContext for rule + holiday rows', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL

@@ -36920,6 +36920,131 @@ module.exports = {
     )
 
     // RFC §5: read-only effective calendar.
+    // #6 TA-2 (design-lock #3056): team-availability — for a group + date range, each member's per-date
+    // state aggregated from resolveEffectiveCalendar(includePending). §3e v1 group-only (groupId required);
+    // §3b scope-gated to group owner/sub-owner/admin; §3a pending leave is a DISTINCT tentative state, never
+    // folded into approved nor subtracted from the scheduled/available count. Provisional UI marking = TA-3.
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/team-availability',
+      withPermission('attendance:read', async (req, res) => {
+        const groupId = normalizeUuidString(typeof req.query.groupId === 'string' ? req.query.groupId.trim() : '')
+        if (!groupId) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"groupId" is required (v1 is group-only).' } })
+          return
+        }
+        const fromRaw = typeof req.query.from === 'string' ? req.query.from.trim() : ''
+        const toRaw = typeof req.query.to === 'string' ? req.query.to.trim() : ''
+        if (!fromRaw || !toRaw) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" and "to" are required (YYYY-MM-DD).' } })
+          return
+        }
+        const from = normalizeDateOnlyStrict(fromRaw)
+        const to = normalizeDateOnlyStrict(toRaw)
+        if (!from || !to) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid "from"/"to" date. Use YYYY-MM-DD.' } })
+          return
+        }
+        if (from > to) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" must be on or before "to".' } })
+          return
+        }
+        const rangeDays = diffDays(from, to) + 1
+        if (rangeDays > 366) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Range must be <= 366 days.' } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const actorId = getUserId(req)
+        if (!actorId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+        // §3b: scope gate — admin OR manages this group (owner/sub-owner). RBAC_BYPASS short-circuits (tests).
+        try {
+          if (process.env.RBAC_BYPASS !== 'true'
+            && !(await hasAttendanceAdminAccess(actorId))
+            && !(await userManagesAttendanceGroup(orgId, groupId, actorId))) {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this group' } })
+            return
+          }
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance group manager tables missing' } })
+            return
+          }
+          throw error
+        }
+
+        try {
+          // P2 (owner review of #3087): a valid-UUID but non-existent/deleted group must 404, NOT a misleading
+          // 200 with members:0 (which disguises "wrong/deleted group" as "everyone empty"). Checked AFTER the
+          // scope gate so an unauthorized caller still gets 403 first (no existence leak to non-managers).
+          const group = await loadAttendanceGroupByIdOrCode(db, orgId, groupId)
+          if (!group) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Attendance group not found' } })
+            return
+          }
+          const memberRows = await db.query(
+            `SELECT DISTINCT user_id FROM attendance_group_members WHERE org_id = $1 AND group_id = $2 ORDER BY user_id ASC`,
+            [orgId, groupId],
+          )
+          const members = memberRows.map((r) => String(r.user_id ?? '').trim()).filter(Boolean)
+          // bound the per-member×date work (resolver + schedule probe per cell) for a v1 read surface.
+          if (members.length * rangeDays > 6000) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Too many members×days for one request (v1 cap 6000); narrow the range.' } })
+            return
+          }
+
+          const items = []
+          for (const memberId of members) {
+            const calendar = await resolveEffectiveCalendar(db, { orgId, userId: memberId, from, to, includePending: true })
+            for (const dayItem of (Array.isArray(calendar?.items) ? calendar.items : [])) {
+              const overlays = Array.isArray(dayItem?.overlays) ? dayItem.overlays : []
+              let state
+              if (overlays.some((o) => o && o.kind === 'personal_leave')) {
+                state = 'approved_leave' // a fact; precedence over pending
+              } else if (overlays.some((o) => o && o.kind === 'pending_leave')) {
+                state = 'pending_leave' // §3a: distinct tentative state, never folded into approved
+              } else if (!(await isUserScheduledForDate(db, orgId, memberId, dayItem.date))) {
+                state = 'unscheduled'
+              } else if (dayItem?.effective?.isWorkingDay === true) {
+                state = 'scheduled'
+              } else {
+                state = 'rest'
+              }
+              items.push({ date: dayItem.date, userId: memberId, state })
+            }
+          }
+
+          // §3a: per-date summary — pending in a SEPARATE tentative bucket; the available (scheduled) count is
+          // never reduced by pending. Only approved leave leaves the scheduled count.
+          const summaryByDate = new Map()
+          for (const it of items) {
+            if (!summaryByDate.has(it.date)) summaryByDate.set(it.date, { date: it.date, scheduled: 0, rest: 0, approvedLeave: 0, pendingLeaveTentative: 0, unscheduled: 0 })
+            const s = summaryByDate.get(it.date)
+            if (it.state === 'scheduled') s.scheduled += 1
+            else if (it.state === 'rest') s.rest += 1
+            else if (it.state === 'approved_leave') s.approvedLeave += 1
+            else if (it.state === 'pending_leave') s.pendingLeaveTentative += 1
+            else if (it.state === 'unscheduled') s.unscheduled += 1
+          }
+
+          // §3a: availableFormal counts scheduled AND pending-leave members — pending does NOT reduce the
+          // formal available headcount (its leave isn't approved); only approved leave leaves availability.
+          const summary = Array.from(summaryByDate.values()).map((s) => ({ ...s, availableFormal: s.scheduled + s.pendingLeaveTentative }))
+          res.json({ ok: true, data: { groupId, range: { from, to }, members: members.length, items, summary } })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance effective calendar tables missing' } })
+            return
+          }
+          throw error
+        }
+      }),
+    )
+
     // Validation is inline (does NOT reuse resolveAttendanceDateRange, which
     // silently defaults missing from/to to a 30-day window). from/to MUST be
     // provided and the inclusive range MUST be <= 366 days.
