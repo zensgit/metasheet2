@@ -97,11 +97,13 @@ const {
   StockPreparationTableActionError,
   __internals: tableActionInternals,
   applyStockPreparationAction,
+  assertStockPrepApplySandboxAllowed,
   assertStockPreparationTargetReady,
   createStockPreparationTableActionRegistry,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
   normalizeActionParameters,
+  resolveStockPrepApplySandboxPolicy,
 } = require('./stock-preparation-table-actions.cjs')
 const {
   assertAuthoritativeLargeBomExpansion,
@@ -1866,6 +1868,9 @@ function createHandlers(services, options = {}) {
         recordsApi: getMultitableRecordsApi(),
         tokenStore: context.storage,
         policyStore: context.storage,
+        // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
+        // Absent (e.g. prod default) → undefined → apply fail-closed.
+        sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
       }))
     },
 
@@ -2017,6 +2022,10 @@ function createHandlers(services, options = {}) {
         applyJobId: firstString(requestParams(req).applyJobId),
       })
       assertApplyJobMatchesExpansion(pendingJob, jobId)
+      // FOS-4b-3 P0 sandbox gate: the large-BOM checkpoint apply funnels through here. Gate the job's
+      // target (objectId-bearing) before any write — fail-closed when no sandbox config/env, and the prod
+      // canonical is always rejected. Same guard/resolver as the small-BOM apply path.
+      assertStockPrepApplySandboxAllowed(pendingJob.target, resolveStockPrepApplySandboxPolicy(context.config))
       const scopedRecordsApi = createTargetScopedRecordsApi(getMultitableRecordsApi(), pendingJob.target)
       const job = await runLargeBomCheckpointApplyJobChunk({
         storage: context.storage,
