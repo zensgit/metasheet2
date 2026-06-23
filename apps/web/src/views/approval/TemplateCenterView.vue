@@ -39,6 +39,14 @@
         >
           新建模板
         </el-button>
+        <el-button
+          v-if="canManageTemplates"
+          style="margin-left: 8px"
+          data-testid="template-center-delegations-link"
+          @click="$router.push('/approval-delegations')"
+        >
+          委托设置
+        </el-button>
       </div>
     </header>
 

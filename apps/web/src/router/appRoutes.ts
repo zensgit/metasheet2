@@ -271,6 +271,12 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Approval Templates', titleZh: '审批模板', requiresAuth: true }
   },
   {
+    path: '/approval-delegations',
+    name: 'approval-delegations',
+    component: () => import('../views/approval/DelegationSettingsView.vue'),
+    meta: { title: 'Delegation Settings', titleZh: '委托设置', requiresAuth: true, permissions: ['approval-templates:manage'] }
+  },
+  {
     path: '/approval-templates/new',
     name: 'approval-template-create',
     component: () => import('../views/approval/TemplateAuthoringView.vue'),

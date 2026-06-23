@@ -15,6 +15,10 @@
 // conflictPolicy = update_from_source; triggerMode = manual). Owner may redirect before FOS-2.
 
 const { scrubSecretStringValue } = require('./payload-redaction.cjs')
+// FOS-4b-1: a preset may declare a permitted SUBSET of registered predefined actions. Importing the
+// registry here is contract-validation only (enum-strict ∈ registry) — it does NOT wire action execution
+// into any route (the generic route still fail-closes on actions; execution = FOS-4b-2, held).
+const { isRegisteredActionId } = require('./field-option-action-registry.cjs')
 
 class FieldOptionSyncContractError extends Error {
   constructor(message, details = {}) {
@@ -139,7 +143,26 @@ function normalizeFieldOptionSyncPreset(input) {
     syncMode: enumValue(input.syncMode, SYNC_MODES, 'syncMode', DEFAULT_SYNC_MODE),
     conflictPolicy: enumValue(input.conflictPolicy, CONFLICT_POLICIES, 'conflictPolicy', DEFAULT_CONFLICT_POLICY),
     triggerMode: enumValue(input.triggerMode, TRIGGER_MODES, 'triggerMode', DEFAULT_TRIGGER_MODE),
+    // FOS-4b-1: permitted SUBSET of registered predefined actions (default []). Enum-strict ∈ registry;
+    // a preset cannot list an unregistered action. Contract only — execution is FOS-4b-2 (held).
+    permittedActionIds: normalizePermittedActionIds(input.permittedActionIds),
   }
+}
+
+// FOS-4b-1: validate a preset's permittedActionIds — each MUST be a registered predefined action.
+function normalizePermittedActionIds(input) {
+  if (input === undefined || input === null) return []
+  if (!Array.isArray(input)) {
+    throw new FieldOptionSyncContractError('permittedActionIds must be an array', { field: 'permittedActionIds' })
+  }
+  return input.map((actionId, index) => {
+    if (!isRegisteredActionId(actionId)) {
+      throw new FieldOptionSyncContractError(`permittedActionIds[${index}] is not a registered predefined action`, {
+        field: 'permittedActionIds', actionId,
+      })
+    }
+    return actionId
+  })
 }
 
 // ---- Preset catalog: values-free constants. Stock-preparation = first preset / compatibility anchor. ----
@@ -181,6 +204,24 @@ const FIELD_OPTION_SYNC_PRESETS = Object.freeze([
     syncMode: 'disable_missing', // the non-default mode being proven end-to-end
     conflictPolicy: 'update_from_source',
     triggerMode: 'manual',
+  }),
+  // FOS-4b-2 (action dry-run path): a preset that PERMITS the registered stock-prep predefined action,
+  // so the generic route's action-binding DRY-RUN path is reachable (validate + preview, NO write/execute;
+  // apply is a later gated sub-slice). Same stock-prep table; values-free.
+  Object.freeze({
+    presetId: 'preset.stock-preparation.with-actions.v1',
+    label: 'Stock-preparation option sync (with predefined actions)',
+    sourceKind: 'static-preset',
+    sourceObjectOrTable: 'operator-config',
+    targetKind: TARGET_KIND,
+    targetTable: 'plm_stock_preparation_main',
+    optionFields: Object.freeze([
+      Object.freeze({ valueField: 'material_type', targetField: 'materialType', targetFieldType: 'single_select' }),
+    ]),
+    syncMode: 'replace',
+    conflictPolicy: 'update_from_source',
+    triggerMode: 'manual',
+    permittedActionIds: Object.freeze(['plm.stock-preparation.pull-bom.v1']), // ∈ FOS-4b-1 registry
   }),
 ])
 
