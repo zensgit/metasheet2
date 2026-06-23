@@ -79,3 +79,21 @@ jobs:
         run: |
           pnpm --filter @metasheet/core-backend test:contract
           pnpm --filter @metasheet/core-backend exec vitest run tests/unit/plm-adapter-yuantus.test.ts --reporter=dot
+
+      - name: Publish consumer pact to broker (advisory, Phase A)
+        # Auto-gate Phase A: runs ONLY when ops has provisioned the broker secret; non-blocking.
+        # Strictly additive (test:contract above is unchanged). UNVERIFIED until a live PactFlow
+        # instance + secrets exist — see the Yuantus dev & verification MD runbook.
+        if: ${{ secrets.PACT_BROKER_BASE_URL != '' }}
+        continue-on-error: true
+        env:
+          PACT_BROKER_BASE_URL: ${{ secrets.PACT_BROKER_BASE_URL }}
+          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/pact-foundation/pact-ruby-standalone/master/install.sh | bash
+          export PATH="$PWD/pact/bin:$PATH"
+          pact-broker publish packages/core-backend/tests/contract/pacts/metasheet2-yuantus-plm.json \
+            --consumer-app-version "${GITHUB_SHA}" \
+            --branch "${GITHUB_REF_NAME}" \
+            --broker-base-url "$PACT_BROKER_BASE_URL" \
+            --broker-token "$PACT_BROKER_TOKEN"
