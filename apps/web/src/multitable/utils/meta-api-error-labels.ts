@@ -26,6 +26,10 @@ export type MetaApiErrorLabelKey =
   | 'error.aiBulkViewFilterUnsupported'
   | 'error.aiBulkInlineConfigRejected'
   | 'error.aiBulkFieldForbidden'
+  // AI BULK async-JOB state copy (B-4) — job lifecycle conflicts keyed on error.code.
+  | 'error.aiBulkActiveJobExists'
+  | 'error.aiBulkJobNotCommittable'
+  | 'error.aiBulkJobCommitInProgress'
 
 const META_API_ERROR_LABELS: Record<MetaApiErrorLabelKey, LocaleText> = {
   'error.forbidden': { en: 'Insufficient permissions', zh: '权限不足' },
@@ -63,6 +67,19 @@ const META_API_ERROR_LABELS: Record<MetaApiErrorLabelKey, LocaleText> = {
   'error.aiBulkFieldForbidden': {
     en: 'This field is not editable, so it cannot be bulk-filled.',
     zh: '该字段不可编辑，无法进行批量填充。',
+  },
+  // AI bulk async-job conflicts (B-4).
+  'error.aiBulkActiveJobExists': {
+    en: 'An AI bulk-fill job for a different scope is already running on this field. Review or cancel it before starting another.',
+    zh: '该字段已有一个不同范围的 AI 批量填充任务在运行。请先审阅或取消后再开始新的任务。',
+  },
+  'error.aiBulkJobNotCommittable': {
+    en: 'This bulk-fill job is not ready to write yet. Wait for generation to finish, then try again.',
+    zh: '该批量填充任务尚未就绪，无法写入。请等待生成完成后重试。',
+  },
+  'error.aiBulkJobCommitInProgress': {
+    en: 'Another write for this bulk-fill job is already in progress.',
+    zh: '该批量填充任务已有另一次写入正在进行中。',
   },
 }
 
@@ -127,6 +144,10 @@ const AI_BULK_ERROR_KEY_BY_CODE: Record<string, MetaApiErrorLabelKey> = {
   AI_BULK_VIEW_FILTER_UNSUPPORTED: 'error.aiBulkViewFilterUnsupported',
   AI_INLINE_CONFIG_REJECTED: 'error.aiBulkInlineConfigRejected',
   FIELD_FORBIDDEN: 'error.aiBulkFieldForbidden',
+  // B-4 async-job conflicts.
+  ACTIVE_JOB_EXISTS: 'error.aiBulkActiveJobExists',
+  BULK_JOB_NOT_COMMITTABLE: 'error.aiBulkJobNotCommittable',
+  BULK_JOB_COMMIT_IN_PROGRESS: 'error.aiBulkJobCommitInProgress',
 }
 
 /**
