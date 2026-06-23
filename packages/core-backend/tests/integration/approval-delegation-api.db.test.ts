@@ -16,6 +16,7 @@ const TS = Date.now()
 const ADMIN = `del-admin-${TS}`
 const FROM = `del-from-${TS}`
 const TO = `del-to-${TS}`
+const MGR = `del-mgr-${TS}`
 
 async function canListen(): Promise<boolean> {
   return await new Promise((r) => {
@@ -50,6 +51,18 @@ describeIfDatabase('delegation (委托) config CRUD — real-DB API', () => {
   beforeAll(async () => {
     expect(await canListen()).toBe(true)
     await ensureApprovalSchemaReady()
+    // Seed the real RBAC chain for a least-privilege manager: rbacGuard walks
+    // user_permissions / namespace admission, not just the token claims, so the
+    // manage-only positive needs an actual grant (mirrors the W6 seam test seedUsers).
+    const seedPool = poolManager.get()
+    await seedPool.query(`INSERT INTO permissions (code, name, description) VALUES ('approval-templates:manage', 'Approval Templates Manage', 'delegation API test') ON CONFLICT (code) DO NOTHING`)
+    await seedPool.query(
+      `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+       VALUES ($1, $2, $1, 'x', 'user', '[]'::jsonb, TRUE, FALSE)
+       ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
+      [MGR, `${MGR}@example.test`],
+    )
+    await seedPool.query(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approval-templates:manage') ON CONFLICT DO NOTHING`, [MGR])
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
     base = `http://127.0.0.1:${server.getAddress()!.port}`
@@ -71,6 +84,8 @@ describeIfDatabase('delegation (委托) config CRUD — real-DB API', () => {
         await pool.query(`DELETE FROM approval_templates WHERE id = ANY($1)`, [tids])
       }
       await pool.query(`DELETE FROM approval_delegations WHERE delegator_user_id LIKE $1`, [`%-${TS}`])
+      await pool.query(`DELETE FROM user_permissions WHERE user_id = $1`, [MGR])
+      await pool.query(`DELETE FROM users WHERE id = $1`, [MGR])
     } catch {
       /* best effort */
     }
@@ -89,7 +104,7 @@ describeIfDatabase('delegation (委托) config CRUD — real-DB API', () => {
       (await req(base, '/api/approval-delegations', reader, { method: 'POST', body: { delegatorUserId: `x-${TS}`, delegateeUserId: `y-${TS}`, scope: 'all', ...WINDOW } })).status,
     ).toBe(403)
     // a non-admin user holding ONLY approval-templates:manage (not *:*) → allowed
-    const manager = await tokWith(base, `del-mgr-${TS}`, 'user', 'approval-templates:manage')
+    const manager = await tokWith(base, MGR, 'user', 'approval-templates:manage')
     expect((await req(base, '/api/approval-delegations', manager)).status).toBe(200)
   })
 
