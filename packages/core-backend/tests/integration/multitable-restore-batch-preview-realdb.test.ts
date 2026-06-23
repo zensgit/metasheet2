@@ -130,9 +130,11 @@ describeIfDatabase('multitable scoped restore batch-preview — BS-2 (real DB)',
     const payload = jwt.decode(res.body?.data?.previewIdentity as string) as { scope?: { recordIds?: string[] }; scopeHash?: string; type?: string }
     expect(payload?.type).toBe('restore-preview-scoped')
     expect(payload?.scope?.recordIds).toEqual([A]) // NOT [A,B,C] — the skipped records never enter the identity
-    // and the scopeHash is exactly hashScope over A's per-record diff (write-set ≡ hashed-set, BS-2 half)
-    const aChanges = Object.fromEntries((res.body?.data?.records ?? []).map((r: { recordId: string; changes?: unknown }) => [r.recordId, r.changes]))[A] as Array<{ fieldId: string; op: 'set' | 'unset'; value: unknown }>
-    expect(payload?.scopeHash).toBe(hashScope([{ recordId: A, changesHash: hashPreviewChanges(aChanges) }]))
+    const aRow = (res.body?.data?.records ?? []).find((r: { recordId: string }) => r.recordId === A)
+    expect(aRow?.previewVersion).toBe(2) // BS-2 returns each restorable record's preview-time version (the FE submits it back)
+    // and the scopeHash is exactly hashScope over A's per-record diff + its preview version (write-set ≡ hashed-set + #2 version bind)
+    const aChanges = aRow?.changes as Array<{ fieldId: string; op: 'set' | 'unset'; value: unknown }>
+    expect(payload?.scopeHash).toBe(hashScope([{ recordId: A, changesHash: hashPreviewChanges(aChanges), version: 2 }]))
   })
 
   test('empty scope → null identity (all records net zero → never a hashScope([]) executable token)', async () => {

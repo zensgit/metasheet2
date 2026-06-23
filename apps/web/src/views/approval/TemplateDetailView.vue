@@ -563,6 +563,7 @@ function fieldTypeLabel(type: FormFieldType) {
     'multi-select': '多选',
     user: '用户',
     attachment: '附件',
+    detail: '明细',
   }
   return map[type] ?? type
 }

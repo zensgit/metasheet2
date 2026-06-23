@@ -76,13 +76,13 @@ describe('restore preview identity — T6-1 contract', () => {
 // (BS-1; D6 discriminated union, D4 scope hash, BS-7 no narrow/widen replay). Pure unit; the execute computing the
 // real per-record diffs → expected scope claims → verify → fan-out write is BS-3.
 
-const perRecordDiff = (id: string) => ({ recordId: id, changesHash: hashPreviewChanges([{ fieldId: 'f1', op: 'set', value: id }]) })
-const scopedClaims = (recordIds: string[]): ScopedRestorePreviewIdentityClaims => ({
+const perRecordDiff = (id: string, version = 2) => ({ recordId: id, changesHash: hashPreviewChanges([{ fieldId: 'f1', op: 'set', value: id }]), version })
+const scopedClaims = (recordIds: string[], versions: Record<string, number> = {}): ScopedRestorePreviewIdentityClaims => ({
   sheetId: 'sheet_1',
   scope: { kind: 'records', recordIds },
   targetVersion: 3,
   strategy: 'revert',
-  scopeHash: hashScope(recordIds.map(perRecordDiff)),
+  scopeHash: hashScope(recordIds.map((id) => perRecordDiff(id, versions[id] ?? 2))),
   actorId: 'user_1',
 })
 const singleClaims = (): RestorePreviewIdentityClaims => ({
@@ -101,6 +101,13 @@ describe('restore preview identity — BS-1 scoped (multi-record) contract', () 
     // the execute computes the expected scopeHash FRESH from the actual set it is about to restore → diverges → reject
     expect(verifyScopedRestorePreviewIdentity(token, scopedClaims(['A', 'B'])).reason).toBe('mismatch_scopeHash')
     expect(verifyScopedRestorePreviewIdentity(token, scopedClaims(['A', 'B', 'C', 'D'])).reason).toBe('mismatch_scopeHash')
+  })
+
+  it('binds the per-record VERSION: a different submitted version → different scopeHash (anti-CAS-bypass)', () => {
+    // same records, same diffs, but B's submitted version is 4 instead of the preview-time 2 — a client trying to
+    // submit the CURRENT version to slip past the optimistic-concurrency CAS instead diverges the hash → reject.
+    const token = mintScopedRestorePreviewIdentity(scopedClaims(['A', 'B'])) // versions default to 2
+    expect(verifyScopedRestorePreviewIdentity(token, scopedClaims(['A', 'B'], { B: 4 })).reason).toBe('mismatch_scopeHash')
   })
 
   it('hashScope is ORDER-INVARIANT over the record set (else a batch could never execute — re-hash would diverge)', () => {
