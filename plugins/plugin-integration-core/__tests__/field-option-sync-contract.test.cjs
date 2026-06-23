@@ -112,8 +112,13 @@ async function main() {
     'unregistered permittedActionId rejected (enum-strict ∈ registry)',
   )
   assert.throws(() => normalizeFieldOptionSyncPreset(validPreset({ permittedActionIds: 'x' })), /must be an array/, 'permittedActionIds must be an array')
-  // catalog presets bind no actions
-  assert.ok(listFieldOptionSyncPresets().every((p) => Array.isArray(p.permittedActionIds) && p.permittedActionIds.length === 0), 'catalog presets carry no action bindings')
+  // catalog: every preset's permittedActionIds is a valid array of registered actions; only the
+  // FOS-4b-2 with-actions preset permits one (the rest are []).
+  const cat = listFieldOptionSyncPresets()
+  assert.ok(cat.every((p) => Array.isArray(p.permittedActionIds)), 'every preset has a permittedActionIds array')
+  const withActions = cat.find((p) => p.presetId === 'preset.stock-preparation.with-actions.v1')
+  assert.deepEqual(withActions.permittedActionIds, ['plm.stock-preparation.pull-bom.v1'], 'with-actions preset permits the registered stock-prep action')
+  assert.ok(cat.filter((p) => p.presetId !== 'preset.stock-preparation.with-actions.v1').every((p) => p.permittedActionIds.length === 0), 'all other catalog presets bind no actions')
 
   console.log('✓ field-option-sync-contract: normalizer + enum-strict + required + values-free(non-vacuous) + catalog + deep-copy + permittedActionIds tests passed')
 }
