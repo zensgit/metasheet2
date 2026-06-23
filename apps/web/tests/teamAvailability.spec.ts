@@ -108,6 +108,22 @@ describe('useTeamAvailability — clear-on-failure invariant (403/404/failure cl
     expect(ta.data.value).toBeNull()
     expect(ta.errorStatus.value).toBe(404)
   })
+
+  it('clears the old table at the START of a new load — no stale group while the request is in flight', async () => {
+    const ta = useTeamAvailability()
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, okPayload()))
+    await ta.load('grp_1', '2026-09-21', '2026-09-21')
+    expect(ta.data.value?.members).toBe(2)
+
+    // a second load whose request never resolves in this tick → the old data must be gone synchronously.
+    let resolveSecond: (r: Response) => void = () => {}
+    apiFetchMock.mockReturnValueOnce(new Promise<Response>((res) => { resolveSecond = res }))
+    const pending = ta.load('grp_b', '2026-09-22', '2026-09-22') // NOT awaited
+    expect(ta.data.value).toBeNull() // group A's table cleared the instant group B's load begins
+    expect(ta.loading.value).toBe(true)
+    resolveSecond(jsonResponse(200, okPayload()))
+    await pending
+  })
 })
 
 describe('AttendanceTeamAvailabilitySection — RENDER (the owner-enumerated §3c vitest criterion)', () => {
@@ -166,6 +182,26 @@ describe('AttendanceTeamAvailabilitySection — RENDER (the owner-enumerated §3
     await flushUi()
     expect(container.querySelector('[data-attendance-team-availability-matrix]')).toBeNull()
     expect(container.querySelector('[data-attendance-team-availability-error]')).toBeTruthy()
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('starting a NEW load immediately removes the previous matrix (no stale table in-flight)', async () => {
+    const { container, app, fillForm, clickLoad } = mountSection()
+    await flushUi()
+    fillForm()
+    await flushUi()
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, okPayload()))
+    clickLoad()
+    await flushUi()
+    expect(container.querySelector('[data-attendance-team-availability-matrix]')).toBeTruthy()
+
+    // a second load whose request never resolves → the matrix must vanish the instant the load starts.
+    apiFetchMock.mockReturnValueOnce(new Promise<Response>(() => { /* never resolves */ }))
+    clickLoad()
+    await flushUi()
+    expect(container.querySelector('[data-attendance-team-availability-matrix]')).toBeNull()
 
     app.unmount()
     container.remove()

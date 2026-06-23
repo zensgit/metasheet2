@@ -17,6 +17,9 @@ export function useTeamAvailability() {
     loading.value = true
     errorStatus.value = null
     errorMessage.value = null
+    // Clear stale results at the START of a new load (owner review of #3095 §P2): while the request is in
+    // flight, the section must NOT render the previous group's matrix under the new form values.
+    data.value = null
     try {
       data.value = await fetchTeamAvailability({ groupId, from, to })
     } catch (e) {
