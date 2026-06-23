@@ -20,9 +20,41 @@ const DEFAULT_RULE = {
   workEndTime: '18:00',
   lateGraceMinutes: 10,
   earlyGraceMinutes: 10,
+  // #5 report tiering (design-lock #3055): lateness tiers above the grace window. severe ≤ absence.
+  severeLateThresholdMinutes: 30,
+  absenceLateThresholdMinutes: 60,
   roundingMinutes: 5,
   workingDays: [1, 2, 3, 4, 5],
   isDefault: true,
+}
+
+// #5 report tiering (design-lock #3055): derive severe-late / absence-late tier counts from the
+// (post-override) lateMinutes and the rule thresholds, so the report metrics are SELF-CALCULATED instead
+// of trusted from record meta (the prior summary.* passthrough). v1 thresholds come from DEFAULT_RULE
+// (severe 30 / absence 60); per-group persistence + a write-side enum-strict normalizer (absence ≥ severe ≥
+// grace reject) land in RT-1a (needs a rule-table migration — attendance_rules is typed columns).
+// Tiers are NESTED — an absence-level record is always also severe-late, mirroring late_count counting
+// every late day: late ⊇ severe ⊇ absence. We ENFORCE the nesting here (effectiveAbsence = max(absence,
+// severe)) so incoherent config can never yield absence-without-severe; a threshold of 0 DISABLES that
+// tier (preserved through the max). Pure function — unit-tested; the single write is in
+// computeAttendanceRecordUpsertValues, into the record meta the report fields already read.
+function computeLateTierCounts(lateMinutes, rule) {
+  const lm = Math.max(0, Math.floor(Number(lateMinutes) || 0))
+  const severe = Number.isFinite(Number(rule?.severeLateThresholdMinutes))
+    ? Math.max(0, Number(rule.severeLateThresholdMinutes))
+    : DEFAULT_RULE.severeLateThresholdMinutes
+  const absenceConfigured = Number.isFinite(Number(rule?.absenceLateThresholdMinutes))
+    ? Math.max(0, Number(rule.absenceLateThresholdMinutes))
+    : DEFAULT_RULE.absenceLateThresholdMinutes
+  // Enforce nesting without resurrecting a disabled (0) absence tier.
+  const effectiveAbsence = absenceConfigured > 0 ? Math.max(absenceConfigured, severe) : 0
+  const severeLateCount = severe > 0 && lm >= severe ? 1 : 0
+  const absenceLateCount = effectiveAbsence > 0 && lm >= effectiveAbsence ? 1 : 0
+  return {
+    severeLateCount,
+    severeLateMinutes: severeLateCount ? lm : 0,
+    absenceLateCount,
+  }
 }
 const DEFAULT_SHIFT = {
   orgId: DEFAULT_ORG_ID,
@@ -7483,6 +7515,13 @@ function normalizeRuleOverride(value) {
     earlyGraceMinutes: Number.isFinite(Number(override.earlyGraceMinutes))
       ? Math.max(0, Number(override.earlyGraceMinutes))
       : undefined,
+    // #5 RT-1a: per-group lateness tier thresholds carry through the override merge (now persisted).
+    severeLateThresholdMinutes: Number.isFinite(Number(override.severeLateThresholdMinutes))
+      ? Math.max(0, Number(override.severeLateThresholdMinutes))
+      : undefined,
+    absenceLateThresholdMinutes: Number.isFinite(Number(override.absenceLateThresholdMinutes))
+      ? Math.max(0, Number(override.absenceLateThresholdMinutes))
+      : undefined,
     roundingMinutes: Number.isFinite(Number(override.roundingMinutes))
       ? Math.max(0, Number(override.roundingMinutes))
       : undefined,
@@ -7515,6 +7554,9 @@ function mapRuleRow(row) {
     workEndTime: row.work_end_time ?? DEFAULT_RULE.workEndTime,
     lateGraceMinutes: Number(row.late_grace_minutes ?? DEFAULT_RULE.lateGraceMinutes),
     earlyGraceMinutes: Number(row.early_grace_minutes ?? DEFAULT_RULE.earlyGraceMinutes),
+    // #5 RT-1a: per-group lateness tier thresholds (read the persisted column, fall back to the RT-1 default).
+    severeLateThresholdMinutes: Number(row.severe_late_threshold_minutes ?? DEFAULT_RULE.severeLateThresholdMinutes),
+    absenceLateThresholdMinutes: Number(row.absence_late_threshold_minutes ?? DEFAULT_RULE.absenceLateThresholdMinutes),
     roundingMinutes: Number(row.rounding_minutes ?? DEFAULT_RULE.roundingMinutes),
     workingDays: normalizeWorkingDays(row.working_days),
     isDefault: row.is_default ?? true,
@@ -12248,7 +12290,7 @@ async function loadDefaultRule(db, orgId) {
   try {
     const rows = await db.query(
       `SELECT id, name, timezone, work_start_time, work_end_time, late_grace_minutes,
-              early_grace_minutes, rounding_minutes, working_days, is_default, org_id
+              early_grace_minutes, severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default, org_id
        FROM attendance_rules
        WHERE is_default = true AND org_id = $1
        ORDER BY created_at DESC
@@ -12258,7 +12300,7 @@ async function loadDefaultRule(db, orgId) {
     if (!rows.length && targetOrg !== DEFAULT_ORG_ID) {
       const fallbackRows = await db.query(
         `SELECT id, name, timezone, work_start_time, work_end_time, late_grace_minutes,
-                early_grace_minutes, rounding_minutes, working_days, is_default, org_id
+                early_grace_minutes, severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default, org_id
          FROM attendance_rules
          WHERE is_default = true AND org_id = $1
          ORDER BY created_at DESC
@@ -12899,6 +12941,39 @@ async function loadApprovedRequestsForOverlay(db, orgId, userId, fromDate, toDat
          AND request_type = ANY($5::text[])
        ORDER BY work_date ASC, created_at ASC NULLS LAST, id ASC`,
       [userId, targetOrg, fromDate, toDate, CALENDAR_OVERLAY_REQUEST_TYPES]
+    )
+    return rows.map((row) => ({
+      id: row.id,
+      requestType: row.request_type,
+      workDate: normalizeDateOnly(row.work_date) ?? row.work_date,
+      status: row.status,
+      metadata: normalizeMetadata(row.metadata),
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
+    }))
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return []
+    throw error
+  }
+}
+
+// #6 TA-1: pending-leave overlay loader — mirrors loadApprovedRequestsForOverlay but for status='pending'
+// and LEAVE only (pending overtime does not make a person "off"). Display-only; the caller adds these as
+// a distinct `pending_leave` kind. A pending row disappears here the instant the request is rejected or
+// approved (it derives live from request status — no stored pending-calendar state).
+async function loadPendingLeaveRequestsForOverlay(db, orgId, userId, fromDate, toDate) {
+  if (!userId || !fromDate || !toDate) return []
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  try {
+    const rows = await db.query(
+      `SELECT id, request_type, work_date, status, metadata, created_at
+       FROM attendance_requests
+       WHERE user_id = $1
+         AND org_id = $2
+         AND work_date BETWEEN $3 AND $4
+         AND status = 'pending'
+         AND request_type = 'leave'
+       ORDER BY work_date ASC, created_at ASC NULLS LAST, id ASC`,
+      [userId, targetOrg, fromDate, toDate]
     )
     return rows.map((row) => ({
       id: row.id,
@@ -14044,6 +14119,9 @@ async function resolveEffectiveCalendar(db, args) {
   let rotationByUser = new Map()
   let rotationShiftsById = new Map()
   let overlays = []
+  // #6 TA-1: pending-leave overlay (display-only). Loaded ONLY when args.includePending === true;
+  // every other caller (incl. the record-compute path) leaves it empty, so pending never reaches records.
+  let pendingOverlays = []
   let groupContext = null
   let groupRule = null
 
@@ -14054,6 +14132,9 @@ async function resolveEffectiveCalendar(db, args) {
     rotationByUser = rotationPrefetch.assignmentsByUser
     rotationShiftsById = rotationPrefetch.shiftsById
     overlays = await loadApprovedRequestsForOverlay(db, orgId, args.userId, from, to)
+    if (args.includePending === true) {
+      pendingOverlays = await loadPendingLeaveRequestsForOverlay(db, orgId, args.userId, from, to)
+    }
   } else if (mode === 'groupId') {
     groupContext = await loadAttendanceGroupByIdOrCode(db, orgId, args.groupId)
     if (!groupContext) throw new Error('NOT_FOUND:group')
@@ -14112,6 +14193,23 @@ async function resolveEffectiveCalendar(db, args) {
       minutes,
       status: row.status,
       refId: row.id,
+    })
+  }
+
+  // #6 TA-1: append pending-leave overlays AFTER the approved ones (empty unless includePending).
+  // Distinct kind 'pending_leave' + provisional flag so display can mark them tentative and any
+  // record/write consumer can filter them out — they are never a fact (mirror the taint-skip discipline).
+  for (const row of pendingOverlays) {
+    const key = row.workDate
+    if (!key) continue
+    if (!overlaysByDate.has(key)) overlaysByDate.set(key, [])
+    overlaysByDate.get(key).push({
+      kind: 'pending_leave',
+      source: 'attendance_requests',
+      requestType: row.requestType,
+      status: 'pending',
+      refId: row.id,
+      provisional: true,
     })
   }
 
@@ -16361,6 +16459,16 @@ function computeAttendanceRecordUpsertValues(options) {
       finalMetrics.status = overrideMetrics.status.trim()
     }
   }
+  // #5 report tiering (design-lock #3055): write the (post-override) lateness tiers into the record meta
+  // the report fields already read (severe_late_count / severe_late_minutes / absence_late_count). Computed
+  // from the EFFECTIVE lateMinutes (so a manual lateMinutes override re-tiers) + the per-group rule
+  // thresholds. Legacy records that predate this never carry these keys → the report fallback reads 0,
+  // unchanged (no history restatement).
+  const lateTiers = computeLateTierCounts(finalMetrics.lateMinutes, rule)
+  finalMeta.severe_late_count = lateTiers.severeLateCount
+  finalMeta.severe_late_minutes = lateTiers.severeLateMinutes
+  finalMeta.absence_late_count = lateTiers.absenceLateCount
+
   const status = statusOverride ?? finalMetrics.status
 
   return {
@@ -18033,6 +18141,8 @@ module.exports = {
     attendanceReportRecordRowKey,
     buildAttendanceImportMultiPunchMeta,
     computeAttendanceRecordUpsertValues,
+    computeLateTierCounts,
+    mapRuleRow,
     resolveAttendanceImportRawClient,
     buildAttendanceImportCopyQuery,
     attachAttendanceImportCopyStreamErrorSink,
@@ -27582,6 +27692,8 @@ module.exports = {
           workEndTime: z.string().optional(),
           lateGraceMinutes: z.number().int().min(0).optional(),
           earlyGraceMinutes: z.number().int().min(0).optional(),
+          severeLateThresholdMinutes: z.number().int().min(0).optional(),
+          absenceLateThresholdMinutes: z.number().int().min(0).optional(),
           roundingMinutes: z.number().int().min(0).optional(),
           workingDays: z.array(z.number().int().min(0).max(6)).optional(),
           orgId: z.string().optional(),
@@ -27600,8 +27712,25 @@ module.exports = {
           workEndTime: parsed.data.workEndTime ?? DEFAULT_RULE.workEndTime,
           lateGraceMinutes: parsed.data.lateGraceMinutes ?? DEFAULT_RULE.lateGraceMinutes,
           earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? DEFAULT_RULE.earlyGraceMinutes,
+          severeLateThresholdMinutes: parsed.data.severeLateThresholdMinutes ?? DEFAULT_RULE.severeLateThresholdMinutes,
+          absenceLateThresholdMinutes: parsed.data.absenceLateThresholdMinutes ?? DEFAULT_RULE.absenceLateThresholdMinutes,
           roundingMinutes: parsed.data.roundingMinutes ?? DEFAULT_RULE.roundingMinutes,
           workingDays: parsed.data.workingDays ?? DEFAULT_RULE.workingDays,
+        }
+
+        // #5 RT-1a normalizer (design-lock §2, the #1776 enum-strict rule): Zod already rejected
+        // non-integers / negatives; now reject incoherent tiers on the RESOLVED payload so a partial
+        // update can't persist an out-of-order rule. absence-late ≥ severe-late ≥ grace.
+        if (!(payload.absenceLateThresholdMinutes >= payload.severeLateThresholdMinutes
+              && payload.severeLateThresholdMinutes >= payload.lateGraceMinutes)) {
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'absenceLateThresholdMinutes ≥ severeLateThresholdMinutes ≥ lateGraceMinutes is required.',
+            },
+          })
+          return
         }
 
         const orgId = getOrgId(req)
@@ -27611,8 +27740,8 @@ module.exports = {
 
             const rows = await trx.query(
               `INSERT INTO attendance_rules
-               (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes, rounding_minutes, working_days, is_default)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, true)
+               (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes, severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, true)
                RETURNING *`,
               [
                 randomUUID(),
@@ -27623,6 +27752,8 @@ module.exports = {
                 payload.workEndTime,
                 payload.lateGraceMinutes,
                 payload.earlyGraceMinutes,
+                payload.severeLateThresholdMinutes,
+                payload.absenceLateThresholdMinutes,
                 payload.roundingMinutes,
                 JSON.stringify(payload.workingDays),
               ]
@@ -36715,6 +36846,9 @@ module.exports = {
         const groupIdRaw = typeof req.query.groupId === 'string' ? req.query.groupId.trim() : ''
         const orgOnlyRaw = typeof req.query.orgOnly === 'string' ? req.query.orgOnly.trim().toLowerCase() : ''
         const orgOnly = orgOnlyRaw === 'true' || orgOnlyRaw === '1'
+        // #6 TA-1: opt-in pending-leave overlay (display-only). Default off → byte-identical to today.
+        const includePendingRaw = typeof req.query.includePending === 'string' ? req.query.includePending.trim().toLowerCase() : ''
+        const includePending = includePendingRaw === 'true' || includePendingRaw === '1'
 
         if (!fromRaw || !toRaw) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: '"from" and "to" are required (YYYY-MM-DD).' } })
@@ -36778,6 +36912,7 @@ module.exports = {
             userId: userIdRaw || undefined,
             groupId: groupIdRaw || undefined,
             orgOnly: orgOnly === true ? true : undefined,
+            includePending: includePending === true ? true : undefined,
             logger,
           })
           res.json({ ok: true, data: result })
