@@ -7,6 +7,7 @@
 
 import type { QueryResult } from '../data-adapters/BaseAdapter'
 import type { ApprovalHistoryEntry, ApprovalRequest } from '../data-adapters/PLMAdapter'
+import type { FormSchema } from '../types/approval-product'
 
 // ── Unified Approval DTO (API response shape) ──
 
@@ -28,6 +29,9 @@ export interface UnifiedApprovalDTO {
   publishedDefinitionId?: string | null
   requestNo?: string | null
   formSnapshot?: Record<string, unknown> | null
+  // Frozen form schema (detail `columns` included) from the instance's pinned template version,
+  // so the read renders detail rows from the FROZEN schema, not the live template.
+  formSchema?: FormSchema | null
   currentNodeKey?: string | null
   /**
    * Parallel gateway (并行分支) — populated only when the instance is in a

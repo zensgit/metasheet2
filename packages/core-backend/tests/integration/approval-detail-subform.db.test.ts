@@ -153,4 +153,22 @@ describeIfDatabase('detail / sub-form (明细) submit→freeze→read — real-D
     expect(bad.status).toBe(400)
     expect(await bad.text()).toMatch(/items\[0\]\.qty is required/)
   })
+
+  it('exposes the frozen detail columns on the instance read (GET /api/approvals/:id — closes Fact B) [C-3a]', async () => {
+    const started = await req(base, '/api/approvals', reqTok, {
+      method: 'POST',
+      body: { templateId: tid, formData: { items: [{ product: 'A', qty: 1 }] } },
+    })
+    const body = (await started.json()) as { id?: string; data?: { id: string } }
+    const aid = body.id ?? body.data?.id
+    const read = await req(base, `/api/approvals/${aid}`, reqTok)
+    expect(read.status).toBe(200)
+    const dto = (await read.json()) as {
+      formSchema?: { fields: Array<{ id: string; columns?: Array<{ id: string }> }> }
+      data?: { formSchema?: { fields: Array<{ id: string; columns?: Array<{ id: string }> }> } }
+    }
+    const schema = dto.formSchema ?? dto.data?.formSchema
+    const detail = schema?.fields.find((field) => field.id === 'items')
+    expect(detail?.columns?.map((column) => column.id)).toEqual(['product', 'qty', 'memo'])
+  })
 })

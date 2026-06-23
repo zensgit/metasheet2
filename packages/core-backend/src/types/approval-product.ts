@@ -313,6 +313,9 @@ export interface UnifiedApprovalDTO {
   publishedDefinitionId?: string | null
   requestNo?: string | null
   formSnapshot?: Record<string, unknown> | null
+  // Frozen form schema from the instance's pinned template version (detail `columns` included),
+  // so the read renders detail rows from the FROZEN schema, not the live template.
+  formSchema?: FormSchema | null
   currentNodeKey?: string | null
   /**
    * Parallel gateway (并行分支) — populated only when the instance is in
