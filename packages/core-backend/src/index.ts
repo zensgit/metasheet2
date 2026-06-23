@@ -156,6 +156,7 @@ import { isOapiReadAllowlistRequest } from './multitable/oapi-read-allowlist'
 import { dashboardRouter } from './routes/dashboard'
 import { createAutomationRoutes } from './routes/automation'
 import { createMultitableAiRoutes } from './routes/multitable-ai'
+import { QueueServiceImpl } from './services/QueueService'
 import { createMultitableButtonRoutes } from './routes/multitable-button'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
@@ -1134,7 +1135,10 @@ export class MetaSheetServer {
     //   A1 readiness (GET /ai/readiness, admin-only) +
     //   A2 shortcut (POST /sheets/:sheetId/ai/shortcut/{preview,run}, record RBAC).
     // See routes/multitable-ai.ts header.
-    this.app.use('/api/multitable', createMultitableAiRoutes())
+    // B-4: inject a real in-process queue so the async bulk-fill job's generate phase
+    // runs the worker (runJob) out-of-band via `enqueue`. WITHOUT it, a large bulk-fill
+    // creates a job + returns a jobId but the worker never executes in production.
+    this.app.use('/api/multitable', createMultitableAiRoutes({ queue: new QueueServiceImpl() }))
     // B1-a1 button field run endpoint. See routes/multitable-button.ts header.
     this.app.use('/api/multitable', createMultitableButtonRoutes())
     this.app.use(apiTokensRouter())

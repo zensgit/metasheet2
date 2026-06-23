@@ -369,27 +369,13 @@ async function setHeaderProgress(query: AiUsageQueryFn, jobId: string, generated
   )
 }
 
-async function setHeaderStatus(
-  query: AiUsageQueryFn,
-  jobId: string,
-  status: WorkflowJobStatus,
-  opts: { quotaPaused?: boolean } = {},
-): Promise<void> {
-  // suspended ⇔ a suspend descriptor (workflow-job-contract): the review wait is
-  // ALWAYS suspend_reason='manual_task' (v1 has no delay/external_event variant).
-  // Any non-suspended status clears the reason.
-  const suspendReason: WorkflowJobSuspendReason | null = status === 'suspended' ? 'manual_task' : null
-  if (opts.quotaPaused !== undefined) {
-    await query(
-      `UPDATE ${AI_BULK_JOB_TABLE} SET status = $2, suspend_reason = $3, quota_paused = $4, updated_at = NOW() WHERE job_id = $1`,
-      [jobId, status, suspendReason, opts.quotaPaused],
-    )
-  } else {
-    await query(
-      `UPDATE ${AI_BULK_JOB_TABLE} SET status = $2, suspend_reason = $3, updated_at = NOW() WHERE job_id = $1`,
-      [jobId, status, suspendReason],
-    )
-  }
+async function setHeaderStatus(query: AiUsageQueryFn, jobId: string, status: WorkflowJobStatus): Promise<void> {
+  // Non-suspend transition (the worker uses this only for `errored`); suspends go
+  // through the guarded `suspendIfRunning`. Any non-suspend status clears the reason.
+  await query(
+    `UPDATE ${AI_BULK_JOB_TABLE} SET status = $2, suspend_reason = NULL, updated_at = NOW() WHERE job_id = $1`,
+    [jobId, status],
+  )
 }
 
 /** Persist the durable commit aggregate on the header (BJ-10). Clears suspend_reason for a non-suspended status. */
@@ -401,11 +387,41 @@ export async function setHeaderAggregate(query: AiUsageQueryFn, jobId: string, a
   )
 }
 
-/** Flip a suspended job back to `running` for the commit phase (clears suspend_reason). */
-export async function setHeaderRunning(query: AiUsageQueryFn, jobId: string): Promise<void> {
-  await query(
-    `UPDATE ${AI_BULK_JOB_TABLE} SET status = 'running', suspend_reason = NULL, updated_at = NOW() WHERE job_id = $1`,
+/**
+ * Flip a COMMITTABLE job into the commit phase (`running`), GUARDED. The committable
+ * set is the worker-no-longer-mutating states — `suspended` (awaiting review),
+ * `errored` (BJ-5: crashed mid-generate, partial committable), and `rejected`
+ * (BJ-4: cancelled, generated rows still committable). Returns false if the job is
+ * NOT committable (queued/running = worker active; resolved = already committed; or
+ * another commit already claimed it) so two commits can never both proceed.
+ */
+export async function setHeaderRunning(query: AiUsageQueryFn, jobId: string): Promise<boolean> {
+  const res = await query(
+    `UPDATE ${AI_BULK_JOB_TABLE} SET status = 'running', suspend_reason = NULL, updated_at = NOW()
+      WHERE job_id = $1 AND status IN ('suspended', 'errored', 'rejected')`,
     [jobId],
+  )
+  return (res.rowCount ?? 0) > 0
+}
+
+/** Read just the job's current status — the worker's per-row cancel check (BJ-4). */
+export async function readJobStatus(query: AiUsageQueryFn, jobId: string): Promise<WorkflowJobStatus | null> {
+  const res = await query(`SELECT status FROM ${AI_BULK_JOB_TABLE} WHERE job_id = $1`, [jobId])
+  const row = res.rows[0] as { status?: string } | undefined
+  return (row?.status as WorkflowJobStatus | undefined) ?? null
+}
+
+/**
+ * Suspend the GENERATE phase for review — guarded on `running` so a concurrent cancel
+ * (which set the header to `rejected`) is NEVER overwritten back to `suspended` (BJ-4).
+ * The worker uses this for every suspend transition (completion / quota-pause / provider
+ * error / blocked); a no-op if the job already left `running`.
+ */
+async function suspendIfRunning(query: AiUsageQueryFn, jobId: string, quotaPaused = false): Promise<void> {
+  await query(
+    `UPDATE ${AI_BULK_JOB_TABLE} SET status = 'suspended', suspend_reason = 'manual_task', quota_paused = $2, updated_at = NOW()
+      WHERE job_id = $1 AND status = 'running'`,
+    [jobId, quotaPaused],
   )
 }
 
@@ -534,9 +550,18 @@ export class BulkFillJobService {
 
     let generated = 0
     let settledCost = 0
-    let quotaPaused = false
 
     for (const row of plan.rows) {
+      // BJ-4: honor a cancel at the next row boundary. Re-read the live status; if the
+      // job is no longer `running` (a concurrent cancel set it `rejected`), STOP — do not
+      // generate further and do NOT overwrite the terminal status. Rows already generated
+      // stay `generated` (charged); the still-`pending` remainder was flipped to
+      // `pending_not_generated` by the cancel.
+      if ((await readJobStatus(query, jobId)) !== 'running') {
+        this.plans.delete(jobId)
+        return
+      }
+
       const ctx: ShortcutRequestContext = {
         pool: this.pool,
         sheetId: plan.sheetId,
@@ -556,7 +581,7 @@ export class BulkFillJobService {
           // partial for review (NOT quota_paused; the remainder is genuinely un-generated).
           await markRemainingPendingNotGenerated(query, jobId)
           await setHeaderProgress(query, jobId, generated, settledCost)
-          await setHeaderStatus(query, jobId, 'suspended')
+          await suspendIfRunning(query, jobId)
           this.plans.delete(jobId)
           return
         }
@@ -578,8 +603,7 @@ export class BulkFillJobService {
         // pending_not_generated (UNCHARGED, no proposal). Suspend + quota_paused.
         await markRemainingPendingNotGenerated(query, jobId)
         await setHeaderProgress(query, jobId, generated, settledCost)
-        await setHeaderStatus(query, jobId, 'suspended', { quotaPaused: true })
-        quotaPaused = true
+        await suspendIfRunning(query, jobId, true)
         this.plans.delete(jobId)
         return
       }
@@ -589,7 +613,7 @@ export class BulkFillJobService {
         // remainder un-generated, suspend the partial for review.
         await markRemainingPendingNotGenerated(query, jobId)
         await setHeaderProgress(query, jobId, generated, settledCost)
-        await setHeaderStatus(query, jobId, 'suspended')
+        await suspendIfRunning(query, jobId)
         this.plans.delete(jobId)
         return
       }
@@ -603,9 +627,9 @@ export class BulkFillJobService {
     }
 
     // Generation complete → suspend(manual_task) awaiting review (BJ-1 lifecycle).
-    void quotaPaused
+    // Guarded on `running` so a cancel landing during the final row is never overwritten.
     await setHeaderProgress(query, jobId, generated, settledCost)
-    await setHeaderStatus(query, jobId, 'suspended')
+    await suspendIfRunning(query, jobId)
     this.plans.delete(jobId)
   }
 }

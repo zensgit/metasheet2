@@ -76,6 +76,7 @@ import {
   setRowCommitOutcome,
   type BulkJobRowSeed,
 } from '../services/ai-bulk-job-service'
+import type { QueueService } from '../types/plugin'
 
 /**
  * Multitable AI routes — A1 readiness (M1b) + A2 shortcut preview/run (M2).
@@ -128,6 +129,14 @@ export interface MultitableAiRouteDeps {
    * real QueueService so `enqueue` runs the worker out-of-band).
    */
   bulkJobService?: BulkFillJobService
+  /**
+   * Optional in-process queue (production wiring). When provided and no
+   * `bulkJobService` is injected, the lazily-built service registers its generate
+   * processor on this queue so `enqueue` runs `runJob` out-of-band — WITHOUT it the
+   * generate phase never executes in production. Omitted in tests (which drive
+   * `runJob` directly for determinism).
+   */
+  queue?: QueueService
 }
 
 function sendStatus(
@@ -174,6 +183,10 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         bulkJobServiceInstance = new BulkFillJobService({
           pool: poolManager.get() as unknown as PoolLike,
           ...(deps.fetchFn ? { fetchFn: deps.fetchFn } : {}),
+          // Production passes a real queue → the service registers its generate
+          // processor and `enqueue` runs the worker out-of-band. No queue (tests) →
+          // `enqueue` is a no-op and the caller drives `runJob` directly.
+          ...(deps.queue ? { queue: deps.queue } : {}),
         })
       }
       return bulkJobServiceInstance
@@ -1338,6 +1351,19 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       const header = await resolveBulkJobForActor(req, res, ledgerQuery, sheetId, jobId)
       if (!header) return
 
+      // BJ-4/BJ-5: the job must be in a COMMITTABLE state — one where the worker is
+      // no longer mutating it. `suspended` = generated & awaiting review; `errored` =
+      // crashed mid-generate (BJ-5, persisted partial committable); `rejected` =
+      // cancelled (BJ-4, already-generated rows still committable). Reject `queued`/
+      // `running` (the worker is still generating — committing now would race it and
+      // write a partial) and `resolved` (already committed). 409 Conflict.
+      if (header.status !== 'suspended' && header.status !== 'errored' && header.status !== 'rejected') {
+        return res.status(409).json({
+          ok: false,
+          error: { code: 'BULK_JOB_NOT_COMMITTABLE', message: `Bulk job is not awaiting commit (status: ${header.status}).` },
+        })
+      }
+
       // Sheet-level gates (bulk-commit parity) — the actor must STILL be able to
       // write the sheet; the per-record re-gate inside commitOneRecord enforces the
       // rest. resolveSheetReadableCapabilities resolves the caller's RBAC.
@@ -1363,8 +1389,15 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       type JobCommitOutcome = 'committed' | 'stale_reprev' | 'write_conflict' | 'skipped_no_perm'
       const counts: Record<JobCommitOutcome, number> = { committed: 0, stale_reprev: 0, write_conflict: 0, skipped_no_perm: 0 }
 
-      // Flip suspended → running for the commit phase (clears suspend_reason).
-      await setHeaderRunning(ledgerQuery, jobId)
+      // Flip a COMMITTABLE job → running for the commit phase, GUARDED (clears
+      // suspend_reason). False = a concurrent commit already claimed it (or it left
+      // the committable set between the read above and here) → 409, no double-commit.
+      if (!(await setHeaderRunning(ledgerQuery, jobId))) {
+        return res.status(409).json({
+          ok: false,
+          error: { code: 'BULK_JOB_COMMIT_IN_PROGRESS', message: 'Another commit is already in progress for this job.' },
+        })
+      }
 
       for (let i = 0; i < generatedRows.length; i += chunkSize) {
         const chunk = generatedRows.slice(i, i + chunkSize)
