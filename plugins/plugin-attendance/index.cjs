@@ -36978,6 +36978,14 @@ module.exports = {
         }
 
         try {
+          // P2 (owner review of #3087): a valid-UUID but non-existent/deleted group must 404, NOT a misleading
+          // 200 with members:0 (which disguises "wrong/deleted group" as "everyone empty"). Checked AFTER the
+          // scope gate so an unauthorized caller still gets 403 first (no existence leak to non-managers).
+          const group = await loadAttendanceGroupByIdOrCode(db, orgId, groupId)
+          if (!group) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Attendance group not found' } })
+            return
+          }
           const memberRows = await db.query(
             `SELECT DISTINCT user_id FROM attendance_group_members WHERE org_id = $1 AND group_id = $2 ORDER BY user_id ASC`,
             [orgId, groupId],

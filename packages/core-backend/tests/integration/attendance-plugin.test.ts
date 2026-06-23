@@ -13912,6 +13912,10 @@ attendanceIntegrationDescribe(
       // §3a: the pending member is still in the formal available headcount (availableFormal = scheduled + pending).
       expect(day?.availableFormal).toBe((day?.scheduled ?? 0) + 1)
 
+      // (2.5) P2 (owner review): admin + a valid-UUID but NON-EXISTENT group → 404, not a misleading 200 empty.
+      const ghostRes = await requestJson(`${baseUrl}/api/attendance/team-availability?groupId=${randomUUID()}&from=${workDate}&to=${workDate}`, { headers: auth })
+      expect(ghostRes.status).toBe(404)
+
       // (3) §3b scope gate: an outsider (non-admin, not a group manager) → 403
       process.env.RBAC_BYPASS = 'false'
       const outsiderTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(outsider)}&roles=employee&perms=attendance:read`)
