@@ -26,7 +26,11 @@ approval-result write-back.
 
    The branch condition reads the top-level total field (`amount`). Detail-row amounts are not
    auto-summed in v1; the applicant-entered total remains the branch input. Auto-sum/calculated
-   total is a separate form-field capability, not hidden inside this template slice.
+   total is a separate form-field capability, not hidden inside this template slice. KNOWN
+   CONTROL LIMITATION: because the gate reads the applicant-entered `amount`, the routing is
+   only as trustworthy as that value — an applicant can under-state the total to route around
+   the higher-amount tier. The amount tier is an authoring/routing aid, not a tamper-proof
+   financial control, until auto-sum or a server-side total check closes the gap.
 
 2. Use existing assignee sources first.
 
@@ -99,7 +103,9 @@ flowchart TD
   higher --> end
 ```
 
-Default threshold proposal: `5000`. The value is editable in the condition-node rule.
+Default threshold proposal: `5000`. The value is editable in the condition-node rule. The
+higher tier node defaults to `dept_head`; the "Manager At Level / Department Head" label
+denotes the single editable source (retuned via the Gate-A editor), not two nodes.
 
 ### High-Amount Purchase
 
@@ -161,7 +167,7 @@ fields. W7 remains gated on a concrete write-back scenario.
 ## Non-Goals
 
 - No job-title/rank resolver in this slice.
-- No automatic detail-row sum.
+- No automatic detail-row sum (so the amount gate is not a tamper-proof control — see Decision 1).
 - No topology add/remove UI.
 - No generic rule builder outside approval template authoring.
 - No approval-result write-back.
