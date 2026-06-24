@@ -18,7 +18,7 @@ provider), not the API:
    (not a silent close), with the unreached rows shown truthfully as "not generated".
 
 Spec: `packages/core-backend/tests/e2e/multitable-ai-bulk-fill-over-cap.e2e.spec.ts`.
-Result: **2 passed (12.8s)** against the live stack.
+Result: **2 passed (16.5s)** against the live stack.
 
 ## Harness / how it runs (dispatch-local, NOT PR-gated)
 
@@ -51,24 +51,30 @@ gitignored).
 | Screenshot | Phase |
 |---|---|
 | `01-progress.png` | generating — progress line "已生成 N / N" |
-| `02-review.png` | paginated review — generated rows + charged-cost note ("$0.0032") |
-| `03-commit-summary.png` | commit summary — "已写入 3 行" |
-| `04-cancel-review.png` | post-cancel review — 1 row committable + "未生成 (4) … 未消耗配额" |
+| `02-review.png` | paginated review — 3 generated rows; one deselected → confirm "写入所选行 (2)" |
+| `03-commit-summary.png` | commit summary — "已写入 2 行" (the selected subset) |
+| `04-cancel-review.png` | post-cancel review — generated rows "可写入" (committable) + unreached "未生成 … 未消耗配额" |
 
 Per-test Playwright traces are emitted under `test-results/**/trace.zip`
 (`npx playwright show-trace <zip>`); not committed (large binaries).
 
 What the assertions lock:
-- happy: progress UI appears; **3 generated rows**; cost note visible; commit summary shown;
-  and — read straight from the API — **all 3 records were actually written**.
-- cancel: the cancel button is present during polling; after clicking it the **dialog stays
-  open** and shows the `pending`/"未生成" group + a `confirm` for the generated subset — a
-  live demonstration of the #3113 truthful-status reconcile behavior at the UI layer.
+- happy: progress UI appears; **3 generated rows**; cost note visible; **one row is deselected
+  so the commit is a TRUE subset** (confirm shows "(2)"); commit summary shown; and — read
+  straight from the API — **exactly the selected 2 records were written** (the deselected row
+  left empty).
+- cancel: the test **waits until ≥1 row is generated, THEN cancels** (exercising the
+  already-generated path, not cancel-before-generation); the **dialog stays open into review**
+  with **≥1 generated row committable** (`可写入`) and a **non-empty `pending`/"未生成" remainder**
+  (asserts `generatedCount` is `≥ 1` and `< 5`); then it **commits the generated subset and
+  verifies via the API that exactly those rows were written** (`written === generatedCount`) —
+  proving already-generated rows stay charged + committable after cancel (the #3113
+  truthful-status reconcile behavior at the UI layer).
 
 ## Finding (for a SEPARATE focused-fix PR — not fixed here)
 
 **The open grid does not auto-refresh after a bulk-fill commit.** After the commit summary
-reports "已写入 3 行", the grid's Summary column still renders the pre-fill "—"; the written
+reports "已写入 N 行", the grid's Summary column still renders the pre-fill "—"; the written
 values appear only after a manual page reload. The data is correct — the API confirms the
 records hold the AI output, and a reload renders them — so this is a **stale-view UX gap**,
 not a write/correctness bug. The spec therefore asserts the write via the API (not the grid)

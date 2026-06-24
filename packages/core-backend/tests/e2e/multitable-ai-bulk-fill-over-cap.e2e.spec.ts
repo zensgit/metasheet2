@@ -101,43 +101,74 @@ test.describe('B-4 AI bulk-fill async over-cap (browser e2e)', () => {
     await expect(page.locator('[data-test="ai-bulk-job-confirm"]')).toBeVisible({ timeout: 30_000 })
     await expect(page.locator('[data-test="ai-bulk-job-row"]')).toHaveCount(3)
     await expect(page.locator('[data-test="ai-bulk-cost"]')).toBeVisible()
+
+    // SELECT A SUBSET: deselect the first generated row → commit only the remaining 2 (a
+    // true subset, not an all-rows commit).
+    await page.locator('[data-test="ai-bulk-job-row-select"]').first().click()
+    await expect(page.locator('[data-test="ai-bulk-job-confirm"]')).toContainText('(2)')
     await shot(page, '02-review.png')
 
-    // Commit the (default-selected) generated subset → backend chunks the write.
+    // Commit the selected subset → backend chunks the write.
     await page.locator('[data-test="ai-bulk-job-confirm"]').click()
     await expect(page.locator('[data-test="ai-bulk-job-commit-summary"]')).toBeVisible({ timeout: 30_000 })
     await shot(page, '03-commit-summary.png')
 
-    // Truth check: the records were actually written (read straight from the API).
+    // Truth check: EXACTLY the selected 2 were written (the deselected row left empty) —
+    // read straight from the API.
     const client = makeAuthClient(request, token)
     const recs = await client.get<{ records: Array<{ data?: Record<string, unknown> }> }>(
       `/api/multitable/records?sheetId=${sheetId}&limit=10`,
     )
     const written = (recs.data?.records ?? []).filter((r) => typeof r.data?.[aiFieldId] === 'string' && r.data[aiFieldId])
-    expect(written.length).toBe(3)
+    expect(written.length).toBe(2)
     // NOTE (finding): the OPEN grid does not auto-refresh after commit — the written
     // values appear only after a reload. Documented as a separate focused-fix item; we
     // assert the write via API rather than locking the stale-grid behavior.
   })
 
-  test('cancel during polling → into review of generated rows (not a silent close)', async ({ request, page }) => {
-    // Needs the mock started with MOCK_AI_DELAY_MS>=1000 so polling lasts long enough.
-    const { sheetId, viewId } = await seedAiSheet(request, token, 5)
+  test('cancel AFTER ≥1 generated → those rows stay committable; unreached rows are pending (not a silent close)', async ({ request, page }) => {
+    // Needs the mock started with MOCK_AI_DELAY_MS>=1000 so the worker is slow enough to
+    // cancel mid-run AFTER at least one row has been generated (the B-4 cancel contract:
+    // already-generated rows remain charged + committable).
+    const { sheetId, viewId, aiFieldId } = await seedAiSheet(request, token, 5)
     await gotoAuthed(page, token, `/multitable/${sheetId}/${viewId}`)
 
     await openBulkFillDialog(page)
     await page.locator('[data-test="ai-bulk-generate"]').click()
 
-    // During polling the cancel button is shown; click it before the worker finishes.
-    const cancel = page.locator('[data-test="ai-bulk-job-cancel"]')
-    await expect(cancel).toBeVisible({ timeout: 15_000 })
-    await cancel.click()
+    // Wait until the progress line reports ≥1 row GENERATED, THEN cancel — so we exercise
+    // the already-generated-rows-stay-committable path, not cancel-before-generation.
+    await expect
+      .poll(
+        async () => {
+          const t = (await page.locator('[data-test="ai-bulk-progress-line"]').textContent().catch(() => '')) ?? ''
+          const m = t.match(/(\d+)\s*\/\s*\d+/)
+          return m ? Number(m[1]) : 0
+        },
+        { timeout: 20_000 },
+      )
+      .toBeGreaterThanOrEqual(1)
+    await page.locator('[data-test="ai-bulk-job-cancel"]').click()
 
-    // Cancel must transition INTO review (dialog stays open), exposing the rows generated
-    // before cancel as committable and the unreached rows truthfully as "not generated".
+    // Into review (dialog stays open): ≥1 generated row committable + unreached rows pending.
     await expect(page.locator('[data-test="ai-bulk-fill"]')).toBeVisible()
-    await expect(page.locator('[data-test="ai-bulk-job-pending"]')).toBeVisible({ timeout: 15_000 })
-    await expect(page.locator('[data-test="ai-bulk-job-confirm"]')).toBeVisible()
+    const generated = page.locator('[data-test="ai-bulk-job-row"]')
+    await expect(generated.first()).toBeVisible({ timeout: 15_000 })
+    const generatedCount = await generated.count()
+    expect(generatedCount).toBeGreaterThanOrEqual(1)
+    expect(generatedCount).toBeLessThan(5) // not all generated → there must be a pending remainder
+    await expect(page.locator('[data-test="ai-bulk-job-pending"]')).toBeVisible()
+    await expect(page.locator('[data-test="ai-bulk-job-confirm"]')).toBeEnabled()
     await shot(page, '04-cancel-review.png')
+
+    // Prove COMMITTABLE: writing the cancelled job's generated subset succeeds.
+    await page.locator('[data-test="ai-bulk-job-confirm"]').click()
+    await expect(page.locator('[data-test="ai-bulk-job-commit-summary"]')).toBeVisible({ timeout: 30_000 })
+    const client = makeAuthClient(request, token)
+    const recs = await client.get<{ records: Array<{ data?: Record<string, unknown> }> }>(
+      `/api/multitable/records?sheetId=${sheetId}&limit=10`,
+    )
+    const written = (recs.data?.records ?? []).filter((r) => typeof r.data?.[aiFieldId] === 'string' && r.data[aiFieldId])
+    expect(written.length).toBe(generatedCount) // the generated subset was charged + committed
   })
 })
