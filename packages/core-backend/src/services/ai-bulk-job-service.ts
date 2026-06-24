@@ -438,6 +438,46 @@ async function markErroredIfRunning(query: AiUsageQueryFn, jobId: string): Promi
   )
 }
 
+/** Default quiet window before a `queued`/`running` job is treated as orphaned (ms). */
+export const DEFAULT_BULK_JOB_RECONCILE_STALE_MS = 10 * 60 * 1000
+
+/**
+ * B-4 follow-up to BJ-5 — reconcile ORPHANED jobs (the hard-process-restart case
+ * that markErroredIfRunning explicitly does NOT cover).
+ *
+ * `runJob` is an in-process worker (QueueService); a hard restart drops the queue
+ * and the in-process plan registry, so any job still `queued`/`running` has no live
+ * worker and can never progress — yet it stays "active" (the BJ-7 partial unique
+ * index counts queued/running/suspended), blocking a fresh start for its
+ * (actor, sheet, field) until expires_at GC. Flip those orphans to `errored`
+ * (header-only, mirroring markErroredIfRunning; already-`generated` rows stay
+ * committable).
+ *
+ * `suspended` jobs are EXCLUDED — they are intentionally paused awaiting review,
+ * not orphaned. The `staleAfterMs` age guard avoids racing a just-claimed job in a
+ * multi-instance deploy: only jobs whose `updated_at` has been quiet longer than
+ * the guard are reconciled (a live worker advances `updated_at` per row). Run at
+ * startup and/or on a periodic sweep. Returns the number of jobs reconciled.
+ */
+export async function reconcileOrphanedBulkJobs(
+  query: AiUsageQueryFn,
+  opts: { staleAfterMs?: number } = {},
+): Promise<number> {
+  const staleMs = opts.staleAfterMs ?? DEFAULT_BULK_JOB_RECONCILE_STALE_MS
+  // Floor at 30s: this is an exported helper, so guard against a misuse that passes
+  // a tiny/zero window and would reconcile a just-claimed, still-live job.
+  const staleAfterSeconds = Math.max(30, Math.round(staleMs / 1000))
+  const res = await query(
+    `UPDATE ${AI_BULK_JOB_TABLE}
+        SET status = 'errored', suspend_reason = NULL, updated_at = NOW()
+      WHERE status IN ('queued', 'running')
+        AND updated_at < NOW() - ($1::int * INTERVAL '1 second')
+      RETURNING job_id`,
+    [staleAfterSeconds],
+  )
+  return Array.isArray(res.rows) ? res.rows.length : 0
+}
+
 /** Write a per-row commit outcome back to job-rows (BJ-10). `committed` is terminal-success. */
 export async function setRowCommitOutcome(
   query: AiUsageQueryFn,

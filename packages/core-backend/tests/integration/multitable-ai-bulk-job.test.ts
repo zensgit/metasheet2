@@ -45,6 +45,7 @@ import {
   cancelBulkJob,
   setHeaderRunning,
   insertBulkJobHeader,
+  reconcileOrphanedBulkJobs,
 } from '../../src/services/ai-bulk-job-service'
 import { QueueServiceImpl } from '../../src/services/QueueService'
 import type { PoolLike } from '../../src/services/ai-bulk-shared'
@@ -636,6 +637,48 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
     expect(commit.body.state).toBe('resolved')
     expect(commit.body.counts.committed).toBe(1)
     expect(await recordValue(String(generated[0].record_id), FLD_TARGET)).toBe('AI OUT')
+  })
+
+  // ── HARD-RESTART RECONCILE (B-4 follow-up to BJ-5) ─────────────────────────
+  test('hard-restart reconcile: a stale orphaned queued/running job → errored; recent + suspended jobs untouched', async () => {
+    // markErroredIfRunning covers only the IN-PROCESS crash path. A HARD restart
+    // drops the in-process worker + queue, so a job left queued/running has no live
+    // worker and can never progress — it must be reconciled at boot. Seed four
+    // headers on DISTINCT fields (the BJ-7 active-job unique index is
+    // (actor, sheet, field), so several active headers for one target collide):
+    // a stale-running orphan, a stale-queued orphan, a just-updated running job (a
+    // live worker on another instance), and a suspended job (intentionally paused).
+    const queryFn = q as unknown as AiUsageQueryFn
+    const mk = async (suffix: string, status: string, ageMinutes: number) => {
+      const jid = `aibulkjob_recon_${suffix}_${TS}`
+      await insertBulkJobHeader(queryFn, {
+        jobId: jid,
+        actorId: ACTOR,
+        sheetId: SHEET_ID,
+        fieldId: `${FLD_TARGET}_recon_${suffix}`,
+        scopeFingerprint: `fp_recon_${suffix}`,
+        total: 3,
+      })
+      await q(
+        `UPDATE ${AI_BULK_JOB_TABLE} SET status = $2, updated_at = NOW() - ($3::int * INTERVAL '1 minute') WHERE job_id = $1`,
+        [jid, status, ageMinutes],
+      )
+      return jid
+    }
+    const staleRunning = await mk('stale_running', 'running', 5)
+    const staleQueued = await mk('stale_queued', 'queued', 5)
+    const recentRunning = await mk('recent_running', 'running', 0)
+    const suspendedOld = await mk('suspended_old', 'suspended', 5)
+
+    // Quiet window 60s: the 5-min-stale active jobs are orphaned; the just-updated
+    // one is a live worker; the suspended one is excluded by STATUS regardless of age.
+    const reconciled = await reconcileOrphanedBulkJobs(queryFn, { staleAfterMs: 60_000 })
+
+    expect((await dbJobHeader(staleRunning))!.status).toBe('errored')
+    expect((await dbJobHeader(staleQueued))!.status).toBe('errored')
+    expect((await dbJobHeader(recentRunning))!.status).toBe('running')
+    expect((await dbJobHeader(suspendedOld))!.status).toBe('suspended')
+    expect(reconciled).toBeGreaterThanOrEqual(2)
   })
 
   // ── DURABILITY KEYSTONE (BJ-9) ─────────────────────────────────────────────
