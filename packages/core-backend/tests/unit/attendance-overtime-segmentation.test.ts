@@ -126,52 +126,56 @@ describe('attendance overtime segmentation O1 helper', () => {
     })).toBe(90)
   })
 
-  it('rejects cross-midnight overtime windows with the stable v1 code', () => {
+  it('NS-3: accepts a one-local-midnight window (lifted); same-day stays single-span; reversed still invalid', () => {
+    // same-day → ok, single span, not crossing midnight
     expect(helpers.validateOvertimeSegmentationWindow({
       workDate: '2026-10-01',
       requestedInAt: '2026-10-01T20:00:00.000Z',
       requestedOutAt: '2026-10-01T22:00:00.000Z',
-    })).toEqual({ ok: true })
+    })).toMatchObject({ ok: true, crossesMidnight: false })
     expect(helpers.validateOvertimeSegmentationWindow({
       workDate: '2026-10-01',
-      requestedInAt: '2026-10-01T00:30:00+08:00',
-      requestedOutAt: '2026-10-01T02:00:00+08:00',
-    })).toEqual({ ok: true })
-    expect(helpers.validateOvertimeSegmentationWindow({
+      requestedInAt: '2026-10-01T08:00:00.000Z',
+      requestedOutAt: '2026-10-01T10:00:00.000Z',
+    })).toMatchObject({ ok: true, crossesMidnight: false })
+    // one local midnight → NOW ACCEPTED with per-date spans (pre-NS-3 was OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED)
+    const cross = helpers.validateOvertimeSegmentationWindow({
       workDate: '2026-10-01',
       requestedInAt: '2026-10-01T23:00:00.000Z',
       requestedOutAt: '2026-10-02T01:00:00.000Z',
-    })).toEqual({ ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' })
+    })
+    expect(cross.ok).toBe(true)
+    expect(cross.crossesMidnight).toBe(true)
+    expect(cross.spans).toHaveLength(2)
+    // reversed → still the stable invalid code
     expect(helpers.validateOvertimeSegmentationWindow({
       workDate: '2026-10-01',
       requestedInAt: '2026-10-01T23:00:00.000Z',
       requestedOutAt: '2026-10-01T22:00:00.000Z',
     })).toEqual({ ok: false, code: 'OVERTIME_INVALID_TIME_WINDOW' })
+    // §P1 workDate anchoring: a window whose first local date is NOT workDate (here both ends land on D+1
+    // while workDate=D) is REJECTED — it must not be silently snapshotted onto workDate.
+    expect(helpers.validateOvertimeSegmentationWindow({
+      workDate: '2026-10-01',
+      requestedInAt: '2026-10-02T09:00:00.000Z',
+      requestedOutAt: '2026-10-02T11:00:00.000Z',
+    })).toEqual({ ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' })
   })
 })
 
 describe('#8 NS-1 — cross-midnight split BEHIND the guard (route still rejects until NS-3)', () => {
-  // §3c route-level reject proof: maybeBuildOvertimeSegmentationSnapshot calls validate with NO options, so
-  // allowCrossMidnight defaults false. A one-midnight window therefore STILL rejects through NS-1/NS-2.
-  it('route default (no options) STILL rejects a one-midnight window with the stable code', () => {
-    expect(helpers.validateOvertimeSegmentationWindow({
+  // #8 NS-3 lifted the reject: the validator (which the route calls) now ACCEPTS a one-local-midnight window
+  // with per-date spans. reversed / multi-midnight keep the stable reject (asserted in the split tests below);
+  // the snapshot-level accept + reject are proven in the real-DB matrix (attendance-plugin.test.ts).
+  it('NS-3: the validator default ACCEPTS a one-midnight window with per-date spans (reject lifted)', () => {
+    const r = helpers.validateOvertimeSegmentationWindow({
       workDate: '2026-10-01',
       requestedInAt: '2026-10-01T23:00:00.000Z',
       requestedOutAt: '2026-10-02T01:00:00.000Z',
-    })).toEqual({ ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' })
-  })
-
-  // The actual route fn (not just the validator): with segmentation enabled, a one-midnight window throws
-  // 422 OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED — proving NS-1 did NOT open the route. (No DB: input.settings
-  // bypasses getSettings, and the reject throws before any calendar load.)
-  it('ROUTE fn maybeBuildOvertimeSegmentationSnapshot still throws 422 for a one-midnight window (NS-1 does not lift it)', async () => {
-    await expect(helpers.maybeBuildOvertimeSegmentationSnapshot(null, {
-      settings: { overtimeSegmentation: { enabled: true } },
-      workDate: '2026-10-01',
-      userId: 'u1',
-      requestedInAt: '2026-10-01T23:00:00.000Z',
-      requestedOutAt: '2026-10-02T01:00:00.000Z',
-    })).rejects.toMatchObject({ status: 422, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' })
+    })
+    expect(r.ok).toBe(true)
+    expect(r.crossesMidnight).toBe(true)
+    expect(r.spans).toHaveLength(2)
   })
 
   it('split: a one-midnight (UTC) window → per-date sub-spans with per-date minutes (§3b/§3d)', () => {
@@ -330,12 +334,87 @@ describe('#8 NS-2 — adversarial matrix pinning NS-1 split + per-own-date bucke
     expect(JSON.stringify(a)).toBe(JSON.stringify(b))
     expect(a.buckets.workdayMinutes + a.buckets.restdayMinutes + a.buckets.holidayMinutes).toBe(120)
   })
+})
 
-  it('NS-2 does NOT touch the route reject — maybeBuildOvertimeSegmentationSnapshot still throws 422 for one-midnight', async () => {
-    await expect(helpers.maybeBuildOvertimeSegmentationSnapshot(null, {
-      settings: { overtimeSegmentation: { enabled: true } },
-      workDate: '2026-10-01', userId: 'u1',
-      requestedInAt: '2026-10-01T23:00:00.000Z', requestedOutAt: '2026-10-02T01:00:00.000Z',
-    })).rejects.toMatchObject({ status: 422, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' })
+describe('#8 NS-3 — buildCrossMidnightOvertimeSegmentationSnapshot (rule-once, partition, per-own-date bucket)', () => {
+  const item = (isWorkingDay: boolean, holiday = false) => ({
+    effective: { isWorkingDay },
+    layers: holiday ? [{ kind: 'holiday', isWorkingDay: false, label: 'Holiday' }] : [],
+  })
+  const itemsByDate = (map: Record<string, ReturnType<typeof item>>) => new Map(Object.entries(map))
+  const splitOf = (startAt: string, endAt: string, tz = 'UTC') =>
+    helpers.splitOvertimeSegmentationWindowAtMidnight({ startAt, endAt, timeZone: tz }).spans
+
+  it('partitions the RULE-NORMALIZED total by window weights, last date remainder, per-own-date bucket', () => {
+    const spans = splitOf('2026-10-01T23:00:00.000Z', '2026-10-02T01:00:00.000Z') // 60/60
+    const snap = helpers.buildCrossMidnightOvertimeSegmentationSnapshot({
+      workDate: '2026-10-01', minutes: 120, overtimeRule: null, spans,
+      itemsByDate: itemsByDate({ '2026-10-01': item(true), '2026-10-02': item(false) }),
+    })
+    expect(snap.crossesMidnight).toBe(true)
+    expect(snap.totalMinutes).toBe(120)
+    expect(snap.segments).toEqual({ workdayMinutes: 60, restdayMinutes: 60, holidayMinutes: 0 })
+    expect(snap.perDate.map((p: { date: string; dayType: string; minutes: number }) => ({ date: p.date, dayType: p.dayType, minutes: p.minutes }))).toEqual([
+      { date: '2026-10-01', dayType: 'workday', minutes: 60 },
+      { date: '2026-10-02', dayType: 'restday', minutes: 60 },
+    ])
+  })
+
+  it('applies the overtime rule ONCE to the aggregate then partitions (no per-sub-span double rounding)', () => {
+    // rule rounds UP to 60; raw 90 → normalized 120; partition by 60/60 weights → 60/60 (not 60→60 + 30→60).
+    const spans = splitOf('2026-10-01T23:00:00.000Z', '2026-10-02T01:00:00.000Z')
+    const snap = helpers.buildCrossMidnightOvertimeSegmentationSnapshot({
+      workDate: '2026-10-01', minutes: 90, overtimeRule: { roundingMinutes: 60 }, spans,
+      itemsByDate: itemsByDate({ '2026-10-01': item(true), '2026-10-02': item(true) }),
+    })
+    expect(snap.totalMinutes).toBe(120)
+    expect(snap.segments.workdayMinutes).toBe(120)
+    expect(snap.perDate[0].minutes + snap.perDate[1].minutes).toBe(120) // conservation
+  })
+
+  it('odd total: last date absorbs the remainder so Σ === total exactly (replay-deterministic)', () => {
+    const spans = splitOf('2026-10-01T23:00:00.000Z', '2026-10-02T01:00:00.000Z') // 60/60 weights
+    const snap = helpers.buildCrossMidnightOvertimeSegmentationSnapshot({
+      workDate: '2026-10-01', minutes: 121, overtimeRule: null, spans,
+      itemsByDate: itemsByDate({ '2026-10-01': item(true), '2026-10-02': item(true) }),
+    })
+    expect(snap.perDate[0].minutes).toBe(60) // floor(121*60/120)
+    expect(snap.perDate[1].minutes).toBe(61) // remainder
+    expect(snap.totalMinutes).toBe(121)
+    // idempotent: identical re-run
+    const snap2 = helpers.buildCrossMidnightOvertimeSegmentationSnapshot({
+      workDate: '2026-10-01', minutes: 121, overtimeRule: null, spans,
+      itemsByDate: itemsByDate({ '2026-10-01': item(true), '2026-10-02': item(true) }),
+    })
+    expect(JSON.stringify(snap)).toBe(JSON.stringify(snap2))
+  })
+
+  it('holiday-after-midnight buckets to holiday; makeup-workday (both flags) buckets to workday', () => {
+    const spans = splitOf('2026-10-01T23:00:00.000Z', '2026-10-02T01:00:00.000Z')
+    const holiday = helpers.buildCrossMidnightOvertimeSegmentationSnapshot({
+      workDate: '2026-10-01', minutes: 120, overtimeRule: null, spans,
+      itemsByDate: itemsByDate({ '2026-10-01': item(true), '2026-10-02': item(false, true) }),
+    })
+    expect(holiday.segments).toEqual({ workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 60 })
+    const makeup = helpers.buildCrossMidnightOvertimeSegmentationSnapshot({
+      workDate: '2026-10-01', minutes: 120, overtimeRule: null, spans,
+      itemsByDate: itemsByDate({ '2026-10-01': item(true), '2026-10-02': item(true, true) }),
+    })
+    expect(makeup.segments).toEqual({ workdayMinutes: 120, restdayMinutes: 0, holidayMinutes: 0 })
+  })
+
+  it('fails closed (OVERTIME_SEGMENTATION_UNRESOLVED, 422) if a spanned date has no calendar item', () => {
+    const spans = splitOf('2026-10-01T23:00:00.000Z', '2026-10-02T01:00:00.000Z')
+    let thrown: { status?: number; code?: string } | undefined
+    try {
+      helpers.buildCrossMidnightOvertimeSegmentationSnapshot({
+        workDate: '2026-10-01', minutes: 120, overtimeRule: null, spans,
+        itemsByDate: itemsByDate({ '2026-10-01': item(true) }), // D+1 missing → must NOT silently bucket as restday
+      })
+    } catch (e) {
+      thrown = e as { status?: number; code?: string }
+    }
+    expect(thrown?.status).toBe(422)
+    expect(thrown?.code).toBe('OVERTIME_SEGMENTATION_UNRESOLVED')
   })
 })

@@ -1,6 +1,10 @@
 name: Yuantus Pact Consumer
 
 on:
+  # Manual activation is available after this workflow_dispatch-enabled workflow exists on
+  # the default branch. Before merge, use the pull_request rerun/push path after secrets
+  # are provisioned; the post-merge push:main run is what publishes the mainBranch pact.
+  workflow_dispatch: {}
   pull_request:
     branches: [main]
     paths:
@@ -9,6 +13,7 @@ on:
       - 'packages/core-backend/tests/unit/plm-adapter-yuantus.test.ts'
       - 'packages/core-backend/package.json'
       - 'pnpm-lock.yaml'
+      - 'scripts/ops/yuantus-pact-consumer-broker-workflow-contract.test.mjs'
       - '.github/workflows/yuantus-pact-consumer.yml'
   push:
     branches: [main]
@@ -18,6 +23,7 @@ on:
       - 'packages/core-backend/tests/unit/plm-adapter-yuantus.test.ts'
       - 'packages/core-backend/package.json'
       - 'pnpm-lock.yaml'
+      - 'scripts/ops/yuantus-pact-consumer-broker-workflow-contract.test.mjs'
       - '.github/workflows/yuantus-pact-consumer.yml'
 
 permissions:
@@ -41,6 +47,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20.x
+
+      - name: Run pact broker workflow contract test
+        run: node --test scripts/ops/yuantus-pact-consumer-broker-workflow-contract.test.mjs
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -79,3 +88,30 @@ jobs:
         run: |
           pnpm --filter @metasheet/core-backend test:contract
           pnpm --filter @metasheet/core-backend exec vitest run tests/unit/plm-adapter-yuantus.test.ts --reporter=dot
+
+      - name: Publish consumer pact to broker (advisory, Phase A)
+        # Auto-gate Phase A: a SHELL guard (below) skips this until ops provisions the broker secret —
+        # NOT a step `if:` (the `secrets` context is unavailable to `steps.if`, so it would skip even
+        # after the secret is set). Non-blocking; strictly additive (test:contract above is unchanged).
+        # UNVERIFIED until a live PactFlow instance + secrets exist — see the Yuantus dev & verification MD.
+        continue-on-error: true
+        env:
+          PACT_BROKER_BASE_URL: ${{ secrets.PACT_BROKER_BASE_URL }}
+          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+          PACT_BROKER_ERROR_ON_UNKNOWN_OPTION: "true"
+        run: |
+          if [ -z "${PACT_BROKER_BASE_URL:-}" ]; then
+            echo "[pact-broker] PACT_BROKER_BASE_URL not set — skipping advisory publish."
+            exit 0
+          fi
+          if [ -z "${PACT_BROKER_TOKEN:-}" ]; then
+            echo "::error title=Pact broker token missing::PACT_BROKER_BASE_URL is set but PACT_BROKER_TOKEN is empty; broker publish is configured but invalid."
+            exit 1
+          fi
+          curl -fsSL https://raw.githubusercontent.com/pact-foundation/pact-ruby-standalone/master/install.sh | bash
+          export PATH="$PWD/pact/bin:$PATH"
+          pact-broker publish packages/core-backend/tests/contract/pacts/metasheet2-yuantus-plm.json \
+            --consumer-app-version "${GITHUB_SHA}" \
+            --branch "${GITHUB_REF_NAME}" \
+            --broker-base-url "$PACT_BROKER_BASE_URL" \
+            --broker-token "$PACT_BROKER_TOKEN"
