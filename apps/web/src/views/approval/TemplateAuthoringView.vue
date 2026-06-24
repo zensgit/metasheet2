@@ -50,13 +50,13 @@
       data-testid="approval-template-unsupported-alert"
     />
 
-    <!-- G-1..G-4: a complex graph is preserved, not unsupported — informational, save stays enabled.
-         G-2 condition rules, G-3 parallel joinMode, and G-4 cc targets are all editable; branches /
-         join target / all edges are preserved topology. -->
+    <!-- G-1..G-5: a complex graph is preserved, not unsupported — informational, save stays enabled.
+         G-2 condition rules, G-3 parallel joinMode, G-4 cc targets, and G-5 approval-node source are
+         all editable; branches / join target / all edges are preserved topology. -->
     <el-alert
       v-if="!unsupportedReason && graphReadOnlyMessage"
       :title="graphReadOnlyMessage"
-      description="表单与基本信息可编辑；条件分支节点可编辑分支规则，并行节点可编辑汇聚模式，抄送节点可编辑抄送对象。分支拓扑与连线在保存时原样保留。"
+      description="表单与基本信息可编辑；条件分支节点可编辑分支规则，并行节点可编辑汇聚模式，抄送节点可编辑抄送对象，审批节点可编辑审批人来源。分支拓扑与连线在保存时原样保留。"
       type="info"
       show-icon
       :closable="false"
@@ -607,7 +607,82 @@
               </el-form-item>
             </div>
 
-            <!-- approval / other — read-only summary (G-4: cc is editable above). -->
+            <!-- G-5: editable approval node — approver SOURCE only (assigneeSources[0]). The node's
+                 approvalMode / emptyAssigneePolicy / autoApprovalPolicy + edges are preserved. Legacy
+                 nodes (no assigneeSources) aren't seeded → fall to the read-only summary below. -->
+            <div
+              v-else-if="node.type === 'approval' && approvalNodeEditFor(node.key)"
+              class="template-authoring__approval-node"
+              data-testid="approval-node-editor"
+              :data-approval-node="node.key"
+            >
+              <el-form-item label="审批人来源">
+                <el-select
+                  :model-value="approvalSourceKind(node.key)"
+                  size="small"
+                  :disabled="readOnly"
+                  style="width: 240px"
+                  data-testid="approval-node-source-kind"
+                  @update:model-value="(kind: ApprovalAssigneeSourceKind) => setApprovalSourceKind(node.key, kind)"
+                >
+                  <el-option
+                    v-for="opt in APPROVAL_NODE_SOURCE_KINDS"
+                    :key="opt.value"
+                    :label="opt.label"
+                    :value="opt.value"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item
+                v-if="approvalSourceKind(node.key) === 'static_user' || approvalSourceKind(node.key) === 'static_role'"
+                :label="approvalSourceKind(node.key) === 'static_user' ? '用户 ID' : '角色 ID'"
+              >
+                <el-select
+                  :model-value="approvalSourceIds(node.key)"
+                  multiple
+                  filterable
+                  allow-create
+                  default-first-option
+                  size="small"
+                  :disabled="readOnly"
+                  style="width: 360px"
+                  placeholder="输入 ID 后回车"
+                  data-testid="approval-node-source-ids"
+                  @update:model-value="(ids: string[]) => setApprovalSourceIds(node.key, ids)"
+                />
+              </el-form-item>
+              <el-form-item
+                v-else-if="approvalSourceKind(node.key) === 'form_field_user'"
+                label="表单用户字段 ID"
+              >
+                <el-input
+                  :model-value="approvalSourceFieldId(node.key)"
+                  size="small"
+                  :disabled="readOnly"
+                  style="width: 240px"
+                  placeholder="顶层 user 字段 ID"
+                  data-testid="approval-node-source-field"
+                  @update:model-value="(fieldId: string) => setApprovalSourceFieldId(node.key, fieldId)"
+                />
+              </el-form-item>
+              <el-form-item
+                v-else-if="approvalSourceKind(node.key) === 'manager_at_level' || approvalSourceKind(node.key) === 'continuous_managers'"
+                :label="approvalSourceKind(node.key) === 'manager_at_level' ? '指定上级层级' : '上级层级数'"
+              >
+                <el-input-number
+                  :model-value="approvalSourceLevel(node.key)"
+                  :min="1"
+                  :max="10"
+                  :step="1"
+                  size="small"
+                  :disabled="readOnly"
+                  data-testid="approval-node-source-level"
+                  @update:model-value="(value: number) => setApprovalSourceLevel(node.key, value ?? 1)"
+                />
+              </el-form-item>
+            </div>
+
+            <!-- approval (legacy / no edit) / other — read-only summary. -->
             <template v-else>
               <ul v-if="nodeConfigSummary(node).length" class="template-authoring__node-summary">
                 <li v-for="(line, lineIndex) in nodeConfigSummary(node)" :key="lineIndex">{{ line }}</li>
@@ -807,6 +882,7 @@ import {
   type FieldAuthoringDraft,
   type ParallelNodeEdit,
   type CcNodeEdit,
+  type ApprovalNodeSourceEdit,
   type TemplateAuthoringDraft,
 } from '../../approvals/templateAuthoring'
 import {
@@ -816,6 +892,7 @@ import {
 } from '../../approvals/commonTemplatePresets'
 import type {
   ApprovalAssigneeSource,
+  ApprovalAssigneeSourceKind,
   ApprovalAssigneeType,
   ApprovalNode,
   CcNodeConfig,
@@ -1002,6 +1079,78 @@ function ccEditFor(nodeKey: string): CcNodeEdit | undefined {
 }
 function ccTargetTypeLabel(targetType: ApprovalAssigneeType): string {
   return targetType === 'role' ? '角色' : '用户'
+}
+
+// ── G-5 approval-node editor (approver SOURCE only; the node's mode/policy + edges are preserved) ──
+// Edits the FIRST assignee source of an approval node in a preserved complex graph; the edit model
+// (`draft.approvalNodeEdits[nodeKey].assigneeSources`) is seeded 1:1 + carried through
+// `applyApprovalNodeEditsToGraph` (every other node + all edges byte-identical). Any extra sources
+// (index 1+) are preserved verbatim. approvalMode / emptyAssigneePolicy / autoApprovalPolicy are
+// NOT editable here (a later slice) — they ride through untouched. Legacy nodes (no `assigneeSources`)
+// aren't seeded, so they fall to the read-only summary below.
+const APPROVAL_NODE_SOURCE_KINDS: { value: ApprovalAssigneeSourceKind; label: string }[] = [
+  { value: 'static_user', label: '指定用户' },
+  { value: 'static_role', label: '指定角色' },
+  { value: 'requester', label: '发起人' },
+  { value: 'direct_manager', label: '直属上级' },
+  { value: 'dept_head', label: '部门主管' },
+  { value: 'continuous_managers', label: '连续多级上级' },
+  { value: 'manager_at_level', label: '指定层级上级' },
+  { value: 'form_field_user', label: '表单用户字段' },
+]
+function approvalNodeEditFor(nodeKey: string): ApprovalNodeSourceEdit | undefined {
+  return draft.value.approvalNodeEdits?.[nodeKey]
+}
+function approvalNodeFirstSource(nodeKey: string): ApprovalAssigneeSource | undefined {
+  return approvalNodeEditFor(nodeKey)?.assigneeSources[0]
+}
+// Replace ONLY the primary (first) source; preserve any extra sources verbatim (no flatten).
+function setApprovalNodeSource(nodeKey: string, source: ApprovalAssigneeSource): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  edit.assigneeSources = [source, ...edit.assigneeSources.slice(1)]
+}
+function approvalSourceKind(nodeKey: string): ApprovalAssigneeSourceKind {
+  return approvalNodeFirstSource(nodeKey)?.kind ?? 'requester'
+}
+function setApprovalSourceKind(nodeKey: string, kind: ApprovalAssigneeSourceKind): void {
+  const next: ApprovalAssigneeSource =
+    kind === 'static_user' ? { kind, userIds: [] }
+      : kind === 'static_role' ? { kind, roleIds: [] }
+        : kind === 'form_field_user' ? { kind, fieldId: '' }
+          : kind === 'continuous_managers' ? { kind, levels: 1 }
+            : kind === 'manager_at_level' ? { kind, level: 1 }
+              : { kind }
+  setApprovalNodeSource(nodeKey, next)
+}
+function approvalSourceIds(nodeKey: string): string[] {
+  const source = approvalNodeFirstSource(nodeKey)
+  if (source?.kind === 'static_user') return source.userIds
+  if (source?.kind === 'static_role') return source.roleIds
+  return []
+}
+function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
+  const kind = approvalSourceKind(nodeKey)
+  if (kind === 'static_user') setApprovalNodeSource(nodeKey, { kind, userIds: ids })
+  else if (kind === 'static_role') setApprovalNodeSource(nodeKey, { kind, roleIds: ids })
+}
+function approvalSourceFieldId(nodeKey: string): string {
+  const source = approvalNodeFirstSource(nodeKey)
+  return source?.kind === 'form_field_user' ? source.fieldId : ''
+}
+function setApprovalSourceFieldId(nodeKey: string, fieldId: string): void {
+  setApprovalNodeSource(nodeKey, { kind: 'form_field_user', fieldId })
+}
+function approvalSourceLevel(nodeKey: string): number {
+  const source = approvalNodeFirstSource(nodeKey)
+  if (source?.kind === 'manager_at_level') return source.level
+  if (source?.kind === 'continuous_managers') return source.levels
+  return 1
+}
+function setApprovalSourceLevel(nodeKey: string, value: number): void {
+  const kind = approvalSourceKind(nodeKey)
+  if (kind === 'manager_at_level') setApprovalNodeSource(nodeKey, { kind, level: value })
+  else if (kind === 'continuous_managers') setApprovalNodeSource(nodeKey, { kind, levels: value })
 }
 
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))

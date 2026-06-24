@@ -40,6 +40,12 @@ import {
   validateCcEdits,
   type CcEdits,
 } from './ccEdit'
+import {
+  applyApprovalNodeEditsToGraph,
+  approvalNodeEditsFromGraph,
+  validateApprovalNodeEdits,
+  type ApprovalNodeEdits,
+} from './approvalNodeEdit'
 
 export type { DetailColumnDraft } from './detailField'
 export { createEmptyDetailColumnDraft, DETAIL_LEAF_FIELD_TYPES } from './detailField'
@@ -55,6 +61,7 @@ export type { ParallelEdits, ParallelNodeEdit } from './parallelEdit'
 export { PARALLEL_JOIN_MODES } from './parallelEdit'
 export type { CcEdits, CcNodeEdit } from './ccEdit'
 export { CC_TARGET_TYPES } from './ccEdit'
+export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
@@ -165,6 +172,7 @@ export interface TemplateAuthoringDraft {
   // G-4 cc editor: editable targetType/targetIds for each `cc` node in `preservedGraph`, seeded
   // 1:1. Topology (edges) + every non-cc node stay byte-identical. Empty {} when no cc node.
   ccEdits?: CcEdits
+  approvalNodeEdits?: ApprovalNodeEdits
 }
 
 // Complex node types the v1 LINEAR steps editor can't author. They are NOT "unsupported" — a
@@ -467,6 +475,72 @@ const RECOGNISED_GRAPH_NODE_TYPES = new Set([
  *    rather than projected to `steps`.
  * Returns `null` when the template is editable OR complex-but-preservable.
  */
+// The approval-node config keys the BACKEND `normalizeApprovalGraph` re-emits for a COMPLEX graph
+// (ApprovalProductService.ts:899-911). Any other key — TOP-LEVEL or NESTED — is silently dropped on
+// save. NB: this is the COMPLEX path's allowlist ONLY — the linear path reconstructs via
+// `buildStepConfig`, which does NOT preserve `fieldPermissions`, so the two allowlists must stay
+// SEPARATE (sharing would let a linear node's `fieldPermissions` through, then flatten it).
+const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
+  'assigneeType',
+  'assigneeIds',
+  'assigneeSources',
+  'approvalMode',
+  'emptyAssigneePolicy',
+  'autoApprovalPolicy',
+  'fieldPermissions',
+]
+// The backend ALSO rebuilds the NESTED shapes from fixed fields, silently dropping any other — so the
+// allowlist must be shape-level, not just top-level:
+//   - assigneeSources[] per kind (ApprovalProductService.ts:408-453)
+//   - autoApprovalPolicy (:371-376) — 4 fields
+//   - fieldPermissions[] (:786-799) — { fieldId, access }
+// All three bottom out in primitives / string-arrays (no deeper objects), so this 2-level check is complete.
+const BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND: Record<string, string[]> = {
+  static_user: ['kind', 'userIds'],
+  static_role: ['kind', 'roleIds'],
+  requester: ['kind'],
+  direct_manager: ['kind'],
+  dept_head: ['kind'],
+  continuous_managers: ['kind', 'levels'],
+  manager_at_level: ['kind', 'level'],
+  form_field_user: ['kind', 'fieldId'],
+}
+const BACKEND_AUTO_APPROVAL_POLICY_KEYS = ['mergeWithRequester', 'mergeAdjacentApprover', 'dedupeHistoricalApprover', 'actorMode']
+const BACKEND_FIELD_PERMISSION_KEYS = ['fieldId', 'access']
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+function hasKeyOutside(value: unknown, allowed: string[]): boolean {
+  return isPlainRecord(value) && Object.keys(value).some((key) => !allowed.includes(key))
+}
+
+/**
+ * True when a COMPLEX approval node's config carries a key — TOP-LEVEL or NESTED in assigneeSources[]
+ * / autoApprovalPolicy / fieldPermissions[] — that the backend `normalizeApprovalGraph` does NOT
+ * re-emit (and silently DROPS on save). The FE preserves config verbatim, so without this the
+ * deep-equal round-trip looks clean while the real save flattens the unknown key.
+ */
+function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): boolean {
+  if (hasKeyOutside(config, BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS)) return true
+  const sources = config.assigneeSources
+  if (Array.isArray(sources)) {
+    for (const source of sources) {
+      if (!isPlainRecord(source)) return true
+      const allowed = BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND[source.kind as string]
+      if (!allowed || hasKeyOutside(source, allowed)) return true
+    }
+  }
+  if (hasKeyOutside(config.autoApprovalPolicy, BACKEND_AUTO_APPROVAL_POLICY_KEYS)) return true
+  const perms = config.fieldPermissions
+  if (Array.isArray(perms)) {
+    for (const perm of perms) {
+      if (!isPlainRecord(perm) || hasKeyOutside(perm, BACKEND_FIELD_PERMISSION_KEYS)) return true
+    }
+  }
+  return false
+}
+
 export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDetailDTO): string | null {
   const unsupportedField = template.formSchema.fields.find((field) => !isAuthorableFieldType(field.type))
   if (unsupportedField) {
@@ -485,10 +559,20 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     return `包含暂不支持编辑的审批节点：${unknownNode.name || unknownNode.key} (${unknownNode.type})`
   }
 
-  // Complex graphs (cc/condition/parallel or non-linear) are load-preserved verbatim — the linear
-  // `steps` projection (and its per-approval-node config allowlist below) does NOT apply, so they
-  // are never "unsupported" here. They open read-only via `graphReadOnlyReason` and save unchanged.
+  // Complex graphs (cc/condition/parallel or non-linear) are load-preserved verbatim via
+  // spread-original-first — BUT the backend `normalizeApprovalGraph` rebuilds each approval node's
+  // config from a fixed allowlist and silently DROPS any other key on save. The FE deep-equal
+  // round-trip can't see that drop, so fail-closed: a complex approval node carrying a config key the
+  // backend won't preserve is unsupported (read-only, save disabled), never silently flattened.
   if (isComplexApprovalGraph(template.approvalGraph)) {
+    const unsupportedComplexApproval = template.approvalGraph.nodes.find(
+      (node) =>
+        node.type === 'approval'
+        && complexApprovalConfigHasBackendDrop(node.config as Record<string, unknown>),
+    )
+    if (unsupportedComplexApproval) {
+      return `审批节点含后端不会保留的配置（保存将丢失），已锁定为只读：${unsupportedComplexApproval.name || unsupportedComplexApproval.key}`
+    }
     return null
   }
 
@@ -579,6 +663,7 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
           // Empty {} when the complex graph has no parallel node (condition/cc-only).
           parallelEdits: parallelEditsFromGraph(template.approvalGraph),
           ccEdits: ccEditsFromGraph(template.approvalGraph),
+          approvalNodeEdits: approvalNodeEditsFromGraph(template.approvalGraph),
         }
       : {}),
     fields: fields.length > 0 ? fields : [createEmptyFieldDraft(1)],
@@ -701,7 +786,10 @@ export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph
   if (draft.preservedGraph) {
     const withConditionEdits = applyConditionEditsToGraph(draft.preservedGraph, draft.conditionEdits ?? {})
     const withParallelEdits = applyParallelEditsToGraph(withConditionEdits, draft.parallelEdits ?? {})
-    return applyCcEditsToGraph(withParallelEdits, draft.ccEdits ?? {})
+    const withCcEdits = applyCcEditsToGraph(withParallelEdits, draft.ccEdits ?? {})
+    // G-5: replace ONLY each edited approval node's `assigneeSources` (approver source); approvalMode /
+    // emptyAssigneePolicy / autoApprovalPolicy + every other node + ALL edges stay byte-identical.
+    return applyApprovalNodeEditsToGraph(withCcEdits, draft.approvalNodeEdits ?? {})
   }
   const approvalNodes = draft.steps.map((step, index) => ({
     key: `approval_${index + 1}`,
@@ -835,6 +923,9 @@ export function validateTemplateDraft(
   }
   if (draft.ccEdits && Object.keys(draft.ccEdits).length > 0) {
     errors.push(...validateCcEdits(draft.ccEdits))
+  }
+  if (draft.approvalNodeEdits && Object.keys(draft.approvalNodeEdits).length > 0) {
+    errors.push(...validateApprovalNodeEdits(draft.approvalNodeEdits, draft.fields))
   }
   const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
   draft.steps.forEach((step, index) => {
