@@ -5845,19 +5845,26 @@ attendanceIntegrationDescribe(
       })
       expect(metadata.resolution).toMatchObject({ action: 'approve', status: 'approved' })
 
+      // #8 NS-3 lifted the reject: a one-midnight overtime window is now ACCEPTED and bucketed per own date
+      // (was OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED pre-NS-3).
       const crossRes = await createOvertime(crossDate, {
         requestedInAt: `${crossDate}T23:00:00.000Z`,
         requestedOutAt: '2036-10-04T01:00:00.000Z',
       })
-      expect(crossRes.status, crossRes.raw).toBe(422)
-      expect((crossRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED')
-      const crossRows = await pool.query(
-        `SELECT COUNT(*)::int AS count
-         FROM attendance_requests
-         WHERE org_id = 'default' AND user_id = $1 AND work_date = $2 AND request_type = 'overtime'`,
-        [userId, crossDate],
-      )
-      expect(Number(crossRows.rows[0]?.count ?? 0)).toBe(0)
+      expect(crossRes.status, crossRes.raw).toBe(201)
+      const crossId = (crossRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
+      expect(crossId).toBeTruthy()
+      const crossSeg = (await loadRequestMetadata(crossId)).overtimeSegmentation as {
+        crossesMidnight?: boolean; totalMinutes?: number
+        segments: { workdayMinutes: number; restdayMinutes: number; holidayMinutes: number }
+        perDate: { date: string; minutes: number }[]
+      }
+      expect(crossSeg.crossesMidnight).toBe(true)
+      expect(crossSeg.totalMinutes).toBe(120)
+      // conserved across the two dates (no boundary double-count) + attributed by own date.
+      expect(crossSeg.segments.workdayMinutes + crossSeg.segments.restdayMinutes + crossSeg.segments.holidayMinutes).toBe(120)
+      expect(crossSeg.perDate.map((p) => p.date)).toEqual([crossDate, '2036-10-04'])
+      expect(crossSeg.perDate.reduce((s, p) => s + p.minutes, 0)).toBe(120)
     } finally {
       if (token && Object.keys(originalSettings).length > 0) {
         await requestJson(`${baseUrl}/api/attendance/settings`, {
