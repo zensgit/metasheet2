@@ -281,9 +281,29 @@ The packaged root now also includes Windows-native wrappers:
 - `bootstrap-admin.bat <admin-email> <admin-password> [admin-name]`: create or repair the initial admin user on a pure Windows host
 - `bootstrap-admin-runXX.bat <admin-email> <admin-password> [admin-name]`: same helper with the packaged run label baked in
 
-These wrappers now call `scripts/ops/multitable-onprem-apply-package.ps1`, so a plain Windows Server 2022 host does not need bash or WSL just to apply a corrective package reroll.
+These wrappers now call `scripts/ops/multitable-onprem-deploy-launcher.ps1`,
+which extracts the supplied package, finds the apply helper inside that staged
+package, and then invokes the fresh helper against the installed root. A plain
+Windows Server 2022 host does not need bash or WSL just to apply a corrective
+package reroll.
 
 The PowerShell helper extracts the incoming archive into a short staging root. By default on Windows it uses `C:\ms-tmp` when `METASHEET_ONPREM_STAGING_ROOT` is unset; set that environment variable only if you need a different short local directory. Zip packages are extracted through `.NET ZipFile` instead of `Expand-Archive`, so the default deploy path avoids the prior `Expand-Archive` cleanup/path failure class as well as deep `%TEMP%` / `MAX_PATH` failures.
+
+If the already-installed `deploy.bat` / launcher is too old to reach the new
+package's launcher (for example it still stages under `%TEMP%` or still uses
+`Expand-Archive` before the new package can take over), use the release sidecar
+bootstrap assets instead of the installed launcher:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\metasheet-multitable-onprem-v<version>-<tag>-deploy-bootstrap.ps1 `
+  -RootDir C:\path\to\installed\metasheet `
+  -PackageArchive .\metasheet-multitable-onprem-v<version>-<tag>.zip
+```
+
+The sidecar is generated next to the release `.zip` / `.tgz` files and reuses
+the current launcher code immediately, so the first hop also defaults to
+`C:\ms-tmp` and `.NET ZipFile`.
 
 The package intentionally does **not** bundle `node_modules`. `deploy.bat`
 defaults to `InstallDeps=1` and refreshes dependencies with
@@ -354,11 +374,10 @@ subsection documents the **scheduled-task** path specifically — the synchronou
    - run a single synchronous `deploy.bat <new-package.zip>` from the
      installed root first (the new wrappers land, the next scheduled-task
      invocation then uses them), or
-   - manually copy `deploy.bat`, `deploy-remote.bat`,
-     `deploy-runXX.bat`, and
-     `scripts\ops\multitable-onprem-deploy-launcher.ps1` from the new
-     package zip into the installed root before letting the scheduled task
-     fire.
+   - if that installed first hop is itself too old to stage the new package,
+     run the release sidecar `*-deploy-bootstrap.ps1` / `.bat` next to the
+     downloaded package archive. The sidecar bypasses the installed launcher
+     and stages through the current launcher logic immediately.
 
    Either path leaves a `>=584dbc88a` `deploy-remote.bat` on disk before the
    first scheduled-task run that is expected to report a real
