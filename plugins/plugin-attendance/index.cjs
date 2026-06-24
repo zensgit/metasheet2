@@ -10211,8 +10211,15 @@ function splitOvertimeSegmentationWindowAtMidnight({ startAt, endAt, timeZone } 
     // §3a: more than one local midnight is NOT splittable in v1 — keep the stable reject.
     return { ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED', reason: 'multi_midnight' }
   }
-  const boundary = buildZonedDate(endDate, '00:00', tz) // local midnight of the next day, as a UTC instant
-  if (!boundary || boundary.getTime() <= start.getTime() || boundary.getTime() >= end.getTime()) {
+  // boundary = local midnight that starts endDate (a UTC instant). Compute it by subtracting end's own
+  // local time-of-day from end — deliberately NOT buildZonedDate(endDate,'00:00',tz): that offset path runs
+  // getZonedParts on an exact-midnight wall-clock, which older ICU (Node 18/20) formats as hour "24",
+  // throwing the offset off by a day. `end` is strictly after midnight here, so its parts are unambiguous;
+  // the `% 24` guard covers the exact-midnight-end edge. (DST-night exactness is NS-2 territory.)
+  const endParts = getZonedParts(end, tz)
+  const endTimeOfDayMs = (((endParts.hour % 24) * 60 + endParts.minute) * 60 + (endParts.second || 0)) * 1000
+  const boundary = new Date(end.getTime() - endTimeOfDayMs)
+  if (boundary.getTime() <= start.getTime() || boundary.getTime() >= end.getTime()) {
     return { ok: false, code: 'OVERTIME_INVALID_TIME_WINDOW' }
   }
   return {
