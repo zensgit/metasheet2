@@ -1,6 +1,6 @@
 # Attendance staging smoke — NS-4 (cross-midnight overtime) + TA-4 (team availability)
 
-> **Status**: ✅ **PASS / CLOSED** (2026-06-24). Both smokes ran end-to-end on staging at deploy SHA `be16791d5`, both **PASS**, **residue=0** — see the filled stamps below. #8 (NS-4) and #6 (TA-4) are fully closed (code on `main` + staging-validated).
+> **Status**: ✅ **PASS / CLOSED** (2026-06-24). Both smokes **PASS / residue=0** on staging — **NS-4** on deploy SHA `be16791d5` (the #3128 follow-up deploy); **TA-4** passed earlier on a prior staging deploy (before #3128). See the filled stamps below. #8 (NS-4) and #6 (TA-4) are fully closed (code on `main` + staging-validated).
 
 > **Conventions**: each smoke is end-to-end through the real staging route + DB. Use a disposable test user/group/dates so cleanup leaves **zero residue**. Record the exact `git rev-parse HEAD` deployed (must include the SHAs noted per section). Restore any global setting you toggle.
 
@@ -59,10 +59,10 @@
 - Delete the test group + members + the pending leave request.
 - **Residue check** (must be 0): `attendance_group_members`, `attendance_groups`, `attendance_requests` for the test group/user.
 
-**PASS stamp** — stamp: `ns4-ta4-mqro9by8` · deploy SHA: `be16791d5` · date: `2026-06-24` · result: ✅ `PASS` · residue=0: ☑ · notes: pending_leave distinct + provisional UI "待审批，未生效" · availableFormal counts pending · group-only / scope / non-existent guards · stale-clear · display-only.
+**PASS stamp** — stamp: `ns4-ta4-mqro9by8` · deploy SHA: `earlier staging deploy (before #3128 / be16791d5; exact SHA not in the run report)` · result: ✅ `PASS` · residue=0: ☑ · notes: pending_leave distinct + provisional UI "待审批，未生效" · availableFormal counts pending · group-only / scope / non-existent guards · stale-clear · display-only.
 
 ---
 
 ## Sign-off
 
-✅ **Closed 2026-06-24.** Both smokes ran end-to-end on staging at deploy SHA `be16791d5` (health ok; migration `zzzz20260624120000_create_meta_config_revisions` applied) — **NS-4 `ns4-pass-sb2u88xu` PASS / residue=0** and **TA-4 `ns4-ta4-mqro9by8` PASS / residue=0**. #8 cross-midnight overtime and #6 team-availability are fully validated end-to-end on staging; temporary worktrees and local branches cleaned up. NS-4 and TA-4 are **closed**.
+✅ **Closed 2026-06-24.** Both smokes **PASS / residue=0** on staging — **NS-4 `ns4-pass-sb2u88xu`** on deploy SHA `be16791d5` (health ok; migration `zzzz20260624120000_create_meta_config_revisions` applied); **TA-4 `ns4-ta4-mqro9by8`** on an earlier staging deploy (it passed before the #3128/NS-4 follow-up). #8 cross-midnight overtime and #6 team-availability are validated end-to-end on staging; temporary worktrees and local branches cleaned up. NS-4 and TA-4 are **closed**.
