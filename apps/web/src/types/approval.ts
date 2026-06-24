@@ -7,6 +7,12 @@ export const APPROVAL_PRODUCT_PERMISSIONS = [
 
 export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[number]
 
+// Sentinel role id for a starter preset's "configure before publish" placeholder static_role. The
+// backend FAIL-FASTS at publish on this exact value (assertNoUnconfiguredPlaceholderRoles), so an
+// untouched preset cannot be published. MUST byte-match backend ApprovalProductService.ts
+// `APPROVAL_ROLE_CONFIGURE_SENTINEL` (the match is locked end-to-end by the preset publish test).
+export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
+
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
 export type ApprovalAssigneeType = 'user' | 'role'
 export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level'

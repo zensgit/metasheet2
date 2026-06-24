@@ -1,3 +1,4 @@
+import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../types/approval'
 import type {
   ApprovalAssigneeSource,
   ApprovalGraph,
@@ -231,9 +232,10 @@ function reimbursementAmountTierGraph(): ApprovalGraph {
 // :4152/4181), so a user-typed and a role-typed branch can NEVER collide — regardless of org data.
 // (Two USER-resolving dynamic sources — e.g. an earlier dept_head here alongside manager_at_level —
 // CAN resolve to the SAME person at runtime → APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT 409; that
-// was the bug.) The role is a STARTER: configure it before publishing — an unconfigured role resolves
-// empty → emptyAssigneePolicy 'error' fails the high path CLOSED (a high-value approver is never
-// silently skipped). The role node name signals "发布前配置".
+// was the bug.) The role is a STARTER using the APPROVAL_ROLE_CONFIGURE_SENTINEL placeholder: the
+// backend FAIL-FASTS at publish (assertNoUnconfiguredPlaceholderRoles → 400 APPROVAL_ROLE_PLACEHOLDER_
+// NOT_CONFIGURED) until the admin replaces it with a real role — so an UNTOUCHED preset cannot be
+// published at all (a verifiable state, not merely a runtime stuck-flow). The node name signals 发布前配置.
 function purchaseAmountTierGraph(): ApprovalGraph {
   return {
     nodes: [
@@ -243,7 +245,7 @@ function purchaseAmountTierGraph(): ApprovalGraph {
       { key: 'manager_approval', type: 'approval', name: '直属上级审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
       { key: 'parallel_fork', type: 'parallel', name: '高额并行审批（会签）', config: { branches: ['edge-fork-mgr', 'edge-fork-role'], joinMode: 'all', joinNodeKey: 'end' } },
       { key: 'higher_manager_approval', type: 'approval', name: '上级经理审批（高额）', config: { assigneeSources: [{ kind: 'manager_at_level', level: 2 }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
-      { key: 'role_approval', type: 'approval', name: '指定审批角色（发布前配置）', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['待配置审批角色'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'role_approval', type: 'approval', name: '指定审批角色（发布前配置）', config: { assigneeSources: [{ kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
       { key: 'end', type: 'end', name: '结束', config: {} },
     ],
     edges: [
