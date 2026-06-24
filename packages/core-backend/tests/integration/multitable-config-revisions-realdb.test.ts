@@ -365,4 +365,56 @@ describeIfDatabase('multitable config-revisions recording — T9-R1 (real DB)', 
     expect(revs[0].after?.config).toHaveProperty('publicForm.publicToken')
     expect(revs[0].after?.config.publicForm.publicToken).not.toEqual(revs[0].before?.config.publicForm.publicToken)
   })
+
+  // === BAR-1 transaction CONSISTENCY (rollback) — a FAILING config-revision insert must roll the config write back
+  // WITH it. This is the proof that the history insert is BOUND to the mutation's transaction (not appended on a
+  // separate success path). Fault-injection (a BEFORE INSERT trigger that raises) is the clean construction, since
+  // these routes validate before the txn and the recording is the last write in it.
+  const withConfigRevisionInsertFailing = async (fn: () => Promise<void>): Promise<void> => {
+    await q(`CREATE OR REPLACE FUNCTION _t9_fail_cr() RETURNS trigger AS $f$ BEGIN RAISE EXCEPTION 't9 injected config-revision failure'; END; $f$ LANGUAGE plpgsql`, [])
+    await q('CREATE TRIGGER _t9_fail_cr_trg BEFORE INSERT ON meta_config_revisions FOR EACH ROW EXECUTE FUNCTION _t9_fail_cr()', [])
+    try { await fn() } finally {
+      await q('DROP TRIGGER IF EXISTS _t9_fail_cr_trg ON meta_config_revisions', [])
+      await q('DROP FUNCTION IF EXISTS _t9_fail_cr()', [])
+    }
+  }
+
+  test('BAR-1 field-permission: a failing config-revision insert rolls back the permission write (txn consistency)', async () => {
+    const fid = (await createField({ name: 'RBPerm', type: 'string' })).body?.data?.field?.id
+    expect((await putFieldPermission(fid, { visible: true, readOnly: false })).status).toBe(200) // baseline grant
+    const before = (await q('SELECT visible, read_only FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [SHEET, fid, SUBJECT])).rows[0]
+    await withConfigRevisionInsertFailing(async () => {
+      expect((await putFieldPermission(fid, { visible: false, readOnly: true })).status).not.toBe(200) // change → records → trigger fails → rollback
+    })
+    const after = (await q('SELECT visible, read_only FROM field_permissions WHERE sheet_id=$1 AND field_id=$2 AND subject_id=$3', [SHEET, fid, SUBJECT])).rows[0]
+    expect(after).toEqual(before) // the DELETE+INSERT rolled back with the failed history insert — grant unchanged
+  })
+
+  test('BAR-1 view: a failing config-revision insert rolls back the view update (txn consistency)', async () => {
+    const vid = (await createView({ name: 'RBView' })).body?.data?.view?.id
+    const before = (await q('SELECT name FROM meta_views WHERE id=$1', [vid])).rows[0]
+    await withConfigRevisionInsertFailing(async () => {
+      expect((await updateView(vid, { name: 'RBView CHANGED' })).status).not.toBe(200)
+    })
+    expect((await q('SELECT name FROM meta_views WHERE id=$1', [vid])).rows[0].name).toBe(before.name) // view config unchanged
+  })
+
+  test('BAR-1 sheet-config: a failing config-revision insert rolls back the sheet-config change (txn consistency)', async () => {
+    const before = !!(await q('SELECT row_level_read_permissions_enabled AS e FROM meta_sheets WHERE id=$1', [SHEET])).rows[0].e
+    await withConfigRevisionInsertFailing(async () => {
+      expect((await putRowDeny(!before)).status).not.toBe(200)
+    })
+    expect(!!(await q('SELECT row_level_read_permissions_enabled AS e FROM meta_sheets WHERE id=$1', [SHEET])).rows[0].e).toBe(before) // unchanged
+  })
+
+  test('BAR-1 cascade: a failing config-revision insert rolls back BOTH the field delete AND the view-config cleanup', async () => {
+    const doomedId = (await createField({ name: 'RBDoomed', type: 'string' })).body?.data?.field?.id
+    const vid = (await createView({ name: 'RBCascade', filterInfo: { conditions: [{ fieldId: doomedId, operator: 'contains', value: 'x' }] }, hiddenFieldIds: [doomedId] })).body?.data?.view?.id
+    const beforeHidden = JSON.stringify((await q('SELECT hidden_field_ids FROM meta_views WHERE id=$1', [vid])).rows[0].hidden_field_ids)
+    await withConfigRevisionInsertFailing(async () => {
+      expect((await deleteField(doomedId)).status).not.toBe(200)
+    })
+    expect((await q('SELECT id FROM meta_fields WHERE id=$1', [doomedId])).rows.length).toBe(1) // field NOT deleted (whole txn rolled back)
+    expect(JSON.stringify((await q('SELECT hidden_field_ids FROM meta_views WHERE id=$1', [vid])).rows[0].hidden_field_ids)).toBe(beforeHidden) // cascade cleanup rolled back too
+  })
 })

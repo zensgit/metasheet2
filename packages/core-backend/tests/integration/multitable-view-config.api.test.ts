@@ -2,6 +2,8 @@ import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import { configRevisionNoop } from './config-revision-mock'
+
 // ---------------------------------------------------------------------------
 // MOCK-POOL CONTRACT (read before editing — this is a hand-rolled SQL matcher).
 //
@@ -82,7 +84,7 @@ const SHEET_OPS_FIELDS: FieldRow[] = [
 
 function createMockPool(queryHandler: QueryHandler) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
-    if (sql.includes('INSERT INTO meta_config_revisions')) return { rows: [], rowCount: 1 }
+    const cr = configRevisionNoop(sql); if (cr) return cr // narrowed INSERT-only match (shared helper)
     return queryHandler(sql, params)
   })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
