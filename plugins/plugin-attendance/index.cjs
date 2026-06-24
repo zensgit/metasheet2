@@ -10233,22 +10233,23 @@ function validateOvertimeSegmentationWindow(input = {}, options = {}) {
   if (endAt.getTime() <= startAt.getTime()) {
     return { ok: false, code: 'OVERTIME_INVALID_TIME_WINDOW' }
   }
-  const startDate = extractOvertimeSegmentationDateOnly(input.requestedInAt ?? input.startAt)
-  const endDate = extractOvertimeSegmentationDateOnly(input.requestedOutAt ?? input.endAt)
-  if (startDate !== workDate || endDate !== workDate) {
-    // §3c: the route keeps rejecting cross-midnight by default — maybeBuildOvertimeSegmentationSnapshot calls
-    // this WITHOUT options, so allowCrossMidnight defaults false and the route stays OVERTIME_CROSS_MIDNIGHT_
-    // UNSUPPORTED until NS-3 explicitly lifts it.
-    if (options.allowCrossMidnight !== true) {
+  // §3c DEFAULT path: the route keeps rejecting cross-midnight via the existing UTC/literal date detection,
+  // UNCHANGED until NS-3 — maybeBuildOvertimeSegmentationSnapshot passes no options → allowCrossMidnight false.
+  if (options.allowCrossMidnight !== true) {
+    const startDate = extractOvertimeSegmentationDateOnly(input.requestedInAt ?? input.startAt)
+    const endDate = extractOvertimeSegmentationDateOnly(input.requestedOutAt ?? input.endAt)
+    if (startDate !== workDate || endDate !== workDate) {
       return { ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' }
     }
-    // allowCrossMidnight path — NOT used by the route in NS-1/NS-2; exercised by unit tests only. A single
-    // local-midnight window splits (§3a/§3b/§3d); multi-midnight or invalid windows still reject.
-    const split = splitOvertimeSegmentationWindowAtMidnight({ startAt, endAt, timeZone: input.timeZone })
-    if (!split.ok) return { ok: false, code: split.code }
-    return { ok: true, crossesMidnight: split.crossesMidnight === true, spans: split.spans }
+    return { ok: true }
   }
-  return { ok: true }
+  // allowCrossMidnight path — NOT used by the route in NS-1/NS-2; exercised by unit tests only. Delegate the
+  // cross-midnight decision to the tz-aware split helper so the validator and the split agree BY CONSTRUCTION
+  // (§3b LOCAL midnight — regardless of the input's UTC/literal representation): a single-local-midnight window
+  // splits; a same-local-date window is a single span; multi-midnight or invalid windows reject.
+  const split = splitOvertimeSegmentationWindowAtMidnight({ startAt, endAt, timeZone: input.timeZone })
+  if (!split.ok) return { ok: false, code: split.code }
+  return { ok: true, crossesMidnight: split.crossesMidnight === true, spans: split.spans }
 }
 
 async function maybeBuildOvertimeSegmentationSnapshot(db, input = {}) {

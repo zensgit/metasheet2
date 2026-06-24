@@ -232,4 +232,20 @@ describe('#8 NS-1 — cross-midnight split BEHIND the guard (route still rejects
       { allowCrossMidnight: true },
     )).toEqual({ ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' })
   })
+
+  it('§3b consistency: allowCrossMidnight splits a Z-string window that crosses LOCAL midnight even though both ends share one UTC date', () => {
+    // 15:30Z / 16:30Z both UTC-slice to 2026-10-01, but in Asia/Shanghai they are 23:30 (10-01) → 00:30 (10-02).
+    // The validator must DELEGATE to the tz-aware split (not silently return same-day) — this is the input shape
+    // that masks a UTC/literal-only gate.
+    const r = helpers.validateOvertimeSegmentationWindow(
+      { workDate: '2026-10-01', requestedInAt: '2026-10-01T15:30:00.000Z', requestedOutAt: '2026-10-01T16:30:00.000Z', timeZone: 'Asia/Shanghai' },
+      { allowCrossMidnight: true },
+    )
+    expect(r.ok).toBe(true)
+    expect(r.crossesMidnight).toBe(true)
+    expect(r.spans.map((s: { date: string; minutes: number }) => ({ date: s.date, minutes: s.minutes }))).toEqual([
+      { date: '2026-10-01', minutes: 30 },
+      { date: '2026-10-02', minutes: 30 },
+    ])
+  })
 })
