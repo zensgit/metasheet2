@@ -7,13 +7,30 @@ logic** (branch rules / conjunction / default edge), **parallel `joinMode`** (`a
 backend-accepted), and **cc targets** (`targetType` / `targetIds`). All graph **topology**
 (parallel branch edgeKeys + `joinNodeKey`, condition branch edges, every edge) is **read-only,
 preserved byte-identical**; **parallel topology / branch add-remove editing is explicitly OUT of
-scope** (a later slice). The original proposal (owner-sequenced via /goal — design-lock first,
-then a v1 **structured editor**, not a free canvas) follows. The approval **runtime** already executes all six
-node types (start / approval / cc / condition / parallel / end) including parallel fork-join,
-but the template-authoring UI is **linear-only** and **fail-closes** (read-only) on any
-cc / condition / parallel node. This locks the scope of a structured author UI that unlocks
-those nodes without flattening existing complex templates. Brand-neutral (external OA /
-mainstream approval platforms; no vendor names).
+scope** (a later slice). Brand-neutral (external OA / mainstream approval platforms; no vendor names).
+
+---
+
+> **⟨HISTORICAL PROPOSAL — as-written 2026-06-23, superseded by the As-built status above⟩**
+> Everything below this line is the **original design proposal**, kept for rationale. Where it
+> differs from the As-built status, **the As-built status governs.** In particular, DO NOT read
+> these as current guidance:
+> - **(1) Parallel is `joinMode`-only.** §1's "`parallel.joinMode='any'` fail-closed (type says
+>   v1='all')", §2's "parallel → branch list + join target + mode" / "add branch, set join target",
+>   and §4's "a parallel join target that isn't reachable" preview are **NOT as-built** — branch
+>   edgeKeys, `joinNodeKey`, and ALL topology are read-only (G-3 edits `joinMode` only).
+> - **(2) `joinMode='any'` shipped** (not fail-closed) — see the §7/§8c RATIFIED notes.
+> - **(3) A complex graph is load-preserved + save-ENABLED.** The "Current authoring …
+>   `UNSUPPORTED_GRAPH_NODE_TYPES` … save disabled" line below describes the **pre-G-1** state.
+>
+> The runtime / validator / node-model facts below remain accurate.
+
+The original proposal (owner-sequenced via /goal — design-lock first, then a v1 **structured
+editor**, not a free canvas). The approval **runtime** already executes all six node types
+(start / approval / cc / condition / parallel / end) including parallel fork-join; the
+template-authoring UI **was** linear-only and fail-closed (read-only) on any cc / condition /
+parallel node — **the state BEFORE this arc** — which the design unlocked without flattening
+existing complex templates.
 
 Grounded in code (explorer-verified 2026-06-23):
 - Node model — `ApprovalNodeType` (6 types) + `ConditionNodeConfig` / `ParallelNodeConfig` /
@@ -25,7 +42,8 @@ Grounded in code (explorer-verified 2026-06-23):
   (no nested parallel, no cross-branch assignee dupes)** + reachability.
 - Runtime — `ApprovalGraphExecutor` executes ALL six types (condition eval, cc dispatch,
   parallel fork/join state machine). **Runtime is ready; the gap is purely UI.**
-- Current authoring — `templateAuthoring.ts:65` `UNSUPPORTED_GRAPH_NODE_TYPES = {cc, condition,
+- Current authoring **[pre-G-1 state — superseded; complex graphs now load-preserve + save]** —
+  `templateAuthoring.ts:65` `UNSUPPORTED_GRAPH_NODE_TYPES = {cc, condition,
   parallel}`; `unsupportedTemplateAuthoringReason()` opens such templates **read-only** (save
   disabled), tests lock "blocks unsupported constructs instead of flattening".
 
@@ -50,16 +68,19 @@ Grounded in code (explorer-verified 2026-06-23):
   key editing). Legacy `assigneeType`/`assigneeIds` config is shown read-only (the editor
   authors `assigneeSources`).
 - **Still fail-closed (read-only template) in v1:** any construct the structured editor does
-  not yet support — e.g. `parallel.joinMode='any'` (type says v1='all'), nested parallel
+  not yet support — e.g. ~~`parallel.joinMode='any'` (type says v1='all')~~ **[NOT as-built —
+  joinMode='any' shipped in G-3]**, nested parallel
   (the validator rejects it anyway), or a graph shape the structured model can't represent.
   Unsupported ⇒ the template stays viewable read-only, **never flattened** (§3).
 
 ## 2. The editor — structured, NOT a free canvas
 - A **node list** (ordered, with branch nesting shown as indentation/grouping) + a **per-node
-  config panel** (condition → branch/rule rows; parallel → branch list + join target + mode;
+  config panel** (condition → branch/rule rows; parallel → ~~branch list + join target +~~ mode
+  **[as-built: joinMode only — branch list / join target are read-only topology]**;
   cc → target picker reusing the existing approval user/role picker) + a **validation preview**
   (inline errors/warnings before save). No drag canvas, no free edge drawing — topology is
-  expressed through structured controls (add branch, set join target), which the builder turns
+  expressed through structured controls (~~add branch, set join target~~ **[as-built: parallel
+  topology is read-only; only joinMode/condition-rules/cc-targets are editable]**), which the builder turns
   into nodes + edges. This fits TemplateAuthoringView's evolution and is far more testable.
 
 ## 3. Anti-flatten — full-graph round-trip (the keystone)
@@ -79,7 +100,8 @@ Grounded in code (explorer-verified 2026-06-23):
   `normalizeApprovalGraph` stays the **sole arbiter** (node uniqueness, edge integrity, config
   shape, condition edgeKeys, parallel safety, reachability) — the FE never relaxes it.
 - A FE **validation preview** mirrors the high-value checks (dangling edges, a condition branch
-  with no edgeKey, a parallel join target that isn't reachable, an empty assignee) and blocks
+  with no edgeKey, ~~a parallel join target that isn't reachable~~ **[not as-built — parallel
+  topology isn't editable, so no such preview]**, an empty assignee) and blocks
   save with inline messages — UX only; the backend re-validates and is final.
 
 ## 5. Runtime-exists boundary
