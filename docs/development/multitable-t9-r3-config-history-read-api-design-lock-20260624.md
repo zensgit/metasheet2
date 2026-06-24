@@ -92,10 +92,16 @@ projection below (NOT as a record mask).
 
 ## Payload projection — no RECORD-mask, but VIEW filter literals ARE redacted
 
+> **One-line rule:** the access gate controls every payload **EXCEPT `view` rows'
+> `filterInfo` filter literals, which are redacted per-requester** (the LOCKED exception below).
+> Config history is NOT returned `before`/`after` in full to anyone with the manage capability —
+> view filter literals are field-read-sensitive and masked.
+
 For most rows the capability gate is the complete control: `before`/`after` hold CONFIG (field
 schema, permission grants, sheet rules) and a caller who holds the manage capability is entitled
-to see it in full. There is **no per-record-value field-mask** here — config history holds no
-record values.
+to see them in full **— with the sole exception of view filter literals (the LOCKED exception
+immediately below)**. There is no per-record-value field-mask here (config history holds no
+record values); the view exception is a targeted filter-literal redaction, not a record mask.
 
 **Exception — `entity_type='view'` (LOCKED).** A view's `filterInfo.conditions[].value` literals
 are already classified as **field-read-sensitive**. The live view read redacts them per-requester
