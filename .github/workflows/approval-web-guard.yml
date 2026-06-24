@@ -1,0 +1,106 @@
+# Approval web guard (targeted gate).
+#
+# Why this exists: the main PR gate (plugin-tests.yml) runs core-backend tests and only
+# `pnpm --filter @metasheet/web build` for the web app — it does NOT run apps/web vitest
+# specs. So FE-only regressions on the approval surface slip through green CI. The detail /
+# sub-form (明细) UI ships pure (Element-Plus-free) helpers in approvals/detailField.ts whose
+# whole job is to (a) render historical rows from the FROZEN snapshot columns without re-fetching
+# the live template and (b) mirror the backend column-validation reject-set client-side — exactly
+# the kind of serialization/render contract a build-only gate can't catch.
+#
+# Scope (deliberately TARGETED, like multitable-web-guard / attendance-web-guard): run the green
+# approval FE helper/round-trip specs only. The full `@metasheet/web` vitest suite still has
+# historical/flaky failures, so wiring the whole suite as a required gate would be red on arrival.
+# Expand the `vitest run` filter as more approval web specs are added.
+name: Approval Web Guard
+
+on:
+  pull_request:
+    paths:
+      - 'apps/web/src/approvals/conditionEdit.ts'
+      - 'apps/web/src/approvals/parallelEdit.ts'
+      - 'apps/web/src/approvals/ccEdit.ts'
+      - 'apps/web/src/approvals/detailField.ts'
+      - 'apps/web/src/approvals/templateAuthoring.ts'
+      - 'apps/web/src/views/approval/ApprovalDetailView.vue'
+      - 'apps/web/src/views/approval/ApprovalNewView.vue'
+      - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
+      - 'apps/web/tests/approval-detail-field.test.ts'
+      - 'apps/web/tests/approval-template-authoring-detail.test.ts'
+      - 'apps/web/tests/approval-template-authoring-graph-preserve.test.ts'
+      - 'apps/web/tests/approval-template-authoring-condition-edit.test.ts'
+      - 'apps/web/tests/approval-template-authoring-parallel-edit.test.ts'
+      - 'apps/web/tests/approval-template-authoring-cc-edit.test.ts'
+      - '.github/workflows/approval-web-guard.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/src/approvals/conditionEdit.ts'
+      - 'apps/web/src/approvals/parallelEdit.ts'
+      - 'apps/web/src/approvals/ccEdit.ts'
+      - 'apps/web/src/approvals/detailField.ts'
+      - 'apps/web/src/approvals/templateAuthoring.ts'
+      - 'apps/web/src/views/approval/ApprovalDetailView.vue'
+      - 'apps/web/src/views/approval/ApprovalNewView.vue'
+      - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
+      - 'apps/web/tests/approval-detail-field.test.ts'
+      - 'apps/web/tests/approval-template-authoring-detail.test.ts'
+      - 'apps/web/tests/approval-template-authoring-graph-preserve.test.ts'
+      - 'apps/web/tests/approval-template-authoring-condition-edit.test.ts'
+      - 'apps/web/tests/approval-template-authoring-parallel-edit.test.ts'
+      - 'apps/web/tests/approval-template-authoring-cc-edit.test.ts'
+      - '.github/workflows/approval-web-guard.yml'
+
+jobs:
+  approval-web-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run approval web guard specs (targeted)
+        # detail/sub-form (明细) FE helpers: frozen-schema row render + fill-row seeding +
+        # column-draft validation (mirrors backend normalizeDetailFieldParts) + buildFormSchema
+        # detail emit/round-trip + validateTemplateDraft detail branch.
+        # G-1 complex-graph load-preserve: anti-flatten round-trip (condition/parallel/cc save
+        # byte-identical) + isComplexApprovalGraph + graphReadOnlyReason vs unsupportedReason split.
+        # G-2 condition editor: topology-preserving edit (rule/conjunction/defaultEdgeKey change →
+        # only the condition node config changes; all other nodes + edges byte-identical; parallel/cc
+        # untouched) + seeding round-trip + validation preview (fieldId / outgoing default edge).
+        # G-3 parallel editor: topology-preserving joinMode edit (only that parallel node's joinMode
+        # changes; branches/joinNodeKey + all other nodes + edges byte-identical) + cross-phase
+        # compose (condition G-2 + parallel G-3 both land) + seeding round-trip + validation preview
+        # (joinMode in backend-accepted {'all','any'}; cc untouched / G-4).
+        run: pnpm --filter @metasheet/web exec vitest run approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit --reporter=dot

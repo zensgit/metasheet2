@@ -57,6 +57,7 @@ export type MetaCoreLabelKey =
   | 'grid.setField' | 'grid.setFieldAria'
   | 'grid.clearField' | 'grid.clearFieldAria'
   | 'grid.deleteSelected' | 'grid.deleteSelectedAria'
+  | 'grid.batchRestore' | 'grid.batchRestoreAria'
   | 'grid.clear' | 'grid.clearSelection'
   | 'grid.noRecordsTitle'
   | 'grid.noRecordsHintPrefix' | 'grid.noRecordsHintAction' | 'grid.noRecordsHintSuffix'
@@ -185,6 +186,8 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'grid.clearFieldAria': { en: 'Clear field on selected records', zh: '清空所选记录的字段' },
   'grid.deleteSelected': { en: 'Delete selected', zh: '删除所选' },
   'grid.deleteSelectedAria': { en: 'Delete selected records', zh: '删除所选记录' },
+  'grid.batchRestore': { en: 'Restore', zh: '恢复' },
+  'grid.batchRestoreAria': { en: 'Restore selected records to an earlier version', zh: '将所选记录恢复到较早版本' },
   'grid.clear': { en: 'Clear', zh: '清除' },
   'grid.clearSelection': { en: 'Clear selection', zh: '清除选择' },
   'grid.noRecordsTitle': { en: 'No records yet', zh: '暂无记录' },

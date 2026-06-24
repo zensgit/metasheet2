@@ -50,6 +50,20 @@
       data-testid="approval-template-unsupported-alert"
     />
 
+    <!-- G-1..G-4: a complex graph is preserved, not unsupported — informational, save stays enabled.
+         G-2 condition rules, G-3 parallel joinMode, and G-4 cc targets are all editable; branches /
+         join target / all edges are preserved topology. -->
+    <el-alert
+      v-if="!unsupportedReason && graphReadOnlyMessage"
+      :title="graphReadOnlyMessage"
+      description="表单与基本信息可编辑；条件分支节点可编辑分支规则，并行节点可编辑汇聚模式，抄送节点可编辑抄送对象。分支拓扑与连线在保存时原样保留。"
+      type="info"
+      show-icon
+      :closable="false"
+      class="template-authoring__alert"
+      data-testid="approval-template-graph-readonly-alert"
+    />
+
     <el-alert
       v-if="loadError || validationErrors.length"
       :title="loadError || '请修正后再保存'"
@@ -161,6 +175,7 @@
                 <el-option label="单选" value="select" />
                 <el-option label="多选" value="multi-select" />
                 <el-option label="用户" value="user" />
+                <el-option label="明细（子表单）" value="detail" />
               </el-select>
             </el-form-item>
             <el-form-item label="占位文本">
@@ -181,6 +196,101 @@
                 :rows="3"
                 placeholder="每行一个选项，格式：显示名:值"
               />
+            </el-form-item>
+            <!-- detail / sub-form (明细) config: sub-field list editor + minRows/maxRows. Each
+                 sub-field is a LEAF type (no nested detail). Mirrors the backend column schema. -->
+            <el-form-item
+              v-if="field.type === 'detail'"
+              label="明细子字段"
+              class="template-authoring__wide"
+            >
+              <div class="template-authoring__detail" data-testid="approval-detail-config">
+                <el-table
+                  v-if="field.detailColumns.length > 0"
+                  :data="field.detailColumns"
+                  border
+                  size="small"
+                  class="template-authoring__detail-table"
+                >
+                  <el-table-column label="子字段 ID" min-width="120">
+                    <template #default="{ row }">
+                      <el-input v-model="row.id" :disabled="readOnly" placeholder="如 product" />
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="名称" min-width="120">
+                    <template #default="{ row }">
+                      <el-input v-model="row.label" :disabled="readOnly" placeholder="如 品名" />
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="类型" min-width="120">
+                    <template #default="{ row }">
+                      <el-select v-model="row.type" :disabled="readOnly" style="width: 100%">
+                        <el-option
+                          v-for="leaf in detailLeafTypeOptions"
+                          :key="leaf.value"
+                          :label="leaf.label"
+                          :value="leaf.value"
+                        />
+                      </el-select>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="必填" width="70" align="center">
+                    <template #default="{ row }">
+                      <el-checkbox v-model="row.required" :disabled="readOnly" />
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="选项" min-width="160">
+                    <template #default="{ row }">
+                      <el-input
+                        v-if="row.type === 'select' || row.type === 'multi-select'"
+                        v-model="row.optionsText"
+                        :disabled="readOnly"
+                        type="textarea"
+                        :rows="2"
+                        placeholder="每行一个：显示名:值"
+                      />
+                      <span v-else class="template-authoring__hint">—</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="70" align="center">
+                    <template #default="{ $index }">
+                      <el-button
+                        type="danger"
+                        link
+                        :disabled="readOnly"
+                        @click="removeDetailColumn(field, $index)"
+                      >
+                        删除
+                      </el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <div v-else class="template-authoring__hint">尚无子字段，请添加至少一个。</div>
+                <div class="template-authoring__detail-actions">
+                  <el-button
+                    size="small"
+                    type="primary"
+                    plain
+                    :disabled="readOnly"
+                    data-testid="approval-detail-add-column"
+                    @click="addDetailColumn(field)"
+                  >
+                    添加子字段
+                  </el-button>
+                  <el-input
+                    v-model="field.minRowsText"
+                    :disabled="readOnly"
+                    placeholder="最小行数"
+                    style="width: 120px"
+                  />
+                  <el-input
+                    v-model="field.maxRowsText"
+                    :disabled="readOnly"
+                    placeholder="最大行数"
+                    style="width: 120px"
+                  />
+                </div>
+              </div>
             </el-form-item>
             <el-form-item label="显隐规则" class="template-authoring__wide">
               <div class="template-authoring__visibility">
@@ -245,8 +355,9 @@
       <el-card class="template-authoring__panel" shadow="never">
         <template #header>
           <div class="template-authoring__panel-header">
-            <strong>审批步骤</strong>
+            <strong>{{ graphReadOnly ? '审批流程（结构）' : '审批步骤' }}</strong>
             <el-button
+              v-if="!graphReadOnly"
               size="small"
               :disabled="readOnly"
               data-testid="approval-template-add-step"
@@ -258,8 +369,221 @@
           </div>
         </template>
 
+        <!-- G-1/G-2: structured render of a preserved complex graph. condition nodes are EDITABLE
+             (G-2 — branch rules / conjunction / default edge); parallel / cc / approval stay
+             READ-ONLY summaries (G-3 / G-4), and every non-condition node + all edges are preserved
+             byte-for-byte on save. Nothing renders as a bare "unsupported". -->
+        <div v-if="graphReadOnly" data-testid="approval-graph-readonly-list">
+          <div
+            v-for="node in graphPreviewNodes"
+            :key="node.key"
+            class="template-authoring__item"
+            data-testid="approval-graph-node-row"
+          >
+            <div class="template-authoring__item-toolbar">
+              <strong>{{ node.name || node.key }}</strong>
+              <span class="template-authoring__node-type" :data-node-type="node.type">
+                {{ nodeTypeLabel(node.type) }}
+              </span>
+            </div>
+
+            <!-- G-2: editable condition node (rules / conjunction / default fall-through edge).
+                 Topology (which branches exist, their edgeKeys/targets) is NOT editable here — only
+                 the matching LOGIC. Branch add/remove is a later slice. -->
+            <div
+              v-if="node.type === 'condition' && conditionEditFor(node.key)"
+              class="template-authoring__condition"
+              data-testid="approval-condition-editor"
+              :data-condition-node="node.key"
+            >
+              <div
+                v-for="branch in conditionEditFor(node.key)!.branches"
+                :key="branch.edgeKey"
+                class="template-authoring__condition-branch"
+                data-testid="approval-condition-branch"
+              >
+                <div class="template-authoring__condition-branch-head">
+                  <span>分支 → {{ branch.edgeKey }}</span>
+                  <el-select
+                    v-model="branch.conjunction"
+                    size="small"
+                    :disabled="readOnly"
+                    style="width: 110px"
+                    data-testid="approval-condition-conjunction"
+                  >
+                    <el-option label="全部满足 (AND)" value="and" />
+                    <el-option label="任一满足 (OR)" value="or" />
+                  </el-select>
+                </div>
+                <div
+                  v-for="(rule, ruleIndex) in branch.rules"
+                  :key="ruleIndex"
+                  class="template-authoring__condition-rule"
+                  data-testid="approval-condition-rule"
+                >
+                  <el-select
+                    v-model="rule.fieldId"
+                    size="small"
+                    filterable
+                    placeholder="字段"
+                    :disabled="readOnly"
+                    style="width: 160px"
+                    data-testid="approval-condition-rule-field"
+                  >
+                    <el-option
+                      v-for="field in conditionFieldOptions"
+                      :key="field.id"
+                      :label="field.label"
+                      :value="field.id"
+                    />
+                  </el-select>
+                  <el-select
+                    v-model="rule.operator"
+                    size="small"
+                    :disabled="readOnly"
+                    style="width: 120px"
+                    data-testid="approval-condition-rule-operator"
+                  >
+                    <el-option
+                      v-for="operator in CONDITION_RULE_OPERATORS"
+                      :key="operator"
+                      :label="conditionOperatorLabel(operator)"
+                      :value="operator"
+                    />
+                  </el-select>
+                  <el-input
+                    v-if="rule.operator !== 'isEmpty'"
+                    :model-value="conditionRuleValueText(rule)"
+                    size="small"
+                    placeholder="比较值"
+                    :disabled="readOnly"
+                    style="width: 160px"
+                    data-testid="approval-condition-rule-value"
+                    @update:model-value="(text: string) => setConditionRuleValue(rule, text)"
+                  />
+                  <el-button
+                    size="small"
+                    type="danger"
+                    :disabled="readOnly || branch.rules.length === 1"
+                    data-testid="approval-condition-rule-remove"
+                    @click="removeConditionRule(branch, ruleIndex)"
+                  >删除</el-button>
+                </div>
+                <el-button
+                  size="small"
+                  :disabled="readOnly"
+                  data-testid="approval-condition-rule-add"
+                  @click="addConditionRule(branch)"
+                >
+                  <el-icon><Plus /></el-icon>
+                  添加规则
+                </el-button>
+              </div>
+              <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
+                <el-select
+                  v-model="conditionEditFor(node.key)!.defaultEdgeKey"
+                  size="small"
+                  clearable
+                  :disabled="readOnly"
+                  style="width: 220px"
+                  placeholder="（无默认分支）"
+                  data-testid="approval-condition-default-edge"
+                >
+                  <el-option
+                    v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
+                    :key="edgeKey"
+                    :label="edgeKey"
+                    :value="edgeKey"
+                  />
+                </el-select>
+              </el-form-item>
+            </div>
+
+            <!-- G-3: editable parallel node — `joinMode` ONLY (会签 all / 或签 any, both
+                 backend-accepted). `branches` (fork edges) + `joinNodeKey` are TOPOLOGY: shown
+                 read-only, preserved byte-for-byte on save. -->
+            <div
+              v-else-if="node.type === 'parallel' && parallelEditFor(node.key)"
+              class="template-authoring__parallel"
+              data-testid="approval-parallel-editor"
+              :data-parallel-node="node.key"
+            >
+              <el-form-item label="汇聚模式" class="template-authoring__parallel-join-mode">
+                <el-select
+                  v-model="parallelEditFor(node.key)!.joinMode"
+                  size="small"
+                  :disabled="readOnly"
+                  style="width: 240px"
+                  data-testid="approval-parallel-join-mode"
+                >
+                  <el-option
+                    v-for="mode in PARALLEL_JOIN_MODES"
+                    :key="mode"
+                    :label="parallelJoinModeLabel(mode)"
+                    :value="mode"
+                  />
+                </el-select>
+              </el-form-item>
+              <!-- branches + join target are preserved topology (not editable here). -->
+              <ul class="template-authoring__node-summary" data-testid="approval-parallel-topology">
+                <li>并行分支：{{ (node.config as ParallelNodeConfig).branches.join('、') || '（无）' }}</li>
+                <li>汇聚节点：{{ (node.config as ParallelNodeConfig).joinNodeKey || '（无）' }}</li>
+              </ul>
+            </div>
+
+            <!-- G-4: editable cc node — targetType (用户/角色) + targetIds. The cc node's edges /
+                 position are TOPOLOGY: preserved byte-for-byte on save. -->
+            <div
+              v-else-if="node.type === 'cc' && ccEditFor(node.key)"
+              class="template-authoring__cc"
+              data-testid="approval-cc-editor"
+              :data-cc-node="node.key"
+            >
+              <el-form-item label="抄送类型">
+                <el-select
+                  v-model="ccEditFor(node.key)!.targetType"
+                  size="small"
+                  :disabled="readOnly"
+                  style="width: 240px"
+                  data-testid="approval-cc-target-type"
+                >
+                  <el-option
+                    v-for="targetType in CC_TARGET_TYPES"
+                    :key="targetType"
+                    :label="ccTargetTypeLabel(targetType)"
+                    :value="targetType"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="抄送对象">
+                <el-select
+                  v-model="ccEditFor(node.key)!.targetIds"
+                  multiple
+                  filterable
+                  allow-create
+                  default-first-option
+                  size="small"
+                  :disabled="readOnly"
+                  style="width: 360px"
+                  placeholder="输入用户/角色 ID 后回车"
+                  data-testid="approval-cc-target-ids"
+                />
+              </el-form-item>
+            </div>
+
+            <!-- approval / other — read-only summary (G-4: cc is editable above). -->
+            <template v-else>
+              <ul v-if="nodeConfigSummary(node).length" class="template-authoring__node-summary">
+                <li v-for="(line, lineIndex) in nodeConfigSummary(node)" :key="lineIndex">{{ line }}</li>
+              </ul>
+              <div v-else class="template-authoring__hint">（无可编辑配置）</div>
+            </template>
+          </div>
+        </div>
+
         <div
           v-for="(step, index) in draft.steps"
+          v-show="!graphReadOnly"
           :key="step.localId"
           class="template-authoring__item"
           data-testid="approval-template-step-row"
@@ -426,17 +750,38 @@ import {
   buildCreateTemplatePayload,
   buildFormSchema,
   buildUpdateTemplatePayload,
+  createEmptyDetailColumnDraft,
   createEmptyFieldDraft,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
+  DETAIL_LEAF_FIELD_TYPES,
   draftFromTemplate,
+  graphReadOnlyReason,
   parseIdsText,
   unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
+  CONDITION_RULE_OPERATORS,
+  PARALLEL_JOIN_MODES,
+  CC_TARGET_TYPES,
   type ApprovalStepDraft,
+  type ConditionBranchEdit,
+  type ConditionNodeEdit,
+  type ConditionRuleEdit,
+  type ConditionRuleOperator,
   type FieldAuthoringDraft,
+  type ParallelNodeEdit,
+  type CcNodeEdit,
   type TemplateAuthoringDraft,
 } from '../../approvals/templateAuthoring'
+import type {
+  ApprovalAssigneeSource,
+  ApprovalAssigneeType,
+  ApprovalNode,
+  CcNodeConfig,
+  ConditionNodeConfig,
+  ParallelJoinMode,
+  ParallelNodeConfig,
+} from '../../types/approval'
 import { useApprovalDirectory } from '../../approvals/useApprovalDirectory'
 
 const route = useRoute()
@@ -449,12 +794,172 @@ const publishing = ref(false)
 const loadError = ref<string | null>(null)
 const validationErrors = ref<string[]>([])
 const unsupportedReason = ref<string | null>(null)
+// G-1: a COMPLEX (condition/parallel/cc/non-linear) graph renders read-only but is NOT
+// unsupported — the form/metadata stay editable and save preserves the graph verbatim.
+const graphReadOnlyMessage = ref<string | null>(null)
 const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
 
 const templateId = computed(() => typeof route.params.id === 'string' ? route.params.id : '')
 const isEditMode = computed(() => templateId.value.length > 0)
+// Truly-unsupported (attachment field / unknown node / extra config keys) locks the WHOLE form.
 const readOnly = computed(() => !canManageTemplates.value || Boolean(unsupportedReason.value))
+// A complex graph is shown via the read-only structured node list (`graphPreviewNodes`); the
+// linear steps editor is hidden. The graph is preserved on save, so this does NOT disable save.
+const graphReadOnly = computed(() => Boolean(graphReadOnlyMessage.value))
 const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value)
+
+// G-1 read-only structured render of a preserved complex graph: a per-node summary of the
+// config the v1 editor doesn't yet author, so authors can SEE the flow they're preserving.
+const graphPreviewNodes = computed<ApprovalNode[]>(() => draft.value.preservedGraph?.nodes ?? [])
+
+const NODE_TYPE_LABELS: Record<string, string> = {
+  start: '发起',
+  approval: '审批',
+  cc: '抄送',
+  condition: '条件分支',
+  parallel: '并行分支',
+  end: '结束',
+}
+function nodeTypeLabel(type: string): string {
+  return NODE_TYPE_LABELS[type] ?? type
+}
+
+function assigneeSourceSummary(source: ApprovalAssigneeSource): string {
+  switch (source.kind) {
+    case 'static_user': return `指定用户：${source.userIds.join('、') || '（无）'}`
+    case 'static_role': return `指定角色：${source.roleIds.join('、') || '（无）'}`
+    case 'requester': return '发起人'
+    case 'form_field_user': return `表单用户字段：${source.fieldId}`
+    case 'direct_manager': return '直属上级'
+    case 'dept_head': return '部门主管'
+    case 'continuous_managers': return `连续多级上级（${source.levels} 级）`
+    case 'manager_at_level': return `指定层级上级（第 ${source.level} 级）`
+    default: return JSON.stringify(source)
+  }
+}
+
+// One read-only descriptor per node config, covering ALL three complex types (condition / parallel
+// / cc) plus approval — so no type silently renders as "unsupported". Returns `[]` for nodes
+// without summarisable config (start/end).
+function nodeConfigSummary(node: ApprovalNode): string[] {
+  const config = node.config as Record<string, unknown>
+  if (node.type === 'condition') {
+    const cfg = config as unknown as ConditionNodeConfig
+    const lines = (cfg.branches ?? []).map((branch) => {
+      const rules = (branch.rules ?? [])
+        .map((rule) => `${rule.fieldId} ${rule.operator}${rule.value === undefined ? '' : ` ${JSON.stringify(rule.value)}`}`)
+        .join(` ${branch.conjunction ?? 'and'} `)
+      return `分支 → ${branch.edgeKey}：${rules || '（无规则）'}`
+    })
+    if (cfg.defaultEdgeKey) lines.push(`默认分支 → ${cfg.defaultEdgeKey}`)
+    return lines
+  }
+  if (node.type === 'parallel') {
+    const cfg = config as unknown as ParallelNodeConfig
+    return [
+      `并行分支：${(cfg.branches ?? []).join('、') || '（无）'}`,
+      `汇聚节点：${cfg.joinNodeKey ?? '（无）'}`,
+      `汇聚模式：${cfg.joinMode ?? '（无）'}`,
+    ]
+  }
+  if (node.type === 'cc') {
+    const cfg = config as unknown as CcNodeConfig
+    return [
+      `抄送类型：${cfg.targetType === 'role' ? '角色' : '用户'}`,
+      `抄送对象：${(cfg.targetIds ?? []).join('、') || '（无）'}`,
+    ]
+  }
+  if (node.type === 'approval') {
+    const sources = Array.isArray(config.assigneeSources) ? config.assigneeSources as ApprovalAssigneeSource[] : []
+    return sources.map((source) => `审批人：${assigneeSourceSummary(source)}`)
+  }
+  return []
+}
+
+// ── G-2 condition editor (logic-only; topology is preserved from `preservedGraph`) ──────────────
+// The editable model lives on `draft.conditionEdits[nodeKey]`, seeded 1:1 from the preserved
+// condition nodes. The controls below mutate ONLY rules / conjunction / defaultEdgeKey;
+// `buildApprovalGraph` re-applies them onto a COPY of the graph (all other nodes + edges untouched).
+function conditionEditFor(nodeKey: string): ConditionNodeEdit | undefined {
+  return draft.value.conditionEdits?.[nodeKey]
+}
+
+// Field options for a rule's fieldId picker — the draft's authorable form fields (id + label).
+const conditionFieldOptions = computed(() =>
+  draft.value.fields
+    .filter((field) => field.id.trim())
+    .map((field) => ({ id: field.id.trim(), label: field.label.trim() || field.id.trim() })),
+)
+
+const CONDITION_OPERATOR_LABELS: Record<ConditionRuleOperator, string> = {
+  eq: '等于',
+  neq: '不等于',
+  gt: '大于',
+  gte: '大于等于',
+  lt: '小于',
+  lte: '小于等于',
+  in: '包含于',
+  isEmpty: '为空',
+}
+function conditionOperatorLabel(operator: ConditionRuleOperator): string {
+  return CONDITION_OPERATOR_LABELS[operator] ?? operator
+}
+
+// The rule value is carried as `unknown` (round-trips a seeded value verbatim). The text input
+// reads/writes a string; `isEmpty` carries no value (handled in the template by hiding the input).
+function conditionRuleValueText(rule: ConditionRuleEdit): string {
+  if (rule.value === undefined || rule.value === null) return ''
+  return typeof rule.value === 'string' ? rule.value : String(rule.value)
+}
+function setConditionRuleValue(rule: ConditionRuleEdit, text: string): void {
+  rule.value = text === '' ? undefined : text
+}
+
+function addConditionRule(branch: ConditionBranchEdit): void {
+  branch.rules.push({ fieldId: '', operator: 'eq', value: undefined })
+}
+function removeConditionRule(branch: ConditionBranchEdit, ruleIndex: number): void {
+  if (branch.rules.length === 1) return
+  branch.rules.splice(ruleIndex, 1)
+}
+
+// Outgoing edge keys of a condition node (from the preserved graph) — the legal default fall-through
+// targets. Topology is read-only here, so these come straight from `preservedGraph.edges`.
+function conditionOutgoingEdgeKeys(nodeKey: string): string[] {
+  return (draft.value.preservedGraph?.edges ?? [])
+    .filter((edge) => edge.source === nodeKey)
+    .map((edge) => edge.key)
+}
+
+// ── G-3 parallel editor (joinMode ONLY; branches / joinNodeKey are preserved topology, read-only) ──
+// The editable model lives on `draft.parallelEdits[nodeKey]`, seeded 1:1 from the preserved parallel
+// nodes. The select below mutates ONLY `joinMode`; `buildApprovalGraph` re-applies it onto a COPY of
+// the graph (branches/joinNodeKey + every non-parallel node + all edges untouched). Both 'all' and
+// 'any' are offered because the backend `normalizeApprovalGraph` accepts both (`PARALLEL_JOIN_MODES`
+// = {'all','any'}, joinMode written verbatim) and the runtime executes 'any' (first-wins).
+function parallelEditFor(nodeKey: string): ParallelNodeEdit | undefined {
+  return draft.value.parallelEdits?.[nodeKey]
+}
+
+const PARALLEL_JOIN_MODE_LABELS: Record<ParallelJoinMode, string> = {
+  all: '全部完成（会签）',
+  any: '任一完成（或签 / 抢占）',
+}
+function parallelJoinModeLabel(mode: ParallelJoinMode): string {
+  return PARALLEL_JOIN_MODE_LABELS[mode] ?? mode
+}
+
+// ── G-4 cc editor (targetType + targetIds; the cc node's edges/position are preserved topology) ──
+// Editable model on `draft.ccEdits[nodeKey]`, seeded 1:1 from the preserved cc nodes. The controls
+// mutate ONLY targetType/targetIds; `buildApprovalGraph` re-applies onto a COPY (every non-cc node +
+// all edges untouched). Matches the backend cc rule (targetType ∈ {user,role}, non-empty targetIds).
+function ccEditFor(nodeKey: string): CcNodeEdit | undefined {
+  return draft.value.ccEdits?.[nodeKey]
+}
+function ccTargetTypeLabel(targetType: ApprovalAssigneeType): string {
+  return targetType === 'role' ? '角色' : '用户'
+}
+
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
 const formSchemaPreview = computed(() => JSON.stringify(buildFormSchema(draft.value), null, 2))
 const approvalGraphPreview = computed(() => JSON.stringify(buildApprovalGraph(draft.value), null, 2))
@@ -527,6 +1032,31 @@ function moveField(index: number, delta: -1 | 1) {
   draft.value.fields = swap(draft.value.fields, index, delta) ?? draft.value.fields
 }
 
+// detail / sub-form (明细) sub-field authoring. Sub-fields are LEAF types only (no nested
+// `detail`), surfaced from the shared `DETAIL_LEAF_FIELD_TYPES` so the picker can never offer
+// `detail` — the one-nesting-level invariant the backend also enforces.
+const DETAIL_LEAF_TYPE_LABELS: Record<string, string> = {
+  text: '文本',
+  textarea: '多行文本',
+  number: '数字',
+  date: '日期',
+  datetime: '日期时间',
+  select: '单选',
+  'multi-select': '多选',
+  user: '用户',
+}
+const detailLeafTypeOptions = computed(() =>
+  DETAIL_LEAF_FIELD_TYPES.map((type) => ({ value: type, label: DETAIL_LEAF_TYPE_LABELS[type] ?? type })),
+)
+
+function addDetailColumn(field: FieldAuthoringDraft) {
+  field.detailColumns = [...field.detailColumns, createEmptyDetailColumnDraft(field.detailColumns.length + 1)]
+}
+
+function removeDetailColumn(field: FieldAuthoringDraft, index: number) {
+  field.detailColumns = field.detailColumns.filter((_, i) => i !== index)
+}
+
 // Visibility-rule depends-on options: other fields that have an id (excludes self).
 function visibilityFieldOptions(current: FieldAuthoringDraft) {
   return draft.value.fields
@@ -551,6 +1081,7 @@ async function loadTemplateForEdit() {
   if (!isEditMode.value) {
     draft.value = createEmptyTemplateDraft()
     unsupportedReason.value = null
+    graphReadOnlyMessage.value = null
     return
   }
   loading.value = true
@@ -558,6 +1089,7 @@ async function loadTemplateForEdit() {
   try {
     const template = await getTemplate(templateId.value)
     unsupportedReason.value = unsupportedTemplateAuthoringReason(template)
+    graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
     syncAllStepOptions()
   } catch (error: any) {
@@ -584,11 +1116,13 @@ async function persistDraft() {
       const updated = await updateTemplate(draft.value.templateId, buildUpdateTemplatePayload(draft.value))
       draft.value = draftFromTemplate(updated)
       unsupportedReason.value = unsupportedTemplateAuthoringReason(updated)
+      graphReadOnlyMessage.value = graphReadOnlyReason(updated)
       return updated
     }
     const created = await createTemplate(buildCreateTemplatePayload(draft.value))
     draft.value = draftFromTemplate(created)
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
+    graphReadOnlyMessage.value = graphReadOnlyReason(created)
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
   } catch (error: any) {
@@ -725,6 +1259,22 @@ onMounted(() => {
   flex: 1;
 }
 
+.template-authoring__detail {
+  width: 100%;
+}
+
+.template-authoring__detail-table {
+  width: 100%;
+}
+
+.template-authoring__detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+
 .template-authoring__item {
   padding: 14px;
   border: 1px solid var(--el-border-color-lighter, #ebeef5);
@@ -737,6 +1287,56 @@ onMounted(() => {
 
 .template-authoring__item-toolbar {
   margin-bottom: 12px;
+}
+
+.template-authoring__node-type {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--el-fill-color-light, #f5f7fa);
+  color: var(--el-text-color-secondary, #606266);
+}
+
+.template-authoring__node-summary {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--el-text-color-regular, #606266);
+}
+
+/* G-2 condition editor */
+.template-authoring__condition {
+  margin-top: 8px;
+}
+
+.template-authoring__condition-branch {
+  border: 1px dashed var(--el-border-color, #dcdfe6);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.template-authoring__condition-branch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--el-text-color-regular, #606266);
+}
+
+.template-authoring__condition-rule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.template-authoring__condition-default {
+  margin: 4px 0 0;
 }
 
 .template-authoring__error-list {

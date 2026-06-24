@@ -11,11 +11,14 @@ const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 const {
+  SANDBOX_FIELD_MAP_MODE,
   StockPreparationTargetProvisioningError,
   buildStockPreparationTargetDescriptor,
   summarizeStockPreparationTargetReadiness,
   inspectStockPreparationCanonicalTarget,
+  inspectStockPreparationSandboxTarget,
   ensureStockPreparationCanonicalTarget,
+  ensureStockPreparationSandboxTarget,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-target-provisioning.cjs'))
 
 const LOGICAL_FIELD_IDS = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id)
@@ -290,6 +293,87 @@ async function main() {
   )
   assert.deepEqual(badCreateError.details.missingFields, ['path'])
   assert.equal(badCreateCalls.records.length, 0, 'failed create verification never uses records API')
+
+  const sandboxObjectId = 'plm_stock_preparation_sandbox_validation'
+  const sandboxDescriptor = buildStockPreparationTargetDescriptor({
+    template: { ...STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, objectId: sandboxObjectId, label: 'Sandbox Stock Preparation' },
+    description: 'Sandbox target descriptor',
+  })
+  assert.equal(sandboxDescriptor.id, sandboxObjectId)
+  assert.equal(sandboxDescriptor.name, 'Sandbox Stock Preparation')
+  assert.equal(sandboxDescriptor.description, 'Sandbox target descriptor')
+  assert.deepEqual(sandboxDescriptor.fields.map((field) => field.id), LOGICAL_FIELD_IDS)
+
+  const { context: sandboxRejectCtx, calls: sandboxRejectCalls } = createContext({ sheetExists: false })
+  const canonicalSandboxError = await rejectsWith(
+    () => ensureStockPreparationSandboxTarget({
+      context: sandboxRejectCtx,
+      projectId: 'tenant:proj',
+      objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
+      permission: 'admin',
+    }),
+    'TARGET_SANDBOX_OBJECT_ID_INVALID',
+  )
+  assert.deepEqual(canonicalSandboxError.details, { reason: 'prod_canonical' })
+  assert.equal(sandboxRejectCalls.findObjectSheet.length, 0, 'canonical objectId is rejected before provisioning reads')
+  assert.equal(sandboxRejectCalls.ensureObject.length, 0, 'canonical objectId is never provisioned as sandbox')
+
+  const { context: sandboxCreateCtx, calls: sandboxCreateCalls } = createContext({ sheetExists: false })
+  const sandboxCreated = await ensureStockPreparationSandboxTarget({
+    context: sandboxCreateCtx,
+    projectId: 'tenant:proj',
+    baseId: 'base_sandbox',
+    objectId: sandboxObjectId,
+    permission: 'admin',
+  })
+  assert.equal(sandboxCreated.ready, true)
+  assert.equal(sandboxCreated.mode, 'sandbox_create')
+  assert.equal(sandboxCreated.target.objectId, sandboxObjectId, 'internal binding keeps the real sandbox object id')
+  assert.equal(sandboxCreated.target.sheetId, 'sheet_created_stock_target')
+  assert.equal(sandboxCreated.evidence.fieldMapMode, SANDBOX_FIELD_MAP_MODE)
+  assert.equal(sandboxCreated.evidence.target.fieldIdMapEmpty, false)
+  assert.ok(sandboxCreated.evidence.objectIdHash, 'sandbox evidence carries a deterministic object hash')
+  assert.equal(JSON.stringify(sandboxCreated.evidence).includes(sandboxObjectId), false, 'sandbox evidence hides object id')
+  assert.equal(JSON.stringify(sandboxCreated.evidence).includes('sheet_created_stock_target'), false, 'sandbox evidence hides sheet id')
+  assert.equal(sandboxCreateCalls.findObjectSheet[0].objectId, sandboxObjectId)
+  assert.equal(sandboxCreateCalls.ensureObject.length, 1)
+  assert.equal(sandboxCreateCalls.ensureObject[0].descriptor.id, sandboxObjectId)
+  assert.equal(sandboxCreateCalls.records.length, 0, 'sandbox create path never uses records API')
+
+  const { context: sandboxExistingCtx, calls: sandboxExistingCalls } = createContext({ sheetExists: true })
+  const sandboxExisting = await inspectStockPreparationSandboxTarget({
+    context: sandboxExistingCtx,
+    projectId: 'tenant:proj',
+    objectId: sandboxObjectId,
+    permission: 'admin',
+  })
+  assert.equal(sandboxExisting.ready, true)
+  assert.equal(sandboxExisting.mode, 'sandbox_existing')
+  assert.equal(sandboxExisting.evidence.fieldMapMode, SANDBOX_FIELD_MAP_MODE)
+  assert.equal(sandboxExisting.evidence.target.fieldIdMapEmpty, false)
+  assert.equal(JSON.stringify(sandboxExisting.evidence).includes(sandboxObjectId), false, 'sandbox existing evidence hides object id')
+  assert.equal(sandboxExistingCalls.findObjectSheet[0].objectId, sandboxObjectId)
+  assert.equal(sandboxExistingCalls.ensureObject.length, 0, 'sandbox existing path does not create')
+
+  const { context: sandboxIncompleteCtx, calls: sandboxIncompleteCalls } = createContext({
+    sheetExists: true,
+    missingFields: ['rawQuantity'],
+  })
+  const sandboxIncompleteError = await rejectsWith(
+    () => ensureStockPreparationSandboxTarget({
+      context: sandboxIncompleteCtx,
+      projectId: 'tenant:proj',
+      objectId: sandboxObjectId,
+      permission: 'admin',
+    }),
+    'TARGET_SCHEMA_INCOMPLETE',
+  )
+  assert.deepEqual(sandboxIncompleteError.details.missingFields, ['rawQuantity'])
+  assert.equal(sandboxIncompleteError.details.fieldMapMode, SANDBOX_FIELD_MAP_MODE)
+  assert.ok(sandboxIncompleteError.details.targetObjectIdHash)
+  assert.equal(JSON.stringify(sandboxIncompleteError.details).includes(sandboxObjectId), false, 'sandbox incomplete error hides object id')
+  assert.equal(sandboxIncompleteCalls.ensureObject.length, 0, 'incomplete sandbox target is not repaired in place')
+  assert.equal(sandboxIncompleteCalls.records.length, 0, 'incomplete sandbox path never uses records API')
 
   console.log('stock-preparation-target-provisioning.test.cjs OK')
 }

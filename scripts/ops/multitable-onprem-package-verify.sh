@@ -662,6 +662,57 @@ function verify_no_bundled_node_modules() {
   rm -f "$matches"
 }
 
+function verify_no_macos_metadata_entries() {
+  local archive_list_file="$1"
+  local matches
+  matches="$(mktemp)"
+  if LC_ALL=C grep -E '(^|/)(\._[^/]+|__MACOSX)(/|$)' "$archive_list_file" > "$matches"; then
+    local sample
+    sample="$(head -n 5 "$matches" | tr '\n' '; ')"
+    rm -f "$matches"
+    die "Package must not contain macOS AppleDouble/resource-fork metadata entries. First entries: ${sample}"
+  fi
+  rm -f "$matches"
+}
+
+function verify_windows_zip_expand_archive_smoke() {
+  local archive="$1"
+  local smoke_root
+  [[ "$archive" == *.zip ]] || return 0
+  command -v pwsh >/dev/null 2>&1 || die "pwsh is required to smoke Windows Expand-Archive behavior for zip packages"
+  smoke_root="$(mktemp -d)"
+  PACKAGE_ARCHIVE="$(cd "$(dirname "$archive")" && pwd)/$(basename "$archive")" \
+  EXTRACT_ROOT="$smoke_root" \
+  pwsh -NoProfile -NonInteractive -Command '
+    $ErrorActionPreference = "Stop"
+    Expand-Archive -LiteralPath $env:PACKAGE_ARCHIVE -DestinationPath $env:EXTRACT_ROOT -Force
+    $root = Get-Item -LiteralPath $env:EXTRACT_ROOT
+    $candidates = @()
+    if (
+      (Test-Path -LiteralPath (Join-Path $root.FullName "pnpm-lock.yaml")) -and
+      (Test-Path -LiteralPath (Join-Path $root.FullName "PACKAGE-METADATA.json")) -and
+      (Test-Path -LiteralPath (Join-Path $root.FullName "scripts/ops/multitable-onprem-apply-package.ps1"))
+    ) {
+      $candidates += $root
+    }
+    $candidates += @(
+      Get-ChildItem -LiteralPath $env:EXTRACT_ROOT -Directory -Recurse -ErrorAction Stop |
+        Where-Object {
+          (Test-Path -LiteralPath (Join-Path $_.FullName "pnpm-lock.yaml")) -and
+          (Test-Path -LiteralPath (Join-Path $_.FullName "PACKAGE-METADATA.json")) -and
+          (Test-Path -LiteralPath (Join-Path $_.FullName "scripts/ops/multitable-onprem-apply-package.ps1"))
+        }
+    )
+    if ($candidates.Count -ne 1) {
+      throw ("Expected exactly one Windows-expanded package root, got {0}: {1}" -f $candidates.Count, (($candidates | ForEach-Object { $_.FullName }) -join "; "))
+    }
+  ' || {
+    rm -rf "$smoke_root" || true
+    die "Windows Expand-Archive smoke failed for zip package"
+  }
+  rm -rf "$smoke_root"
+}
+
 # When sourced (e.g. by the focused test), define functions only — do not run the
 # package verification main flow. Direct execution (BASH_SOURCE[0] == $0) runs normally.
 if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
@@ -699,6 +750,7 @@ case "$PACKAGE_FILE" in
     archive_type="zip"
     command -v unzip >/dev/null 2>&1 || die "unzip is required to verify zip packages"
     unzip -q "$PACKAGE_FILE" -d "$EXTRACT_ROOT"
+    verify_windows_zip_expand_archive_smoke "$PACKAGE_FILE"
     if command -v zipinfo >/dev/null 2>&1; then
       zipinfo -1 "$PACKAGE_FILE" > "$list_file"
     else
@@ -712,6 +764,7 @@ esac
 
 pkg_name="$(head -n 1 "$list_file" | cut -d/ -f1)"
 pkg_root="${EXTRACT_ROOT}/${pkg_name}"
+verify_no_macos_metadata_entries "$list_file"
 verify_no_bundled_node_modules "$list_file"
 
 required=(

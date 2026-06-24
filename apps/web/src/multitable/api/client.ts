@@ -974,6 +974,41 @@ export interface RestorePreviewResult {
   previewIdentity: string | null
 }
 
+// BS-4: scoped (multi-record) restore preview/execute results — a faithful client of the BS-2/BS-3 wire.
+export interface RestoreBatchPreviewRecord {
+  recordId: string
+  status: 'restorable' | 'skipped'
+  changes?: RestorePreviewChange[]
+  affectedFieldCount?: number
+  /** the record's preview-time version — submitted back verbatim as expectedVersions[recordId] (the version bind). */
+  previewVersion?: number
+  /** why a record is not restorable: unavailable | version_unavailable | unsupported | snapshot_unavailable | schema_drift | no_change */
+  skipReason?: string
+}
+export interface RestoreBatchPreviewResult {
+  records: RestoreBatchPreviewRecord[]
+  /** the RESTORABLE record set the identity binds (sorted) — the FE executes exactly this set. */
+  scope: string[]
+  restorableCount: number
+  skippedCount: number
+  targetVersion: number
+  previewIdentity: string | null
+}
+export interface RestoreBatchExecuteRecord {
+  recordId: string
+  status: 'restored' | 'skipped'
+  newVersion?: number
+  restoredFieldIds?: string[]
+  /** write-level skip taxonomy (surfaced verbatim): denied | conflict | forbidden | error */
+  skipReason?: 'denied' | 'conflict' | 'forbidden' | 'error'
+}
+export interface RestoreBatchExecuteResult {
+  records: RestoreBatchExecuteRecord[]
+  restoredCount: number
+  skippedCount: number
+  targetVersion: number
+}
+
 export interface AiShortcutPreviewData {
   status: 'succeeded'
   action: 'preview'
@@ -2017,6 +2052,38 @@ export class MultitableApiClient {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
     )
     return this.parseJson<RestoreRecordResult>(res)
+  }
+
+  // BS-4: preview a multi-record restore. Read-only — returns each record's restorable/skipped outcome + the scope
+  // identity. Pair with restoreBatchExecute; never batch-restore without showing the per-record preview.
+  async restoreBatchPreview(sheetId: string, recordIds: string[], targetVersion: number, fieldIds?: string[]): Promise<RestoreBatchPreviewResult> {
+    const body: { targetVersion: number; recordIds: string[]; fieldIds?: string[] } = { targetVersion, recordIds }
+    if (fieldIds && fieldIds.length > 0) body.fieldIds = fieldIds
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/restore-batch-preview`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+    )
+    return this.parseJson<RestoreBatchPreviewResult>(res)
+  }
+
+  // BS-4: execute a previewed batch restore. `expectedVersions` MUST be each record's previewVersion from the preview
+  // (the version bind — the server folds the submitted value into the scopeHash); `recordIds` MUST be the preview's
+  // `scope`. PARTIAL: per-record restored/skipped(denied|conflict|forbidden) in the result.
+  async restoreBatchExecute(
+    sheetId: string,
+    recordIds: string[],
+    targetVersion: number,
+    expectedVersions: Record<string, number>,
+    previewIdentity: string,
+    fieldIds?: string[],
+  ): Promise<RestoreBatchExecuteResult> {
+    const body: { targetVersion: number; recordIds: string[]; expectedVersions: Record<string, number>; previewIdentity: string; fieldIds?: string[] } = { targetVersion, recordIds, expectedVersions, previewIdentity }
+    if (fieldIds && fieldIds.length > 0) body.fieldIds = fieldIds
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/restore-batch-execute`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+    )
+    return this.parseJson<RestoreBatchExecuteResult>(res)
   }
 
   // --- Form submit ---
