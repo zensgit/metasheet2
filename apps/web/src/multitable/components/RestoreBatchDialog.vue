@@ -25,6 +25,7 @@
               @keyup.enter="onVersionChange"
             />
           </label>
+          <p v-if="advancedOpen" class="restore-batch__version-hint" data-test="batch-restore-version-hint">{{ l('record.batchRestoreVersionHint') }}</p>
         </div>
 
         <div class="restore-batch__body">
@@ -202,6 +203,11 @@ function onDone(): void {
   padding: 4px 6px;
   border: 1px solid var(--border, #cbd5e1);
   border-radius: 6px;
+}
+.restore-batch__version-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary, #64748b);
 }
 .restore-batch__body {
   padding: 16px;

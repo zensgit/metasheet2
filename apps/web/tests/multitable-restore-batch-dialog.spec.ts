@@ -11,7 +11,25 @@ import { createApp, nextTick } from 'vue'
 
 import RestoreBatchDialog from '../src/multitable/components/RestoreBatchDialog.vue'
 import { buildBatchExpectedVersions } from '../src/multitable/utils/batch-restore-expected-versions'
+import { resolveSelectionLabels } from '../src/multitable/utils/batch-restore-labels'
 import type { RestoreBatchPreviewRecord, RestoreBatchExecuteRecord } from '../src/multitable/api/client'
+
+describe('resolveSelectionLabels — BS-4 off-page title capture', () => {
+  const rows = [{ id: 'A', data: { f1: 'Alpha' } }, { id: 'B', data: { f1: 'Beta' } }]
+  it('captures the primary-field title for loaded (on-page) records', () => {
+    expect(resolveSelectionLabels(['A', 'B'], rows, 'f1', {})).toEqual({ A: 'Alpha', B: 'Beta' })
+  })
+  it('KEEPS a previously-captured title for a record no longer loaded (off-page / post-reset) — the key property', () => {
+    // C is selected but not in the (reset) rows; its title was captured earlier → retained, not lost to the id.
+    expect(resolveSelectionLabels(['A', 'C'], rows, 'f1', { C: 'Gamma' })).toEqual({ A: 'Alpha', C: 'Gamma' })
+  })
+  it('a fresh on-page title OVERRIDES a stale captured one (the live grid wins when loaded)', () => {
+    expect(resolveSelectionLabels(['A'], rows, 'f1', { A: 'OldAlpha' })).toEqual({ A: 'Alpha' })
+  })
+  it('empty (caller falls back to the id) when neither loaded nor previously captured', () => {
+    expect(resolveSelectionLabels(['Z'], rows, 'f1', {})).toEqual({ Z: '' })
+  })
+})
 
 describe('buildBatchExpectedVersions — BS-4 wire-drift guard', () => {
   it('maps ONLY scope records to their previewVersion (skipped records excluded; current version never used)', () => {
@@ -96,6 +114,8 @@ describe('RestoreBatchDialog — BS-4 panel', () => {
     await nextTick()
     const input = q('[data-test="batch-restore-version"]') as HTMLInputElement
     expect(input).toBeTruthy()
+    expect(q('[data-test="batch-restore-version-hint"]')).toBeTruthy() // the per-record version-N semantic is explained
+    expect(document.body.textContent).toContain('its own version') // the clearer copy
     input.value = '3'
     input.dispatchEvent(new Event('change'))
     expect(props.onPreviewVersion).toHaveBeenCalledWith(3)

@@ -607,6 +607,7 @@ import RestorePreviewDialog from '../components/RestorePreviewDialog.vue'
 import RestoreBatchDialog from '../components/RestoreBatchDialog.vue'
 import type { RestorePreviewChange, RestoreBatchPreviewRecord, RestoreBatchExecuteRecord } from '../api/client'
 import { buildBatchExpectedVersions } from '../utils/batch-restore-expected-versions'
+import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
 import MetaRecordDrawer from '../components/MetaRecordDrawer.vue'
 import MetaNotificationBell from '../components/MetaNotificationBell.vue'
@@ -1988,7 +1989,18 @@ const batchRestore = ref<{
   restoredCount: number
 }>({ visible: false, phase: 'preview', loading: false, targetVersion: 1, recordIds: [], records: [], scope: [], restorableCount: 0, skippedCount: 0, executable: false, identity: null, resultRecords: [], restoredCount: 0 })
 
+// Off-page record titles (UX follow-up): a record can only be SELECTED while it is loaded, so its title is in
+// grid.rows AT SELECTION TIME. Capture it then (no fetch, no restore-wire touch) so the label survives the row
+// later scrolling off / a view reset — the batch dialog then shows a real title instead of the bare recordId.
+const gridSelectionLabels = ref<Record<string, string>>({})
+function captureSelectionLabels(recordIds: string[]): void {
+  const pf = grid.visibleFields.value[0] as { id: string } | undefined
+  gridSelectionLabels.value = resolveSelectionLabels(recordIds, grid.rows.value as ReadonlyArray<{ id: string; data?: Record<string, unknown> }>, pf?.id, gridSelectionLabels.value)
+}
 const batchRecordLabel = (recordId: string): string => {
+  const captured = gridSelectionLabels.value[recordId]
+  if (captured) return captured
+  // belt-and-suspenders live lookup (dialog opened without a fresh capture); else the bare id
   const row = grid.rows.value.find((r: { id: string }) => r.id === recordId) as { data?: Record<string, unknown> } | undefined
   const pf = grid.visibleFields.value[0] as { id: string } | undefined
   const val = row && pf ? row.data?.[pf.id] : undefined
@@ -3302,6 +3314,7 @@ const exportInitialFormat = ref<'csv' | 'xlsx'>('xlsx')
 const exportSelectedRecordIds = ref<Set<string>>(new Set())
 function onGridSelectionChange(recordIds: string[]) {
   exportSelectedRecordIds.value = new Set(recordIds)
+  captureSelectionLabels(recordIds) // capture batch-restore titles while the rows are still loaded (off-page resolution)
 }
 
 // --- Export (A2: column/row selection via MetaExportDialog) ---

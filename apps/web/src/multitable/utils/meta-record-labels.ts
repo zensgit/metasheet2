@@ -48,7 +48,7 @@ export type MetaRecordLabelKey =
   | 'record.restorePreviewLoading' | 'record.restorePreviewSet' | 'record.restorePreviewUnset'
   // --- BS-4 scoped (multi-record) batch restore ---
   | 'record.batchRestoreTitle' | 'record.batchRestoreRevertOriginal' | 'record.batchRestoreAdvanced'
-  | 'record.batchRestoreVersionLabel' | 'record.batchRestoreSummaryRestorable' | 'record.batchRestoreSummarySkipped'
+  | 'record.batchRestoreVersionLabel' | 'record.batchRestoreVersionHint' | 'record.batchRestoreSummaryRestorable' | 'record.batchRestoreSummarySkipped'
   | 'record.batchRestoreLoading' | 'record.batchRestoreNoneRestorable' | 'record.batchRestoreConfirm'
   | 'record.batchRestoreCancel' | 'record.batchRestoreDone' | 'record.batchRestoreResultTitle'
   | 'record.batchRestoreRestored'
@@ -134,6 +134,7 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.batchRestoreRevertOriginal': { en: 'Revert selected records to their original version', zh: '将所选记录恢复到初始版本' },
   'record.batchRestoreAdvanced': { en: 'Advanced', zh: '高级' },
   'record.batchRestoreVersionLabel': { en: 'Restore to version', zh: '恢复到版本' },
+  'record.batchRestoreVersionHint': { en: 'Each record is restored to its own version of that number; records without it are skipped.', zh: '每条记录恢复到它自己的该版本号；没有该版本的记录会被跳过。' },
   'record.batchRestoreSummaryRestorable': { en: 'will be restored', zh: '将被恢复' },
   'record.batchRestoreSummarySkipped': { en: 'skipped', zh: '跳过' },
   'record.batchRestoreLoading': { en: 'Previewing…', zh: '预览中…' },
