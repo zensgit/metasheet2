@@ -67,6 +67,13 @@ function verify_windows_entrypoints() {
   fi
   search_fixed_string '[multitable-onprem-deploy-launcher]' "$launcher_helper" || die "launcher must self-identify in its logs"
   search_fixed_string 'Expand-StagingArchive' "$launcher_helper" || die "launcher must extract the supplied package into a staging directory before invoking the apply helper"
+  search_fixed_string "defaulting to short Windows staging root" "$launcher_helper" || die "launcher must default to a short Windows staging root when METASHEET_ONPREM_STAGING_ROOT is unset"
+  search_fixed_string "C:\ms-tmp" "$launcher_helper" || die "launcher must use C:\\ms-tmp as the built-in short Windows staging default"
+  search_fixed_string 'System.IO.Compression.ZipFile' "$launcher_helper" || die "launcher must use .NET ZipFile for zip extraction instead of Expand-Archive"
+  search_fixed_string 'ExtractToDirectory' "$launcher_helper" || die "launcher must extract zip archives with ZipFile.ExtractToDirectory"
+  if search_fixed_string 'Expand-Archive' "$launcher_helper"; then
+    die "launcher must not use Expand-Archive for zip deploy extraction; use .NET ZipFile so default zip deploy avoids Expand-Archive cleanup/path failures"
+  fi
   search_fixed_string 'Resolve-StagedPackageRoot' "$launcher_helper" || die "launcher must resolve the staged package root before invoking the apply helper"
   search_fixed_string 'METASHEET_ONPREM_STAGING_ROOT' "$launcher_helper" || die "launcher must support METASHEET_ONPREM_STAGING_ROOT for short Windows staging paths"
   search_fixed_string '-StagingRoot $stagingBase' "$launcher_helper" || die "launcher must pass its resolved staging base to the staged apply helper"
@@ -84,6 +91,13 @@ function verify_windows_entrypoints() {
 
   local apply_helper="${root}/scripts/ops/multitable-onprem-apply-package.ps1"
   search_fixed_string 'Refresh dependencies (cmd.exe /c pnpm install --frozen-lockfile)' "$apply_helper" || die "PowerShell apply helper must refresh dependencies on package apply through cmd.exe"
+  search_fixed_string "defaulting to short Windows staging root" "$apply_helper" || die "PowerShell apply helper must default to a short Windows staging root when METASHEET_ONPREM_STAGING_ROOT is unset"
+  search_fixed_string "C:\ms-tmp" "$apply_helper" || die "PowerShell apply helper must use C:\\ms-tmp as the built-in short Windows staging default"
+  search_fixed_string 'System.IO.Compression.ZipFile' "$apply_helper" || die "PowerShell apply helper must use .NET ZipFile for zip extraction instead of Expand-Archive"
+  search_fixed_string 'ExtractToDirectory' "$apply_helper" || die "PowerShell apply helper must extract zip archives with ZipFile.ExtractToDirectory"
+  if search_fixed_string 'Expand-Archive' "$apply_helper"; then
+    die "PowerShell apply helper must not use Expand-Archive for zip deploy extraction; use .NET ZipFile so default zip deploy avoids Expand-Archive cleanup/path failures"
+  fi
   search_fixed_string 'DependencyRefreshTimeoutSec' "$apply_helper" || die "PowerShell apply helper must expose dependency refresh timeout"
   search_fixed_string 'DependencyRefreshHeartbeatSec' "$apply_helper" || die "PowerShell apply helper must expose dependency refresh heartbeat"
   search_fixed_string 'METASHEET_ONPREM_STAGING_ROOT' "$apply_helper" || die "PowerShell apply helper must support METASHEET_ONPREM_STAGING_ROOT for short Windows extraction paths"
@@ -225,6 +239,7 @@ function verify_deployable_artifact_contract() {
   search_fixed_string '"dependencyInstallMode": "refresh-on-apply"' "$metadata_json" || die "PACKAGE-METADATA.json must document dependency refresh policy"
   search_fixed_string '"windowsEntryPoint": "deploy.bat <package.zip|package.tgz>"' "$metadata_json" || die "PACKAGE-METADATA.json must document the Windows entrypoint"
   search_fixed_string '"windowsStagingRootEnv": "METASHEET_ONPREM_STAGING_ROOT"' "$metadata_json" || die "PACKAGE-METADATA.json must document the Windows staging root environment override"
+  search_fixed_string '"windowsDefaultStagingRoot": "C:\\ms-tmp"' "$metadata_json" || die "PACKAGE-METADATA.json must document the built-in short Windows staging default"
 }
 
 function verify_build_provenance() {
@@ -675,17 +690,18 @@ function verify_no_macos_metadata_entries() {
   rm -f "$matches"
 }
 
-function verify_windows_zip_expand_archive_smoke() {
+function verify_windows_zip_zipfile_smoke() {
   local archive="$1"
   local smoke_root
   [[ "$archive" == *.zip ]] || return 0
-  command -v pwsh >/dev/null 2>&1 || die "pwsh is required to smoke Windows Expand-Archive behavior for zip packages"
+  command -v pwsh >/dev/null 2>&1 || die "pwsh is required to smoke Windows ZipFile extraction behavior for zip packages"
   smoke_root="$(mktemp -d)"
   PACKAGE_ARCHIVE="$(cd "$(dirname "$archive")" && pwd)/$(basename "$archive")" \
   EXTRACT_ROOT="$smoke_root" \
   pwsh -NoProfile -NonInteractive -Command '
     $ErrorActionPreference = "Stop"
-    Expand-Archive -LiteralPath $env:PACKAGE_ARCHIVE -DestinationPath $env:EXTRACT_ROOT -Force
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($env:PACKAGE_ARCHIVE, $env:EXTRACT_ROOT)
     $root = Get-Item -LiteralPath $env:EXTRACT_ROOT
     $candidates = @()
     if (
@@ -708,7 +724,7 @@ function verify_windows_zip_expand_archive_smoke() {
     }
   ' || {
     rm -rf "$smoke_root" || true
-    die "Windows Expand-Archive smoke failed for zip package"
+    die "Windows ZipFile extraction smoke failed for zip package"
   }
   rm -rf "$smoke_root"
 }
@@ -750,7 +766,7 @@ case "$PACKAGE_FILE" in
     archive_type="zip"
     command -v unzip >/dev/null 2>&1 || die "unzip is required to verify zip packages"
     unzip -q "$PACKAGE_FILE" -d "$EXTRACT_ROOT"
-    verify_windows_zip_expand_archive_smoke "$PACKAGE_FILE"
+    verify_windows_zip_zipfile_smoke "$PACKAGE_FILE"
     if command -v zipinfo >/dev/null 2>&1; then
       zipinfo -1 "$PACKAGE_FILE" > "$list_file"
     else
