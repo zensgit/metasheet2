@@ -86,15 +86,30 @@ the timeline can be added later without re-deriving the gate口径.
 Reuse from the record-history read API: access resolution (`resolveSheet…Capabilities`),
 deterministic pagination (`created_at DESC, id DESC`), actor-name enrichment
 (`resolveUserDisplayNames`). Do **NOT** reuse: `canRead`, per-record permission scope, or
-`loadAllowedFieldIds` / `redactRecordRevisionEntry` (the field-mask). Those are for record
-*values*; config history has none.
+`redactRecordRevisionEntry` (the RECORD field-mask) — those are for record *values*, of which
+config history has none. **`loadAllowedFieldIds` IS reused**, but only to drive the view-payload
+projection below (NOT as a record mask).
 
-## No field-mask (why it's safe)
+## Payload projection — no RECORD-mask, but VIEW filter literals ARE redacted
 
-`before`/`after` hold CONFIG — field schema, view config, permission grants, sheet rules. A
-caller who holds the manage capability for that entity manages that config and is entitled to
-see it in full. There are no per-record values and no per-record permissions in these rows, so
-there is nothing to field-mask; the capability gate is the complete control.
+For most rows the capability gate is the complete control: `before`/`after` hold CONFIG (field
+schema, permission grants, sheet rules) and a caller who holds the manage capability is entitled
+to see it in full. There is **no per-record-value field-mask** here — config history holds no
+record values.
+
+**Exception — `entity_type='view'` (LOCKED).** A view's `filterInfo.conditions[].value` literals
+are already classified as **field-read-sensitive**. The live view read redacts them per-requester
+via `redactViewConfigFilterLiterals(view, allowedFieldIds)` at *every* serialization site (#2052;
+proven by `multitable-viewconfig-filter-literal-redaction.test.ts` / R9 — a `canManageViews`
+caller who is field-DENIED must NOT see the denied field's literal). Since `canManageViews` does
+**not** imply field-read, returning historical `before`/`after.filterInfo` raw would **bypass that
+protection and leak the denied literal through history.** Therefore R3 MUST, for view rows, redact
+filter literals inside **both** `before` and `after` using the requester's `loadAllowedFieldIds(…)`
++ the exact `redactViewConfigFilterLiterals` semantics, BEFORE returning the row.
+
+This is a PAYLOAD projection layered on the access gate, and **distinct from it**: the gate decides
+*which rows* a caller sees; this decides *which filter literals within a view row*. All other entity
+types (`field`, `permission`, `sheet_config`) are returned in full to the endpoint's cap-holder.
 
 ## Read-side locks
 
@@ -102,12 +117,15 @@ there is nothing to field-mask; the capability gate is the complete control.
 - **L-R2 deterministic pagination** — `(sheet_id, created_at DESC, id DESC)`; stable cursor/offset.
 - **L-R3 read-only** — R3 never mutates. Restore/rollback is the *parked* Time-Machine write-side, NOT R3.
 - **L-R4 actor enrichment read-only** — display names only; no PII beyond the existing record-history read.
+- **L-R5 view filter-literal redaction** — view rows' `before`/`after.filterInfo` literals are redacted per-requester via `loadAllowedFieldIds` + `redactViewConfigFilterLiterals` (#2052/R9) before return; the manage gate alone is NOT sufficient for view payloads.
 
 ## Scope
 
 **IN R3:** the per-type read endpoints above (backend), gated symmetrically, paginated,
-actor-enriched; real-DB goldens for each entity type + each permission subtype + the
-fail-closed DENY cases.
+actor-enriched, with view-row filter-literal redaction (L-R5); real-DB goldens for each entity
+type + each permission subtype + the fail-closed DENY cases + the view-literal redaction (a
+field-denied view-manager reads view history WITHOUT the denied literal; a fully-allowed viewer
+sees it; field/sheet/permission payloads unmasked except by their cap gate).
 
 **OUT (later / separate gated opt-in):** the unified timeline; any FE surface; cross-sheet /
 cross-base config history; and all write-side restore/rollback.
@@ -117,9 +135,11 @@ cross-base config history; and all write-side restore/rollback.
 - 🔒 **R3-0** design-lock (this doc) — review + approve the gate口径 + endpoint shape before impl.
 - ⬜ **R3-1** `configHistoryRequiredCapability` predicate + unit tests (incl. fail-closed on unknown type / malformed permission scope).
 - ⬜ **R3-2** per-type read endpoints (fields / views / sheet-config) — cap gate + pagination + actor enrichment.
+- ⬜ **R3-2b** view-payload projection (L-R5) — redact `before`/`after.filterInfo` literals via `loadAllowedFieldIds` + `redactViewConfigFilterLiterals` in the view-history endpoint.
 - ⬜ **R3-3** permission-subtype endpoints (sheet / view / field) — each its own gate per the table.
-- ⬜ **R3-4** real-DB goldens: each surface returns only its rows; a caller with cap X reads X-rows and is 403'd on the others; malformed `entity_id` → DENY; pagination order stable.
+- ⬜ **R3-4** real-DB goldens: each surface returns only its rows; cap-X reads X-rows + is 403'd on the others; malformed `entity_id` → DENY; pagination stable; AND view-history filter-literal redaction (field-denied view-manager does NOT see the denied literal; fully-allowed sees it; field/sheet/permission payloads unmasked except by the cap gate).
 - ⬜ **R3-5** register the real-DB test in `plugin-tests.yml`.
 
-> Dependency: R3 reads what R2 records, so **#3130 (T9-R2) must be in `main` before R3 impl lands.**
-> Deferred items (unified timeline, FE) are each a separate explicit opt-in after R3 ships.
+> Dependency: R3 reads what R2 records — **#3130 (T9-R2) is merged on `main` (5defc2f9), so this is
+> satisfied.** (#3138 backfills R2's rollback goldens — test-only, lands independently, does not gate
+> the design.) Deferred items (unified timeline, FE) are each a separate explicit opt-in after R3 ships.
