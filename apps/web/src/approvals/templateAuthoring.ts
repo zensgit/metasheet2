@@ -2,6 +2,7 @@ import type {
   ApprovalAssigneeSource,
   ApprovalGraph,
   ApprovalMode,
+  ApprovalNode,
   ApprovalNodeConfig,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateVisibilityScope,
@@ -541,6 +542,58 @@ function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): b
   return false
 }
 
+// The COMPLEX-path config shapes the backend re-emits for the OTHER node types (same silent-drop
+// risk as approval): cc → {targetType, targetIds} (ApprovalProductService.ts:920-923); parallel →
+// {branches, joinMode, joinNodeKey} (:946-950); condition → {branches, defaultEdgeKey} with each
+// branch {edgeKey, conjunction?, rules} and each rule {fieldId, operator, value?} (:956-985 — the
+// rule `value` is a free leaf, NOT shape-checked); start/end → {} (default, :988).
+const BACKEND_CC_CONFIG_KEYS = ['targetType', 'targetIds']
+const BACKEND_PARALLEL_CONFIG_KEYS = ['branches', 'joinMode', 'joinNodeKey']
+const BACKEND_CONDITION_CONFIG_KEYS = ['branches', 'defaultEdgeKey']
+const BACKEND_CONDITION_BRANCH_KEYS = ['edgeKey', 'conjunction', 'rules']
+const BACKEND_CONDITION_RULE_KEYS = ['fieldId', 'operator', 'value']
+
+/**
+ * True when a complex node's config carries a key the backend `normalizeApprovalGraph` does NOT
+ * re-emit (and silently drops on save) — generalises the approval-node shape-check to EVERY node
+ * type. cc/parallel are flat; condition recurses config → branches[] → rules[]; start/end re-emit
+ * {} so any config key is dropped. Without this a save flattens the unknown key while the FE
+ * deep-equal round-trip looks clean.
+ */
+function complexNodeConfigHasBackendDrop(node: ApprovalNode): boolean {
+  const config = (node.config ?? {}) as Record<string, unknown>
+  switch (node.type) {
+    case 'approval':
+      return complexApprovalConfigHasBackendDrop(config)
+    case 'cc':
+      return hasKeyOutside(config, BACKEND_CC_CONFIG_KEYS)
+    case 'parallel':
+      return hasKeyOutside(config, BACKEND_PARALLEL_CONFIG_KEYS)
+    case 'condition': {
+      if (hasKeyOutside(config, BACKEND_CONDITION_CONFIG_KEYS)) return true
+      const branches = config.branches
+      if (Array.isArray(branches)) {
+        for (const branch of branches) {
+          if (!isPlainRecord(branch) || hasKeyOutside(branch, BACKEND_CONDITION_BRANCH_KEYS)) return true
+          const rules = branch.rules
+          if (Array.isArray(rules)) {
+            for (const rule of rules) {
+              if (!isPlainRecord(rule) || hasKeyOutside(rule, BACKEND_CONDITION_RULE_KEYS)) return true
+            }
+          }
+        }
+      }
+      return false
+    }
+    case 'start':
+    case 'end':
+      // backend re-emits {} for these — any config key would be silently dropped.
+      return Object.keys(config).length > 0
+    default:
+      return false
+  }
+}
+
 export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDetailDTO): string | null {
   const unsupportedField = template.formSchema.fields.find((field) => !isAuthorableFieldType(field.type))
   if (unsupportedField) {
@@ -560,18 +613,14 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
   }
 
   // Complex graphs (cc/condition/parallel or non-linear) are load-preserved verbatim via
-  // spread-original-first — BUT the backend `normalizeApprovalGraph` rebuilds each approval node's
-  // config from a fixed allowlist and silently DROPS any other key on save. The FE deep-equal
-  // round-trip can't see that drop, so fail-closed: a complex approval node carrying a config key the
-  // backend won't preserve is unsupported (read-only, save disabled), never silently flattened.
+  // spread-original-first — BUT the backend `normalizeApprovalGraph` rebuilds EVERY node's config
+  // from a fixed per-type allowlist and silently DROPS any other key (top-level or nested) on save.
+  // The FE deep-equal round-trip can't see that drop, so fail-closed: ANY node carrying a config key
+  // the backend won't preserve is unsupported (read-only, save disabled), never silently flattened.
   if (isComplexApprovalGraph(template.approvalGraph)) {
-    const unsupportedComplexApproval = template.approvalGraph.nodes.find(
-      (node) =>
-        node.type === 'approval'
-        && complexApprovalConfigHasBackendDrop(node.config as Record<string, unknown>),
-    )
-    if (unsupportedComplexApproval) {
-      return `审批节点含后端不会保留的配置（保存将丢失），已锁定为只读：${unsupportedComplexApproval.name || unsupportedComplexApproval.key}`
+    const unsupportedNode = template.approvalGraph.nodes.find((node) => complexNodeConfigHasBackendDrop(node))
+    if (unsupportedNode) {
+      return `节点含后端不会保留的配置（保存将丢失），已锁定为只读：${unsupportedNode.name || unsupportedNode.key}（${unsupportedNode.type}）`
     }
     return null
   }

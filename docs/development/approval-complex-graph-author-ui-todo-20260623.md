@@ -115,11 +115,10 @@
   doc's deferral premise was factually wrong. Re-scoped OUT of "out of scope" — pending owner
   ratification (see the G-3 PR body). The OTHER parallel limits (nested parallel, editing
   branches/joinNodeKey topology) remain out of scope.
-- 🔜 **FOLLOW-UP (G-5 review, NAMED not fixed): cc / condition / parallel config unknown-key
-  fail-closed.** G-5 added `complexApprovalConfigHasBackendDrop` (top-level + nested) for `approval`
-  nodes ONLY. The SAME latent gap exists for cc/condition/parallel: the backend rebuilds those configs
-  from fixed shapes (e.g. cc → `{targetType, targetIds}`, ApprovalProductService.ts:920-923) and
-  silently drops any other key, while the FE spread-preserves it → save-flatten the FE round-trip
-  can't see. Pre-existing since G-2/3/4, outside G-5's stated scope; needs a sibling shape-check pass
-  (their nested shapes — condition `branches[].rules[]`, parallel `branches[]` — are deeper, so size
-  it separately). Tracked here as a declared boundary.
+- ✅ **FOLLOW-UP DONE — cc / condition / parallel config unknown-key fail-closed.**
+  `complexNodeConfigHasBackendDrop` generalises the approval shape-check to EVERY node type: cc →
+  `{targetType, targetIds}`, parallel → `{branches, joinMode, joinNodeKey}`, condition → recurses
+  config → `branches[].{edgeKey, conjunction, rules}` → `rules[].{fieldId, operator, value}` (the
+  rule `value` is a free leaf, NOT shape-checked), start/end → `{}`. Any unknown key — top-level or
+  nested — on ANY complex node now → unsupported (read-only, save disabled), never silently flattened
+  on save. 11 tests; the whole complex graph-save surface is fail-closed for unknown keys.
