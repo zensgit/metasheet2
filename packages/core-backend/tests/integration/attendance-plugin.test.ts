@@ -5968,6 +5968,12 @@ attendanceIntegrationDescribe(
       const multiRes = await createOvertime({ minutes: 200, requestedInAt: zonedUtcIso(workDate, '23:00', tz), requestedOutAt: zonedUtcIso(farDate, '01:00', tz) })
       expect(multiRes.status).toBe(422)
       expect((multiRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED')
+
+      // NS-4 staging contract: reversed overtime windows surface the overtime-specific code at the route layer,
+      // not the generic request VALIDATION_ERROR used by non-overtime request types.
+      const reversedRes = await createOvertime({ minutes: 60, requestedInAt: zonedUtcIso(workDate, '10:00', tz), requestedOutAt: zonedUtcIso(workDate, '09:00', tz) })
+      expect(reversedRes.status).toBe(422)
+      expect((reversedRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('OVERTIME_INVALID_TIME_WINDOW')
     } finally {
       // §P2: restore the GLOBAL segmentation setting so later tests don't run under enabled=true.
       if (token && Object.keys(originalSettings).length > 0) {

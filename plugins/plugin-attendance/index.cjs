@@ -23922,6 +23922,14 @@ module.exports = {
       const requestedOutAt = parseDateInput(requestedOutSource)
 
       if (requestedInAt && requestedOutAt && requestedOutAt <= requestedInAt) {
+        if (requestType === 'overtime') {
+          throw new HttpError(
+            422,
+            'OVERTIME_INVALID_TIME_WINDOW',
+            'Invalid overtime time window',
+            singleValidationDetail('requestedOutAt', 'Must be after requestedInAt')
+          )
+        }
         throw new HttpError(
           400,
           'VALIDATION_ERROR',
