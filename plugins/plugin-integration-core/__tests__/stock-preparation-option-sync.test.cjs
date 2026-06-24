@@ -13,6 +13,7 @@ const {
   StockPreparationOptionSyncError,
   optionSetsFromInput,
   syncStockPreparationOptions,
+  syncStockPreparationSandboxOptions,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-option-sync.cjs'))
 
 const FIELD_IDS = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id)
@@ -166,6 +167,53 @@ async function main() {
   assert.ok(!evidenceText.includes('Casting'), 'evidence must not include option labels')
   assert.ok(!evidenceText.includes('sheet_stock_preparation'), 'evidence must not include sheet id')
 
+  const sandboxObjectId = 'plm_stock_preparation_sandbox_validation'
+  const { context: sandboxContext, calls: sandboxCalls } = createContext({ ready: true })
+  const sandboxResult = await syncStockPreparationSandboxOptions({
+    context: sandboxContext,
+    projectId: 'tenant_1:integration-core',
+    objectId: sandboxObjectId,
+    permission: 'admin',
+    optionSets: {
+      material_type: [{ value: 'plate', label: 'Plate' }],
+      blank_type: [{ value: 'casting', label: 'Casting' }],
+      stock_preparation_status: [{ value: 'pending', label: 'Pending' }],
+    },
+  })
+  assert.equal(sandboxResult.ok, true)
+  assert.ok(sandboxResult.target.objectIdHash, 'sandbox option sync returns only an object hash')
+  assert.equal(Object.prototype.hasOwnProperty.call(sandboxResult.target, 'objectId'), false)
+  assert.equal(sandboxCalls.patchObjectFieldProperty.length, 4, 'sandbox sync seeds contract + three config_info fields')
+  assert.ok(
+    sandboxCalls.patchObjectFieldProperty.every((call) => call.objectId === sandboxObjectId),
+    'sandbox option sync patches only the sandbox object id',
+  )
+  const sandboxEvidence = JSON.stringify(sandboxResult.evidence)
+  assert.equal(sandboxEvidence.includes(sandboxObjectId), false, 'sandbox option evidence hides object id')
+  assert.equal(sandboxEvidence.includes('sheet_stock_preparation'), false, 'sandbox option evidence hides sheet id')
+  assert.equal(sandboxEvidence.includes('plate'), false, 'sandbox option evidence hides option values')
+  assert.equal(sandboxEvidence.includes('Casting'), false, 'sandbox option evidence hides option labels')
+
+  const { context: sandboxDefaultContext, calls: sandboxDefaultCalls } = createContext({ ready: true })
+  const sandboxDefaultResult = await syncStockPreparationSandboxOptions({
+    context: sandboxDefaultContext,
+    projectId: 'tenant_1:integration-core',
+    objectId: sandboxObjectId,
+    permission: 'admin',
+  })
+  assert.equal(sandboxDefaultResult.ok, true)
+  assert.equal(
+    sandboxDefaultCalls.patchObjectFieldProperty.length,
+    1,
+    'sandbox sync without config_info still seeds the contract decision options only',
+  )
+  assert.equal(sandboxDefaultCalls.patchObjectFieldProperty[0].fieldId, 'lastPlmRefreshDecision')
+  assert.equal(sandboxDefaultResult.evidence.skipped.length, 3, 'sandbox sync records config_info fields as skipped when not supplied')
+  assert.ok(
+    sandboxDefaultResult.evidence.skipped.every((entry) => entry.reason === 'config_info_not_supplied'),
+    'sandbox sync skip evidence is reason/count metadata only',
+  )
+
   const notReady = createContext({ ready: false })
   await rejectsWith(
     () => syncStockPreparationOptions({
@@ -229,6 +277,27 @@ async function main() {
     }),
     'OPTION_SYNC_CONFIG_INVALID',
   )
+
+  const executableKeyContext = createContext()
+  const executableKeyError = await rejectsWith(
+    () => syncStockPreparationSandboxOptions({
+      context: executableKeyContext.context,
+      projectId: 'tenant_1:integration-core',
+      objectId: sandboxObjectId,
+      permission: 'admin',
+      optionSets: {
+        material_type: [{
+          value: 'plate',
+          rawSQL: 'select * from private_table',
+          functionBody: 'return 1',
+          payloadTemplate: { value: 'hidden' },
+        }],
+      },
+    }),
+    'OPTION_SYNC_EXECUTABLE_REJECTED',
+  )
+  assert.equal(executableKeyContext.calls.patchObjectFieldProperty.length, 0, 'executable-like option keys fail before patching metadata')
+  assert.equal(JSON.stringify(executableKeyError.details).includes('private_table'), false, 'executable-key error details hide raw values')
 
   await rejectsWith(
     () => syncStockPreparationOptions({

@@ -64,6 +64,14 @@ function assertSandboxObjectId(value, field = 'objectId') {
       { reason: 'prod_canonical' },
     )
   }
+  if (!/^plm_stock_preparation_sandbox(?:$|[_-])/.test(objectId)) {
+    throw new StockPreparationTargetProvisioningError(
+      422,
+      'TARGET_SANDBOX_OBJECT_ID_INVALID',
+      'sandbox stock-preparation target objectId must use the stock-preparation sandbox namespace',
+      { reason: 'not_sandbox_namespace' },
+    )
+  }
   return objectId
 }
 
@@ -423,6 +431,8 @@ module.exports = {
   StockPreparationTargetProvisioningError,
   buildStockPreparationTargetDescriptor,
   summarizeStockPreparationTargetReadiness,
+  hashEvidenceValue,
+  sandboxStockPreparationTemplate,
   inspectStockPreparationCanonicalTarget,
   inspectStockPreparationSandboxTarget,
   ensureStockPreparationCanonicalTarget,

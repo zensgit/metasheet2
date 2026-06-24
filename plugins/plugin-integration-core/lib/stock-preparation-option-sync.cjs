@@ -11,7 +11,10 @@ const {
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
 const {
+  hashEvidenceValue,
   inspectStockPreparationCanonicalTarget,
+  inspectStockPreparationSandboxTarget,
+  sandboxStockPreparationTemplate,
 } = require('./stock-preparation-target-provisioning.cjs')
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
@@ -34,6 +37,31 @@ const FORBIDDEN_EXECUTABLE_KEYS = Object.freeze([
   'payload',
   'query',
   'rawSql',
+  'script',
+  'sql',
+  'url',
+])
+
+const ALLOWED_OPTION_KEYS = Object.freeze([
+  'actionBindings',
+  'actions',
+  'color',
+  'enabled',
+  'label',
+  'order',
+  'value',
+])
+
+const FORBIDDEN_EXECUTABLE_KEY_PATTERNS = Object.freeze([
+  'body',
+  'command',
+  'endpoint',
+  'function',
+  'handler',
+  'javascript',
+  'payload',
+  'query',
+  'rawsql',
   'script',
   'sql',
   'url',
@@ -89,6 +117,16 @@ function isRedactedMarker(value) {
   return /\[redacted[^\]]*\]|<redacted[^>]*>/i.test(value)
 }
 
+function normalizedKeyFingerprint(key) {
+  return String(key).toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+function isForbiddenExecutableKey(key) {
+  const fingerprint = normalizedKeyFingerprint(key)
+  return FORBIDDEN_EXECUTABLE_KEYS.some((forbidden) => normalizedKeyFingerprint(forbidden) === fingerprint) ||
+    FORBIDDEN_EXECUTABLE_KEY_PATTERNS.some((pattern) => fingerprint.includes(pattern))
+}
+
 function assertSafeString(value, field) {
   const str = requiredString(value, field)
   if (isRedactedMarker(str) || /<[^>]+>/.test(str)) {
@@ -102,8 +140,8 @@ function assertSafeString(value, field) {
 
 function assertNoExecutableKeys(value, field) {
   if (!isPlainObject(value)) return
-  for (const key of FORBIDDEN_EXECUTABLE_KEYS) {
-    if (key in value) {
+  for (const key of Object.keys(value)) {
+    if (isForbiddenExecutableKey(key)) {
       throw new StockPreparationOptionSyncError(422, 'OPTION_SYNC_EXECUTABLE_REJECTED', `${field} must not carry executable key ${key}`, {
         field: `${field}.${key}`,
       })
@@ -177,6 +215,13 @@ function normalizeOption(input, index, sourceKey) {
     throw new StockPreparationOptionSyncError(422, 'OPTION_SYNC_CONFIG_INVALID', `${field} must be an object`, { field })
   }
   assertNoExecutableKeys(input, field)
+  for (const key of Object.keys(input)) {
+    if (!ALLOWED_OPTION_KEYS.includes(key)) {
+      throw new StockPreparationOptionSyncError(422, 'OPTION_SYNC_CONFIG_INVALID', `${field}.${key} is not supported`, {
+        field: `${field}.${key}`,
+      })
+    }
+  }
   const value = assertSafeString(input.value, `${field}.value`)
   const option = { value }
   const label = optionalString(input.label)
@@ -253,9 +298,12 @@ function templateOptionFields(template) {
   return template.fields.filter((field) => field.type === 'select' && field.optionSource)
 }
 
-function summarizeOptionSyncEvidence({ template, synced, skipped }) {
+function summarizeOptionSyncEvidence({ template, synced, skipped, includeObjectId = true }) {
+  const targetIdentity = includeObjectId
+    ? { objectId: template.objectId }
+    : { objectIdHash: hashEvidenceValue(template.objectId) }
   return {
-    objectId: template.objectId,
+    ...targetIdentity,
     fields: synced.map((entry) => ({
       field: entry.field,
       optionSource: { ...entry.optionSource },
@@ -310,22 +358,28 @@ function publicOptionSyncConfig(input = {}) {
   }
 }
 
-async function syncStockPreparationOptions(input = {}) {
+async function syncStockPreparationOptionsForTarget(input = {}) {
   const context = input.context || {}
   const provisioning = getOptionSyncProvisioningApi(context)
   assertAdminPermission(input.permission)
   const projectId = assertSafeString(input.projectId, 'projectId')
   const template = normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
-  const inspected = await inspectStockPreparationCanonicalTarget({
-    context,
-    projectId,
-    permission: REQUIRED_PERMISSION,
-    template,
-  })
+  const includeObjectId = input.includeObjectId !== false
+  const inspectTarget = typeof input.inspectTarget === 'function'
+    ? input.inspectTarget
+    : () => inspectStockPreparationCanonicalTarget({
+        context,
+        projectId,
+        permission: REQUIRED_PERMISSION,
+        template,
+      })
+  const inspected = await inspectTarget()
   if (!inspected.ready) {
     throw new StockPreparationOptionSyncError(422, 'OPTION_SYNC_TARGET_NOT_READY', 'stock-preparation target must be ready before option sync', {
       mode: inspected.mode,
-      targetObjectId: template.objectId,
+      ...(includeObjectId
+        ? { targetObjectId: template.objectId }
+        : { targetObjectIdHash: hashEvidenceValue(template.objectId) }),
       missingFields: inspected.evidence && inspected.evidence.missingFields,
     })
   }
@@ -336,7 +390,9 @@ async function syncStockPreparationOptions(input = {}) {
   if (unknownSourceKey) {
     throw new StockPreparationOptionSyncError(422, 'OPTION_SYNC_UNKNOWN_SOURCE', 'option set source key is not declared by the stock-preparation template', {
       sourceKey: unknownSourceKey,
-      targetObjectId: template.objectId,
+      ...(includeObjectId
+        ? { targetObjectId: template.objectId }
+        : { targetObjectIdHash: hashEvidenceValue(template.objectId) }),
     })
   }
   // FOS-2: delegate the loop / skip / patch / error-if-none to the shared kernel. The patch body,
@@ -378,7 +434,9 @@ async function syncStockPreparationOptions(input = {}) {
         }),
       noFieldsSynced: ({ targetObjectId, skipped: skippedEntries }) =>
         new StockPreparationOptionSyncError(422, 'OPTION_SYNC_NO_FIELDS', 'no stock-preparation option fields were synchronized', {
-          targetObjectId,
+          ...(includeObjectId
+            ? { targetObjectId }
+            : { targetObjectIdHash: hashEvidenceValue(targetObjectId) }),
           skipped: skippedEntries.map((entry) => ({ field: entry.field, reason: entry.reason })),
         }),
     },
@@ -393,11 +451,40 @@ async function syncStockPreparationOptions(input = {}) {
   return {
     ok: true,
     target: {
-      objectId: template.objectId,
+      ...(includeObjectId
+        ? { objectId: template.objectId }
+        : { objectIdHash: hashEvidenceValue(template.objectId) }),
       fieldCount: synced.length,
     },
-    evidence: summarizeOptionSyncEvidence({ template, synced, skipped }),
+    evidence: summarizeOptionSyncEvidence({ template, synced, skipped, includeObjectId }),
   }
+}
+
+async function syncStockPreparationOptions(input = {}) {
+  return syncStockPreparationOptionsForTarget(input)
+}
+
+async function syncStockPreparationSandboxOptions(input = {}) {
+  const context = input.context || {}
+  const projectId = assertSafeString(input.projectId, 'projectId')
+  const template = sandboxStockPreparationTemplate({
+    objectId: input.objectId,
+    label: input.label,
+  })
+  return syncStockPreparationOptionsForTarget({
+    ...input,
+    context,
+    projectId,
+    template,
+    includeObjectId: false,
+    inspectTarget: () => inspectStockPreparationSandboxTarget({
+      context,
+      projectId,
+      objectId: input.objectId,
+      label: input.label,
+      permission: REQUIRED_PERMISSION,
+    }),
+  })
 }
 
 module.exports = {
@@ -407,6 +494,7 @@ module.exports = {
   StockPreparationOptionSyncError,
   optionSetsFromInput,
   syncStockPreparationOptions,
+  syncStockPreparationSandboxOptions,
   summarizeOptionSyncEvidence,
   __internals: {
     isPlainObject,
