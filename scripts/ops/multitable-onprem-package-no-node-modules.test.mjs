@@ -157,15 +157,15 @@ test('on-prem zip verifier fallback lists full archive depth', () => {
   )
 })
 
-test('on-prem zip verifier smokes Windows Expand-Archive package-root layout', () => {
+test('on-prem zip verifier smokes Windows ZipFile package-root layout', () => {
   assert.match(
     verifyScript,
-    /function verify_windows_zip_expand_archive_smoke\(\)/,
-    'zip verification should include a Windows Expand-Archive smoke',
+    /function verify_windows_zip_zipfile_smoke\(\)/,
+    'zip verification should include a Windows ZipFile smoke',
   )
   assert.match(
     verifyScript,
-    /Expand-Archive -LiteralPath \$env:PACKAGE_ARCHIVE -DestinationPath \$env:EXTRACT_ROOT -Force/,
+    /\[System\.IO\.Compression\.ZipFile\]::ExtractToDirectory\(\$env:PACKAGE_ARCHIVE, \$env:EXTRACT_ROOT\)/,
     'the smoke should use the same PowerShell extraction primitive as Windows deploy',
   )
   assert.match(

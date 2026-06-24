@@ -367,8 +367,9 @@ Upgrade / corrective reroll:
   deploy root, run:
     deploy.bat <downloaded-package.zip>
 
-  On Windows hosts whose default %TEMP% path is deep or redirected, pin staging
-  to a short local root before running deploy.bat:
+  Windows deploy defaults staging to C:\ms-tmp when no override is supplied, so
+  .zip and .tgz applies avoid deep %TEMP% / MAX_PATH failures by default. You
+  can still pin a different short local root before running deploy.bat:
     mkdir C:\ms-tmp 2>NUL
     set "METASHEET_ONPREM_STAGING_ROOT=C:\ms-tmp"
     deploy.bat <downloaded-package.zip>
@@ -401,6 +402,7 @@ EOF
   "dependencyInstallMode": "refresh-on-apply",
   "windowsEntryPoint": "deploy.bat <package.zip|package.tgz>",
   "windowsStagingRootEnv": "METASHEET_ONPREM_STAGING_ROOT",
+  "windowsDefaultStagingRoot": "C:\\\\ms-tmp",
   "linuxEntryPoint": "scripts/ops/multitable-onprem-package-install.sh",
   "includedRuntimeRoots": [
     "apps/web/dist",
@@ -614,8 +616,8 @@ Runtime dependencies:
   from the package root before migrations/bootstrap.
 
 Windows staging root:
-  If the host's default %TEMP% path is deep, redirected, or fails package
-  staging, create a short local directory and set METASHEET_ONPREM_STAGING_ROOT
+  The Windows helpers default staging to C:\ms-tmp when no override is supplied.
+  If you need a different short local directory, set METASHEET_ONPREM_STAGING_ROOT
   before running deploy.bat:
     mkdir C:\ms-tmp 2>NUL
     set "METASHEET_ONPREM_STAGING_ROOT=C:\ms-tmp"
@@ -651,6 +653,7 @@ cat > "${METADATA_JSON_TMP_PATH}" <<EOF
   "nodeModulesBundled": false,
   "windowsEntryPoint": "deploy.bat <package.zip|package.tgz>",
   "windowsStagingRootEnv": "METASHEET_ONPREM_STAGING_ROOT",
+  "windowsDefaultStagingRoot": "C:\\\\ms-tmp",
   "attendanceOnly": false,
   "productMode": "platform",
   "includedPlugins": ["plugin-attendance", "plugin-integration-core"],

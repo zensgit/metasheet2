@@ -283,7 +283,7 @@ The packaged root now also includes Windows-native wrappers:
 
 These wrappers now call `scripts/ops/multitable-onprem-apply-package.ps1`, so a plain Windows Server 2022 host does not need bash or WSL just to apply a corrective package reroll.
 
-The PowerShell helper extracts the incoming archive into a short-lived system temp directory instead of a deep deploy-root subdirectory, which avoids common Windows long-path failures during `Expand-Archive`.
+The PowerShell helper extracts the incoming archive into a short staging root. By default on Windows it uses `C:\ms-tmp` when `METASHEET_ONPREM_STAGING_ROOT` is unset; set that environment variable only if you need a different short local directory. Zip packages are extracted through `.NET ZipFile` instead of `Expand-Archive`, so the default deploy path avoids the prior `Expand-Archive` cleanup/path failure class as well as deep `%TEMP%` / `MAX_PATH` failures.
 
 The package intentionally does **not** bundle `node_modules`. `deploy.bat`
 defaults to `InstallDeps=1` and refreshes dependencies with
