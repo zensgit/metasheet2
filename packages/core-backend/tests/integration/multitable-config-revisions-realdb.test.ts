@@ -36,6 +36,11 @@ const patchFormShare = (viewId: string, body: Record<string, unknown>) =>
   request(app).patch(`/api/multitable/sheets/${SHEET}/views/${viewId}/form-share`).send(body)
 const regenerateFormShare = (viewId: string) =>
   request(app).post(`/api/multitable/sheets/${SHEET}/views/${viewId}/form-share/regenerate`).send({})
+const grantActorSheetAdmin = () => q(
+  `INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code)
+   VALUES ($1, 'user', $2, 'spreadsheet:admin')`,
+  [SHEET, ACTOR],
+)
 const permissionEntityId = (scope: 'field' | 'sheet' | 'view', parts: string[]) => `${scope}:${JSON.stringify(parts)}`
 const configRevs = async (entityId?: string) => (await q(
   `SELECT entity_type, entity_id, action, before, after, changed_keys, batch_id, actor_id
@@ -53,6 +58,7 @@ describeIfDatabase('multitable config-revisions recording — T9-R1 (real DB)', 
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'CR Sheet'])
     await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
     await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [SUBJECT])
+    await grantActorSheetAdmin()
   })
 
   afterAll(async () => {
@@ -72,6 +78,7 @@ describeIfDatabase('multitable config-revisions recording — T9-R1 (real DB)', 
     await q('DELETE FROM meta_view_permissions WHERE view_id IN (SELECT id FROM meta_views WHERE sheet_id = $1)', [SHEET]).catch(() => {})
     await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
+    await grantActorSheetAdmin()
     await q('DELETE FROM meta_views WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET])
     await q("UPDATE meta_sheets SET row_level_read_permissions_enabled = false, conditional_read_rules = '[]'::jsonb WHERE id = $1", [SHEET])
