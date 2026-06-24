@@ -1459,6 +1459,9 @@ export class AutomationService {
     const lockRow = lockRes.rows[0] as { locked?: unknown; locked_by?: unknown; created_by?: unknown } | undefined
     if (!lockRow) return // record gone — the resume's own missing-record path already handled it
     ensureRecordNotLocked(event.actor?.id ?? null, lockRow, () => new Error('source record is locked'))
+    // rich-longText SAFE: patch carries ONLY system outcome values (status enum / approver id / ISO
+    // timestamp), never user-supplied longText — classified SAFE in the rich-longText write-sink guard.
+    // lock-guarded: the backwrite respects the source record lock via ensureRecordNotLocked just above (B1).
     await this.queryFn(
       `UPDATE meta_records
        SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, version = version + 1, updated_at = NOW()
