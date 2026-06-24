@@ -1,6 +1,6 @@
 # Attendance staging smoke — NS-4 (cross-midnight overtime) + TA-4 (team availability)
 
-> **Status**: PREPARED (environment-free). Run on staging when the channel is available; fill the PASS stamps below with the **deploy SHA**, **date**, **result**, and **residue=0** confirmation. These are the two remaining gates for #8 (NS-4) and #6 (TA-4); all underlying code is on `main`.
+> **Status**: ✅ **PASS / CLOSED** (2026-06-24). Both smokes ran end-to-end on staging at deploy SHA `be16791d5`, both **PASS**, **residue=0** — see the filled stamps below. #8 (NS-4) and #6 (TA-4) are fully closed (code on `main` + staging-validated).
 
 > **Conventions**: each smoke is end-to-end through the real staging route + DB. Use a disposable test user/group/dates so cleanup leaves **zero residue**. Record the exact `git rev-parse HEAD` deployed (must include the SHAs noted per section). Restore any global setting you toggle.
 
@@ -32,7 +32,7 @@
 - Delete the created overtime requests + their `attendance_events`; delete the holiday + overtime rule; **restore** the original settings; delete `attendance_records` for the test user/dates.
 - **Residue check** (must be 0): `attendance_requests`, `attendance_events`, `attendance_records`, `attendance_holidays`, `attendance_overtime_rules` — every one for the test user/dates/rule (an orphaned event or leftover rule is a false-green).
 
-**PASS stamp** — deploy SHA: `__________` · date: `__________` · result: `PASS / FAIL` · residue=0: `☐` · notes: `__________`
+**PASS stamp** — stamp: `ns4-pass-sb2u88xu` · deploy SHA: `be16791d5` · date: `2026-06-24` · result: ✅ `PASS` · residue=0: ☑ · notes: covered one-midnight accepted · per-own-date conserved buckets · D+1 holiday bucket · approve recompute byte-identical · multi-midnight reject · off-workDate reject · reversed → 422 `OVERTIME_INVALID_TIME_WINDOW` (#3128) · same-day regression · record/report/summary aggregated buckets.
 
 ---
 
@@ -59,10 +59,10 @@
 - Delete the test group + members + the pending leave request.
 - **Residue check** (must be 0): `attendance_group_members`, `attendance_groups`, `attendance_requests` for the test group/user.
 
-**PASS stamp** — deploy SHA: `__________` · date: `__________` · result: `PASS / FAIL` · residue=0: `☐` · notes: `__________`
+**PASS stamp** — stamp: `ns4-ta4-mqro9by8` · deploy SHA: `be16791d5` · date: `2026-06-24` · result: ✅ `PASS` · residue=0: ☑ · notes: pending_leave distinct + provisional UI "待审批，未生效" · availableFormal counts pending · group-only / scope / non-existent guards · stale-clear · display-only.
 
 ---
 
 ## Sign-off
 
-Both smokes PASS, residue=0, on a deploy SHA containing the noted PRs → NS-4 and TA-4 are closed and the #8 cross-midnight + #6 team-availability arcs are fully validated end-to-end on staging. Record the SHAs above and the operator who ran them.
+✅ **Closed 2026-06-24.** Both smokes ran end-to-end on staging at deploy SHA `be16791d5` (health ok; migration `zzzz20260624120000_create_meta_config_revisions` applied) — **NS-4 `ns4-pass-sb2u88xu` PASS / residue=0** and **TA-4 `ns4-ta4-mqro9by8` PASS / residue=0**. #8 cross-midnight overtime and #6 team-availability are fully validated end-to-end on staging; temporary worktrees and local branches cleaned up. NS-4 and TA-4 are **closed**.
