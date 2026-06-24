@@ -21,6 +21,12 @@ ARCHIVE_TGZ_TMP_PATH="${TMP_OUTPUT_DIR}/${PACKAGE_NAME}.tgz"
 ARCHIVE_ZIP_TMP_PATH="${TMP_OUTPUT_DIR}/${PACKAGE_NAME}.zip"
 ARCHIVE_TGZ_SHA_TMP_PATH="${ARCHIVE_TGZ_TMP_PATH}.sha256"
 ARCHIVE_ZIP_SHA_TMP_PATH="${ARCHIVE_ZIP_TMP_PATH}.sha256"
+BOOTSTRAP_PS1_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}-deploy-bootstrap.ps1"
+BOOTSTRAP_BAT_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}-deploy-bootstrap.bat"
+BOOTSTRAP_PS1_TMP_PATH="${TMP_OUTPUT_DIR}/${PACKAGE_NAME}-deploy-bootstrap.ps1"
+BOOTSTRAP_BAT_TMP_PATH="${TMP_OUTPUT_DIR}/${PACKAGE_NAME}-deploy-bootstrap.bat"
+BOOTSTRAP_PS1_SHA_TMP_PATH="${BOOTSTRAP_PS1_TMP_PATH}.sha256"
+BOOTSTRAP_BAT_SHA_TMP_PATH="${BOOTSTRAP_BAT_TMP_PATH}.sha256"
 METADATA_JSON_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}.json"
 METADATA_JSON_TMP_PATH="${TMP_OUTPUT_DIR}/${PACKAGE_NAME}.json"
 CHECKSUM_FILE="${OUTPUT_DIR}/SHA256SUMS"
@@ -333,6 +339,29 @@ exit /b %ERRORLEVEL%
 EOF
 }
 
+function write_windows_first_hop_bootstrap_assets() {
+  cp "${ROOT_DIR}/scripts/ops/multitable-onprem-deploy-launcher.ps1" "$BOOTSTRAP_PS1_TMP_PATH"
+
+  cat > "$BOOTSTRAP_BAT_TMP_PATH" <<EOF
+@echo off
+setlocal
+if "%~1"=="" (
+  echo Usage: ${PACKAGE_NAME}-deploy-bootstrap.bat ^<package.zip^|package.tgz^> [installed-root]
+  exit /b 64
+)
+set "INSTALL_ROOT=%~2"
+if "%INSTALL_ROOT%"=="" set "INSTALL_ROOT=%cd%"
+REM First-hop bootstrap sidecar. Use this from a release download when the
+REM already-installed deploy.bat/launcher is too old to stage the new package
+REM under C:\ms-tmp. It intentionally bypasses the installed launcher and runs
+REM the fresh launcher sidecar next to this .bat file.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0${PACKAGE_NAME}-deploy-bootstrap.ps1" -RootDir "%INSTALL_ROOT%" -PackageArchive "%~1"
+set "APPLY_EXIT=%ERRORLEVEL%"
+echo [multitable-onprem-deploy-bootstrap] apply exit=%APPLY_EXIT%
+exit /b %APPLY_EXIT%
+EOF
+}
+
 function write_deployment_guides() {
   cat > "${PACKAGE_ROOT}/DEPLOYMENT.txt" <<EOF
 MetaSheet Multitable On-Prem Deployable Package
@@ -401,6 +430,8 @@ EOF
   "nodeModulesBundled": false,
   "dependencyInstallMode": "refresh-on-apply",
   "windowsEntryPoint": "deploy.bat <package.zip|package.tgz>",
+  "windowsFirstHopBootstrap": "release sidecar: ${PACKAGE_NAME}-deploy-bootstrap.ps1",
+  "windowsFirstHopBootstrapWrapper": "release sidecar: ${PACKAGE_NAME}-deploy-bootstrap.bat",
   "windowsStagingRootEnv": "METASHEET_ONPREM_STAGING_ROOT",
   "windowsDefaultStagingRoot": "C:\\\\ms-tmp",
   "linuxEntryPoint": "scripts/ops/multitable-onprem-package-install.sh",
@@ -570,6 +601,15 @@ which extracts the supplied package to a staging temp dir and invokes the
 apply helper *from inside the new package*. This avoids the prior
 "first apply uses the stale installed helper" issue on upgrades.
 
+First-hop bootstrap sidecar:
+  If an existing Windows install still has an old deploy.bat / launcher that
+  fails before the new package can take over, download the release sidecar
+  ${PACKAGE_NAME}-deploy-bootstrap.ps1 (or the .bat wrapper) next to the package
+  archive and run it from the existing install root:
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\${PACKAGE_NAME}-deploy-bootstrap.ps1 -RootDir . -PackageArchive .\${PACKAGE_NAME}.zip
+  The sidecar uses the current launcher logic immediately, defaults staging to
+  C:\ms-tmp on Windows, and invokes the staged package's fresh apply helper.
+
 K3 WISE PoC operator tools (Node only; no Docker needed to run these):
   Runtime plugin:
     plugins/plugin-integration-core
@@ -624,7 +664,8 @@ Windows staging root:
     deploy.bat <downloaded-package.zip>
 EOF
 
-run rm -f "$ARCHIVE_TGZ_TMP_PATH" "$ARCHIVE_ZIP_TMP_PATH" "$ARCHIVE_TGZ_SHA_TMP_PATH" "$ARCHIVE_ZIP_SHA_TMP_PATH" "$METADATA_JSON_TMP_PATH"
+run rm -f "$ARCHIVE_TGZ_TMP_PATH" "$ARCHIVE_ZIP_TMP_PATH" "$ARCHIVE_TGZ_SHA_TMP_PATH" "$ARCHIVE_ZIP_SHA_TMP_PATH" "$BOOTSTRAP_PS1_TMP_PATH" "$BOOTSTRAP_BAT_TMP_PATH" "$BOOTSTRAP_PS1_SHA_TMP_PATH" "$BOOTSTRAP_BAT_SHA_TMP_PATH" "$METADATA_JSON_TMP_PATH"
+write_windows_first_hop_bootstrap_assets
 find "$PACKAGE_ROOT" \( -name '._*' -o -name '__MACOSX' \) -prune -exec rm -rf {} +
 run env COPYFILE_DISABLE=1 tar --no-xattrs -czf "$ARCHIVE_TGZ_TMP_PATH" -C "$BUILD_ROOT" "$PACKAGE_NAME"
 run bash -lc "cd \"$BUILD_ROOT\" && COPYFILE_DISABLE=1 zip -X -qr \"$ARCHIVE_ZIP_TMP_PATH\" \"$PACKAGE_NAME\""
@@ -632,15 +673,25 @@ assert_no_macos_metadata_entries "$ARCHIVE_TGZ_TMP_PATH" tgz "tgz package"
 assert_no_macos_metadata_entries "$ARCHIVE_ZIP_TMP_PATH" zip "zip package"
 write_sha_file "$ARCHIVE_TGZ_TMP_PATH"
 write_sha_file "$ARCHIVE_ZIP_TMP_PATH"
+write_sha_file "$BOOTSTRAP_PS1_TMP_PATH"
+write_sha_file "$BOOTSTRAP_BAT_TMP_PATH"
 
 checksum_tmp="$(mktemp)"
 if [[ -f "$CHECKSUM_FILE" ]]; then
-  awk -v tgz="${PACKAGE_NAME}.tgz" -v zip="${PACKAGE_NAME}.zip" '$2 != tgz && $2 != zip { print }' "$CHECKSUM_FILE" > "$checksum_tmp"
+  awk \
+    -v tgz="${PACKAGE_NAME}.tgz" \
+    -v zip="${PACKAGE_NAME}.zip" \
+    -v ps1="${PACKAGE_NAME}-deploy-bootstrap.ps1" \
+    -v bat="${PACKAGE_NAME}-deploy-bootstrap.bat" \
+    '$2 != tgz && $2 != zip && $2 != ps1 && $2 != bat { print }' \
+    "$CHECKSUM_FILE" > "$checksum_tmp"
 else
   : > "$checksum_tmp"
 fi
 add_checksum_entry "$ARCHIVE_TGZ_TMP_PATH" >> "$checksum_tmp"
 add_checksum_entry "$ARCHIVE_ZIP_TMP_PATH" >> "$checksum_tmp"
+add_checksum_entry "$BOOTSTRAP_PS1_TMP_PATH" >> "$checksum_tmp"
+add_checksum_entry "$BOOTSTRAP_BAT_TMP_PATH" >> "$checksum_tmp"
 
 cat > "${METADATA_JSON_TMP_PATH}" <<EOF
 {
@@ -652,6 +703,8 @@ cat > "${METADATA_JSON_TMP_PATH}" <<EOF
   "directReplaceSafe": false,
   "nodeModulesBundled": false,
   "windowsEntryPoint": "deploy.bat <package.zip|package.tgz>",
+  "windowsFirstHopBootstrap": "$(basename "$BOOTSTRAP_PS1_PATH")",
+  "windowsFirstHopBootstrapWrapper": "$(basename "$BOOTSTRAP_BAT_PATH")",
   "windowsStagingRootEnv": "METASHEET_ONPREM_STAGING_ROOT",
   "windowsDefaultStagingRoot": "C:\\\\ms-tmp",
   "attendanceOnly": false,
@@ -668,6 +721,10 @@ mv "$ARCHIVE_TGZ_TMP_PATH" "$ARCHIVE_TGZ_PATH"
 mv "$ARCHIVE_ZIP_TMP_PATH" "$ARCHIVE_ZIP_PATH"
 mv "$ARCHIVE_TGZ_SHA_TMP_PATH" "${ARCHIVE_TGZ_PATH}.sha256"
 mv "$ARCHIVE_ZIP_SHA_TMP_PATH" "${ARCHIVE_ZIP_PATH}.sha256"
+mv "$BOOTSTRAP_PS1_TMP_PATH" "$BOOTSTRAP_PS1_PATH"
+mv "$BOOTSTRAP_BAT_TMP_PATH" "$BOOTSTRAP_BAT_PATH"
+mv "$BOOTSTRAP_PS1_SHA_TMP_PATH" "${BOOTSTRAP_PS1_PATH}.sha256"
+mv "$BOOTSTRAP_BAT_SHA_TMP_PATH" "${BOOTSTRAP_BAT_PATH}.sha256"
 mv "$checksum_tmp" "$CHECKSUM_FILE"
 checksum_tmp=""
 mv "${METADATA_JSON_TMP_PATH}" "${METADATA_JSON_PATH}"
@@ -678,5 +735,9 @@ info "  archive_tgz: ${ARCHIVE_TGZ_PATH}"
 info "  archive_zip: ${ARCHIVE_ZIP_PATH}"
 info "  checksum_tgz: ${ARCHIVE_TGZ_PATH}.sha256"
 info "  checksum_zip: ${ARCHIVE_ZIP_PATH}.sha256"
+info "  bootstrap_ps1: ${BOOTSTRAP_PS1_PATH}"
+info "  bootstrap_bat: ${BOOTSTRAP_BAT_PATH}"
+info "  checksum_bootstrap_ps1: ${BOOTSTRAP_PS1_PATH}.sha256"
+info "  checksum_bootstrap_bat: ${BOOTSTRAP_BAT_PATH}.sha256"
 info "  index: ${CHECKSUM_FILE}"
 info "  metadata_json: ${METADATA_JSON_PATH}"
