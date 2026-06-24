@@ -1,7 +1,14 @@
 # Design-lock: Approval complex-graph node author UI (复杂图节点作者 UI)
 
-**Status:** PROPOSED (owner-sequenced 2026-06-23 via /goal — design-lock first, then a v1
-**structured editor**, not a free canvas). The approval **runtime** already executes all six
+**Status:** RATIFIED + SHIPPED (2026-06-23). The arc is complete on main — design-lock #3102,
+G-1 load-preserve #3103, G-2 condition #3104, G-3 parallel join-mode #3105, G-4 cc #3106.
+**As-built scope** (refined from the original proposal below): the editor edits **condition
+logic** (branch rules / conjunction / default edge), **parallel `joinMode`** (`all`/`any` — both
+backend-accepted), and **cc targets** (`targetType` / `targetIds`). All graph **topology**
+(parallel branch edgeKeys + `joinNodeKey`, condition branch edges, every edge) is **read-only,
+preserved byte-identical**; **parallel topology / branch add-remove editing is explicitly OUT of
+scope** (a later slice). The original proposal (owner-sequenced via /goal — design-lock first,
+then a v1 **structured editor**, not a free canvas) follows. The approval **runtime** already executes all six
 node types (start / approval / cc / condition / parallel / end) including parallel fork-join,
 but the template-authoring UI is **linear-only** and **fail-closes** (read-only) on any
 cc / condition / parallel node. This locks the scope of a structured author UI that unlocks
@@ -34,8 +41,9 @@ Grounded in code (explorer-verified 2026-06-23):
 
 ## 1. v1 scope — which nodes are editable, which stay read-only
 - **Editable (all runtime-ready):** `condition` (branches: rules `{fieldId, operator, value}` +
-  `conjunction` and/or, + `defaultEdgeKey`), `parallel` (branch edgeKeys + `joinNodeKey` +
-  `joinMode`), `cc` (`targetType` user/role + `targetIds`). Plus the existing `approval` node
+  `conjunction` and/or, + `defaultEdgeKey`), `parallel` (**`joinMode` only** — `all`/`any`;
+  branch edgeKeys + `joinNodeKey` are topology, preserved read-only **[as-built]**), `cc`
+  (`targetType` user/role + `targetIds`). Plus the existing `approval` node
   config (unchanged).
 - **Read-only / structural (never hand-edited):** `start` / `end` (auto-managed), and node
   `key`s / `edge`s identity (the editor manages topology through structured controls, not raw
@@ -87,8 +95,8 @@ Grounded in code (explorer-verified 2026-06-23):
   save untouched → graph byte-identical.
 - **G-2 · condition editor.** Author condition branches/rules + default edge; full-graph build;
   FE preview. 
-- **G-3 · parallel editor.** Author parallel branches + join (v1 `joinMode='all'`); respect the
-  backend's no-nested / no-cross-branch-dupe rules in the preview.
+- **G-3 · parallel editor.** Author parallel `joinMode` (`all`/`any`, both backend-accepted);
+  branch edgeKeys + `joinNodeKey` are topology, read-only **[as-built — branch add/remove deferred].**
 - **G-4 · cc editor.** Author cc targets (reuse the approval picker).
 - The structured-graph editor is the form-schema-adjacent surface the detail arc stabilized
   first (goal sequencing: C 明细 done → graph UI now).
@@ -96,16 +104,14 @@ Grounded in code (explorer-verified 2026-06-23):
 ## 7. Boundaries / non-goals (v1 — all reopen-only)
 - **No free-canvas / drag-edge editor** (structured controls only).
 - **No new node types**, no runtime changes, no `normalizeApprovalGraph` changes.
-- **No nested parallel**, no `joinMode='any'` authoring in v1 (validator/type say 'all') — both
-  stay fail-closed read-only.
-  > **CORRECTION (G-3, 2026-06-23):** the parenthetical "(validator/type say 'all')" is **factually
-  > wrong**. The backend `normalizeApprovalGraph` ACCEPTS both — `PARALLEL_JOIN_MODES =
-  > new Set(['all', 'any'])` (`ApprovalProductService.ts:289`), validated at `:940`, written
-  > verbatim at `:948`; the FE/BE type union is `'all' | 'any'`; and the runtime executes `'any'`
-  > (first-wins, `:3691`). G-3 therefore makes `joinMode` editable with BOTH options (the mandatory
-  > pre-check found 'any' is not backend-rejected, so per the "UI must not produce backend-rejected
-  > graphs" rule there is no reason to withhold it). Nested parallel and editing
-  > branches/joinNodeKey topology REMAIN out of scope. Pending owner ratification — see the G-3 PR.
+- **No nested parallel**; **no parallel topology editing** (branch add/remove, `joinNodeKey`) — the
+  parallel editor edits `joinMode` only; branches/joinNodeKey are preserved read-only **[as-built]**.
+  > **RATIFIED (G-3, 2026-06-23 — shipped #3105):** `joinMode='any'` IS backend-accepted —
+  > `PARALLEL_JOIN_MODES = new Set(['all', 'any'])` (`ApprovalProductService.ts:289`), validated at
+  > `:940`, written verbatim at `:948`; the FE/BE type union is `'all' | 'any'`; the runtime executes
+  > `'any'` (first-wins, `:3691`). G-3 ships `joinMode` editable with BOTH options. The original
+  > §7/§8c "joinMode='any' deferred (validator/type say 'all')" premise was factually wrong and is
+  > superseded as-built. Branch / `joinNodeKey` topology editing REMAINS out of scope.
 - **No flatten, ever** — unsupported constructs stay read-only, never dropped.
 - **No W7** approval-result write-back (its own gated scope-doc, pending a concrete scenario).
 
@@ -113,9 +119,9 @@ Grounded in code (explorer-verified 2026-06-23):
 - (a) v1 editable set = `condition` + `parallel` + `cc` (default), phased G-2/G-3/G-4 after the
   G-1 load-preserve foundation. Override to a narrower first set if wanted.
 - (b) Phasing order — default condition → parallel → cc (most-common-first). Confirm or reorder.
-- (c) `parallel.joinMode='any'` authoring = deferred (default; v1 'all' only). Confirm.
-  > **SUPERSEDED (G-3, 2026-06-23):** the deferral rested on the §7 premise that the validator/type
-  > only allow 'all', which the code disproves (set `{'all','any'}`, accepted + runtime-executed).
-  > G-3 ships both modes; this decision now needs owner ratification rather than confirmation.
+- (c) `parallel.joinMode='any'` authoring = **RATIFIED + SHIPPED** (G-3 #3105). The original
+  "deferred" default rested on the §7 premise that the validator/type only allow 'all', which the
+  code disproves (set `{'all','any'}`, accepted + runtime-executed); the owner audit (2026-06-23)
+  ratified shipping both modes.
 - (d) Whether G-1 (load-preserve + read-only structured render) ships before any editor, or is
   folded into G-2 — default = G-1 standalone (proves anti-flatten before editing).
