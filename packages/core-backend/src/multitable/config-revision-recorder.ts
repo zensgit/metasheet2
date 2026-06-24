@@ -1,13 +1,11 @@
 /**
- * T9-R1 — config/schema-change history recorder (FIELDS only in v1).
+ * T9 — config/schema-change history recorder.
  *
  * `recordConfigRevision` appends one `meta_config_revisions` row using the MUTATION'S OWN transaction `query`, so a
  * config change and its history row commit or roll back together — the history can never diverge from live config
- * (T9-L4). It is append-only and never restores (T9-L1). The field-diff helpers below are diff-first (T9-L /D2):
+ * (T9-L4). It is append-only and never restores (T9-L1). The diff helpers below are diff-first (T9-L /D2):
  * create → after = the field's own config; delete → before = the config; update → the changed keys only (empty diff
  * → null, the caller records nothing — no rename-to-same spam).
- *
- * NOT in R1: read API, permissions, views, sheet-config, cascade recording. This module only RECORDS field changes.
  */
 
 type QueryFn = (text: string, params: unknown[]) => Promise<unknown>
@@ -62,17 +60,52 @@ function sameConfigValue(a: unknown, b: unknown): boolean {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
 }
 
-export interface FieldDiff {
+export interface ConfigDiff {
   before: Record<string, unknown> | null
   after: Record<string, unknown> | null
   changedKeys: string[]
 }
 
+function pickConfigKeys(snapshot: Record<string, unknown>, keys: ReadonlyArray<string>): Record<string, unknown> {
+  const picked: Record<string, unknown> = {}
+  for (const key of keys) picked[key] = snapshot[key]
+  return picked
+}
+
+export function configCreateDiff(after: Record<string, unknown>, changedKeys: ReadonlyArray<string>): ConfigDiff {
+  return { before: null, after: pickConfigKeys(after, changedKeys), changedKeys: [...changedKeys] }
+}
+
+export function configDeleteDiff(before: Record<string, unknown>, changedKeys: ReadonlyArray<string>): ConfigDiff {
+  return { before: pickConfigKeys(before, changedKeys), after: null, changedKeys: [...changedKeys] }
+}
+
+export function configUpdateDiff(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  keys: ReadonlyArray<string>,
+): ConfigDiff | null {
+  const changedKeys: string[] = []
+  const b: Record<string, unknown> = {}
+  const a: Record<string, unknown> = {}
+  for (const k of keys) {
+    if (!sameConfigValue(before[k], after[k])) {
+      changedKeys.push(k)
+      b[k] = before[k]
+      a[k] = after[k]
+    }
+  }
+  if (changedKeys.length === 0) return null
+  return { before: b, after: a, changedKeys }
+}
+
+export type FieldDiff = ConfigDiff
+
 export function fieldCreateDiff(after: FieldConfigSnapshot): FieldDiff {
-  return { before: null, after: { ...after }, changedKeys: [...FIELD_CONFIG_KEYS] }
+  return configCreateDiff(after as unknown as Record<string, unknown>, FIELD_CONFIG_KEYS as ReadonlyArray<string>)
 }
 export function fieldDeleteDiff(before: FieldConfigSnapshot): FieldDiff {
-  return { before: { ...before }, after: null, changedKeys: [...FIELD_CONFIG_KEYS] }
+  return configDeleteDiff(before as unknown as Record<string, unknown>, FIELD_CONFIG_KEYS as ReadonlyArray<string>)
 }
 /**
  * Record the order-only side-effect of a bulk reorder: a field mutation (insert-in-middle / reorder / delete)
@@ -99,16 +132,9 @@ export async function recordFieldOrderShifts(
 
 /** Update diff — only the changed config keys. Returns null on a no-op (caller records nothing). */
 export function fieldUpdateDiff(before: FieldConfigSnapshot, after: FieldConfigSnapshot): FieldDiff | null {
-  const changedKeys: string[] = []
-  const b: Record<string, unknown> = {}
-  const a: Record<string, unknown> = {}
-  for (const k of FIELD_CONFIG_KEYS) {
-    if (!sameConfigValue(before[k], after[k])) {
-      changedKeys.push(k)
-      b[k] = before[k]
-      a[k] = after[k]
-    }
-  }
-  if (changedKeys.length === 0) return null
-  return { before: b, after: a, changedKeys }
+  return configUpdateDiff(
+    before as unknown as Record<string, unknown>,
+    after as unknown as Record<string, unknown>,
+    FIELD_CONFIG_KEYS as ReadonlyArray<string>,
+  )
 }

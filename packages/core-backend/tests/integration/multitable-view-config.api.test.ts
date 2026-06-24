@@ -81,7 +81,10 @@ const SHEET_OPS_FIELDS: FieldRow[] = [
 ]
 
 function createMockPool(queryHandler: QueryHandler) {
-  const query = vi.fn(async (sql: string, params?: unknown[]) => queryHandler(sql, params))
+  const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    if (sql.includes('INSERT INTO meta_config_revisions')) return { rows: [], rowCount: 1 }
+    return queryHandler(sql, params)
+  })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
   return { query, transaction }
 }
@@ -455,9 +458,22 @@ describe('Multitable view config API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id FROM meta_views WHERE id = $1')) {
+        if (sql.includes('FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_kanban'])
-          return { rows: [{ id: 'view_kanban', sheet_id: 'sheet_ops' }], rowCount: 1 }
+          return {
+            rows: [{
+              id: 'view_kanban',
+              sheet_id: 'sheet_ops',
+              name: 'Kanban',
+              type: 'kanban',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: {},
+            }],
+            rowCount: 1,
+          }
         }
         if (sql.includes('SELECT sp.sheet_id, sp.perm_code, sp.subject_type')) {
           expect(params).toEqual(['user_multitable_1', ['sheet_ops']])
@@ -483,7 +499,7 @@ describe('Multitable view config API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id FROM meta_views WHERE id = $1')) {
+        if (sql.includes('FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_missing'])
           return { rows: [], rowCount: 0 }
         }

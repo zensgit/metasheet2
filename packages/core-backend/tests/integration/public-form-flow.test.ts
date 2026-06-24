@@ -134,6 +134,7 @@ function buildQueryHandler(
 
 function createMockPool(queryHandler: QueryHandler) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    if (sql.includes('INSERT INTO meta_config_revisions')) return { rows: [], rowCount: 1 }
     if (sql.includes('FROM spreadsheet_permissions')) return { rows: [], rowCount: 0 }
     if (sql.includes('FROM field_permissions')) return { rows: [], rowCount: 0 }
     if (sql.includes('FROM view_permissions')) return { rows: [], rowCount: 0 }

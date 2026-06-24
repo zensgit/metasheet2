@@ -74,7 +74,16 @@ import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity } from '../multitable/restore-preview-identity'
-import { recordConfigRevision, recordFieldOrderShifts, fieldCreateDiff, fieldUpdateDiff, fieldDeleteDiff } from '../multitable/config-revision-recorder'
+import {
+  recordConfigRevision,
+  recordFieldOrderShifts,
+  configCreateDiff,
+  configDeleteDiff,
+  configUpdateDiff,
+  fieldCreateDiff,
+  fieldUpdateDiff,
+  fieldDeleteDiff,
+} from '../multitable/config-revision-recorder'
 import { computeRecordRestoreDiff } from '../multitable/record-restore-diff'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
@@ -4684,6 +4693,93 @@ function getRequestActorId(req: Request): string | null {
   return typeof actorId === 'string' && actorId.trim().length > 0 ? actorId.trim() : null
 }
 
+const VIEW_CONFIG_HISTORY_KEYS = ['name', 'type', 'filterInfo', 'sortInfo', 'groupInfo', 'hiddenFieldIds', 'config'] as const
+const FIELD_PERMISSION_HISTORY_KEYS = ['fieldId', 'subjectType', 'subjectId', 'visible', 'readOnly'] as const
+const VIEW_PERMISSION_HISTORY_KEYS = ['viewId', 'subjectType', 'subjectId', 'permission'] as const
+const SHEET_PERMISSION_HISTORY_KEYS = ['subjectType', 'subjectId', 'accessLevel'] as const
+
+function permissionConfigEntityId(scope: 'field' | 'sheet' | 'view', parts: string[]): string {
+  return `${scope}:${JSON.stringify(parts)}`
+}
+
+function cloneConfigObject(value: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>
+}
+
+function viewConfigSnapshotFromRow(row: any): Record<string, unknown> {
+  return {
+    name: String(row.name),
+    type: String(row.type ?? 'grid'),
+    filterInfo: cloneConfigObject(normalizeJson(row.filter_info)),
+    sortInfo: cloneConfigObject(normalizeJson(row.sort_info)),
+    groupInfo: cloneConfigObject(normalizeJson(row.group_info)),
+    hiddenFieldIds: [...normalizeJsonArray(row.hidden_field_ids)],
+    config: cloneConfigObject(normalizeJson(row.config)),
+  }
+}
+
+function viewConfigSnapshot(view: {
+  name: string
+  type: string
+  filterInfo?: Record<string, unknown>
+  sortInfo?: Record<string, unknown>
+  groupInfo?: Record<string, unknown>
+  hiddenFieldIds?: string[]
+  config?: Record<string, unknown>
+}): Record<string, unknown> {
+  return {
+    name: view.name,
+    type: view.type,
+    filterInfo: cloneConfigObject(view.filterInfo ?? {}),
+    sortInfo: cloneConfigObject(view.sortInfo ?? {}),
+    groupInfo: cloneConfigObject(view.groupInfo ?? {}),
+    hiddenFieldIds: [...(view.hiddenFieldIds ?? [])],
+    config: cloneConfigObject(view.config ?? {}),
+  }
+}
+
+function fieldPermissionSnapshot(args: {
+  fieldId: string
+  subjectType: string
+  subjectId: string
+  visible: boolean
+  readOnly: boolean
+}): Record<string, unknown> {
+  return {
+    fieldId: args.fieldId,
+    subjectType: args.subjectType,
+    subjectId: args.subjectId,
+    visible: args.visible,
+    readOnly: args.readOnly,
+  }
+}
+
+function viewPermissionSnapshot(args: {
+  viewId: string
+  subjectType: string
+  subjectId: string
+  permission: string
+}): Record<string, unknown> {
+  return {
+    viewId: args.viewId,
+    subjectType: args.subjectType,
+    subjectId: args.subjectId,
+    permission: args.permission,
+  }
+}
+
+function sheetPermissionSnapshot(args: {
+  subjectType: string
+  subjectId: string
+  accessLevel: string
+}): Record<string, unknown> {
+  return {
+    subjectType: args.subjectType,
+    subjectId: args.subjectId,
+    accessLevel: args.accessLevel,
+  }
+}
+
 function publishMultitableSheetRealtime(payload: MultitableSheetRealtimePayload): void {
   // Delegate to the shared module (extracted for reuse by future Yjs bridge)
   publishMultitableSheetRealtimeShared(payload as SharedRealtimePayload)
@@ -6345,6 +6441,18 @@ export function univerMetaRouter(): Router {
       }
 
       await pool.transaction(async ({ query }) => {
+        const configBatchId = randomUUID()
+        const beforeResult = await query(
+          `SELECT perm_code FROM spreadsheet_permissions
+           WHERE sheet_id = $1
+             AND subject_type = $2
+             AND subject_id = $3
+             AND perm_code = ANY($4::text[])`,
+          [sheetId, subjectType, subjectId, MANAGED_SHEET_PERMISSION_CODES],
+        )
+        const beforeAccessLevel = deriveSheetAccessLevel(
+          ((beforeResult as any).rows as Array<{ perm_code: string }>).map((row) => String(row.perm_code)),
+        )
         await query(
           `DELETE FROM spreadsheet_permissions
            WHERE sheet_id = $1
@@ -6365,6 +6473,32 @@ export function univerMetaRouter(): Router {
               CANONICAL_SHEET_PERMISSION_CODE_BY_ACCESS_LEVEL[parsed.data.accessLevel],
             ],
           )
+        }
+        const before = beforeAccessLevel
+          ? sheetPermissionSnapshot({ subjectType, subjectId, accessLevel: beforeAccessLevel })
+          : null
+        const after = parsed.data.accessLevel !== 'none'
+          ? sheetPermissionSnapshot({ subjectType, subjectId, accessLevel: parsed.data.accessLevel })
+          : null
+        const diff = before && after
+          ? configUpdateDiff(before, after, SHEET_PERMISSION_HISTORY_KEYS)
+          : before
+            ? configDeleteDiff(before, SHEET_PERMISSION_HISTORY_KEYS)
+            : after
+              ? configCreateDiff(after, SHEET_PERMISSION_HISTORY_KEYS)
+              : null
+        if (diff) {
+          await recordConfigRevision(query, {
+            sheetId,
+            entityType: 'permission',
+            entityId: permissionConfigEntityId('sheet', [subjectType, subjectId]),
+            action: before && after ? 'update' : before ? 'delete' : 'create',
+            before: diff.before,
+            after: diff.after,
+            changedKeys: diff.changedKeys,
+            batchId: configBatchId,
+            actorId: getRequestActorId(req),
+          })
         }
       })
 
@@ -6432,7 +6566,28 @@ export function univerMetaRouter(): Router {
       }
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
-      await pool.query('UPDATE meta_sheets SET row_level_read_permissions_enabled = $1 WHERE id = $2', [parsed.data.enabled, sheetId])
+      await pool.transaction(async ({ query }) => {
+        const beforeResult = await query('SELECT row_level_read_permissions_enabled AS enabled FROM meta_sheets WHERE id = $1', [sheetId])
+        const before = {
+          rowLevelReadPermissionsEnabled: ((beforeResult as any).rows?.[0] as { enabled?: boolean } | undefined)?.enabled === true,
+        }
+        const after = { rowLevelReadPermissionsEnabled: parsed.data.enabled }
+        await query('UPDATE meta_sheets SET row_level_read_permissions_enabled = $1 WHERE id = $2', [parsed.data.enabled, sheetId])
+        const diff = configUpdateDiff(before, after, ['rowLevelReadPermissionsEnabled'])
+        if (diff) {
+          await recordConfigRevision(query, {
+            sheetId,
+            entityType: 'sheet_config',
+            entityId: sheetId,
+            action: 'update',
+            before: diff.before,
+            after: diff.after,
+            changedKeys: diff.changedKeys,
+            batchId: randomUUID(),
+            actorId: getRequestActorId(req),
+          })
+        }
+      })
       return res.json({ ok: true, data: { enabled: parsed.data.enabled } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
@@ -6496,7 +6651,28 @@ export function univerMetaRouter(): Router {
       }
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
-      await pool.query('UPDATE meta_sheets SET conditional_read_rules = $1::jsonb WHERE id = $2', [JSON.stringify(rules), sheetId])
+      await pool.transaction(async ({ query }) => {
+        const beforeResult = await query('SELECT conditional_read_rules AS rules FROM meta_sheets WHERE id = $1', [sheetId])
+        const before = {
+          conditionalReadRules: parseConditionalRules(((beforeResult as any).rows?.[0] as { rules?: unknown } | undefined)?.rules).rules,
+        }
+        const after = { conditionalReadRules: rules }
+        await query('UPDATE meta_sheets SET conditional_read_rules = $1::jsonb WHERE id = $2', [JSON.stringify(rules), sheetId])
+        const diff = configUpdateDiff(before, after, ['conditionalReadRules'])
+        if (diff) {
+          await recordConfigRevision(query, {
+            sheetId,
+            entityType: 'sheet_config',
+            entityId: sheetId,
+            action: 'update',
+            before: diff.before,
+            after: diff.after,
+            changedKeys: diff.changedKeys,
+            batchId: randomUUID(),
+            actorId: getRequestActorId(req),
+          })
+        }
+      })
       return res.json({ ok: true, data: { rules } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
@@ -6663,6 +6839,12 @@ export function univerMetaRouter(): Router {
       }
 
       await pool.transaction(async ({ query }) => {
+        const configBatchId = randomUUID()
+        const beforeResult = await query(
+          'SELECT permission FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3',
+          [viewId, subjectType, subjectId],
+        )
+        const beforePermission = ((beforeResult as any).rows?.[0] as { permission?: string } | undefined)?.permission
         await query(
           `DELETE FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3`,
           [viewId, subjectType, subjectId],
@@ -6673,6 +6855,32 @@ export function univerMetaRouter(): Router {
              VALUES ($1, $2, $3, $4)`,
             [viewId, subjectType, subjectId, parsed.data.permission],
           )
+        }
+        const before = typeof beforePermission === 'string'
+          ? viewPermissionSnapshot({ viewId, subjectType, subjectId, permission: beforePermission })
+          : null
+        const after = parsed.data.permission !== 'none'
+          ? viewPermissionSnapshot({ viewId, subjectType, subjectId, permission: parsed.data.permission })
+          : null
+        const diff = before && after
+          ? configUpdateDiff(before, after, VIEW_PERMISSION_HISTORY_KEYS)
+          : before
+            ? configDeleteDiff(before, VIEW_PERMISSION_HISTORY_KEYS)
+            : after
+              ? configCreateDiff(after, VIEW_PERMISSION_HISTORY_KEYS)
+              : null
+        if (diff) {
+          await recordConfigRevision(query, {
+            sheetId,
+            entityType: 'permission',
+            entityId: permissionConfigEntityId('view', [viewId, subjectType, subjectId]),
+            action: before && after ? 'update' : before ? 'delete' : 'create',
+            before: diff.before,
+            after: diff.after,
+            changedKeys: diff.changedKeys,
+            batchId: configBatchId,
+            actorId: getRequestActorId(req),
+          })
         }
       })
 
@@ -6850,21 +7058,74 @@ export function univerMetaRouter(): Router {
         }
       }
 
-      if (parsed.data.remove) {
-        await pool.query(
-          `DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_type = $3 AND subject_id = $4`,
+      await pool.transaction(async ({ query }) => {
+        const configBatchId = randomUUID()
+        const beforeResult = await query(
+          `SELECT visible, read_only
+           FROM field_permissions
+           WHERE sheet_id = $1 AND field_id = $2 AND subject_type = $3 AND subject_id = $4`,
           [sheetId, fieldId, subjectType, subjectId],
         )
+        const beforeRow = (beforeResult as any).rows?.[0] as { visible?: boolean; read_only?: boolean } | undefined
+        const before = beforeRow
+          ? fieldPermissionSnapshot({
+            fieldId,
+            subjectType,
+            subjectId,
+            visible: beforeRow.visible !== false,
+            readOnly: beforeRow.read_only === true,
+          })
+          : null
+
+        if (parsed.data.remove) {
+          await query(
+            `DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_type = $3 AND subject_id = $4`,
+            [sheetId, fieldId, subjectType, subjectId],
+          )
+        } else {
+          await query(
+            `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (sheet_id, field_id, subject_type, subject_id)
+             DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only`,
+            [sheetId, fieldId, subjectType, subjectId, parsed.data.visible ?? true, parsed.data.readOnly ?? false],
+          )
+        }
+
+        const after = parsed.data.remove
+          ? null
+          : fieldPermissionSnapshot({
+            fieldId,
+            subjectType,
+            subjectId,
+            visible: parsed.data.visible ?? true,
+            readOnly: parsed.data.readOnly ?? false,
+          })
+        const diff = before && after
+          ? configUpdateDiff(before, after, FIELD_PERMISSION_HISTORY_KEYS)
+          : before
+            ? configDeleteDiff(before, FIELD_PERMISSION_HISTORY_KEYS)
+            : after
+              ? configCreateDiff(after, FIELD_PERMISSION_HISTORY_KEYS)
+              : null
+        if (diff) {
+          await recordConfigRevision(query, {
+            sheetId,
+            entityType: 'permission',
+            entityId: permissionConfigEntityId('field', [fieldId, subjectType, subjectId]),
+            action: before && after ? 'update' : before ? 'delete' : 'create',
+            before: diff.before,
+            after: diff.after,
+            changedKeys: diff.changedKeys,
+            batchId: configBatchId,
+            actorId: getRequestActorId(req),
+          })
+        }
+      })
+
+      if (parsed.data.remove) {
         return res.json({ ok: true, data: { sheetId, fieldId, subjectType, subjectId, removed: true } })
       }
-
-      await pool.query(
-        `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (sheet_id, field_id, subject_type, subject_id)
-         DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only`,
-        [sheetId, fieldId, subjectType, subjectId, parsed.data.visible ?? true, parsed.data.readOnly ?? false],
-      )
 
       return res.json({
         ok: true,
@@ -8990,8 +9251,8 @@ export function univerMetaRouter(): Router {
         await query('DELETE FROM meta_fields WHERE id = $1', [fieldId])
         await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
 
-        // T9-R1: record the field deletion (before = the deleted field's config). The cascade view-config cleanup
-        // below is NOT recorded in R1 (view recording is R2); it will group under this batchId once R2 lands (T9-L7).
+        // T9: record the field deletion (before = the deleted field's config). Any cascade view-config cleanup below
+        // is recorded under the SAME batchId so the operation remains one logical config-change batch (T9-L7).
         await recordConfigRevision(query, {
           sheetId, entityType: 'field', entityId: fieldId, action: 'delete',
           ...fieldDeleteDiff({ name: String(row.name), type: String(row.type), property: row.property, order }),
@@ -9011,10 +9272,11 @@ export function univerMetaRouter(): Router {
         await recordFieldOrderShifts(query, sheetId, shiftedDel.map((r) => ({ id: String(r.id), newOrder: Number(r.order) })), -1, configBatchId, getRequestActorId(req))
 
         const views = await query(
-          'SELECT id, filter_info, sort_info, group_info, hidden_field_ids FROM meta_views WHERE sheet_id = $1',
+          'SELECT id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1',
           [sheetId],
         )
         for (const v of (views as any).rows as any[]) {
+          const beforeView = viewConfigSnapshotFromRow(v)
           const filterInfo = normalizeJson(v.filter_info)
           const sortInfo = normalizeJson(v.sort_info)
           const groupInfo = normalizeJson(v.group_info)
@@ -9038,6 +9300,27 @@ export function univerMetaRouter(): Router {
             'UPDATE meta_views SET filter_info = $2::jsonb, sort_info = $3::jsonb, group_info = $4::jsonb, hidden_field_ids = $5::jsonb WHERE id = $1',
             [String(v.id), JSON.stringify(nextFilterInfo), JSON.stringify(nextSortInfo), JSON.stringify(nextGroupInfo), JSON.stringify(nextHidden)],
           )
+          const afterView = {
+            ...beforeView,
+            filterInfo: nextFilterInfo,
+            sortInfo: nextSortInfo,
+            groupInfo: nextGroupInfo,
+            hiddenFieldIds: nextHidden,
+          }
+          const cascadeDiff = configUpdateDiff(beforeView, afterView, VIEW_CONFIG_HISTORY_KEYS)
+          if (cascadeDiff) {
+            await recordConfigRevision(query, {
+              sheetId,
+              entityType: 'view',
+              entityId: String(v.id),
+              action: 'update',
+              before: cascadeDiff.before,
+              after: cascadeDiff.after,
+              changedKeys: cascadeDiff.changedKeys,
+              batchId: configBatchId,
+              actorId: getRequestActorId(req),
+            })
+          }
         }
 
         return { deleted: fieldId, sheetId }
@@ -9079,12 +9362,35 @@ export function univerMetaRouter(): Router {
 
       if (result.rows.length === 0 && capabilities.canManageViews) {
         const defaultId = buildId('view')
-        await pool.query(
-          `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
-           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
-           ON CONFLICT (id) DO NOTHING`,
-          [defaultId, sheetId, '默认视图', 'grid', '{}', '{}', '{}', '[]', '{}'],
-        )
+        const defaultView = viewConfigSnapshot({
+          name: '默认视图',
+          type: 'grid',
+          filterInfo: {},
+          sortInfo: {},
+          groupInfo: {},
+          hiddenFieldIds: [],
+          config: {},
+        })
+        await pool.transaction(async ({ query }) => {
+          const insert = await query(
+            `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
+             VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
+             ON CONFLICT (id) DO NOTHING
+             RETURNING id`,
+            [defaultId, sheetId, '默认视图', 'grid', '{}', '{}', '{}', '[]', '{}'],
+          )
+          if (((insert as any).rows ?? []).length > 0) {
+            await recordConfigRevision(query, {
+              sheetId,
+              entityType: 'view',
+              entityId: defaultId,
+              action: 'create',
+              ...configCreateDiff(defaultView, VIEW_CONFIG_HISTORY_KEYS),
+              batchId: randomUUID(),
+              actorId: getRequestActorId(req),
+            })
+          }
+        })
         result = await pool.query(
           'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 200',
           [sheetId],
@@ -9172,22 +9478,6 @@ export function univerMetaRouter(): Router {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: hierarchyConfigError } })
       }
 
-      await pool.query(
-        `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)`,
-        [
-          viewId,
-          sheetId,
-          name,
-          type,
-          JSON.stringify(parsed.data.filterInfo ?? {}),
-          JSON.stringify(parsed.data.sortInfo ?? {}),
-          JSON.stringify(parsed.data.groupInfo ?? {}),
-          JSON.stringify(parsed.data.hiddenFieldIds ?? []),
-          JSON.stringify(incomingConfig),
-        ],
-      )
-
       const view: UniverMetaViewConfig = {
         id: viewId,
         sheetId,
@@ -9199,6 +9489,32 @@ export function univerMetaRouter(): Router {
         hiddenFieldIds: parsed.data.hiddenFieldIds ?? [],
         config: incomingConfig,
       }
+      await pool.transaction(async ({ query }) => {
+        await query(
+          `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)`,
+          [
+            viewId,
+            sheetId,
+            name,
+            type,
+            JSON.stringify(parsed.data.filterInfo ?? {}),
+            JSON.stringify(parsed.data.sortInfo ?? {}),
+            JSON.stringify(parsed.data.groupInfo ?? {}),
+            JSON.stringify(parsed.data.hiddenFieldIds ?? []),
+            JSON.stringify(incomingConfig),
+          ],
+        )
+        await recordConfigRevision(query, {
+          sheetId,
+          entityType: 'view',
+          entityId: viewId,
+          action: 'create',
+          ...configCreateDiff(viewConfigSnapshot(view), VIEW_CONFIG_HISTORY_KEYS),
+          batchId: randomUUID(),
+          actorId: getRequestActorId(req),
+        })
+      })
 
       metaViewConfigCache.set(viewId, view)
       const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, (await resolveRequestAccess(req)).userId, capabilities)
@@ -9245,6 +9561,7 @@ export function univerMetaRouter(): Router {
       const row: any = current.rows[0]
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), String(row.sheet_id))
       if (!capabilities.canManageViews) return sendForbidden(res)
+      const beforeView = viewConfigSnapshotFromRow(row)
       // #2068 re-save guard: compute the writer's allowed-field set up front, then merge the incoming
       // filterInfo against the current DB filter so a redacted denied condition (echoed back with NO `value`)
       // preserves the persisted literal instead of erasing it; reject 400 on a structural mismatch.
@@ -9301,22 +9618,6 @@ export function univerMetaRouter(): Router {
         }
       }
 
-      await pool.query(
-        `UPDATE meta_views
-         SET name = $2, type = $3, filter_info = $4::jsonb, sort_info = $5::jsonb, group_info = $6::jsonb, hidden_field_ids = $7::jsonb, config = $8::jsonb
-         WHERE id = $1`,
-        [
-          viewId,
-          nextName,
-          nextType,
-          JSON.stringify(nextFilter ?? {}),
-          JSON.stringify(nextSort ?? {}),
-          JSON.stringify(nextGroup ?? {}),
-          JSON.stringify(nextHiddenFieldIds ?? []),
-          JSON.stringify(nextConfig ?? {}),
-        ],
-      )
-
       const view: UniverMetaViewConfig = {
         id: viewId,
         sheetId: String(row.sheet_id),
@@ -9328,6 +9629,38 @@ export function univerMetaRouter(): Router {
         hiddenFieldIds: nextHiddenFieldIds ?? [],
         config: nextConfig ?? {},
       }
+      const afterView = viewConfigSnapshot(view)
+      await pool.transaction(async ({ query }) => {
+        await query(
+          `UPDATE meta_views
+           SET name = $2, type = $3, filter_info = $4::jsonb, sort_info = $5::jsonb, group_info = $6::jsonb, hidden_field_ids = $7::jsonb, config = $8::jsonb
+           WHERE id = $1`,
+          [
+            viewId,
+            nextName,
+            nextType,
+            JSON.stringify(nextFilter ?? {}),
+            JSON.stringify(nextSort ?? {}),
+            JSON.stringify(nextGroup ?? {}),
+            JSON.stringify(nextHiddenFieldIds ?? []),
+            JSON.stringify(nextConfig ?? {}),
+          ],
+        )
+        const diff = configUpdateDiff(beforeView, afterView, VIEW_CONFIG_HISTORY_KEYS)
+        if (diff) {
+          await recordConfigRevision(query, {
+            sheetId: String(row.sheet_id),
+            entityType: 'view',
+            entityId: viewId,
+            action: 'update',
+            before: diff.before,
+            after: diff.after,
+            changedKeys: diff.changedKeys,
+            batchId: randomUUID(),
+            actorId: getRequestActorId(req),
+          })
+        }
+      })
 
       metaViewConfigCache.set(viewId, view)
       return res.json({ ok: true, data: { view: redactViewConfigFilterLiterals(view, allowedFieldIds) } })
@@ -9430,6 +9763,7 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
 
+      const beforeView = viewConfigSnapshotFromRow(row)
       const nextConfig = normalizeJson(row.config)
       const existingPublicForm = getPublicFormConfig({
         id: viewId,
@@ -9562,13 +9896,6 @@ export function univerMetaRouter(): Router {
         Object.assign(nextConfig, withLayout)
       }
 
-      await pool.query(
-        `UPDATE meta_views
-         SET config = $2::jsonb
-         WHERE id = $1`,
-        [viewId, JSON.stringify(nextConfig)],
-      )
-
       const view: UniverMetaViewConfig = {
         id: viewId,
         sheetId,
@@ -9580,6 +9907,29 @@ export function univerMetaRouter(): Router {
         hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
         config: nextConfig,
       }
+      const afterView = viewConfigSnapshot(view)
+      await pool.transaction(async ({ query }) => {
+        await query(
+          `UPDATE meta_views
+           SET config = $2::jsonb
+           WHERE id = $1`,
+          [viewId, JSON.stringify(nextConfig)],
+        )
+        const diff = configUpdateDiff(beforeView, afterView, VIEW_CONFIG_HISTORY_KEYS)
+        if (diff) {
+          await recordConfigRevision(query, {
+            sheetId,
+            entityType: 'view',
+            entityId: viewId,
+            action: 'update',
+            before: diff.before,
+            after: diff.after,
+            changedKeys: diff.changedKeys,
+            batchId: randomUUID(),
+            actorId: getRequestActorId(req),
+          })
+        }
+      })
       metaViewConfigCache.set(viewId, view)
       return res.json({ ok: true, data: await serializePublicFormShareConfig(pool.query.bind(pool), view) })
     } catch (err) {
@@ -9615,6 +9965,7 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
 
+      const beforeView = viewConfigSnapshotFromRow(row)
       const nextConfig = normalizeJson(row.config)
       const existingPublicForm = getPublicFormConfig({
         id: viewId,
@@ -9635,13 +9986,6 @@ export function univerMetaRouter(): Router {
         accessMode: normalizePublicFormAccessMode(existingPublicForm?.accessMode),
       } as Record<string, unknown>
 
-      await pool.query(
-        `UPDATE meta_views
-         SET config = $2::jsonb
-         WHERE id = $1`,
-        [viewId, JSON.stringify(nextConfig)],
-      )
-
       const view: UniverMetaViewConfig = {
         id: viewId,
         sheetId,
@@ -9653,6 +9997,29 @@ export function univerMetaRouter(): Router {
         hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
         config: nextConfig,
       }
+      const afterView = viewConfigSnapshot(view)
+      await pool.transaction(async ({ query }) => {
+        await query(
+          `UPDATE meta_views
+           SET config = $2::jsonb
+           WHERE id = $1`,
+          [viewId, JSON.stringify(nextConfig)],
+        )
+        const diff = configUpdateDiff(beforeView, afterView, VIEW_CONFIG_HISTORY_KEYS)
+        if (diff) {
+          await recordConfigRevision(query, {
+            sheetId,
+            entityType: 'view',
+            entityId: viewId,
+            action: 'update',
+            before: diff.before,
+            after: diff.after,
+            changedKeys: diff.changedKeys,
+            batchId: randomUUID(),
+            actorId: getRequestActorId(req),
+          })
+        }
+      })
       metaViewConfigCache.set(viewId, view)
       return res.json({
         ok: true,
@@ -9707,13 +10074,29 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      const current = await pool.query('SELECT id, sheet_id FROM meta_views WHERE id = $1', [viewId])
+      const current = await pool.query(
+        'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
+        [viewId],
+      )
       if (current.rows.length === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), String((current.rows[0] as any).sheet_id ?? ''))
+      const row: any = current.rows[0]
+      const sheetId = String(row.sheet_id ?? '')
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
-      await pool.query('DELETE FROM meta_views WHERE id = $1', [viewId])
+      await pool.transaction(async ({ query }) => {
+        await query('DELETE FROM meta_views WHERE id = $1', [viewId])
+        await recordConfigRevision(query, {
+          sheetId,
+          entityType: 'view',
+          entityId: viewId,
+          action: 'delete',
+          ...configDeleteDiff(viewConfigSnapshotFromRow(row), VIEW_CONFIG_HISTORY_KEYS),
+          batchId: randomUUID(),
+          actorId: getRequestActorId(req),
+        })
+      })
       invalidateViewConfigCache(viewId)
       return res.json({ ok: true, data: { deleted: viewId } })
     } catch (err) {
@@ -9831,12 +10214,32 @@ export function univerMetaRouter(): Router {
         // GET /views — does not lazily create a default view (#1670). Seed the
         // same default Grid view the /views fallback would create.
         const defaultViewId = buildId('view')
-        await query(
+        const defaultViewInsert = await query(
           `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
-           ON CONFLICT (id) DO NOTHING`,
+           ON CONFLICT (id) DO NOTHING
+           RETURNING id`,
           [defaultViewId, sheetId, '默认视图', 'grid', '{}', '{}', '{}', '[]', '{}'],
         )
+        if (((defaultViewInsert as any).rows ?? []).length > 0) {
+          await recordConfigRevision(query, {
+            sheetId,
+            entityType: 'view',
+            entityId: defaultViewId,
+            action: 'create',
+            ...configCreateDiff(viewConfigSnapshot({
+              name: '默认视图',
+              type: 'grid',
+              filterInfo: {},
+              sortInfo: {},
+              groupInfo: {},
+              hiddenFieldIds: [],
+              config: {},
+            }), VIEW_CONFIG_HISTORY_KEYS),
+            batchId: randomUUID(),
+            actorId: getRequestActorId(req),
+          })
+        }
 
         if (seed) {
           await createSeededSheet({ sheetId, name, description, query: query as unknown as QueryFn })
