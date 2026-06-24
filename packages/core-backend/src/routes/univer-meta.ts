@@ -74,6 +74,7 @@ import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity } from '../multitable/restore-preview-identity'
+import { recordConfigRevision, recordFieldOrderShifts, fieldCreateDiff, fieldUpdateDiff, fieldDeleteDiff } from '../multitable/config-revision-recorder'
 import { computeRecordRestoreDiff } from '../multitable/record-restore-diff'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
@@ -8406,6 +8407,7 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       await pool.transaction(async ({ query }) => {
+        const configBatchId = randomUUID() // T9-R1: one batchId per request — the new field + any shifted fields share it
         const { type, property } = await normalizeFieldWriteInput(
           query as unknown as QueryFn,
           sheetId,
@@ -8445,7 +8447,9 @@ export function univerMetaRouter(): Router {
           const maxOrder = Number((maxRes as any).rows?.[0]?.max_order ?? -1)
           order = Number.isFinite(maxOrder) ? maxOrder + 1 : 0
         } else {
-          await query('UPDATE meta_fields SET "order" = "order" + 1 WHERE sheet_id = $1 AND "order" >= $2', [sheetId, order])
+          // T9-R1: insert-in-middle shifts existing fields +1 — record each shifted field's order change too.
+          const shifted = ((await query('UPDATE meta_fields SET "order" = "order" + 1 WHERE sheet_id = $1 AND "order" >= $2 RETURNING id, "order"', [sheetId, order])) as any).rows as Array<{ id: string; order: number }>
+          await recordFieldOrderShifts(query, sheetId, shifted.map((r) => ({ id: String(r.id), newOrder: Number(r.order) })), 1, configBatchId, getRequestActorId(req))
         }
 
         const insert = await query(
@@ -8468,6 +8472,13 @@ export function univerMetaRouter(): Router {
         if (type === 'autoNumber') {
           await backfillAutoNumberField(query, sheetId, fieldId, property)
         }
+
+        // T9-R1: record the field creation in the SAME transaction (config history can't diverge from live config).
+        await recordConfigRevision(query, {
+          sheetId, entityType: 'field', entityId: fieldId, action: 'create',
+          ...fieldCreateDiff({ name: String(row.name), type: String(row.type), property: row.property, order: Number(row.order) }),
+          batchId: configBatchId, actorId: getRequestActorId(req),
+        })
       })
 
       const fieldRes = await pool.query(
@@ -8742,6 +8753,7 @@ export function univerMetaRouter(): Router {
           typeof parsed.data.property !== 'undefined' ? parsed.data.property : row.property,
         )
         const desiredOrder = parsed.data.order
+        const configBatchId = randomUUID() // T9-R1: one batchId per request — the updated field + any shifted fields share it
 
         // Rich-longText backward-compat gate (§4) — shared with the plugin-SDK provisioning
         // property write so BOTH boundaries reject flipping a POPULATED field to rich (whose old
@@ -8851,16 +8863,19 @@ export function univerMetaRouter(): Router {
         }
 
         if (typeof desiredOrder === 'number' && desiredOrder !== currentOrder) {
+          // T9-R1: a reorder shifts the fields BETWEEN old and new position — record each shifted field's order too.
           if (desiredOrder < currentOrder) {
-            await query(
-              'UPDATE meta_fields SET "order" = "order" + 1 WHERE sheet_id = $1 AND "order" >= $2 AND "order" < $3 AND id <> $4',
+            const shifted = ((await query(
+              'UPDATE meta_fields SET "order" = "order" + 1 WHERE sheet_id = $1 AND "order" >= $2 AND "order" < $3 AND id <> $4 RETURNING id, "order"',
               [sheetId, desiredOrder, currentOrder, fieldId],
-            )
+            )) as any).rows as Array<{ id: string; order: number }>
+            await recordFieldOrderShifts(query, sheetId, shifted.map((r) => ({ id: String(r.id), newOrder: Number(r.order) })), 1, configBatchId, getRequestActorId(req))
           } else {
-            await query(
-              'UPDATE meta_fields SET "order" = "order" - 1 WHERE sheet_id = $1 AND "order" > $2 AND "order" <= $3 AND id <> $4',
+            const shifted = ((await query(
+              'UPDATE meta_fields SET "order" = "order" - 1 WHERE sheet_id = $1 AND "order" > $2 AND "order" <= $3 AND id <> $4 RETURNING id, "order"',
               [sheetId, currentOrder, desiredOrder, fieldId],
-            )
+            )) as any).rows as Array<{ id: string; order: number }>
+            await recordFieldOrderShifts(query, sheetId, shifted.map((r) => ({ id: String(r.id), newOrder: Number(r.order) })), -1, configBatchId, getRequestActorId(req))
           }
         }
 
@@ -8890,6 +8905,19 @@ export function univerMetaRouter(): Router {
           const relLink = extractRelationAggregationLinkFieldId(String(nextProperty.expression))
           if (relLink && !refs.includes(relLink)) refs.push(relLink)
           await syncFormulaDependencies(query, sheetId, fieldId, refs)
+        }
+
+        // T9-R1: record the field update — only the CHANGED config keys; a no-op (nothing changed) records nothing.
+        const updateDiff = fieldUpdateDiff(
+          { name: String(row.name), type: String(row.type), property: row.property, order: Number(row.order) },
+          { name: String(updatedRow.name), type: String(updatedRow.type), property: updatedRow.property, order: Number(updatedRow.order) },
+        )
+        if (updateDiff) {
+          await recordConfigRevision(query, {
+            sheetId, entityType: 'field', entityId: fieldId, action: 'update',
+            before: updateDiff.before, after: updateDiff.after, changedKeys: updateDiff.changedKeys,
+            batchId: configBatchId, actorId: getRequestActorId(req),
+          })
         }
 
         return serializeFieldRow(updatedRow)
@@ -8952,14 +8980,23 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       const result = await pool.transaction(async ({ query }) => {
-        const existing = await query('SELECT id, sheet_id, "order" FROM meta_fields WHERE id = $1', [fieldId])
+        const existing = await query('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1', [fieldId])
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
         const row = (existing as any).rows[0]
         const sheetId = String(row.sheet_id)
         const order = Number(row.order ?? 0)
+        const configBatchId = randomUUID() // T9-R1: one batchId — the deleted field + the order-shift of later fields share it
 
         await query('DELETE FROM meta_fields WHERE id = $1', [fieldId])
         await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
+
+        // T9-R1: record the field deletion (before = the deleted field's config). The cascade view-config cleanup
+        // below is NOT recorded in R1 (view recording is R2); it will group under this batchId once R2 lands (T9-L7).
+        await recordConfigRevision(query, {
+          sheetId, entityType: 'field', entityId: fieldId, action: 'delete',
+          ...fieldDeleteDiff({ name: String(row.name), type: String(row.type), property: row.property, order }),
+          batchId: configBatchId, actorId: getRequestActorId(req),
+        })
 
         try {
           await query('DELETE FROM meta_links WHERE field_id = $1', [fieldId])
@@ -8969,7 +9006,9 @@ export function univerMetaRouter(): Router {
 
         // lock-exempt: field-delete schema op — drops the deleted field's key sheet-wide; not a per-record user edit.
         await query('UPDATE meta_records SET data = data - $1 WHERE sheet_id = $2', [fieldId, sheetId])
-        await query('UPDATE meta_fields SET "order" = "order" - 1 WHERE sheet_id = $1 AND "order" > $2', [sheetId, order])
+        // T9-R1: deleting a field shifts later fields' order -1 — record each shifted field under the same batchId.
+        const shiftedDel = ((await query('UPDATE meta_fields SET "order" = "order" - 1 WHERE sheet_id = $1 AND "order" > $2 RETURNING id, "order"', [sheetId, order])) as any).rows as Array<{ id: string; order: number }>
+        await recordFieldOrderShifts(query, sheetId, shiftedDel.map((r) => ({ id: String(r.id), newOrder: Number(r.order) })), -1, configBatchId, getRequestActorId(req))
 
         const views = await query(
           'SELECT id, filter_info, sort_info, group_info, hidden_field_ids FROM meta_views WHERE sheet_id = $1',

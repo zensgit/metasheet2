@@ -2,6 +2,8 @@ import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import { configRevisionNoop } from './config-revision-mock'
+
 type QueryResult = {
   rows: any[]
   rowCount?: number
@@ -161,6 +163,7 @@ describe('Multitable record and form context API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -265,6 +268,7 @@ describe('Multitable record and form context API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -365,6 +369,7 @@ describe('Multitable record and form context API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -429,6 +434,7 @@ describe('Multitable record and form context API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -475,6 +481,7 @@ describe('Multitable record and form context API', () => {
           expect(params).toEqual(['sheet_public'])
           return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -523,6 +530,7 @@ describe('Multitable record and form context API', () => {
           expect(params).toEqual(['sheet_public'])
           return { rows: [{ id: 'sheet_public', base_id: 'base_public', name: 'Public', description: 'Public intake' }] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -635,6 +643,7 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -776,6 +785,7 @@ describe('Multitable record and form context API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -873,6 +883,7 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -958,6 +969,7 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1086,6 +1098,7 @@ describe('Multitable record and form context API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1222,6 +1235,7 @@ describe('Multitable record and form context API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1281,6 +1295,7 @@ describe('Multitable record and form context API', () => {
           expect(params).toEqual(['rec_missing', 'sheet_ops'])
           return { rows: [] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1363,6 +1378,7 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1457,6 +1473,7 @@ describe('Multitable record and form context API', () => {
           expect(params).toEqual([['rec_1']])
           return { rows: [] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1535,6 +1552,7 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1588,6 +1606,7 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1620,6 +1639,7 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })

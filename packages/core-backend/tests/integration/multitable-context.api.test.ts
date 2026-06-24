@@ -2,6 +2,8 @@ import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import { configRevisionNoop } from './config-revision-mock'
+
 type QueryResult = {
   rows: any[]
   rowCount?: number
@@ -146,6 +148,7 @@ describe('Multitable context API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -263,6 +266,7 @@ describe('Multitable context API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -334,6 +338,7 @@ describe('Multitable context API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -406,6 +411,7 @@ describe('Multitable context API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -503,6 +509,7 @@ describe('Multitable context API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -544,6 +551,7 @@ describe('Multitable context API', () => {
         if (sql.includes('INSERT INTO meta_views')) {
           return { rows: [], rowCount: 1 }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -574,6 +582,7 @@ describe('Multitable context API', () => {
           viewInsert = params
           return { rows: [], rowCount: 1 }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -696,6 +705,7 @@ describe('Multitable context API', () => {
           const [viewId] = params as [string]
           return { rows: views.filter((view) => view.id === viewId) }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -784,6 +794,7 @@ describe('Multitable context API', () => {
           const [viewId] = params as [string]
           return { rows: views.filter((view) => view.id === viewId) }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -876,6 +887,7 @@ describe('Multitable context API', () => {
         if (sql.includes('INSERT INTO meta_views')) {
           return { rows: [], rowCount: 1 }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -907,6 +919,7 @@ describe('Multitable context API', () => {
             rows: [{ id: 'base_ops', owner_id: 'someone_else' }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -934,6 +947,7 @@ describe('Multitable context API', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [], rowCount: 1 }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -958,6 +972,7 @@ describe('Multitable context API', () => {
           expect(params).toEqual(['sheet_missing'])
           return { rows: [], rowCount: 0 }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1032,6 +1047,7 @@ describe('Multitable context API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1104,6 +1120,7 @@ describe('Multitable context API', () => {
           })
           return { rows: [], rowCount: 1 }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1177,6 +1194,7 @@ describe('Multitable context API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1252,6 +1270,7 @@ describe('Multitable context API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1364,6 +1383,7 @@ describe('Multitable context API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1484,6 +1504,7 @@ describe('Multitable context API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
