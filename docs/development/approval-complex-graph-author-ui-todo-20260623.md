@@ -93,6 +93,19 @@
 - ✅ 13 cc tests (topology-preservation + condition×cc compose + untouched round-trip + validation),
   wired into approval-web-guard. The complex-graph author UI render+edit set is complete.
 
+## Phase G-5 — approval-node editor ✅ (post-arc slice; unlocks #3114 amount-tier preset runtime)
+- ✅ approval node's **approver SOURCE only** (`assigneeSources`) editable in a preserved complex
+  graph; pure logic in `approvalNodeEdit.ts` (`applyApprovalNodeEditsToGraph` = the FOURTH disjoint
+  pass after condition/parallel/cc — every other node + all edges byte-identical; spread-original-first
+  so the edited node's own `approvalMode` / `emptyAssigneePolicy` / `autoApprovalPolicy` survive).
+  Legacy nodes (no `assigneeSources`) aren't seeded → cloned verbatim, read-only.
+- ✅ **SCOPE (honest):** approver-source editing only; `approvalMode` / `emptyAssigneePolicy` are
+  PRESERVED, not yet editable (a later slice). View is a compact per-kind source control (ID-typed,
+  not the rich directory picker yet); multi-source nodes edit the primary source + preserve extras.
+- ✅ 13 tests (topology + WITHIN-NODE preservation + legacy round-trip + FOUR-phase compose +
+  form_field_user→top-level-user validation), wired into approval-web-guard. This is the #3114
+  Decision-4 prerequisite (admins can now tune "which role/person approves at a threshold").
+
 ## Out of scope (v1 — reopen-only, see design-lock §7)
 - 🔒 Free-canvas / drag-edge editor · new node types · runtime/validator changes · nested
   parallel · any flatten of unsupported constructs · W7 approval-result write-back (own scope-doc,

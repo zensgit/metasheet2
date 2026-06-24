@@ -40,6 +40,12 @@ import {
   validateCcEdits,
   type CcEdits,
 } from './ccEdit'
+import {
+  applyApprovalNodeEditsToGraph,
+  approvalNodeEditsFromGraph,
+  validateApprovalNodeEdits,
+  type ApprovalNodeEdits,
+} from './approvalNodeEdit'
 
 export type { DetailColumnDraft } from './detailField'
 export { createEmptyDetailColumnDraft, DETAIL_LEAF_FIELD_TYPES } from './detailField'
@@ -55,6 +61,7 @@ export type { ParallelEdits, ParallelNodeEdit } from './parallelEdit'
 export { PARALLEL_JOIN_MODES } from './parallelEdit'
 export type { CcEdits, CcNodeEdit } from './ccEdit'
 export { CC_TARGET_TYPES } from './ccEdit'
+export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
@@ -165,6 +172,7 @@ export interface TemplateAuthoringDraft {
   // G-4 cc editor: editable targetType/targetIds for each `cc` node in `preservedGraph`, seeded
   // 1:1. Topology (edges) + every non-cc node stay byte-identical. Empty {} when no cc node.
   ccEdits?: CcEdits
+  approvalNodeEdits?: ApprovalNodeEdits
 }
 
 // Complex node types the v1 LINEAR steps editor can't author. They are NOT "unsupported" — a
@@ -579,6 +587,7 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
           // Empty {} when the complex graph has no parallel node (condition/cc-only).
           parallelEdits: parallelEditsFromGraph(template.approvalGraph),
           ccEdits: ccEditsFromGraph(template.approvalGraph),
+          approvalNodeEdits: approvalNodeEditsFromGraph(template.approvalGraph),
         }
       : {}),
     fields: fields.length > 0 ? fields : [createEmptyFieldDraft(1)],
@@ -701,7 +710,10 @@ export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph
   if (draft.preservedGraph) {
     const withConditionEdits = applyConditionEditsToGraph(draft.preservedGraph, draft.conditionEdits ?? {})
     const withParallelEdits = applyParallelEditsToGraph(withConditionEdits, draft.parallelEdits ?? {})
-    return applyCcEditsToGraph(withParallelEdits, draft.ccEdits ?? {})
+    const withCcEdits = applyCcEditsToGraph(withParallelEdits, draft.ccEdits ?? {})
+    // G-5: replace ONLY each edited approval node's `assigneeSources` (approver source); approvalMode /
+    // emptyAssigneePolicy / autoApprovalPolicy + every other node + ALL edges stay byte-identical.
+    return applyApprovalNodeEditsToGraph(withCcEdits, draft.approvalNodeEdits ?? {})
   }
   const approvalNodes = draft.steps.map((step, index) => ({
     key: `approval_${index + 1}`,
@@ -835,6 +847,9 @@ export function validateTemplateDraft(
   }
   if (draft.ccEdits && Object.keys(draft.ccEdits).length > 0) {
     errors.push(...validateCcEdits(draft.ccEdits))
+  }
+  if (draft.approvalNodeEdits && Object.keys(draft.approvalNodeEdits).length > 0) {
+    errors.push(...validateApprovalNodeEdits(draft.approvalNodeEdits, draft.fields))
   }
   const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
   draft.steps.forEach((step, index) => {
