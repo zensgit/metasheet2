@@ -3763,6 +3763,90 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.equal(res.body.error.details.reason, 'prod_canonical')
   assert.equal(provisioning.calls.length, 0, 'canonical objectId is rejected before sandbox provisioning')
 
+  let callCountBefore = provisioning.calls.length
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/sandbox-target/ensure', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      baseId: 'base_stock',
+      objectId: 'customer_real_table',
+    },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'TARGET_SANDBOX_OBJECT_ID_INVALID')
+  assert.equal(res.body.error.details.reason, 'not_sandbox_namespace')
+  assert.equal(provisioning.calls.length, callCountBefore, 'non-sandbox objectId is rejected before sandbox provisioning')
+
+  callCountBefore = provisioning.calls.length
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/sandbox-target/ensure', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      baseId: 'base_stock',
+      objectId: 'plm_stock_preparation_sandbox_validation',
+      optionSets: {
+        material_type: [{
+          value: 'plate',
+          rawSQL: 'select * from private_table',
+          functionBody: 'return 1',
+          payloadTemplate: { value: 'hidden' },
+        }],
+      },
+    },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'OPTION_SYNC_EXECUTABLE_REJECTED')
+  assert.equal(provisioning.calls.length, callCountBefore, 'invalid sandbox option seed is rejected before provisioning')
+  assert.equal(JSON.stringify(res.body).includes('private_table'), false, 'invalid option seed response hides raw values')
+
+  callCountBefore = provisioning.calls.length
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/sandbox-target/ensure', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      baseId: 'base_stock',
+      objectId: 'plm_stock_preparation_sandbox_validation',
+      optionSets: {},
+      configInfo: { rawSQL: [{ value: 'secret' }] },
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_INVALID')
+  assert.equal(provisioning.calls.length, callCountBefore, 'conflicting sandbox option aliases are rejected before provisioning')
+  assert.equal(JSON.stringify(res.body).includes('secret'), false, 'conflicting alias response hides ignored option values')
+
+  callCountBefore = provisioning.calls.length
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/sandbox-target/ensure', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      baseId: 'base_stock',
+      objectId: 'plm_stock_preparation_sandbox_validation',
+      optionSets: {},
+      optionSources: { typo_source: [{ value: 'plate' }] },
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_INVALID')
+  assert.equal(provisioning.calls.length, callCountBefore, 'conflicting sandbox optionSources alias is rejected before provisioning')
+
+  callCountBefore = provisioning.calls.length
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/sandbox-target/ensure', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      baseId: 'base_stock',
+      objectId: 'plm_stock_preparation_sandbox_validation',
+      optionSets: {
+        typo_source: [{ value: 'plate' }],
+      },
+    },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'OPTION_SYNC_UNKNOWN_SOURCE')
+  assert.ok(res.body.error.details.targetObjectIdHash)
+  assert.equal(provisioning.calls.length, callCountBefore, 'unknown sandbox option source is rejected before provisioning')
+
   res = await invoke(routes, 'GET', '/api/integration/stock-preparation/target/readiness', {
     user: ADMIN_USER,
     query: { projectId: 'tenant_1:integration-core' },
@@ -3845,6 +3929,11 @@ async function testStockPreparationTargetProvisioningRoutes() {
       baseId: 'base_stock',
       objectId: sandboxObjectId,
       label: 'Sandbox Stock Preparation',
+      optionSets: {
+        material_type: [{ value: 'plate', label: 'Plate' }],
+        blank_type: [{ value: 'casting', label: 'Casting' }],
+        stock_preparation_status: [{ value: 'pending', label: 'Pending' }],
+      },
     },
   })
   assertOkResponse(res, 201)
@@ -3855,8 +3944,14 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.equal(res.body.data.evidence.fieldMapMode, 'sandbox')
   assert.equal(res.body.data.evidence.target.fieldIdMapEmpty, false)
   assert.ok(res.body.data.evidence.objectIdHash, 'sandbox route returns object hash evidence')
+  assert.equal(res.body.data.optionSync.ok, true)
+  assert.ok(res.body.data.optionSync.target.objectIdHash, 'sandbox option sync returns target hash evidence')
+  assert.equal(Object.prototype.hasOwnProperty.call(res.body.data.optionSync.target, 'objectId'), false)
+  assert.equal(res.body.data.optionSync.evidence.fields.length, 4, 'sandbox route seeds contract + three config_info option fields')
   assert.equal(JSON.stringify(res.body.data).includes(sandboxObjectId), false, 'sandbox route response hides object id')
   assert.equal(JSON.stringify(res.body.data).includes('sheet_stock_canonical_created'), false, 'sandbox route response hides sheet id')
+  assert.equal(JSON.stringify(res.body.data).includes('plate'), false, 'sandbox route response hides option values')
+  assert.equal(JSON.stringify(res.body.data).includes('Casting'), false, 'sandbox route response hides option labels')
   const sandboxEnsureCall = findCalls(sandboxProvisioning.calls, 'ensureObject')[0]
   assert.equal(sandboxEnsureCall[1].projectId, 'tenant_1:integration-core')
   assert.equal(sandboxEnsureCall[1].baseId, 'base_stock')
@@ -3867,6 +3962,19 @@ async function testStockPreparationTargetProvisioningRoutes() {
     STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id),
     'sandbox ensure descriptor keeps the stock-prep manifest fields',
   )
+  const sandboxOptionPatches = findCalls(sandboxProvisioning.calls, 'patchObjectFieldProperty')
+  assert.equal(sandboxOptionPatches.length, 4, 'sandbox ensure seeds select options through the option-sync kernel')
+  assert.ok(
+    sandboxOptionPatches.every((call) => call[1].objectId === sandboxObjectId),
+    'sandbox option seeding patches only the sandbox object id',
+  )
+  assert.equal(
+    sandboxOptionPatches.some((call) => call[1].objectId === STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId),
+    false,
+    'sandbox option seeding never patches the canonical object',
+  )
+  const materialPatch = sandboxOptionPatches.find((call) => call[1].fieldId === 'materialType')
+  assert.deepEqual(materialPatch[1].propertyPatch.options, [{ value: 'plate', label: 'Plate' }])
 
   const leakySandbox = createStockPreparationTargetProvisioningApi()
   leakySandbox.api.ensureObject = async (input) => {

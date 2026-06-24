@@ -132,14 +132,17 @@ const {
 } = require('./stock-preparation-conflict-planner.cjs')
 const {
   StockPreparationTargetProvisioningError,
+  hashEvidenceValue,
   inspectStockPreparationCanonicalTarget,
   ensureStockPreparationCanonicalTarget,
   inspectStockPreparationSandboxTarget,
   ensureStockPreparationSandboxTarget,
+  sandboxStockPreparationTemplate,
 } = require('./stock-preparation-target-provisioning.cjs')
 const {
   StockPreparationOptionSyncError,
   syncStockPreparationOptions,
+  syncStockPreparationSandboxOptions,
   optionSetsFromInput,
 } = require('./stock-preparation-option-sync.cjs')
 // FOS-4: canonical stock-prep objectId — readiness is bound per TARGET, so any preset targeting this
@@ -423,7 +426,7 @@ const VALID_C6_WRITE_APPLY_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'conf
 const VALID_TEMPLATE_INSTANTIATE_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'targetSystemId', 'sourceSystemId', 'pipelineName'])
 const VALID_C6_WRITE_APPLY_CONFIRM_KEYS = new Set(['dryRunToken'])
 const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId'])
-const VALID_STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId', 'objectId', 'label'])
+const VALID_STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId', 'objectId', 'label', 'optionSets', 'optionSources', 'configInfo'])
 const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
   'tenantId',
   'workspaceId',
@@ -576,6 +579,16 @@ function stockPreparationTargetInput(req, rawInput = {}) {
   }
 }
 
+function optionSetAliasValue(input, errorCode) {
+  const aliases = ['optionSets', 'optionSources', 'configInfo'].filter((key) =>
+    Object.prototype.hasOwnProperty.call(input, key),
+  )
+  if (aliases.length > 1) {
+    throw new HttpRouteError(400, errorCode, 'use only one option set request field alias', { fields: aliases.sort() })
+  }
+  return aliases.length === 1 ? input[aliases[0]] : {}
+}
+
 function normalizeStockPreparationSandboxTargetRequest(input = {}) {
   if (!isPlainObject(input)) {
     throw new HttpRouteError(400, 'STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_INVALID', 'request must be an object')
@@ -592,6 +605,7 @@ function normalizeStockPreparationSandboxTargetRequest(input = {}) {
     baseId: firstString(input.baseId),
     objectId: firstString(input.objectId),
     label: firstString(input.label),
+    optionSets: optionSetAliasValue(input, 'STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_INVALID'),
   }
 }
 
@@ -606,6 +620,24 @@ function stockPreparationSandboxTargetInput(req, rawInput = {}) {
     baseId: input.baseId,
     objectId: input.objectId,
     label: input.label,
+    optionSets: input.optionSets,
+  }
+}
+
+function validateStockPreparationSandboxOptionSeedInput(input = {}) {
+  const template = sandboxStockPreparationTemplate({ objectId: input.objectId, label: input.label })
+  const optionSets = optionSetsFromInput(input.optionSets || {})
+  const allowedSourceKeys = new Set(
+    template.fields
+      .filter((field) => field.type === 'select' && field.optionSource)
+      .map((field) => field.optionSource.key),
+  )
+  const unknownSourceKey = Object.keys(optionSets).find((sourceKey) => !allowedSourceKeys.has(sourceKey))
+  if (unknownSourceKey) {
+    throw new StockPreparationOptionSyncError(422, 'OPTION_SYNC_UNKNOWN_SOURCE', 'option set source key is not declared by the stock-preparation sandbox template', {
+      sourceKey: unknownSourceKey,
+      targetObjectIdHash: hashEvidenceValue(template.objectId),
+    })
   }
 }
 
@@ -622,7 +654,7 @@ function normalizeStockPreparationOptionSyncRequest(input = {}) {
     tenantId: firstString(input.tenantId),
     workspaceId: firstString(input.workspaceId),
     projectId: firstString(input.projectId),
-    optionSets: input.optionSets || input.optionSources || input.configInfo || {},
+    optionSets: optionSetAliasValue(input, 'STOCK_PREPARATION_OPTION_SYNC_REQUEST_INVALID'),
   }
 }
 
@@ -742,6 +774,7 @@ function publicStockPreparationSandboxTargetResult(result) {
     mode: result.mode,
     targetBindingAvailable: result.target != null,
     evidence: result.evidence,
+    ...(result.optionSync ? { optionSync: result.optionSync } : {}),
   }
 }
 
@@ -763,6 +796,14 @@ function sandboxTargetRouteError(error) {
         error.details || {},
       )
     }
+  }
+  if (error instanceof StockPreparationOptionSyncError) {
+    return new HttpRouteError(
+      Number.isInteger(error.status) ? error.status : 422,
+      error.code || 'TARGET_SANDBOX_OPTION_SYNC_FAILED',
+      error.message || 'sandbox stock-preparation target option sync failed',
+      error.details || {},
+    )
   }
   return new HttpRouteError(
     503,
@@ -2207,6 +2248,7 @@ function createHandlers(services, options = {}) {
       requireAccess(req, 'admin')
       const input = stockPreparationSandboxTargetInput(req, requestBody(req))
       try {
+        validateStockPreparationSandboxOptionSeedInput(input)
         const result = await ensureStockPreparationSandboxTarget({
           context,
           projectId: input.projectId,
@@ -2215,6 +2257,19 @@ function createHandlers(services, options = {}) {
           label: input.label,
           permission: 'admin',
         })
+        const optionSync = await syncStockPreparationSandboxOptions({
+          context,
+          projectId: input.projectId,
+          objectId: input.objectId,
+          label: input.label,
+          permission: 'admin',
+          optionSets: input.optionSets,
+        })
+        result.optionSync = {
+          ok: optionSync.ok === true,
+          target: optionSync.target,
+          evidence: optionSync.evidence,
+        }
         return sendOk(res, publicStockPreparationSandboxTargetResult(result), result.mode === 'sandbox_create' ? 201 : 200)
       } catch (error) {
         throw sandboxTargetRouteError(error)

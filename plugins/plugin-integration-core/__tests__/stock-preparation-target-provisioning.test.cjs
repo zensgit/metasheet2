@@ -318,6 +318,20 @@ async function main() {
   assert.equal(sandboxRejectCalls.findObjectSheet.length, 0, 'canonical objectId is rejected before provisioning reads')
   assert.equal(sandboxRejectCalls.ensureObject.length, 0, 'canonical objectId is never provisioned as sandbox')
 
+  const { context: nonSandboxRejectCtx, calls: nonSandboxRejectCalls } = createContext({ sheetExists: false })
+  const nonSandboxError = await rejectsWith(
+    () => ensureStockPreparationSandboxTarget({
+      context: nonSandboxRejectCtx,
+      projectId: 'tenant:proj',
+      objectId: 'customer_real_table',
+      permission: 'admin',
+    }),
+    'TARGET_SANDBOX_OBJECT_ID_INVALID',
+  )
+  assert.deepEqual(nonSandboxError.details, { reason: 'not_sandbox_namespace' })
+  assert.equal(nonSandboxRejectCalls.findObjectSheet.length, 0, 'non-sandbox objectId is rejected before provisioning reads')
+  assert.equal(nonSandboxRejectCalls.ensureObject.length, 0, 'non-sandbox objectId is never provisioned as sandbox')
+
   const { context: sandboxCreateCtx, calls: sandboxCreateCalls } = createContext({ sheetExists: false })
   const sandboxCreated = await ensureStockPreparationSandboxTarget({
     context: sandboxCreateCtx,
