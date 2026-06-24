@@ -74,7 +74,7 @@ import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity } from '../multitable/restore-preview-identity'
-import { recordConfigRevision, recordFieldOrderShifts, fieldCreateDiff, fieldUpdateDiff, fieldDeleteDiff, type FieldConfigSnapshot } from '../multitable/config-revision-recorder'
+import { recordConfigRevision, recordFieldOrderShifts, fieldCreateDiff, fieldUpdateDiff, fieldDeleteDiff } from '../multitable/config-revision-recorder'
 import { computeRecordRestoreDiff } from '../multitable/record-restore-diff'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
