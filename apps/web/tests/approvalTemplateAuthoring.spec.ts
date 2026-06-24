@@ -1,3 +1,4 @@
+/* eslint-disable vue/one-component-per-file, vue/require-default-prop */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
@@ -156,6 +157,24 @@ const ElCheckbox = defineComponent({
   },
 })
 
+const ElTable = defineComponent({
+  name: 'ElTable',
+  props: { data: Array },
+  render() {
+    return h('div', {
+      'data-testid': (this.$attrs as any)?.['data-testid'],
+    }, this.$slots.default?.())
+  },
+})
+
+const ElTableColumn = defineComponent({
+  name: 'ElTableColumn',
+  props: { label: String },
+  render() {
+    return h('div')
+  },
+})
+
 const passthrough = (name: string, tag = 'div') => defineComponent({
   name,
   render() {
@@ -188,6 +207,8 @@ function installStubs(app: VueApp<Element>) {
   app.component('ElOption', ElOption)
   app.component('ElCheckbox', ElCheckbox)
   app.component('ElAlert', ElAlert)
+  app.component('ElTable', ElTable)
+  app.component('ElTableColumn', ElTableColumn)
   app.component('ElCard', passthrough('ElCard', 'section'))
   app.component('ElForm', passthrough('ElForm', 'form'))
   app.component('ElFormItem', passthrough('ElFormItem', 'label'))
@@ -637,6 +658,25 @@ describe('TemplateAuthoringView', () => {
     expect(payload.key).toBe('travel')
     expect(payload.name).toBe('出差审批')
     expect(payload.approvalGraph.nodes.map((node: any) => node.key)).toEqual(['start', 'approval_1', 'end'])
+    expect(replaceSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_created/edit' })
+  })
+
+  it('creates a common purchase template as a draft without publishing', async () => {
+    await mountView()
+
+    const button = container!.querySelector('[data-testid="approval-template-preset-purchase"]') as HTMLButtonElement
+    expect(button).not.toBeNull()
+    button.click()
+    await flushUi()
+
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+    expect(publishTemplateSpy).not.toHaveBeenCalled()
+    const payload = createTemplateSpy.mock.calls[0]?.[0] as any
+    expect(payload.key).toMatch(/^purchase-approval-/)
+    expect(payload.name).toBe('采购审批')
+    expect(payload.category).toBe('采购')
+    expect(payload.formSchema.fields.some((field: any) => field.id === 'purchase_items' && field.type === 'detail')).toBe(true)
+    expect(payload.approvalGraph.nodes.filter((node: any) => node.type === 'approval')).toHaveLength(3)
     expect(replaceSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_created/edit' })
   })
 
