@@ -449,9 +449,12 @@ export const DEFAULT_BULK_JOB_RECONCILE_STALE_MS = 10 * 60 * 1000
  * and the in-process plan registry, so any job still `queued`/`running` has no live
  * worker and can never progress — yet it stays "active" (the BJ-7 partial unique
  * index counts queued/running/suspended), blocking a fresh start for its
- * (actor, sheet, field) until expires_at GC. Flip those orphans to `errored`
- * (header-only, mirroring markErroredIfRunning; already-`generated` rows stay
- * committable).
+ * (actor, sheet, field) until expires_at GC. Flip those orphans to `errored` AND, in
+ * the SAME atomic statement, convert their still-`pending` rows to
+ * `pending_not_generated` so the header and its rows can never disagree. (Leaving rows
+ * in raw `pending` would hide them from the review breakdown — the poll count + FE
+ * buckets only surface `pending_not_generated`, not raw `pending` — violating
+ * truthful-status.) Already-`generated` rows are untouched and stay committable.
  *
  * `suspended` jobs are EXCLUDED — they are intentionally paused awaiting review,
  * not orphaned. The `staleAfterMs` age guard avoids racing a just-claimed job in a
@@ -467,12 +470,26 @@ export async function reconcileOrphanedBulkJobs(
   // Floor at 30s: this is an exported helper, so guard against a misuse that passes
   // a tiny/zero window and would reconcile a just-claimed, still-live job.
   const staleAfterSeconds = Math.max(30, Math.round(staleMs / 1000))
+  // ONE atomic statement: flip stale orphan HEADERS to `errored`, and in the same
+  // statement convert those jobs' still-`pending` ROWS to `pending_not_generated`, so a
+  // reconciled job's header and rows can never disagree. `generated` rows are untouched
+  // (committable); other row states (skipped/failure) are left as-is; `suspended` jobs
+  // are excluded by the header status filter.
   const res = await query(
-    `UPDATE ${AI_BULK_JOB_TABLE}
-        SET status = 'errored', suspend_reason = NULL, updated_at = NOW()
-      WHERE status IN ('queued', 'running')
-        AND updated_at < NOW() - ($1::int * INTERVAL '1 second')
-      RETURNING job_id`,
+    `WITH reconciled AS (
+       UPDATE ${AI_BULK_JOB_TABLE}
+          SET status = 'errored', suspend_reason = NULL, updated_at = NOW()
+        WHERE status IN ('queued', 'running')
+          AND updated_at < NOW() - ($1::int * INTERVAL '1 second')
+        RETURNING job_id
+     ), orphaned_rows AS (
+       UPDATE ${AI_BULK_JOB_ROWS_TABLE}
+          SET state = 'pending_not_generated', updated_at = NOW()
+        WHERE job_id IN (SELECT job_id FROM reconciled)
+          AND state = 'pending'
+        RETURNING 1
+     )
+     SELECT job_id FROM reconciled`,
     [staleAfterSeconds],
   )
   return Array.isArray(res.rows) ? res.rows.length : 0
