@@ -34,7 +34,7 @@
 | **AttendanceBonusPolicy** | 满勤奖规则、"发生请假即取消"、迟到早退阈值 | 迟到/早退阈值 = #5 RT 报表分级 + 每组阈值 已有 | **满勤 flag** + "发生请假即取消"判定（新） |
 | **PayrollSettlementPolicy** | 周期末如何处理剩余池、工资基数口径、周期 | `attendance_payroll_cycles` + payroll summary 导出点 已有 | 各来源**结转/过期/payout/直付** config + 导出契约 |
 | **PolicyAssignment** | 规则分配给哪些员工/部门/岗位/考勤组/合同类型 + **生效日期** | org/组/子管理员/合同维度 基础设施 已有 | assignment 记录 + 生效日期（新） |
-| **Ledger** | 加班入账 / 请假抵扣 / 周期 payout / 人工调整 走**不可变流水** | `attendance_leave_balance_events` 已是余额不可变事件流 | 扩出 OT-入账 / payout / 人工调整 三类事件 |
+| **Ledger** | 加班入账 / 请假抵扣 / 周期 payout / 人工调整 走**不可变流水** | `attendance_leave_balance_events` 已是余额不可变事件流；**`event_type` 仍是余额动作枚举 `grant/deduct/expire/revoke`**，OT 入账已用 `event_type='grant' + source_type='overtime_conversion'` 表达 | 扩 **`source_type`**（如 `overtime_conversion` / `settlement_payout` / `manual_adjust`）+ settlement-item / payroll-export 标记。**是否新增 `event_type` = 单独 migration 决策,本锁不提前锁事件层** |
 
 ---
 
@@ -86,7 +86,10 @@
 ## 6. 合规护栏（法律下限，不可配）
 
 normalizer 同时是 fail-closed 合规护栏，**法律下限高于管理员 config**：
-- **法定节假日加班**：依《劳动法》§44 **必须支付（300%）、不得以补休抵扣** → 可入池/可抵扣**强制排除法定节假日 OT**；管理员标成"可抵扣"直接拒。
+- **节假日加班按日历日 `dayType` 分级判定**（不是笼统"节假日"）：
+  - `statutory_holiday`（真正法定假日）：依《劳动法》§44 **必须支付（300%）、不得以补休抵扣** → 中国法域 preset 下**强制 `direct_pay_required`**,管理员**配不动**（标成可抵扣/免付直接拒）；
+  - `adjusted_rest_day`（调休日）/ `company_holiday`（公司假）：**企业可配置**进调休池或周期结算。
+  - 这样支持"长假**首个法定日必付**、其余**调休日可配**",但**不允许把真正法定休假日配成免付**。
 - **工作日延时加班**：多数地区不宜无条件转池 → 默认不入池/给合规提示（§11 待拍板默认）。
 - **休息日加班**：经典调休来源，可安排补休（200% 或调休）。
 - **来源分开** → normalizer 对违法组合给提示或禁止；未知字段拒。
@@ -122,7 +125,7 @@ normalizer 同时是 fail-closed 合规护栏，**法律下限高于管理员 co
 - ⬜ v1-4 账4 PayrollSettlementPolicy 导出契约（剩余 + 可折算/直付，不含金额）
 - ⬜ v1-5 PolicyAssignment + 生效日期 + 结算快照
 - ⬜ v1-6 授权 UI（克隆审批模板授权那套）+ 预设清单
-- ⬜ v1-7 Ledger 扩 OT-入账/payout/人工调整 三类事件
+- ⬜ v1-7 Ledger 扩 `source_type`（`overtime_conversion`/`settlement_payout`/`manual_adjust`）+ settlement-item/payroll-export 标记（复用现有 `event_type` `grant/deduct/expire/revoke`；新增 `event_type` = 单独 migration 决策,不在本锁）
 - ⬜ v1-8 real-DB 矩阵（三例 §9）+ staging smoke
 - 🔒 v2 跨池扣减顺序（v1 绿 + 显式 opt-in 后另起）
 
@@ -144,7 +147,7 @@ v2 若配 `deductFrom: ["comp_time","annual"]`：例 3 → comp_time 扣 10、an
 
 ## 10. 复用的现成基础设施（grounding，已在当前 main 核实）
 
-- **`deductLeaveBalance(trx, {leaveTypeCode, amountMinutes, sourceType, sourceId, insufficient…})`**（plugin index.cjs:15588）= 通用 FIFO 扣减引擎（C3 抽象给年假/法定假 L0，#2622）：`ORDER BY expires_at ASC` 最早过期优先、多类型同表、写 `attendance_leave_balance_events` 审计（带 `sourceId=requestId`）。**"FIFO vs 过期"代码里已定 = 最早过期优先。**
+- **`deductLeaveBalance(trx, {leaveTypeCode, amountMinutes, sourceType, sourceId, insufficient…})`**（符号引用为准；当前 main `plugins/plugin-attendance/index.cjs:15339`，行号随漂移）= **L0 通用 FIFO helper**：`ORDER BY expires_at ASC` 最早过期优先、多类型同表、写 `attendance_leave_balance_events` 审计（带 `sourceId=requestId`）。**"FIFO vs 过期"代码里已定 = 最早过期优先。**（注：#2622 是年假 design-lock,非本 helper 的实现落点。）
 - **`attendance_leave_balance_events`** = 余额不可变事件流（Ledger 雏形）。
 - **`compTimeGrantMinutes`** = OT 三段引擎已产出的加班折算分钟（账1 入池来源）。
 - **`attendance_payroll_cycles` + payroll summary** = 账4 导出点。
