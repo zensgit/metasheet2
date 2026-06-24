@@ -478,4 +478,29 @@ describe('useAiBulkFill — async-job state machine', () => {
     expect([...bulk.selected.value].sort()).toEqual(['rec_g1', 'rec_g2']) // default-select generated
     expect(bulk.state.error).toBeNull() // cleared on retry
   })
+
+  // ── Resilience: a FAILED cancel must not freeze the UI in polling with stale progress ──
+  it('a failed cancel RESUMES polling (UI keeps live progress, not frozen) and surfaces the error', async () => {
+    vi.useFakeTimers()
+    const fetchFn = router({
+      start: () => jsonResponse({ jobId: 'aibulkjob_1' }),
+      poll: (n) => jsonResponse(pollHeader({ state: 'running', generated: n })), // worker still running
+      rows: () => jsonResponse({ rows: JOB_ROWS, nextCursor: null }),
+      cancel: () => jsonResponse({ error: { code: 'INTERNAL_ERROR', message: 'boom' } }, { status: 500 }), // cancel fails
+    })
+    const { bulk } = setup(fetchFn as never, 2000)
+
+    await bulk.preview(previewInput) // first poll → running
+    expect(bulk.state.phase).toBe('polling')
+
+    await bulk.cancelJob() // cancel API fails
+    expect(bulk.state.phase).toBe('polling') // RESUMED, not frozen
+    expect(bulk.state.error).not.toBeNull() // the cancel failure is surfaced
+
+    // Polling genuinely continues — a later tick fetches a fresh header.
+    const before = fetchFn.mock.calls.length
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(fetchFn.mock.calls.length).toBeGreaterThan(before)
+    expect(bulk.state.phase).toBe('polling')
+  })
 })

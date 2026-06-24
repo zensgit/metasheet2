@@ -461,6 +461,13 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
     } catch (err) {
       if (token !== pollToken) return false
       fail(err)
+      // Resilience: the cancel did not land, so the worker may still be running. We
+      // cleared polling above — resume it so the UI shows LIVE progress instead of
+      // freezing on stale numbers until the user retries cancel. pollStep stops cleanly
+      // on its own if the backend is genuinely down; a later cancel re-clears via clearPoll().
+      if (state.phase === 'polling') {
+        await pollStep(token)
+      }
       return false
     }
     if (token !== pollToken) return false
