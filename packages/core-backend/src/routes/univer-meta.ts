@@ -74,6 +74,7 @@ import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity } from '../multitable/restore-preview-identity'
+import { recordConfigRevision, fieldCreateDiff, fieldUpdateDiff, fieldDeleteDiff, type FieldConfigSnapshot } from '../multitable/config-revision-recorder'
 import { computeRecordRestoreDiff } from '../multitable/record-restore-diff'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
@@ -8468,6 +8469,13 @@ export function univerMetaRouter(): Router {
         if (type === 'autoNumber') {
           await backfillAutoNumberField(query, sheetId, fieldId, property)
         }
+
+        // T9-R1: record the field creation in the SAME transaction (config history can't diverge from live config).
+        await recordConfigRevision(query, {
+          sheetId, entityType: 'field', entityId: fieldId, action: 'create',
+          ...fieldCreateDiff({ name: String(row.name), type: String(row.type), property: row.property, order: Number(row.order) }),
+          batchId: randomUUID(), actorId: getRequestActorId(req),
+        })
       })
 
       const fieldRes = await pool.query(
@@ -8892,6 +8900,19 @@ export function univerMetaRouter(): Router {
           await syncFormulaDependencies(query, sheetId, fieldId, refs)
         }
 
+        // T9-R1: record the field update — only the CHANGED config keys; a no-op (nothing changed) records nothing.
+        const updateDiff = fieldUpdateDiff(
+          { name: String(row.name), type: String(row.type), property: row.property, order: Number(row.order) },
+          { name: String(updatedRow.name), type: String(updatedRow.type), property: updatedRow.property, order: Number(updatedRow.order) },
+        )
+        if (updateDiff) {
+          await recordConfigRevision(query, {
+            sheetId, entityType: 'field', entityId: fieldId, action: 'update',
+            before: updateDiff.before, after: updateDiff.after, changedKeys: updateDiff.changedKeys,
+            batchId: randomUUID(), actorId: getRequestActorId(req),
+          })
+        }
+
         return serializeFieldRow(updatedRow)
       })
 
@@ -8952,7 +8973,7 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       const result = await pool.transaction(async ({ query }) => {
-        const existing = await query('SELECT id, sheet_id, "order" FROM meta_fields WHERE id = $1', [fieldId])
+        const existing = await query('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1', [fieldId])
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
         const row = (existing as any).rows[0]
         const sheetId = String(row.sheet_id)
@@ -8960,6 +8981,14 @@ export function univerMetaRouter(): Router {
 
         await query('DELETE FROM meta_fields WHERE id = $1', [fieldId])
         await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
+
+        // T9-R1: record the field deletion (before = the deleted field's config). The cascade view-config cleanup
+        // below is NOT recorded in R1 (view recording is R2); it will group under this batchId once R2 lands (T9-L7).
+        await recordConfigRevision(query, {
+          sheetId, entityType: 'field', entityId: fieldId, action: 'delete',
+          ...fieldDeleteDiff({ name: String(row.name), type: String(row.type), property: row.property, order }),
+          batchId: randomUUID(), actorId: getRequestActorId(req),
+        })
 
         try {
           await query('DELETE FROM meta_links WHERE field_id = $1', [fieldId])
