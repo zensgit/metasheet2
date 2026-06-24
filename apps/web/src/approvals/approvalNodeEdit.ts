@@ -104,10 +104,13 @@ function isAssigneeSourceValid(source: ApprovalAssigneeSource, topLevelUserField
       // backend: fieldId must reference a TOP-LEVEL `user` field (sub-fields unresolvable).
       if (source.fieldId.trim().length === 0) return false
       return topLevelUserFieldIds ? topLevelUserFieldIds.has(source.fieldId.trim()) : true
+    // PREVIEW only: integer ≥ 1. The backend additionally enforces a manager-chain level CAP
+    // (MAX_MANAGER_CHAIN_LEVELS) which is NOT mirrored here — the UI input caps at 10 and the
+    // backend `normalizeApprovalGraph` is the final arbiter on the ceiling.
     case 'continuous_managers':
-      return source.levels >= 1
+      return Number.isInteger(source.levels) && source.levels >= 1
     case 'manager_at_level':
-      return source.level >= 1
+      return Number.isInteger(source.level) && source.level >= 1
     case 'requester':
     case 'direct_manager':
     case 'dept_head':

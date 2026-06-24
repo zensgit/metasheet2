@@ -3,6 +3,7 @@ import type { ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/appr
 import {
   buildApprovalGraph,
   draftFromTemplate,
+  unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
   type TemplateAuthoringDraft,
 } from '../src/approvals/templateAuthoring'
@@ -188,5 +189,38 @@ describe('validateApprovalNodeEdits (preview mirrors the backend assignee rule)'
     const draft = draftFromTemplate(buildTemplate(APPROVAL_GRAPH))
     draft.approvalNodeEdits!.approval_1.assigneeSources = []
     expect(validateTemplateDraft(draft).some((e) => /审批人来源/.test(e))).toBe(true)
+  })
+})
+
+describe('G-5 fail-closed — complex approval-node config must stay within the BACKEND allowlist', () => {
+  // The backend `normalizeApprovalGraph` rebuilds approval config from {assigneeType, assigneeIds,
+  // assigneeSources, approvalMode, emptyAssigneePolicy, autoApprovalPolicy, fieldPermissions} and
+  // silently DROPS any other key on save. The FE deep-equal round-trip can't see that drop, so a
+  // complex approval node (cc node forces the preserved path) carrying an unknown key must be
+  // UNSUPPORTED — read-only + save disabled — not silently flattened on save.
+  const complexWith = (approvalConfig: Record<string, unknown>): ApprovalGraph => ({
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'approval_1', type: 'approval', name: '主管', config: approvalConfig },
+      { key: 'cc_1', type: 'cc', name: '抄送', config: { targetType: 'role', targetIds: ['finance'] } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'e1', source: 'start', target: 'approval_1' },
+      { key: 'e2', source: 'approval_1', target: 'cc_1' },
+      { key: 'e3', source: 'cc_1', target: 'end' },
+    ],
+  })
+  it('flags a complex approval node carrying an unknown config key (backend would drop it → save disabled)', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'direct_manager' }], customRoutingHint: 'x' })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+  it('ALLOWS fieldPermissions — the backend DOES preserve it on the complex path (not over-strict)', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'direct_manager' }], fieldPermissions: [{ fieldId: 'amount', access: 'hidden' }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+  })
+  it('allows a complex approval node with only backend-preserved keys', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { mergeWithRequester: true } })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
   })
 })

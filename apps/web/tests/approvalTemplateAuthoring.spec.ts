@@ -735,6 +735,74 @@ describe('TemplateAuthoringView', () => {
     expect((container!.querySelector('[data-testid="approval-step-source-kind"]') as HTMLSelectElement).value).toBe('direct_manager') // hydrated back
   })
 
+  // G-5 wiring (mounted SFC): helper tests prove the edit logic; these prove the COMPLEX-graph
+  // approval-node SOURCE control actually writes the changed source through @update:model-value →
+  // edit model → save payload (the wire a pure-helper test can't see), and that a legacy node shows
+  // no editor. cc node forces the preserved-graph (complex) path so the structured editor renders.
+  function buildG5ComplexGraph(approval1Config: Record<string, unknown>) {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '主管', config: approval1Config },
+        { key: 'cc_1', type: 'cc', name: '抄送', config: { targetType: 'role', targetIds: ['finance'] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'cc_1' },
+        { key: 'e3', source: 'cc_1', target: 'end' },
+      ],
+    }
+  }
+
+  it('G-5 wiring: changing an approval-node source via the SFC control writes it to the save payload; mode/policy/autoApprovalPolicy + cc + edges preserved', async () => {
+    routeParams = { id: 'tpl_g5' }
+    const graph = buildG5ComplexGraph({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { mergeWithRequester: true } })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph }))
+    await mountView()
+    await flushUi()
+
+    // editor renders for the seeded approval node, hydrated to its current source
+    expect(container!.querySelector('[data-approval-node="approval_1"]')).not.toBeNull()
+    const kindSelect = container!.querySelector('[data-testid="approval-node-source-kind"]') as HTMLSelectElement
+    expect(kindSelect).not.toBeNull()
+    expect(kindSelect.value).toBe('direct_manager')
+
+    // change the source kind through the REAL control (direct_manager → dept_head — both valid
+    // no-ID kinds; a static_* target would need IDs the multi-select stub can't drive, and that ID
+    // logic is helper-covered. Note: switching to an EMPTY static_role correctly BLOCKS save via the
+    // validation preview — proving validation is wired too), then save.
+    kindSelect.value = 'dept_head'
+    kindSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    const approval1 = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1')
+    expect(approval1.config.assigneeSources).toEqual([{ kind: 'dept_head' }]) // CHANGED via the control
+    expect(approval1.config.approvalMode).toBe('single') // preserved on the edited node
+    expect(approval1.config.emptyAssigneePolicy).toBe('error') // preserved
+    expect(approval1.config.autoApprovalPolicy).toEqual({ mergeWithRequester: true }) // preserved
+    // cc node + ALL edges byte-identical
+    expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'cc_1').config).toEqual({ targetType: 'role', targetIds: ['finance'] })
+    expect(payload.approvalGraph.edges).toEqual(graph.edges)
+  })
+
+  it('G-5 wiring: a LEGACY approval node (assigneeType/assigneeIds, no assigneeSources) shows NO source editor but still renders read-only', async () => {
+    routeParams = { id: 'tpl_g5_legacy' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({ assigneeType: 'role', assigneeIds: ['legacy_role'], approvalMode: 'single' }),
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-approval-node="approval_1"]')).toBeNull() // no editor for a legacy node
+    expect(container!.querySelector('[data-testid="approval-graph-readonly-list"]')).not.toBeNull() // graph still renders (legacy keys are allowlisted)
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // not fail-closed
+  })
+
   it('dept_head reads back editable: a saved dept_head template is NOT fail-closed (no unsupported alert, save enabled, sourceKind hydrated)', async () => {
     routeParams = { id: 'tpl_dh' }
     getTemplateSpy.mockResolvedValue(buildTemplate({

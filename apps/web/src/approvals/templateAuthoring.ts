@@ -475,6 +475,21 @@ const RECOGNISED_GRAPH_NODE_TYPES = new Set([
  *    rather than projected to `steps`.
  * Returns `null` when the template is editable OR complex-but-preservable.
  */
+// The approval-node config keys the BACKEND `normalizeApprovalGraph` re-emits for a COMPLEX graph
+// (ApprovalProductService.ts:899-911). Any other key is silently dropped on save. NB: this is the
+// COMPLEX path's allowlist ONLY — the linear path reconstructs via `buildStepConfig`, which does NOT
+// preserve `fieldPermissions`, so the two allowlists must stay SEPARATE (sharing would let a linear
+// node's `fieldPermissions` through, then flatten it — the same bug on the other path).
+const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
+  'assigneeType',
+  'assigneeIds',
+  'assigneeSources',
+  'approvalMode',
+  'emptyAssigneePolicy',
+  'autoApprovalPolicy',
+  'fieldPermissions',
+]
+
 export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDetailDTO): string | null {
   const unsupportedField = template.formSchema.fields.find((field) => !isAuthorableFieldType(field.type))
   if (unsupportedField) {
@@ -493,10 +508,22 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     return `包含暂不支持编辑的审批节点：${unknownNode.name || unknownNode.key} (${unknownNode.type})`
   }
 
-  // Complex graphs (cc/condition/parallel or non-linear) are load-preserved verbatim — the linear
-  // `steps` projection (and its per-approval-node config allowlist below) does NOT apply, so they
-  // are never "unsupported" here. They open read-only via `graphReadOnlyReason` and save unchanged.
+  // Complex graphs (cc/condition/parallel or non-linear) are load-preserved verbatim via
+  // spread-original-first — BUT the backend `normalizeApprovalGraph` rebuilds each approval node's
+  // config from a fixed allowlist and silently DROPS any other key on save. The FE deep-equal
+  // round-trip can't see that drop, so fail-closed: a complex approval node carrying a config key the
+  // backend won't preserve is unsupported (read-only, save disabled), never silently flattened.
   if (isComplexApprovalGraph(template.approvalGraph)) {
+    const unsupportedComplexApproval = template.approvalGraph.nodes.find(
+      (node) =>
+        node.type === 'approval'
+        && Object.keys(node.config as Record<string, unknown>).some(
+          (key) => !BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS.includes(key),
+        ),
+    )
+    if (unsupportedComplexApproval) {
+      return `审批节点含后端不会保留的配置（保存将丢失），已锁定为只读：${unsupportedComplexApproval.name || unsupportedComplexApproval.key}`
+    }
     return null
   }
 
