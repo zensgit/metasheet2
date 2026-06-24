@@ -40,6 +40,13 @@ import {
   validateCcEdits,
   type CcEdits,
 } from './ccEdit'
+import {
+  applyApprovalNodeEditsToGraph,
+  approvalNodeEditsFromGraph,
+  unsupportedComplexApprovalNodeConfigReason,
+  validateApprovalNodeEdits,
+  type ApprovalNodeEdits,
+} from './approvalNodeEdit'
 
 export type { DetailColumnDraft } from './detailField'
 export { createEmptyDetailColumnDraft, DETAIL_LEAF_FIELD_TYPES } from './detailField'
@@ -55,6 +62,8 @@ export type { ParallelEdits, ParallelNodeEdit } from './parallelEdit'
 export { PARALLEL_JOIN_MODES } from './parallelEdit'
 export type { CcEdits, CcNodeEdit } from './ccEdit'
 export { CC_TARGET_TYPES } from './ccEdit'
+export type { ApprovalNodeEdits, ApprovalNodeEdit } from './approvalNodeEdit'
+export { APPROVAL_NODE_SOURCE_KINDS } from './approvalNodeEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
@@ -165,6 +174,11 @@ export interface TemplateAuthoringDraft {
   // G-4 cc editor: editable targetType/targetIds for each `cc` node in `preservedGraph`, seeded
   // 1:1. Topology (edges) + every non-cc node stay byte-identical. Empty {} when no cc node.
   ccEdits?: CcEdits
+  // G-5 approval-node editor: editable approval config for each approval node in a preserved graph.
+  // It mutates ONLY assignee source / approvalMode / emptyAssigneePolicy / mergeWithRequester on
+  // that approval node. `fieldPermissions` and other preserved siblings remain intact; every
+  // non-edited node and every edge stay byte-identical.
+  approvalNodeEdits?: ApprovalNodeEdits
 }
 
 // Complex node types the v1 LINEAR steps editor can't author. They are NOT "unsupported" — a
@@ -485,11 +499,11 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     return `包含暂不支持编辑的审批节点：${unknownNode.name || unknownNode.key} (${unknownNode.type})`
   }
 
-  // Complex graphs (cc/condition/parallel or non-linear) are load-preserved verbatim — the linear
-  // `steps` projection (and its per-approval-node config allowlist below) does NOT apply, so they
-  // are never "unsupported" here. They open read-only via `graphReadOnlyReason` and save unchanged.
+  // Complex graphs (cc/condition/parallel or non-linear) are load-preserved and partially editable.
+  // G-5 opens approval-node config editing inside that graph, so approval nodes whose config cannot
+  // be represented by the structured editor must fail closed rather than being flattened.
   if (isComplexApprovalGraph(template.approvalGraph)) {
-    return null
+    return unsupportedComplexApprovalNodeConfigReason(template.approvalGraph)
   }
 
   const ordered = orderedLinearNodes(template.approvalGraph)
@@ -539,7 +553,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
 export function graphReadOnlyReason(template: ApprovalTemplateDetailDTO): string | null {
   if (unsupportedTemplateAuthoringReason(template)) return null
   if (!isComplexApprovalGraph(template.approvalGraph)) return null
-  return '该审批流程包含复杂节点：条件分支可在下方编辑分支规则，并行 / 抄送节点以只读结构展示；未改动的节点与连线在保存时原样保留，不会被改写。'
+  return '该审批流程包含复杂节点：可编辑条件分支规则、并行汇聚模式、抄送对象和审批节点配置；未改动的节点与连线在保存时原样保留，不会被改写。'
 }
 
 export function draftFromTemplate(template: ApprovalTemplateDetailDTO): TemplateAuthoringDraft {
@@ -579,6 +593,7 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
           // Empty {} when the complex graph has no parallel node (condition/cc-only).
           parallelEdits: parallelEditsFromGraph(template.approvalGraph),
           ccEdits: ccEditsFromGraph(template.approvalGraph),
+          approvalNodeEdits: approvalNodeEditsFromGraph(template.approvalGraph),
         }
       : {}),
     fields: fields.length > 0 ? fields : [createEmptyFieldDraft(1)],
@@ -690,18 +705,16 @@ function buildStepConfig(step: ApprovalStepDraft): ApprovalNodeConfig {
 }
 
 export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph {
-  // G-1/G-2/G-3 anti-flatten keystone: a preserved complex graph is NEVER rebuilt from `steps`, so
-  // its cc/condition/parallel nodes/edges survive save. Two disjoint edit passes COMPOSE onto a COPY
-  // of the graph: G-2 (`applyConditionEditsToGraph`) replaces ONLY each condition node's config, G-3
-  // (`applyParallelEditsToGraph`) replaces ONLY each parallel node's `joinMode`, and G-4
-  // (`applyCcEditsToGraph`) replaces ONLY each cc node's targetType/targetIds. The three passes touch
-  // disjoint node types and each deep-clones everything else, so all edits land while every other
-  // node + ALL edges stay byte-identical; an untouched graph round-trips unchanged.
+  // G-1..G-5 anti-flatten keystone: a preserved complex graph is NEVER rebuilt from `steps`.
+  // Disjoint edit passes COMPOSE onto a COPY of the graph: condition logic, parallel joinMode, cc
+  // targets, and approval-node config. Each pass touches only its node type and deep-clones
+  // everything else, so all topology and every untouched node remain byte-identical.
   // Only linear drafts take the build below.
   if (draft.preservedGraph) {
     const withConditionEdits = applyConditionEditsToGraph(draft.preservedGraph, draft.conditionEdits ?? {})
     const withParallelEdits = applyParallelEditsToGraph(withConditionEdits, draft.parallelEdits ?? {})
-    return applyCcEditsToGraph(withParallelEdits, draft.ccEdits ?? {})
+    const withCcEdits = applyCcEditsToGraph(withParallelEdits, draft.ccEdits ?? {})
+    return applyApprovalNodeEditsToGraph(withCcEdits, draft.approvalNodeEdits ?? {})
   }
   const approvalNodes = draft.steps.map((step, index) => ({
     key: `approval_${index + 1}`,
@@ -835,6 +848,9 @@ export function validateTemplateDraft(
   }
   if (draft.ccEdits && Object.keys(draft.ccEdits).length > 0) {
     errors.push(...validateCcEdits(draft.ccEdits))
+  }
+  if (draft.approvalNodeEdits && Object.keys(draft.approvalNodeEdits).length > 0) {
+    errors.push(...validateApprovalNodeEdits(draft.approvalNodeEdits, buildFormSchema(draft)))
   }
   const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
   draft.steps.forEach((step, index) => {

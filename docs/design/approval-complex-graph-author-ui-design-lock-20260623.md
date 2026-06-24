@@ -1,13 +1,17 @@
 # Design-lock: Approval complex-graph node author UI (复杂图节点作者 UI)
 
-**Status:** RATIFIED + SHIPPED (2026-06-23). The arc is complete on main — design-lock #3102,
-G-1 load-preserve #3103, G-2 condition #3104, G-3 parallel join-mode #3105, G-4 cc #3106.
+**Status:** RATIFIED + SHIPPED (2026-06-23). The initial arc is complete on main — design-lock
+#3102, G-1 load-preserve #3103, G-2 condition #3104, G-3 parallel join-mode #3105, G-4 cc #3106.
+The G-5 follow-up adds approval-node config editing inside preserved complex graphs, satisfying
+the amount-tier preset Gate A without changing graph topology.
 **As-built scope** (refined from the original proposal below): the editor edits **condition
 logic** (branch rules / conjunction / default edge), **parallel `joinMode`** (`all`/`any` — both
-backend-accepted), and **cc targets** (`targetType` / `targetIds`). All graph **topology**
-(parallel branch edgeKeys + `joinNodeKey`, condition branch edges, every edge) is **read-only,
-preserved byte-identical**; **parallel topology / branch add-remove editing is explicitly OUT of
-scope** (a later slice). Brand-neutral (external OA / mainstream approval platforms; no vendor names).
+backend-accepted), **cc targets** (`targetType` / `targetIds`), and **approval-node config**
+(`assigneeSources`, `approvalMode`, `emptyAssigneePolicy`, and
+`autoApprovalPolicy.mergeWithRequester`). All graph **topology** (parallel branch edgeKeys +
+`joinNodeKey`, condition branch edges, every edge) is **read-only, preserved byte-identical**;
+**parallel topology / branch add-remove editing is explicitly OUT of scope** (a later slice).
+Brand-neutral (external OA / mainstream approval platforms; no vendor names).
 
 ---
 
@@ -22,6 +26,9 @@ scope** (a later slice). Brand-neutral (external OA / mainstream approval platfo
 > - **(2) `joinMode='any'` shipped** (not fail-closed) — see the §7/§8c RATIFIED notes.
 > - **(3) A complex graph is load-preserved + save-ENABLED.** The "Current authoring …
 >   `UNSUPPORTED_GRAPH_NODE_TYPES` … save disabled" line below describes the **pre-G-1** state.
+> - **(4) Approval-node config is editable in the G-5 follow-up.** §1's "Plus the existing
+>   approval node config (unchanged)" line described the pre-G-5 state. G-5 edits approval-node
+>   sources and strategy fields while preserving topology and unsupported config fail-closed.
 >
 > The runtime / validator / node-model facts below remain accurate.
 
@@ -61,8 +68,9 @@ Grounded in code (explorer-verified 2026-06-23):
 - **Editable (all runtime-ready):** `condition` (branches: rules `{fieldId, operator, value}` +
   `conjunction` and/or, + `defaultEdgeKey`), `parallel` (**`joinMode` only** — `all`/`any`;
   branch edgeKeys + `joinNodeKey` are topology, preserved read-only **[as-built]**), `cc`
-  (`targetType` user/role + `targetIds`). Plus the existing `approval` node
-  config (unchanged).
+  (`targetType` user/role + `targetIds`), and `approval` node config
+  (`assigneeSources`, `approvalMode`, `emptyAssigneePolicy`,
+  `autoApprovalPolicy.mergeWithRequester`) **[as-built G-5 follow-up]**.
 - **Read-only / structural (never hand-edited):** `start` / `end` (auto-managed), and node
   `key`s / `edge`s identity (the editor manages topology through structured controls, not raw
   key editing). Legacy `assigneeType`/`assigneeIds` config is shown read-only (the editor
@@ -80,8 +88,9 @@ Grounded in code (explorer-verified 2026-06-23):
   cc → target picker reusing the existing approval user/role picker) + a **validation preview**
   (inline errors/warnings before save). No drag canvas, no free edge drawing — topology is
   expressed through structured controls (~~add branch, set join target~~ **[as-built: parallel
-  topology is read-only; only joinMode/condition-rules/cc-targets are editable]**), which the builder turns
-  into nodes + edges. This fits TemplateAuthoringView's evolution and is far more testable.
+  topology is read-only; only joinMode/condition-rules/cc-targets/approval-node config are
+  editable]**), which the builder turns into nodes + edges. This fits TemplateAuthoringView's
+  evolution and is far more testable.
 
 ## 3. Anti-flatten — full-graph round-trip (the keystone)
 - The editor's draft model carries the **whole graph** (all nodes + edges + every node's
@@ -120,6 +129,10 @@ Grounded in code (explorer-verified 2026-06-23):
 - **G-3 · parallel editor.** Author parallel `joinMode` (`all`/`any`, both backend-accepted);
   branch edgeKeys + `joinNodeKey` are topology, read-only **[as-built — branch add/remove deferred].**
 - **G-4 · cc editor.** Author cc targets (reuse the approval picker).
+- **G-5 · approval-node config editor.** Author approval-node assignee source + approval mode +
+  empty-assignee policy + merge-with-requester inside preserved complex graphs. All node keys,
+  all edges, condition configs, parallel configs, cc configs, and non-edited approval nodes remain
+  deep-equal; unsupported legacy / multi-source / unknown approval-node config stays fail-closed.
 - The structured-graph editor is the form-schema-adjacent surface the detail arc stabilized
   first (goal sequencing: C 明细 done → graph UI now).
 

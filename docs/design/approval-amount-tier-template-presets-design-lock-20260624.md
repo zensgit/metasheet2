@@ -1,11 +1,12 @@
 # Amount-Tier Approval Template Presets — Design Lock
 
-Status: RATIFIED — RUNTIME NOT BUILT
+Status: RATIFIED — PRESET RUNTIME NOT BUILT
 
 Grounding: approval authoring can create/edit linear approval templates, preserve complex graphs,
-edit condition-node rules, edit parallel `joinMode` (`all` / `any`), and edit cc targets. The common
-template preset slice creates basic reimbursement/purchase drafts. This design locks the next
-advanced preset family: amount-tier reimbursement and amount-tier purchase.
+edit condition-node rules, edit parallel `joinMode` (`all` / `any`), edit cc targets, and edit
+approval-node sources/strategy inside preserved complex graphs. The common template preset slice
+creates basic reimbursement/purchase drafts. This design locks the next advanced preset family:
+amount-tier reimbursement and amount-tier purchase.
 
 ## Goal
 
@@ -51,10 +52,9 @@ approval-result write-back.
 
 4. The advanced presets require editable approval nodes inside preserved complex graphs.
 
-   Current complex-graph authoring can edit condition rules and parallel join mode, but approval
-   nodes inside a complex graph are displayed as read-only summaries. That is not enough for a
-   reusable amount-tier preset because administrators must be able to tune "which role/person/source
-   approves at this threshold".
+   The G-5 complex-graph follow-up satisfies this gate: approval nodes inside a preserved graph can
+   now edit their assignee source and approval strategy without topology changes. That unlocks the
+   preset implementation, but it does not mean the amount-tier preset payloads themselves are built.
 
    Therefore implementation order is:
 
@@ -134,6 +134,9 @@ Default threshold proposal: `20000`. `joinMode` defaults to `all` for purchase c
 ## Build Gates
 
 ### Gate A — Complex Approval-Node Editor
+
+Status: satisfied by the G-5 complex-graph approval-node editor follow-up. The advanced preset
+payloads remain unbuilt until Gate B/C and the preset slice land.
 
 Before shipping the advanced presets, the authoring UI must let an admin edit approval-node sources
 inside preserved complex graphs without changing topology.

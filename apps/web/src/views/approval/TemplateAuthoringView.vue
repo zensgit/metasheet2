@@ -7,7 +7,7 @@
       </el-button>
       <div>
         <h1>{{ isEditMode ? '编辑审批模板' : '新建审批模板' }}</h1>
-        <p>面向模板管理员的线性审批模板编辑器</p>
+        <p>面向模板管理员的审批模板编辑器</p>
       </div>
       <div class="template-authoring__actions">
         <el-button
@@ -50,13 +50,13 @@
       data-testid="approval-template-unsupported-alert"
     />
 
-    <!-- G-1..G-4: a complex graph is preserved, not unsupported — informational, save stays enabled.
-         G-2 condition rules, G-3 parallel joinMode, and G-4 cc targets are all editable; branches /
-         join target / all edges are preserved topology. -->
+    <!-- G-1..G-5: a complex graph is preserved, not unsupported — informational, save stays
+         enabled. G-2 condition rules, G-3 parallel joinMode, G-4 cc targets, and G-5 approval-node
+         config are editable; branches / join target / all edges are preserved topology. -->
     <el-alert
       v-if="!unsupportedReason && graphReadOnlyMessage"
       :title="graphReadOnlyMessage"
-      description="表单与基本信息可编辑；条件分支节点可编辑分支规则，并行节点可编辑汇聚模式，抄送节点可编辑抄送对象。分支拓扑与连线在保存时原样保留。"
+      description="表单与基本信息可编辑；条件分支节点可编辑分支规则，并行节点可编辑汇聚模式，抄送节点可编辑抄送对象，审批节点可编辑审批人来源与策略。分支拓扑与连线在保存时原样保留。"
       type="info"
       show-icon
       :closable="false"
@@ -405,10 +405,9 @@
           </div>
         </template>
 
-        <!-- G-1/G-2: structured render of a preserved complex graph. condition nodes are EDITABLE
-             (G-2 — branch rules / conjunction / default edge); parallel / cc / approval stay
-             READ-ONLY summaries (G-3 / G-4), and every non-condition node + all edges are preserved
-             byte-for-byte on save. Nothing renders as a bare "unsupported". -->
+        <!-- G-1..G-5: structured render of a preserved complex graph. condition / parallel / cc /
+             approval-node config are editable in place; topology (node keys, edges, branch edgeKeys,
+             join target) stays byte-for-byte preserved. Nothing renders as a bare "unsupported". -->
         <div v-if="graphReadOnly" data-testid="approval-graph-readonly-list">
           <div
             v-for="node in graphPreviewNodes"
@@ -535,6 +534,160 @@
               </el-form-item>
             </div>
 
+            <!-- G-5: editable approval node config. Node key/order and all edges are topology;
+                 config siblings such as fieldPermissions are preserved by the builder. -->
+            <div
+              v-else-if="node.type === 'approval' && approvalNodeEditFor(node.key)"
+              class="template-authoring__approval-node"
+              data-testid="approval-node-editor"
+              :data-approval-node="node.key"
+            >
+              <div class="template-authoring__grid">
+                <el-form-item label="审批人来源">
+                  <el-select
+                    v-model="approvalNodeEditFor(node.key)!.sourceKind"
+                    size="small"
+                    :disabled="readOnly"
+                    style="width: 100%"
+                    data-testid="approval-node-source-kind"
+                    @change="syncApprovalNodeOptions(approvalNodeEditFor(node.key)!)"
+                  >
+                    <el-option label="指定用户" value="static_user" />
+                    <el-option label="指定角色" value="static_role" />
+                    <el-option label="发起人" value="requester" />
+                    <el-option label="直属上级" value="direct_manager" />
+                    <el-option label="部门主管" value="dept_head" />
+                    <el-option label="连续多级上级" value="continuous_managers" />
+                    <el-option label="指定层级上级" value="manager_at_level" />
+                    <el-option label="表单用户字段" value="form_field_user" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item v-if="approvalNodeEditFor(node.key)!.sourceKind === 'continuous_managers'" label="上级层级数">
+                  <el-input-number
+                    v-model="approvalNodeEditFor(node.key)!.levels"
+                    :min="1"
+                    :max="10"
+                    :step="1"
+                    size="small"
+                    :disabled="readOnly"
+                    data-testid="approval-node-levels"
+                  />
+                </el-form-item>
+                <el-form-item v-if="approvalNodeEditFor(node.key)!.sourceKind === 'manager_at_level'" label="指定上级层级">
+                  <el-input-number
+                    v-model="approvalNodeEditFor(node.key)!.level"
+                    :min="1"
+                    :max="10"
+                    :step="1"
+                    size="small"
+                    :disabled="readOnly"
+                    data-testid="approval-node-level"
+                  />
+                </el-form-item>
+                <el-form-item v-if="approvalNodeEditFor(node.key)!.sourceKind === 'static_user'" label="选择用户">
+                  <el-select
+                    :model-value="approvalNodeIds(approvalNodeEditFor(node.key)!)"
+                    multiple
+                    filterable
+                    remote
+                    :remote-method="onUserSearch"
+                    :loading="directory.usersLoading.value"
+                    :disabled="readOnly"
+                    style="width: 100%"
+                    placeholder="搜索用户名 / 邮箱 / ID"
+                    data-testid="approval-node-user-picker"
+                    @update:model-value="(ids: string[]) => setApprovalNodeIds(approvalNodeEditFor(node.key)!, ids)"
+                    @visible-change="(visible: boolean) => visible && onUserSearch('')"
+                  >
+                    <el-option
+                      v-for="user in directory.users.value"
+                      :key="user.id"
+                      :label="directory.formatUserLabel(user)"
+                      :value="user.id"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item v-if="approvalNodeEditFor(node.key)!.sourceKind === 'static_role'" label="选择角色">
+                  <el-select
+                    :model-value="approvalNodeIds(approvalNodeEditFor(node.key)!)"
+                    multiple
+                    filterable
+                    :disabled="readOnly"
+                    style="width: 100%"
+                    placeholder="选择角色"
+                    data-testid="approval-node-role-picker"
+                    @update:model-value="(ids: string[]) => setApprovalNodeIds(approvalNodeEditFor(node.key)!, ids)"
+                  >
+                    <el-option
+                      v-for="role in directory.roles.value"
+                      :key="role.id"
+                      :label="directory.formatRoleLabel(role)"
+                      :value="role.id"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item v-if="approvalNodeEditFor(node.key)!.sourceKind === 'static_user' || approvalNodeEditFor(node.key)!.sourceKind === 'static_role'" label="手动输入 ID（高级）">
+                  <el-input
+                    v-model="approvalNodeEditFor(node.key)!.idsText"
+                    size="small"
+                    :disabled="readOnly"
+                    placeholder="逗号或换行分隔"
+                    data-testid="approval-node-ids-text"
+                  />
+                </el-form-item>
+                <el-form-item v-if="approvalNodeEditFor(node.key)!.sourceKind === 'form_field_user'" label="表单用户字段">
+                  <el-select
+                    v-model="approvalNodeEditFor(node.key)!.fieldId"
+                    size="small"
+                    :disabled="readOnly"
+                    style="width: 100%"
+                    data-testid="approval-node-form-field"
+                  >
+                    <el-option
+                      v-for="field in userFields"
+                      :key="field.id"
+                      :label="`${field.label} (${field.id})`"
+                      :value="field.id"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="审批模式">
+                  <el-select
+                    v-model="approvalNodeEditFor(node.key)!.approvalMode"
+                    size="small"
+                    :disabled="readOnly"
+                    style="width: 100%"
+                    data-testid="approval-node-approval-mode"
+                  >
+                    <el-option label="单人通过" value="single" />
+                    <el-option label="全部通过" value="all" />
+                    <el-option label="任一通过" value="any" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="空审批人策略">
+                  <el-select
+                    v-model="approvalNodeEditFor(node.key)!.emptyAssigneePolicy"
+                    size="small"
+                    :disabled="readOnly"
+                    style="width: 100%"
+                    data-testid="approval-node-empty-policy"
+                  >
+                    <el-option label="报错" value="error" />
+                    <el-option label="自动通过" value="auto-approve" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="自审策略">
+                  <el-checkbox
+                    v-model="approvalNodeEditFor(node.key)!.mergeWithRequester"
+                    :disabled="readOnly"
+                    data-testid="approval-node-merge-with-requester"
+                  >
+                    发起人自动通过（自审合并）
+                  </el-checkbox>
+                </el-form-item>
+              </div>
+            </div>
+
             <!-- G-3: editable parallel node — `joinMode` ONLY (会签 all / 或签 any, both
                  backend-accepted). `branches` (fork edges) + `joinNodeKey` are TOPOLOGY: shown
                  read-only, preserved byte-for-byte on save. -->
@@ -607,7 +760,7 @@
               </el-form-item>
             </div>
 
-            <!-- approval / other — read-only summary (G-4: cc is editable above). -->
+            <!-- approval fallback / other: summary only. Editable approval nodes render above. -->
             <template v-else>
               <ul v-if="nodeConfigSummary(node).length" class="template-authoring__node-summary">
                 <li v-for="(line, lineIndex) in nodeConfigSummary(node)" :key="lineIndex">{{ line }}</li>
@@ -800,6 +953,7 @@ import {
   PARALLEL_JOIN_MODES,
   CC_TARGET_TYPES,
   type ApprovalStepDraft,
+  type ApprovalNodeEdit,
   type ConditionBranchEdit,
   type ConditionNodeEdit,
   type ConditionRuleEdit,
@@ -836,8 +990,9 @@ const creatingPresetId = ref<CommonApprovalTemplatePresetId | null>(null)
 const loadError = ref<string | null>(null)
 const validationErrors = ref<string[]>([])
 const unsupportedReason = ref<string | null>(null)
-// G-1: a COMPLEX (condition/parallel/cc/non-linear) graph renders read-only but is NOT
-// unsupported — the form/metadata stay editable and save preserves the graph verbatim.
+// G-1..G-5: a COMPLEX (condition/parallel/cc/non-linear) graph renders through the structured
+// graph surface, not the linear steps editor. The form/metadata stay editable and save preserves
+// untouched topology verbatim.
 const graphReadOnlyMessage = ref<string | null>(null)
 const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
 
@@ -847,13 +1002,13 @@ const commonTemplatePresets = COMMON_APPROVAL_TEMPLATE_PRESETS
 const showPresetLibrary = computed(() => !isEditMode.value && canManageTemplates.value)
 // Truly-unsupported (attachment field / unknown node / extra config keys) locks the WHOLE form.
 const readOnly = computed(() => !canManageTemplates.value || Boolean(unsupportedReason.value))
-// A complex graph is shown via the read-only structured node list (`graphPreviewNodes`); the
-// linear steps editor is hidden. The graph is preserved on save, so this does NOT disable save.
+// A complex graph is shown via the structured node list (`graphPreviewNodes`); the linear steps
+// editor is hidden. The graph is preserved on save, so this does NOT disable save.
 const graphReadOnly = computed(() => Boolean(graphReadOnlyMessage.value))
 const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value)
 
-// G-1 read-only structured render of a preserved complex graph: a per-node summary of the
-// config the v1 editor doesn't yet author, so authors can SEE the flow they're preserving.
+// G-1 structured render of a preserved complex graph: a per-node summary plus the editable
+// config panels added in later G slices.
 const graphPreviewNodes = computed<ApprovalNode[]>(() => draft.value.preservedGraph?.nodes ?? [])
 
 const NODE_TYPE_LABELS: Record<string, string> = {
@@ -882,8 +1037,8 @@ function assigneeSourceSummary(source: ApprovalAssigneeSource): string {
   }
 }
 
-// One read-only descriptor per node config, covering ALL three complex types (condition / parallel
-// / cc) plus approval — so no type silently renders as "unsupported". Returns `[]` for nodes
+// One descriptor per node config, covering ALL three complex types (condition / parallel / cc)
+// plus approval — so no type silently renders as "unsupported". Returns `[]` for nodes
 // without summarisable config (start/end).
 function nodeConfigSummary(node: ApprovalNode): string[] {
   const config = node.config as Record<string, unknown>
@@ -1004,6 +1159,11 @@ function ccTargetTypeLabel(targetType: ApprovalAssigneeType): string {
   return targetType === 'role' ? '角色' : '用户'
 }
 
+// ── G-5 approval node editor (config-only; graph topology preserved) ──────────────────────────
+function approvalNodeEditFor(nodeKey: string): ApprovalNodeEdit | undefined {
+  return draft.value.approvalNodeEdits?.[nodeKey]
+}
+
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
 const formSchemaPreview = computed(() => JSON.stringify(buildFormSchema(draft.value), null, 2))
 const approvalGraphPreview = computed(() => JSON.stringify(buildApprovalGraph(draft.value), null, 2))
@@ -1021,12 +1181,24 @@ function setStepIds(step: ApprovalStepDraft, ids: string[]): void {
   step.idsText = ids.join(', ')
 }
 
+function approvalNodeIds(edit: ApprovalNodeEdit): string[] {
+  return parseIdsText(edit.idsText)
+}
+
+function setApprovalNodeIds(edit: ApprovalNodeEdit, ids: string[]): void {
+  edit.idsText = ids.join(', ')
+}
+
 async function onUserSearch(query: string): Promise<void> {
   await directory.searchUsers(query)
   // Keep already-selected ids visible as chips even if the new search page omits them.
   for (const step of draft.value.steps) {
     if (step.sourceKind !== 'static_user') continue
     for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
+  }
+  for (const edit of Object.values(draft.value.approvalNodeEdits ?? {})) {
+    if (edit.sourceKind !== 'static_user') continue
+    for (const id of parseIdsText(edit.idsText)) directory.ensureUserOptionVisible(id)
   }
 }
 
@@ -1040,8 +1212,17 @@ function syncStepOptions(step: ApprovalStepDraft): void {
   }
 }
 
+function syncApprovalNodeOptions(edit: ApprovalNodeEdit): void {
+  if (edit.sourceKind === 'static_user') {
+    for (const id of parseIdsText(edit.idsText)) directory.ensureUserOptionVisible(id)
+  } else if (edit.sourceKind === 'static_role') {
+    for (const id of parseIdsText(edit.idsText)) directory.ensureRoleOptionVisible(id)
+  }
+}
+
 function syncAllStepOptions(): void {
   for (const step of draft.value.steps) syncStepOptions(step)
+  for (const edit of Object.values(draft.value.approvalNodeEdits ?? {})) syncApprovalNodeOptions(edit)
 }
 
 function clearErrors() {

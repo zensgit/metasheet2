@@ -85,7 +85,7 @@ const ElButton = defineComponent({
 
 const ElInput = defineComponent({
   name: 'ElInput',
-  props: { modelValue: [String, Number], disabled: Boolean, type: String, rows: Number, placeholder: String },
+  props: { modelValue: [String, Number], disabled: Boolean, type: String, rows: Number, placeholder: String, size: String },
   emits: ['update:modelValue'],
   render() {
     return h('input', {
@@ -99,7 +99,7 @@ const ElInput = defineComponent({
 
 const ElInputNumber = defineComponent({
   name: 'ElInputNumber',
-  props: { modelValue: Number, disabled: Boolean, min: Number, max: Number, step: Number },
+  props: { modelValue: Number, disabled: Boolean, min: Number, max: Number, step: Number, size: String },
   emits: ['update:modelValue'],
   render() {
     return h('input', {
@@ -114,7 +114,7 @@ const ElInputNumber = defineComponent({
 
 const ElSelect = defineComponent({
   name: 'ElSelect',
-  props: { modelValue: [String, Array], disabled: Boolean },
+  props: { modelValue: [String, Array], disabled: Boolean, size: String },
   emits: ['update:modelValue', 'change'],
   render() {
     return h('select', {
@@ -908,6 +908,89 @@ describe('TemplateAuthoringView', () => {
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
     expect(payload.approvalGraph).toEqual(parallelGraph)
     expect(payload.approvalGraph.nodes.some((node: any) => node.type === 'parallel')).toBe(true)
+  })
+
+  it('G-5: wires a complex-graph approval node editor into the saved payload without changing topology', async () => {
+    routeParams = { id: 'tpl_amount_tier' }
+    const complexGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        {
+          key: 'cond_1',
+          type: 'condition',
+          name: '金额判断',
+          config: { branches: [{ edgeKey: 'edge-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 5000 }], conjunction: 'and' }], defaultEdgeKey: 'edge-low' },
+        },
+        {
+          key: 'approval_high',
+          type: 'approval',
+          name: '高额审批',
+          config: {
+            assigneeSources: [{ kind: 'direct_manager' }],
+            approvalMode: 'single',
+            emptyAssigneePolicy: 'error',
+            autoApprovalPolicy: { mergeWithRequester: true, mergeAdjacentApprover: true },
+            fieldPermissions: [{ fieldId: 'amount', access: 'hidden' }],
+          },
+        },
+        {
+          key: 'approval_low',
+          type: 'approval',
+          name: '普通审批',
+          config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'auto-approve' },
+        },
+        { key: 'cc_1', type: 'cc', name: '抄送', config: { targetType: 'role', targetIds: ['finance'] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-cond', source: 'start', target: 'cond_1' },
+        { key: 'edge-high', source: 'cond_1', target: 'approval_high' },
+        { key: 'edge-low', source: 'cond_1', target: 'approval_low' },
+        { key: 'edge-approval-high-cc', source: 'approval_high', target: 'cc_1' },
+        { key: 'edge-cc-end', source: 'cc_1', target: 'end' },
+        { key: 'edge-approval-low-end', source: 'approval_low', target: 'end' },
+      ],
+    }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_amount_tier', approvalGraph: complexGraph }))
+
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull()
+    const highEditor = container!.querySelector('[data-approval-node="approval_high"]') as HTMLElement
+    expect(highEditor).not.toBeNull()
+    const sourceSelect = highEditor.querySelector('[data-testid="approval-node-source-kind"]') as HTMLSelectElement
+    expect(sourceSelect.value).toBe('direct_manager')
+    sourceSelect.value = 'static_role'
+    sourceSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    const idsInput = highEditor.querySelector('[data-testid="approval-node-ids-text"]') as HTMLInputElement
+    idsInput.value = 'finance, cfo'
+    idsInput.dispatchEvent(new Event('input'))
+    const approvalMode = highEditor.querySelector('[data-testid="approval-node-approval-mode"]') as HTMLSelectElement
+    approvalMode.value = 'all'
+    approvalMode.dispatchEvent(new Event('change'))
+    const mergeToggle = highEditor.querySelector('[data-testid="approval-node-merge-with-requester"]') as HTMLInputElement
+    mergeToggle.checked = false
+    mergeToggle.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.approvalGraph.edges).toEqual(complexGraph.edges)
+    expect(payload.approvalGraph.nodes.find((node: any) => node.key === 'cond_1')).toEqual(complexGraph.nodes[1])
+    expect(payload.approvalGraph.nodes.find((node: any) => node.key === 'approval_low')).toEqual(complexGraph.nodes[3])
+    expect(payload.approvalGraph.nodes.find((node: any) => node.key === 'cc_1')).toEqual(complexGraph.nodes[4])
+    expect(payload.approvalGraph.nodes.find((node: any) => node.key === 'approval_high').config).toEqual({
+      assigneeSources: [{ kind: 'static_role', roleIds: ['finance', 'cfo'] }],
+      approvalMode: 'all',
+      emptyAssigneePolicy: 'error',
+      autoApprovalPolicy: { mergeAdjacentApprover: true },
+      fieldPermissions: [{ fieldId: 'amount', access: 'hidden' }],
+    })
   })
 
   it('T8: disables the self-approver toggle when the template opens read-only', async () => {
