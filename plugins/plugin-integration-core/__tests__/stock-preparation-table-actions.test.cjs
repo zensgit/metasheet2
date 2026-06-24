@@ -294,11 +294,13 @@ async function testBridgeSourceKindRequiresExplicitMatchingReadPlanAndCanDryRun(
   const action = normalizeStockPreparationActionConfig(baseAction({
     source: {
       externalSystemId: 'bridge_source_1',
+      workspaceId: 'workspace_source',
       kind: 'bridge:legacy-sql-readonly',
     },
   }))
 
   assert.equal(action.source.kind, 'bridge:legacy-sql-readonly')
+  assert.equal(action.source.workspaceId, 'workspace_source', 'source workspace binding is preserved for route lookup')
   assert.equal(action.source.readPlan.sourceKind, 'bridge:legacy-sql-readonly', 'omitted readPlan sourceKind inherits the explicit Bridge source kind')
 
   const dryRun = await dryRunStockPreparationAction({

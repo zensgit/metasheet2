@@ -143,6 +143,7 @@ function normalizeSource(input = {}) {
   }
   return {
     externalSystemId: requiredString(input.externalSystemId, 'source.externalSystemId'),
+    workspaceId: optionalString(input.workspaceId) || undefined,
     kind,
     readPlan,
   }
@@ -413,6 +414,7 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
     parameters,
     source: {
       externalSystemId: action.source.externalSystemId,
+      workspaceId: action.source.workspaceId,
       readPlan: action.source.readPlan,
     },
     target: action.target,

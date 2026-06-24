@@ -1430,7 +1430,9 @@ function createHandlers(services, options = {}) {
     const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
       ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       : externalSystems.getExternalSystem.bind(externalSystems)
-    const system = await loadSystem(scopedInput(req, { id: action.source.externalSystemId }))
+    const sourceScope = { id: action.source.externalSystemId }
+    if (action.source.workspaceId) sourceScope.workspaceId = action.source.workspaceId
+    const system = await loadSystem(scopedInput(req, sourceScope))
     if (!system || system.kind !== action.source.kind) {
       throw new HttpRouteError(422, 'TABLE_ACTION_SOURCE_INVALID', `table action source must be ${action.source.kind}`, {
         actionId: action.actionId,
