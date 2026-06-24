@@ -26,11 +26,11 @@
 | 4 | Create overtime **off workDate** (`workDate=D`, window entirely on `D+1`) | `422`, code `OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED` (§P1 anchor). |
 | 5 | Create overtime **reversed** (`out ≤ in`) | `422`, code `OVERTIME_INVALID_TIME_WINDOW`. |
 | 6 | Create a **same-day** overtime (regression) | `201`, `overtimeSegmentation` shape **unchanged** from pre-#8 (single `dayType`, all minutes in one bucket, **no** `crossesMidnight`/`perDate`). |
-| 7 | Check the report/summary surface for the cross-midnight request | the per-date buckets (workday/restday/holiday) are exposed by date, matching step 1. |
+| 7 | Check the record / report / summary surface for the cross-midnight request | the surfaces expose the **aggregated** `workday/restday/holiday` bucket **totals**, conserved with step 1 (Σ = `totalMinutes`). `perDate` lives ONLY in the request's `metadata.overtimeSegmentation` — the record/report/summary do **NOT** expand by date (don't smoke against a non-existent per-date report surface). |
 
 **Cleanup / residue**
 - Delete the created overtime requests + their `attendance_events`; delete the holiday + overtime rule; **restore** the original settings; delete `attendance_records` for the test user/dates.
-- **Residue check** (must be 0): `attendance_requests`, `attendance_records`, `attendance_holidays` for the test user/dates.
+- **Residue check** (must be 0): `attendance_requests`, `attendance_events`, `attendance_records`, `attendance_holidays`, `attendance_overtime_rules` — every one for the test user/dates/rule (an orphaned event or leftover rule is a false-green).
 
 **PASS stamp** — deploy SHA: `__________` · date: `__________` · result: `PASS / FAIL` · residue=0: `☐` · notes: `__________`
 
