@@ -80,6 +80,42 @@
     </el-alert>
 
     <div v-loading="loading" class="template-authoring__body">
+      <el-card
+        v-if="showPresetLibrary"
+        class="template-authoring__panel"
+        shadow="never"
+        data-testid="approval-template-preset-library"
+      >
+        <template #header>
+          <div class="template-authoring__panel-header">
+            <strong>常用审批模板</strong>
+            <span class="template-authoring__hint">创建为草稿，发布前可继续调整字段和审批人。</span>
+          </div>
+        </template>
+        <div class="template-authoring__preset-grid">
+          <div
+            v-for="preset in commonTemplatePresets"
+            :key="preset.id"
+            class="template-authoring__preset"
+          >
+            <div>
+              <strong>{{ preset.title }}</strong>
+              <p>{{ preset.description }}</p>
+            </div>
+            <el-button
+              type="primary"
+              plain
+              :loading="creatingPresetId === preset.id"
+              :disabled="creatingPresetId !== null"
+              :data-testid="`approval-template-preset-${preset.id}`"
+              @click="createFromPreset(preset.id)"
+            >
+              使用模板
+            </el-button>
+          </div>
+        </div>
+      </el-card>
+
       <el-card class="template-authoring__panel" shadow="never">
         <template #header>
           <strong>基本信息</strong>
@@ -773,6 +809,11 @@ import {
   type CcNodeEdit,
   type TemplateAuthoringDraft,
 } from '../../approvals/templateAuthoring'
+import {
+  buildCommonApprovalTemplatePresetPayload,
+  COMMON_APPROVAL_TEMPLATE_PRESETS,
+  type CommonApprovalTemplatePresetId,
+} from '../../approvals/commonTemplatePresets'
 import type {
   ApprovalAssigneeSource,
   ApprovalAssigneeType,
@@ -791,6 +832,7 @@ const { canManageTemplates } = useApprovalPermissions()
 const loading = ref(false)
 const saving = ref(false)
 const publishing = ref(false)
+const creatingPresetId = ref<CommonApprovalTemplatePresetId | null>(null)
 const loadError = ref<string | null>(null)
 const validationErrors = ref<string[]>([])
 const unsupportedReason = ref<string | null>(null)
@@ -801,6 +843,8 @@ const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
 
 const templateId = computed(() => typeof route.params.id === 'string' ? route.params.id : '')
 const isEditMode = computed(() => templateId.value.length > 0)
+const commonTemplatePresets = COMMON_APPROVAL_TEMPLATE_PRESETS
+const showPresetLibrary = computed(() => !isEditMode.value && canManageTemplates.value)
 // Truly-unsupported (attachment field / unknown node / extra config keys) locks the WHOLE form.
 const readOnly = computed(() => !canManageTemplates.value || Boolean(unsupportedReason.value))
 // A complex graph is shown via the read-only structured node list (`graphPreviewNodes`); the
@@ -1133,6 +1177,25 @@ async function persistDraft() {
   }
 }
 
+async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
+  if (!canManageTemplates.value || creatingPresetId.value) return
+  creatingPresetId.value = presetId
+  loadError.value = null
+  try {
+    const created = await createTemplate(buildCommonApprovalTemplatePresetPayload(presetId))
+    draft.value = draftFromTemplate(created)
+    unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
+    graphReadOnlyMessage.value = graphReadOnlyReason(created)
+    syncAllStepOptions()
+    await router.replace({ path: `/approval-templates/${created.id}/edit` })
+    ElMessage.success('模板草稿已创建')
+  } catch (error: any) {
+    loadError.value = error?.message ?? '创建常用模板失败'
+  } finally {
+    creatingPresetId.value = null
+  }
+}
+
 async function handleSave() {
   if (!canSave.value || saving.value) return
   const saved = await persistDraft()
@@ -1239,6 +1302,30 @@ onMounted(() => {
 
 .template-authoring__wide {
   grid-column: 1 / -1;
+}
+
+.template-authoring__preset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.template-authoring__preset {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 148px;
+  padding: 14px;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border-radius: 8px;
+}
+
+.template-authoring__preset p {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary, #606266);
 }
 
 .template-authoring__visibility {
@@ -1358,6 +1445,10 @@ pre {
   }
 
   .template-authoring__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .template-authoring__preset-grid {
     grid-template-columns: 1fr;
   }
 }
