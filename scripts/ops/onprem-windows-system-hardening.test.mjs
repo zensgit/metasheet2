@@ -46,6 +46,11 @@ test('Windows apply helper retries post-PM2 healthcheck during warmup and remain
 test('Windows apply helper resolves extracted package root by package markers, not first child directory', () => {
   const script = readScript('scripts/ops/multitable-onprem-apply-package.ps1')
 
+  assert.match(script, /defaulting to short Windows staging root \$tempBase/)
+  assert.match(script, /C:\\ms-tmp/)
+  assert.match(script, /System\.IO\.Compression\.ZipFile/)
+  assert.match(script, /ExtractToDirectory\(\$ArchivePath, \$TargetDir\)/)
+  assert.doesNotMatch(script, /Expand-Archive/)
   assert.match(script, /function Test-OnPremPackageRoot/)
   assert.match(script, /function Resolve-ExtractedPackageRoot/)
   assert.match(script, /pnpm-lock\.yaml/)
@@ -64,6 +69,11 @@ test('Windows apply helper resolves extracted package root by package markers, n
 test('Windows deploy launcher resolves staged package root by package markers, not first child directory', () => {
   const script = readScript('scripts/ops/multitable-onprem-deploy-launcher.ps1')
 
+  assert.match(script, /defaulting to short Windows staging root \$base/)
+  assert.match(script, /C:\\ms-tmp/)
+  assert.match(script, /System\.IO\.Compression\.ZipFile/)
+  assert.match(script, /ExtractToDirectory\(\$Archive, \$Stage\)/)
+  assert.doesNotMatch(script, /Expand-Archive/)
   assert.match(script, /function Resolve-StagedPackageRoot/)
   assert.match(script, /pnpm-lock\.yaml/)
   assert.match(script, /PACKAGE-METADATA\.json/)

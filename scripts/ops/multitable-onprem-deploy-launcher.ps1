@@ -56,7 +56,12 @@ function Resolve-StagingBase {
     $base = $env:METASHEET_ONPREM_STAGING_ROOT
   }
   if ([string]::IsNullOrWhiteSpace($base)) {
-    $base = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+      $base = 'C:\ms-tmp'
+      Write-LauncherInfo "No staging root override set; defaulting to short Windows staging root $base"
+    } else {
+      $base = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+    }
   }
   if ([string]::IsNullOrWhiteSpace($base)) {
     throw 'No staging root is available. Set METASHEET_ONPREM_STAGING_ROOT to a short local path such as C:\ms-tmp.'
@@ -82,8 +87,9 @@ function Expand-StagingArchive {
 
   $lower = $Archive.ToLowerInvariant()
   if ($lower.EndsWith('.zip')) {
-    Write-LauncherInfo "Extracting zip via Expand-Archive"
-    Expand-Archive -LiteralPath $Archive -DestinationPath $Stage -Force
+    Write-LauncherInfo "Extracting zip via System.IO.Compression.ZipFile"
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($Archive, $Stage)
     return
   }
 
