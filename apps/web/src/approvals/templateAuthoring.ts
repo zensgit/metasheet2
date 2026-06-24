@@ -16,10 +16,53 @@ import type {
   CreateApprovalTemplateRequest,
   UpdateApprovalTemplateRequest,
 } from '../types/approval'
+import {
+  buildDetailColumns,
+  detailColumnDraftsFromField,
+  validateDetailColumnsDraft,
+  type DetailColumnDraft,
+} from './detailField'
+import {
+  applyConditionEditsToGraph,
+  conditionEditsFromGraph,
+  validateConditionEdits,
+  type ConditionEdits,
+} from './conditionEdit'
+import {
+  applyParallelEditsToGraph,
+  parallelEditsFromGraph,
+  validateParallelEdits,
+  type ParallelEdits,
+} from './parallelEdit'
+import {
+  applyCcEditsToGraph,
+  ccEditsFromGraph,
+  validateCcEdits,
+  type CcEdits,
+} from './ccEdit'
+
+export type { DetailColumnDraft } from './detailField'
+export { createEmptyDetailColumnDraft, DETAIL_LEAF_FIELD_TYPES } from './detailField'
+export type {
+  ConditionEdits,
+  ConditionNodeEdit,
+  ConditionBranchEdit,
+  ConditionRuleEdit,
+  ConditionRuleOperator,
+} from './conditionEdit'
+export { CONDITION_RULE_OPERATORS } from './conditionEdit'
+export type { ParallelEdits, ParallelNodeEdit } from './parallelEdit'
+export { PARALLEL_JOIN_MODES } from './parallelEdit'
+export type { CcEdits, CcNodeEdit } from './ccEdit'
+export { CC_TARGET_TYPES } from './ccEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
 
+// Top-level authorable field types: the 8 leaf scalar types plus `detail` (repeatable
+// line-items group). `attachment` is intentionally excluded (not authorable in v1); `detail`
+// is top-level-only — its sub-fields are restricted to the leaf set (`DETAIL_LEAF_FIELD_TYPES`)
+// and may never themselves be `detail` (one nesting level).
 export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'text',
   'textarea',
@@ -29,6 +72,7 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
   'select',
   'multi-select',
   'user',
+  'detail',
 ]
 
 /**
@@ -51,6 +95,11 @@ export interface FieldAuthoringDraft {
   placeholder: string
   optionsText: string
   visibility: FieldVisibilityDraft
+  // detail / sub-form authoring — meaningful only when `type === 'detail'`. `columns` is the
+  // editable sub-field list; `minRowsText`/`maxRowsText` are raw text inputs ('' = unset).
+  detailColumns: DetailColumnDraft[]
+  minRowsText: string
+  maxRowsText: string
   original?: FormField
 }
 
@@ -94,9 +143,45 @@ export interface TemplateAuthoringDraft {
   allowRevoke: boolean
   fields: FieldAuthoringDraft[]
   steps: ApprovalStepDraft[]
+  // G-1 anti-flatten keystone: a COMPLEX graph (any cc/condition/parallel node, or any
+  // non-linear shape) is captured here verbatim at hydrate and emitted UNCHANGED by
+  // `buildApprovalGraph` — the linear `steps` projection is NEVER applied to it, so save can
+  // not drop/reorder complex nodes/edges/config. `undefined` for plain linear templates (which
+  // keep the editable `steps` round-trip). The graph editor (G-2+) replaces this pass-through.
+  preservedGraph?: ApprovalGraph
+  // G-2 condition editor: editable LOGIC for each `condition` node in `preservedGraph`, keyed by
+  // node key (seeded 1:1 from the preserved condition nodes). Only a condition node's rules /
+  // conjunction / defaultEdgeKey are editable here; branch/edge TOPOLOGY and every non-condition
+  // node/edge stay byte-identical-preserved (G-1 floor). `buildApprovalGraph` applies these onto a
+  // COPY of `preservedGraph`. Empty/absent for linear or non-condition complex graphs.
+  conditionEdits?: ConditionEdits
+  // G-3 parallel editor: editable `joinMode` for each `parallel` node in `preservedGraph`, keyed by
+  // node key (seeded 1:1 from the preserved parallel nodes). ONLY `joinMode` ('all' | 'any' — both
+  // backend-accepted, see `parallelEdit.ts`) is editable; `branches`/`joinNodeKey` are topology and
+  // every non-parallel node/edge stay byte-identical-preserved. `buildApprovalGraph` composes these
+  // with the condition edits onto a COPY of `preservedGraph`. Empty/absent for linear or
+  // non-parallel complex graphs.
+  parallelEdits?: ParallelEdits
+  // G-4 cc editor: editable targetType/targetIds for each `cc` node in `preservedGraph`, seeded
+  // 1:1. Topology (edges) + every non-cc node stay byte-identical. Empty {} when no cc node.
+  ccEdits?: CcEdits
 }
 
-const UNSUPPORTED_GRAPH_NODE_TYPES = new Set(['cc', 'condition', 'parallel'])
+// Complex node types the v1 LINEAR steps editor can't author. They are NOT "unsupported" — a
+// graph containing them is load-preserved verbatim (read-only graph view), never flattened.
+const COMPLEX_GRAPH_NODE_TYPES = new Set(['cc', 'condition', 'parallel'])
+
+/**
+ * True when a graph can't be edited through the linear `steps` model and so must be
+ * preserved verbatim: any `cc` / `condition` / `parallel` node is present, OR the topology is
+ * not a single linear start→approval*→end chain (`orderedLinearNodes` returns null). This is the
+ * G-1 anti-flatten gate — its truth means `draftFromTemplate` captures `preservedGraph` and the
+ * view renders the graph read-only.
+ */
+export function isComplexApprovalGraph(graph: ApprovalGraph): boolean {
+  if (graph.nodes.some((node) => COMPLEX_GRAPH_NODE_TYPES.has(node.type))) return true
+  return orderedLinearNodes(graph) === null
+}
 
 function nextLocalId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`
@@ -112,6 +197,9 @@ export function createEmptyFieldDraft(index = 1): FieldAuthoringDraft {
     placeholder: '',
     optionsText: '',
     visibility: emptyVisibilityDraft(),
+    detailColumns: [],
+    minRowsText: '',
+    maxRowsText: '',
   }
 }
 
@@ -229,6 +317,9 @@ function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
     placeholder: field.placeholder ?? '',
     optionsText: formatOptionsText(field.options),
     visibility: visibilityDraftFromRule(field.visibilityRule),
+    detailColumns: field.type === 'detail' ? detailColumnDraftsFromField(field) : [],
+    minRowsText: field.type === 'detail' && field.minRows != null ? String(field.minRows) : '',
+    maxRowsText: field.type === 'detail' && field.maxRows != null ? String(field.maxRows) : '',
     original: field,
   }
 }
@@ -352,24 +443,59 @@ function orderedLinearNodes(graph: ApprovalGraph): ApprovalGraph['nodes'] | null
   return ordered
 }
 
+// The full set of node types the runtime recognises. A node whose type is outside this set is
+// genuinely un-authorable (data corruption / a newer schema) → the whole template stays read-only
+// and save is blocked, never flattened. `cc`/`condition`/`parallel` ARE recognised (G-1
+// load-preserves them) and are deliberately included here.
+const RECOGNISED_GRAPH_NODE_TYPES = new Set([
+  'start',
+  'approval',
+  'cc',
+  'condition',
+  'parallel',
+  'end',
+])
+
+/**
+ * Reason the WHOLE template must open read-only with SAVE DISABLED (truly-unsupported, distinct
+ * from a complex-but-save-preserving graph — see `graphReadOnlyReason`). Returns a message for:
+ *  - an un-authorable FIELD type (e.g. `attachment`), or
+ *  - a node carrying EXTRA keys beyond key/type/name/config, or a node whose `type` is not
+ *    recognised by the runtime, or
+ *  - (LINEAR graphs only) an approval node whose `config` has keys/sources the linear editor
+ *    can't represent — for COMPLEX graphs this is skipped because the graph is preserved verbatim
+ *    rather than projected to `steps`.
+ * Returns `null` when the template is editable OR complex-but-preservable.
+ */
 export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDetailDTO): string | null {
   const unsupportedField = template.formSchema.fields.find((field) => !isAuthorableFieldType(field.type))
   if (unsupportedField) {
     return `包含暂不支持编辑的字段类型：${unsupportedField.label || unsupportedField.id} (${unsupportedField.type})`
   }
 
+  // A node carrying extra keys, or an unrecognised node type, is genuinely un-authorable and
+  // blocks save. NOTE: cc/condition/parallel are RECOGNISED (load-preserved) and do NOT trip
+  // this — they are surfaced read-only via `graphReadOnlyReason`, never flattened.
   const unknownNode = template.approvalGraph.nodes.find((node) => {
     const nodeKeys = Object.keys(node as unknown as Record<string, unknown>)
     return nodeKeys.some((key) => !['key', 'type', 'name', 'config'].includes(key))
-      || UNSUPPORTED_GRAPH_NODE_TYPES.has(node.type)
-      || !['start', 'approval', 'end'].includes(node.type)
+      || !RECOGNISED_GRAPH_NODE_TYPES.has(node.type)
   })
   if (unknownNode) {
     return `包含暂不支持编辑的审批节点：${unknownNode.name || unknownNode.key} (${unknownNode.type})`
   }
 
+  // Complex graphs (cc/condition/parallel or non-linear) are load-preserved verbatim — the linear
+  // `steps` projection (and its per-approval-node config allowlist below) does NOT apply, so they
+  // are never "unsupported" here. They open read-only via `graphReadOnlyReason` and save unchanged.
+  if (isComplexApprovalGraph(template.approvalGraph)) {
+    return null
+  }
+
   const ordered = orderedLinearNodes(template.approvalGraph)
   if (!ordered) {
+    // Unreachable in practice (a non-linear graph is already complex above), but keeps the
+    // linear path total: an unexpected non-linear shape stays read-only rather than projecting.
     return '审批流程不是 MVP 支持的线性结构'
   }
 
@@ -400,14 +526,38 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
   return null
 }
 
+/**
+ * G-1 — reason the GRAPH (not the whole template) must render READ-ONLY: the graph is complex
+ * (any cc/condition/parallel node, or non-linear) so the v1 linear `steps` editor can't author
+ * it. Distinct from `unsupportedTemplateAuthoringReason`: a complex graph is NOT unsupported — the
+ * form/metadata stay EDITABLE and SAVE stays enabled (it preserves the graph verbatim via
+ * `draftFromTemplate`→`preservedGraph`→`buildApprovalGraph`). Returns `null` for a linear graph
+ * (the steps editor is live) and for a truly-unsupported template (that path is fully read-only
+ * via `unsupportedTemplateAuthoringReason`; the graph view never opens). The G-2+ editors will
+ * narrow this to only genuinely-unrepresentable constructs.
+ */
+export function graphReadOnlyReason(template: ApprovalTemplateDetailDTO): string | null {
+  if (unsupportedTemplateAuthoringReason(template)) return null
+  if (!isComplexApprovalGraph(template.approvalGraph)) return null
+  return '该审批流程包含复杂节点：条件分支可在下方编辑分支规则，并行 / 抄送节点以只读结构展示；未改动的节点与连线在保存时原样保留，不会被改写。'
+}
+
 export function draftFromTemplate(template: ApprovalTemplateDetailDTO): TemplateAuthoringDraft {
+  // G-1 anti-flatten keystone: a complex graph is captured VERBATIM and never projected to the
+  // linear `steps` model. `buildApprovalGraph` re-emits it byte-identical, so load→save can not
+  // drop or reorder its cc/condition/parallel nodes/edges/config.
+  const complex = isComplexApprovalGraph(template.approvalGraph)
   const ordered = orderedLinearNodes(template.approvalGraph) ?? template.approvalGraph.nodes
   const fields = template.formSchema.fields
     .map(fieldDraftFromField)
     .filter((field): field is FieldAuthoringDraft => field !== null)
-  const steps = ordered
-    .map(stepDraftFromApprovalNode)
-    .filter((step): step is ApprovalStepDraft => step !== null)
+  // Skip the approval-only step projection for complex graphs — they round-trip via
+  // `preservedGraph`, and projecting would discard the non-approval nodes (the flatten risk).
+  const steps = complex
+    ? []
+    : ordered
+        .map(stepDraftFromApprovalNode)
+        .filter((step): step is ApprovalStepDraft => step !== null)
 
   return {
     templateId: template.id,
@@ -419,8 +569,22 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
     visibilityIdsText: formatIds(template.visibilityScope?.ids),
     slaHoursText: template.slaHours == null ? '' : String(template.slaHours),
     allowRevoke: true,
+    ...(complex
+      ? {
+          preservedGraph: template.approvalGraph,
+          // G-2: seed the editable condition logic from the preserved condition nodes (1:1).
+          // Empty {} when the complex graph has no condition node (parallel/cc-only).
+          conditionEdits: conditionEditsFromGraph(template.approvalGraph),
+          // G-3: seed the editable parallel joinMode from the preserved parallel nodes (1:1).
+          // Empty {} when the complex graph has no parallel node (condition/cc-only).
+          parallelEdits: parallelEditsFromGraph(template.approvalGraph),
+          ccEdits: ccEditsFromGraph(template.approvalGraph),
+        }
+      : {}),
     fields: fields.length > 0 ? fields : [createEmptyFieldDraft(1)],
-    steps: steps.length > 0 ? steps : [createEmptyStepDraft(1)],
+    // A complex graph round-trips via `preservedGraph` and has no editable steps — keep
+    // `steps: []` (no phantom step). Linear drafts seed an empty step for the editor.
+    steps: complex ? steps : (steps.length > 0 ? steps : [createEmptyStepDraft(1)]),
   }
 }
 
@@ -443,6 +607,23 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
         next.options = parseOptionsText(field.optionsText)
       } else {
         delete next.options
+      }
+      // detail / sub-form: emit `columns` + optional `minRows`/`maxRows` from the sub-field
+      // editor, or delete all three so a field changed away from `detail` does not carry stale
+      // detail keys resurrected from the `original` spread (mirrors the options omit discipline;
+      // the backend rejects detail-only keys on a non-detail field).
+      if (field.type === 'detail') {
+        next.columns = buildDetailColumns(field.detailColumns)
+        const minRows = field.minRowsText.trim()
+        const maxRows = field.maxRowsText.trim()
+        if (minRows) next.minRows = Number(minRows)
+        else delete next.minRows
+        if (maxRows) next.maxRows = Number(maxRows)
+        else delete next.maxRows
+      } else {
+        delete next.columns
+        delete next.minRows
+        delete next.maxRows
       }
       // Editor is authoritative for visibilityRule: emit the built rule, or
       // delete it so a cleared rule is not resurrected from the `original` spread.
@@ -509,6 +690,19 @@ function buildStepConfig(step: ApprovalStepDraft): ApprovalNodeConfig {
 }
 
 export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph {
+  // G-1/G-2/G-3 anti-flatten keystone: a preserved complex graph is NEVER rebuilt from `steps`, so
+  // its cc/condition/parallel nodes/edges survive save. Two disjoint edit passes COMPOSE onto a COPY
+  // of the graph: G-2 (`applyConditionEditsToGraph`) replaces ONLY each condition node's config, G-3
+  // (`applyParallelEditsToGraph`) replaces ONLY each parallel node's `joinMode`, and G-4
+  // (`applyCcEditsToGraph`) replaces ONLY each cc node's targetType/targetIds. The three passes touch
+  // disjoint node types and each deep-clones everything else, so all edits land while every other
+  // node + ALL edges stay byte-identical; an untouched graph round-trips unchanged.
+  // Only linear drafts take the build below.
+  if (draft.preservedGraph) {
+    const withConditionEdits = applyConditionEditsToGraph(draft.preservedGraph, draft.conditionEdits ?? {})
+    const withParallelEdits = applyParallelEditsToGraph(withConditionEdits, draft.parallelEdits ?? {})
+    return applyCcEditsToGraph(withParallelEdits, draft.ccEdits ?? {})
+  }
   const approvalNodes = draft.steps.map((step, index) => ({
     key: `approval_${index + 1}`,
     type: 'approval' as const,
@@ -569,6 +763,18 @@ export function validateTemplateDraft(
         errors.push(`字段 ${field.label || field.id} 的选项 label/value 不能为空`)
       }
     }
+    // detail / sub-form: mirror the backend `normalizeDetailFieldParts` reject-set client-side
+    // (non-empty leaf-only unique-id columns, no nesting, minRows <= maxRows non-negative ints).
+    if (field.type === 'detail') {
+      errors.push(
+        ...validateDetailColumnsDraft(
+          field.label.trim() || field.id.trim(),
+          field.detailColumns,
+          field.minRowsText,
+          field.maxRowsText,
+        ),
+      )
+    }
   })
   // Mirror the server visibility-rule reject-set (normalizeFormFieldVisibilityRule +
   // validateFormFieldVisibilityRules): dependency must reference an existing field,
@@ -612,7 +818,24 @@ export function validateTemplateDraft(
     cycleState.set(fieldId, 2)
   }
   visibilityDeps.forEach((_dependsOn, fieldId) => visitVisibility(fieldId))
-  if (draft.steps.length === 0) errors.push('至少需要一个审批步骤')
+  // A complex graph (preservedGraph) carries no editable steps — the step requirement only
+  // applies to linear drafts that build their graph from `steps`.
+  if (!draft.preservedGraph && draft.steps.length === 0) errors.push('至少需要一个审批步骤')
+  // G-2 condition-editor PREVIEW: rule fieldId must reference a form field, operator must be in the
+  // union, and defaultEdgeKey must be an OUTGOING edge of the condition node (the fall-through edge;
+  // checked against `preservedGraph`'s edges). UX-only — the backend `normalizeApprovalGraph`
+  // re-validates and is the final arbiter (we never relax it here).
+  if (draft.conditionEdits && Object.keys(draft.conditionEdits).length > 0) {
+    errors.push(...validateConditionEdits(draft.conditionEdits, buildFormSchema(draft), draft.preservedGraph))
+  }
+  // G-3 parallel-editor PREVIEW: joinMode must be in the backend-accepted set ('all' | 'any').
+  // UX-only — the backend `normalizeApprovalGraph` re-validates and is the final arbiter.
+  if (draft.parallelEdits && Object.keys(draft.parallelEdits).length > 0) {
+    errors.push(...validateParallelEdits(draft.parallelEdits))
+  }
+  if (draft.ccEdits && Object.keys(draft.ccEdits).length > 0) {
+    errors.push(...validateCcEdits(draft.ccEdits))
+  }
   const userFieldIds = new Set(draft.fields.filter((field) => field.type === 'user').map((field) => field.id.trim()))
   draft.steps.forEach((step, index) => {
     const label = step.name.trim() || `审批步骤 ${index + 1}`

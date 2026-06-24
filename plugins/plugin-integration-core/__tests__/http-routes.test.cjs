@@ -3705,6 +3705,14 @@ async function testStockPreparationTargetProvisioningRoutes() {
     registered.includes('POST /api/integration/stock-preparation/target/ensure'),
     'stock-preparation target ensure route registered',
   )
+  assert.ok(
+    registered.includes('GET /api/integration/stock-preparation/sandbox-target/readiness'),
+    'stock-preparation sandbox target readiness route registered',
+  )
+  assert.ok(
+    registered.includes('POST /api/integration/stock-preparation/sandbox-target/ensure'),
+    'stock-preparation sandbox target ensure route registered',
+  )
 
   let res = await invoke(routes, 'GET', '/api/integration/stock-preparation/target/readiness', {
     user: WRITE_USER,
@@ -3720,6 +3728,40 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'STOCK_PREPARATION_TARGET_REQUEST_INVALID')
   assert.equal(provisioning.calls.length, 0, 'client-supplied sheetId/permission is rejected before provisioning')
+
+  res = await invoke(routes, 'GET', '/api/integration/stock-preparation/sandbox-target/readiness', {
+    user: WRITE_USER,
+    query: { projectId: 'tenant_1:integration-core', objectId: 'plm_stock_preparation_sandbox_validation' },
+  })
+  assert.equal(res.statusCode, 403, 'write user cannot inspect sandbox target readiness')
+  assert.equal(provisioning.calls.length, 0, 'non-admin sandbox request does not reach provisioning API')
+
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/sandbox-target/ensure', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      baseId: 'base_stock',
+      objectId: 'plm_stock_preparation_sandbox_validation',
+      sheetId: 'evil_sheet',
+      permission: 'admin',
+    },
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_INVALID')
+  assert.equal(provisioning.calls.length, 0, 'sandbox client-supplied sheetId/permission is rejected before provisioning')
+
+  res = await invoke(routes, 'POST', '/api/integration/stock-preparation/sandbox-target/ensure', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      baseId: 'base_stock',
+      objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
+    },
+  })
+  assert.equal(res.statusCode, 422)
+  assert.equal(res.body.error.code, 'TARGET_SANDBOX_OBJECT_ID_INVALID')
+  assert.equal(res.body.error.details.reason, 'prod_canonical')
+  assert.equal(provisioning.calls.length, 0, 'canonical objectId is rejected before sandbox provisioning')
 
   res = await invoke(routes, 'GET', '/api/integration/stock-preparation/target/readiness', {
     user: ADMIN_USER,
@@ -3789,6 +3831,73 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.deepEqual(res.body.error.details.missingFields, ['path'])
   assert.equal(JSON.stringify(res.body.error).includes('sheet_stock_canonical_private'), false, 'incomplete error hides sheet id')
   assert.equal(findCalls(incomplete.calls, 'ensureObject').length, 0, 'incomplete existing target is not repaired in place')
+
+  const sandboxObjectId = 'plm_stock_preparation_sandbox_validation'
+  const sandboxProvisioning = createStockPreparationTargetProvisioningApi()
+  const sandboxMount = mountRoutes(createMockServices().services, {
+    provisioningApi: sandboxProvisioning.api,
+    recordsApi: createTableActionRecordsApi().recordsApi,
+  })
+  res = await invoke(sandboxMount.routes, 'POST', '/api/integration/stock-preparation/sandbox-target/ensure', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      baseId: 'base_stock',
+      objectId: sandboxObjectId,
+      label: 'Sandbox Stock Preparation',
+    },
+  })
+  assertOkResponse(res, 201)
+  assert.equal(res.body.data.ready, true)
+  assert.equal(res.body.data.mode, 'sandbox_create')
+  assert.equal(res.body.data.targetBindingAvailable, true)
+  assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'targetBinding'), false, 'sandbox route never exposes target binding')
+  assert.equal(res.body.data.evidence.fieldMapMode, 'sandbox')
+  assert.equal(res.body.data.evidence.target.fieldIdMapEmpty, false)
+  assert.ok(res.body.data.evidence.objectIdHash, 'sandbox route returns object hash evidence')
+  assert.equal(JSON.stringify(res.body.data).includes(sandboxObjectId), false, 'sandbox route response hides object id')
+  assert.equal(JSON.stringify(res.body.data).includes('sheet_stock_canonical_created'), false, 'sandbox route response hides sheet id')
+  const sandboxEnsureCall = findCalls(sandboxProvisioning.calls, 'ensureObject')[0]
+  assert.equal(sandboxEnsureCall[1].projectId, 'tenant_1:integration-core')
+  assert.equal(sandboxEnsureCall[1].baseId, 'base_stock')
+  assert.equal(sandboxEnsureCall[1].descriptor.id, sandboxObjectId)
+  assert.notEqual(sandboxEnsureCall[1].descriptor.id, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)
+  assert.deepEqual(
+    sandboxEnsureCall[1].descriptor.fields.map((field) => field.id),
+    STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id),
+    'sandbox ensure descriptor keeps the stock-prep manifest fields',
+  )
+
+  const leakySandbox = createStockPreparationTargetProvisioningApi()
+  leakySandbox.api.ensureObject = async (input) => {
+    leakySandbox.calls.push(['ensureObject', clone(input)])
+    const err = new Error(`cannot provision ${input.descriptor.id} in sheet_sandbox_private`)
+    err.status = 500
+    err.code = 'HOST_PROVISIONING_FAILED'
+    err.details = {
+      objectId: input.descriptor.id,
+      sheetId: 'sheet_sandbox_private',
+    }
+    throw err
+  }
+  const leakyMount = mountRoutes(createMockServices().services, {
+    provisioningApi: leakySandbox.api,
+    recordsApi: createTableActionRecordsApi().recordsApi,
+  })
+  res = await invoke(leakyMount.routes, 'POST', '/api/integration/stock-preparation/sandbox-target/ensure', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'tenant_1:integration-core',
+      baseId: 'base_stock',
+      objectId: sandboxObjectId,
+    },
+  })
+  assert.equal(res.statusCode, 503)
+  assert.equal(res.body.error.code, 'TARGET_SANDBOX_PROVISIONING_FAILED')
+  assert.equal(res.body.error.message, 'sandbox stock-preparation target provisioning failed')
+  assert.equal(res.body.error.details.reason, 'provisioning_failed')
+  assert.equal(JSON.stringify(res.body).includes(sandboxObjectId), false, 'sandbox host error response hides object id')
+  assert.equal(JSON.stringify(res.body).includes('sheet_sandbox_private'), false, 'sandbox host error response hides sheet id')
 }
 
 async function testStockPreparationOptionSyncRoute() {

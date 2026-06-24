@@ -4,6 +4,7 @@
       <span class="meta-grid__bulk-count">{{ selectedCount(selectedIds.size, isZh) }}</span>
       <button v-if="canBulkEdit" class="meta-grid__bulk-btn" :aria-label="l('grid.setFieldAria')" @click="onBulkEdit('set')">{{ l('grid.setField') }}</button>
       <button v-if="canBulkEdit" class="meta-grid__bulk-btn" :aria-label="l('grid.clearFieldAria')" @click="onBulkEdit('clear')">{{ l('grid.clearField') }}</button>
+      <button v-if="canBulkRestore" class="meta-grid__bulk-btn" :aria-label="l('grid.batchRestoreAria')" data-test="grid-bulk-restore" @click="onBulkRestore">{{ l('grid.batchRestore') }}</button>
       <button v-if="canDelete" class="meta-grid__bulk-btn meta-grid__bulk-btn--danger" :aria-label="l('grid.deleteSelectedAria')" @click="onBulkDelete">{{ l('grid.deleteSelected') }}</button>
       <button class="meta-grid__bulk-btn" :aria-label="l('grid.clearSelection')" @click="selectedIds = new Set(); emit('selection-change', [])">{{ l('grid.clear') }}</button>
     </div>
@@ -426,6 +427,7 @@ const props = defineProps<{
   canEdit: boolean
   canDelete?: boolean
   canBulkEdit?: boolean
+  canBulkRestore?: boolean
   canCreate?: boolean
   frozenLeftColumnIds?: string[]
   rowActionOverrides?: Record<string, MetaRowActions>
@@ -513,6 +515,7 @@ const emit = defineEmits<{
   (e: 'selection-change', recordIds: string[]): void
   (e: 'bulk-delete', recordIds: string[]): void
   (e: 'bulk-edit', payload: { mode: 'set' | 'clear'; recordIds: string[] }): void
+  (e: 'bulk-restore', recordIds: string[]): void
   // Duplicate / clone record (design 2026-06-16): right-click a row → request a duplicate. The native
   // context menu is suppressed so the row affordance is the menu; the workbench owns the create + clone-open.
   (e: 'duplicate-record', recordId: string): void
@@ -897,6 +900,13 @@ function toggleSelectRow(recordId: string) {
 function onBulkDelete() {
   const deletable = [...selectedIds.value].filter((id) => resolveRowActions(id).canDelete)
   if (deletable.length > 0) emit('bulk-delete', deletable)
+}
+
+// Batch restore (BS-4): emit the selected records the actor can edit (restore is a write). The server re-checks
+// per record (row-deny / write-gate / version) in the preview + execute, so this is a coarse pre-filter only.
+function onBulkRestore() {
+  const restorable = [...selectedIds.value].filter((id) => resolveRowActions(id).canEdit)
+  if (restorable.length > 0) emit('bulk-restore', restorable)
 }
 
 function onBulkEdit(mode: 'set' | 'clear') {

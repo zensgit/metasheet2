@@ -254,7 +254,7 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
+          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
           :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :person-summaries="grid.personSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
@@ -277,7 +277,7 @@
           @cursor-focus="onCellCursorFocus"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @load-more="grid.loadMore" @open-link-picker="onGridLinkPicker" @open-person-picker="onGridPersonPicker" @resize-column="onSetColumnWidth"
-          @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @reorder-field="onReorderField"
+          @bulk-delete="onBulkDelete" @bulk-edit="onBulkEditRequest" @bulk-restore="onBulkRestoreRequest" @reorder-field="onReorderField"
           @create-record="onAddRecord"
           @duplicate-record="onDuplicateRecord"
           @set-frozen="onSetFrozen"
@@ -398,6 +398,24 @@
       :is-zh="isZh"
       @confirm="onConfirmRestore"
       @cancel="onCancelRestore"
+    />
+    <RestoreBatchDialog
+      :visible="batchRestore.visible"
+      :phase="batchRestore.phase"
+      :loading="batchRestore.loading"
+      :target-version="batchRestore.targetVersion"
+      :preview-records="batchRestore.records"
+      :restorable-count="batchRestore.restorableCount"
+      :skipped-count="batchRestore.skippedCount"
+      :executable="batchRestore.executable"
+      :result-records="batchRestore.resultRecords"
+      :restored-count="batchRestore.restoredCount"
+      :record-label-of="batchRecordLabel"
+      :is-zh="isZh"
+      @preview-version="onBatchPreviewVersion"
+      @confirm="onConfirmBatchRestore"
+      @cancel="onBatchRestoreCancel"
+      @done="onBatchRestoreDone"
     />
     <MetaLinkPicker
       :visible="linkPickerVisible"
@@ -586,7 +604,10 @@ import MetaToolbar from '../components/MetaToolbar.vue'
 import MetaGridTable from '../components/MetaGridTable.vue'
 import MetaExportDialog, { type ExportConfirmPayload } from '../components/MetaExportDialog.vue'
 import RestorePreviewDialog from '../components/RestorePreviewDialog.vue'
-import type { RestorePreviewChange } from '../api/client'
+import RestoreBatchDialog from '../components/RestoreBatchDialog.vue'
+import type { RestorePreviewChange, RestoreBatchPreviewRecord, RestoreBatchExecuteRecord } from '../api/client'
+import { buildBatchExpectedVersions } from '../utils/batch-restore-expected-versions'
+import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
 import MetaRecordDrawer from '../components/MetaRecordDrawer.vue'
 import MetaNotificationBell from '../components/MetaNotificationBell.vue'
@@ -1949,6 +1970,105 @@ function onCancelRestore() {
   restorePreview.value = { ...restorePreview.value, visible: false }
 }
 
+// BS-4: scoped (multi-record) restore. Default entry = revert-to-original (v1); the dialog's Advanced picker
+// re-previews at any version. The FE is a faithful client of the BS-2/BS-3 wire — it submits each record's
+// previewVersion as expectedVersions over the identity's scope, and surfaces the skip-reason taxonomy verbatim.
+const batchRestore = ref<{
+  visible: boolean
+  phase: 'preview' | 'result'
+  loading: boolean
+  targetVersion: number
+  recordIds: string[]
+  records: RestoreBatchPreviewRecord[]
+  scope: string[]
+  restorableCount: number
+  skippedCount: number
+  executable: boolean
+  identity: string | null
+  resultRecords: RestoreBatchExecuteRecord[]
+  restoredCount: number
+}>({ visible: false, phase: 'preview', loading: false, targetVersion: 1, recordIds: [], records: [], scope: [], restorableCount: 0, skippedCount: 0, executable: false, identity: null, resultRecords: [], restoredCount: 0 })
+
+// Off-page record titles (UX follow-up): a record can only be SELECTED while it is loaded, so its title is in
+// grid.rows AT SELECTION TIME. Capture it then (no fetch, no restore-wire touch) so the label survives the row
+// later scrolling off / a view reset — the batch dialog then shows a real title instead of the bare recordId.
+const gridSelectionLabels = ref<Record<string, string>>({})
+function captureSelectionLabels(recordIds: string[]): void {
+  const pf = grid.visibleFields.value[0] as { id: string } | undefined
+  gridSelectionLabels.value = resolveSelectionLabels(recordIds, grid.rows.value as ReadonlyArray<{ id: string; data?: Record<string, unknown> }>, pf?.id, gridSelectionLabels.value)
+}
+const batchRecordLabel = (recordId: string): string => {
+  const captured = gridSelectionLabels.value[recordId]
+  if (captured) return captured
+  // belt-and-suspenders live lookup (dialog opened without a fresh capture); else the bare id
+  const row = grid.rows.value.find((r: { id: string }) => r.id === recordId) as { data?: Record<string, unknown> } | undefined
+  const pf = grid.visibleFields.value[0] as { id: string } | undefined
+  const val = row && pf ? row.data?.[pf.id] : undefined
+  return val != null && val !== '' ? String(val) : recordId
+}
+
+// Monotonic token: rapid Advanced version-switching (v3 → v4) can resolve out of order — only the LAST request's
+// response may land, or a slow v3 could overwrite v4's preview (wrong diff shown / identity mismatch at confirm).
+let batchPreviewSeq = 0
+async function runBatchPreview(version: number) {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return
+  const seq = ++batchPreviewSeq
+  batchRestore.value = { ...batchRestore.value, loading: true, targetVersion: version }
+  try {
+    const pv = await workbench.client.restoreBatchPreview(sheetId, batchRestore.value.recordIds, version)
+    if (seq !== batchPreviewSeq) return // a newer preview superseded this one → drop the stale response
+    batchRestore.value = { ...batchRestore.value, loading: false, phase: 'preview', records: pv.records, scope: pv.scope, restorableCount: pv.restorableCount, skippedCount: pv.skippedCount, executable: pv.previewIdentity != null, identity: pv.previewIdentity }
+  } catch (error) {
+    if (seq !== batchPreviewSeq) return // stale failure too — don't tear down a newer preview
+    batchRestore.value = { ...batchRestore.value, visible: false }
+    showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
+  }
+}
+
+function onBulkRestoreRequest(recordIds: string[]) {
+  if (!workbench.activeSheetId.value || recordIds.length === 0) return
+  batchRestore.value = { visible: true, phase: 'preview', loading: true, targetVersion: 1, recordIds, records: [], scope: [], restorableCount: 0, skippedCount: 0, executable: false, identity: null, resultRecords: [], restoredCount: 0 }
+  void runBatchPreview(1)
+}
+
+function onBatchPreviewVersion(version: number) {
+  void runBatchPreview(version)
+}
+
+async function onConfirmBatchRestore() {
+  const sheetId = workbench.activeSheetId.value
+  const state = batchRestore.value
+  if (!sheetId || !state.identity || state.scope.length === 0) { batchRestore.value = { ...state, visible: false }; return }
+  const expectedVersions = buildBatchExpectedVersions(state.records, state.scope) // wire-drift guard
+  // [P3] FE fail-closed: if any scope record lacks a previewVersion, expectedVersions would be incomplete and the
+  // server would 400 — block the execute and show a restore error (the user re-opens batch restore to retry) rather
+  // than sending incomplete expectedVersions. (Can't happen with current BS-2, which always returns previewVersion
+  // for a restorable record; defensive against a future wire change.)
+  if (Object.keys(expectedVersions).length !== state.scope.length) {
+    batchRestore.value = { ...state, visible: false }
+    showError(recordLabel('record.errorRestore', isZh.value))
+    return
+  }
+  batchRestore.value = { ...state, loading: true }
+  try {
+    const result = await workbench.client.restoreBatchExecute(sheetId, state.scope, state.targetVersion, expectedVersions, state.identity)
+    batchRestore.value = { ...batchRestore.value, loading: false, phase: 'result', resultRecords: result.records, restoredCount: result.restoredCount, skippedCount: result.skippedCount }
+    await grid.loadViewData(grid.page.value.offset)
+    showSuccess(`${result.restoredCount} ${recordLabel('record.batchRestoreRestored', isZh.value)} · ${result.skippedCount} ${recordLabel('record.batchRestoreSummarySkipped', isZh.value)}`)
+  } catch (error) {
+    batchRestore.value = { ...batchRestore.value, loading: false }
+    showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
+  }
+}
+
+function onBatchRestoreDone() {
+  batchRestore.value = { ...batchRestore.value, visible: false }
+}
+function onBatchRestoreCancel() {
+  batchRestore.value = { ...batchRestore.value, visible: false }
+}
+
 async function onReloadConflict() {
   await grid.reloadCurrentPage()
   if (selectedRecordId.value) {
@@ -3194,6 +3314,7 @@ const exportInitialFormat = ref<'csv' | 'xlsx'>('xlsx')
 const exportSelectedRecordIds = ref<Set<string>>(new Set())
 function onGridSelectionChange(recordIds: string[]) {
   exportSelectedRecordIds.value = new Set(recordIds)
+  captureSelectionLabels(recordIds) // capture batch-restore titles while the rows are still loaded (off-page resolution)
 }
 
 // --- Export (A2: column/row selection via MetaExportDialog) ---

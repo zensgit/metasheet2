@@ -974,6 +974,41 @@ export interface RestorePreviewResult {
   previewIdentity: string | null
 }
 
+// BS-4: scoped (multi-record) restore preview/execute results — a faithful client of the BS-2/BS-3 wire.
+export interface RestoreBatchPreviewRecord {
+  recordId: string
+  status: 'restorable' | 'skipped'
+  changes?: RestorePreviewChange[]
+  affectedFieldCount?: number
+  /** the record's preview-time version — submitted back verbatim as expectedVersions[recordId] (the version bind). */
+  previewVersion?: number
+  /** why a record is not restorable: unavailable | version_unavailable | unsupported | snapshot_unavailable | schema_drift | no_change */
+  skipReason?: string
+}
+export interface RestoreBatchPreviewResult {
+  records: RestoreBatchPreviewRecord[]
+  /** the RESTORABLE record set the identity binds (sorted) — the FE executes exactly this set. */
+  scope: string[]
+  restorableCount: number
+  skippedCount: number
+  targetVersion: number
+  previewIdentity: string | null
+}
+export interface RestoreBatchExecuteRecord {
+  recordId: string
+  status: 'restored' | 'skipped'
+  newVersion?: number
+  restoredFieldIds?: string[]
+  /** write-level skip taxonomy (surfaced verbatim): denied | conflict | forbidden | error */
+  skipReason?: 'denied' | 'conflict' | 'forbidden' | 'error'
+}
+export interface RestoreBatchExecuteResult {
+  records: RestoreBatchExecuteRecord[]
+  restoredCount: number
+  skippedCount: number
+  targetVersion: number
+}
+
 export interface AiShortcutPreviewData {
   status: 'succeeded'
   action: 'preview'
@@ -1102,6 +1137,122 @@ export interface AiBulkCommitRowOutcome {
 export interface AiBulkCommitData {
   outcomes: AiBulkCommitRowOutcome[]
   counts: Record<AiBulkCommitOutcome, number>
+}
+
+// AI BULK fill — ASYNC JOB (B-4). When a bulk-preview request exceeds the inline
+// cap the backend creates a job instead of generating inline and returns
+// `{ jobId }` (bare body — no `{ ok, data }` envelope: parseJson passes it through
+// as-is). These mirror the EXACT job-route wire 1:1 (multitable-ai.ts: poll
+// `bulk-job/:jobId` ~1238, paginated `bulk-job/:jobId/rows` ~1280, commit
+// `bulk-job/:jobId/commit` ~1431, cancel `bulk-job/:jobId/cancel` ~1316). Do NOT
+// reshape — the truthful-status UI depends on every distinct state surviving the
+// wire (the same fixture-drift rule as B-3).
+
+/**
+ * Job lifecycle status (the poll route's `state`, a WorkflowJobStatus). Job mode
+ * cares about: `queued`/`running` (the worker is still generating — keep polling)
+ * → `suspended` (generation done, AWAITING review — the diff is ready) /
+ * `resolved` (already committed — terminal success) / `rejected` (cancelled —
+ * already-generated rows stay committable) / `errored` (crashed mid-generate —
+ * the persisted partial is still committable).
+ */
+export type AiBulkJobStatus =
+  | 'queued'
+  | 'running'
+  | 'suspended'
+  | 'resolved'
+  | 'rejected'
+  | 'errored'
+
+/** A bulk-fill start either generated inline (≤ cap, B-3 path) or created a job (over cap). */
+export type AiBulkPreviewStart = AiBulkPreviewData | AiBulkJobStart
+
+export interface AiBulkJobStart {
+  jobId: string
+}
+
+/** True when the over-cap start created an async job (vs. the inline B-3 preview). */
+export function isAiBulkJobStart(start: AiBulkPreviewStart): start is AiBulkJobStart {
+  return 'jobId' in start
+}
+
+/**
+ * Poll header (multitable-ai.ts BJ-3 ~1238). The durable progress counters +
+ * per-state row counts + the commit aggregate. `state` drives the poll loop;
+ * `generated`/`total` the progress bar; `quotaPaused` the banner; `settledCost`
+ * the already-charged spend. Counts are the truthful per-bucket tallies.
+ */
+export interface AiBulkJobPoll {
+  jobId: string
+  state: AiBulkJobStatus
+  /** Why the job suspended (BJ-3) — e.g. `manual_task` (awaiting review). Display copy is by state, not this. */
+  suspendReason: string | null
+  /** Provider-bound denominator (NOT including skipped_no_perm rows). */
+  total: number
+  generated: number
+  skippedCount: number
+  failuresCount: number
+  committedCount: number
+  pendingNotGeneratedCount: number
+  /** Already-charged provider spend (USD) for this job so far. */
+  settledCost: number
+  /** true → generation paused on the per-tenant quota (BJ — partial; re-run to continue). */
+  quotaPaused: boolean
+  /** Durable commit aggregate ({ confirmed, attempted, counts }) once committed; null before. */
+  aggregate: unknown
+}
+
+/** Row review state (multitable-ai.ts BJ-9). ONLY `generated` is confirmable. */
+export type AiBulkJobRowState =
+  | 'pending'
+  | 'generated'
+  | 'skipped'
+  | 'failure'
+  | 'committed'
+  | 'pending_not_generated'
+
+/**
+ * One review row (multitable-ai.ts BJ-9 ~1280). `proposed` is the cached output
+ * (null until generated). `currentValue` is the server-read target value the
+ * write would overwrite (null = genuinely empty). `masked` flags a reduced
+ * context. `reason` carries the skipped/failure/pending_not_generated detail.
+ */
+export interface AiBulkJobRow {
+  recordId: string
+  ordinal: number
+  state: AiBulkJobRowState
+  currentValue: string | null
+  proposed: string | null
+  masked: boolean
+  reason: string | null
+}
+
+/** A paginated review page (multitable-ai.ts BJ-9). Follow `nextCursor` until null. */
+export interface AiBulkJobRowsPage {
+  rows: AiBulkJobRow[]
+  nextCursor: number | null
+}
+
+/** Job-commit per-row outcome — DIVERGES from B-2: `committed` (not `written`), no `not_in_cache`. */
+export type AiBulkJobCommitOutcome =
+  | 'committed'
+  | 'stale_reprev'
+  | 'write_conflict'
+  | 'skipped_no_perm'
+
+/** Commit response (multitable-ai.ts BJ-10 ~1431). The job resolves; counts is the truthful tally. */
+export interface AiBulkJobCommitData {
+  jobId: string
+  state: AiBulkJobStatus
+  counts: Record<AiBulkJobCommitOutcome, number>
+  attempted: number
+}
+
+/** Cancel response (multitable-ai.ts BJ-4 ~1316). `state` is `rejected` on success. */
+export interface AiBulkJobCancelData {
+  jobId: string
+  cancelled: boolean
+  state: AiBulkJobStatus
 }
 
 export interface AiUsageSummary {
@@ -1599,7 +1750,11 @@ export class MultitableApiClient {
   // (NOT the loaded page); viewId is required for scope:'view'. The response
   // separates confirmable rows / uncharged skipped / CHARGED non-confirmable
   // failures / settled cost / a partial (capped) flag — preserved verbatim.
-  async aiBulkPreview(sheetId: string, input: AiBulkPreviewInput): Promise<AiBulkPreviewData> {
+  //
+  // OVER the inline cap the backend returns a bare `{ jobId }` instead of an
+  // inline preview (B-4 async job). The caller discriminates with
+  // `isAiBulkJobStart` and switches to the poll/review/commit job flow.
+  async aiBulkPreview(sheetId: string, input: AiBulkPreviewInput): Promise<AiBulkPreviewStart> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/ai/shortcut/bulk-preview`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1625,6 +1780,58 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ runId: input.runId, recordIds: input.recordIds }),
     })
+    return this.parseJson(res)
+  }
+
+  // AI BULK JOB poll (B-4 BJ-3) — durable progress header for an async over-cap
+  // job: state (queued|running while generating; suspended|resolved|rejected|
+  // errored terminal), generated/total, per-state counts, settledCost,
+  // quotaPaused, aggregate. A bare body (no envelope) — passed through verbatim.
+  async getBulkJob(sheetId: string, jobId: string): Promise<AiBulkJobPoll> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/ai/shortcut/bulk-job/${encodeURIComponent(jobId)}`,
+    )
+    return this.parseJson(res)
+  }
+
+  // AI BULK JOB rows (B-4 BJ-9) — paginated review page ordered by ordinal. Pass
+  // `cursor` (the previous page's `nextCursor`) to page forward; omit for the
+  // first page. Returns `{ rows, nextCursor }` (nextCursor null on the last page).
+  // Only `state === 'generated'` rows are confirmable; others are read-only.
+  async getBulkJobRows(sheetId: string, jobId: string, cursor?: number | null): Promise<AiBulkJobRowsPage> {
+    const query = typeof cursor === 'number' ? `?cursor=${encodeURIComponent(String(cursor))}` : ''
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/ai/shortcut/bulk-job/${encodeURIComponent(jobId)}/rows${query}`,
+    )
+    return this.parseJson(res)
+  }
+
+  // AI BULK JOB commit (B-4 BJ-10) — WRITE the confirmed `generated` rows. The FE
+  // sends the confirmed recordIds ONCE; the BACKEND chunks internally (never loop
+  // here). Returns `{ jobId, state:'resolved', counts, attempted }`. Outcomes
+  // DIVERGE from B-2: `committed` (not `written`), no `not_in_cache`. A row may
+  // still come back stale_reprev / write_conflict / skipped_no_perm (commit
+  // re-gates the live record). 409 if the job is not committable / already committing.
+  async commitBulkJob(sheetId: string, jobId: string, recordIds: string[]): Promise<AiBulkJobCommitData> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/ai/shortcut/bulk-job/${encodeURIComponent(jobId)}/commit`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recordIds }),
+      },
+    )
+    return this.parseJson(res)
+  }
+
+  // AI BULK JOB cancel (B-4 BJ-4) — stop the worker at the next row. Rows already
+  // `generated` stay charged + committable; ungenerated rows → pending_not_generated
+  // (uncharged); the job → `rejected`. NOT a refund. Returns `{ jobId, cancelled, state }`.
+  async cancelBulkJob(sheetId: string, jobId: string): Promise<AiBulkJobCancelData> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/ai/shortcut/bulk-job/${encodeURIComponent(jobId)}/cancel`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+    )
     return this.parseJson(res)
   }
 
@@ -1845,6 +2052,38 @@ export class MultitableApiClient {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
     )
     return this.parseJson<RestoreRecordResult>(res)
+  }
+
+  // BS-4: preview a multi-record restore. Read-only — returns each record's restorable/skipped outcome + the scope
+  // identity. Pair with restoreBatchExecute; never batch-restore without showing the per-record preview.
+  async restoreBatchPreview(sheetId: string, recordIds: string[], targetVersion: number, fieldIds?: string[]): Promise<RestoreBatchPreviewResult> {
+    const body: { targetVersion: number; recordIds: string[]; fieldIds?: string[] } = { targetVersion, recordIds }
+    if (fieldIds && fieldIds.length > 0) body.fieldIds = fieldIds
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/restore-batch-preview`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+    )
+    return this.parseJson<RestoreBatchPreviewResult>(res)
+  }
+
+  // BS-4: execute a previewed batch restore. `expectedVersions` MUST be each record's previewVersion from the preview
+  // (the version bind — the server folds the submitted value into the scopeHash); `recordIds` MUST be the preview's
+  // `scope`. PARTIAL: per-record restored/skipped(denied|conflict|forbidden) in the result.
+  async restoreBatchExecute(
+    sheetId: string,
+    recordIds: string[],
+    targetVersion: number,
+    expectedVersions: Record<string, number>,
+    previewIdentity: string,
+    fieldIds?: string[],
+  ): Promise<RestoreBatchExecuteResult> {
+    const body: { targetVersion: number; recordIds: string[]; expectedVersions: Record<string, number>; previewIdentity: string; fieldIds?: string[] } = { targetVersion, recordIds, expectedVersions, previewIdentity }
+    if (fieldIds && fieldIds.length > 0) body.fieldIds = fieldIds
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/restore-batch-execute`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+    )
+    return this.parseJson<RestoreBatchExecuteResult>(res)
   }
 
   // --- Form submit ---

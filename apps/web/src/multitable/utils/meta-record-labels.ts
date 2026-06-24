@@ -46,6 +46,15 @@ export type MetaRecordLabelKey =
   | 'record.restorePreviewTitle' | 'record.restorePreviewWillChange' | 'record.restorePreviewNoChanges'
   | 'record.restorePreviewConflict' | 'record.restorePreviewExecute' | 'record.restorePreviewCancel'
   | 'record.restorePreviewLoading' | 'record.restorePreviewSet' | 'record.restorePreviewUnset'
+  // --- BS-4 scoped (multi-record) batch restore ---
+  | 'record.batchRestoreTitle' | 'record.batchRestoreRevertOriginal' | 'record.batchRestoreAdvanced'
+  | 'record.batchRestoreVersionLabel' | 'record.batchRestoreVersionHint' | 'record.batchRestoreSummaryRestorable' | 'record.batchRestoreSummarySkipped'
+  | 'record.batchRestoreLoading' | 'record.batchRestoreNoneRestorable' | 'record.batchRestoreConfirm'
+  | 'record.batchRestoreCancel' | 'record.batchRestoreDone' | 'record.batchRestoreResultTitle'
+  | 'record.batchRestoreRestored'
+  | 'record.batchReasonUnavailable' | 'record.batchReasonVersionUnavailable' | 'record.batchReasonUnsupported'
+  | 'record.batchReasonSnapshotUnavailable' | 'record.batchReasonSchemaDrift' | 'record.batchReasonNoChange'
+  | 'record.batchReasonDenied' | 'record.batchReasonConflict' | 'record.batchReasonForbidden' | 'record.batchReasonError'
   // FE-owned static fallback strings (the `error?.message ?? l(...)`
   // pattern from T3A2). Backend error.message remains raw when present.
   | 'record.errorHistoryLoad' | 'record.errorWatchLoad' | 'record.errorWatchUpdate'
@@ -120,6 +129,31 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.restorePreviewLoading': { en: 'Loading preview…', zh: '正在加载预览…' },
   'record.restorePreviewSet': { en: 'set', zh: '设为' },
   'record.restorePreviewUnset': { en: 'clear', zh: '清空' },
+  // BS-4 batch restore
+  'record.batchRestoreTitle': { en: 'Batch restore', zh: '批量恢复' },
+  'record.batchRestoreRevertOriginal': { en: 'Revert selected records to their original version', zh: '将所选记录恢复到初始版本' },
+  'record.batchRestoreAdvanced': { en: 'Advanced', zh: '高级' },
+  'record.batchRestoreVersionLabel': { en: 'Restore to version', zh: '恢复到版本' },
+  'record.batchRestoreVersionHint': { en: 'Each record is restored to its own version of that number; records without it are skipped.', zh: '每条记录恢复到它自己的该版本号；没有该版本的记录会被跳过。' },
+  'record.batchRestoreSummaryRestorable': { en: 'will be restored', zh: '将被恢复' },
+  'record.batchRestoreSummarySkipped': { en: 'skipped', zh: '跳过' },
+  'record.batchRestoreLoading': { en: 'Previewing…', zh: '预览中…' },
+  'record.batchRestoreNoneRestorable': { en: 'No selected records can be restored to this version', zh: '没有所选记录可恢复到该版本' },
+  'record.batchRestoreConfirm': { en: 'Restore', zh: '恢复' },
+  'record.batchRestoreCancel': { en: 'Cancel', zh: '取消' },
+  'record.batchRestoreDone': { en: 'Done', zh: '完成' },
+  'record.batchRestoreResultTitle': { en: 'Restore results', zh: '恢复结果' },
+  'record.batchRestoreRestored': { en: 'Restored', zh: '已恢复' },
+  'record.batchReasonUnavailable': { en: 'Unavailable', zh: '不可用' },
+  'record.batchReasonVersionUnavailable': { en: 'No such version', zh: '无该版本' },
+  'record.batchReasonUnsupported': { en: 'Not supported', zh: '不支持' },
+  'record.batchReasonSnapshotUnavailable': { en: 'No snapshot', zh: '无快照' },
+  'record.batchReasonSchemaDrift': { en: 'Schema changed', zh: '结构已变' },
+  'record.batchReasonNoChange': { en: 'No change', zh: '无变化' },
+  'record.batchReasonDenied': { en: 'Not permitted', zh: '无权限' },
+  'record.batchReasonConflict': { en: 'Version conflict', zh: '版本冲突' },
+  'record.batchReasonForbidden': { en: 'Field write-denied', zh: '字段不可写' },
+  'record.batchReasonError': { en: 'Error', zh: '错误' },
   'record.errorRestore': { en: 'Restore failed', zh: '恢复失败' },
   'record.errorHistoryLoad': { en: 'Failed to load history', zh: '加载历史失败' },
   'record.errorWatchLoad': { en: 'Failed to load watch status', zh: '加载关注状态失败' },
@@ -148,6 +182,27 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
   const entry = META_RECORD_LABELS[key]
   return isZh ? entry.zh : entry.en
+}
+
+// BS-4: map a wire skip-reason (preview: unavailable/version_unavailable/unsupported/snapshot_unavailable/
+// schema_drift/no_change · execute: denied/conflict/forbidden/error) to its typed label. Unknown → raw reason
+// (forward-compatible if the backend adds a reason). Keeps the FE a faithful client of the wire taxonomy.
+const BATCH_REASON_KEYS: Record<string, MetaRecordLabelKey> = {
+  unavailable: 'record.batchReasonUnavailable',
+  version_unavailable: 'record.batchReasonVersionUnavailable',
+  unsupported: 'record.batchReasonUnsupported',
+  snapshot_unavailable: 'record.batchReasonSnapshotUnavailable',
+  schema_drift: 'record.batchReasonSchemaDrift',
+  no_change: 'record.batchReasonNoChange',
+  denied: 'record.batchReasonDenied',
+  conflict: 'record.batchReasonConflict',
+  forbidden: 'record.batchReasonForbidden',
+  error: 'record.batchReasonError',
+}
+export function batchSkipReasonLabel(reason: string | undefined, isZh: boolean): string {
+  if (!reason) return ''
+  const key = BATCH_REASON_KEYS[reason]
+  return key ? recordLabel(key, isZh) : reason
 }
 
 // --- Interpolation helpers (not keys) ---

@@ -8,6 +8,7 @@ import {
   buildFormSchema,
   createEmptyTemplateDraft,
   draftFromTemplate,
+  graphReadOnlyReason,
   unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
 } from '../src/approvals/templateAuthoring'
@@ -283,8 +284,12 @@ describe('approval template authoring helpers', () => {
     expect(schema.fields[0]?.label).toBe('报销金额')
   })
 
-  it('blocks unsupported graph constructs instead of flattening them', () => {
-    const reason = unsupportedTemplateAuthoringReason(buildTemplate({
+  it('G-1: load-PRESERVES a complex (parallel) graph instead of flattening — graph read-only, save-able, byte-identical round-trip', () => {
+    // Behaviour CHANGED at G-1: cc/condition/parallel are no longer "unsupported" (which blocked
+    // save). They are load-preserved verbatim — the graph renders read-only, the form stays
+    // editable, and save re-emits the SAME graph (no flatten). See the dedicated round-trip suite
+    // in approval-template-authoring-graph-preserve.test.ts.
+    const template = buildTemplate({
       approvalGraph: {
         nodes: [
           { key: 'start', type: 'start', name: '发起', config: {} },
@@ -296,9 +301,15 @@ describe('approval template authoring helpers', () => {
           { key: 'edge-fork-end', source: 'fork', target: 'end' },
         ],
       },
-    }))
+    })
 
-    expect(reason).toContain('暂不支持编辑的审批节点')
+    // no longer unsupported (save NOT blocked) — but the graph is flagged read-only.
+    expect(unsupportedTemplateAuthoringReason(template)).toBeNull()
+    expect(graphReadOnlyReason(template)).not.toBeNull()
+    // anti-flatten: save re-emits the parallel graph byte-identical, never the linear projection.
+    const rebuilt = buildApprovalGraph(draftFromTemplate(template))
+    expect(rebuilt).toEqual(template.approvalGraph)
+    expect(rebuilt.nodes.some((node) => node.type === 'parallel')).toBe(true)
   })
 
   it('fails closed on a node carrying fieldPermissions (no node-field editor yet)', () => {
@@ -809,33 +820,54 @@ describe('TemplateAuthoringView', () => {
     expect(payload.approvalGraph.nodes[1].config.autoApprovalPolicy).toEqual({ mergeWithRequester: true })
   })
 
-  it('opens unsupported existing graphs read-only and refuses to save them', async () => {
+  it('G-1: opens a complex (parallel) graph READ-ONLY but save-able — preserves the graph on save, never flattens', async () => {
+    // Behaviour CHANGED at G-1: a complex graph is no longer fail-closed (save disabled). It opens
+    // with the form editable + the graph rendered read-only (structured node list), and SAVE is
+    // enabled — the save re-emits the SAME graph (anti-flatten), it does not project to a linear
+    // start→approval→end chain.
     routeParams = { id: 'tpl_parallel' }
-    getTemplateSpy.mockResolvedValue(buildTemplate({
-      id: 'tpl_parallel',
-      approvalGraph: {
-        nodes: [
-          { key: 'start', type: 'start', name: '发起', config: {} },
-          { key: 'parallel_1', type: 'parallel', name: '并行审批', config: { branches: ['a', 'b'], joinMode: 'all', joinNodeKey: 'end' } },
-          { key: 'end', type: 'end', name: '结束', config: {} },
-        ],
-        edges: [
-          { key: 'edge-start-parallel_1', source: 'start', target: 'parallel_1' },
-          { key: 'edge-parallel_1-end', source: 'parallel_1', target: 'end' },
-        ],
-      },
-    }))
+    const parallelGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'parallel_1', type: 'parallel', name: '并行审批', config: { branches: ['a', 'b'], joinMode: 'all', joinNodeKey: 'join_1' } },
+        { key: 'approval_a', type: 'approval', name: '财务', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'approval_b', type: 'approval', name: '法务', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'join_1', type: 'approval', name: '汇聚', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-parallel_1', source: 'start', target: 'parallel_1' },
+        { key: 'edge-parallel_1-a', source: 'parallel_1', target: 'approval_a' },
+        { key: 'edge-parallel_1-b', source: 'parallel_1', target: 'approval_b' },
+        { key: 'edge-approval_a-join', source: 'approval_a', target: 'join_1' },
+        { key: 'edge-approval_b-join', source: 'approval_b', target: 'join_1' },
+        { key: 'edge-join_1-end', source: 'join_1', target: 'end' },
+      ],
+    }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_parallel', approvalGraph: parallelGraph }))
 
     await mountView()
+    await flushUi()
 
-    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')?.textContent)
-      .toContain('暂不支持编辑')
+    // NOT fail-closed: no unsupported alert; the informational graph-read-only alert shows instead.
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-template-graph-readonly-alert"]')).not.toBeNull()
+    // the linear steps editor is hidden; the read-only structured node list renders the parallel node.
+    expect(container!.querySelector('[data-testid="approval-template-add-step"]')).toBeNull()
+    const nodeRows = container!.querySelectorAll('[data-testid="approval-graph-node-row"]')
+    expect(nodeRows.length).toBe(parallelGraph.nodes.length)
+    expect(container!.querySelector('[data-node-type="parallel"]')).not.toBeNull()
+
+    // save is ENABLED and preserves the graph byte-identical (anti-flatten through the real wire).
     const saveButton = container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement
-    expect(saveButton.disabled).toBe(true)
+    expect(saveButton.disabled).toBe(false)
     saveButton.click()
     await flushUi()
 
-    expect(updateTemplateSpy).not.toHaveBeenCalled()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.approvalGraph).toEqual(parallelGraph)
+    expect(payload.approvalGraph.nodes.some((node: any) => node.type === 'parallel')).toBe(true)
   })
 
   it('T8: disables the self-approver toggle when the template opens read-only', async () => {
