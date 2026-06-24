@@ -75,6 +75,30 @@ export type MetaAiBulkLabelKey =
   | 'aibulk.outcomeSkippedNoPerm'
   | 'aibulk.allExpired'
   | 'aibulk.done'
+  // ── B-4 async JOB mode (over the inline cap) ──
+  // Progress (queued/running — worker still generating)
+  | 'aibulk.jobQueued'
+  | 'aibulk.jobRunning'
+  | 'aibulk.jobProgressAria'
+  | 'aibulk.jobQuotaPaused'
+  // Review heading + the new pending_not_generated row state (cancel before reach)
+  | 'aibulk.jobReviewHeading'
+  | 'aibulk.colJobState'
+  | 'aibulk.stateGenerated'
+  | 'aibulk.statePendingNotGenerated'
+  | 'aibulk.statePendingNotGeneratedNote'
+  // Terminal banners for a committable-but-not-clean job
+  | 'aibulk.jobCancelledNotice'
+  | 'aibulk.jobErroredNotice'
+  | 'aibulk.jobResolvedNotice'
+  // Job action buttons
+  | 'aibulk.jobCancel'
+  | 'aibulk.jobConfirm'
+  | 'aibulk.jobCommitting'
+  | 'aibulk.jobLoadErrorBody'
+  | 'aibulk.jobLoadRetry'
+  // Job commit outcomes (DIVERGE from B-2: `committed` not `written`; no `not_in_cache`)
+  | 'aibulk.jobOutcomeCommitted'
 
 const LABELS: Record<MetaAiBulkLabelKey, LocaleText> = {
   'aibulk.trigger': { en: 'AI fill column', zh: 'AI 填充整列' },
@@ -162,6 +186,40 @@ const LABELS: Record<MetaAiBulkLabelKey, LocaleText> = {
     zh: '确认的行均无法写入——预览可能已过期。请再次运行 AI 填充以重新生成。',
   },
   'aibulk.done': { en: 'Done', zh: '完成' },
+  // ── B-4 async JOB mode ──
+  'aibulk.jobQueued': { en: 'Queued — starting…', zh: '排队中——即将开始…' },
+  'aibulk.jobRunning': { en: 'Generating in the background…', zh: '正在后台生成…' },
+  'aibulk.jobProgressAria': { en: 'Bulk-fill generation progress', zh: '批量填充生成进度' },
+  'aibulk.jobQuotaPaused': {
+    en: 'Generation paused — the per-tenant AI quota ran out before every row was generated. Write the rows already generated, then run AI fill again later to continue.',
+    zh: '生成已暂停——在全部行生成完成前，租户 AI 配额已用尽。可先写入已生成的行，稍后再次运行 AI 填充以继续。',
+  },
+  'aibulk.jobReviewHeading': { en: 'Review generated rows', zh: '审阅已生成的行' },
+  'aibulk.colJobState': { en: 'State', zh: '状态' },
+  'aibulk.stateGenerated': { en: 'Ready to write', zh: '可写入' },
+  'aibulk.statePendingNotGenerated': { en: 'Not generated', zh: '未生成' },
+  'aibulk.statePendingNotGeneratedNote': {
+    en: 'These rows were never generated (the job was cancelled before reaching them) and consumed no quota. Run AI fill again to generate them.',
+    zh: '这些行从未生成（任务在处理到它们之前已取消），未消耗配额。请再次运行 AI 填充以生成它们。',
+  },
+  'aibulk.jobCancelledNotice': {
+    en: 'This job was cancelled. The rows already generated below are still ready to write; the rest were not generated.',
+    zh: '此任务已取消。下方已生成的行仍可写入；其余行未生成。',
+  },
+  'aibulk.jobErroredNotice': {
+    en: 'Generation stopped on an error. The rows already generated below are still ready to write; run AI fill again to continue with the rest.',
+    zh: '生成因出错而中止。下方已生成的行仍可写入；请再次运行 AI 填充以继续处理其余行。',
+  },
+  'aibulk.jobResolvedNotice': { en: 'This job is complete. See the write results below.', zh: '此任务已完成。写入结果见下方。' },
+  'aibulk.jobCancel': { en: 'Cancel generation', zh: '取消生成' },
+  'aibulk.jobConfirm': { en: 'Write selected rows', zh: '写入所选行' },
+  'aibulk.jobCommitting': { en: 'Writing…', zh: '写入中…' },
+  'aibulk.jobOutcomeCommitted': { en: 'Written', zh: '已写入' },
+  'aibulk.jobLoadErrorBody': {
+    en: "The full review couldn't be loaded, so committing is disabled to avoid writing an incomplete batch. Retry, or cancel and start over.",
+    zh: '无法加载完整的审阅列表，为避免写入不完整的批次，已禁用提交。请重试，或取消后重新开始。',
+  },
+  'aibulk.jobLoadRetry': { en: 'Retry loading', zh: '重新加载' },
 }
 
 export function aiBulkLabel(key: MetaAiBulkLabelKey, isZh: boolean): string {
@@ -270,4 +328,62 @@ export function aiBulkCommitSummary(counts: Record<string, number>, isZh: boolea
   if (notInCache > 0) parts.push(`${notInCache} expired/not-cached`)
   if (noPerm > 0) parts.push(`${noPerm} no-permission`)
   return parts.join(' · ') + ` (${written + stale + conflict + notInCache + noPerm} ${rowWord(written + stale + conflict + notInCache + noPerm)})`
+}
+
+// ── B-4 async JOB helpers (the inline helpers above are unchanged) ──
+
+/**
+ * Job generation progress line — "{generated} / {total} generated". The counts
+ * are numeric data interpolated raw; the surrounding word is localized. `total`
+ * is the provider-bound denominator (skipped_no_perm rows are NOT in it).
+ */
+export function aiBulkJobProgressLine(generated: number, total: number, isZh: boolean): string {
+  return isZh ? `已生成 ${generated} / ${total}` : `${generated} / ${total} generated`
+}
+
+/**
+ * Distinct copy for each JOB commit per-row OUTCOME. DIVERGES from the inline
+ * (B-2) vocabulary: the terminal success is `committed` (not `written`) and there
+ * is NO `not_in_cache`. stale_reprev / write_conflict / skipped_no_perm reuse the
+ * inline copy. Falls back to the raw outcome.
+ */
+export function aiBulkJobOutcomeLabel(outcome: string, isZh: boolean): string {
+  switch (outcome) {
+    case 'committed':
+      return aiBulkLabel('aibulk.jobOutcomeCommitted', isZh)
+    case 'stale_reprev':
+      return aiBulkLabel('aibulk.outcomeStale', isZh)
+    case 'write_conflict':
+      return aiBulkLabel('aibulk.outcomeConflict', isZh)
+    case 'skipped_no_perm':
+      return aiBulkLabel('aibulk.outcomeSkippedNoPerm', isZh)
+    default:
+      return outcome
+  }
+}
+
+/**
+ * Aggregate JOB commit summary — the headline truthful-status line for the job
+ * commit. Lists every non-zero outcome bucket (`committed` vocabulary; no
+ * not_in_cache). Mirrors aiBulkCommitSummary's row-count tail.
+ */
+export function aiBulkJobCommitSummary(counts: Record<string, number>, isZh: boolean): string {
+  const committed = counts.committed ?? 0
+  const stale = counts.stale_reprev ?? 0
+  const conflict = counts.write_conflict ?? 0
+  const noPerm = counts.skipped_no_perm ?? 0
+  const total = committed + stale + conflict + noPerm
+  const parts: string[] = []
+  if (isZh) {
+    parts.push(`已写入 ${committed} 行`)
+    if (stale > 0) parts.push(`需重新预览 ${stale} 行`)
+    if (conflict > 0) parts.push(`写入冲突 ${conflict} 行`)
+    if (noPerm > 0) parts.push(`无权限 ${noPerm} 行`)
+    return parts.join(' · ')
+  }
+  parts.push(`${committed} written`)
+  if (stale > 0) parts.push(`${stale} need re-preview`)
+  if (conflict > 0) parts.push(`${conflict} write-conflict`)
+  if (noPerm > 0) parts.push(`${noPerm} no-permission`)
+  return parts.join(' · ') + ` (${total} ${rowWord(total)})`
 }
