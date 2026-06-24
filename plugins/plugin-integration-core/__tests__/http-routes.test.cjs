@@ -5046,6 +5046,65 @@ async function testTableActionRoutesSupportExplicitBridgeSource() {
   assert.equal(findCalls(mismatch.calls, 'mismatchCreateAdapter').length, 0, 'kind mismatch fails before adapter creation')
 }
 
+async function testTableActionRoutesUseConfiguredSourceWorkspaceScope() {
+  const adapterCalls = []
+  const records = createTableActionRecordsApi()
+  const action = tableActionConfig({
+    source: {
+      externalSystemId: 'plm_sql_source',
+      workspaceId: 'workspace_source',
+    },
+  })
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        if (input.workspaceId !== 'workspace_source') {
+          const error = new Error('external system not found')
+          error.name = 'ExternalSystemNotFoundError'
+          throw error
+        }
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Scoped PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system, deps) {
+        calls.push(['createAdapter', system, deps])
+        adapterCalls.push({ system, deps })
+        return createTableActionSourceAdapter(tableActionPlmData(), calls)
+      },
+    },
+  })
+  const { routes } = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    config: {
+      stockPreparationTableActions: [action],
+    },
+  })
+
+  const res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    query: { workspaceId: 'wrong_workspace' },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'ready')
+  const lookup = findCall(calls, 'getExternalSystemForAdapter')
+  assert.equal(lookup[1].workspaceId, 'workspace_source', 'action source.workspaceId wins over request query for source lookup')
+  assert.equal(adapterCalls[0].system.workspaceId, 'workspace_source', 'adapter is created with the configured source workspace')
+  assert.equal(adapterCalls[0].deps.principal, 'user_read', 'dry-run source read still runs as the request user')
+  assert.equal(findCalls(calls, 'sourceRead').length > 0, true, 'configured workspace lookup reaches the source adapter')
+}
+
 async function testTableActionTargetPreflightBeforeSourceAdapter() {
   const { calls, services } = createMockServices({
     externalSystemRegistry: {
@@ -5349,6 +5408,7 @@ async function main() {
   await testLargeBomDurableStorageFailureIsValuesFree()
   await testTableActionConflictPolicyRoutes()
   await testTableActionRoutesSupportExplicitBridgeSource()
+  await testTableActionRoutesUseConfiguredSourceWorkspaceScope()
   await testTableActionTargetPreflightBeforeSourceAdapter()
   await testTableActionUnconfiguredFailsClosed()
   await testTemplatePreviewReferenceMappingResolution()
