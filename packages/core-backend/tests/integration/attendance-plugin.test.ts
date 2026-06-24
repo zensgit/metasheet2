@@ -5845,19 +5845,26 @@ attendanceIntegrationDescribe(
       })
       expect(metadata.resolution).toMatchObject({ action: 'approve', status: 'approved' })
 
+      // #8 NS-3 lifted the reject: a one-midnight overtime window is now ACCEPTED and bucketed per own date
+      // (was OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED pre-NS-3).
       const crossRes = await createOvertime(crossDate, {
         requestedInAt: `${crossDate}T23:00:00.000Z`,
         requestedOutAt: '2036-10-04T01:00:00.000Z',
       })
-      expect(crossRes.status, crossRes.raw).toBe(422)
-      expect((crossRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED')
-      const crossRows = await pool.query(
-        `SELECT COUNT(*)::int AS count
-         FROM attendance_requests
-         WHERE org_id = 'default' AND user_id = $1 AND work_date = $2 AND request_type = 'overtime'`,
-        [userId, crossDate],
-      )
-      expect(Number(crossRows.rows[0]?.count ?? 0)).toBe(0)
+      expect(crossRes.status, crossRes.raw).toBe(201)
+      const crossId = (crossRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
+      expect(crossId).toBeTruthy()
+      const crossSeg = (await loadRequestMetadata(crossId)).overtimeSegmentation as {
+        crossesMidnight?: boolean; totalMinutes?: number
+        segments: { workdayMinutes: number; restdayMinutes: number; holidayMinutes: number }
+        perDate: { date: string; minutes: number }[]
+      }
+      expect(crossSeg.crossesMidnight).toBe(true)
+      expect(crossSeg.totalMinutes).toBe(120)
+      // conserved across the two dates (no boundary double-count) + attributed by own date.
+      expect(crossSeg.segments.workdayMinutes + crossSeg.segments.restdayMinutes + crossSeg.segments.holidayMinutes).toBe(120)
+      expect(crossSeg.perDate.map((p) => p.date)).toEqual([crossDate, '2036-10-04'])
+      expect(crossSeg.perDate.reduce((s, p) => s + p.minutes, 0)).toBe(120)
     } finally {
       if (token && Object.keys(originalSettings).length > 0) {
         await requestJson(`${baseUrl}/api/attendance/settings`, {
@@ -5871,6 +5878,107 @@ attendanceIntegrationDescribe(
         await pool.query('DELETE FROM attendance_records WHERE user_id = $1 AND work_date::text = ANY($2::text[])', [userId, [holidayDate, offDate, crossDate]]).catch(() => undefined)
         await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
       }
+      await pool.query('DELETE FROM attendance_holidays WHERE id = $1', [holidayId]).catch(() => undefined)
+      if (overtimeRuleId) await pool.query('DELETE FROM attendance_overtime_rules WHERE id = $1', [overtimeRuleId]).catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.end().catch(() => undefined)
+    }
+  })
+
+  it('加班三段 NS-3 — a one-midnight overtime window is ACCEPTED, bucketed per OWN date, conserved, replay-idempotent; multi-midnight rejects (real DB)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-ns3-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const createdRequestIds: string[] = []
+    let originalSettings: Record<string, unknown> = {}
+    let token: string | undefined
+    const workDate = '2037-06-12' // June → no DST transition in any tz, so the local-midnight offset is stable
+    const nextDate = '2037-06-13'
+    const farDate = '2037-06-14'
+    const holidayId = randomUUID()
+    let overtimeRuleId: string | undefined
+    // UTC ISO for a local wall-clock in tz (DST-safe here because the dates avoid transitions).
+    const zonedUtcIso = (dateStr: string, timeStr: string, tz: string): string => {
+      const guess = new Date(`${dateStr}T${timeStr}:00.000Z`)
+      const local = new Date(guess.toLocaleString('en-US', { timeZone: tz }))
+      return new Date(guess.getTime() + (guess.getTime() - local.getTime())).toISOString()
+    }
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
+      token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) return
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+
+      const ruleRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, { method: 'POST', headers, body: JSON.stringify({ name: `ns3-ot-${runSuffix}`, minMinutes: 0, roundingMinutes: 1 }) })
+      expect([201, 409]).toContain(ruleRes.status)
+      overtimeRuleId = (ruleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!overtimeRuleId) {
+        const listRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, { headers: { Authorization: `Bearer ${token}` } })
+        overtimeRuleId = ((listRes.body as { data?: { items?: { id?: string; name?: string }[] } } | undefined)?.data?.items ?? []).find(i => i.name === `ns3-ot-${runSuffix}`)?.id
+      }
+      if (!overtimeRuleId) return
+
+      // learn the user's work timezone so the window crosses LOCAL midnight regardless of the org default.
+      const calRes = await requestJson(`${baseUrl}/api/attendance/effective-calendar?from=${workDate}&to=${workDate}&userId=${encodeURIComponent(userId)}`, { headers: { Authorization: `Bearer ${token}` } })
+      const tz = ((calRes.body as { data?: { timezone?: string } } | undefined)?.data?.timezone) || 'UTC'
+
+      // holiday on the after-midnight date → its portion must bucket to holiday.
+      await pool.query(`INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin) VALUES ($1, 'default', $2, $3, false, 'national')`, [holidayId, nextDate, `NS3 Holiday ${runSuffix}`])
+      // §P2: snapshot settings so finally can restore them (segmentation is a GLOBAL toggle — don't leak it).
+      const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
+      originalSettings = ((settingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+      expect((await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ overtimeSegmentation: { enabled: true } }) })).status).toBe(200)
+
+      const createOvertime = async (body: Record<string, unknown>) => {
+        const res = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers, body: JSON.stringify({ workDate, requestType: 'overtime', overtimeRuleId, ...body }) })
+        const id = (res.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+        if (id) createdRequestIds.push(id)
+        return res
+      }
+      const loadSeg = async (id: string) => ((await pool.query('SELECT metadata FROM attendance_requests WHERE id = $1', [id])).rows[0]?.metadata as { overtimeSegmentation?: any })?.overtimeSegmentation
+
+      // (1) one local midnight (workDate 23:00 → nextDate 01:00 local) → accepted + bucketed per own date.
+      const crossRes = await createOvertime({ minutes: 120, requestedInAt: zonedUtcIso(workDate, '23:00', tz), requestedOutAt: zonedUtcIso(nextDate, '01:00', tz) })
+      expect(crossRes.status, crossRes.raw).toBe(201)
+      const crossId = (crossRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
+      const seg = await loadSeg(crossId)
+      expect(seg.crossesMidnight).toBe(true)
+      expect(seg.totalMinutes).toBe(120)
+      // conservation: buckets sum to total, no boundary double-count.
+      expect(seg.segments.workdayMinutes + seg.segments.restdayMinutes + seg.segments.holidayMinutes).toBe(120)
+      expect(seg.perDate).toHaveLength(2)
+      expect(seg.perDate.map((p: { date: string }) => p.date)).toEqual([workDate, nextDate])
+      // the after-midnight date is the holiday → 60 min in the holiday bucket, attributed to nextDate.
+      expect(seg.perDate[1]).toMatchObject({ date: nextDate, dayType: 'holiday', minutes: 60 })
+      expect(seg.segments.holidayMinutes).toBe(60)
+
+      // (2) replay idempotency: corrupt the draft snapshot, approve → recomputed identical inside the txn.
+      const before = JSON.stringify(seg)
+      await pool.query(`UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation,segments,holidayMinutes}', '999'::jsonb, true) WHERE id = $1`, [crossId])
+      expect((await requestJson(`${baseUrl}/api/attendance/requests/${crossId}/approve`, { method: 'POST', headers, body: JSON.stringify({ comment: 'approve ns3' }) })).status).toBe(200)
+      expect(JSON.stringify(await loadSeg(crossId))).toBe(before)
+
+      // (3) more than one midnight still rejects with the stable code.
+      const multiRes = await createOvertime({ minutes: 200, requestedInAt: zonedUtcIso(workDate, '23:00', tz), requestedOutAt: zonedUtcIso(farDate, '01:00', tz) })
+      expect(multiRes.status).toBe(422)
+      expect((multiRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED')
+    } finally {
+      // §P2: restore the GLOBAL segmentation setting so later tests don't run under enabled=true.
+      if (token && Object.keys(originalSettings).length > 0) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
+      }
+      if (createdRequestIds.length > 0) {
+        await pool.query('DELETE FROM attendance_events WHERE meta->>\'requestId\' = ANY($1::text[])', [createdRequestIds]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+      }
+      // §P2: the approve step can write a record for the synthetic user/dates — clean it up.
+      await pool.query('DELETE FROM attendance_records WHERE user_id = $1 AND work_date::text = ANY($2::text[])', [userId, [workDate, nextDate, farDate]]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_holidays WHERE id = $1', [holidayId]).catch(() => undefined)
       if (overtimeRuleId) await pool.query('DELETE FROM attendance_overtime_rules WHERE id = $1', [overtimeRuleId]).catch(() => undefined)
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS

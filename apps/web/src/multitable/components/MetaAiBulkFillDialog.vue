@@ -567,7 +567,7 @@ const props = defineProps<{
   isZh: boolean
 }>()
 
-const emit = defineEmits<{ (e: 'close'): void }>()
+const emit = defineEmits<{ (e: 'close'): void; (e: 'committed'): void }>()
 
 const ctrl = props.controller
 const l = (key: MetaAiBulkLabelKey): string => aiBulkLabel(key, props.isZh)
@@ -643,9 +643,11 @@ function jobOutcomeLabel(outcome: string): string {
 function jobOutcomeBadgeClass(outcome: string): string {
   return outcome === 'committed' ? 'ai-bulk__badge--ready' : 'ai-bulk__badge--warn'
 }
-function onJobConfirm(): void {
+async function onJobConfirm(): Promise<void> {
   if (ctrl.busy.value || ctrl.selectedCount.value === 0) return
-  void ctrl.commitJob()
+  const result = await ctrl.commitJob()
+  // A commit wrote records server-side; the open grid is stale until reloaded.
+  if (result) emit('committed')
 }
 function onJobCancel(): void {
   void ctrl.cancelJob()
@@ -686,9 +688,11 @@ function onGenerate(): void {
   }
 }
 
-function onConfirm(): void {
+async function onConfirm(): Promise<void> {
   if (ctrl.busy.value || ctrl.selectedCount.value === 0) return
-  void ctrl.commit()
+  const result = await ctrl.commit()
+  // A commit wrote records server-side; the open grid is stale until reloaded.
+  if (result) emit('committed')
 }
 
 function onClose(): void {

@@ -10099,6 +10099,61 @@ function buildOvertimeSegmentationSnapshot(input = {}) {
   }
 }
 
+// #8 NS-3 (design-lock #3071): build the snapshot for a one-local-midnight overtime window. The
+// rule-normalized total is computed ONCE (identical to the same-day path), then partitioned across the
+// per-date window weights — integer math, LAST date gets the remainder so Σ buckets === total exactly
+// (conservation + replay-determinism = "no boundary double-count"). Each date's portion is bucketed by
+// ITS OWN canonical day-type (resolveOvertimeDayTypeFromEffectiveCalendarItem on that date's item; an
+// effective working day wins over a holiday layer — 调休). The rule is NEVER re-applied per sub-span.
+// Fails closed (OVERTIME_SEGMENTATION_UNRESOLVED) if any spanned date's calendar item is missing.
+function buildCrossMidnightOvertimeSegmentationSnapshot(input = {}) {
+  const workDate = normalizeDateOnlyValue(input.workDate)
+  const spans = Array.isArray(input.spans) ? input.spans : []
+  const itemsByDate = input.itemsByDate instanceof Map ? input.itemsByDate : new Map()
+  const total = applyOvertimeRule(
+    normalizeOvertimeSegmentationMinutes(input.minutes),
+    input.overtimeRule ?? null,
+  )
+  const totalWeight = spans.reduce((sum, span) => sum + Math.max(0, Number(span.minutes) || 0), 0)
+  const segments = { workdayMinutes: 0, restdayMinutes: 0, holidayMinutes: 0 }
+  const perDate = []
+  let allocated = 0
+  spans.forEach((span, index) => {
+    const item = itemsByDate.get(span.date)
+    if (!item) {
+      throw new HttpError(422, 'OVERTIME_SEGMENTATION_UNRESOLVED', 'Unable to resolve overtime day type')
+    }
+    const isLast = index === spans.length - 1
+    // last date absorbs the remainder so the partition sums to `total` with no rounding loss.
+    const portion = isLast
+      ? Math.max(0, total - allocated)
+      : (totalWeight > 0 ? Math.floor((total * (Number(span.minutes) || 0)) / totalWeight) : 0)
+    allocated += portion
+    const dayTypeResult = resolveOvertimeDayTypeFromEffectiveCalendarItem(item)
+    const dayType = OVERTIME_DAY_TYPES.has(dayTypeResult.dayType) ? dayTypeResult.dayType : 'restday'
+    if (dayType === 'workday') segments.workdayMinutes += portion
+    else if (dayType === 'holiday') segments.holidayMinutes += portion
+    else segments.restdayMinutes += portion
+    perDate.push({ date: span.date, dayType, minutes: portion, calendar: dayTypeResult.decision })
+  })
+  // Backward-compatible shape: keep dayType/calendar (the primary workDate's) so existing consumers read a
+  // sane summary; add crossesMidnight + perDate for the full per-date breakdown. segments/totalMinutes are
+  // the conserved buckets/total.
+  const primary = perDate[0] ?? { dayType: 'restday', calendar: null }
+  return {
+    version: OVERTIME_SEGMENTATION_VERSION,
+    engine: OVERTIME_SEGMENTATION_ENGINE,
+    workDate,
+    crossesMidnight: true,
+    dayType: primary.dayType,
+    calendar: primary.calendar,
+    perDate,
+    segments,
+    totalMinutes: total,
+    compTimeGrantMinutes: total,
+  }
+}
+
 function createApprovedMinutesEntry() {
   return {
     leaveMinutes: 0,
@@ -10173,22 +10228,12 @@ function normalizeOvertimeSegmentationDateTime(value) {
   return date
 }
 
-function extractOvertimeSegmentationDateOnly(value) {
-  if (typeof value === 'string') {
-    const literalDate = normalizeDateOnlyStrict(value.trim().slice(0, 10))
-    if (literalDate) return literalDate
-  }
-  const date = normalizeOvertimeSegmentationDateTime(value)
-  return date ? date.toISOString().slice(0, 10) : null
-}
-
-// #8 NS-1 (design-lock #3071 §3): split a single-local-midnight overtime window into per-date sub-spans,
-// so each portion is judged + attributed by its OWN local date (§3b split at rule local midnight; §3d OT
-// minutes per sub-span date). This is a PRIMITIVE for NS-3 — it does NOT lift the route reject: the default
-// validateOvertimeSegmentationWindow path (and thus maybeBuildOvertimeSegmentationSnapshot) keeps returning
-// OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED until NS-3. §3a: only ONE local midnight splits; multi-midnight stays
-// rejected. NOTE: the split uses the rule timezone (local midnight); cross-midnight DETECTION on the default
-// path is unchanged (extractOvertimeSegmentationDateOnly). Reconciling the two is an NS-3 wiring concern.
+// #8 NS-1/NS-3 (design-lock #3071 §3): split a single-local-midnight overtime window into per-date sub-spans,
+// so each portion is judged + attributed by its OWN local date (§3b split at the work timezone's local
+// midnight; §3d OT minutes per sub-span date). §3a: only ONE local midnight splits; multi-midnight stays
+// rejected. Since NS-3 this split is the SINGLE source of cross-midnight detection inside
+// validateOvertimeSegmentationWindow (the old UTC/literal date compare is gone), so a Z-string that shares a
+// UTC date but crosses local midnight is not masked.
 function overtimeSegmentationLocalDateKey(date, timeZone) {
   const parts = getZonedParts(date, (typeof timeZone === 'string' && timeZone.trim()) ? timeZone.trim() : 'UTC')
   return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`
@@ -10256,7 +10301,7 @@ function bucketOvertimeSegmentationWindowAtMidnight({ startAt, endAt, timeZone, 
   return { ok: true, crossesMidnight: split.crossesMidnight === true, perDate, buckets }
 }
 
-function validateOvertimeSegmentationWindow(input = {}, options = {}) {
+function validateOvertimeSegmentationWindow(input = {}) {
   const workDate = normalizeDateOnlyStrict(input.workDate)
   const startAt = normalizeOvertimeSegmentationDateTime(input.requestedInAt ?? input.startAt)
   const endAt = normalizeOvertimeSegmentationDateTime(input.requestedOutAt ?? input.endAt)
@@ -10264,22 +10309,20 @@ function validateOvertimeSegmentationWindow(input = {}, options = {}) {
   if (endAt.getTime() <= startAt.getTime()) {
     return { ok: false, code: 'OVERTIME_INVALID_TIME_WINDOW' }
   }
-  // §3c DEFAULT path: the route keeps rejecting cross-midnight via the existing UTC/literal date detection,
-  // UNCHANGED until NS-3 — maybeBuildOvertimeSegmentationSnapshot passes no options → allowCrossMidnight false.
-  if (options.allowCrossMidnight !== true) {
-    const startDate = extractOvertimeSegmentationDateOnly(input.requestedInAt ?? input.startAt)
-    const endDate = extractOvertimeSegmentationDateOnly(input.requestedOutAt ?? input.endAt)
-    if (startDate !== workDate || endDate !== workDate) {
-      return { ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' }
-    }
-    return { ok: true }
-  }
-  // allowCrossMidnight path — NOT used by the route in NS-1/NS-2; exercised by unit tests only. Delegate the
-  // cross-midnight decision to the tz-aware split helper so the validator and the split agree BY CONSTRUCTION
-  // (§3b LOCAL midnight — regardless of the input's UTC/literal representation): a single-local-midnight window
-  // splits; a same-local-date window is a single span; multi-midnight or invalid windows reject.
+  // #8 NS-3: the cross-midnight reject is LIFTED. The tz-aware split is the single source of truth — a window
+  // crossing exactly one LOCAL midnight (§3b) is ACCEPTED and returns per-date spans; reversed and
+  // multi-midnight windows keep the stable reject code; a same-local-date window returns one span (the
+  // snapshot then takes the byte-identical same-day path). Detection is delegated to the split (NOT the old
+  // UTC/literal date compare) so a Z-string that shares a UTC date but crosses local midnight is not masked.
   const split = splitOvertimeSegmentationWindowAtMidnight({ startAt, endAt, timeZone: input.timeZone })
   if (!split.ok) return { ok: false, code: split.code }
+  // #8 NS-3 (owner review §P1): anchor to workDate. The window must START on workDate (a one-midnight window
+  // then naturally spans workDate → next day). A window whose first local date is NOT workDate — e.g. both ends
+  // land on D+1 while workDate=D — is rejected, restoring the anchoring the pre-NS-3 date compare enforced
+  // (else the snapshot's same-day path would attribute an off-workDate window onto workDate).
+  if (split.spans[0]?.date !== workDate) {
+    return { ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' }
+  }
   return { ok: true, crossesMidnight: split.crossesMidnight === true, spans: split.spans }
 }
 
@@ -10291,28 +10334,17 @@ async function maybeBuildOvertimeSegmentationSnapshot(db, input = {}) {
   const workDate = normalizeDateOnlyValue(input.workDate)
   if (!workDate || !input.userId) return null
 
-  const windowValidation = validateOvertimeSegmentationWindow({
-    workDate,
-    requestedInAt: input.requestedInAt,
-    requestedOutAt: input.requestedOutAt,
-  })
-  if (!windowValidation.ok) {
-    throw new HttpError(
-      422,
-      windowValidation.code,
-      windowValidation.code === 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED'
-        ? 'Cross-midnight overtime is not supported in v1'
-        : 'Invalid overtime time window',
-    )
-  }
-
+  // #8 NS-3: load workDate AND the next local date so a one-midnight window can bucket each date by its OWN
+  // calendar. resolveEffectiveCalendar also yields the work timezone for the split's local-midnight. A
+  // same-local-date window uses only the workDate item → byte-identical to the pre-#8 snapshot.
+  const nextDate = addDaysToDateKey(workDate, 1) ?? workDate
   let calendar
   try {
     calendar = await resolveEffectiveCalendar(db, {
       orgId: input.orgId,
       userId: input.userId,
       from: workDate,
-      to: workDate,
+      to: nextDate,
     })
   } catch (error) {
     if (isDatabaseSchemaError(error)) {
@@ -10320,11 +10352,45 @@ async function maybeBuildOvertimeSegmentationSnapshot(db, input = {}) {
     }
     throw error
   }
-  const effectiveCalendarItem = Array.isArray(calendar?.items) ? calendar.items[0] : null
+  const itemsByDate = new Map()
+  for (const item of (Array.isArray(calendar?.items) ? calendar.items : [])) {
+    const key = item && item.date ? String(item.date).slice(0, 10) : null
+    if (key) itemsByDate.set(key, item)
+  }
+
+  // #8 NS-3: one local midnight is now ACCEPTED; reversed / multi-midnight keep the stable reject code. The
+  // split uses the work timezone so detection matches the calendar's own local dates.
+  const windowValidation = validateOvertimeSegmentationWindow({
+    workDate,
+    requestedInAt: input.requestedInAt,
+    requestedOutAt: input.requestedOutAt,
+    timeZone: calendar?.timezone,
+  })
+  if (!windowValidation.ok) {
+    throw new HttpError(
+      422,
+      windowValidation.code,
+      windowValidation.code === 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED'
+        ? 'Cross-midnight overtime spanning more than one midnight is not supported'
+        : 'Invalid overtime time window',
+    )
+  }
+
+  if (windowValidation.crossesMidnight === true) {
+    return buildCrossMidnightOvertimeSegmentationSnapshot({
+      workDate,
+      minutes: input.minutes,
+      overtimeRule: input.overtimeRule ?? null,
+      spans: windowValidation.spans,
+      itemsByDate,
+    })
+  }
+
+  // same-local-date — byte-identical to the pre-#8 path: only the workDate item, the unchanged builder.
+  const effectiveCalendarItem = itemsByDate.get(workDate)
   if (!effectiveCalendarItem) {
     throw new HttpError(422, 'OVERTIME_SEGMENTATION_UNRESOLVED', 'Unable to resolve overtime day type')
   }
-
   return buildOvertimeSegmentationSnapshot({
     workDate,
     minutes: input.minutes,
@@ -18222,6 +18288,7 @@ module.exports = {
     OVERTIME_SEGMENTATION_ENGINE,
     OVERTIME_SEGMENTATION_VERSION,
     buildOvertimeSegmentationSnapshot,
+    buildCrossMidnightOvertimeSegmentationSnapshot,
     resolveCompTimeGrantMinutesFromOvertimeMetadata,
     resolveOvertimeDayTypeFromEffectiveCalendarItem,
     validateOvertimeSegmentationWindow,
