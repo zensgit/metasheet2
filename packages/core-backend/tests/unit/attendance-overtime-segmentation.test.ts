@@ -249,3 +249,84 @@ describe('#8 NS-1 — cross-midnight split BEHIND the guard (route still rejects
     ])
   })
 })
+
+describe('#8 NS-2 — adversarial matrix pinning NS-1 split + per-own-date bucketing (route reject UNCHANGED)', () => {
+  const allWorkday = () => ({ isWorkingDay: true })
+  const byDate = (map: Record<string, { isWorkingDay?: boolean; isHoliday?: boolean }>) => (d: string) => map[d] ?? {}
+
+  it('same-day window: single span, bucketed by its own date (no split)', () => {
+    const r = helpers.bucketOvertimeSegmentationWindowAtMidnight({
+      startAt: '2026-10-01T20:00:00.000Z', endAt: '2026-10-01T22:00:00.000Z', timeZone: 'UTC', classifyDate: allWorkday,
+    })
+    expect(r.ok).toBe(true)
+    expect(r.crossesMidnight).toBe(false)
+    expect(r.perDate).toEqual([{ date: '2026-10-01', minutes: 120, kind: 'workday' }])
+    expect(r.buckets).toEqual({ workdayMinutes: 120, restdayMinutes: 0, holidayMinutes: 0 })
+  })
+
+  it('23:00→01:00 across two WORKDAYS splits 1h/1h into the workday bucket by date', () => {
+    const r = helpers.bucketOvertimeSegmentationWindowAtMidnight({
+      startAt: '2026-10-01T23:00:00.000Z', endAt: '2026-10-02T01:00:00.000Z', timeZone: 'UTC', classifyDate: allWorkday,
+    })
+    expect(r.perDate).toEqual([
+      { date: '2026-10-01', minutes: 60, kind: 'workday' },
+      { date: '2026-10-02', minutes: 60, kind: 'workday' },
+    ])
+    expect(r.buckets).toEqual({ workdayMinutes: 120, restdayMinutes: 0, holidayMinutes: 0 })
+  })
+
+  it('restday-after-midnight buckets correctly: D workday, D+1 restday → 60 workday + 60 restday (no bleed)', () => {
+    const r = helpers.bucketOvertimeSegmentationWindowAtMidnight({
+      startAt: '2026-10-01T23:00:00.000Z', endAt: '2026-10-02T01:00:00.000Z', timeZone: 'UTC',
+      classifyDate: byDate({ '2026-10-01': { isWorkingDay: true }, '2026-10-02': { isWorkingDay: false } }),
+    })
+    expect(r.perDate).toEqual([
+      { date: '2026-10-01', minutes: 60, kind: 'workday' },
+      { date: '2026-10-02', minutes: 60, kind: 'restday' },
+    ])
+    expect(r.buckets).toEqual({ workdayMinutes: 60, restdayMinutes: 60, holidayMinutes: 0 })
+  })
+
+  it('holiday-after-midnight buckets to the holiday bucket (holiday overrides workday)', () => {
+    const r = helpers.bucketOvertimeSegmentationWindowAtMidnight({
+      startAt: '2026-10-01T23:00:00.000Z', endAt: '2026-10-02T01:00:00.000Z', timeZone: 'UTC',
+      classifyDate: byDate({ '2026-10-01': { isWorkingDay: true }, '2026-10-02': { isWorkingDay: true, isHoliday: true } }),
+    })
+    expect(r.buckets).toEqual({ workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 60 })
+  })
+
+  it('§3b local-midnight bucketing: a Shanghai Z-string window buckets per LOCAL date', () => {
+    const r = helpers.bucketOvertimeSegmentationWindowAtMidnight({
+      startAt: '2026-10-01T15:30:00.000Z', endAt: '2026-10-01T16:30:00.000Z', timeZone: 'Asia/Shanghai',
+      classifyDate: byDate({ '2026-10-01': { isWorkingDay: true }, '2026-10-02': { isWorkingDay: false } }),
+    })
+    expect(r.perDate).toEqual([
+      { date: '2026-10-01', minutes: 30, kind: 'workday' },
+      { date: '2026-10-02', minutes: 30, kind: 'restday' },
+    ])
+    expect(r.buckets).toEqual({ workdayMinutes: 30, restdayMinutes: 30, holidayMinutes: 0 })
+  })
+
+  it('reversed and multi-midnight windows keep the stable reject (no buckets)', () => {
+    expect(helpers.bucketOvertimeSegmentationWindowAtMidnight({ startAt: '2026-10-02T01:00:00.000Z', endAt: '2026-10-01T23:00:00.000Z', timeZone: 'UTC', classifyDate: allWorkday }))
+      .toMatchObject({ ok: false, code: 'OVERTIME_INVALID_TIME_WINDOW' })
+    expect(helpers.bucketOvertimeSegmentationWindowAtMidnight({ startAt: '2026-10-01T23:00:00.000Z', endAt: '2026-10-03T01:00:00.000Z', timeZone: 'UTC', classifyDate: allWorkday }))
+      .toMatchObject({ ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' })
+  })
+
+  it('idempotent: re-bucketing the same window yields byte-identical buckets, total == window minutes (no boundary double-count)', () => {
+    const args = { startAt: '2026-10-01T23:00:00.000Z', endAt: '2026-10-02T01:00:00.000Z', timeZone: 'UTC', classifyDate: byDate({ '2026-10-01': { isWorkingDay: true }, '2026-10-02': { isWorkingDay: false } }) }
+    const a = helpers.bucketOvertimeSegmentationWindowAtMidnight(args)
+    const b = helpers.bucketOvertimeSegmentationWindowAtMidnight(args)
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b))
+    expect(a.buckets.workdayMinutes + a.buckets.restdayMinutes + a.buckets.holidayMinutes).toBe(120)
+  })
+
+  it('NS-2 does NOT touch the route reject — maybeBuildOvertimeSegmentationSnapshot still throws 422 for one-midnight', async () => {
+    await expect(helpers.maybeBuildOvertimeSegmentationSnapshot(null, {
+      settings: { overtimeSegmentation: { enabled: true } },
+      workDate: '2026-10-01', userId: 'u1',
+      requestedInAt: '2026-10-01T23:00:00.000Z', requestedOutAt: '2026-10-02T01:00:00.000Z',
+    })).rejects.toMatchObject({ status: 422, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' })
+  })
+})

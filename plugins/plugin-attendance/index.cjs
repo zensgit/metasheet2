@@ -10232,6 +10232,28 @@ function splitOvertimeSegmentationWindowAtMidnight({ startAt, endAt, timeZone } 
   }
 }
 
+// #8 NS-2 (design-lock #3071): pin NS-1's split. Classify each sub-span by ITS OWN local date
+// (workday / restday / holiday) and sum per-bucket — so a restday portion after midnight counts as restday,
+// not bleeding into the prior workday (§1.1/§3d). This is a PURE primitive still BEHIND the guard: the route
+// reject is unchanged (NS-3 lifts it). classifyDate(dateKey) → { isWorkingDay?: boolean, isHoliday?: boolean }.
+// Idempotent: re-bucketing the same window yields byte-identical buckets (no double-count at the boundary).
+function bucketOvertimeSegmentationWindowAtMidnight({ startAt, endAt, timeZone, classifyDate } = {}) {
+  const split = splitOvertimeSegmentationWindowAtMidnight({ startAt, endAt, timeZone })
+  if (!split.ok) return split // reversed / multi-midnight keep the stable reject
+  const classify = typeof classifyDate === 'function' ? classifyDate : () => ({})
+  const buckets = { workdayMinutes: 0, restdayMinutes: 0, holidayMinutes: 0 }
+  const perDate = []
+  for (const span of split.spans) {
+    const info = classify(span.date) || {}
+    const kind = info.isHoliday === true ? 'holiday' : (info.isWorkingDay === true ? 'workday' : 'restday')
+    if (kind === 'holiday') buckets.holidayMinutes += span.minutes
+    else if (kind === 'workday') buckets.workdayMinutes += span.minutes
+    else buckets.restdayMinutes += span.minutes
+    perDate.push({ date: span.date, minutes: span.minutes, kind })
+  }
+  return { ok: true, crossesMidnight: split.crossesMidnight === true, perDate, buckets }
+}
+
 function validateOvertimeSegmentationWindow(input = {}, options = {}) {
   const workDate = normalizeDateOnlyStrict(input.workDate)
   const startAt = normalizeOvertimeSegmentationDateTime(input.requestedInAt ?? input.startAt)
@@ -18202,6 +18224,7 @@ module.exports = {
     resolveOvertimeDayTypeFromEffectiveCalendarItem,
     validateOvertimeSegmentationWindow,
     splitOvertimeSegmentationWindowAtMidnight,
+    bucketOvertimeSegmentationWindowAtMidnight,
     maybeBuildOvertimeSegmentationSnapshot,
   },
   __attendanceReportFieldCatalogForTests: {
