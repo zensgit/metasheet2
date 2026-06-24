@@ -12191,6 +12191,11 @@ function mergeSettings(base, update) {
       ...(base?.overtimeSegmentation || {}),
       ...(update?.overtimeSegmentation || {}),
     },
+    // pooledSources is an array → replaced wholesale when an update provides it (partial merges meaningless).
+    overtimeBankPolicy: {
+      ...(base?.overtimeBankPolicy || {}),
+      ...(update?.overtimeBankPolicy || {}),
+    },
     autoShiftMatching: {
       ...(base?.autoShiftMatching || {}),
       ...(update?.autoShiftMatching || {}),
