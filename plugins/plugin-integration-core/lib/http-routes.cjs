@@ -2248,6 +2248,10 @@ function createHandlers(services, options = {}) {
       requireAccess(req, 'admin')
       const input = stockPreparationSandboxTargetInput(req, requestBody(req))
       try {
+        // Ordering rationale: validate (alias + sandbox objectId + option key/source) catches bad inputs
+        // BEFORE ensure, so no provisioning happens on bad input. A sync failure AFTER ensure leaves a
+        // structure-only sandbox target, which is acceptable: this is sandbox-only and ensure+sync is
+        // idempotent on retry.
         validateStockPreparationSandboxOptionSeedInput(input)
         const result = await ensureStockPreparationSandboxTarget({
           context,
