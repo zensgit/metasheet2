@@ -92,6 +92,10 @@ const ALLOWLIST: Record<string, { disposition: 'CHOKEPOINT' | 'SAFE'; reason: st
     disposition: 'SAFE',
     reason: 'writes ONLY computed formula-result keys — derived server-side, never raw user HTML',
   },
+  'multitable/automation-service.ts': {
+    disposition: 'SAFE',
+    reason: 'W7-1 approval-result backwrite writes ONLY system outcome values (status enum / approver id / ISO timestamp) — never user-supplied longText',
+  },
 }
 
 /** A file is a `meta_records.data` writer iff it contains an INSERT/UPDATE touching `meta_records`

@@ -2350,6 +2350,38 @@ describe('AutomationService — Rule CRUD', () => {
     expect(dbExecuteResults).toHaveLength(0)
   })
 
+  it('W7-1: createRule accepts a valid resultWriteback mapping and rejects an empty / malformed one', async () => {
+    const base = { templateId: 'tpl_1', formDataMapping: { amount: '{{record.amount}}' } }
+    const withRW = (rw: unknown) => ({ ...base, resultWriteback: rw })
+
+    // valid: a fixed outcome→field mapping (≥1 field, all non-empty strings)
+    dbExecuteResults.push([])
+    const ok = await service.createRule('sheet_1', {
+      name: 'Backwrite rule', triggerType: 'record.created', triggerConfig: {},
+      actionType: 'start_approval',
+      actionConfig: withRW({ statusField: 'approval_status', approverField: 'approved_by' }),
+      actions: [{ type: 'start_approval', config: withRW({ statusField: 'approval_status', approverField: 'approved_by' }) }],
+      executionMode: 'workflow_job_v1', createdBy: 'user_1',
+    })
+    expect(ok.action_type).toBe('start_approval')
+
+    // invalid: an empty mapping maps no outcome field
+    await expect(service.createRule('sheet_1', {
+      name: 'Empty backwrite', triggerType: 'record.created', triggerConfig: {},
+      actionType: 'start_approval', actionConfig: withRW({}),
+      actions: [{ type: 'start_approval', config: withRW({}) }],
+      executionMode: 'workflow_job_v1', createdBy: 'user_1',
+    })).rejects.toThrow(/resultWriteback must map at least one/)
+
+    // invalid: a non-string field target (no expression / object allowed — values-constrained)
+    await expect(service.createRule('sheet_1', {
+      name: 'Bad backwrite field', triggerType: 'record.created', triggerConfig: {},
+      actionType: 'start_approval', actionConfig: withRW({ statusField: 123 }),
+      actions: [{ type: 'start_approval', config: withRW({ statusField: 123 }) }],
+      executionMode: 'workflow_job_v1', createdBy: 'user_1',
+    })).rejects.toThrow(/resultWriteback\.statusField must be a non-empty string/)
+  })
+
   it('A6-3-1: createRule accepts condition_branch only with workflow_job_v1', async () => {
     const action = {
       type: 'condition_branch',
