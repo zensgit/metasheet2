@@ -7,28 +7,31 @@ predecessor lands; ✅ = shipped. Nothing past D-0 starts without the design-loc
 ## D-0 — design-lock
 - ⬜ Ratify scope / principles / phasing (this doc + the design-lock). **Awaiting owner ratification.**
 
-## D-1 — canvas render (read-only) + library spike  🔒 (until D-0 ratified)
-- 🔒 Render an existing complex graph on a canvas (nodes/edges/branches) from the G-1 preserved-graph.
-- 🔒 Spike: maintained graph-editor library (ALv2/MIT, model-drivable) vs bespoke — decide here.
-- 🔒 Gate: load→render→save round-trips **byte-identical** (anti-flatten floor); read-only only.
+## D-1 — interactive canvas render + library spike  🔒 (gated for spike + manual/E2E QA)
+- 🔒 Interactive free-drag canvas (visual layout, drag-to-position, draw-edges) + graph-editor library
+  spike (ALv2/MIT vs bespoke). NOT unit-verifiable in the jsdom/DOM-stub harness → gated. The topology
+  ENGINE it would drive is BUILT (D-2/D-3), so this is de-risked. Layout positions = a separate
+  `layout` sidecar that never reaches `normalizeApprovalGraph` (design-lock §6).
 
-## D-2 — node palette + add/remove + connect  🔒
-- 🔒 Drag approval/cc nodes from a palette; draw edges; the backend validates on save.
-- 🔒 Gate: a canvas-built linear+cc graph normalizes + round-trips; structured editor untouched.
+## D-2 — topology engine + clickable add/remove/insert  ✅ (engine + non-drag surface)
+- ✅ `graphTopologyEdit.ts` (appendApprovalNode / removeLinearNode + branch ops) + the
+  `applyTopologyToComplexDraft` bridge + a clickable node-row toolbar. 12 unit + 1 mounted test.
+- 🔒 The drag-from-palette GESTURE (part of the interactive canvas, D-1).
 
-## D-3 — condition / parallel branch authoring  🔒
-- 🔒 Add/remove branches, set the condition gate, wire the parallel join (the topology the list editor
-  keeps read-only); reuse the G-2/G-3 config panels.
+## D-3 — condition / parallel branch authoring  ✅ (engine + surface)
+- ✅ Add/remove condition + parallel branches via the engine + the "添加分支" toolbar buttons, reusing
+  the G-2/G-3 config panels; backend validates on save; anti-flatten preserved.
 
-## D-4 — form-field drag-drop builder  🔒 (parallel to D-1..D-3)
-- 🔒 Field-type palette + drag-reorder + sections, on the existing field model + types.
+## D-4 — form-field reorder  ⚙️ (logic ✅, drag gesture gated)
+- ✅ `moveItemToIndex` drag-to-position logic + native-drag wiring (logic unit-covered).
+- 🔒 The drag GESTURE (manual/E2E QA) · field-type palette · sections.
 
 ## D-5 — live validation preview  🔒
-- 🔒 Surface dangling-edge / unreachable / duplicate-key live as you drag (backend stays final arbiter).
+- 🔒 Live dangling-edge / unreachable as you drag (pairs with the canvas; `validateTemplateDraft`
+  already surfaces errors on save).
 
-## D-6 — canvas ⇄ list parity + cohesion  🔒
-- 🔒 Switch surfaces on one template with no drift; sentinel hint (#3141) + fail-closed surface (#3129)
-  behave identically on the canvas.
+## D-6 — canvas ⇄ list parity  🔒 (only meaningful once the interactive canvas exists)
+- 🔒 Switch surfaces with no drift; sentinel hint (#3141) + fail-closed (#3129) identical on canvas.
 
 ## Out of scope (v1 — reopen-only, see design-lock §5)
 - 🔒 No canvas build in D-0 · no new node types / runtime / validator changes · no deletion of the

@@ -862,6 +862,43 @@ export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph
   }
 }
 
+/**
+ * D-2/D-3 topology bridge: apply a STRUCTURAL graph op (graphTopologyEdit) to a COMPLEX draft. The op
+ * runs on the current EFFECTIVE graph (preservedGraph with the G-2..G-5 config edits already applied,
+ * so no in-progress config is lost), the result becomes the new preservedGraph, and the four
+ * config-edit maps are re-seeded from it. `buildApprovalGraph(result)` therefore equals the op's
+ * output, so the (future) canvas and the structured editors stay one source of truth. No-op for a
+ * linear draft (no preservedGraph) — linear structure is authored via `steps`.
+ */
+export function applyTopologyToComplexDraft(
+  draft: TemplateAuthoringDraft,
+  op: (graph: ApprovalGraph) => ApprovalGraph,
+): TemplateAuthoringDraft {
+  if (!draft.preservedGraph) return draft
+  const next = op(buildApprovalGraph(draft))
+  return {
+    ...draft,
+    preservedGraph: next,
+    conditionEdits: conditionEditsFromGraph(next),
+    parallelEdits: parallelEditsFromGraph(next),
+    ccEdits: ccEditsFromGraph(next),
+    approvalNodeEdits: approvalNodeEditsFromGraph(next),
+  }
+}
+
+/**
+ * D-4 form-field reorder: move the item at `from` to index `to`, returning a NEW array (pure). This is
+ * the drag-to-position logic the field builder's native drag wires to — more general than the existing
+ * one-step up/down. Out-of-range indices are clamped/no-op'd so a stray drag can't corrupt the list.
+ */
+export function moveItemToIndex<T>(items: T[], from: number, to: number): T[] {
+  if (from < 0 || from >= items.length || to < 0 || to >= items.length || from === to) return items.slice()
+  const next = items.slice()
+  const [moved] = next.splice(from, 1)
+  next.splice(to, 0, moved)
+  return next
+}
+
 export function buildVisibilityScope(draft: TemplateAuthoringDraft): ApprovalTemplateVisibilityScope {
   if (draft.visibilityType === 'all') return { type: 'all', ids: [] }
   return { type: draft.visibilityType, ids: parseIdsText(draft.visibilityIdsText) }

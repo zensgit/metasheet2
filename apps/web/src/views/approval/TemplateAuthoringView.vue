@@ -185,6 +185,10 @@
           :key="field.localId"
           class="template-authoring__item"
           data-testid="approval-template-field-row"
+          :draggable="!readOnly"
+          @dragstart="onFieldDragStart(index)"
+          @dragover.prevent
+          @drop="onFieldDrop(index)"
         >
           <div class="template-authoring__item-toolbar">
             <strong>字段 {{ index + 1 }}</strong>
@@ -421,6 +425,35 @@
               <span class="template-authoring__node-type" :data-node-type="node.type">
                 {{ nodeTypeLabel(node.type) }}
               </span>
+              <!-- D-2/D-3 topology authoring (structural, clickable — the free-drag canvas is the gated
+                   next slice). Buttons are shown only when the graphTopologyEdit precondition holds. -->
+              <div v-if="!readOnly" class="template-authoring__node-topology" data-testid="approval-node-topology-actions">
+                <el-button
+                  v-if="node.type === 'condition'"
+                  size="small"
+                  :data-testid="`approval-topology-add-condition-branch-${node.key}`"
+                  @click="onAddConditionBranch(node.key)"
+                >添加条件分支</el-button>
+                <el-button
+                  v-if="node.type === 'parallel'"
+                  size="small"
+                  :data-testid="`approval-topology-add-parallel-branch-${node.key}`"
+                  @click="onAddParallelBranch(node.key)"
+                >添加并行分支</el-button>
+                <el-button
+                  v-if="canInsertAfter(node)"
+                  size="small"
+                  :data-testid="`approval-topology-insert-after-${node.key}`"
+                  @click="onInsertApprovalAfter(node.key)"
+                >下方插入审批</el-button>
+                <el-button
+                  v-if="canRemoveNode(node)"
+                  size="small"
+                  type="danger"
+                  :data-testid="`approval-topology-remove-${node.key}`"
+                  @click="onRemoveNode(node.key)"
+                >删除节点</el-button>
+              </div>
             </div>
 
             <!-- G-2: editable condition node (rules / conjunction / default fall-through edge).
@@ -896,7 +929,15 @@ import {
   type CcNodeEdit,
   type ApprovalNodeSourceEdit,
   type TemplateAuthoringDraft,
+  applyTopologyToComplexDraft,
+  moveItemToIndex,
 } from '../../approvals/templateAuthoring'
+import {
+  addConditionBranch,
+  addParallelBranch,
+  appendApprovalNode,
+  removeLinearNode,
+} from '../../approvals/graphTopologyEdit'
 import {
   buildCommonApprovalTemplatePresetPayload,
   COMMON_APPROVAL_TEMPLATE_PRESETS,
@@ -907,6 +948,7 @@ import type {
   ApprovalAssigneeSource,
   ApprovalAssigneeSourceKind,
   ApprovalAssigneeType,
+  ApprovalGraph,
   ApprovalNode,
   CcNodeConfig,
   ConditionNodeConfig,
@@ -1149,6 +1191,41 @@ function approvalSourceIsPlaceholder(nodeKey: string): boolean {
   return approvalSourceKind(nodeKey) === 'static_role'
     && approvalSourceIds(nodeKey).includes(APPROVAL_ROLE_CONFIGURE_SENTINEL)
 }
+
+// ── D-2/D-3 topology authoring (structural graph edits via graphTopologyEdit + applyTopologyToComplexDraft) ──
+// Each op runs on the EFFECTIVE graph (configs applied) and re-seeds the draft, so the structured
+// editors stay in sync. Guards mirror the engine preconditions so a shown button never throws; a
+// (defensive) throw surfaces as loadError. The interactive free-drag canvas is the gated next slice.
+function runTopologyOp(op: (graph: ApprovalGraph) => ApprovalGraph): void {
+  try {
+    draft.value = applyTopologyToComplexDraft(draft.value, op)
+  } catch (error) {
+    loadError.value = error instanceof Error ? error.message : '拓扑修改失败'
+  }
+}
+function onAddConditionBranch(nodeKey: string): void {
+  runTopologyOp((graph) => addConditionBranch(graph, nodeKey))
+}
+function onAddParallelBranch(nodeKey: string): void {
+  runTopologyOp((graph) => addParallelBranch(graph, nodeKey))
+}
+function onInsertApprovalAfter(nodeKey: string): void {
+  runTopologyOp((graph) => appendApprovalNode(graph, nodeKey))
+}
+function onRemoveNode(nodeKey: string): void {
+  runTopologyOp((graph) => removeLinearNode(graph, nodeKey))
+}
+function topologyEdgeCount(nodeKey: string, dir: 'source' | 'target'): number {
+  return (draft.value.preservedGraph?.edges ?? []).filter((edge) => edge[dir] === nodeKey).length
+}
+function canInsertAfter(node: ApprovalNode): boolean {
+  return node.type !== 'end' && topologyEdgeCount(node.key, 'source') === 1
+}
+function canRemoveNode(node: ApprovalNode): boolean {
+  return (node.type === 'approval' || node.type === 'cc')
+    && topologyEdgeCount(node.key, 'target') === 1
+    && topologyEdgeCount(node.key, 'source') === 1
+}
 function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
   const kind = approvalSourceKind(nodeKey)
   if (kind === 'static_user') setApprovalNodeSource(nodeKey, { kind, userIds: ids })
@@ -1243,6 +1320,17 @@ function removeField(index: number) {
 
 function moveField(index: number, delta: -1 | 1) {
   draft.value.fields = swap(draft.value.fields, index, delta) ?? draft.value.fields
+}
+// D-4 drag-reorder: native HTML5 drag wires to the pure `moveItemToIndex` logic. (The drag GESTURE is
+// manual/E2E QA — jsdom DragEvent is unreliable; the reorder LOGIC is unit-covered in templateAuthoring.)
+const draggedFieldIndex = ref<number | null>(null)
+function onFieldDragStart(index: number) {
+  if (!readOnly.value) draggedFieldIndex.value = index
+}
+function onFieldDrop(index: number) {
+  if (readOnly.value || draggedFieldIndex.value === null) return
+  draft.value.fields = moveItemToIndex(draft.value.fields, draggedFieldIndex.value, index)
+  draggedFieldIndex.value = null
 }
 
 // detail / sub-form (明细) sub-field authoring. Sub-fields are LEAF types only (no nested
