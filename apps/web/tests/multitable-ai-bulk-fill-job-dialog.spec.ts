@@ -295,4 +295,25 @@ describe('MetaAiBulkFillDialog — async-job (over-cap) rendering', () => {
     expect((q('[data-test="ai-bulk-job-confirm"]') as HTMLButtonElement).disabled).toBe(true)
     app.unmount()
   })
+
+  it('a page-load failure renders the fail-closed jobLoadError UI (error body + retry, NO commit / NO rows)', async () => {
+    const fetchFn = router({
+      start: () => jsonResponse({ jobId: 'aibulkjob_1' }),
+      poll: () => jsonResponse(pollHeader({ total: 5, generated: 2 })),
+      rows: (cursor) => {
+        if (cursor === null) return jsonResponse({ rows: JOB_ROWS.slice(0, 2), nextCursor: 1 })
+        return jsonResponse({ error: { code: 'INTERNAL_ERROR', message: 'boom' } }, { status: 500 }) // page 2 fails
+      },
+    })
+    const { app } = mountDialog(fetchFn as never)
+    ;(q('[data-test="ai-bulk-generate"]') as HTMLButtonElement).click()
+    await flush()
+
+    // Fail-closed UI: error body + retry button, and NO confirmable surface (no commit, no rows).
+    expect(q('[data-test="ai-bulk-job-load-error"]')).not.toBeNull()
+    expect(q('[data-test="ai-bulk-job-load-retry"]')).not.toBeNull()
+    expect(q('[data-test="ai-bulk-job-confirm"]')).toBeNull()
+    expect(qa('[data-test="ai-bulk-job-row"]')).toHaveLength(0)
+    app.unmount()
+  })
 })

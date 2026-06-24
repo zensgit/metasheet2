@@ -95,6 +95,8 @@ export type MetaAiBulkLabelKey =
   | 'aibulk.jobCancel'
   | 'aibulk.jobConfirm'
   | 'aibulk.jobCommitting'
+  | 'aibulk.jobLoadErrorBody'
+  | 'aibulk.jobLoadRetry'
   // Job commit outcomes (DIVERGE from B-2: `committed` not `written`; no `not_in_cache`)
   | 'aibulk.jobOutcomeCommitted'
 
@@ -213,6 +215,11 @@ const LABELS: Record<MetaAiBulkLabelKey, LocaleText> = {
   'aibulk.jobConfirm': { en: 'Write selected rows', zh: '写入所选行' },
   'aibulk.jobCommitting': { en: 'Writing…', zh: '写入中…' },
   'aibulk.jobOutcomeCommitted': { en: 'Written', zh: '已写入' },
+  'aibulk.jobLoadErrorBody': {
+    en: "The full review couldn't be loaded, so committing is disabled to avoid writing an incomplete batch. Retry, or cancel and start over.",
+    zh: '无法加载完整的审阅列表，为避免写入不完整的批次，已禁用提交。请重试，或取消后重新开始。',
+  },
+  'aibulk.jobLoadRetry': { en: 'Retry loading', zh: '重新加载' },
 }
 
 export function aiBulkLabel(key: MetaAiBulkLabelKey, isZh: boolean): string {

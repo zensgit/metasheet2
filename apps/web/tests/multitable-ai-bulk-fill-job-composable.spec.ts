@@ -394,4 +394,88 @@ describe('useAiBulkFill — async-job state machine', () => {
     expect(fetchFn.mock.calls.length).toBe(callsBefore) // no further polls
     expect(bulk.state.phase).toBe('idle') // not resurrected
   })
+
+  // ── Pagination-completeness FAIL-CLOSED (BJ-9: review-before-write must show the COMPLETE diff) ──
+  // Each incomplete-load path must NOT enter the confirmable `jobReview` (else the user could
+  // commit what they think is the whole batch but is only the loaded prefix).
+
+  it('FAIL-CLOSED: a page-2 load error does NOT enter review (no truncated diff, no selection)', async () => {
+    const fetchFn = router({
+      start: () => jsonResponse({ jobId: 'aibulkjob_1' }),
+      poll: () => jsonResponse(pollHeader({ total: 5, generated: 2 })),
+      rows: (cursor) => {
+        if (cursor === null) return jsonResponse({ rows: JOB_ROWS.slice(0, 2), nextCursor: 1 })
+        return jsonResponse({ error: { code: 'INTERNAL_ERROR', message: 'boom' } }, { status: 500 }) // page 2 fails
+      },
+    })
+    const { bulk } = setup(fetchFn as never)
+
+    await bulk.preview(previewInput)
+
+    expect(bulk.state.phase).toBe('jobLoadError') // NOT jobReview
+    expect(bulk.state.jobRows).toHaveLength(0) // no truncated diff retained
+    expect(bulk.selected.value.size).toBe(0) // no committable selection
+    expect(bulk.state.error).not.toBeNull() // the page error is surfaced
+  })
+
+  it('FAIL-CLOSED: a non-advancing cursor does NOT enter review', async () => {
+    const fetchFn = router({
+      start: () => jsonResponse({ jobId: 'aibulkjob_1' }),
+      poll: () => jsonResponse(pollHeader({ total: 5, generated: 2 })),
+      rows: (cursor) => {
+        if (cursor === null) return jsonResponse({ rows: JOB_ROWS.slice(0, 2), nextCursor: 1 })
+        return jsonResponse({ rows: JOB_ROWS.slice(2, 4), nextCursor: 1 }) // SAME cursor → non-advancing
+      },
+    })
+    const { bulk } = setup(fetchFn as never)
+
+    await bulk.preview(previewInput)
+
+    expect(bulk.state.phase).toBe('jobLoadError')
+    expect(bulk.state.jobRows).toHaveLength(0)
+    expect(bulk.selected.value.size).toBe(0)
+  })
+
+  it('FAIL-CLOSED: MAX_ROW_PAGES exhaustion does NOT enter review', async () => {
+    // Always advance the cursor and never return null → the loader exhausts the page cap.
+    const fetchFn = router({
+      start: () => jsonResponse({ jobId: 'aibulkjob_1' }),
+      poll: () => jsonResponse(pollHeader({ total: 5, generated: 2 })),
+      rows: (cursor) => {
+        const next = (cursor === null ? 0 : Number(cursor)) + 1
+        return jsonResponse({ rows: [JOB_ROWS[0]], nextCursor: next })
+      },
+    })
+    const { bulk } = setup(fetchFn as never)
+
+    await bulk.preview(previewInput)
+
+    expect(bulk.state.phase).toBe('jobLoadError')
+    expect(bulk.state.jobRows).toHaveLength(0)
+    expect(bulk.selected.value.size).toBe(0)
+  })
+
+  it('retryJobLoad re-runs the fail-closed loader: transient page error → jobLoadError → retry → jobReview', async () => {
+    let page2Attempts = 0
+    const fetchFn = router({
+      start: () => jsonResponse({ jobId: 'aibulkjob_1' }),
+      poll: () => jsonResponse(pollHeader({ total: 5, generated: 2 })),
+      rows: (cursor) => {
+        if (cursor === null) return jsonResponse({ rows: JOB_ROWS.slice(0, 2), nextCursor: 1 })
+        page2Attempts += 1
+        if (page2Attempts === 1) return jsonResponse({ error: { code: 'INTERNAL_ERROR', message: 'boom' } }, { status: 500 })
+        return jsonResponse({ rows: JOB_ROWS.slice(2), nextCursor: null }) // retry: page 2 succeeds → complete
+      },
+    })
+    const { bulk } = setup(fetchFn as never)
+
+    await bulk.preview(previewInput)
+    expect(bulk.state.phase).toBe('jobLoadError')
+
+    await bulk.retryJobLoad()
+    expect(bulk.state.phase).toBe('jobReview') // now complete → confirmable
+    expect(bulk.state.jobRows).toHaveLength(5)
+    expect([...bulk.selected.value].sort()).toEqual(['rec_g1', 'rec_g2']) // default-select generated
+    expect(bulk.state.error).toBeNull() // cleared on retry
+  })
 })

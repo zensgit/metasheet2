@@ -51,6 +51,7 @@ export type AiBulkFillPhase =
   // Async job (over cap, B-4) phases.
   | 'polling' // job created; worker generating (queued/running) — polling progress
   | 'jobReview' // committable terminal (suspended/errored/rejected) — rows fetched
+  | 'jobLoadError' // review rows failed to load COMPLETELY — fail-closed, NOT confirmable
   | 'jobCommitting'
   | 'jobDone'
 
@@ -324,36 +325,70 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
 
   /**
    * Fetch ALL review rows by following nextCursor, accumulating, then default-
-   * select every `generated` row and enter jobReview. Guarded against a non-
-   * advancing cursor (MAX_ROW_PAGES). Token-aware: a dialog close mid-fetch
-   * (reset bumps the token) aborts before any state write.
+   * select every `generated` row and enter jobReview.
+   *
+   * FAIL-CLOSED on incomplete pagination (BJ-9 — review-before-write MUST show the
+   * COMPLETE job-rows diff; otherwise the user could confirm what they think is the
+   * whole batch but is only the loaded prefix). The ONLY path into `jobReview` is a
+   * genuine completion (`nextCursor == null`). A page-load error (even after partial
+   * pages), a non-advancing cursor, or MAX_ROW_PAGES exhaustion all land in
+   * `jobLoadError` with NO selection and NO rows — never a confirmable review.
+   * cancelJob() reuses this loader, so it inherits the same guarantee. Token-aware:
+   * a dialog close mid-fetch (reset bumps the token) aborts before any state write.
    */
   async function loadAllJobRows(jobId: string, token: number): Promise<void> {
     const all: AiBulkJobRow[] = []
     let cursor: number | null = null
+    let completed = false
+    // Fail-closed: clear any prior rows/selection up front so no incomplete-load
+    // path can leave a confirmable selection or a stale diff behind.
+    state.jobRows = []
+    selected.value = new Set()
     try {
       for (let page = 0; page < MAX_ROW_PAGES; page += 1) {
         const res = await opts.client.getBulkJobRows(opts.sheetId(), jobId, cursor)
         if (token !== pollToken) return
         all.push(...res.rows)
-        if (res.nextCursor == null) break
-        if (res.nextCursor === cursor) break // non-advancing cursor guard
+        if (res.nextCursor == null) {
+          completed = true
+          break
+        }
+        if (res.nextCursor === cursor) break // non-advancing cursor → INCOMPLETE
         cursor = res.nextCursor
       }
     } catch (err) {
       if (token !== pollToken) return
+      // A page failed mid-pagination — NEVER review on a partial load. Surface the
+      // error and stop in the fail-closed state.
       fail(err)
-      // Keep whatever we got; if nothing, fall back to idle so the user can retry.
-      if (all.length === 0) {
-        state.phase = 'idle'
-        return
-      }
+      state.phase = 'jobLoadError'
+      return
     }
     if (token !== pollToken) return
+    if (!completed) {
+      // Non-advancing cursor or MAX_ROW_PAGES exhausted → the diff is truncated.
+      // Fail-closed rather than letting the user confirm an incomplete batch.
+      state.phase = 'jobLoadError'
+      return
+    }
+    // Pagination genuinely completed (nextCursor == null) → safe to review.
     state.jobRows = all
     // Default selection = ALL `generated` rows (the only confirmable ones).
     selected.value = new Set(all.filter((r) => r.state === 'generated').map((r) => r.recordId))
     state.phase = 'jobReview'
+  }
+
+  /**
+   * Retry a failed review load (from `jobLoadError`). Re-runs the fail-closed loader
+   * for the current job; on success it enters jobReview, on a repeat failure it
+   * stays in jobLoadError. Token-safe (a closed/reset dialog won't reload).
+   */
+  async function retryJobLoad(): Promise<void> {
+    const jobId = state.jobId
+    if (!jobId || state.phase !== 'jobLoadError') return
+    clearError()
+    state.phase = 'polling' // loading indicator while we re-fetch the rows
+    await loadAllJobRows(jobId, pollToken)
   }
 
   /**
@@ -495,6 +530,7 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
     commit,
     commitJob,
     cancelJob,
+    retryJobLoad,
     toggleRow,
     selectAllConfirmable,
     clearSelection,

@@ -348,6 +348,13 @@
             </section>
           </template>
 
+          <!-- ───────────────────────── Phase: jobLoadError (review rows failed to load COMPLETELY) ───────────────────────── -->
+          <template v-else-if="ctrl.state.phase === 'jobLoadError'">
+            <p class="ai-bulk__alert ai-bulk__alert--error" data-test="ai-bulk-job-load-error">
+              {{ l('aibulk.jobLoadErrorBody') }}
+            </p>
+          </template>
+
           <!-- ───────────────────────── Phase: jobCommitting / jobDone ───────────────────────── -->
           <template v-else-if="ctrl.state.phase === 'jobCommitting' || ctrl.state.phase === 'jobDone'">
             <div v-if="jobCommitData" class="ai-bulk__result-head">
@@ -474,6 +481,19 @@
               @click="onJobConfirm"
             >
               {{ jobConfirmLabel }}
+            </button>
+          </template>
+
+          <!-- jobLoadError: retry the (fail-closed) review load, or cancel -->
+          <template v-else-if="ctrl.state.phase === 'jobLoadError'">
+            <button type="button" class="ai-bulk__btn" @click="onClose">{{ l('aibulk.cancel') }}</button>
+            <button
+              type="button"
+              class="ai-bulk__btn ai-bulk__btn--primary"
+              data-test="ai-bulk-job-load-retry"
+              @click="ctrl.retryJobLoad"
+            >
+              {{ l('aibulk.jobLoadRetry') }}
             </button>
           </template>
 
