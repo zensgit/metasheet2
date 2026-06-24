@@ -8665,6 +8665,36 @@ attendanceIntegrationDescribe(
       return ((res.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
     }
 
+    it('round-trips overtimeBankPolicy (wire lock): PUT→GET full shape, partial PUT preserves siblings, statutory_holiday → 400', async () => {
+      if (!baseUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-otbank-wire-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+      const putSettings = (body: Record<string, unknown>) =>
+        requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
+      const originalSettings = await loadSettingsForTest(adminToken)
+      try {
+        // (1) full PUT → GET returns the full shape — locks the whole wire: DEFAULT_SETTINGS + normalizeSettings
+        // + the settings zod schema + mergeSettings. (Normalizer unit tests do NOT cover this wire.)
+        expect((await putSettings({ overtimeBankPolicy: { enabled: true, pooledSources: ['restday', 'workday'], maxMinutesPerPeriod: 600, validityDays: 90 } })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).overtimeBankPolicy).toEqual({
+          enabled: true, pooledSources: ['restday', 'workday'], maxMinutesPerPeriod: 600, validityDays: 90,
+        })
+        // (2) partial PUT preserves siblings — PUT only { enabled:false }; pooledSources/cap/validity must NOT be
+        // cleared (this is the exact mergeSettings-whitelist gap the advisor caught).
+        expect((await putSettings({ overtimeBankPolicy: { enabled: false } })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).overtimeBankPolicy).toEqual({
+          enabled: false, pooledSources: ['restday', 'workday'], maxMinutesPerPeriod: 600, validityDays: 90,
+        })
+        // (3) API-layer compliance reject (not just the normalizer drop): statutory_holiday → 400 at PUT.
+        expect((await putSettings({ overtimeBankPolicy: { pooledSources: ['statutory_holiday'] } })).status).toBe(400)
+      } finally {
+        await putSettings({ overtimeBankPolicy: originalSettings.overtimeBankPolicy }).catch(() => undefined)
+      }
+    })
+
     it('round-trips auto-write settings including auto mode while rejecting invalid bounds', async () => {
       if (!baseUrl) return
       const runSuffix = Date.now().toString(36)
