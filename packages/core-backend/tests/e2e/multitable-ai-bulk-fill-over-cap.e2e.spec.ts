@@ -121,9 +121,22 @@ test.describe('B-4 AI bulk-fill async over-cap (browser e2e)', () => {
     )
     const written = (recs.data?.records ?? []).filter((r) => typeof r.data?.[aiFieldId] === 'string' && r.data[aiFieldId])
     expect(written.length).toBe(2)
-    // NOTE (finding): the OPEN grid does not auto-refresh after commit — the written
-    // values appear only after a reload. Documented as a separate focused-fix item; we
-    // assert the write via API rather than locking the stale-grid behavior.
+
+    // GRID REFRESH (this PR's fix): close the dialog and confirm the committed AI values are
+    // now rendered IN THE GRID without a manual reload. Before the fix the grid kept showing
+    // the pre-fill cells ("—") until a page reload; the dialog's `committed` event now drives
+    // grid.reloadCurrentPage().
+    await page.locator('[data-test="ai-bulk-job-done"]').click()
+    await expect(page.locator('[data-test="ai-bulk-fill"]')).toBeHidden()
+    // Close the field manager too, so the grid is unobscured for the assertion + screenshot.
+    await page.locator('.meta-field-mgr__close').click()
+    // The 2 committed rows now show the AI value WITHOUT a reload; the DESELECTED row (source
+    // row 0) keeps its empty Summary ("—") and never received an AI value.
+    await expect(page.locator('[role="gridcell"]').filter({ hasText: 'AI summary' })).toHaveCount(2, { timeout: 15_000 })
+    const deselectedRow = page.locator('[role="row"]').filter({ hasText: 'source row 0' })
+    await expect(deselectedRow).toContainText('—')
+    await expect(deselectedRow).not.toContainText('AI summary')
+    await shot(page, '05-grid-refreshed.png')
   })
 
   test('cancel AFTER ≥1 generated → those rows stay committable; unreached rows are pending (not a silent close)', async ({ request, page }) => {

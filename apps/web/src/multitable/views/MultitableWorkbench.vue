@@ -461,6 +461,7 @@
       :record-name="bulkFillRecordName"
       :is-zh="isZh"
       @close="onBulkFillClose"
+      @committed="onBulkFillCommitted"
     />
     <MetaViewManager
       :visible="showViewManager" :views="workbench.views.value" :fields="propertyVisibleWorkbenchFields" :sheet-id="workbench.activeSheetId.value"
@@ -757,6 +758,13 @@ function onFieldManagerBulkFill(payload: { fieldId: string }) {
 function onBulkFillClose() {
   aiBulkFillVisible.value = false
   aiBulkFillFieldId.value = ''
+}
+
+function onBulkFillCommitted() {
+  // A bulk-fill commit wrote records server-side; reload the current page so the AI values
+  // appear in the grid immediately (the dialog stays open showing the summary). Without this
+  // the grid renders the pre-fill cells until a manual reload.
+  void grid.reloadCurrentPage()
 }
 
 // Display resolvers for the diff table (the dialog is presentation-only).

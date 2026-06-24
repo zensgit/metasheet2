@@ -54,6 +54,7 @@ gitignored).
 | `02-review.png` | paginated review — 3 generated rows; one deselected → confirm "写入所选行 (2)" |
 | `03-commit-summary.png` | commit summary — "已写入 2 行" (the selected subset) |
 | `04-cancel-review.png` | post-cancel review — generated rows "可写入" (committable) + unreached "未生成 … 未消耗配额" |
+| `05-grid-refreshed.png` | grid auto-refreshed after commit — committed rows show "AI summary #N", deselected row stays "—" (no manual reload) |
 
 Per-test Playwright traces are emitted under `test-results/**/trace.zip`
 (`npx playwright show-trace <zip>`); not committed (large binaries).
@@ -72,15 +73,19 @@ What the assertions lock:
   same `pending_not_generated` truthful-status *surface* as the #3113 reconcile — NOT
   hard-restart reconciliation itself, which is correctly listed under "Not covered" below.)
 
-## Finding (for a SEPARATE focused-fix PR — not fixed here)
+## Finding — RESOLVED (grid auto-refresh after commit)
 
-**The open grid does not auto-refresh after a bulk-fill commit.** After the commit summary
-reports "已写入 N 行", the grid's Summary column still renders the pre-fill "—"; the written
-values appear only after a manual page reload. The data is correct — the API confirms the
-records hold the AI output, and a reload renders them — so this is a **stale-view UX gap**,
-not a write/correctness bug. The spec therefore asserts the write via the API (not the grid)
-to avoid locking the stale behavior. Recommend a small focused fix: refresh the affected
-view/records after `commitJob` resolves.
+**The open grid did not auto-refresh after a bulk-fill commit.** After the commit summary
+reported "已写入 N 行", the grid's Summary column still rendered the pre-fill "—"; the written
+values appeared only after a manual page reload. The data was correct — the API confirmed the
+records held the AI output, and a reload rendered them — so it was a **stale-view UX gap**, not
+a write/correctness bug.
+
+**Resolution (separate focused PR):** `MetaAiBulkFillDialog` now emits a `committed` event on a
+successful commit (inline + job paths), and `MultitableWorkbench` calls
+`grid.reloadCurrentPage()` — so the grid shows the values immediately, no reload. The
+happy-path e2e was extended to assert it (close the dialog → the committed AI values are
+rendered in the grid, the deselected row stays "—"), captured in `05-grid-refreshed.png`.
 
 ## Not covered (by design)
 
