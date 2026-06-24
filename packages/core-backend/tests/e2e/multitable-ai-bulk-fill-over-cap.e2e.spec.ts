@@ -130,7 +130,12 @@ test.describe('B-4 AI bulk-fill async over-cap (browser e2e)', () => {
     await expect(page.locator('[data-test="ai-bulk-fill"]')).toBeHidden()
     // Close the field manager too, so the grid is unobscured for the assertion + screenshot.
     await page.locator('.meta-field-mgr__close').click()
-    await expect(page.locator('[role="gridcell"]').filter({ hasText: 'AI summary' }).first()).toBeVisible({ timeout: 15_000 })
+    // The 2 committed rows now show the AI value WITHOUT a reload; the DESELECTED row (source
+    // row 0) keeps its empty Summary ("—") and never received an AI value.
+    await expect(page.locator('[role="gridcell"]').filter({ hasText: 'AI summary' })).toHaveCount(2, { timeout: 15_000 })
+    const deselectedRow = page.locator('[role="row"]').filter({ hasText: 'source row 0' })
+    await expect(deselectedRow).toContainText('—')
+    await expect(deselectedRow).not.toContainText('AI summary')
     await shot(page, '05-grid-refreshed.png')
   })
 
