@@ -10182,7 +10182,50 @@ function extractOvertimeSegmentationDateOnly(value) {
   return date ? date.toISOString().slice(0, 10) : null
 }
 
-function validateOvertimeSegmentationWindow(input = {}) {
+// #8 NS-1 (design-lock #3071 §3): split a single-local-midnight overtime window into per-date sub-spans,
+// so each portion is judged + attributed by its OWN local date (§3b split at rule local midnight; §3d OT
+// minutes per sub-span date). This is a PRIMITIVE for NS-3 — it does NOT lift the route reject: the default
+// validateOvertimeSegmentationWindow path (and thus maybeBuildOvertimeSegmentationSnapshot) keeps returning
+// OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED until NS-3. §3a: only ONE local midnight splits; multi-midnight stays
+// rejected. NOTE: the split uses the rule timezone (local midnight); cross-midnight DETECTION on the default
+// path is unchanged (extractOvertimeSegmentationDateOnly). Reconciling the two is an NS-3 wiring concern.
+function overtimeSegmentationLocalDateKey(date, timeZone) {
+  const parts = getZonedParts(date, (typeof timeZone === 'string' && timeZone.trim()) ? timeZone.trim() : 'UTC')
+  return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`
+}
+
+function splitOvertimeSegmentationWindowAtMidnight({ startAt, endAt, timeZone } = {}) {
+  const start = normalizeOvertimeSegmentationDateTime(startAt)
+  const end = normalizeOvertimeSegmentationDateTime(endAt)
+  if (!start || !end) return { ok: false, code: 'OVERTIME_INVALID_TIME_WINDOW' }
+  if (end.getTime() <= start.getTime()) return { ok: false, code: 'OVERTIME_INVALID_TIME_WINDOW' }
+  const tz = (typeof timeZone === 'string' && timeZone.trim()) ? timeZone.trim() : 'UTC'
+  const startDate = overtimeSegmentationLocalDateKey(start, tz)
+  const endDate = overtimeSegmentationLocalDateKey(end, tz)
+  const minutesBetween = (a, b) => Math.round((b.getTime() - a.getTime()) / 60000)
+  if (startDate === endDate) {
+    // same local date — no split.
+    return { ok: true, crossesMidnight: false, spans: [{ date: startDate, startAt: start.toISOString(), endAt: end.toISOString(), minutes: minutesBetween(start, end) }] }
+  }
+  if (endDate !== addDaysToDateKey(startDate, 1)) {
+    // §3a: more than one local midnight is NOT splittable in v1 — keep the stable reject.
+    return { ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED', reason: 'multi_midnight' }
+  }
+  const boundary = buildZonedDate(endDate, '00:00', tz) // local midnight of the next day, as a UTC instant
+  if (!boundary || boundary.getTime() <= start.getTime() || boundary.getTime() >= end.getTime()) {
+    return { ok: false, code: 'OVERTIME_INVALID_TIME_WINDOW' }
+  }
+  return {
+    ok: true,
+    crossesMidnight: true,
+    spans: [
+      { date: startDate, startAt: start.toISOString(), endAt: boundary.toISOString(), minutes: minutesBetween(start, boundary) },
+      { date: endDate, startAt: boundary.toISOString(), endAt: end.toISOString(), minutes: minutesBetween(boundary, end) },
+    ],
+  }
+}
+
+function validateOvertimeSegmentationWindow(input = {}, options = {}) {
   const workDate = normalizeDateOnlyStrict(input.workDate)
   const startAt = normalizeOvertimeSegmentationDateTime(input.requestedInAt ?? input.startAt)
   const endAt = normalizeOvertimeSegmentationDateTime(input.requestedOutAt ?? input.endAt)
@@ -10193,7 +10236,17 @@ function validateOvertimeSegmentationWindow(input = {}) {
   const startDate = extractOvertimeSegmentationDateOnly(input.requestedInAt ?? input.startAt)
   const endDate = extractOvertimeSegmentationDateOnly(input.requestedOutAt ?? input.endAt)
   if (startDate !== workDate || endDate !== workDate) {
-    return { ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' }
+    // §3c: the route keeps rejecting cross-midnight by default — maybeBuildOvertimeSegmentationSnapshot calls
+    // this WITHOUT options, so allowCrossMidnight defaults false and the route stays OVERTIME_CROSS_MIDNIGHT_
+    // UNSUPPORTED until NS-3 explicitly lifts it.
+    if (options.allowCrossMidnight !== true) {
+      return { ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' }
+    }
+    // allowCrossMidnight path — NOT used by the route in NS-1/NS-2; exercised by unit tests only. A single
+    // local-midnight window splits (§3a/§3b/§3d); multi-midnight or invalid windows still reject.
+    const split = splitOvertimeSegmentationWindowAtMidnight({ startAt, endAt, timeZone: input.timeZone })
+    if (!split.ok) return { ok: false, code: split.code }
+    return { ok: true, crossesMidnight: split.crossesMidnight === true, spans: split.spans }
   }
   return { ok: true }
 }
@@ -18140,6 +18193,8 @@ module.exports = {
     resolveCompTimeGrantMinutesFromOvertimeMetadata,
     resolveOvertimeDayTypeFromEffectiveCalendarItem,
     validateOvertimeSegmentationWindow,
+    splitOvertimeSegmentationWindowAtMidnight,
+    maybeBuildOvertimeSegmentationSnapshot,
   },
   __attendanceReportFieldCatalogForTests: {
     ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS,
