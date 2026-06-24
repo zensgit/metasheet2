@@ -238,6 +238,8 @@ function verify_deployable_artifact_contract() {
   search_fixed_string '"nodeModulesBundled": false' "$metadata_json" || die "PACKAGE-METADATA.json must document node_modules policy"
   search_fixed_string '"dependencyInstallMode": "refresh-on-apply"' "$metadata_json" || die "PACKAGE-METADATA.json must document dependency refresh policy"
   search_fixed_string '"windowsEntryPoint": "deploy.bat <package.zip|package.tgz>"' "$metadata_json" || die "PACKAGE-METADATA.json must document the Windows entrypoint"
+  search_fixed_string '"windowsFirstHopBootstrap": "release sidecar:' "$metadata_json" || die "PACKAGE-METADATA.json must document the first-hop bootstrap release sidecar"
+  search_fixed_string '"windowsFirstHopBootstrapWrapper": "release sidecar:' "$metadata_json" || die "PACKAGE-METADATA.json must document the first-hop bootstrap wrapper release sidecar"
   search_fixed_string '"windowsStagingRootEnv": "METASHEET_ONPREM_STAGING_ROOT"' "$metadata_json" || die "PACKAGE-METADATA.json must document the Windows staging root environment override"
   search_fixed_string '"windowsDefaultStagingRoot": "C:\\ms-tmp"' "$metadata_json" || die "PACKAGE-METADATA.json must document the built-in short Windows staging default"
 }
