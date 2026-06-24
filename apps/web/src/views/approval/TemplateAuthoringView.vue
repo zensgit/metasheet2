@@ -680,6 +680,18 @@
                   @update:model-value="(value: number) => setApprovalSourceLevel(node.key, value ?? 1)"
                 />
               </el-form-item>
+              <!-- G-5 sentinel hint: a starter preset's placeholder role surfaces HERE, in the editor,
+                   so the admin replaces it before publish (rather than hitting the publish-time 400). -->
+              <el-alert
+                v-if="approvalSourceIsPlaceholder(node.key)"
+                type="warning"
+                :closable="false"
+                show-icon
+                class="template-authoring__placeholder-hint"
+                data-testid="approval-node-placeholder-hint"
+                title="此为占位审批角色，发布前请替换为真实角色 ID"
+                description="占位角色无人可认领，未替换将无法发布该模板。"
+              />
             </div>
 
             <!-- approval (legacy / no edit) / other — read-only summary. -->
@@ -890,6 +902,7 @@ import {
   COMMON_APPROVAL_TEMPLATE_PRESETS,
   type CommonApprovalTemplatePresetId,
 } from '../../approvals/commonTemplatePresets'
+import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../../types/approval'
 import type {
   ApprovalAssigneeSource,
   ApprovalAssigneeSourceKind,
@@ -1128,6 +1141,13 @@ function approvalSourceIds(nodeKey: string): string[] {
   if (source?.kind === 'static_user') return source.userIds
   if (source?.kind === 'static_role') return source.roleIds
   return []
+}
+// G-5 sentinel hint: true when the source is a static_role still carrying the starter-preset
+// placeholder (APPROVAL_ROLE_CONFIGURE_SENTINEL). The backend blocks publish on it; this surfaces it
+// in the editor so the admin replaces it first. Non-blocking — the draft still saves.
+function approvalSourceIsPlaceholder(nodeKey: string): boolean {
+  return approvalSourceKind(nodeKey) === 'static_role'
+    && approvalSourceIds(nodeKey).includes(APPROVAL_ROLE_CONFIGURE_SENTINEL)
 }
 function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
   const kind = approvalSourceKind(nodeKey)

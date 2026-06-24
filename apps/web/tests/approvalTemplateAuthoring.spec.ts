@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
 import type { ApprovalNodeConfig, ApprovalTemplateDetailDTO, AutoApprovalPolicy } from '../src/types/approval'
+import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../src/types/approval'
 import {
   buildApprovalGraph,
   buildCreateTemplatePayload,
@@ -801,6 +802,26 @@ describe('TemplateAuthoringView', () => {
     expect(container!.querySelector('[data-approval-node="approval_1"]')).toBeNull() // no editor for a legacy node
     expect(container!.querySelector('[data-testid="approval-graph-readonly-list"]')).not.toBeNull() // graph still renders (legacy keys are allowlisted)
     expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // not fail-closed
+  })
+
+  it('G-5 sentinel hint: an approval node whose static_role carries the placeholder sentinel shows the in-editor hint', async () => {
+    routeParams = { id: 'tpl_sentinel' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+    }))
+    await mountView()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-node-placeholder-hint"]')).not.toBeNull() // surfaced in the editor, before publish
+  })
+
+  it('G-5 sentinel hint: a normal static_role (real role id) shows NO placeholder hint', async () => {
+    routeParams = { id: 'tpl_realrole' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_role', roleIds: ['finance-approvers'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+    }))
+    await mountView()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-node-placeholder-hint"]')).toBeNull()
   })
 
   it('dept_head reads back editable: a saved dept_head template is NOT fail-closed (no unsupported alert, save enabled, sourceKind hydrated)', async () => {
