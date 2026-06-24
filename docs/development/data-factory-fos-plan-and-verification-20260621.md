@@ -7,7 +7,7 @@
 
 - **FOS 全可自主构建段已落地**:FOS-0(设计锁)→ FOS-1(合同)→ FOS-2(runtime 泛化,stock-prep 零漂移)→ FOS-3(UI,dual-route 不破坏既有能力)→ FOS-2b-pre(host 只读 `getObjectField`)→ FOS-2b(sync-mode merge runtime,三锁:不删除 / 不静默写 / replace 零漂移)→ **FOS-4 prove-the-path**(2nd preset `disable_missing` + per-target readiness + **HTTP wire-test,P2 closed**)→ **FOS-4b-1/2 action dry-run**(contract + generic route dry-run path,**先不执行写**)。Data Factory 的选项同步从「同步备料选项」(business-specific)泛化为「同步字段选项」(generic + preset),**stock-prep 降为第一个 preset / 兼容锚**;`append`/`disable_missing`/`keep_existing`/`manual_confirm` runtime 已实现,并由 FOS-4 在 stock-prep 表上 **HTTP 解封 + wire-verified**(disable_missing 真实 route 只禁不删);action-binding 的 generic dry-run 路径已打通且 apply 仍关闭。
 - **每刀**:独立 PR + adversarial review APPROVE + 经验非空洞证明(zero-drift / values-free / wire revert-proof)+ 真实 gate(后端 node 测试;前端 `vue-tsc -b`)。
-- **剩余 gated(各带 gate,非自动构建)**:**FOS-4b-3-prod 首笔生产 apply**(写 prod canonical;sandbox apply gate 已 shipped,但生产写仍是独立 owner gate)、**真实业务域 preset**、**scheduled / after-source-refresh 触发**(demand-gated)。见 §6;**每项需先签的 scope decision 见 §7**(余下开发 = decision-gated,本轮不在 blanket 指令下盲开)。
+- **剩余 gated(各带 gate,非自动构建)**:**FOS-4b-3-prod 首笔生产 apply**(写 prod canonical;sandbox apply gate 已 shipped 且 **sandbox Path 1 实机 PASS — 见 §9**,但生产写仍是独立 owner gate)、**Path 2 large-BOM checkpoint apply**(parked;先 values-free 分类 manual_confirm/conflict 再谈授权)、**真实业务域 preset**、**scheduled / after-source-refresh 触发**(demand-gated)。见 §6/§9;**每项需先签的 scope decision 见 §7**(余下开发 = decision-gated,本轮不在 blanket 指令下盲开)。
 
 ## 1. 状态阶梯
 
@@ -112,6 +112,38 @@ boundary                      : REQUIRED_ADAPTER_METHODS 未改(0) / FOS 链零 
 ```
 
 结论:**contract → runtime → UI → sync-mode → prove-the-path 整线在 merged main 上集成绿 + 不变式经验非空洞**。其后 FOS-4b-1/2 又分别以自身 CI + 复审补齐 action contract / dry-run path。余下全部 decision-gated(§7;FOS-4b 安全模型见其设计锁 §8 终态)。
+
+## 9. FOS-4b-3 sandbox 实机验证 — Path 1 PASS(entity machine,#3093,2026-06-24)
+
+> **实机(entity machine)real-deploy 验证**,补在 §8 单元/集成绿之上。此前 origin/main 的本 MD 只到 runbook/gate 层,**未记录这次实机 PASS**。本节补记。
+
+部署包:**#3127 sandbox option seeding,squash `04e1fd884`**(seed contract decision options + 传入 config_info options;canonical / 非 sandbox-namespace fail-closed;values-free)。precondition unblocker 链(均为前置阻塞修复,非 gate/apply bug):#3098 sandbox-target ensure → #3100 archive 硬化 → #3109 source-scope 修复 → #3127 option seeding。
+
+**Path 1(small-BOM single-shot)= PASS**(实机,values-free evidence):
+
+```text
+option seeding            : 4 个 select 字段均有 options,sandboxZeroOptionSelectCount=0
+single-shot sandbox apply : created=209,failed=0(只落 sandbox 目标)
+re-pull 幂等              : 重跑 dry-run → add=0 / skip=209;re-apply created=0(无重复)
+人工字段保留              : 编辑的 human 字段在 re-apply 后存活,sandbox 行数维持 209
+canonical/prod guard      : STOCK_PREP_APPLY_SANDBOX_ONLY / prod_canonical 仍拒
+evidence                  : values-free(无 objectId / sheetId / option 值 / 标签 / 凭据)
+```
+
+**已验证(Path 1):** in-function gate(small-BOM `applyStockPreparationAction`)+ apply 核心(幂等 / 人工字段保留 / option seeding)+ canonical 拒。
+
+**未验证 / 仍 gated:**
+- **Path 2(large-BOM checkpoint apply route gate)**= 历史 bypass 所在的 route gate(`tableActionLargeBomApplyJobRun`),**尚未实机端到端验证**。options 已 seed、reviewed cap 已抬,可跑;**下一步先 values-free 分类 `manual_confirm=85` / `conflictType=4`,再谈是否授权 checkpoint apply**。**parked,待独立授权。**
+- **FOS-4b-3-prod(首笔生产 apply / 写 prod canonical)**= **仍 gated**(独立 owner gate)。Path 1 PASS **不**自动解锁生产;生产 apply 可走两条路径之一,故建议**两条 sandbox 路径都证完**再谈 prod。
+
+**边界:** production apply 仍关闭;Path 2 parked;本次未开任何 K3 Save / Submit / Audit / BOM。
+
+**解耦的 follow-up(非 apply-gate blocker,不得稀释 Path 1,不得据此自动开 prod):** Windows 默认 deploy 路径硬化 —— zip `Expand-Archive` cleanup/path、tgz Windows MAX_PATH;short-staging launcher workaround = PASS。单列为 deployment hardening。
+
+状态行:
+```text
+sandbox validation runbook shipped; sandbox-option package (#3127 `04e1fd884`) deployed on entity machine; Path 1 sandbox apply / idempotency / human-field preservation PASS; Path 2 large-BOM apply parked; production apply still closed; Windows default deploy-path hardening = separate follow-up.
+```
 
 ---
 
