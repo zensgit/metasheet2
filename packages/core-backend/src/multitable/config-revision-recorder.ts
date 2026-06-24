@@ -74,6 +74,29 @@ export function fieldCreateDiff(after: FieldConfigSnapshot): FieldDiff {
 export function fieldDeleteDiff(before: FieldConfigSnapshot): FieldDiff {
   return { before: { ...before }, after: null, changedKeys: [...FIELD_CONFIG_KEYS] }
 }
+/**
+ * Record the order-only side-effect of a bulk reorder: a field mutation (insert-in-middle / reorder / delete)
+ * shifts OTHER fields' `order`, and each of those is a real config change. The caller passes the rows the shift
+ * `UPDATE … RETURNING id, "order"` returned (the NEW order) + the `delta` applied (+1 or -1), and the SHARED
+ * per-request `batchId` so the whole reorder reads as one logical operation. Old order = newOrder − delta.
+ */
+export async function recordFieldOrderShifts(
+  query: QueryFn,
+  sheetId: string,
+  shifted: Array<{ id: string; newOrder: number }>,
+  delta: number,
+  batchId: string,
+  actorId: string | null,
+): Promise<void> {
+  for (const f of shifted) {
+    await recordConfigRevision(query, {
+      sheetId, entityType: 'field', entityId: f.id, action: 'update',
+      before: { order: f.newOrder - delta }, after: { order: f.newOrder }, changedKeys: ['order'],
+      batchId, actorId,
+    })
+  }
+}
+
 /** Update diff — only the changed config keys. Returns null on a no-op (caller records nothing). */
 export function fieldUpdateDiff(before: FieldConfigSnapshot, after: FieldConfigSnapshot): FieldDiff | null {
   const changedKeys: string[] = []

@@ -115,4 +115,49 @@ describeIfDatabase('multitable config-revisions recording — T9-R1 (real DB)', 
     // structure-only: the row carries config keys, never a record-data column
     for (const r of revs) expect(Object.keys(r.after ?? {}).sort()).toEqual(['name', 'order', 'property', 'type'])
   })
+
+  test('MIDDLE INSERT: create at order 0 shifts existing fields — each shift recorded under ONE batchId', async () => {
+    const a = (await createField({ name: 'A', type: 'string' })).body?.data?.field?.id // order 0
+    const b = (await createField({ name: 'B', type: 'string' })).body?.data?.field?.id // order 1
+    await q('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [SHEET])
+    const c = (await createField({ name: 'C', type: 'string', order: 0 })).body?.data?.field?.id // insert at front → A,B shift +1
+    const revs = await configRevs()
+    expect(revs.length).toBe(3) // C create + A,B order shifts (previously only C was recorded — the [P2] gap)
+    const byId = Object.fromEntries(revs.map((r) => [r.entity_id, r]))
+    expect(byId[c].action).toBe('create')
+    expect(byId[a]).toMatchObject({ action: 'update' }); expect(byId[a].changed_keys).toEqual(['order'])
+    expect(byId[a].before).toMatchObject({ order: 0 }); expect(byId[a].after).toMatchObject({ order: 1 })
+    expect(byId[b].before).toMatchObject({ order: 1 }); expect(byId[b].after).toMatchObject({ order: 2 })
+    expect(new Set(revs.map((r) => r.batch_id)).size).toBe(1) // one logical operation = one batchId
+  })
+
+  test('REORDER: moving a field shifts the fields between it — each recorded under ONE batchId', async () => {
+    const a = (await createField({ name: 'A', type: 'string' })).body?.data?.field?.id // 0
+    const b = (await createField({ name: 'B', type: 'string' })).body?.data?.field?.id // 1
+    const c = (await createField({ name: 'C', type: 'string' })).body?.data?.field?.id // 2
+    await q('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [SHEET])
+    await updateField(a, { order: 2 }) // A 0→2 ; B,C shift -1
+    const revs = await configRevs()
+    expect(revs.length).toBe(3) // A update + B,C shifts
+    const byId = Object.fromEntries(revs.map((r) => [r.entity_id, r]))
+    expect(byId[a].action).toBe('update'); expect(byId[a].changed_keys).toContain('order')
+    expect(byId[b].changed_keys).toEqual(['order']); expect(byId[c].changed_keys).toEqual(['order'])
+    expect(new Set(revs.map((r) => r.batch_id)).size).toBe(1)
+  })
+
+  test('DELETE shift: deleting a middle field shifts later fields -1 — recorded under ONE batchId', async () => {
+    const a = (await createField({ name: 'A', type: 'string' })).body?.data?.field?.id // 0
+    const b = (await createField({ name: 'B', type: 'string' })).body?.data?.field?.id // 1
+    const c = (await createField({ name: 'C', type: 'string' })).body?.data?.field?.id // 2
+    await q('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [SHEET])
+    await deleteField(b) // B deleted (order 1) ; C shifts 2→1
+    const revs = await configRevs()
+    expect(revs.length).toBe(2) // B delete + C shift
+    const byId = Object.fromEntries(revs.map((r) => [r.entity_id, r]))
+    expect(byId[b].action).toBe('delete')
+    expect(byId[c].changed_keys).toEqual(['order'])
+    expect(byId[c].before).toMatchObject({ order: 2 }); expect(byId[c].after).toMatchObject({ order: 1 })
+    expect(new Set(revs.map((r) => r.batch_id)).size).toBe(1)
+    void a // a unused beyond setup
+  })
 })
