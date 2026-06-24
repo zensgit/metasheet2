@@ -287,12 +287,21 @@ describe('#8 NS-2 — adversarial matrix pinning NS-1 split + per-own-date bucke
     expect(r.buckets).toEqual({ workdayMinutes: 60, restdayMinutes: 60, holidayMinutes: 0 })
   })
 
-  it('holiday-after-midnight buckets to the holiday bucket (holiday overrides workday)', () => {
+  it('holiday-after-midnight (a TRUE holiday, not a makeup workday) buckets to the holiday bucket', () => {
     const r = helpers.bucketOvertimeSegmentationWindowAtMidnight({
       startAt: '2026-10-01T23:00:00.000Z', endAt: '2026-10-02T01:00:00.000Z', timeZone: 'UTC',
-      classifyDate: byDate({ '2026-10-01': { isWorkingDay: true }, '2026-10-02': { isWorkingDay: true, isHoliday: true } }),
+      classifyDate: byDate({ '2026-10-01': { isWorkingDay: true }, '2026-10-02': { isWorkingDay: false, isHoliday: true } }),
     })
     expect(r.buckets).toEqual({ workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 60 })
+  })
+
+  it('makeup-workday precedence (调休): isWorkingDay WINS over a holiday layer — matches resolveOvertimeDayTypeFromEffectiveCalendarItem', () => {
+    const r = helpers.bucketOvertimeSegmentationWindowAtMidnight({
+      startAt: '2026-10-01T23:00:00.000Z', endAt: '2026-10-02T01:00:00.000Z', timeZone: 'UTC',
+      // D+1 = a holiday date designated a makeup workday → both flags → canonical day-type is WORKDAY, not holiday.
+      classifyDate: byDate({ '2026-10-01': { isWorkingDay: true }, '2026-10-02': { isWorkingDay: true, isHoliday: true } }),
+    })
+    expect(r.buckets).toEqual({ workdayMinutes: 120, restdayMinutes: 0, holidayMinutes: 0 })
   })
 
   it('§3b local-midnight bucketing: a Shanghai Z-string window buckets per LOCAL date', () => {

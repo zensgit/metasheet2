@@ -10245,7 +10245,9 @@ function bucketOvertimeSegmentationWindowAtMidnight({ startAt, endAt, timeZone, 
   const perDate = []
   for (const span of split.spans) {
     const info = classify(span.date) || {}
-    const kind = info.isHoliday === true ? 'holiday' : (info.isWorkingDay === true ? 'workday' : 'restday')
+    // Precedence MUST match the canonical resolveOvertimeDayTypeFromEffectiveCalendarItem: an effective
+    // working day WINS even on a holiday layer (a makeup-workday / 调休 is a workday, not a holiday).
+    const kind = info.isWorkingDay === true ? 'workday' : (info.isHoliday === true ? 'holiday' : 'restday')
     if (kind === 'holiday') buckets.holidayMinutes += span.minutes
     else if (kind === 'workday') buckets.workdayMinutes += span.minutes
     else buckets.restdayMinutes += span.minutes

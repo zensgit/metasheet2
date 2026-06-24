@@ -47,9 +47,11 @@ No change to overnight **shift** handling (already correct) or to any non-overti
 4. **NS-3 lift the reject** — only after NS-2 is green: the route accepts the one-midnight window; the stable code remains for invalid cases. Wires NS-2's bucketing into the snapshot and adds the **real-DB integration over the actual segmentation snapshot** (incl. replay-through-persistence idempotency); aligns the bucketing `classifyDate` contract with the existing `resolveOvertimeDayTypeFromEffectiveCalendarItem` (one day-type model). The test-lock at `attendance-overtime-segmentation.test.ts:144` is updated to assert the new accept + the preserved reject for invalid windows.
 5. **NS-4 staging smoke** — a real cross-midnight overtime window segments + buckets correctly; a multi-midnight one still rejects; idempotent re-run.
 
-## 6. Verification plan (real-DB, per plan §2 "data-affecting paths get real-DB integration")
+## 6. Verification plan — **NS-3 / NS-4** (real-DB, per plan §2 "data-affecting paths get real-DB integration")
 
-- a 23:00→01:00 overtime window splits 1h to date D and 1h to date D+1, each bucketed by its own day's context (workday vs restday vs holiday); the snapshot round-trips through the **actual** segmentation projection.
+> NS-2 proves the split + per-own-date bucketing at the **pure-primitive** level (mock day-type classifier, unit matrix). The **real-DB snapshot round-trip below is NS-3**, because the route rejects cross-midnight until NS-3 lifts it — until then nothing cross-midnight can flow through the actual snapshot.
+
+- a 23:00→01:00 overtime window splits 1h to date D and 1h to date D+1, each bucketed by its own day's context (workday vs restday vs holiday — **an effective working day wins over a holiday layer**, per `resolveOvertimeDayTypeFromEffectiveCalendarItem`, so a 调休 makeup-workday counts as workday); the snapshot round-trips through the **actual** segmentation projection.
 - re-running segmentation on the same window is byte-identical (no boundary double-count).
 - a reversed window and a >1-midnight window still return `OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED`.
 - regression: same-day windows byte-identical to pre-#8; overnight **shift** metrics unchanged.
