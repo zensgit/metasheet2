@@ -137,7 +137,7 @@
 
 ## 0.5 下一阶段目标（2026-06-22 锁定）— 跨午夜加班放开 + 团队可用性 + 销假 + 报表分级（✅ 已闭环 2026-06-24）
 
-> owner-set 新目标（接 §2 line 185「另起新的 owner 目标」）：四条并行切片，各自按所需证据档位闭环（design-lock → runtime → owner review →）；**#6/#8 含 staging smoke，#5/#7 以 code + CI/real-DB 闭环**（详见 §收口）。全程稳妥 auto-merge、**未碰分支保护**（strict=true / 5 context）。
+> owner-set 新目标（接 §2 line 185「另起新的 owner 目标」）：四条并行切片，各自按所需证据档位闭环（design-lock → runtime → owner review）；**#6/#8 含 staging smoke，#5/#7 以 code + CI/real-DB 闭环**（详见 §收口）。全程稳妥 auto-merge、**未碰分支保护**（strict=true / 5 context）。
 
 | 项 | 内容 | 当前状态 | 完成口径 |
 |---|---|---|---|
