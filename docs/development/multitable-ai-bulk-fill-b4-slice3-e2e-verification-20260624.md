@@ -68,8 +68,9 @@ What the assertions lock:
   with **≥1 generated row committable** (`可写入`) and a **non-empty `pending`/"未生成" remainder**
   (asserts `generatedCount` is `≥ 1` and `< 5`); then it **commits the generated subset and
   verifies via the API that exactly those rows were written** (`written === generatedCount`) —
-  proving already-generated rows stay charged + committable after cancel (the #3113
-  truthful-status reconcile behavior at the UI layer).
+  proving already-generated rows stay charged + committable after cancel. (This exercises the
+  same `pending_not_generated` truthful-status *surface* as the #3113 reconcile — NOT
+  hard-restart reconciliation itself, which is correctly listed under "Not covered" below.)
 
 ## Finding (for a SEPARATE focused-fix PR — not fixed here)
 
