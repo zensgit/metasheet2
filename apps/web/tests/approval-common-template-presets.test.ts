@@ -90,10 +90,25 @@ describe('common approval template presets', () => {
     expect(gate?.config).toMatchObject({ branches: [{ rules: [{ fieldId: 'amount', operator: 'gte', value: 5000 }] }] })
   })
 
-  it('purchase_amount_tier forks to a parallel会签 join at the terminal end node', () => {
+  it('purchase_amount_tier forks a parallel会签 (join at end) with one user-resolving + one static_role branch — distinct-typed, no dynamic conflict', () => {
     const payload = buildCommonApprovalTemplatePresetPayload('purchase_amount_tier', { keySuffix: 'unit' })
-    const parallel = payload.approvalGraph.nodes.find((node) => node.type === 'parallel')
+    const graph = payload.approvalGraph
+    const parallel = graph.nodes.find((node) => node.type === 'parallel')
     expect(parallel?.config).toMatchObject({ joinMode: 'all', joinNodeKey: 'end' })
+
+    // The two parallel branch approvers must resolve to DISTINCT assignment TYPES — exactly one
+    // role-typed (static_role) + one user-resolving — so the runtime parallel-dynamic-conflict (key
+    // `assignmentType:assigneeId`) is impossible by construction. The enforcement-layer proof is in
+    // approval-wp1-parallel-gateway.api.test.ts (two user branches → 409; user + role → clean fork).
+    // This locks the preset SHAPE so it can't regress back to two user-resolving branches.
+    const branchKinds = (parallel!.config as { branches: string[] }).branches.map((edgeKey) => {
+      const target = graph.edges.find((edge) => edge.key === edgeKey)?.target
+      const node = graph.nodes.find((n) => n.key === target)
+      return (node?.config as { assigneeSources?: Array<{ kind: string }> }).assigneeSources?.[0]?.kind
+    })
+    expect(branchKinds.filter((kind) => kind === 'static_role')).toHaveLength(1) // the design's "Configured Role"
+    expect(branchKinds.filter((kind) => kind !== 'static_role' && kind !== undefined)).toHaveLength(1) // a user-resolving branch
+    expect(branchKinds).not.toContain('dept_head') // the original bug: dept_head(user) + manager_at_level(user) could collide
   })
 
   it('purchase preset uses the budget owner user field and a detail table without complex graph nodes', () => {

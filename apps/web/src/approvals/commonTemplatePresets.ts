@@ -224,9 +224,16 @@ function reimbursementAmountTierGraph(): ApprovalGraph {
 
 // Amount-tier purchase (design-lock #3114): the condition node routes on the top-level `amount` —
 // below threshold → a single direct-manager approval; at/above threshold → a PARALLEL fork (joinMode
-// 'all' = 会签 by default; 'any' = 或签 editable) of two DISTINCT higher approvers that join at `end`.
-// Default threshold 20000. The two parallel approvers use distinct DYNAMIC sources (no static IDs →
-// no create-time duplicate-assignee reject); the role node is a starter to retune before publishing.
+// 'all' = 会签 by default; 'any' = 或签 editable) joining at `end`. Default threshold 20000.
+// The two parallel branches MUST resolve to DISTINCT assignment TYPES: a user-resolving manager
+// (manager_at_level → `user:X`) + a static_role (the design's "Configured Role / Person" → `role:Y`).
+// The runtime parallel-conflict key is `${assignmentType}:${assigneeId}` (ApprovalProductService.ts
+// :4152/4181), so a user-typed and a role-typed branch can NEVER collide — regardless of org data.
+// (Two USER-resolving dynamic sources — e.g. an earlier dept_head here alongside manager_at_level —
+// CAN resolve to the SAME person at runtime → APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT 409; that
+// was the bug.) The role is a STARTER: configure it before publishing — an unconfigured role resolves
+// empty → emptyAssigneePolicy 'error' fails the high path CLOSED (a high-value approver is never
+// silently skipped). The role node name signals "发布前配置".
 function purchaseAmountTierGraph(): ApprovalGraph {
   return {
     nodes: [
@@ -236,7 +243,7 @@ function purchaseAmountTierGraph(): ApprovalGraph {
       { key: 'manager_approval', type: 'approval', name: '直属上级审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
       { key: 'parallel_fork', type: 'parallel', name: '高额并行审批（会签）', config: { branches: ['edge-fork-mgr', 'edge-fork-role'], joinMode: 'all', joinNodeKey: 'end' } },
       { key: 'higher_manager_approval', type: 'approval', name: '上级经理审批（高额）', config: { assigneeSources: [{ kind: 'manager_at_level', level: 2 }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
-      { key: 'role_approval', type: 'approval', name: '部门负责人/指定角色审批（发布前配置）', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'role_approval', type: 'approval', name: '指定审批角色（发布前配置）', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['待配置审批角色'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
       { key: 'end', type: 'end', name: '结束', config: {} },
     ],
     edges: [
