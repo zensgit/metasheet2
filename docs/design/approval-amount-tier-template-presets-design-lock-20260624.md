@@ -1,6 +1,8 @@
 # Amount-Tier Approval Template Presets — Design Lock
 
-Status: RATIFIED — RUNTIME NOT BUILT
+Status: RATIFIED — RUNTIME SHIPPED (amount-tier reimbursement + purchase presets; real-DB create
+acceptance + terminal-join runtime coverage). Decision 4's approval-node editor prerequisite shipped
+as G-5 (#3124); the editable complex-graph surface is fail-closed for unknown config keys (#3129).
 
 Grounding: approval authoring can create/edit linear approval templates, preserve complex graphs,
 edit condition-node rules, edit parallel `joinMode` (`all` / `any`), and edit cc targets. The common

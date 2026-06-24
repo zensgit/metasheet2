@@ -7,6 +7,8 @@ import {
   buildCommonApprovalTemplatePresetPayload,
   COMMON_APPROVAL_TEMPLATE_PRESETS,
 } from '../../../../apps/web/src/approvals/commonTemplatePresets'
+import { APPROVAL_ROLE_CONFIGURE_SENTINEL as FE_ROLE_SENTINEL } from '../../../../apps/web/src/types/approval'
+import { APPROVAL_ROLE_CONFIGURE_SENTINEL as BACKEND_ROLE_SENTINEL } from '../../src/services/ApprovalProductService'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -118,4 +120,30 @@ describeIfDatabase('common approval template presets — real-DB backend accepta
       )
     },
   )
+
+  it('purchase_amount_tier: the parallel node round-trips with joinNodeKey=end through create→normalize', async () => {
+    // The purchase amount-tier preset's high path forks to a parallel join that targets the terminal
+    // END node. Assert the backend normalize preserves joinNodeKey='end' (a future "helpful" rewrite
+    // of the join target — e.g. to a synthetic join node — would silently change the runtime shape).
+    const payload = buildCommonApprovalTemplatePresetPayload('purchase_amount_tier', { keySuffix: `realdb-${TS}-joinkey` })
+    const response = await jsonRequest(baseUrl, '/api/approval-templates', token, { method: 'POST', body: payload })
+    expect(response.status, await response.clone().text()).toBe(201)
+    const body = await response.json() as { approvalGraph: { nodes: Array<{ type: string; config: Record<string, unknown> }> } }
+    const parallel = body.approvalGraph.nodes.find((node) => node.type === 'parallel')
+    expect(parallel).toBeDefined()
+    expect(parallel!.config.joinNodeKey).toBe('end')
+    expect(parallel!.config.joinMode).toBe('all')
+  })
+
+  it('purchase_amount_tier: an UNTOUCHED preset CANNOT be published — the placeholder role fail-fasts at publish (a verifiable state, not a runtime stuck-flow)', async () => {
+    expect(FE_ROLE_SENTINEL).toBe(BACKEND_ROLE_SENTINEL) // FE preset placeholder MUST byte-match the backend guard, else the guard misses it
+    const payload = buildCommonApprovalTemplatePresetPayload('purchase_amount_tier', { keySuffix: `realdb-${TS}-sentinel` })
+    const createResponse = await jsonRequest(baseUrl, '/api/approval-templates', token, { method: 'POST', body: payload })
+    expect(createResponse.status, await createResponse.clone().text()).toBe(201) // draft create is allowed (the sentinel is a valid static_role shape)
+    const template = await createResponse.json() as { id: string }
+    // publishing AS-IS must be REJECTED — the admin must replace the placeholder role first
+    const publishResponse = await jsonRequest(baseUrl, `/api/approval-templates/${template.id}/publish`, token, { method: 'POST', body: { policy: { allowRevoke: true } } })
+    expect(publishResponse.status).toBe(400)
+    expect(await publishResponse.text()).toContain('APPROVAL_ROLE_PLACEHOLDER_NOT_CONFIGURED')
+  })
 })
