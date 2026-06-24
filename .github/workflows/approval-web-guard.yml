@@ -21,10 +21,13 @@ on:
       - 'apps/web/src/approvals/parallelEdit.ts'
       - 'apps/web/src/approvals/ccEdit.ts'
       - 'apps/web/src/approvals/detailField.ts'
+      - 'apps/web/src/approvals/commonTemplatePresets.ts'
       - 'apps/web/src/approvals/templateAuthoring.ts'
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
       - 'apps/web/src/views/approval/ApprovalNewView.vue'
       - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
+      - 'apps/web/tests/approval-common-template-presets.test.ts'
+      - 'apps/web/tests/approvalTemplateAuthoring.spec.ts'
       - 'apps/web/tests/approval-detail-field.test.ts'
       - 'apps/web/tests/approval-template-authoring-detail.test.ts'
       - 'apps/web/tests/approval-template-authoring-graph-preserve.test.ts'
@@ -39,10 +42,13 @@ on:
       - 'apps/web/src/approvals/parallelEdit.ts'
       - 'apps/web/src/approvals/ccEdit.ts'
       - 'apps/web/src/approvals/detailField.ts'
+      - 'apps/web/src/approvals/commonTemplatePresets.ts'
       - 'apps/web/src/approvals/templateAuthoring.ts'
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
       - 'apps/web/src/views/approval/ApprovalNewView.vue'
       - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
+      - 'apps/web/tests/approval-common-template-presets.test.ts'
+      - 'apps/web/tests/approvalTemplateAuthoring.spec.ts'
       - 'apps/web/tests/approval-detail-field.test.ts'
       - 'apps/web/tests/approval-template-authoring-detail.test.ts'
       - 'apps/web/tests/approval-template-authoring-graph-preserve.test.ts'
@@ -99,8 +105,10 @@ jobs:
         # G-2 condition editor: topology-preserving edit (rule/conjunction/defaultEdgeKey change →
         # only the condition node config changes; all other nodes + edges byte-identical; parallel/cc
         # untouched) + seeding round-trip + validation preview (fieldId / outgoing default edge).
+        # Common-template presets: the first three preset payloads stay linear/editable and the
+        # authoring page button creates a draft through the real createTemplate wrapper, never publish.
         # G-3 parallel editor: topology-preserving joinMode edit (only that parallel node's joinMode
         # changes; branches/joinNodeKey + all other nodes + edges byte-identical) + cross-phase
         # compose (condition G-2 + parallel G-3 both land) + seeding round-trip + validation preview
         # (joinMode in backend-accepted {'all','any'}; cc untouched / G-4).
-        run: pnpm --filter @metasheet/web exec vitest run approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit --reporter=dot

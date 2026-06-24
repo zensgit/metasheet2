@@ -31,6 +31,7 @@ export default defineConfig({
       'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-detail-subform.db.test.ts',
       'tests/integration/approval-pack1a-lifecycle.api.test.ts',
+      'tests/integration/approval-common-template-presets.api.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
