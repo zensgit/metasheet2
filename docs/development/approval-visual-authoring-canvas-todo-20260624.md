@@ -7,11 +7,11 @@ predecessor lands; ✅ = shipped. Nothing past D-0 starts without the design-loc
 ## D-0 — design-lock
 - ⬜ Ratify scope / principles / phasing (this doc + the design-lock). **Awaiting owner ratification.**
 
-## D-1 — interactive canvas render + library spike  🔒 (gated for spike + manual/E2E QA)
-- 🔒 Interactive free-drag canvas (visual layout, drag-to-position, draw-edges) + graph-editor library
-  spike (ALv2/MIT vs bespoke). NOT unit-verifiable in the jsdom/DOM-stub harness → gated. The topology
-  ENGINE it would drive is BUILT (D-2/D-3), so this is de-risked. Layout positions = a separate
-  `layout` sidecar that never reaches `normalizeApprovalGraph` (design-lock §6).
+## D-1 — visual canvas render  ✅ (bespoke SVG/HTML; library spike decided = bespoke for testability)
+- ✅ `graphLayout.ts` longest-path layered layout (pure) → positioned node boxes + SVG edges, topology
+  toolbar on canvas nodes. `nodePositions` drag sidecar never reaches the saved graph (§6). 6 layout
+  unit + 2 mounted canvas tests.
+- 🔒 The raw mouse-drag GESTURE (node reposition / draw-edge) — manual/E2E QA, not jsdom-unit-testable.
 
 ## D-2 — topology engine + clickable add/remove/insert  ✅ (engine + non-drag surface)
 - ✅ `graphTopologyEdit.ts` (appendApprovalNode / removeLinearNode + branch ops) + the
@@ -26,12 +26,13 @@ predecessor lands; ✅ = shipped. Nothing past D-0 starts without the design-loc
 - ✅ `moveItemToIndex` drag-to-position logic + native-drag wiring (logic unit-covered).
 - 🔒 The drag GESTURE (manual/E2E QA) · field-type palette · sections.
 
-## D-5 — live validation preview  🔒
-- 🔒 Live dangling-edge / unreachable as you drag (pairs with the canvas; `validateTemplateDraft`
-  already surfaces errors on save).
+## D-5 — live validation preview  ✅
+- ✅ `graphValidityIssues` (dangling edge / unreachable / no-successor) surfaced as a live canvas alert;
+  backend stays final arbiter on save. Unit + mounted (no-false-positive) tested.
 
-## D-6 — canvas ⇄ list parity  🔒 (only meaningful once the interactive canvas exists)
-- 🔒 Switch surfaces with no drift; sentinel hint (#3141) + fail-closed (#3129) identical on canvas.
+## D-6 — canvas ⇄ list parity  ✅
+- ✅ 结构列表 ⇄ 画布视图 toggle on one template; fail-closed (#3129) + sentinel hint (#3141) unchanged.
+- 🔒 Inline node-config editing ON the canvas (config currently via the list view through the toggle).
 
 ## Out of scope (v1 — reopen-only, see design-lock §5)
 - 🔒 No canvas build in D-0 · no new node types / runtime / validator changes · no deletion of the

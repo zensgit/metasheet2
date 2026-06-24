@@ -855,6 +855,52 @@ describe('TemplateAuthoringView', () => {
     expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches).toHaveLength(2) // the added branch is saved
   })
 
+  function buildCanvasConditionGraph() {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'cond_1', type: 'condition', name: '判断', config: { branches: [{ edgeKey: 'e-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] }], defaultEdgeKey: 'e-low' } },
+        { key: 'app_high', type: 'approval', name: '高', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-start-c', source: 'start', target: 'cond_1' },
+        { key: 'e-high', source: 'cond_1', target: 'app_high' },
+        { key: 'e-low', source: 'cond_1', target: 'end' },
+        { key: 'e-high-end', source: 'app_high', target: 'end' },
+      ],
+    }
+  }
+
+  it('D-1 canvas: toggling to 画布视图 renders the graph visually (nodes + SVG edges), no false validity warning', async () => {
+    routeParams = { id: 'tpl_canvas' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCanvasConditionGraph() }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]').length).toBe(4) // 4 nodes rendered
+    expect(container!.querySelectorAll('[data-testid="approval-canvas-edge"]').length).toBe(4) // 4 edges rendered
+    expect(container!.querySelector('[data-testid="approval-canvas-validity"]')).toBeNull() // a valid graph → no warning
+  })
+
+  it('D-1/D-3 canvas: adding a condition branch ON THE CANVAS grows it and saves the new structure', async () => {
+    routeParams = { id: 'tpl_canvas2' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCanvasConditionGraph() }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+    const before = container!.querySelectorAll('[data-testid="approval-canvas-node"]').length
+    ;(container!.querySelector('[data-testid="approval-canvas-add-condition-cond_1"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]').length).toBe(before + 1) // new node on canvas
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches).toHaveLength(2) // saved
+  })
+
   it('dept_head reads back editable: a saved dept_head template is NOT fail-closed (no unsupported alert, save enabled, sourceKind hydrated)', async () => {
     routeParams = { id: 'tpl_dh' }
     getTemplateSpy.mockResolvedValue(buildTemplate({

@@ -413,7 +413,79 @@
              (G-2 — branch rules / conjunction / default edge); parallel / cc / approval stay
              READ-ONLY summaries (G-3 / G-4), and every non-condition node + all edges are preserved
              byte-for-byte on save. Nothing renders as a bare "unsupported". -->
-        <div v-if="graphReadOnly" data-testid="approval-graph-readonly-list">
+        <!-- D-6 view toggle: structured list ⇄ visual canvas (complex graphs only) -->
+        <div v-if="graphReadOnly" class="template-authoring__view-toggle" data-testid="approval-graph-view-toggle">
+          <el-button size="small" :type="canvasViewMode === 'list' ? 'primary' : 'default'" data-testid="approval-view-list" @click="canvasViewMode = 'list'">结构列表</el-button>
+          <el-button size="small" :type="canvasViewMode === 'canvas' ? 'primary' : 'default'" data-testid="approval-view-canvas" @click="canvasViewMode = 'canvas'">画布视图</el-button>
+        </div>
+
+        <!-- D-1/D-5 visual canvas: auto-laid-out nodes + SVG edges + topology toolbar + live validity.
+             The mouse-drag GESTURE is manual/E2E QA; everything else is unit-covered. Node config is
+             edited in the「结构列表」view (D-6 toggle). -->
+        <div v-if="graphReadOnly && canvasViewMode === 'canvas'">
+          <el-alert
+            v-if="canvasValidity.length"
+            type="warning"
+            :closable="false"
+            show-icon
+            data-testid="approval-canvas-validity"
+            title="画布结构校验（保存时后端为最终判定）"
+          >
+            <ul class="template-authoring__error-list"><li v-for="issue in canvasValidity" :key="issue">{{ issue }}</li></ul>
+          </el-alert>
+          <div
+            class="template-authoring__canvas"
+            data-testid="approval-graph-canvas"
+            :style="{ position: 'relative', height: canvasLayout.height + 'px', width: canvasLayout.width + 'px' }"
+          >
+            <svg class="template-authoring__canvas-edges" :width="canvasLayout.width" :height="canvasLayout.height" style="position:absolute;left:0;top:0">
+              <defs>
+                <marker id="approval-canvas-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+                  <path d="M0,0 L7,3 L0,6 Z" fill="#bbb" />
+                </marker>
+              </defs>
+              <line
+                v-for="line in canvasEdgeLines"
+                :key="line.key"
+                :x1="line.x1"
+                :y1="line.y1"
+                :x2="line.x2"
+                :y2="line.y2"
+                stroke="#bbb"
+                stroke-width="1.5"
+                marker-end="url(#approval-canvas-arrow)"
+                data-testid="approval-canvas-edge"
+              />
+            </svg>
+            <div
+              v-for="pos in canvasLayout.nodes"
+              :key="pos.key"
+              class="template-authoring__canvas-node"
+              :class="{ 'is-selected': selectedCanvasNode === pos.key }"
+              :style="{ position: 'absolute', left: pos.x + 'px', top: pos.y + 'px', width: CANVAS_NODE_W + 'px' }"
+              :data-canvas-node="pos.key"
+              data-testid="approval-canvas-node"
+              :draggable="!readOnly"
+              @click="selectedCanvasNode = pos.key"
+              @dragstart="onCanvasNodeDragStart(pos.key)"
+              @dragend="onCanvasNodeDragEnd($event)"
+            >
+              <strong>{{ canvasNodeByKey(pos.key)?.name || pos.key }}</strong>
+              <span class="template-authoring__node-type" :data-node-type="canvasNodeByKey(pos.key)?.type">
+                {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
+              </span>
+              <div v-if="!readOnly" class="template-authoring__canvas-node-actions">
+                <el-button v-if="canvasNodeByKey(pos.key)?.type === 'condition'" size="small" :data-testid="`approval-canvas-add-condition-${pos.key}`" @click.stop="onAddConditionBranch(pos.key)">+条件分支</el-button>
+                <el-button v-if="canvasNodeByKey(pos.key)?.type === 'parallel'" size="small" :data-testid="`approval-canvas-add-parallel-${pos.key}`" @click.stop="onAddParallelBranch(pos.key)">+并行分支</el-button>
+                <el-button v-if="canInsertAfter(canvasNodeByKey(pos.key)!)" size="small" :data-testid="`approval-canvas-insert-${pos.key}`" @click.stop="onInsertApprovalAfter(pos.key)">下方插入</el-button>
+                <el-button v-if="canRemoveNode(canvasNodeByKey(pos.key)!)" size="small" type="danger" :data-testid="`approval-canvas-remove-${pos.key}`" @click.stop="onRemoveNode(pos.key)">删除</el-button>
+              </div>
+            </div>
+          </div>
+          <p class="template-authoring__hint">画布用于查看与编排结构（增删节点 / 分支、拖动布局）。各节点的审批人 / 规则配置请切换到「结构列表」编辑。</p>
+        </div>
+
+        <div v-if="graphReadOnly && canvasViewMode === 'list'" data-testid="approval-graph-readonly-list">
           <div
             v-for="node in graphPreviewNodes"
             :key="node.key"
@@ -938,6 +1010,7 @@ import {
   appendApprovalNode,
   removeLinearNode,
 } from '../../approvals/graphTopologyEdit'
+import { computeLayout, graphValidityIssues, type GraphLayout } from '../../approvals/graphLayout'
 import {
   buildCommonApprovalTemplatePresetPayload,
   COMMON_APPROVAL_TEMPLATE_PRESETS,
@@ -1225,6 +1298,65 @@ function canRemoveNode(node: ApprovalNode): boolean {
   return (node.type === 'approval' || node.type === 'cc')
     && topologyEdgeCount(node.key, 'target') === 1
     && topologyEdgeCount(node.key, 'source') === 1
+}
+
+// ── D-1/D-5/D-6 visual canvas (bespoke SVG/HTML — the render is DATA, so it's unit-testable; only the
+// raw mouse-drag GESTURE is manual/E2E QA). Auto-layout via computeLayout, overridable by a position
+// SIDECAR (`nodePositions`) that NEVER reaches the saved graph. Reuses the same topology handlers as
+// the list; config editing stays in the list view (toggle = D-6 parity). ──
+const canvasViewMode = ref<'list' | 'canvas'>('list')
+const selectedCanvasNode = ref<string | null>(null)
+const nodePositions = ref<Record<string, { x: number; y: number }>>({})
+const draggingCanvasNode = ref<string | null>(null)
+const CANVAS_NODE_W = 150
+const CANVAS_NODE_H = 56
+const canvasEffectiveGraph = computed<ApprovalGraph>(() => buildApprovalGraph(draft.value))
+const canvasLayout = computed<GraphLayout>(() => {
+  const layout = computeLayout(canvasEffectiveGraph.value)
+  return {
+    ...layout,
+    nodes: layout.nodes.map((n) => {
+      const override = nodePositions.value[n.key]
+      return override ? { ...n, x: override.x, y: override.y } : n
+    }),
+  }
+})
+const canvasValidity = computed<string[]>(() => (draft.value.preservedGraph ? graphValidityIssues(canvasEffectiveGraph.value) : []))
+function canvasNodeByKey(key: string): ApprovalNode | undefined {
+  return canvasEffectiveGraph.value.nodes.find((n) => n.key === key)
+}
+const canvasEdgeLines = computed(() => {
+  const pos = new Map(canvasLayout.value.nodes.map((n) => [n.key, n]))
+  return canvasEffectiveGraph.value.edges.map((edge) => {
+    const s = pos.get(edge.source)
+    const t = pos.get(edge.target)
+    return {
+      key: edge.key,
+      x1: (s?.x ?? 0) + CANVAS_NODE_W,
+      y1: (s?.y ?? 0) + CANVAS_NODE_H / 2,
+      x2: t?.x ?? 0,
+      y2: (t?.y ?? 0) + CANVAS_NODE_H / 2,
+    }
+  })
+})
+function onCanvasNodeDragStart(key: string): void {
+  if (!readOnly.value) draggingCanvasNode.value = key
+}
+function onCanvasNodeDragEnd(event: DragEvent): void {
+  // The drag GESTURE is manual/E2E QA; this position-update (sidecar only, never saved) is exercised.
+  if (readOnly.value || !draggingCanvasNode.value) return
+  const surface = (event.currentTarget as HTMLElement | null)?.closest('[data-testid="approval-graph-canvas"]')
+  const rect = surface?.getBoundingClientRect()
+  if (rect) {
+    nodePositions.value = {
+      ...nodePositions.value,
+      [draggingCanvasNode.value]: {
+        x: Math.max(0, Math.round(event.clientX - rect.left - CANVAS_NODE_W / 2)),
+        y: Math.max(0, Math.round(event.clientY - rect.top - CANVAS_NODE_H / 2)),
+      },
+    }
+  }
+  draggingCanvasNode.value = null
 }
 function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
   const kind = approvalSourceKind(nodeKey)
@@ -1708,5 +1840,42 @@ pre {
   .template-authoring__preset-grid {
     grid-template-columns: 1fr;
   }
+}
+
+.template-authoring__view-toggle {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.template-authoring__canvas {
+  position: relative;
+  overflow: auto;
+  border: 1px solid var(--el-border-color, #dcdfe6);
+  border-radius: 6px;
+  background: #fafafa;
+  min-height: 200px;
+}
+.template-authoring__canvas-node {
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border: 1px solid var(--el-border-color, #dcdfe6);
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: grab;
+  font-size: 12px;
+}
+.template-authoring__canvas-node.is-selected {
+  border-color: var(--el-color-primary, #409eff);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-5, #a0cfff);
+}
+.template-authoring__canvas-node-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
 }
 </style>

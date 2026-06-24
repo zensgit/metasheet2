@@ -54,19 +54,31 @@ is unreliable); the **reorder logic** is unit-covered.
 - All wired into **approval-web-guard** (new src + test added to paths + the vitest filter).
 - Full local run: **vue-tsc clean, lint clean, 50/50** across the topology + authoring specs.
 
-## Remaining — gated, named (NOT silently skipped)
+## D-1 / D-5 / D-6 — visual canvas (shipped in the follow-up round)
 
-- **D-1 interactive free-drag canvas + graph-editor library adoption.** Visual node layout,
-  drag-to-position, draw-edges-by-dragging, pan/zoom. This is the part that is **not unit-verifiable**
-  in the jsdom/DOM-stub harness every other slice uses — drag/pan/canvas physics need a real browser.
-  Correct next step per the design-lock: a **library spike** (a maintained ALv2/MIT Vue graph editor,
-  driven from our model, vs bespoke) behind a manual/E2E QA gate. The topology *engine* above is
-  exactly what it would drive, so that work is de-risked, not blocked.
-- **Layout positions** are not part of the runtime graph — persisting them needs a separate `layout`
-  sidecar that never reaches `normalizeApprovalGraph` (open decision from the design-lock §6).
-- **D-5 live validation preview** — `validateTemplateDraft` already surfaces errors on save; making it
-  live-as-you-drag pairs with the canvas (gated with it).
-- **D-6 canvas ⇄ list parity** — only meaningful once the canvas surface exists.
+The interactive canvas was then built, **bespoke (SVG/HTML) rather than a heavy graph library** —
+chosen so the render / operations / layout / validity ARE unit-verifiable in the existing harness
+(only the raw mouse-drag *gesture* is manual/E2E QA):
+- **D-1 canvas render** — `graphLayout.ts` longest-path layered layout (pure) → positioned node boxes
+  + SVG edges. A `nodePositions` sidecar holds drag overrides and **never reaches the saved graph**
+  (the design-lock §6 layout-sidecar decision). The same topology toolbar (add branch / insert /
+  remove) sits on the canvas nodes, wired to the same engine + bridge.
+- **D-5 live validity** — `graphValidityIssues` (pure: dangling edge / unreachable node / no-successor)
+  surfaced as a live canvas alert; the backend stays the final arbiter on save.
+- **D-6 canvas ⇄ list toggle** — 结构列表 ⇄ 画布视图 on one template; the fail-closed surface (#3129) +
+  sentinel hint (#3141) are unchanged (node config is edited in the list view).
+
+Verification (this round): `approval-graph-layout.test.ts` **6 tests** (layered layout incl. a rejoin
+sitting after both branches + the 4 validity cases) + **2 mounted canvas tests** (toggle → 4 nodes +
+4 SVG edges render with no false validity; add-condition-branch ON the canvas grows it + saves 2
+branches). Wired into approval-web-guard.
+
+## Remaining (true polish tail — design-lock §5, reopen-only)
+- The raw **mouse-drag gesture** (node reposition / draw-edge-by-dragging) — manual/E2E QA, not
+  jsdom-unit-testable; the position-update + topology LOGIC underneath is covered.
+- Library-grade interaction polish (smooth pan/zoom, edge routing, copy/paste subgraphs, templates
+  gallery, mobile) + inline node-config editing on the canvas (today config is edited in the list view
+  via the toggle) — explicit later investment, not a silent gap.
 
 ## Principle adherence (the release-blocker checklist, all green)
 Backend stays sole arbiter (engine emits, never relaxes); config editors reused (the surface wires to
