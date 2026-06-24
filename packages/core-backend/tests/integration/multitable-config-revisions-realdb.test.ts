@@ -74,7 +74,7 @@ describeIfDatabase('multitable config-revisions recording — T9-R1 (real DB)', 
     await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_views WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET])
-    await q('UPDATE meta_sheets SET row_level_read_permissions_enabled = false, conditional_read_rules = NULL WHERE id = $1', [SHEET])
+    await q("UPDATE meta_sheets SET row_level_read_permissions_enabled = false, conditional_read_rules = '[]'::jsonb WHERE id = $1", [SHEET])
   })
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
