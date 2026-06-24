@@ -476,10 +476,10 @@ const RECOGNISED_GRAPH_NODE_TYPES = new Set([
  * Returns `null` when the template is editable OR complex-but-preservable.
  */
 // The approval-node config keys the BACKEND `normalizeApprovalGraph` re-emits for a COMPLEX graph
-// (ApprovalProductService.ts:899-911). Any other key is silently dropped on save. NB: this is the
-// COMPLEX path's allowlist ONLY — the linear path reconstructs via `buildStepConfig`, which does NOT
-// preserve `fieldPermissions`, so the two allowlists must stay SEPARATE (sharing would let a linear
-// node's `fieldPermissions` through, then flatten it — the same bug on the other path).
+// (ApprovalProductService.ts:899-911). Any other key — TOP-LEVEL or NESTED — is silently dropped on
+// save. NB: this is the COMPLEX path's allowlist ONLY — the linear path reconstructs via
+// `buildStepConfig`, which does NOT preserve `fieldPermissions`, so the two allowlists must stay
+// SEPARATE (sharing would let a linear node's `fieldPermissions` through, then flatten it).
 const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
   'assigneeType',
   'assigneeIds',
@@ -489,6 +489,57 @@ const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
   'autoApprovalPolicy',
   'fieldPermissions',
 ]
+// The backend ALSO rebuilds the NESTED shapes from fixed fields, silently dropping any other — so the
+// allowlist must be shape-level, not just top-level:
+//   - assigneeSources[] per kind (ApprovalProductService.ts:408-453)
+//   - autoApprovalPolicy (:371-376) — 4 fields
+//   - fieldPermissions[] (:786-799) — { fieldId, access }
+// All three bottom out in primitives / string-arrays (no deeper objects), so this 2-level check is complete.
+const BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND: Record<string, string[]> = {
+  static_user: ['kind', 'userIds'],
+  static_role: ['kind', 'roleIds'],
+  requester: ['kind'],
+  direct_manager: ['kind'],
+  dept_head: ['kind'],
+  continuous_managers: ['kind', 'levels'],
+  manager_at_level: ['kind', 'level'],
+  form_field_user: ['kind', 'fieldId'],
+}
+const BACKEND_AUTO_APPROVAL_POLICY_KEYS = ['mergeWithRequester', 'mergeAdjacentApprover', 'dedupeHistoricalApprover', 'actorMode']
+const BACKEND_FIELD_PERMISSION_KEYS = ['fieldId', 'access']
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+function hasKeyOutside(value: unknown, allowed: string[]): boolean {
+  return isPlainRecord(value) && Object.keys(value).some((key) => !allowed.includes(key))
+}
+
+/**
+ * True when a COMPLEX approval node's config carries a key — TOP-LEVEL or NESTED in assigneeSources[]
+ * / autoApprovalPolicy / fieldPermissions[] — that the backend `normalizeApprovalGraph` does NOT
+ * re-emit (and silently DROPS on save). The FE preserves config verbatim, so without this the
+ * deep-equal round-trip looks clean while the real save flattens the unknown key.
+ */
+function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): boolean {
+  if (hasKeyOutside(config, BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS)) return true
+  const sources = config.assigneeSources
+  if (Array.isArray(sources)) {
+    for (const source of sources) {
+      if (!isPlainRecord(source)) return true
+      const allowed = BACKEND_ASSIGNEE_SOURCE_KEYS_BY_KIND[source.kind as string]
+      if (!allowed || hasKeyOutside(source, allowed)) return true
+    }
+  }
+  if (hasKeyOutside(config.autoApprovalPolicy, BACKEND_AUTO_APPROVAL_POLICY_KEYS)) return true
+  const perms = config.fieldPermissions
+  if (Array.isArray(perms)) {
+    for (const perm of perms) {
+      if (!isPlainRecord(perm) || hasKeyOutside(perm, BACKEND_FIELD_PERMISSION_KEYS)) return true
+    }
+  }
+  return false
+}
 
 export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDetailDTO): string | null {
   const unsupportedField = template.formSchema.fields.find((field) => !isAuthorableFieldType(field.type))
@@ -517,9 +568,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     const unsupportedComplexApproval = template.approvalGraph.nodes.find(
       (node) =>
         node.type === 'approval'
-        && Object.keys(node.config as Record<string, unknown>).some(
-          (key) => !BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS.includes(key),
-        ),
+        && complexApprovalConfigHasBackendDrop(node.config as Record<string, unknown>),
     )
     if (unsupportedComplexApproval) {
       return `审批节点含后端不会保留的配置（保存将丢失），已锁定为只读：${unsupportedComplexApproval.name || unsupportedComplexApproval.key}`

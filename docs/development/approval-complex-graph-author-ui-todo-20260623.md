@@ -115,3 +115,11 @@
   doc's deferral premise was factually wrong. Re-scoped OUT of "out of scope" — pending owner
   ratification (see the G-3 PR body). The OTHER parallel limits (nested parallel, editing
   branches/joinNodeKey topology) remain out of scope.
+- 🔜 **FOLLOW-UP (G-5 review, NAMED not fixed): cc / condition / parallel config unknown-key
+  fail-closed.** G-5 added `complexApprovalConfigHasBackendDrop` (top-level + nested) for `approval`
+  nodes ONLY. The SAME latent gap exists for cc/condition/parallel: the backend rebuilds those configs
+  from fixed shapes (e.g. cc → `{targetType, targetIds}`, ApprovalProductService.ts:920-923) and
+  silently drops any other key, while the FE spread-preserves it → save-flatten the FE round-trip
+  can't see. Pre-existing since G-2/3/4, outside G-5's stated scope; needs a sibling shape-check pass
+  (their nested shapes — condition `branches[].rules[]`, parallel `branches[]` — are deeper, so size
+  it separately). Tracked here as a declared boundary.

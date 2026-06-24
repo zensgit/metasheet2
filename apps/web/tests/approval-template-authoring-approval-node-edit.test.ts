@@ -223,4 +223,32 @@ describe('G-5 fail-closed — complex approval-node config must stay within the 
     const graph = complexWith({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { mergeWithRequester: true } })
     expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
   })
+
+  // NESTED unknown keys: the backend rebuilds assigneeSources[] / autoApprovalPolicy / fieldPermissions[]
+  // from fixed fields too, so a nested unknown key is ALSO silently dropped on save — must be fail-closed,
+  // not just top-level keys.
+  it('flags a nested unknown key in an assigneeSources entry (backend drops it)', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'direct_manager', futureFlag: true }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+  it('flags a nested unknown key in autoApprovalPolicy (backend drops it)', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'direct_manager' }], autoApprovalPolicy: { mergeWithRequester: true, futureFlag: true } })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+  it('flags a nested unknown key in a fieldPermissions entry (backend drops it)', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'direct_manager' }], fieldPermissions: [{ fieldId: 'amount', access: 'hidden', futureFlag: true }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+  it('flags an unknown assignee source KIND', () => {
+    const graph = complexWith({ assigneeSources: [{ kind: 'future_kind' }] })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).not.toBeNull()
+  })
+  it('ALLOWS fully-known nested shapes (per-kind fields + all 4 policy fields + fieldPermissions {fieldId,access})', () => {
+    const graph = complexWith({
+      assigneeSources: [{ kind: 'static_user', userIds: ['u1'] }, { kind: 'manager_at_level', level: 2 }],
+      autoApprovalPolicy: { mergeWithRequester: true, mergeAdjacentApprover: false, dedupeHistoricalApprover: true, actorMode: 'system' },
+      fieldPermissions: [{ fieldId: 'amount', access: 'hidden' }],
+    })
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
+  })
 })
