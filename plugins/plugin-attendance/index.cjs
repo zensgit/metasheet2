@@ -10316,6 +10316,13 @@ function validateOvertimeSegmentationWindow(input = {}) {
   // UTC/literal date compare) so a Z-string that shares a UTC date but crosses local midnight is not masked.
   const split = splitOvertimeSegmentationWindowAtMidnight({ startAt, endAt, timeZone: input.timeZone })
   if (!split.ok) return { ok: false, code: split.code }
+  // #8 NS-3 (owner review §P1): anchor to workDate. The window must START on workDate (a one-midnight window
+  // then naturally spans workDate → next day). A window whose first local date is NOT workDate — e.g. both ends
+  // land on D+1 while workDate=D — is rejected, restoring the anchoring the pre-NS-3 date compare enforced
+  // (else the snapshot's same-day path would attribute an off-workDate window onto workDate).
+  if (split.spans[0]?.date !== workDate) {
+    return { ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' }
+  }
   return { ok: true, crossesMidnight: split.crossesMidnight === true, spans: split.spans }
 }
 

@@ -135,8 +135,8 @@ describe('attendance overtime segmentation O1 helper', () => {
     })).toMatchObject({ ok: true, crossesMidnight: false })
     expect(helpers.validateOvertimeSegmentationWindow({
       workDate: '2026-10-01',
-      requestedInAt: '2026-10-01T00:30:00+08:00',
-      requestedOutAt: '2026-10-01T02:00:00+08:00',
+      requestedInAt: '2026-10-01T08:00:00.000Z',
+      requestedOutAt: '2026-10-01T10:00:00.000Z',
     })).toMatchObject({ ok: true, crossesMidnight: false })
     // one local midnight → NOW ACCEPTED with per-date spans (pre-NS-3 was OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED)
     const cross = helpers.validateOvertimeSegmentationWindow({
@@ -153,6 +153,13 @@ describe('attendance overtime segmentation O1 helper', () => {
       requestedInAt: '2026-10-01T23:00:00.000Z',
       requestedOutAt: '2026-10-01T22:00:00.000Z',
     })).toEqual({ ok: false, code: 'OVERTIME_INVALID_TIME_WINDOW' })
+    // §P1 workDate anchoring: a window whose first local date is NOT workDate (here both ends land on D+1
+    // while workDate=D) is REJECTED — it must not be silently snapshotted onto workDate.
+    expect(helpers.validateOvertimeSegmentationWindow({
+      workDate: '2026-10-01',
+      requestedInAt: '2026-10-02T09:00:00.000Z',
+      requestedOutAt: '2026-10-02T11:00:00.000Z',
+    })).toEqual({ ok: false, code: 'OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED' })
   })
 })
 

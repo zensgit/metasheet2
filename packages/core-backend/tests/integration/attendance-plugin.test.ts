@@ -5895,6 +5895,8 @@ attendanceIntegrationDescribe(
     const previousRbacBypass = process.env.RBAC_BYPASS
     const pool = new Pool({ connectionString: dbUrl })
     const createdRequestIds: string[] = []
+    let originalSettings: Record<string, unknown> = {}
+    let token: string | undefined
     const workDate = '2037-06-12' // June → no DST transition in any tz, so the local-midnight offset is stable
     const nextDate = '2037-06-13'
     const farDate = '2037-06-14'
@@ -5909,7 +5911,7 @@ attendanceIntegrationDescribe(
     try {
       process.env.RBAC_BYPASS = 'true'
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
-      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 
@@ -5928,6 +5930,9 @@ attendanceIntegrationDescribe(
 
       // holiday on the after-midnight date → its portion must bucket to holiday.
       await pool.query(`INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin) VALUES ($1, 'default', $2, $3, false, 'national')`, [holidayId, nextDate, `NS3 Holiday ${runSuffix}`])
+      // §P2: snapshot settings so finally can restore them (segmentation is a GLOBAL toggle — don't leak it).
+      const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
+      originalSettings = ((settingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
       expect((await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify({ overtimeSegmentation: { enabled: true } }) })).status).toBe(200)
 
       const createOvertime = async (body: Record<string, unknown>) => {
@@ -5964,10 +5969,16 @@ attendanceIntegrationDescribe(
       expect(multiRes.status).toBe(422)
       expect((multiRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('OVERTIME_CROSS_MIDNIGHT_UNSUPPORTED')
     } finally {
+      // §P2: restore the GLOBAL segmentation setting so later tests don't run under enabled=true.
+      if (token && Object.keys(originalSettings).length > 0) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
+      }
       if (createdRequestIds.length > 0) {
         await pool.query('DELETE FROM attendance_events WHERE meta->>\'requestId\' = ANY($1::text[])', [createdRequestIds]).catch(() => undefined)
         await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
       }
+      // §P2: the approve step can write a record for the synthetic user/dates — clean it up.
+      await pool.query('DELETE FROM attendance_records WHERE user_id = $1 AND work_date::text = ANY($2::text[])', [userId, [workDate, nextDate, farDate]]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_holidays WHERE id = $1', [holidayId]).catch(() => undefined)
       if (overtimeRuleId) await pool.query('DELETE FROM attendance_overtime_rules WHERE id = $1', [overtimeRuleId]).catch(() => undefined)
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
