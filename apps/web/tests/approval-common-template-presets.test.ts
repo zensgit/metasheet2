@@ -3,10 +3,11 @@ import type { ApprovalTemplateDetailDTO, CreateApprovalTemplateRequest } from '.
 import {
   buildCommonApprovalTemplatePresetPayload,
   COMMON_APPROVAL_TEMPLATE_PRESETS,
-  type CommonApprovalTemplatePresetId,
 } from '../src/approvals/commonTemplatePresets'
 import {
+  buildApprovalGraph,
   draftFromTemplate,
+  graphReadOnlyReason,
   unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
 } from '../src/approvals/templateAuthoring'
@@ -31,24 +32,24 @@ function detailFromPayload(payload: CreateApprovalTemplateRequest): ApprovalTemp
 }
 
 describe('common approval template presets', () => {
-  it('ships the first three business presets as draft creators', () => {
+  it('ships the basic + amount-tier business presets as draft creators', () => {
     expect(COMMON_APPROVAL_TEMPLATE_PRESETS.map((preset) => preset.id)).toEqual([
       'leave',
       'reimbursement',
       'purchase',
+      'reimbursement_amount_tier',
+      'purchase_amount_tier',
     ])
   })
 
-  it.each(COMMON_APPROVAL_TEMPLATE_PRESETS.map((preset) => preset.id))(
-    '%s preset creates a linear editable template payload',
+  it.each(['leave', 'reimbursement', 'purchase'] as const)(
+    '%s basic preset creates a LINEAR editable template payload',
     (presetId) => {
-      const payload = buildCommonApprovalTemplatePresetPayload(presetId as CommonApprovalTemplatePresetId, {
-        keySuffix: 'unit',
-      })
+      const payload = buildCommonApprovalTemplatePresetPayload(presetId, { keySuffix: 'unit' })
       const detail = detailFromPayload(payload)
       const nodeTypes = payload.approvalGraph.nodes.map((node) => node.type)
 
-      expect(payload.key).toMatch(new RegExp(`^${presetId === 'leave' ? 'leave' : presetId}-approval-unit$`))
+      expect(payload.key).toMatch(new RegExp(`^${presetId}-approval-unit$`))
       expect(nodeTypes.every((type) => type === 'start' || type === 'approval' || type === 'end')).toBe(true)
       expect(payload.approvalGraph.edges).toHaveLength(payload.approvalGraph.nodes.length - 1)
       expect(unsupportedTemplateAuthoringReason(detail)).toBeNull()
@@ -59,6 +60,41 @@ describe('common approval template presets', () => {
       expect(validateTemplateDraft(draft, null)).toEqual([])
     },
   )
+
+  it.each(['reimbursement_amount_tier', 'purchase_amount_tier'] as const)(
+    '%s amount-tier preset creates a COMPLEX preserved graph (anti-flatten round-trip, G-1 floor)',
+    (presetId) => {
+      const payload = buildCommonApprovalTemplatePresetPayload(presetId, { keySuffix: 'unit' })
+      const detail = detailFromPayload(payload)
+      const nodeTypes = payload.approvalGraph.nodes.map((node) => node.type)
+
+      // complex graph: an `amount` condition gate (+ parallel for purchase). NOT linear.
+      expect(nodeTypes).toContain('condition')
+      // supported (load-preserved, save ENABLED) but rendered read-only/structured.
+      expect(unsupportedTemplateAuthoringReason(detail)).toBeNull()
+      expect(graphReadOnlyReason(detail)).not.toBeNull()
+
+      // anti-flatten floor: captured as preservedGraph, NOT projected to steps, and re-emitted
+      // byte-identical (load→save can not flatten the condition/parallel nodes).
+      const draft = draftFromTemplate(detail)
+      expect(draft.preservedGraph).toBeDefined()
+      expect(draft.steps).toEqual([])
+      expect(buildApprovalGraph(draft)).toEqual(payload.approvalGraph)
+      expect(validateTemplateDraft(draft, null)).toEqual([])
+    },
+  )
+
+  it('reimbursement_amount_tier gates a higher-tier approver on amount >= 5000', () => {
+    const payload = buildCommonApprovalTemplatePresetPayload('reimbursement_amount_tier', { keySuffix: 'unit' })
+    const gate = payload.approvalGraph.nodes.find((node) => node.type === 'condition')
+    expect(gate?.config).toMatchObject({ branches: [{ rules: [{ fieldId: 'amount', operator: 'gte', value: 5000 }] }] })
+  })
+
+  it('purchase_amount_tier forks to a parallel会签 join at the terminal end node', () => {
+    const payload = buildCommonApprovalTemplatePresetPayload('purchase_amount_tier', { keySuffix: 'unit' })
+    const parallel = payload.approvalGraph.nodes.find((node) => node.type === 'parallel')
+    expect(parallel?.config).toMatchObject({ joinMode: 'all', joinNodeKey: 'end' })
+  })
 
   it('purchase preset uses the budget owner user field and a detail table without complex graph nodes', () => {
     const payload = buildCommonApprovalTemplatePresetPayload('purchase', { keySuffix: 'unit' })

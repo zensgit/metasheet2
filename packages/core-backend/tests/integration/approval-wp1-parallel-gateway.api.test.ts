@@ -125,6 +125,30 @@ function buildParallelGatewayGraph(joinMode: 'all' | 'any' = 'all') {
   }
 }
 
+// Terminal-join variant (#3114 purchase amount-tier preset uses joinNodeKey:'end'): a parallel fork
+// whose branches join directly at the END node — the regression guard proving the runtime fork-join
+// executor COMPLETES the instance when the join target is terminal (resolveFromNode(joinNodeKey) →
+// end-completes, ApprovalGraphExecutor.ts ~676/761), so a future executor refactor can't silently
+// break it. Static assignees sidestep the directory; the topology is what's under test.
+function buildJoinAtEndGraph() {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      { key: 'parallel_fork', type: 'parallel', config: { branches: ['edge-fork-a', 'edge-fork-b'], joinMode: 'all', joinNodeKey: 'end' } },
+      { key: 'approver_a', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['joinend-a'] } },
+      { key: 'approver_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['joinend-b'] } },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-fork', source: 'start', target: 'parallel_fork' },
+      { key: 'edge-fork-a', source: 'parallel_fork', target: 'approver_a' },
+      { key: 'edge-fork-b', source: 'parallel_fork', target: 'approver_b' },
+      { key: 'edge-a-end', source: 'approver_a', target: 'end' },
+      { key: 'edge-b-end', source: 'approver_b', target: 'end' },
+    ],
+  }
+}
+
 describeIfDatabase('Approval Wave 2 WP1 parallel-gateway (并行分支) API', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''
@@ -170,6 +194,39 @@ describeIfDatabase('Approval Wave 2 WP1 parallel-gateway (并行分支) API', ()
     if (server) {
       await server.stop()
     }
+  })
+
+  it('parallel branches that join at a TERMINAL end node complete the instance (joinNodeKey=end, #3114 amount-tier purchase shape)', async () => {
+    const adminToken = await authToken(baseUrl, 'approval-admin-joinend')
+    const requesterToken = await authToken(baseUrl, 'requester-joinend')
+    const aToken = await authToken(baseUrl, 'joinend-a')
+    const bToken = await authToken(baseUrl, 'joinend-b')
+
+    const templateResponse = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: { key: `approval-joinend-${Date.now()}`, name: 'Join-At-End Template', formSchema: buildFormSchema(), approvalGraph: buildJoinAtEndGraph() },
+    })
+    expect(templateResponse.status).toBe(201)
+    const template = await templateResponse.json() as { id: string }
+    createdTemplateIds.add(template.id)
+    expect((await jsonRequest(baseUrl, `/api/approval-templates/${template.id}/publish`, adminToken, { method: 'POST', body: { policy: { allowRevoke: true } } })).status).toBe(200)
+
+    const createResponse = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId: template.id, formData: { reason: 'join-at-end' } },
+    })
+    expect(createResponse.status).toBe(201)
+    const approval = await createResponse.json() as { id: string; status: string; currentNodeKeys?: string[] | null }
+    createdApprovalIds.add(approval.id)
+    expect([...(approval.currentNodeKeys || [])].sort()).toEqual(['approver_a', 'approver_b']) // forked to both branches
+
+    // approve the first branch — still pending (join-all waits for both)
+    const afterA = await (await jsonRequest(baseUrl, `/api/approvals/${approval.id}/actions`, aToken, { method: 'POST', body: { action: 'approve' } })).json() as { status: string }
+    expect(afterA.status).toBe('pending')
+
+    // approve the second branch — join-all satisfied, join target is END → instance COMPLETES
+    const afterB = await (await jsonRequest(baseUrl, `/api/approvals/${approval.id}/actions`, bToken, { method: 'POST', body: { action: 'approve' } })).json() as { status: string }
+    expect(afterB.status).toBe('approved') // resolveFromNode(joinNodeKey='end') completed the instance
   })
 
   it('forks two branches and joins only after all branches complete (joinMode=all)', async () => {

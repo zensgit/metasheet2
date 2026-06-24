@@ -118,4 +118,18 @@ describeIfDatabase('common approval template presets — real-DB backend accepta
       )
     },
   )
+
+  it('purchase_amount_tier: the parallel node round-trips with joinNodeKey=end through create→normalize', async () => {
+    // The purchase amount-tier preset's high path forks to a parallel join that targets the terminal
+    // END node. Assert the backend normalize preserves joinNodeKey='end' (a future "helpful" rewrite
+    // of the join target — e.g. to a synthetic join node — would silently change the runtime shape).
+    const payload = buildCommonApprovalTemplatePresetPayload('purchase_amount_tier', { keySuffix: `realdb-${TS}-joinkey` })
+    const response = await jsonRequest(baseUrl, '/api/approval-templates', token, { method: 'POST', body: payload })
+    expect(response.status, await response.clone().text()).toBe(201)
+    const body = await response.json() as { approvalGraph: { nodes: Array<{ type: string; config: Record<string, unknown> }> } }
+    const parallel = body.approvalGraph.nodes.find((node) => node.type === 'parallel')
+    expect(parallel).toBeDefined()
+    expect(parallel!.config.joinNodeKey).toBe('end')
+    expect(parallel!.config.joinMode).toBe('all')
+  })
 })

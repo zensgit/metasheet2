@@ -8,7 +8,12 @@ import type {
   FormSchema,
 } from '../types/approval'
 
-export type CommonApprovalTemplatePresetId = 'leave' | 'reimbursement' | 'purchase'
+export type CommonApprovalTemplatePresetId =
+  | 'leave'
+  | 'reimbursement'
+  | 'purchase'
+  | 'reimbursement_amount_tier'
+  | 'purchase_amount_tier'
 
 export interface CommonApprovalTemplatePreset {
   id: CommonApprovalTemplatePresetId
@@ -50,6 +55,18 @@ export const COMMON_APPROVAL_TEMPLATE_PRESETS: CommonApprovalTemplatePreset[] = 
     title: '采购审批',
     category: '采购',
     description: '采购类型、供应商、预算负责人、物品明细与逐级审核。',
+  },
+  {
+    id: 'reimbursement_amount_tier',
+    title: '报销审批（金额分级）',
+    category: '报销',
+    description: '高额报销自动升级：金额达阈值时增加部门主管审批（阈值/审批人可调）。',
+  },
+  {
+    id: 'purchase_amount_tier',
+    title: '采购审批（金额分级）',
+    category: '采购',
+    description: '高额采购升级并行会签：金额达阈值时由上级经理与指定角色并行审批（阈值/汇聚模式/审批人可调）。',
   },
 ]
 
@@ -181,6 +198,61 @@ function purchaseSchema(): FormSchema {
   }
 }
 
+// Amount-tier reimbursement (design-lock #3114): a condition node gates a higher-tier approver on the
+// top-level `amount`. Low amount → end after the direct manager; amount ≥ threshold → a dept-head
+// (higher-tier) approval before end. Default threshold 5000, editable in the condition-node rule
+// (Gate-A). The branch reads the top-level `amount` total (detail-row auto-sum is a separate
+// form-field capability, not this slice — design-lock Decision 1).
+function reimbursementAmountTierGraph(): ApprovalGraph {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'approval_1', type: 'approval', name: '直属上级审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'amount_gate', type: 'condition', name: '金额分级判断', config: { branches: [{ edgeKey: 'edge-gate-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 5000 }] }], defaultEdgeKey: 'edge-gate-end' } },
+      { key: 'approval_high', type: 'approval', name: '部门主管审批（高额）', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+      { key: 'edge-approval_1-gate', source: 'approval_1', target: 'amount_gate' },
+      { key: 'edge-gate-high', source: 'amount_gate', target: 'approval_high' },
+      { key: 'edge-gate-end', source: 'amount_gate', target: 'end' },
+      { key: 'edge-high-end', source: 'approval_high', target: 'end' },
+    ],
+  }
+}
+
+// Amount-tier purchase (design-lock #3114): the condition node routes on the top-level `amount` —
+// below threshold → a single direct-manager approval; at/above threshold → a PARALLEL fork (joinMode
+// 'all' = 会签 by default; 'any' = 或签 editable) of two DISTINCT higher approvers that join at `end`.
+// Default threshold 20000. The two parallel approvers use distinct DYNAMIC sources (no static IDs →
+// no create-time duplicate-assignee reject); the role node is a starter to retune before publishing.
+function purchaseAmountTierGraph(): ApprovalGraph {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'budget_owner_approval', type: 'approval', name: '预算负责人审批', config: { assigneeSources: [{ kind: 'form_field_user', fieldId: 'budget_owner' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'amount_gate', type: 'condition', name: '金额分级判断', config: { branches: [{ edgeKey: 'edge-gate-fork', rules: [{ fieldId: 'amount', operator: 'gte', value: 20000 }] }], defaultEdgeKey: 'edge-gate-manager' } },
+      { key: 'manager_approval', type: 'approval', name: '直属上级审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'parallel_fork', type: 'parallel', name: '高额并行审批（会签）', config: { branches: ['edge-fork-mgr', 'edge-fork-role'], joinMode: 'all', joinNodeKey: 'end' } },
+      { key: 'higher_manager_approval', type: 'approval', name: '上级经理审批（高额）', config: { assigneeSources: [{ kind: 'manager_at_level', level: 2 }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'role_approval', type: 'approval', name: '部门负责人/指定角色审批（发布前配置）', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-budget', source: 'start', target: 'budget_owner_approval' },
+      { key: 'edge-budget-gate', source: 'budget_owner_approval', target: 'amount_gate' },
+      { key: 'edge-gate-fork', source: 'amount_gate', target: 'parallel_fork' },
+      { key: 'edge-gate-manager', source: 'amount_gate', target: 'manager_approval' },
+      { key: 'edge-fork-mgr', source: 'parallel_fork', target: 'higher_manager_approval' },
+      { key: 'edge-fork-role', source: 'parallel_fork', target: 'role_approval' },
+      { key: 'edge-mgr-end', source: 'higher_manager_approval', target: 'end' },
+      { key: 'edge-role-end', source: 'role_approval', target: 'end' },
+      { key: 'edge-manager-end', source: 'manager_approval', target: 'end' },
+    ],
+  }
+}
+
 function presetConfig(id: CommonApprovalTemplatePresetId): {
   keyPrefix: string
   name: string
@@ -226,6 +298,24 @@ function presetConfig(id: CommonApprovalTemplatePresetId): {
           { name: '直属上级审批', source: { kind: 'direct_manager' } },
           { name: '部门主管审批', source: { kind: 'dept_head' } },
         ]),
+      }
+    case 'reimbursement_amount_tier':
+      return {
+        keyPrefix: 'reimbursement-amount-tier',
+        name: '报销审批（金额分级）',
+        description: '高额报销自动升级审批草稿。金额阈值与各级审批人可在编辑页调整后再发布。',
+        category: '报销',
+        formSchema: reimbursementSchema(),
+        approvalGraph: reimbursementAmountTierGraph(),
+      }
+    case 'purchase_amount_tier':
+      return {
+        keyPrefix: 'purchase-amount-tier',
+        name: '采购审批（金额分级）',
+        description: '高额采购升级为并行会签草稿。金额阈值、汇聚模式（会签/或签）与各级审批人可在编辑页调整后再发布。',
+        category: '采购',
+        formSchema: purchaseSchema(),
+        approvalGraph: purchaseAmountTierGraph(),
       }
   }
 }
