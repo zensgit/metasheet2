@@ -212,6 +212,16 @@ const DEFAULT_SETTINGS = {
   overtimeSegmentation: {
     enabled: false,
   },
+  // 加班银行 (overtime bank) — OvertimeBankPolicy v1-1a LATENT config (design-lock
+  // attendance-overtime-bank-settlement-designlock-20260624, §3/§6/§11). Default OFF; nothing enforces it
+  // yet (v1-1b source-tagged lots + later slices consume it). pooledSources is an allowlist that CANNOT
+  // contain statutory_holiday — 法定节假日加班按《劳动法》§44 必须支付、不得调休抵扣 (compliance floor §6).
+  overtimeBankPolicy: {
+    enabled: false,
+    pooledSources: [],
+    maxMinutesPerPeriod: 0,
+    validityDays: null,
+  },
   // 自动对班 (auto shift matching) — A1 preview/manual apply plus A2 scheduler auto-write.
   // Runtime still requires env flags in addition to these org settings.
   autoShiftMatching: {
@@ -11860,6 +11870,7 @@ function normalizeSettings(raw) {
     compTimeFromOvertime: normalizeCompTimeFromOvertimeSetting(raw.compTimeFromOvertime),
     annualLeavePolicy: normalizeAnnualLeavePolicySetting(raw.annualLeavePolicy),
     overtimeSegmentation: normalizeOvertimeSegmentationSetting(raw.overtimeSegmentation),
+    overtimeBankPolicy: normalizeOvertimeBankPolicySetting(raw.overtimeBankPolicy),
     autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
   }
 }
@@ -11987,6 +11998,38 @@ function normalizeAnnualLeaveTiers(raw, fallbackTiers) {
   }
   if (tiers.length > 0 && tiers[tiers.length - 1].maxYears !== null) return clone()
   return tiers
+}
+
+// 加班银行可入池来源白名单 (OvertimeBankPolicy.pooledSources allowlist). statutory_holiday 故意缺席:§6 合规
+// 下限 —— 法定节假日加班按《劳动法》§44 必须支付、不得进调休池,无论管理员怎么配。adjusted_rest_day /
+// company_holiday 可配;workday 默认不入池(§11)但企业显式 opt-in 时允许。
+const OVERTIME_BANK_POOLABLE_SOURCES = Object.freeze([
+  'workday', 'restday', 'adjusted_rest_day', 'company_holiday', 'special_hours',
+])
+
+// OvertimeBankPolicy v1-1a LATENT normalizer. Fail-closed enum-strict: only the allowlist survives in
+// pooledSources (statutory_holiday + unknowns dropped = compliance floor §6). Default dormant (enabled
+// false). Nothing enforces this yet; v1-1b source-tagged lots + later slices consume it.
+function normalizeOvertimeBankPolicySetting(raw) {
+  const value = raw && typeof raw === 'object' ? raw : {}
+  const seen = new Set()
+  const pooledSources = []
+  for (const item of Array.isArray(value.pooledSources) ? value.pooledSources : []) {
+    if (typeof item === 'string' && OVERTIME_BANK_POOLABLE_SOURCES.includes(item) && !seen.has(item)) {
+      seen.add(item)
+      pooledSources.push(item)
+    }
+  }
+  const validityRaw = value.validityDays
+  const validityDays = validityRaw === null || validityRaw === undefined
+    ? null
+    : (Math.max(0, parseNumber(validityRaw, 0)) || null)
+  return {
+    enabled: parseBoolean(value.enabled, false),
+    pooledSources,
+    maxMinutesPerPeriod: Math.max(0, parseNumber(value.maxMinutesPerPeriod, 0)),
+    validityDays,
+  }
 }
 
 function normalizeOvertimeSegmentationSetting(raw) {
@@ -18296,6 +18339,10 @@ module.exports = {
     bucketOvertimeSegmentationWindowAtMidnight,
     maybeBuildOvertimeSegmentationSnapshot,
   },
+  __attendanceOvertimeBankForTests: {
+    OVERTIME_BANK_POOLABLE_SOURCES,
+    normalizeOvertimeBankPolicySetting,
+  },
   __attendanceReportFieldCatalogForTests: {
     ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS,
     ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
@@ -19388,6 +19435,15 @@ module.exports = {
       compTimeFromOvertime: z.object({
         enabled: z.boolean().optional(),
         expiresInDays: z.number().int().positive().nullable().optional(),
+      }).optional(),
+      // 加班银行 (overtime bank) — OvertimeBankPolicy v1-1a latent config. Round-trips through PUT/GET; no
+      // runtime enforces it yet. pooledSources enum EXCLUDES statutory_holiday (compliance floor §6 — 法定
+      // 节假日加班 must be paid, not poolable), so a PUT including it is rejected at the API.
+      overtimeBankPolicy: z.object({
+        enabled: z.boolean().optional(),
+        pooledSources: z.array(z.enum(['workday', 'restday', 'adjusted_rest_day', 'company_holiday', 'special_hours'])).optional(),
+        maxMinutesPerPeriod: z.number().int().min(0).optional(),
+        validityDays: z.number().int().positive().nullable().optional(),
       }).optional(),
       // 年假/法定假余额引擎 — L0 latent config (design-lock #2622). Round-trips through PUT/GET; no
       // runtime reads it until L2 (accrual). tiers = org-configurable statutory bands.
