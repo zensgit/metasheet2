@@ -21,6 +21,7 @@ on:
       - 'apps/web/src/approvals/parallelEdit.ts'
       - 'apps/web/src/approvals/ccEdit.ts'
       - 'apps/web/src/approvals/approvalNodeEdit.ts'
+      - 'apps/web/src/approvals/graphTopologyEdit.ts'
       - 'apps/web/src/approvals/detailField.ts'
       - 'apps/web/src/approvals/commonTemplatePresets.ts'
       - 'apps/web/src/approvals/templateAuthoring.ts'
@@ -37,6 +38,7 @@ on:
       - 'apps/web/tests/approval-template-authoring-cc-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-approval-node-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-complex-node-config-allowlist.test.ts'
+      - 'apps/web/tests/approval-graph-topology-edit.test.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -45,6 +47,7 @@ on:
       - 'apps/web/src/approvals/parallelEdit.ts'
       - 'apps/web/src/approvals/ccEdit.ts'
       - 'apps/web/src/approvals/approvalNodeEdit.ts'
+      - 'apps/web/src/approvals/graphTopologyEdit.ts'
       - 'apps/web/src/approvals/detailField.ts'
       - 'apps/web/src/approvals/commonTemplatePresets.ts'
       - 'apps/web/src/approvals/templateAuthoring.ts'
@@ -61,6 +64,7 @@ on:
       - 'apps/web/tests/approval-template-authoring-cc-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-approval-node-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-complex-node-config-allowlist.test.ts'
+      - 'apps/web/tests/approval-graph-topology-edit.test.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -117,4 +121,4 @@ jobs:
         # changes; branches/joinNodeKey + all other nodes + edges byte-identical) + cross-phase
         # compose (condition G-2 + parallel G-3 both land) + seeding round-trip + validation preview
         # (joinMode in backend-accepted {'all','any'}; cc untouched / G-4).
-        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit --reporter=dot

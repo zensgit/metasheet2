@@ -824,6 +824,37 @@ describe('TemplateAuthoringView', () => {
     expect(container!.querySelector('[data-testid="approval-node-placeholder-hint"]')).toBeNull()
   })
 
+  it('D-3 topology: clicking "add condition branch" grows the condition graph and saves the new structure', async () => {
+    routeParams = { id: 'tpl_topo' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'cond_1', type: 'condition', name: '判断', config: { branches: [{ edgeKey: 'e-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] }], defaultEdgeKey: 'e-low' } },
+          { key: 'app_high', type: 'approval', name: '高', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-c', source: 'start', target: 'cond_1' },
+          { key: 'e-high', source: 'cond_1', target: 'app_high' },
+          { key: 'e-low', source: 'cond_1', target: 'end' },
+          { key: 'e-high-end', source: 'app_high', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+    const rowsBefore = container!.querySelectorAll('[data-testid="approval-graph-node-row"]').length
+    ;(container!.querySelector('[data-testid="approval-topology-add-condition-branch-cond_1"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-graph-node-row"]').length).toBe(rowsBefore + 1) // a new approval node appeared
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches).toHaveLength(2) // the added branch is saved
+  })
+
   it('dept_head reads back editable: a saved dept_head template is NOT fail-closed (no unsupported alert, save enabled, sourceKind hydrated)', async () => {
     routeParams = { id: 'tpl_dh' }
     getTemplateSpy.mockResolvedValue(buildTemplate({
