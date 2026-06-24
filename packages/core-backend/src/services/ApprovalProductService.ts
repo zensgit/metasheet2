@@ -485,8 +485,10 @@ function failValidation(context: ValidationContext, message: string): never {
 
 // A starter preset (e.g. the amount-tier purchase, #3114) ships a static_role branch the admin MUST
 // configure before publishing. A NORMAL placeholder role id would publish fine and then JAM the flow
-// at runtime (empty role → emptyAssigneePolicy 'error' on every instance — a stuck flow, not a clear
-// signal). Instead the starter uses this SENTINEL role id, and `assertNoUnconfiguredPlaceholderRoles`
+// at runtime: a placeholder static_role creates a ROLE-typed assignment to a role NOBODY holds, so
+// every instance STALLS on an unclaimable role assignment in to-do matching (NOT an empty-assignee
+// error — emptyAssigneePolicy never fires; the source resolves to one role assignment, just an
+// unclaimable one). Instead the starter uses this SENTINEL role id, and `assertNoUnconfiguredPlaceholderRoles`
 // FAIL-FASTS at PUBLISH, so an untouched preset can never reach a published definition — which also
 // means START is inherently protected (no published graph can contain the sentinel). FE mirror:
 // apps/web/src/types/approval.ts `APPROVAL_ROLE_CONFIGURE_SENTINEL` (the match is locked end-to-end by
@@ -2493,7 +2495,8 @@ export class ApprovalProductService {
       validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
-      // otherwise the high path jams at runtime (empty role). See APPROVAL_ROLE_CONFIGURE_SENTINEL.
+      // otherwise the high path stalls at runtime on an unclaimable role assignment (nobody holds the
+      // placeholder role). See APPROVAL_ROLE_CONFIGURE_SENTINEL.
       assertNoUnconfiguredPlaceholderRoles(approvalGraph)
       const runtimeGraph = buildRuntimeGraph(approvalGraph, policy)
 
