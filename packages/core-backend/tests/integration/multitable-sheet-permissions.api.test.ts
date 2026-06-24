@@ -2,6 +2,8 @@ import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import { configRevisionNoop } from './config-revision-mock'
+
 type QueryResult = {
   rows: any[]
   rowCount?: number
@@ -186,6 +188,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ id: 'rec_1', sheet_id: 'sheet_ops', version: 3, data: { fld_name: 'Order A' } }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -283,6 +286,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -351,6 +355,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -398,6 +403,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
           return { rows: [] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -436,6 +442,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -496,6 +503,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ id: 'rec_owned', sheet_id: 'sheet_ops', version: 3, data: { fld_name: 'Mine' }, created_by: 'user_sheet_acl_1' }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -547,6 +555,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ id: 'rec_1', sheet_id: 'sheet_ops', version: 1, data: { fld_name: 'Blocked' }, created_by: 'user_sheet_acl_2' }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -597,6 +606,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['rec_1'])
           return { rows: [{ id: 'rec_1', sheet_id: 'sheet_ops' }] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -687,6 +697,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -775,6 +786,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -974,6 +986,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           records.delete('rec_owned')
           return { rows: [] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1068,6 +1081,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['view_grid'])
           return { rows: [{ id: 'view_grid', sheet_id: 'sheet_ops' }] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1125,6 +1139,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1328,6 +1343,7 @@ describe('Multitable sheet-scoped permissions API', () => {
         if (sql.includes('SELECT id, email, name, avatar_url') && sql.includes('FROM users')) {
           return { rows: [] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1502,6 +1518,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['role_ops_writer'])
           return { rows: [{ permission_code: 'multitable:write' }] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1621,6 +1638,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1682,6 +1700,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1771,6 +1790,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           if (params?.[0] === 'role_scope_only') return { rows: [] }
           throw new Error(`Unexpected role permission lookup: ${params?.[0]}`)
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1886,6 +1906,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1987,6 +2008,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2071,6 +2093,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2177,6 +2200,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2235,6 +2259,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['role_ops_writer'])
           return { rows: [{ id: 'role_ops_writer' }] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2262,6 +2287,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
           return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write-own', subject_type: 'user' }] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2293,6 +2319,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
           return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write', subject_type: 'user' }] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2352,6 +2379,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2413,6 +2441,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [], rowCount: 1 }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2441,6 +2470,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ sheet_id: 'sheet_locked', perm_code: 'spreadsheet:comment' }],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2484,6 +2514,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2533,6 +2564,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['sheet_target'])
           return { rows: [{ id: 'sheet_target', base_id: 'base_ops', name: 'Vendors', description: null }] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2596,6 +2628,7 @@ describe('Multitable sheet-scoped permissions API', () => {
         if (sql.includes('field_permissions')) {
           return { rows: [] }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2677,6 +2710,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             return { rows: [{ sheet_id: 'sheet_vendors', perm_code: 'spreadsheet:write-own' }] }
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2755,6 +2789,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             return { rows: [{ sheet_id: 'sheet_vendors', perm_code: 'spreadsheet:comment' }] }
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2812,6 +2847,7 @@ describe('Multitable sheet-scoped permissions API', () => {
         if (sql.includes('INSERT INTO meta_fields')) {
           throw new Error('field insert should not run when foreign sheet is unreadable')
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2854,6 +2890,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2903,6 +2940,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2957,6 +2995,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3011,6 +3050,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3063,6 +3103,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             ],
           }
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3101,6 +3142,7 @@ describe('Multitable sheet-scoped permissions API', () => {
         if (sql.includes('FROM field_permissions fp') && sql.includes('LEFT JOIN platform_member_groups g')) {
           throw undefinedTableError('platform_member_groups')
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3131,6 +3173,7 @@ describe('Multitable sheet-scoped permissions API', () => {
         if (sql.includes('FROM meta_view_permissions vp') && sql.includes('LEFT JOIN platform_member_groups g')) {
           throw undefinedTableError('platform_member_groups')
         }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
