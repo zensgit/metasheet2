@@ -45,6 +45,7 @@ import {
   cancelBulkJob,
   setHeaderRunning,
   insertBulkJobHeader,
+  insertBulkJobRowsPending,
   reconcileOrphanedBulkJobs,
 } from '../../src/services/ai-bulk-job-service'
 import { QueueServiceImpl } from '../../src/services/QueueService'
@@ -679,6 +680,54 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
     expect((await dbJobHeader(recentRunning))!.status).toBe('running')
     expect((await dbJobHeader(suspendedOld))!.status).toBe('suspended')
     expect(reconciled).toBeGreaterThanOrEqual(2)
+  })
+
+  test('hard-restart reconcile (TRUTHFUL ROWS): seeded rows → errored; generated stays charged, pending → pending_not_generated, skipped untouched, NO raw pending leaks', async () => {
+    const queryFn = q as unknown as AiUsageQueryFn
+    const jid = `aibulkjob_reconrows_${TS}`
+    await insertBulkJobHeader(queryFn, {
+      jobId: jid,
+      actorId: ACTOR,
+      sheetId: SHEET_ID,
+      fieldId: `${FLD_TARGET}_reconrows`,
+      scopeFingerprint: 'fp_reconrows',
+      total: 3,
+    })
+    // A PARTIAL pre-restart state: 1 generated (charged), 1 still pending (the worker
+    // never reached it), 1 skipped. A hard restart then orphaned the running header.
+    await insertBulkJobRowsPending(queryFn, jid, [
+      { recordId: 'rec_gen', ordinal: 0, state: 'pending', currentValue: 'old' },
+      { recordId: 'rec_pend', ordinal: 1, state: 'pending', currentValue: null },
+      { recordId: 'rec_skip', ordinal: 2, state: 'skipped', currentValue: null, reason: 'skipped_no_perm' },
+    ])
+    await q(
+      `UPDATE ${AI_BULK_JOB_ROWS_TABLE} SET state = 'generated', proposed_value = $2, usage_tokens = 30, cost_usd = 0.01 WHERE job_id = $1 AND record_id = 'rec_gen'`,
+      [jid, 'AI OUT'],
+    )
+    await q(`UPDATE ${AI_BULK_JOB_TABLE} SET status = 'running', updated_at = NOW() - INTERVAL '5 minutes' WHERE job_id = $1`, [jid])
+
+    const reconciled = await reconcileOrphanedBulkJobs(queryFn, { staleAfterMs: 60_000 })
+    expect(reconciled).toBeGreaterThanOrEqual(1)
+
+    // Header reconciled to errored (committable terminal).
+    expect((await dbJobHeader(jid))!.status).toBe('errored')
+
+    // ROWS stay truthful: generated stays generated + charged; the still-pending row is
+    // converted to pending_not_generated (NOT left as raw `pending`, which the poll count +
+    // FE buckets would hide); skipped is untouched.
+    const rows = await dbJobRows(jid)
+    const byId = (rid: string) => rows.find((r) => String(r.record_id) === rid)!
+    expect(byId('rec_gen').state).toBe('generated')
+    expect(Number(byId('rec_gen').usage_tokens)).toBe(30) // still charged
+    expect(byId('rec_gen').proposed_value).toBe('AI OUT')
+    expect(byId('rec_pend').state).toBe('pending_not_generated')
+    expect(byId('rec_skip').state).toBe('skipped')
+    // Truthful-status keystone: NO row is left in raw `pending` (the state the UI hides).
+    expect(rows.filter((r) => r.state === 'pending')).toHaveLength(0)
+
+    // The poll surfaces the converted row in pendingNotGeneratedCount (visible in the FE breakdown).
+    const poll = await pollJob(jid)
+    expect(poll.body.pendingNotGeneratedCount).toBe(1)
   })
 
   // ── DURABILITY KEYSTONE (BJ-9) ─────────────────────────────────────────────
