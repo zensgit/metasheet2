@@ -5,17 +5,40 @@ import { PostgresAdapter } from './PostgresAdapter'
 import { HTTPAdapter } from './HTTPAdapter'
 import { MSSQLAdapter } from './MSSQLAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
+import { PLMAdapter } from './PLMAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
+import type { IConfigService, ILogger } from '../di/identifiers'
 
 // Credential fields that hold secrets and are encrypted at rest. Identifiers
 // like `username` are left as-is (matching the codebase's encrypt-secrets-only
 // convention).
 const SENSITIVE_CREDENTIAL_KEYS = ['password', 'apiKey', 'token']
-export const SUPPORTED_DATA_SOURCE_TYPES = ['postgresql', 'postgres', 'http', 'sqlserver', 'mysql'] as const
+export const SUPPORTED_DATA_SOURCE_TYPES = ['postgresql', 'postgres', 'http', 'sqlserver', 'mysql', 'plm'] as const
 export const DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED'
 export const DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED'
 
 type AdapterConstructor = new (config: DataSourceConfig) => BaseDataAdapter
+
+const emptyConfigService: IConfigService = {
+  get: async () => undefined,
+  set: async () => undefined,
+  getAll: async () => ({}),
+  reload: async () => undefined,
+  validate: async () => ({ valid: true, errors: [] }),
+}
+
+const consoleLogger: ILogger = {
+  info: (...args: unknown[]) => console.info(...args),
+  warn: (...args: unknown[]) => console.warn(...args),
+  error: (...args: unknown[]) => console.error(...args),
+  debug: (...args: unknown[]) => console.debug(...args),
+}
+
+class ManagedPLMAdapter extends PLMAdapter {
+  constructor(config: DataSourceConfig) {
+    super(emptyConfigService, consoleLogger, config)
+  }
+}
 
 function optionIsTrue(options: AdapterOptions | undefined, key: string): boolean {
   return options?.[key] === true
@@ -240,6 +263,7 @@ export class DataSourceManager extends EventEmitter {
     this.registerAdapterType('http', HTTPAdapter as unknown as AdapterConstructor)
     this.registerAdapterType('sqlserver', MSSQLAdapter as unknown as AdapterConstructor)
     this.registerAdapterType('mysql', MySQLAdapter as unknown as AdapterConstructor)
+    this.registerAdapterType('plm', ManagedPLMAdapter as unknown as AdapterConstructor)
   }
 
   registerAdapterType(type: string, adapterClass: AdapterConstructor): void {

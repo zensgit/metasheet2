@@ -23,7 +23,7 @@
 | **FOS-4b-1(action contract)** | 动作注册表 `FOS_PREDEFINED_ACTIONS` + preset `permittedActionIds`(enum-strict ∈ 注册表)+ normalizer(注册表∩permitted、param 白名单、gating 注册表所有、禁动作体)。**LOCK-SAFE 零执行**(generic route 仍 fail-closed;未接执行;stock-prep 零漂移) | ✅ done | #3066(`7a602a013`) |
 | **FOS-4b-2(action dry-run path)** | generic route `dryRun` 模式接受 actionId 引用 → 经 FOS-4b-1 注册表∩preset 校验 → values-free preview;**先不执行写**(preview 在 kernel 前 return → 零 patch / 零执行);非 dryRun + 动作 → fail-closed;pure-option 零漂移 | ✅ done(**owner ratified dry-run-only**)| #3072(`6f6ff921d`) |
 | FOS-4b-3-impl(sandbox apply gate)| P0 fail-closed sandbox 闸,守住 small+large-BOM 两条 apply 路径;server config / env(`STOCK_PREP_SANDBOX_MODE`+allowlist)开关;prod canonical 始终拒 | ✅ shipped(sandbox-only;owner ratified A;adversarial review APPROVE,large-BOM bypass 已闭)| #3089(`4b31901f6`) |
-| FOS-4b-3-prod(首笔生产 apply)| 解除 sandbox 限制、对 prod canonical 真实写 | 🔒 gated(独立 owner gate;sandbox validation 已 COMPLETE;下一步 = production gate design-lock / controlled canonical exception,不授权写)| `…fos-4b-3-prod-apply-gate-design-lock-20260625.md` |
+| FOS-4b-3-prod(首笔生产 apply)| 解除 sandbox 限制、对 prod canonical 真实写 | 🔒 gated:**P1 policy contract #3195 + P2 guarded runtime #3199 已合并但 dormant-by-default**(server-config-only,无 env;无配置 → canonical 仍拒);**P3 runbook 已写**;**P4 首笔生产写仍待独立 owner 授权 + 配置 production policy**(sandbox COMPLETE 不自动解锁)| design-lock `…prod-apply-gate-design-lock-20260625.md` + runbook `…prod-apply-runbook-20260625.md` |
 | FOS-4b 真实业务域 preset | stock-prep 表以外 source/target,各带自己的 readiness binding | 🔒 gated(需 named target) | 设计锁 §7.2 |
 | scheduled 触发 | scheduled / after_source_refresh | 🔒 gated(demand-gated,各带 gate + observability) | 设计锁 §11 |
 
@@ -165,7 +165,7 @@ evidence                : values-free(无 workspace/object/sheet id / projectNo 
 **sandbox validation COMPLETE:** Path 1(single-shot apply / idempotency / human-field),Step 1(Windows first-hop deploy),Path 2(large-BOM route-gate / held-row / idempotency)均 PASS。small-BOM in-function gate 与 large-BOM route gate 两个真实写入口均已实机证明。
 
 **仍 gated / 仍关闭:**
-- **FOS-4b-3-prod(首笔生产 apply / 写 prod canonical)**= **仍 gated**(独立 owner gate)。sandbox validation COMPLETE **不**自动解锁生产;production gate 需要单独授权、rollback/evidence plan、目标范围、stop rules,以及一个受控 canonical exception 的安全模型(`data-factory-fos-4b-3-prod-apply-gate-design-lock-20260625.md`)。
+- **FOS-4b-3-prod(首笔生产 apply / 写 prod canonical)**= **仍 gated**(独立 owner gate)。设计锁 = `data-factory-fos-4b-3-prod-apply-gate-design-lock-20260625.md`;受控 canonical exception 安全模型。**P1 policy contract(#3195 `931c018e2`)+ P2 guarded runtime(#3199 `aedc7dbf6`)已合并,但 dormant-by-default**(production policy = server-config-only,无 env;无配置 → 两个真实写入口都走 sandbox gate,canonical 仍拒;复审 APPROVE,route parity + 无 fall-through + 无 bypass 经验证)。**P3 production runbook 已写**(`data-factory-fos-4b-3-prod-apply-runbook-20260625.md`:授权模板 / 配置 / 预检 / dry-run→apply / 回滚 / stop rules / values-free evidence)。**P4 首笔真实生产写仍待独立 owner 授权 + 配置 production policy**;sandbox validation COMPLETE 不自动解锁。production apply 仍关闭。
 - **FOS-4b 真实业务域 preset**= 仍需 named target。
 - **scheduled / after-source-refresh**= 仍需 named demand。
 

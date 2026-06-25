@@ -2413,6 +2413,33 @@
                 </button>
               </div>
 
+              <div class="attendance__admin-subsection" data-admin-card="attendance-bonus-policy">
+                <h4>{{ tr('Full-attendance (满勤) policy', '满勤规则') }}</h4>
+                <p class="attendance__field-hint">
+                  {{ tr('What disqualifies a full-attendance bonus. Any leave breaks it even if the leave was offset by the comp-time pool; late/early beyond the threshold breaks it. Late/early thresholds reuse the shift rules.', '什么会取消满勤资格。任意请假即取消（即便该请假已被调休池抵扣）；迟到/早退超阈值即取消。迟到/早退阈值沿用班次规则。') }}
+                </p>
+                <label class="attendance__field attendance__field--inline" for="attendance-bonus-enabled">
+                  <input type="checkbox" id="attendance-bonus-enabled" v-model="attendanceBonusPolicyForm.enabled" data-bonus-policy="enabled" />
+                  <span>{{ tr('Enable full-attendance flag', '启用满勤标记') }}</span>
+                </label>
+                <label class="attendance__field attendance__field--inline" for="attendance-bonus-leave-breaks">
+                  <input type="checkbox" id="attendance-bonus-leave-breaks" v-model="attendanceBonusPolicyForm.anyLeaveBreaksFullAttendance" data-bonus-policy="leave-breaks" />
+                  <span>{{ tr('Any leave breaks full attendance (even if pool-offset)', '任意请假取消满勤（即便被池抵扣）') }}</span>
+                </label>
+                <label class="attendance__field attendance__field--inline" for="attendance-bonus-late-breaks">
+                  <input type="checkbox" id="attendance-bonus-late-breaks" v-model="attendanceBonusPolicyForm.lateBeyondThresholdBreaksFullAttendance" data-bonus-policy="late-breaks" />
+                  <span>{{ tr('Late / early-leave breaks full attendance', '迟到/早退取消满勤') }}</span>
+                </label>
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="settingsLoading"
+                  data-bonus-policy="save"
+                  @click="saveAttendanceBonusPolicy"
+                >
+                  {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save full-attendance policy', '保存满勤规则') }}
+                </button>
+              </div>
+
               <div class="attendance__admin-subsection" data-admin-card="multi-shift-day">
                 <h4>{{ tr('Multi-shift day', '一天多班次') }}</h4>
                 <p class="attendance__field-hint">
@@ -8960,6 +8987,11 @@ interface AttendanceSettings {
     enabled?: boolean
     rules?: Array<{ requestLeaveType?: string; deductFrom?: string[]; insufficient?: string }>
   }
+  attendanceBonusPolicy?: {
+    enabled?: boolean
+    anyLeaveBreaksFullAttendance?: boolean
+    lateBeyondThresholdBreaksFullAttendance?: boolean
+  }
   autoShiftMatching?: {
     enabled?: boolean
     mode?: 'preview' | 'apply' | 'auto'
@@ -13153,6 +13185,14 @@ function addLeaveOffsetRule() {
 function removeLeaveOffsetRule(index: number) {
   leaveOffsetForm.rules.splice(index, 1)
 }
+
+// 加班银行 v1-6c AttendanceBonusPolicy admin card (满勤). Saved via saveAttendanceBonusPolicy → PUTs ONLY
+// { attendanceBonusPolicy }. The two break-toggles default ON (§3: any leave → not 满勤, even if pool-offset).
+const attendanceBonusPolicyForm = reactive({
+  enabled: false,
+  anyLeaveBreaksFullAttendance: true,
+  lateBeyondThresholdBreaksFullAttendance: true,
+})
 
 // Multi-shift day M4 admin card. Saved via saveMultiShiftDay, which PUTs ONLY { multiShiftDay }.
 // Default off keeps the assignment editor single-slot and omits slotIndex from assignment writes.
@@ -18919,6 +18959,7 @@ async function loadSettings() {
     applyShiftComplianceToForm(data.data || {})
     applyOvertimeBankPolicyToForm(data.data || {})
     applyLeaveOffsetToForm(data.data || {})
+    applyAttendanceBonusToForm(data.data || {})
     applyMultiShiftDayToForm(data.data || {})
     applyOutdoorToForm(data.data || {})
     applyInOutMergeToForm(data.data || {})
@@ -18967,6 +19008,14 @@ function applyLeaveOffsetToForm(settings: AttendanceSettings) {
         insufficient: r?.insufficient === 'partial_unpaid_absence' ? 'partial_unpaid_absence' : 'block',
       }))
     : []
+}
+
+function applyAttendanceBonusToForm(settings: AttendanceSettings) {
+  const p = settings.attendanceBonusPolicy || {}
+  attendanceBonusPolicyForm.enabled = p.enabled === true
+  // the two break-toggles default ON (matches the backend normalizer default).
+  attendanceBonusPolicyForm.anyLeaveBreaksFullAttendance = p.anyLeaveBreaksFullAttendance !== false
+  attendanceBonusPolicyForm.lateBeyondThresholdBreaksFullAttendance = p.lateBeyondThresholdBreaksFullAttendance !== false
 }
 
 function normalizeMultiShiftMaxSlots(value: unknown): number {
@@ -19473,6 +19522,39 @@ async function saveLeaveOffsetPolicy() {
     setStatus(tr('Leave offset updated.', '请假抵扣已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save leave offset', '保存请假抵扣失败'), 'save-settings')
+  } finally {
+    settingsLoading.value = false
+  }
+}
+
+async function saveAttendanceBonusPolicy() {
+  settingsLoading.value = true
+  try {
+    // PUT ONLY attendanceBonusPolicy — backend per-key merge preserves every other policy.
+    const payload = {
+      attendanceBonusPolicy: {
+        enabled: attendanceBonusPolicyForm.enabled === true,
+        anyLeaveBreaksFullAttendance: attendanceBonusPolicyForm.anyLeaveBreaksFullAttendance === true,
+        lateBeyondThresholdBreaksFullAttendance: attendanceBonusPolicyForm.lateBeyondThresholdBreaksFullAttendance === true,
+      },
+    }
+    const response = await apiFetchWithTimeout('/api/attendance/settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw createForbiddenError()
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to save full-attendance policy', '保存满勤规则失败'))
+    }
+    adminForbidden.value = false
+    applyAttendanceBonusToForm((data.data || payload) as AttendanceSettings)
+    setStatus(tr('Full-attendance policy updated.', '满勤规则已更新。'))
+  } catch (error: any) {
+    setStatusFromError(error, tr('Failed to save full-attendance policy', '保存满勤规则失败'), 'save-settings')
   } finally {
     settingsLoading.value = false
   }

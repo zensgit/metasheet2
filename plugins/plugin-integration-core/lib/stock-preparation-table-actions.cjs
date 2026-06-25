@@ -32,6 +32,10 @@ const {
   applyStockPreparationPlan,
   summarizeApplyResultForEvidence,
 } = require('./stock-preparation-apply-writer.cjs')
+const {
+  normalizeStockPrepApplyProductionPolicy,
+  assertProductionPolicyNotExpired,
+} = require('./stock-preparation-production-policy.cjs')
 
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const TABLE_ACTION_KIND = 'parameterized_table_action'
@@ -695,10 +699,67 @@ function resolveStockPrepApplySandboxPolicy(config, env = process.env) {
   return undefined
 }
 
+// FOS-4b-3-prod P2: resolve the production policy from SERVER CONFIG ONLY (no env — dormant by default).
+// Absent → undefined → the apply path stays on the sandbox gate (canonical rejected). A production policy is
+// only ever present when an owner explicitly sets context.config.stockPrepApplyProduction. There is
+// deliberately no env switch: production must require explicit server config, never an environment variable.
+function resolveStockPrepApplyProductionPolicy(config) {
+  if (config && isPlainObject(config.stockPrepApplyProduction)) {
+    return config.stockPrepApplyProduction
+  }
+  return undefined
+}
+
+// FOS-4b-3-prod P2: the SINGLE apply gate for BOTH write entry points (small-BOM in-function + large-BOM
+// route), so route parity is structural and the two paths cannot drift. It branches on the PRESENCE of a
+// production policy (not on validation success): a configured production policy takes the production path and
+// ANY failure is a hard reject (never a silent demotion to sandbox); absent → the unchanged sandbox gate
+// (canonical rejected). The controlled canonical exception requires a valid + unexpired + in-window policy,
+// an EXPLICIT canonical objectId, and matching route + action. Returns { mode, maxCleanRows } for the later
+// post-plan bound. Values-free errors (coarse reason only). now is the caller-supplied current time.
+function assertStockPrepApplyAllowed(target, gateContext = {}) {
+  const { sandboxPolicy, productionPolicy, now, route, actionId } = gateContext
+  if (productionPolicy !== undefined && productionPolicy !== null) {
+    const policy = normalizeStockPrepApplyProductionPolicy(productionPolicy) // throws (422) on malformed
+    assertProductionPolicyNotExpired(policy, now) // throws (422) expired / expiry_too_far / missing_now
+    const objectId = target && optionalString(target.objectId)
+    // Require an EXPLICIT canonical objectId — an omitted/defaulted objectId must not authorize a prod write.
+    if (!objectId || objectId !== policy.authorizedTargetObjectId) {
+      throw new StockPreparationTableActionError(403, 'STOCK_PREP_PRODUCTION_APPLY_DENIED', 'production apply target is not the authorized canonical target', { reason: 'target_mismatch' })
+    }
+    if (policy.allowedRoute !== 'both' && policy.allowedRoute !== route) {
+      throw new StockPreparationTableActionError(403, 'STOCK_PREP_PRODUCTION_APPLY_DENIED', 'production apply route is not authorized', { reason: 'route_mismatch' })
+    }
+    if (!actionId || policy.allowedActionId !== actionId) {
+      throw new StockPreparationTableActionError(403, 'STOCK_PREP_PRODUCTION_APPLY_DENIED', 'production apply action is not authorized', { reason: 'action_mismatch' })
+    }
+    return { mode: 'production', maxCleanRows: policy.maxCleanRows }
+  }
+  // No production policy configured → sandbox gate (unchanged; canonical rejected; sandbox allowlist).
+  assertStockPrepApplySandboxAllowed(target, sandboxPolicy)
+  return { mode: 'sandbox', maxCleanRows: null }
+}
+
+// FOS-4b-3-prod P2: post-plan, pre-write bound. Only enforced on the production path; rejects before any
+// write if the plan's clean (add/update) row count exceeds the authorized maxCleanRows.
+function assertProductionCleanRowsWithinBound(gateResult, cleanRowCount) {
+  if (gateResult && gateResult.mode === 'production' && cleanRowCount > gateResult.maxCleanRows) {
+    throw new StockPreparationTableActionError(403, 'STOCK_PREP_PRODUCTION_APPLY_DENIED', 'production apply clean-row count exceeds the authorized bound', { reason: 'max_clean_rows_exceeded' })
+  }
+}
+
 async function applyStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
-  // P0: sandbox gate FIRST — fail-closed before any token consume, dry-run recompute, or write.
-  assertStockPrepApplySandboxAllowed(action.target, input.sandboxPolicy)
+  // FOS-4b-3-prod P2: shared apply gate FIRST — fail-closed before any token consume, dry-run, or write.
+  // No production policy → sandbox gate (canonical rejected). A configured production policy may authorize
+  // the canonical (small route) per the controlled exception.
+  const applyGate = assertStockPrepApplyAllowed(action.target, {
+    sandboxPolicy: input.sandboxPolicy,
+    productionPolicy: input.productionPolicy,
+    now: input.now,
+    route: 'small',
+    actionId: action.actionId,
+  })
   const parameters = normalizeActionParameters(input.parameters)
   const tokenRecord = await consumeDryRunToken(input.tokenStore, input.dryRunToken, {
     actionId: action.actionId,
@@ -731,6 +792,10 @@ async function applyStockPreparationAction(input = {}) {
   if (duplicateResolution && Number(duplicateResolution.resolvedGroupCount || 0) > 0 && input.acceptDuplicateResolution !== true) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DUPLICATE_RESOLUTION_REVIEW_REQUIRED', 'resolved duplicate groups require acceptDuplicateResolution=true')
   }
+  // FOS-4b-3-prod P2: post-plan production bound — clean (add/update) rows must be within maxCleanRows.
+  // No-op on the sandbox path (mode!=='production'); rejects before any write on the production path.
+  const cleanRowCount = (dryRun.plan.counts[DECISIONS.ADD] || 0) + (dryRun.plan.counts[DECISIONS.UPDATE] || 0)
+  assertProductionCleanRowsWithinBound(applyGate, cleanRowCount)
   const applyResult = await applyStockPreparationPlan({
     permission: input.permission,
     plan: dryRun.plan,
@@ -769,9 +834,12 @@ module.exports = {
   TABLE_ACTION_KIND,
   StockPreparationTableActionError,
   applyStockPreparationAction,
+  assertProductionCleanRowsWithinBound,
+  assertStockPrepApplyAllowed,
   assertStockPrepApplySandboxAllowed,
   assertStockPreparationTargetReady,
   createStockPreparationTableActionRegistry,
+  resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
