@@ -1,4 +1,4 @@
-# Time Machine remaining-dev (pass 2) — design & verification
+# Global History remaining-dev (pass 2) — design & verification
 
 ## 🚫 BLOCKED ON EXPLICIT SIGN-OFF (not built — by design)
 
@@ -27,7 +27,14 @@ This pass closed the [P1] review findings on the prior pass, then completed the 
 - **[P2]** design-lock status corrected (#3172); the closeout MD records both fixes (#3170).
 
 ### Safe completions
-- **R4 config-history polish** (#3177): diff-rendering depth (`summarizeConfigValue` — compact `k: v` for config
+
+> **Status correction (2026-06-25).** #3177 below was listed here prematurely — it is **NOT a completed/landed item.**
+> As of this correction **#3177 is still OPEN with `multitable-web-guard` FAILING**, and **#3169 (FE) is also still
+> OPEN** (with a blocking REQUEST-CHANGES: post-restore `onConfigReverted` doesn't reload sheet-meta/grid, so a revert
+> looks successful while the field name / view filter / grid stay stale). The "Landing status" section below describes
+> the *intended* dependency order, not what has actually merged.
+
+- **R4 config-history polish** (#3177) — **OPEN; `multitable-web-guard` FAILING; not yet landed.** diff-rendering depth (`summarizeConfigValue` — compact `k: v` for config
   objects instead of raw JSON, config-only so no value masking) + an **end-to-end mount→button→fetch wire test**
   (clicks Revert→confirm, asserts the real `config-restore-preview` then `config-restore-execute` fetches fire with the
   server `previewToken`) — closing the wire-coverage gap flagged earlier. vue-tsc 0; spec 13/13.
@@ -42,11 +49,13 @@ This pass closed the [P1] review findings on the prior pass, then completed the 
 - cross-base data-sync, dashboards — parked off this line.
 
 ## Landing status
-[P1]#2 #3165 + sub-features #3168 **merged**. Landing dependency-gated: #3172 (identity) → #3169 (FE) → #3177
-(R4 polish) → #3170 (MD); BS-3.1 + this doc follow. Each new write path is mutation/trigger-proven, allow-and-deny.
+[P1]#2 #3165 + sub-features #3168 **merged**. Landing dependency-gated (this is the **INTENDED** order — corrected
+2026-06-25 to live state, not all merged): #3172 (identity) → #3169 (FE — **OPEN**, blocking REQUEST-CHANGES) → #3177
+(R4 polish — **OPEN, `multitable-web-guard` failing**) → #3170 (MD — **closed as superseded** by #3178/#3181). BS-3.1 +
+this doc follow. Each new write path is mutation/trigger-proven, allow-and-deny.
 
 ## The honest bottom line
-The read/preview/scoped-write/non-destructive arcs of the Time Machine line are complete and hardened. The **only**
+The read/preview/scoped-write/non-destructive arcs of the Global History / point-in-time restore line are complete and hardened. The **only**
 remaining development is the **destructive Reset (T8-2)** and the **irreversible data-loss config ops** — and those are
 deliberately held at your sign-off, with their decisions resolved and a build plan ready. Say yes to D1–D5 and I build
 T8-2 behind the default-off flag with the full PIT-2 / ceiling / atomicity golden suite.

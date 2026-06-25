@@ -7,7 +7,7 @@
 
 ## Why this is gated and not auto-built
 
-Reset is the one genuinely destructive capability in the whole Time Machine line: it **deletes records created after
+Reset is the one genuinely destructive capability in the whole Global History / point-in-time restore line: it **deletes records created after
 T** (Revert keeps them). A bug here loses data. The line's discipline — and the [P1] review that just caught a T8-1
 gate miss — say the destructive path gets an explicit, deliberate sign-off, not a broad "complete it." So this is
 presented for decision, with the safe half (T8-1 Revert) already shipped (#3165).
