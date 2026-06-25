@@ -157,6 +157,7 @@ The production runbook must include a rollback or recovery plan before any produ
 - define how failed rows and dead letters are reviewed without exposing values;
 - require a re-pull idempotency check after apply;
 - require human-preserved field verification on at least one edited row if updates are in scope.
+- carry forward the #3093 source-registry operator nuance: `sourceRegistryScopeAdjustedByOmittingWorkspaceQuery=true` / `sourceLookupSucceeded=true` must be checked values-free before production.
 
 Rollback evidence is required even if the expected run is all-adds.
 
