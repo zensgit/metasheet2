@@ -15744,9 +15744,13 @@ function respondShiftComplianceCapExceeded(res, error) {
 // deduct event per touched lot. Insufficient active balance → HttpError(422, insufficientCode) → the
 // caller's approval txn rolls back. The CALLER owns amount semantics (deductionBasis): comp_time
 // passes actual minutes; 年假 L3 will pass standard-day minutes (requestedDays × standardDayMinutes).
-async function deductLeaveBalance(trx, { orgId, userId, leaveTypeCode, amountMinutes, sourceType, insufficientCode, insufficientLabel, sourceId }) {
+// mode='block' (default, every existing caller) → throw 422 on insufficient (full-or-nothing, byte-identical).
+// mode='partial' (加班银行 v1-2b §4 partial_unpaid_absence) → deduct what's available, never throw; the
+// returned `shortfall` (requested − deducted) is the unpaid portion → 账3 real-absence (= shortfall). The
+// `block` path is unchanged: existing callers omit `mode`, and the loop still deducts the full request.
+async function deductLeaveBalance(trx, { orgId, userId, leaveTypeCode, amountMinutes, sourceType, insufficientCode, insufficientLabel, sourceId, mode = 'block' }) {
   const deductMinutes = Math.floor(Number(amountMinutes) || 0)
-  if (deductMinutes <= 0) return { deducted: 0, lots: 0 }
+  if (deductMinutes <= 0) return { deducted: 0, lots: 0, shortfall: 0 }
   const lots = (await trx.query(
     `SELECT id, remaining_minutes, status
        FROM attendance_leave_balances
@@ -15757,14 +15761,15 @@ async function deductLeaveBalance(trx, { orgId, userId, leaveTypeCode, amountMin
     [orgId, userId, leaveTypeCode]
   )).map((row) => ({ id: row.id, remaining: Number(row.remaining_minutes), status: row.status }))
   const available = lots.reduce((sum, lot) => sum + lot.remaining, 0)
-  if (available < deductMinutes) {
+  if (available < deductMinutes && mode !== 'partial') {
     throw new HttpError(
       422,
       insufficientCode,
       `${insufficientLabel} balance insufficient: requested ${deductMinutes} min, available ${available} min`
     )
   }
-  let remaining = deductMinutes
+  const target = mode === 'partial' ? Math.min(available, deductMinutes) : deductMinutes
+  let remaining = target
   let touched = 0
   for (const lot of lots) {
     if (remaining <= 0) break
@@ -15785,7 +15790,7 @@ async function deductLeaveBalance(trx, { orgId, userId, leaveTypeCode, amountMin
     remaining -= take
     touched += 1
   }
-  return { deducted: deductMinutes, lots: touched }
+  return { deducted: target, lots: touched, shortfall: Math.max(0, deductMinutes - target) }
 }
 
 // ④ C3 (#2230 design-lock): comp_time (调休) balance deduction on a comp_time leave's final approval —
@@ -25941,6 +25946,36 @@ module.exports = {
                   insufficientLabel: 'Annual leave',
                   sourceId: requestId,
                 })
+              }
+            }
+            // ④ 加班银行 v1-2b (design-lock §4 账2 LeaveOffsetPolicy): rule-driven deduction for leave types with
+            // NO dedicated deduction block — comp_time + annual keep their own (above), and this path SKIPS them,
+            // so no leave type is ever deducted twice (the load-bearing invariant). DORMANT (policy disabled,
+            // default) → personal_leave etc. deduct nowhere = byte-identical. ENABLED + a matching rule → deduct
+            // the request's minutes from the rule's single pool (deductFrom[0]); 'unpaid' pool = no balance
+            // deduction (the leave is just unpaid). insufficient: 'block' → 422 + full rollback (no partial
+            // approval); 'partial_unpaid_absence' → deduct what's available, approve, and the shortfall
+            // (requested − deducted) = 账3 real absence (computed downstream from the deduct events; v1-2b only
+            // does the 账2 deduction).
+            const leaveOffsetCode = requestType === 'leave' ? requestMetadata.leaveType?.code : null
+            if (leaveOffsetCode && leaveOffsetCode !== 'comp_time' && leaveOffsetCode !== 'annual') {
+              const offsetPolicy = (await getSettings(trx))?.leaveBalanceDeductionPolicy
+              if (offsetPolicy?.enabled === true) {
+                const rule = (offsetPolicy.rules || []).find((r) => r.requestLeaveType === leaveOffsetCode)
+                const pool = rule?.deductFrom?.[0]
+                if (rule && pool && pool !== 'unpaid') {
+                  await deductLeaveBalance(trx, {
+                    orgId,
+                    userId: requestRow.user_id,
+                    leaveTypeCode: pool,
+                    amountMinutes: requestMetadata.minutes,
+                    sourceType: 'leave_offset',
+                    insufficientCode: 'LEAVE_OFFSET_BALANCE_INSUFFICIENT',
+                    insufficientLabel: `Leave offset (${leaveOffsetCode}→${pool})`,
+                    sourceId: requestId,
+                    mode: rule.insufficient === 'partial_unpaid_absence' ? 'partial' : 'block',
+                  })
+                }
               }
             }
             const baseRule = await loadDefaultRule(trx, orgId)
