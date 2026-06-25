@@ -1,16 +1,16 @@
 # T8-2 Reset-to-T (destructive PIT restore) — build-readiness + decisions for sign-off
 
-> Status: **AWAITING EXPLICIT OWNER SIGN-OFF — NOT built.** The T8 design-lock (§5) requires Reset to have a *separate
-> rollback-semantics sign-off, not just doc approval*. A re-issued `/goal` is not that sign-off. This doc resolves the
-> §5 decisions (D1–D5) and proposes a flag-gated build, so the sign-off is a concrete yes/no rather than an open
-> question. Nothing destructive ships until you approve this.
+> Status: **RATIFIED + IMPLEMENTED BY #3214; DEFAULT-OFF AT RUNTIME.** The T8 design-lock (§5) required a separate
+> rollback-semantics sign-off. That sign-off has now been given for D1-D5, and #3214 implements the Reset runtime behind
+> `MULTITABLE_ENABLE_PIT_RESET`. Shipping the code is not the same as enabling it in production: the operational flag
+> remains the belt-and-suspenders gate for rollout.
 
 ## Why this is gated and not auto-built
 
 Reset is the one genuinely destructive capability in the whole Global History / point-in-time restore line: it **deletes records created after
-T** (Revert keeps them). A bug here loses data. The line's discipline — and the [P1] review that just caught a T8-1
-gate miss — say the destructive path gets an explicit, deliberate sign-off, not a broad "complete it." So this is
-presented for decision, with the safe half (T8-1 Revert) already shipped (#3165).
+T** (Revert keeps them). A bug here loses data. The line's discipline — and the [P1] review that caught a T8-1
+gate miss — required an explicit, deliberate sign-off, not a broad "complete it." That sign-off is now recorded by the
+#3214 implementation and this readiness doc is retained as the ratified decision record.
 
 ## Reset = Revert + delete-post-T-created
 
@@ -21,8 +21,7 @@ preflight.
 
 ## Decisions to ratify (T8 design-lock §5)
 
-- **D1 — ship Reset at all?** Recommend **yes** — it's the natural capstone. **There is no destructive code yet; the
-  build awaits THIS sign-off.** On your yes I build it, and the runtime ships behind a default-OFF flag
+- **D1 — ship Reset at all?** **Ratified yes.** #3214 ships the runtime behind a default-OFF flag
   (`MULTITABLE_ENABLE_PIT_RESET`) as belt-and-suspenders so it's inert even post-build until explicitly enabled — but
   the flag is the *operational* gate *after* authorization, not a substitute for it. Revert stays the default,
   always-on path.
@@ -43,19 +42,19 @@ to be reverted is permission-checked; if a SINGLE one is denied, the **entire Re
 written** (no partial skip, no fail-halfway — unlike Revert, which may partial-skip). The proving golden is a
 **mutation check**: drop one preflight check → a denied target slips into the destructive set → the test fails.
 
-## Proposed verification (what the build would ship with)
+## Verification shipped in #3214
 
-Real-DB goldens: flag-off → Reset refused (inert); flag-on + whole-sheet Reset → post-T-created **deleted**,
+Real-DB goldens: flag-off → Reset refused (inert); flag-on + whole-sheet Reset → post-T-created **soft-deleted**,
 pre-T-state reverted, forward revisions + `source=restore` batch written; **PIT-2 all-or-nothing blocks on any single
-denial, zero writes** (+ the mutation check); above-ceiling → `413`; `confirm`-absent → refused; PIT-3 no count/
-existence leak; PIT-7 reveal-non-composition. Plus a destructive-delete atomicity golden (a forced mid-write failure
-leaves the sheet untouched).
+denial, zero writes**; above-ceiling → `413`; `confirm`-absent → refused; delete-set divergence on created-after-preview
+and edited-after-preview records; PIT-3 no blocker/count/existence oracle; PIT-7 reveal-non-composition. Plus the
+load-bearing destructive atomicity golden: a forced delete-revision failure after revert writes have begun rolls the
+entire transaction back, leaving the sheet untouched.
 
 ## What I need from you
 
-A yes/no on **D1–D5 as recommended** (or your amendments). On a yes, I build T8-2 behind the default-off flag with the
-goldens above, on the T8-1 branch/its successor, and present it for review before the flag is ever enabled in any real
-environment.
+No further design decision is needed for D1-D5. Remaining rollout control is operational: keep
+`MULTITABLE_ENABLE_PIT_RESET` off until the owning environment explicitly enables Reset.
 
 ## Adjacent destructive/irreversible items (same gate, same ask)
 
