@@ -1,4 +1,6 @@
-import type { FormSchema, FormField } from '../types/approval-product'
+import type { FormSchema, FormField, AmountConsistencyMapping } from '../types/approval-product'
+
+export type { AmountConsistencyMapping }
 
 // Server-side amount total-check (design-lock approval-amount-server-side-total-check-20260624) — Gate A:
 // a PURE control (no DB) that an applicant-supplied top-level total equals the sum of that submission's
@@ -6,12 +8,6 @@ import type { FormSchema, FormField } from '../types/approval-product'
 // DERIVED from the amount column's own declared precision (default 2) so the comparison is at the field's
 // granularity. Returns an error message on mismatch / malformed input (fail-closed), else null. Runs ONLY
 // when a template declares the mapping; never invoked without one.
-
-export interface AmountConsistencyMapping {
-  totalFieldId: string
-  detailFieldId: string
-  amountColumnId: string
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)

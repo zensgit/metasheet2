@@ -312,6 +312,7 @@ jobs:
             tests/integration/approval-delegation-api.db.test.ts \
             tests/integration/approval-detail-subform.db.test.ts \
             tests/integration/approval-common-template-presets.api.test.ts \
+            tests/integration/approval-amount-total-check.api.test.ts \
             tests/integration/approval-wp1-parallel-gateway.api.test.ts \
             --reporter=dot
 

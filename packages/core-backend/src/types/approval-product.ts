@@ -232,8 +232,19 @@ export interface FormField {
   maxRows?: number
 }
 
+export interface AmountConsistencyMapping {
+  totalFieldId: string
+  detailFieldId: string
+  amountColumnId: string
+}
+
 export interface FormSchema {
   fields: FormField[]
+  // Server-side amount total-check (design-lock #3161): when present, createApproval validates that
+  // formData[totalFieldId] equals the money-safe sum of formData[detailFieldId][*][amountColumnId],
+  // fail-closed, before the graph is built. Validated + preserved at template-save (assertFormSchema),
+  // so it round-trips with form_schema (no migration / no separate config column).
+  amountConsistencyCheck?: AmountConsistencyMapping
 }
 
 export interface ApprovalRequesterSnapshot {
