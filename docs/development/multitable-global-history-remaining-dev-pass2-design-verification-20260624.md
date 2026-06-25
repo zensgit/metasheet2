@@ -1,16 +1,15 @@
 # Global History remaining-dev (pass 2) — design & verification
 
-## 🚫 BLOCKED ON EXPLICIT SIGN-OFF (not built — by design)
+## Current status after T8-2 ratification
 
-- **T8-2 Reset-to-T** (destructive PIT restore — *deletes* records created after T). Decisions resolved + flag-gated
-  build plan in `multitable-t8-2-reset-build-readiness-20260624.md`; awaiting your **yes/no on D1–D5** (the T8
-  design-lock §5 requires a separate rollback-semantics sign-off, which a re-issued `/goal` is not). **No destructive
-  code was written.**
-- **T9-W data-loss config ops** (field *undelete* / *lossy retype*) + **T8-1 undelete-execute** — same gate, same ask;
-  also need the codebase-wide undelete slice first. Refused `422` today.
+- **T8-2 Reset-to-T** (destructive PIT restore — *soft-deletes* records created after T) is now ratified and implemented
+  by #3214 behind `MULTITABLE_ENABLE_PIT_RESET` (default off). D1-D5 are no longer an open design gate: v1 is whole
+  sheet only, `canManageSheetAccess` + flag gated, synchronous under `MULTITABLE_SHEET_REVERT_MAX_RECORDS`, typed
+  `confirm:'reset'`, and preview-token-bound.
+- **T9-W data-loss config ops** (field *undelete* / *lossy retype*) + **T8-1 undelete-execute** remain gated; they need
+  the codebase-wide undelete/link-rebuild story first and are refused `422` today.
 
-These are the one part of "the remaining dev" that the line's discipline says I must not self-authorize — especially
-one turn after the [P1] review caught a T8 gate miss. They are presented for decision, not shipped.
+Production enablement of T8-2 remains an operational flag decision, not a code/design gap.
 
 ## What this pass DID complete (safe, non-destructive)
 
@@ -55,7 +54,11 @@ This pass closed the [P1] review findings on the prior pass, then completed the 
 this doc follow. Each new write path is mutation/trigger-proven, allow-and-deny.
 
 ## The honest bottom line
-The read/preview/scoped-write/non-destructive arcs of the Global History / point-in-time restore line are complete and hardened. The **only**
-remaining development is the **destructive Reset (T8-2)** and the **irreversible data-loss config ops** — and those are
-deliberately held at your sign-off, with their decisions resolved and a build plan ready. Say yes to D1–D5 and I build
-T8-2 behind the default-off flag with the full PIT-2 / ceiling / atomicity golden suite.
+The read/preview/scoped-write/non-destructive arcs of the Global History / point-in-time restore line are complete and
+hardened. The destructive Reset v1 is now built behind the default-off flag with PIT-2 / ceiling / preview-identity /
+single-transaction atomicity goldens. Remaining work is no longer "build T8-2"; it is narrower:
+
+- production rollout of `MULTITABLE_ENABLE_PIT_RESET` when an environment owner wants Reset enabled;
+- T8-1 undelete-execute, which needs the cross-cutting resurrect + link-rebuild slice;
+- T9-W irreversible config operations (field undelete / lossy retype), still design-lock-first;
+- optional T8 scale extensions: async reset above the synchronous ceiling and permission-filtered subset reset.

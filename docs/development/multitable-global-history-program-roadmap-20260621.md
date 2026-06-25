@@ -1,8 +1,12 @@
 # Multitable Global History — Program Roadmap (T5–T9)
 
 > The 规划 for "complete the remaining history-records + Global History development plan." It records the staged
-> execution, the build-vs-design-lock split, and the ratification gates. The read-only foundation is built; the
-> write/destructive slices are design-locked (the 设计 deliverable) and held for explicit owner ratification.
+> execution, the build-vs-design-lock split, and the ratification gates.
+>
+> **Status reconciliation (2026-06-25):** this roadmap's §3/§5 are retained history from the design-lock phase. Since
+> then, T6/T8/T9 have advanced. For T8 specifically, T8-1 Revert-to-T is shipped and T8-2 Reset-to-T is implemented by
+> #3214 behind `MULTITABLE_ENABLE_PIT_RESET` (default off). Treat
+> `multitable-t8-2-reset-dev-verification-20260625.md` and the T8 design-lock status block as the current T8 ledger.
 
 ## 0. Where the line already is (shipped)
 

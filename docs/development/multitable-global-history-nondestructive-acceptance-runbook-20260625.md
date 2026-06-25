@@ -178,7 +178,8 @@ The non-destructive line is acceptable for pilot if:
 - all expected error/status semantics in section 4 are observed;
 - no masked field value, hidden field ID, denied record count, or denied record existence is visible to a restricted actor;
 - no write path accepts a client-computable identity in place of a server preview token;
-- T8-2 Reset-to-T and T9-W data-loss operations remain unavailable unless separately ratified.
+- T8-2 Reset-to-T remains unavailable unless `MULTITABLE_ENABLE_PIT_RESET` is explicitly enabled; T9-W data-loss
+  operations remain unavailable unless separately ratified.
 
 If this pass fails on UX only, file polish follow-ups against the owning surface.
 If it fails on permission, preview identity, drift, or atomicity, stop the pilot and fix before release.
@@ -187,7 +188,7 @@ If it fails on permission, preview identity, drift, or atomicity, stop the pilot
 
 | Item | Status | Required next action |
 |---|---|---|
-| T8-2 Reset-to-T | Gated destructive path | Explicit owner sign-off on D1-D5, then build behind a flag with PIT-2 / ceiling / atomicity goldens. |
+| T8-2 Reset-to-T | Runtime shipped default-OFF (#3214) | Enable only by explicit environment decision via `MULTITABLE_ENABLE_PIT_RESET`; async/subset reset remain follow-ups. |
 | T9-W data-loss config ops | Gated irreversible config path | Separate design/sign-off for field undelete and lossy retype; likely depends on the wider undelete story. |
 | T8-1 undelete-execute | Deferred | Needs the cross-cutting undelete/link-rebuild slice. |
 | Record-history keyset `hasMore` | Deferred | Resolve same-millisecond ordering semantics before implementing. |

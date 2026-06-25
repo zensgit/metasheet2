@@ -1,9 +1,9 @@
 # Multitable Global History — T8 Point-In-Time Restore (DESIGN-LOCK)
 
-> Status: **DESIGN-LOCK, docs-only. OWNER-GATED — the single most dangerous slice in the program.** Runtime
-> requires a SEPARATE explicit owner ratification of the rollback semantics (§6), beyond ratifying this doc.
-> Prerequisites (per the canonical plan T8): T7 point-in-time read-only view PROVEN, T5 restore-preview PROVEN,
-> async/max-size decided. **No T8 runtime is built until all of those + owner ratification.**
+> Status: **DESIGN-LOCK + RUNTIME STATUS.** The owner-gated semantics remain locked here. T8-1 Revert-to-T is shipped.
+> T8-2 Reset-to-T has now been separately ratified for D1-D5 and implemented by #3214 behind
+> `MULTITABLE_ENABLE_PIT_RESET` (default off). Production enablement is still an operational decision; the design gate
+> for the v1 runtime is closed.
 > Basis: canonical design-lock LOCK-9/10/11/12; the T5 preview lock; the T6 scoped-restore lock (T8 is the
 > sheet-wide generalization of T6's write, over the T7/T5-1 as-of-T reconstruction).
 
@@ -56,25 +56,22 @@ confirmation UX. Mutation-checks on PIT-2 (drop a preflight check → a denied t
 
 ## 5. Decisions to ratify (the heavy ones — SEPARATE owner sign-off, not just doc approval)
 
-- **D1 — Reset (destructive) at all, in v1?** Recommend: ship **Revert-only first** (zero data loss); Reset as a
-  later, separately-ratified slice. This de-risks the whole program — Revert covers most "go back to T" needs.
-- **D2 — Who may execute a sheet rollback.** A capability strictly ABOVE normal record-write (e.g. a base-admin
-  or a dedicated `multitable:history-restore` capability), since one call rewrites a whole table. Recommend: a
-  dedicated capability, never plain `canEditRecord`.
-- **D3 — Async threshold + hard max size.** The record/field-count above which the rollback runs async, and the
-  ceiling above which it is refused. Recommend: sync under a few hundred records, async above, hard-refuse above
-  a configured ceiling.
-- **D4 — Confirmation / two-step + audit.** A destructive Reset requires an explicit typed confirmation + is
-  audited with actor/T/scope (never values). Recommend: yes.
-- **D5 — Scope granularity.** Whole sheet only, or a permission-filtered subset (a view/filter)? Recommend:
-  whole sheet first; subset is a follow-up.
+- **D1 — Reset (destructive) at all, in v1?** **Ratified yes for #3214**, after T8-1 Revert was proven. Runtime remains
+  default-off behind `MULTITABLE_ENABLE_PIT_RESET`.
+- **D2 — Who may execute a sheet rollback.** **Ratified v1 gate: `canManageSheetAccess` + flag.** This is above normal
+  record-write; a future dedicated `multitable:history-restore` capability can tighten the contract later.
+- **D3 — Async threshold + hard max size.** **Ratified v1: synchronous under `MULTITABLE_SHEET_REVERT_MAX_RECORDS`,
+  fail-closed `413` above it.** Async reset remains a future scale extension.
+- **D4 — Confirmation / two-step + audit.** **Ratified yes.** Execute requires `confirm: 'reset'`; reset writes forward
+  `source=restore` history in a single transaction.
+- **D5 — Scope granularity.** **Ratified v1: whole sheet only.** Permission-filtered subset reset remains a follow-up.
 
 ## 6. Gated TODO
 
-- ⬜ **T8-0 — ratify** this doc AND the rollback semantics (D1–D5) as a SEPARATE explicit owner sign-off.
-- 🔒 **T8-1 — Revert-to-T** (non-destructive, owner-opt-in) over T7 + T6's write. Real-DB goldens + browser UX.
-- 🔒 **T8-2 — Reset-to-T** (destructive, SEPARATE owner ratification, only after Revert proven). The hard-gated
-  delete path + async runner + ceiling. Reviewed alone, most adversarial test pass in the program.
+- ✅ **T8-0 — ratified.** D1-D5 are explicitly settled for v1.
+- ✅ **T8-1 — Revert-to-T** (non-destructive, owner-opt-in) over T7 + T6's write. Real-DB goldens + browser UX shipped.
+- ✅ **T8-2 — Reset-to-T runtime** (#3214). Destructive delete path is default-off, preview-token-bound, all-or-nothing,
+  and covered by real-DB goldens. Async reset and subset reset are not part of v1.
 
 ## 7. Out of scope / anti-goals
 
