@@ -174,6 +174,10 @@ export interface TemplateAuthoringDraft {
   // 1:1. Topology (edges) + every non-cc node stay byte-identical. Empty {} when no cc node.
   ccEdits?: CcEdits
   approvalNodeEdits?: ApprovalNodeEdits
+  // Server-side amount total-check mapping (design-lock #3161, shipped by #3176; on the presets via
+  // #3183). The editor does NOT author it yet — it is carried hydrate→save VERBATIM so an
+  // authoring-page save cannot silently drop a preset-shipped control (the #3161 §1 exposure).
+  amountConsistencyCheck?: FormSchema['amountConsistencyCheck']
 }
 
 // Complex node types the v1 LINEAR steps editor can't author. They are NOT "unsupported" — a
@@ -702,6 +706,11 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
     visibilityIdsText: formatIds(template.visibilityScope?.ids),
     slaHoursText: template.slaHours == null ? '' : String(template.slaHours),
     allowRevoke: true,
+    // Hydrate side of the #3161 §1 preserve: carry the amount total-check mapping through verbatim
+    // (shallow clone, never alias the source schema). Absent → no key (no phantom on round-trip).
+    ...(template.formSchema.amountConsistencyCheck
+      ? { amountConsistencyCheck: { ...template.formSchema.amountConsistencyCheck } }
+      : {}),
     ...(complex
       ? {
           preservedGraph: template.approvalGraph,
@@ -769,6 +778,9 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
       }
       return next
     }),
+    // Preserve side of the #3161 §1 fix: re-emit the amount total-check mapping verbatim. The editor
+    // doesn't author it, so a rebuild that dropped it would silently kill a preset-shipped control.
+    ...(draft.amountConsistencyCheck ? { amountConsistencyCheck: { ...draft.amountConsistencyCheck } } : {}),
   }
 }
 
