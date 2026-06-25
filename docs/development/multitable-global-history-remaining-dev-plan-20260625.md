@@ -50,14 +50,16 @@ revert suite 8/8 unregressed. tsc 0. Independently reviewed; the **PIT-2 golden 
 lock check makes golden (c) fail). **Status: awaiting owner review/merge of #3214 + a separate decision to flip the
 flag in any real env.**
 
-## 3. record-history `hasMore` keyset estimate — BUILDING (completable, no semantics change)
+## 3. record-history `hasMore` keyset estimate — DONE (PR #3217)
 
 The estimate path early-stops a keyset scan to answer "more than offset+limit VISIBLE batches?" without the exact
 total. The deferred parity bug (estimate walks µs-DESC; exact path orders same-millisecond batches by
 ms-truncated-time + batchId) is resolved **without changing shipped behavior**: the estimate collects the *complete*
 same-millisecond cluster at the page boundary, then sorts by the **existing** exact-path comparator and slices — so its
-page matches the exact path's, no ordering "decision" required. LOCK-3 leak-guard preserved (mutation-checked).
-*(Verification to be appended on landing.)*
+page matches the exact path's, no ordering "decision" required. **Verification:** 11/11 real-DB goldens (incl. the
+same-ms parity test); LOCK-3 leak-guard **mutation-proven** (neutering `isDenied` makes the leak-guard golden fail);
+tsc 0; exact path unchanged. A test literal that wrongly assumed µs-ordering for same-ms batches was corrected
+(offset-4 = lowest batchId = `keys[0]`, matching the exact path). PR #3217.
 
 ## 4. GATED remaining dev — plan + sign-off ask
 
@@ -76,6 +78,7 @@ data-loss. Refused `422` today. **Ask** — explicit sign-off; field-undelete li
 (4a) and may be only partially achievable (schema restored, values not).
 
 ## 5. Bottom line
-T8-2 (authorised) is built + verified + behind a default-OFF flag awaiting your review/merge; `hasMore` (non-destructive)
-is being completed in parallel. Undelete-execute and T9-W data-loss remain **gated on an explicit, item-specific
-sign-off** — this doc resolves their design questions so each is a concrete yes/no when you choose.
+T8-2 (authorised) is built + verified + behind a default-OFF flag awaiting your review/merge (#3214); `hasMore`
+(non-destructive) is complete + verified (#3217). Undelete-execute and T9-W data-loss remain **gated on an explicit,
+item-specific sign-off** — this doc resolves their design questions so each is a concrete yes/no when you choose.
+That is the whole remaining-dev map: two built, two planned-and-gated.
