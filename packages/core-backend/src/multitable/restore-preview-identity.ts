@@ -252,12 +252,15 @@ export function verifyConfigRestorePreviewIdentity(token: string, expected: Conf
 // Reset = Revert (surviving records to their T-state) + SOFT-DELETE the records CREATED AFTER T. Its identity is
 // DISJOINT from revert (`type: 'restore-preview-pit-reset'`), so a revert token can never trigger a destructive
 // reset (and vice versa). It binds TWO order-invariant hashes: `revertScopeHash` (the reverts, identical to revert)
-// AND `deleteScopeHash` (the EXACT set of post-T-created record ids to delete). Execute RE-ENUMERATES both and
-// re-hashes; a record created between preview and execute re-enumerates into the delete-set → `deleteScopeHash`
-// diverges → rejected. So Reset can NEVER delete a record the actor did not see in the preview (the load-bearing
+// AND `deleteScopeHash` (the EXACT set of post-T-created record ids AND their preview-time versions to delete).
+// Execute RE-ENUMERATES both and re-hashes; a record created OR edited between preview and execute diverges →
+// rejected. So Reset can NEVER delete a record/version the actor did not see in the preview (the load-bearing
 // data-safety property for the only path in the line that destroys rows).
-export function hashDeleteSet(recordIds: string[]): string {
-  const canon = [...new Set(recordIds)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+export function hashDeleteSet(records: Array<{ recordId: string; version: number }>): string {
+  const canon = records
+    .map((r) => ({ recordId: r.recordId, version: Number.isFinite(r.version) ? Math.trunc(r.version) : 0 }))
+    .sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : a.version - b.version))
+    .map((r) => JSON.stringify([r.recordId, r.version]))
   return createHash('sha256').update(JSON.stringify(canon)).digest('hex')
 }
 
@@ -268,7 +271,7 @@ export interface PitResetPreviewIdentityClaims {
   strategy: 'reset'
   /** sha256 over the sorted revert set (recordId + masked changesHash + version), via hashScope — same as revert. */
   revertScopeHash: string
-  /** sha256 over the sorted set of post-T-created record ids to delete, via hashDeleteSet. */
+  /** sha256 over the sorted set of post-T-created record ids + preview versions to delete, via hashDeleteSet. */
   deleteScopeHash: string
   actorId: string
 }

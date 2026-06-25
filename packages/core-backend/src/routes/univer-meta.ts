@@ -195,7 +195,7 @@ import {
   createYjsInvalidationPostCommitHook,
   type YjsInvalidator,
 } from '../multitable/post-commit-hooks'
-import { listRecordRevisions, type RecordRevisionEntry } from '../multitable/record-history-service'
+import { listRecordRevisions, recordRecordRevision, type RecordRevisionEntry } from '../multitable/record-history-service'
 import {
   countUnreadRecordSubscriptionNotifications,
   getRecordSubscriptionStatus,
@@ -8608,6 +8608,75 @@ export function univerMetaRouter(): Router {
     return { reverts, undeleteCount, keptCreatedAfterT, createdAfterTIds, driftCount, patchContext }
   }
 
+  type PitResetRevert = { recordId: string; diff: RecordChange[]; changesHash: string; version: number }
+  type PitResetDelete = { recordId: string; version: number; data: Record<string, unknown> }
+  type PitResetComputation =
+    | null
+    | { tooLarge: true; recordCount: number }
+    | { blocked: true; reason: 'denied' | 'forbidden' | 'schema_drift' | 'undelete_unsupported' }
+    | {
+        reverts: PitResetRevert[]
+        deletes: PitResetDelete[]
+        patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>>
+      }
+
+  const computeSheetReset = async (
+    pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
+    access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
+  ): Promise<PitResetComputation> => {
+    const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
+    const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
+    if (!patchContext) return null
+    const { fieldById, fieldPermissions } = patchContext
+    const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
+    if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount }
+    const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
+    const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+    const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
+    const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
+      ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
+    const liveById = new Map<string, { data: Record<string, unknown>; version: number }>()
+    for (const r of (await pool.query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; data: unknown; version: unknown }>) {
+      liveById.set(String(r.id), { data: asRec(r.data), version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0 })
+    }
+    const stateMap = await reconstructRecordsAtT(pool.query.bind(pool), sheetId, asOfIso)
+    const reverts: PitResetRevert[] = []
+    const deletes: PitResetDelete[] = []
+    for (const [recordId, live] of liveById) {
+      const target = stateMap.get(recordId)
+      if (!target || !target.exists) {
+        if (deniedIds.has(recordId)) return { blocked: true, reason: 'denied' }
+        deletes.push({ recordId, version: live.version, data: live.data })
+      }
+    }
+    for (const [recordId, target] of stateMap) {
+      if (!target.exists) continue
+      const live = liveById.get(recordId)
+      if (!live) return { blocked: true, reason: 'undelete_unsupported' }
+      const targetSnapshot = asRec(target.data)
+      for (const fid of Object.keys(targetSnapshot)) {
+        if (!fieldById.has(fid)) return { blocked: true, reason: 'schema_drift' }
+      }
+      const diff = computeRecordRestoreDiff({ fieldById, rawTypeById, targetSnapshot, currentData: live.data, recordId, currentVersion: live.version, normalizeLinkIds })
+      if (diff.length === 0) continue
+      if (deniedIds.has(recordId)) return { blocked: true, reason: 'denied' }
+      if (diff.some((c) => {
+        const guard = fieldById.get(c.fieldId)
+        const perm = fieldPermissions[c.fieldId]
+        return !(guard && !guard.hidden && guard.readOnly !== true) || !(perm && perm.visible !== false && perm.readOnly !== true) || !allowed.has(c.fieldId)
+      })) return { blocked: true, reason: 'forbidden' }
+      reverts.push({ recordId, diff, changesHash: hashPreviewChanges(diff.map((c) => ({ fieldId: c.fieldId, op: c.op, value: c.value }))), version: live.version })
+    }
+    return { reverts, deletes, patchContext }
+  }
+
+  const sendPitResetBlocked = (res: Response, reason: 'denied' | 'forbidden' | 'schema_drift' | 'undelete_unsupported') => {
+    if (reason === 'schema_drift' || reason === 'undelete_unsupported') {
+      return res.status(422).json({ ok: false, error: { code: 'RESET_UNSUPPORTED', message: 'Reset-to-T cannot be executed for this sheet without a separate schema-drift/undelete slice; nothing written.' } })
+    }
+    return res.status(409).json({ ok: false, error: { code: 'RESET_BLOCKED', message: 'Reset is all-or-nothing: a target is denied or forbidden, so nothing was written.' } })
+  }
+
   router.post('/sheets/:sheetId/revert-preview', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const parsed = z.object({ asOf: z.string().min(1) }).safeParse(req.body)
@@ -8704,12 +8773,10 @@ export function univerMetaRouter(): Router {
   // Reset = T8-1 Revert (surviving records → their T-state) + SOFT-DELETE the records CREATED AFTER T (Revert keeps
   // them). Gated behind a default-OFF env flag (D1, belt-and-suspenders) ON TOP OF canManageSheetAccess (D2), the
   // size ceiling (D3), a typed two-step confirm:'reset' (D4), whole-sheet only (D5). The destructive delete-set is
-  // bound into the signed identity (deleteScopeHash) and RE-ENUMERATED + re-compared at execute, so Reset can NEVER
-  // delete a record the actor did not see in the preview. PIT-2: an all-or-nothing permission preflight rejects the
-  // WHOLE reset (zero writes) if a SINGLE revert or delete target is denied/forbidden/locked — no partial-skip.
-  // Atomicity is REVERT-FIRST / delete-second (patchRecords opens its own txn → NOT single-txn "untouched"; a
-  // delete-phase failure leaves surviving records reverted + post-T records intact-or-in-trash = recoverable,
-  // re-runnable to convergence, never data loss). Soft-delete via RecordService.deleteRecord (→ recycle-bin trash).
+  // bound into the signed identity by record id + preview-time version and RE-ENUMERATED + re-compared at execute,
+  // so Reset can NEVER delete a record/version the actor did not see in the preview. PIT-2: all revert + delete
+  // writes happen in ONE transaction; a single denied/forbidden/locked/conflicted target aborts the whole Reset with
+  // zero writes/deletes/revisions.
   const PIT_RESET_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true'
 
   router.post('/sheets/:sheetId/reset-preview', async (req: Request, res: Response) => {
@@ -8724,22 +8791,23 @@ export function univerMetaRouter(): Router {
       const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: sheet-admin cap, above plain record-write
-      const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
+      const computed = await computeSheetReset(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record reset ceiling; a sheet-wide reset of this size is refused.` } })
-      const { reverts, createdAfterTIds, undeleteCount, driftCount } = computed
-      const previewIdentity = (reverts.length > 0 || createdAfterTIds.length > 0)
+      if ('blocked' in computed) return sendPitResetBlocked(res, computed.reason)
+      const { reverts, deletes } = computed
+      const previewIdentity = (reverts.length > 0 || deletes.length > 0)
         ? mintPitResetPreviewIdentity({
             sheetId, asOf: asOfIso, strategy: 'reset',
             revertScopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
-            deleteScopeHash: hashDeleteSet(createdAfterTIds), actorId: access.userId,
+            deleteScopeHash: hashDeleteSet(deletes.map((d) => ({ recordId: d.recordId, version: d.version }))), actorId: access.userId,
           })
         : null // nothing to revert AND nothing to delete → no-op, no executable token
       return res.json({ ok: true, data: {
         asOf: asOfIso, strategy: 'reset',
-        summary: { visibleRevertCount: reverts.length, deleteCount: createdAfterTIds.length, visibleUndeleteCount: undeleteCount, conflictCount: driftCount },
+        summary: { visibleRevertCount: reverts.length, deleteCount: deletes.length, visibleUndeleteCount: 0, conflictCount: 0 },
         records: reverts.map((r) => ({ recordId: r.recordId, fieldIds: r.diff.map((dd) => dd.fieldId) })),
-        deleteRecordIds: createdAfterTIds, // the actor's VISIBLE post-T-created records that Reset would soft-delete
+        deleteRecordIds: deletes.map((d) => d.recordId),
         undeleteSupported: false, previewIdentity,
       } })
     } catch (err) {
@@ -8764,91 +8832,207 @@ export function univerMetaRouter(): Router {
       const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2
-      const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities) // RE-ENUMERATE reverts + delete-set
+      const computed = await computeSheetReset(pool, req, sheetId, asOfIso, access, capabilities) // RE-ENUMERATE reverts + delete-set
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record reset ceiling; a sheet-wide reset of this size is refused.` } })
-      const { reverts, createdAfterTIds, patchContext } = computed
+      if ('blocked' in computed) return sendPitResetBlocked(res, computed.reason)
+      const { reverts, deletes, patchContext } = computed
       // Verify the signed reset identity against the RE-ENUMERATED reverts AND delete-set. A record created between
-      // preview and execute re-enumerates into createdAfterTIds → deleteScopeHash diverges → 409. The delete-set can
-      // NEVER widen past what the actor saw in the preview (the load-bearing data-safety property).
+      // preview and execute re-enumerates into deletes; a delete target edited since preview changes its bound version.
       const verdict = verifyPitResetPreviewIdentity(parsed.data.previewIdentity, {
         sheetId, asOf: asOfIso, strategy: 'reset',
         revertScopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
-        deleteScopeHash: hashDeleteSet(createdAfterTIds), actorId: access.userId,
+        deleteScopeHash: hashDeleteSet(deletes.map((d) => ({ recordId: d.recordId, version: d.version }))), actorId: access.userId,
       })
       if (!verdict.valid) {
         const status = verdict.reason === 'expired' ? 410 : 409
         return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Reset preview identity rejected (${verdict.reason}); the sheet changed since preview — re-preview` } })
       }
-      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions } = patchContext
-      const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
-        ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
+      const { fieldById } = patchContext
 
-      // PIT-2 ALL-OR-NOTHING PREFLIGHT — before ANY write, permission-check EVERY revert AND EVERY delete target. A
-      // SINGLE blocker rejects the WHOLE reset with zero writes (no partial-skip, unlike Revert). Dropping any check
-      // below lets a denied/forbidden/locked target into the destructive set → the all-or-nothing golden fails.
-      const blockers: Array<{ recordId: string; reason: string }> = []
-      for (const c of reverts) {
-        if (deniedIds.has(c.recordId)) { blockers.push({ recordId: c.recordId, reason: 'denied' }); continue }
-        const hasForbidden = c.diff.some((ch) => {
-          const guard = fieldById.get(ch.fieldId); const perm = fieldPermissions[ch.fieldId]
-          return !(guard && !guard.hidden && guard.readOnly !== true) || !(perm && perm.visible !== false && perm.readOnly !== true)
-        })
-        if (hasForbidden) blockers.push({ recordId: c.recordId, reason: 'forbidden' })
-      }
-      // delete-set preflight mirrors RecordService.deleteRecord's gates (canDeleteRecord cap + row write-allowed +
-      // not-locked + not row-denied) so a blocked delete is caught BEFORE any write, never thrown mid-delete-phase.
-      const delRows = createdAfterTIds.length > 0
-        ? (await pool.query('SELECT id, created_by, locked, locked_by FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])', [sheetId, createdAfterTIds])).rows as Array<Record<string, unknown>>
-        : []
-      const delRowById = new Map(delRows.map((r) => [String(r.id), r]))
-      for (const id of createdAfterTIds) {
-        if (deniedIds.has(id)) { blockers.push({ recordId: id, reason: 'denied' }); continue }
-        if (!capabilities.canDeleteRecord) { blockers.push({ recordId: id, reason: 'forbidden' }); continue }
-        const row = delRowById.get(id)
-        if (!row) { blockers.push({ recordId: id, reason: 'gone' }); continue } // vanished since re-enumerate
-        const createdBy = typeof row.created_by === 'string' ? row.created_by : null
-        if (!ensureRecordWriteAllowed(capabilities, sheetScope, access, createdBy, 'delete')) { blockers.push({ recordId: id, reason: 'forbidden' }); continue }
-        try { ensureRecordNotLocked(getRequestActorId(req), row, () => new Error('locked')) } catch { blockers.push({ recordId: id, reason: 'locked' }) }
-      }
-      if (blockers.length > 0) {
-        return res.status(409).json({ ok: false, error: { code: 'RESET_BLOCKED', message: 'Reset is all-or-nothing: a target is denied/forbidden/locked, so NOTHING was written.', blockers } })
-      }
-
-      // ── Phase A — REVERT-FIRST (atomic among reverts: one patchRecords call = one txn; a throw rolls it all back) ──
-      const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
-      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
-      if (yjsInvalidator) recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
-      let revertedCount = 0
-      if (reverts.length > 0) {
-        try {
-          const result = await recordWriteService.patchRecords({ sheetId, changesByRecord: new Map(reverts.map((c) => [c.recordId, c.diff])), actorId: getRequestActorId(req), fields, visiblePropertyFields: readableEchoFields, visiblePropertyFieldIds: readableEchoFieldIds, attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore' })
-          revertedCount = result.updated.length
-        } catch (revErr) {
-          if (revErr instanceof ServiceVersionConflictError || revErr instanceof RecordServiceVersionConflictError || revErr instanceof ServiceFieldForbiddenError || revErr instanceof RecordServiceFieldForbiddenError || revErr instanceof ServiceValidationError || revErr instanceof RecordServiceValidationError) {
-            return res.status(409).json({ ok: false, error: { code: 'RESET_REVERT_FAILED', message: 'A record changed since preview; the revert rolled back and NOTHING was deleted — re-preview.' } })
-          }
-          throw revErr
-        }
-      }
-      // ── Phase B — DELETE-SECOND (soft-delete → recycle-bin trash + delete revision + realtime, per record) ──
-      const recordService = new RecordService(pool, eventBus)
+      const actorId = getRequestActorId(req)
+      const affectedIds = [...new Set([...reverts.map((r) => r.recordId), ...deletes.map((d) => d.recordId)])]
+      const batchId = randomUUID()
+      const updatedRows: Array<{ recordId: string; version: number; fieldIds: string[]; patch: Record<string, unknown> }> = []
       const deletedRecordIds: string[] = []
+
       try {
-        for (const id of createdAfterTIds) {
-          await recordService.deleteRecord({
-            recordId: id, actorId: getRequestActorId(req), access,
-            resolveSheetAccess: async (sid) => { const r = await resolveSheetCapabilities(req, pool.query.bind(pool), sid); return { capabilities: r.capabilities, ...(r.sheetScope ? { sheetScope: r.sheetScope } : {}) } },
-          })
-          deletedRecordIds.push(id)
+        await pool.transaction(async ({ query }) => {
+          const baseRow = (await query('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])).rows[0] as Record<string, unknown> | undefined
+          const baseId = typeof baseRow?.base_id === 'string' ? baseRow.base_id : null
+          const lockedRows = affectedIds.length > 0
+            ? (await query(
+                `SELECT id, version, data, created_by, locked, locked_by, created_at, updated_at
+                   FROM meta_records
+                  WHERE sheet_id = $1 AND id = ANY($2::text[])
+                  FOR UPDATE`,
+                [sheetId, affectedIds],
+              )).rows as Array<Record<string, unknown>>
+            : []
+          const rowById = new Map(lockedRows.map((r) => [String(r.id), r]))
+
+          for (const candidate of reverts) {
+            const row = rowById.get(candidate.recordId)
+            if (!row) throw new ServiceVersionConflictError(candidate.recordId, 0)
+            ensureRecordNotLocked(actorId, row, () => new ServiceValidationError(`Record is locked: ${candidate.recordId}`, 'FORBIDDEN'))
+            const serverVersion = Number(row.version ?? 1)
+            if (serverVersion !== candidate.version) throw new ServiceVersionConflictError(candidate.recordId, serverVersion)
+            const previousData = normalizeJson(row.data)
+            const patch: Record<string, unknown> = {}
+            const unsetIds: string[] = []
+            for (const change of candidate.diff) {
+              if (change.op === 'unset') unsetIds.push(change.fieldId)
+              else patch[change.fieldId] = change.value
+            }
+            const updateRes = unsetIds.length > 0
+              // lock-guarded: PIT Reset reverts in one transaction after ensureRecordNotLocked above.
+              ? await query(
+                  `UPDATE meta_records
+                     SET data = (data - $5::text[]) || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
+                   WHERE sheet_id = $2 AND id = $3
+                   RETURNING version`,
+                  [JSON.stringify(patch), sheetId, candidate.recordId, actorId, unsetIds],
+                )
+              // lock-guarded: PIT Reset reverts in one transaction after ensureRecordNotLocked above.
+              : await query(
+                  `UPDATE meta_records
+                     SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
+                   WHERE sheet_id = $2 AND id = $3
+                   RETURNING version`,
+                  [JSON.stringify(patch), sheetId, candidate.recordId, actorId],
+                )
+            const nextVersion = Number((updateRes.rows[0] as { version?: unknown } | undefined)?.version ?? serverVersion + 1)
+            const afterImage: Record<string, unknown> = { ...previousData, ...patch }
+            const revisionPatch: Record<string, unknown> = { ...patch }
+            for (const removedId of unsetIds) {
+              delete afterImage[removedId]
+              revisionPatch[removedId] = null
+            }
+            await recordRecordRevision(query, {
+              sheetId,
+              recordId: candidate.recordId,
+              version: nextVersion,
+              action: 'update',
+              source: 'restore',
+              actorId,
+              changedFieldIds: [...Object.keys(patch), ...unsetIds],
+              patch: revisionPatch,
+              snapshot: afterImage,
+              batchId,
+            })
+            for (const change of candidate.diff) {
+              const field = fieldById.get(change.fieldId)
+              if (field?.type !== 'link') continue
+              const ids = change.op === 'unset' ? [] : normalizeLinkIds(change.value)
+              const cfg = field.link
+              if (ids.length > 0 && !cfg?.foreignSheetId) {
+                throw new ServiceValidationError('Link field is missing its foreign sheet target', 'FORBIDDEN')
+              }
+              if (ids.length > 0) {
+                const exists = await query(
+                  'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+                  [cfg.foreignSheetId, ids],
+                )
+                const found = new Set((exists.rows as Array<{ id: unknown }>).map((r) => String(r.id)))
+                if (ids.some((id) => !found.has(id))) {
+                  throw new ServiceValidationError('Linked reset target is no longer valid', 'FORBIDDEN')
+                }
+              }
+              const current = await query('SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2', [change.fieldId, candidate.recordId])
+              const existingIds = (current.rows as Array<{ foreign_record_id: unknown }>).map((r) => String(r.foreign_record_id))
+              const existing = new Set(existingIds)
+              const next = new Set(ids)
+              const toDelete = existingIds.filter((id) => !next.has(id))
+              const toInsert = ids.filter((id) => !existing.has(id))
+              if (toDelete.length > 0) {
+                await query(
+                  'DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY($3::text[])',
+                  [change.fieldId, candidate.recordId, toDelete],
+                )
+              }
+              for (const foreignId of toInsert) {
+                await query(
+                  `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+                   VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+                  [buildId('lnk').slice(0, 50), change.fieldId, candidate.recordId, foreignId],
+                )
+              }
+              if (ids.length === 0) await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [change.fieldId, candidate.recordId])
+            }
+            updatedRows.push({ recordId: candidate.recordId, version: nextVersion, fieldIds: [...Object.keys(patch), ...unsetIds], patch: revisionPatch })
+          }
+
+          for (const candidate of deletes) {
+            const row = rowById.get(candidate.recordId)
+            if (!row) throw new ServiceVersionConflictError(candidate.recordId, 0)
+            ensureRecordNotLocked(actorId, row, () => new ServiceValidationError(`Record is locked: ${candidate.recordId}`, 'FORBIDDEN'))
+            const serverVersion = Number(row.version ?? 1)
+            if (serverVersion !== candidate.version) throw new ServiceVersionConflictError(candidate.recordId, serverVersion)
+            const createdBy = typeof row.created_by === 'string' ? row.created_by : null
+            if (!capabilities.canDeleteRecord || !ensureRecordWriteAllowed(capabilities, sheetScope, access, createdBy, 'delete')) {
+              throw new ServiceValidationError('Record deletion is not allowed', 'FORBIDDEN')
+            }
+            const snapshot = normalizeJson(row.data)
+            await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [candidate.recordId])
+            await recordRecordRevision(query, {
+              sheetId,
+              recordId: candidate.recordId,
+              version: serverVersion,
+              action: 'delete',
+              source: 'restore',
+              actorId,
+              changedFieldIds: [],
+              patch: {},
+              snapshot,
+              batchId,
+            })
+            await query(
+              `INSERT INTO meta_records_trash
+                 (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
+               VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
+              [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null],
+            )
+            // lock-guarded: PIT Reset deletes in the same transaction after ensureRecordNotLocked above.
+            await query('DELETE FROM meta_records WHERE sheet_id = $1 AND id = $2', [sheetId, candidate.recordId])
+            deletedRecordIds.push(candidate.recordId)
+          }
+        })
+      } catch (err) {
+        if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) {
+          return res.status(409).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: 'Reset target changed since preview; nothing written — re-preview.' } })
         }
-      } catch (delErr) {
-        // Revert-first means surviving records are already reverted + the not-yet-deleted post-T records remain
-        // (data-safe). Re-running Reset converges (reverts become no-ops, the remaining deletes retry).
-        console.error('[univer-meta] reset delete-phase failed after revert:', delErr)
-        return res.status(500).json({ ok: false, error: { code: 'RESET_DELETE_INCOMPLETE', message: `Reverts applied (${revertedCount}); the delete phase failed after ${deletedRecordIds.length}/${createdAfterTIds.length} soft-deletes. The sheet is data-safe (reverted records + remaining post-T records intact); re-run reset to converge.`, revertedCount, deletedRecordIds } })
+        if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError || err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) {
+          return res.status(409).json({ ok: false, error: { code: 'RESET_BLOCKED', message: 'Reset is all-or-nothing: a target is forbidden/locked, so nothing was written.' } })
+        }
+        throw err
       }
-      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'reset', revertedCount, deletedCount: deletedRecordIds.length, deletedRecordIds } })
+      if (updatedRows.length > 0) {
+        publishMultitableSheetRealtime({
+          spreadsheetId: sheetId,
+          actorId,
+          source: 'multitable',
+          kind: 'record-updated',
+          recordIds: updatedRows.map((r) => r.recordId),
+          fieldIds: [...new Set(updatedRows.flatMap((r) => r.fieldIds))],
+          recordPatches: updatedRows.map((r) => ({ recordId: r.recordId, version: r.version, patch: r.patch })),
+        })
+        for (const row of updatedRows) {
+          eventBus.emit('multitable.record.updated', { sheetId, recordId: row.recordId, changes: row.patch, actorId })
+        }
+      }
+      if (deletedRecordIds.length > 0) {
+        publishMultitableSheetRealtime({
+          spreadsheetId: sheetId,
+          actorId,
+          source: 'multitable',
+          kind: 'record-deleted',
+          recordIds: deletedRecordIds,
+        })
+        for (const recordId of deletedRecordIds) {
+          eventBus.emit('multitable.record.deleted', { sheetId, recordId, actorId })
+        }
+      }
+      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'reset', revertedCount: updatedRows.length, deletedCount: deletedRecordIds.length, deletedRecordIds } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
       const hint = getDbNotReadyMessage(err)

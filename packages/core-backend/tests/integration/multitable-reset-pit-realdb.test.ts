@@ -3,11 +3,11 @@
  * T-state) + SOFT-DELETE the records created after T. Goldens: (a) flag-off → inert 403; (b) flag-on → post-T-created
  * SOFT-DELETED (to recycle-bin trash) + survivors reverted (source=restore); (c) PIT-2 all-or-nothing — a LOCKED
  * delete-target → 409 RESET_BLOCKED with ZERO writes (mutation-proven: drop the not-locked preflight check → D is
- * deleted → this golden fails); (d) ceiling → 413; (e) typed confirm:'reset' required → 400; (f) delete-set
- * divergence — a record created between preview/execute → 409, NOTHING deleted (the load-bearing data-safety prop);
- * (g) revert-first atomicity — a forced revision failure aborts the revert before any delete; (h) PIT-7 reveal-non-
- * composition (source-grep); (i) D2 sheet-admin gate. Runs only with DATABASE_URL. Row-deny exclusion of the
- * delete-set is inherited from computeSheetRevert (covered by the T8-1 + batch-restore suites' loadDeniedRecordIds seam).
+ * deleted → this golden fails); (d) row-deny added after preview → 409 RESET_BLOCKED with ZERO writes and no blocker
+ * details; (e) ceiling → 413; (f) typed confirm:'reset' required → 400; (g) delete-set divergence — a record created
+ * or edited between preview/execute → 409, NOTHING deleted; (h) single-transaction atomicity — a forced DELETE-revision
+ * failure rolls back the already-started A/B reverts too; (i) PIT-7 reveal-non-composition; (j) D2 sheet-admin gate.
+ * Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -111,24 +111,38 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
     const pv = await resetPreview()
     const ex = await resetExecute({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity, confirm: 'reset' })
     expect(ex.status).toBe(409); expect(ex.body?.error?.code).toBe('RESET_BLOCKED')
-    expect((ex.body?.error?.blockers ?? []).some((b: { recordId: string; reason: string }) => b.recordId === D && b.reason === 'locked')).toBe(true)
+    expect(ex.body?.error?.blockers).toBeUndefined() // no target id/count oracle on the destructive path
     // ZERO writes — the all-or-nothing preflight rejected BEFORE any revert or delete
     for (const id of [A, B]) { const r = await recordRow(id); expect(r?.data?.[NAME]).toBe('new'); expect(r?.version).toBe(2) } // NOT reverted
     expect(await recordRow(D)).toBeTruthy() // NOT deleted
   })
 
-  test('(d) ceiling: a sheet above SHEET_REVERT_MAX_RECORDS → 413', async () => {
+  test('(d) PIT-2 all-or-nothing: row-deny added after preview → RESET_BLOCKED, ZERO writes, no blocker oracle', async () => {
+    const pv = await resetPreview()
+    await q("UPDATE meta_sheets SET row_level_read_permissions_enabled = true, conditional_read_rules = $2::jsonb WHERE id = $1", [SHEET, JSON.stringify([{ id: 'r1', fieldId: NAME, operator: 'eq', value: 'newbie', effect: 'deny_read' }])])
+    const ex = await resetExecute({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity, confirm: 'reset' })
+    expect(ex.status).toBe(409)
+    expect(ex.body?.error?.code).toBe('RESET_BLOCKED')
+    expect(ex.body?.error?.blockers).toBeUndefined() // no denied-row id/count oracle on the destructive path
+    for (const id of [A, B]) { const r = await recordRow(id); expect(r?.data?.[NAME]).toBe('new'); expect(r?.version).toBe(2) }
+    expect(await recordRow(D)).toBeTruthy()
+    expect(await inTrash(D)).toBe(false)
+    const restoreRevs = (await q(`SELECT count(*)::int AS c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`, [SHEET])).rows[0] as { c: number }
+    expect(restoreRevs.c).toBe(0)
+  })
+
+  test('(e) ceiling: a sheet above SHEET_REVERT_MAX_RECORDS → 413', async () => {
     for (let i = 0; i < 8; i++) await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [`rec_rs_big_${TS}_${i}`, SHEET, JSON.stringify({ [NAME]: 'x' })])
     expect((await resetPreview()).status).toBe(413)
   })
 
-  test('(e) D4 typed confirm: execute WITHOUT confirm:"reset" → 400 (no stray-call trigger)', async () => {
+  test('(f) D4 typed confirm: execute WITHOUT confirm:"reset" → 400 (no stray-call trigger)', async () => {
     const pv = await resetPreview()
     expect((await resetExecute({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity })).status).toBe(400) // confirm absent
     expect((await resetExecute({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity, confirm: 'revert' })).status).toBe(400) // wrong confirm
   })
 
-  test('(f) delete-set divergence: a record created AFTER the preview → execute 409, NOTHING deleted', async () => {
+  test('(g1) delete-set divergence: a record created AFTER the preview → execute 409, NOTHING deleted', async () => {
     const pv = await resetPreview() // delete-set bound = {D}
     const E = `rec_rs_e_${TS}`
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [E, SHEET, JSON.stringify({ [NAME]: 'sneaked-in' })]) // now post-T-created too
@@ -138,19 +152,29 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
     expect(await recordRow(E)).toBeTruthy() // E (never in the preview) NOT deleted — the load-bearing safety property
   })
 
-  test('(g) revert-first atomicity: a forced revision failure aborts the revert → NOTHING deleted', async () => {
+  test('(g2) delete-set version drift: a post-T-created record edited after preview → execute 409, NOTHING deleted', async () => {
+    const pv = await resetPreview() // D bound at version 1
+    await q('UPDATE meta_records SET data = $2::jsonb, version = version + 1 WHERE id = $1', [D, JSON.stringify({ [NAME]: 'edited-after-preview', [SALARY]: 501 })])
+    const ex = await resetExecute({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity, confirm: 'reset' })
+    expect(ex.status).toBe(409); expect(ex.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
+    expect((await recordRow(D))?.data?.[NAME]).toBe('edited-after-preview')
+    for (const id of [A, B]) { const r = await recordRow(id); expect(r?.data?.[NAME]).toBe('new'); expect(r?.version).toBe(2) }
+  })
+
+  test('(h) single-transaction atomicity: DELETE-revision failure rolls back prior A/B reverts AND D delete', async () => {
     const pv = await resetPreview()
-    await q(`CREATE OR REPLACE FUNCTION _rs_fail() RETURNS trigger AS $f$ BEGIN RAISE EXCEPTION 'rs injected'; END; $f$ LANGUAGE plpgsql`, [])
+    await q(`CREATE OR REPLACE FUNCTION _rs_fail() RETURNS trigger AS $f$ BEGIN IF NEW.action = 'delete' THEN RAISE EXCEPTION 'rs injected'; END IF; RETURN NEW; END; $f$ LANGUAGE plpgsql`, [])
     await q('CREATE TRIGGER _rs_fail_trg BEFORE INSERT ON meta_record_revisions FOR EACH ROW EXECUTE FUNCTION _rs_fail()', [])
     try { await resetExecute({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity, confirm: 'reset' }) } finally {
       await q('DROP TRIGGER IF EXISTS _rs_fail_trg ON meta_record_revisions', [])
       await q('DROP FUNCTION IF EXISTS _rs_fail()', [])
     }
-    for (const id of [A, B]) { const r = await recordRow(id); expect(r?.data?.[NAME]).toBe('new'); expect(r?.version).toBe(2) } // revert rolled back
-    expect(await recordRow(D)).toBeTruthy() // delete never reached (revert-first abort) → D intact
+    for (const id of [A, B]) { const r = await recordRow(id); expect(r?.data?.[NAME]).toBe('new'); expect(r?.version).toBe(2) } // A/B updates rolled back
+    expect(await recordRow(D)).toBeTruthy()
+    expect(await inTrash(D)).toBe(false)
   })
 
-  test('(h) PIT-7: the reset path composes NO reveal grant (source-grep)', () => {
+  test('(i) PIT-7: the reset path composes NO reveal grant (source-grep)', () => {
     const src = readFileSync(join(__dirname, '../../src/routes/univer-meta.ts'), 'utf8')
     const start = src.indexOf('T8-2 Reset-to-T (DESTRUCTIVE PIT restore)')
     const end = src.indexOf("records/:recordId/subscriptions'", start)
@@ -159,7 +183,7 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
     expect(block).not.toMatch(/resolveActiveRevealGrant|loadRevealedFieldIds|loadActiveReveal/) // reveal never composes into the destructive write
   })
 
-  test('(i) D2: a normal record editor (write but NOT sheet-admin) is FORBIDDEN reset', async () => {
+  test('(j) D2: a normal record editor (write but NOT sheet-admin) is FORBIDDEN reset', async () => {
     curPerms = ['multitable:read', 'multitable:write'] // no share → no canManageSheetAccess
     expect((await resetPreview()).status).toBe(403)
     expect((await resetExecute({ asOf: T1, previewIdentity: 'x', confirm: 'reset' })).status).toBe(403)
