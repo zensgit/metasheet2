@@ -1,6 +1,8 @@
 # Approval Formula Conditions — Design Lock
 
-Status: PROPOSED — RUNTIME NOT BUILT.
+Status: RATIFIED — RUNTIME NOT BUILT. Owner decisions resolved:
+`AND/OR/NOT` only in v1; numeric aggregates fail closed; backend evaluator
+ships before dry-run.
 
 Goal: make approval condition branches more flexible than today's
 `fieldId + operator + value` rules, while keeping the approval backend as the
@@ -95,6 +97,10 @@ V1 supports:
   - `MIN({detail.amount})`
   - `MAX({detail.amount})`
 
+Arithmetic is fail-closed on unsafe numeric states. Division by zero, `NaN`,
+`Infinity`, overflow, or any other non-finite intermediate/result rejects the
+formula at publish or fails the branch evaluation closed at runtime.
+
 The result type MUST be boolean. A numeric or string formula is invalid for
 branching unless it is compared to something.
 
@@ -122,6 +128,16 @@ small deterministic evaluator with a narrower attack surface:
 - no volatile functions such as time/random;
 - no mutation;
 - bounded expression length and AST size.
+
+The v1 bounds are deliberately concrete so the DoS guard is testable:
+
+- expression length: max 512 UTF-16 code units;
+- AST nodes: max 128;
+- nesting depth: max 16;
+- field references: max 64;
+- function calls: max 32.
+
+Exceeding any bound fails publish, dry-run, and runtime evaluation closed.
 
 If implementation reuses any existing formula parser utilities, it must still
 wrap them in an approval-specific validator that enforces the v1 allowlist above.
@@ -181,6 +197,11 @@ normalization and any declared amount total-check. They may read:
 This does NOT make `amount = quantity * unit_price` tamper-proof. Backend
 line-math enforcement remains a separate future lock.
 
+The trust model does not widen. Routing on `SUM({detail.amount})` still routes
+on declared submitted values, exactly like today's `{amount} >= ...` rule. The
+backend total-check guarantees consistency between total and detail amount; it
+does not prove the line values themselves are truthful.
+
 ### 7. Frontend Authoring Shape
 
 Condition nodes get two predicate modes per branch:
@@ -238,6 +259,10 @@ Required tests:
 - invalid syntax fails publish;
 - unknown field fails publish;
 - non-boolean expression fails publish;
+- division by zero, `NaN`, and non-finite arithmetic fail closed;
+- expression length/AST/depth/reference/function caps reject oversized formulas;
+- formula branches survive `normalizeApprovalGraph`, publish, and reload without
+  being dropped or flattened;
 - `SUM({detail.amount}) >= threshold` routes correctly;
 - malformed runtime data fails closed, not default-branch.
 
@@ -274,11 +299,11 @@ total-check already make `amount` reliable.
 - AI formula generation. This can be a later convenience feature after the
   deterministic evaluator is shipped.
 
-## Owner Decisions Before Runtime
+## Resolved Owner Decisions
 
-1. Boolean syntax: accept only `AND/OR/NOT`, or also `&&/||/!` aliases?
-   Recommendation: accept `AND/OR/NOT` in v1, add aliases later only if needed.
-2. Aggregate strictness: fail closed on any non-numeric aggregate cell, or skip
-   invalid cells? Recommendation: fail closed.
-3. Dry-run timing: ship backend evaluator first without dry-run, or include the
-   dry-run endpoint in FC-1? Recommendation: evaluator first, dry-run with FC-2.
+1. Boolean syntax: accept only `AND/OR/NOT` in v1. `&&`, `||`, and `!` aliases
+   are deferred until there is a concrete authoring need.
+2. Aggregate strictness: fail closed on any missing/non-numeric aggregate cell.
+   Approval routing must not silently ignore malformed monetary data.
+3. Dry-run timing: ship the backend evaluator first. The dry-run endpoint belongs
+   with FC-2 authoring, after the evaluator contract is real.
