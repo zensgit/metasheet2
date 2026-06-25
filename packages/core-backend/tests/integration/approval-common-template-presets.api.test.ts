@@ -135,6 +135,40 @@ describeIfDatabase('common approval template presets — real-DB backend accepta
     expect(parallel!.config.joinMode).toBe('all')
   })
 
+  it('amount-tier formula conditions round-trip through create→normalize', async () => {
+    const cases = [
+      {
+        id: 'reimbursement_amount_tier' as const,
+        expression: '{expense_type} == "差旅" AND {amount} >= 5000',
+      },
+      {
+        id: 'purchase_amount_tier' as const,
+        expression: 'SUM({purchase_items.amount}) >= 20000',
+      },
+    ]
+
+    for (const item of cases) {
+      const payload = buildCommonApprovalTemplatePresetPayload(item.id, {
+        keySuffix: `realdb-${TS}-formula-${item.id}`,
+      })
+      const response = await jsonRequest(baseUrl, '/api/approval-templates', token, {
+        method: 'POST',
+        body: payload,
+      })
+      expect(response.status, await response.clone().text()).toBe(201)
+      const body = await response.json() as {
+        approvalGraph: { nodes: Array<{ type: string; config: Record<string, unknown> }> }
+      }
+      const condition = body.approvalGraph.nodes.find((node) => node.type === 'condition')
+      expect(condition?.config).toMatchObject({
+        branches: [{
+          rules: [],
+          formula: { expression: item.expression },
+        }],
+      })
+    }
+  })
+
   it('purchase_amount_tier: an UNTOUCHED preset CANNOT be published — the placeholder role fail-fasts at publish (a verifiable state, not a runtime stuck-flow)', async () => {
     expect(FE_ROLE_SENTINEL).toBe(BACKEND_ROLE_SENTINEL) // FE preset placeholder MUST byte-match the backend guard, else the guard misses it
     const payload = buildCommonApprovalTemplatePresetPayload('purchase_amount_tier', { keySuffix: `realdb-${TS}-sentinel` })
