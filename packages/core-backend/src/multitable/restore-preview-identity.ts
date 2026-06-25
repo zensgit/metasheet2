@@ -162,3 +162,44 @@ export function verifyScopedRestorePreviewIdentity(token: string, expected: Scop
   if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
   return { valid: true }
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// T8-1: PIT (point-in-time, sheet-wide) Revert preview-identity. A DISTINCT discriminated `type` from the single
+// and scoped identities (PIT-1 + PIT-4): a sheet-wide Revert-to-T binds the as-of time `asOf` PLUS the order-
+// invariant `scopeHash` over the EXACT computed revert set (each affected record's masked changesHash + version),
+// so a revert set that drifted between preview and execute (a record edited / a new post-T edit) re-hashes and is
+// rejected → re-preview. `strategy: 'revert'` only — the destructive Reset is T8-2 (a SEPARATE, hard-gated slice).
+export interface PitRevertPreviewIdentityClaims {
+  sheetId: string
+  /** the point in time the sheet is reverted to (ISO). */
+  asOf: string
+  strategy: 'revert'
+  /** sha256 over the sorted revert set (recordId + per-record masked changesHash + version), via hashScope. */
+  scopeHash: string
+  actorId: string
+}
+
+export function mintPitRevertPreviewIdentity(claims: PitRevertPreviewIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
+  return jwt.sign({ type: 'restore-preview-pit-revert', ...claims }, getSecret(), { algorithm: 'HS256', expiresIn } as SignOptions)
+}
+
+export interface PitRevertVerifyResult {
+  valid: boolean
+  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_asOf' | 'mismatch_strategy' | 'mismatch_scopeHash' | 'mismatch_actorId'
+}
+
+export function verifyPitRevertPreviewIdentity(token: string, expected: PitRevertPreviewIdentityClaims): PitRevertVerifyResult {
+  let payload: Partial<PitRevertPreviewIdentityClaims> & { type?: string }
+  try {
+    payload = jwt.verify(token, getSecret()) as Partial<PitRevertPreviewIdentityClaims> & { type?: string }
+  } catch (e) {
+    return { valid: false, reason: (e as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid' }
+  }
+  if (payload.type !== 'restore-preview-pit-revert') return { valid: false, reason: 'wrong_type' } // single/scoped tokens rejected
+  if (payload.sheetId !== expected.sheetId) return { valid: false, reason: 'mismatch_sheetId' }
+  if (payload.asOf !== expected.asOf) return { valid: false, reason: 'mismatch_asOf' }
+  if (payload.strategy !== expected.strategy) return { valid: false, reason: 'mismatch_strategy' }
+  if (payload.scopeHash !== expected.scopeHash) return { valid: false, reason: 'mismatch_scopeHash' }
+  if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
+  return { valid: true }
+}
