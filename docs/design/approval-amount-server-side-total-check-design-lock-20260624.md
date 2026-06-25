@@ -1,6 +1,6 @@
 # Amount Server-Side Total Check — Design Lock
 
-Status: IMPLEMENTED BY #3176; FOLLOW-UP GAPS TRACKED
+Status: IMPLEMENTED BY #3176; FOLLOW-UP GAPS RESOLVED (§1 #3197 · §2 #3183 · §3 #3207)
 
 Grounding: the amount-tier approval line — design-lock
 `approval-amount-tier-template-presets-design-lock-20260624.md` plus the Gate-A
