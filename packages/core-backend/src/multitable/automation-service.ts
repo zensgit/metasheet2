@@ -3,6 +3,8 @@ import type { Kysely } from 'kysely'
 import type { EventBus } from '../integration/events/event-bus'
 import { Logger } from '../core/logger'
 import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, type AutomationTriggerType } from './automation-triggers'
+import { ensureRecordNotLocked } from './record-lock'
+import { publishMultitableSheetRealtime } from './realtime-publish'
 import {
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
@@ -142,6 +144,23 @@ function validateStartApprovalConfig(config: Record<string, unknown>, path: stri
     if (mode !== undefined && mode !== 'trigger_actor' && mode !== 'rule_creator') {
       return `${path}.requester.mode must be trigger_actor or rule_creator`
     }
+  }
+  // W7-1 approval-result backwrite: a DECLARED, FIXED outcome→field mapping. The admin picks WHICH
+  // source field receives `outcome` / `approver` / `completedAt` — NOT a free template expression — so
+  // the write path stays values-constrained (values come from the completion event, never user strings).
+  // Optional; ≥1 field if present. The mapping is part of the action config, so it is covered by the
+  // resume-time action-fingerprint drift guard (cannot be swapped after the approval suspends).
+  if (config.resultWriteback !== undefined) {
+    if (!isRecord(config.resultWriteback)) return `${path}.resultWriteback must be an object`
+    const fields = ['statusField', 'approverField', 'completedAtField'] as const
+    let mapped = 0
+    for (const field of fields) {
+      const value = config.resultWriteback[field]
+      if (value === undefined) continue
+      if (typeof value !== 'string' || value.trim().length === 0) return `${path}.resultWriteback.${field} must be a non-empty string`
+      mapped += 1
+    }
+    if (mapped === 0) return `${path}.resultWriteback must map at least one of statusField/approverField/completedAtField`
   }
   return null
 }
@@ -1356,6 +1375,18 @@ export class AutomationService {
       recordData = (row.data as Record<string, unknown>) ?? {}
     }
 
+    // W7-1: declared approval-result backwrite to the SOURCE record (fixed mapping, values from the
+    // event, through the lock guard). Best-effort — a locked/missing record logs + skips rather than
+    // crashing the resume, so the automation's remaining actions still run.
+    try {
+      const backwritten = await this.writeApprovalResultBack(bridge, execRule.actions[bridge.stepIndex]?.config ?? {}, event)
+      // W7-1a: merge the backwrite into the resume snapshot so the TAIL actions (send_webhook /
+      // update_record / ...) see the just-written result, not the pre-approval record.
+      if (backwritten) recordData = { ...recordData, ...backwritten }
+    } catch (err) {
+      logger.warn(`approval-result backwrite skipped for bridge ${bridge.id}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+
     const triggerEvent = bridge.triggerEvent ?? {}
     const context: ExecutionContext = {
       executionId: execution.id,
@@ -1401,6 +1432,71 @@ export class AutomationService {
       error: `Approval completed with ${event.transition.toStatus}`,
       durationMs: 0,
     }
+  }
+
+  /**
+   * W7-1 approval-result backwrite: write the DECLARED fixed outcome→field mapping (from the
+   * start_approval action's `resultWriteback`) onto the SOURCE record, using values from the completion
+   * event ONLY (never user-templated strings — that keeps the write path values-constrained, the whole
+   * reason this was gated). Goes through the record lock guard (B1: an automation does not implicitly own
+   * a lock). Null-safe: `approver` is null on auto/system approval (the field is written null, not
+   * crashed). Same-base only (the source record that started the approval). Approval-only is enforced by
+   * the caller (runs in the approved branch); rejection backwrite is a named follow-up.
+   */
+  private async writeApprovalResultBack(
+    bridge: AutomationApprovalBridgeRow,
+    startApprovalConfig: Record<string, unknown>,
+    event: ApprovalCompletionEventV1,
+  ): Promise<Record<string, unknown> | null> {
+    const writeback = isRecord(startApprovalConfig.resultWriteback) ? startApprovalConfig.resultWriteback : null
+    if (!writeback || !bridge.recordId || !bridge.sheetId) return null
+    const patch: Record<string, unknown> = {}
+    if (typeof writeback.statusField === 'string') patch[writeback.statusField] = event.transition.toStatus
+    if (typeof writeback.approverField === 'string') patch[writeback.approverField] = event.actor?.id ?? null
+    if (typeof writeback.completedAtField === 'string') patch[writeback.completedAtField] = event.occurredAt
+    if (Object.keys(patch).length === 0) return null
+
+    const lockRes = await this.queryFn(
+      'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
+      [bridge.recordId, bridge.sheetId],
+    )
+    const lockRow = lockRes.rows[0] as { locked?: unknown; locked_by?: unknown; created_by?: unknown } | undefined
+    if (!lockRow) return null // record gone — the resume's own missing-record path already handled it
+    ensureRecordNotLocked(event.actor?.id ?? null, lockRow, () => new Error('source record is locked'))
+    // rich-longText SAFE: patch carries ONLY system outcome values (status enum / approver id / ISO
+    // timestamp), never user-supplied longText — classified SAFE in the rich-longText write-sink guard.
+    // lock-guarded: the backwrite respects the source record lock via ensureRecordNotLocked just above (B1).
+    await this.queryFn(
+      `UPDATE meta_records
+       SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, version = version + 1, updated_at = NOW()
+       WHERE id = $2 AND sheet_id = $3`,
+      [JSON.stringify(patch), bridge.recordId, bridge.sheetId],
+    )
+
+    // W7-1a parity: emit the chaining event + realtime fan-out, matching update_record, so UI /
+    // subscribers / downstream record.updated automations see the backwrite live. Depth-guarded
+    // (inherits the trigger's _automationDepth + 1) so a backwrite-driven cascade can't run away.
+    const actorId = event.actor?.id ?? null
+    const automationDepth = (((bridge.triggerEvent as Record<string, unknown> | null)?._automationDepth as number) ?? 0) + 1
+    this.eventBus.emit('multitable.record.updated', {
+      sheetId: bridge.sheetId,
+      recordId: bridge.recordId,
+      changes: patch,
+      actorId,
+      _automationDepth: automationDepth,
+    })
+    try {
+      publishMultitableSheetRealtime({
+        spreadsheetId: bridge.sheetId,
+        source: 'multitable',
+        kind: 'record-updated',
+        recordId: bridge.recordId,
+        actorId: actorId ?? undefined,
+      })
+    } catch {
+      // publishMultitableSheetRealtime swallows its own errors; belt-and-suspenders.
+    }
+    return patch
   }
 
   private async failApprovalBridgeExecution(

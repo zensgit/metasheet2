@@ -151,7 +151,7 @@ async function createPublishedTemplate(
   return template.id
 }
 
-async function createStartApprovalRule(svc: AutomationService, templateId: string): Promise<string> {
+async function createStartApprovalRule(svc: AutomationService, templateId: string, resultWriteback?: Record<string, string>): Promise<string> {
   const startApproval = {
     type: 'start_approval',
     config: {
@@ -160,6 +160,7 @@ async function createStartApprovalRule(svc: AutomationService, templateId: strin
         summary: 'Record {{record.title}} needs approval',
       },
       requester: { mode: 'trigger_actor' },
+      ...(resultWriteback ? { resultWriteback } : {}),
     },
   } as const
   const created = await svc.createRule(SHEET, {
@@ -345,6 +346,117 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
       expect(finalJobs[0].result).toMatchObject({ outcome: 'approved' })
       finalJobs.forEach((job) => expect(() => normalizeWorkflowJob(job)).not.toThrow())
     } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('W7-1: approval.approved writes the result back to the source record (declared fixed mapping)', async () => {
+    const svc = makeAutomationService((async () => new Response('OK', { status: 200 })) as never)
+    try {
+      const RW = { statusField: 'approval_status', approverField: 'approved_by', completedAtField: 'approved_at' }
+      const templateId = await createPublishedTemplate()
+      const ruleId = await createStartApprovalRule(svc, templateId, RW)
+      await seedSheetRecord('Q4 plan')
+      const execRule = {
+        id: ruleId,
+        name: 'W6 start approval',
+        sheetId: SHEET,
+        trigger: { type: 'record.created', config: {} },
+        actions: [
+          {
+            type: 'start_approval',
+            config: {
+              templateId,
+              formDataMapping: { summary: 'Record {{record.title}} needs approval' },
+              requester: { mode: 'trigger_actor' },
+              resultWriteback: RW,
+            },
+          },
+          { type: 'send_webhook', config: { url: 'https://example.test/w6-tail' } },
+        ],
+        enabled: true,
+        createdBy: REQUESTER,
+        createdAt: new Date(TS).toISOString(),
+        executionMode: 'workflow_job_v1',
+      }
+      const execution = await svc.executeRule(execRule as never, {
+        sheetId: SHEET,
+        recordId: RECORD,
+        data: { title: 'Q4 plan' },
+        actorId: REQUESTER,
+      })
+      executionIds.push(execution.id)
+
+      const bridge = await q(
+        `SELECT approval_instance_id FROM multitable_automation_approval_bridges WHERE execution_id = $1`,
+        [execution.id],
+      )
+      approvalIds.push(bridge.rows[0].approval_instance_id)
+
+      const approvals = new ApprovalProductService()
+      const after = await approvals.dispatchAction(
+        bridge.rows[0].approval_instance_id,
+        { action: 'approve', comment: 'go' },
+        { userId: APPROVER, userName: APPROVER },
+      )
+      expect(after.status).toBe('approved')
+      await waitForExecutionStatus(svc, execution.id, 'success')
+
+      // W7-1: the SOURCE record now carries the approval result — values from the completion event,
+      // written via the declared fixed mapping (NOT a templated expression into the write path).
+      const rec = await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [RECORD, SHEET])
+      const data = rec.rows[0].data as Record<string, unknown>
+      expect(data.approval_status).toBe('approved')
+      expect(data.approved_by).toBe(APPROVER)
+      expect(typeof data.approved_at).toBe('string') // the completion timestamp
+    } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('W7-1a: backwrite is visible to tail actions (recordData merge) + emits record.updated (realtime parity)', async () => {
+    const webhookBodies: string[] = []
+    const updatedEvents: Array<Record<string, unknown>> = []
+    const subId = eventBus.subscribe('multitable.record.updated', (p: unknown) => { updatedEvents.push(p as Record<string, unknown>) })
+    const svc = makeAutomationService((async (_url: string, opts?: { body?: string }) => {
+      if (opts?.body) webhookBodies.push(opts.body)
+      return new Response('OK', { status: 200 })
+    }) as never)
+    try {
+      const RW = { statusField: 'approval_status' }
+      const templateId = await createPublishedTemplate()
+      const ruleId = await createStartApprovalRule(svc, templateId, RW)
+      await seedSheetRecord('Q4 plan')
+      const execRule = {
+        id: ruleId,
+        name: 'W6 start approval',
+        sheetId: SHEET,
+        trigger: { type: 'record.created', config: {} },
+        actions: [
+          { type: 'start_approval', config: { templateId, formDataMapping: { summary: 'Record {{record.title}} needs approval' }, requester: { mode: 'trigger_actor' }, resultWriteback: RW } },
+          { type: 'send_webhook', config: { url: 'https://example.test/w7a-tail' } },
+        ],
+        enabled: true,
+        createdBy: REQUESTER,
+        createdAt: new Date(TS).toISOString(),
+        executionMode: 'workflow_job_v1',
+      }
+      const execution = await svc.executeRule(execRule as never, { sheetId: SHEET, recordId: RECORD, data: { title: 'Q4 plan' }, actorId: REQUESTER })
+      executionIds.push(execution.id)
+      const bridge = await q(`SELECT approval_instance_id FROM multitable_automation_approval_bridges WHERE execution_id = $1`, [execution.id])
+      approvalIds.push(bridge.rows[0].approval_instance_id)
+      const approvals = new ApprovalProductService()
+      await approvals.dispatchAction(bridge.rows[0].approval_instance_id, { action: 'approve', comment: 'go' }, { userId: APPROVER, userName: APPROVER })
+      await waitForExecutionStatus(svc, execution.id, 'success')
+
+      // gap 1 (recordData merge): the tail send_webhook's recordData snapshot includes the backwrite.
+      expect(webhookBodies.length).toBeGreaterThan(0)
+      const body = JSON.parse(webhookBodies[webhookBodies.length - 1]) as { data?: Record<string, unknown> }
+      expect(body.data?.approval_status).toBe('approved')
+      // gap 2 (realtime/chaining parity): the backwrite emitted multitable.record.updated.
+      expect(updatedEvents.some((e) => (e.changes as Record<string, unknown> | undefined)?.approval_status === 'approved' && e.recordId === RECORD)).toBe(true)
+    } finally {
+      eventBus.unsubscribe(subId)
       svc.shutdown()
     }
   })

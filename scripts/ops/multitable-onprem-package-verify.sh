@@ -66,6 +66,10 @@ function verify_windows_entrypoints() {
     die "PowerShell launcher script must be packaged for deploy.bat self-bootstrap"
   fi
   search_fixed_string '[multitable-onprem-deploy-launcher]' "$launcher_helper" || die "launcher must self-identify in its logs"
+  search_fixed_string 'Write-Host ("[multitable-onprem-deploy-launcher] {0}" -f $Message)' "$launcher_helper" || die "launcher must log through Write-Host so informational messages do not pollute helper return values"
+  if search_fixed_string 'Write-Output ("[multitable-onprem-deploy-launcher] {0}" -f $Message)' "$launcher_helper"; then
+    die "launcher must not log through Write-Output; PowerShell success-stream output pollutes helper return values such as the staging root"
+  fi
   search_fixed_string 'Expand-StagingArchive' "$launcher_helper" || die "launcher must extract the supplied package into a staging directory before invoking the apply helper"
   search_fixed_string "defaulting to short Windows staging root" "$launcher_helper" || die "launcher must default to a short Windows staging root when METASHEET_ONPREM_STAGING_ROOT is unset"
   search_fixed_string "C:\ms-tmp" "$launcher_helper" || die "launcher must use C:\\ms-tmp as the built-in short Windows staging default"
@@ -90,6 +94,10 @@ function verify_windows_entrypoints() {
   fi
 
   local apply_helper="${root}/scripts/ops/multitable-onprem-apply-package.ps1"
+  search_fixed_string 'Write-Host "[multitable-onprem-apply-package] $Message"' "$apply_helper" || die "PowerShell apply helper must log through Write-Host so informational messages do not pollute helper return values"
+  if search_fixed_string 'Write-Output "[multitable-onprem-apply-package] $Message"' "$apply_helper"; then
+    die "PowerShell apply helper must not log through Write-Output; PowerShell success-stream output pollutes helper return values such as the staging root"
+  fi
   search_fixed_string 'Refresh dependencies (cmd.exe /c pnpm install --frozen-lockfile)' "$apply_helper" || die "PowerShell apply helper must refresh dependencies on package apply through cmd.exe"
   search_fixed_string "defaulting to short Windows staging root" "$apply_helper" || die "PowerShell apply helper must default to a short Windows staging root when METASHEET_ONPREM_STAGING_ROOT is unset"
   search_fixed_string "C:\ms-tmp" "$apply_helper" || die "PowerShell apply helper must use C:\\ms-tmp as the built-in short Windows staging default"
@@ -238,6 +246,8 @@ function verify_deployable_artifact_contract() {
   search_fixed_string '"nodeModulesBundled": false' "$metadata_json" || die "PACKAGE-METADATA.json must document node_modules policy"
   search_fixed_string '"dependencyInstallMode": "refresh-on-apply"' "$metadata_json" || die "PACKAGE-METADATA.json must document dependency refresh policy"
   search_fixed_string '"windowsEntryPoint": "deploy.bat <package.zip|package.tgz>"' "$metadata_json" || die "PACKAGE-METADATA.json must document the Windows entrypoint"
+  search_fixed_string '"windowsFirstHopBootstrap": "release sidecar:' "$metadata_json" || die "PACKAGE-METADATA.json must document the first-hop bootstrap release sidecar"
+  search_fixed_string '"windowsFirstHopBootstrapWrapper": "release sidecar:' "$metadata_json" || die "PACKAGE-METADATA.json must document the first-hop bootstrap wrapper release sidecar"
   search_fixed_string '"windowsStagingRootEnv": "METASHEET_ONPREM_STAGING_ROOT"' "$metadata_json" || die "PACKAGE-METADATA.json must document the Windows staging root environment override"
   search_fixed_string '"windowsDefaultStagingRoot": "C:\\ms-tmp"' "$metadata_json" || die "PACKAGE-METADATA.json must document the built-in short Windows staging default"
 }

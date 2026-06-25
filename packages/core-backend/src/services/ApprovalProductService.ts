@@ -483,6 +483,35 @@ function failValidation(context: ValidationContext, message: string): never {
   throw new ServiceError(message, context.status, context.code)
 }
 
+// A starter preset (e.g. the amount-tier purchase, #3114) ships a static_role branch the admin MUST
+// configure before publishing. A NORMAL placeholder role id would publish fine and then JAM the flow
+// at runtime: a placeholder static_role creates a ROLE-typed assignment to a role NOBODY holds, so
+// every instance STALLS on an unclaimable role assignment in to-do matching (NOT an empty-assignee
+// error — emptyAssigneePolicy never fires; the source resolves to one role assignment, just an
+// unclaimable one). Instead the starter uses this SENTINEL role id, and `assertNoUnconfiguredPlaceholderRoles`
+// FAIL-FASTS at PUBLISH, so an untouched preset can never reach a published definition — which also
+// means START is inherently protected (no published graph can contain the sentinel). FE mirror:
+// apps/web/src/types/approval.ts `APPROVAL_ROLE_CONFIGURE_SENTINEL` (the match is locked end-to-end by
+// the real-preset publish test in approval-common-template-presets.api.test.ts).
+export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
+
+function assertNoUnconfiguredPlaceholderRoles(approvalGraph: ApprovalGraph): void {
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const sources = (node.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
+    for (const source of sources) {
+      if (source.kind === 'static_role' && source.roleIds.includes(APPROVAL_ROLE_CONFIGURE_SENTINEL)) {
+        throw new ServiceError(
+          `审批节点「${node.name || node.key}」仍为占位审批角色，请先配置真实审批角色后再发布`,
+          400,
+          'APPROVAL_ROLE_PLACEHOLDER_NOT_CONFIGURED',
+          { nodeKey: node.key },
+        )
+      }
+    }
+  }
+}
+
 function deepFreeze<T>(value: T): T {
   if (Array.isArray(value)) {
     value.forEach((entry) => deepFreeze(entry))
@@ -2465,6 +2494,10 @@ export class ApprovalProductService {
       const approvalGraph = asApprovalGraph(version.approval_graph)
       validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
+      // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
+      // otherwise the high path stalls at runtime on an unclaimable role assignment (nobody holds the
+      // placeholder role). See APPROVAL_ROLE_CONFIGURE_SENTINEL.
+      assertNoUnconfiguredPlaceholderRoles(approvalGraph)
       const runtimeGraph = buildRuntimeGraph(approvalGraph, policy)
 
       const publishedDefinitionResult = await client.query<PublishedDefinitionRow>(

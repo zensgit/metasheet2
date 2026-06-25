@@ -32,7 +32,10 @@ $ErrorActionPreference = 'Stop'
 
 function Write-LauncherInfo {
   param([string]$Message)
-  Write-Output ("[multitable-onprem-deploy-launcher] {0}" -f $Message)
+  # Use the host stream, not the success output stream. PowerShell functions
+  # return every success-stream object, so Write-Output inside helpers such as
+  # Resolve-StagingBase can pollute the caller's path value.
+  Write-Host ("[multitable-onprem-deploy-launcher] {0}" -f $Message)
 }
 
 function Resolve-LauncherPath {

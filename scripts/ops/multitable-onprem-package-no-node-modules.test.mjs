@@ -189,3 +189,46 @@ test('on-prem zip verifier smokes Windows ZipFile package-root layout', () => {
     'package-root detection should require the apply helper from the package',
   )
 })
+
+test('on-prem package build emits first-hop Windows bootstrap sidecar assets', () => {
+  assert.match(
+    buildScript,
+    /BOOTSTRAP_PS1_PATH="\$\{OUTPUT_DIR\}\/\$\{PACKAGE_NAME\}-deploy-bootstrap\.ps1"/,
+    'the build should emit a release-sidecar PowerShell bootstrap',
+  )
+  assert.match(
+    buildScript,
+    /BOOTSTRAP_BAT_PATH="\$\{OUTPUT_DIR\}\/\$\{PACKAGE_NAME\}-deploy-bootstrap\.bat"/,
+    'the build should emit a release-sidecar batch wrapper',
+  )
+  assert.match(
+    buildScript,
+    /cp "\$\{ROOT_DIR\}\/scripts\/ops\/multitable-onprem-deploy-launcher\.ps1" "\$BOOTSTRAP_PS1_TMP_PATH"/,
+    'the bootstrap PowerShell sidecar should reuse the current launcher implementation',
+  )
+  assert.match(
+    buildScript,
+    /multitable-onprem-deploy-bootstrap/,
+    'the bootstrap wrapper should emit its own parseable apply-exit marker',
+  )
+  assert.match(
+    buildScript,
+    /write_sha_file "\$BOOTSTRAP_PS1_TMP_PATH"/,
+    'the PowerShell sidecar should get a sha256 file',
+  )
+  assert.match(
+    buildScript,
+    /add_checksum_entry "\$BOOTSTRAP_BAT_TMP_PATH" >> "\$checksum_tmp"/,
+    'the batch sidecar should be listed in SHA256SUMS',
+  )
+  assert.match(
+    buildScript,
+    /"windowsFirstHopBootstrap": "\$\(basename "\$BOOTSTRAP_PS1_PATH"\)"/,
+    'external metadata should name the first-hop bootstrap sidecar',
+  )
+  assert.match(
+    verifyScript,
+    /first-hop bootstrap release sidecar/,
+    'package verifier should require the package metadata to describe the bootstrap sidecar',
+  )
+})
