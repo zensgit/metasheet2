@@ -84,6 +84,7 @@ import {
   fieldUpdateDiff,
   fieldDeleteDiff,
 } from '../multitable/config-revision-recorder'
+import { configHistoryRequiredCapability, type ConfigManageCapKey } from '../multitable/config-history-read'
 import { computeRecordRestoreDiff } from '../multitable/record-restore-diff'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
@@ -7462,6 +7463,90 @@ export function univerMetaRouter(): Router {
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list record history' } })
     }
   })
+
+  // ---------------------------------------------------------------------------
+  // T9-R3 — config-history READ API (per-entity-type, write-gate-symmetric, fail-closed).
+  // Design-lock: docs/development/multitable-t9-r3-config-history-read-api-design-lock-20260624.md.
+  // The ACCESS gate (which rows) = the EXACT capability that gates WRITING that config. VIEW rows
+  // additionally redact field-read-sensitive filter literals in before/after (payload projection,
+  // #2052/R9) — canManageViews does NOT imply field-read.
+  const readConfigHistoryRows = async (
+    sheetId: string, entityType: string, scopePrefix: string | null, limit: number, offset: number,
+  ): Promise<Array<Record<string, unknown>>> => {
+    const pool = poolManager.get()
+    const params: unknown[] = [sheetId, entityType]
+    let sql = `SELECT id, entity_type, entity_id, action, before, after, changed_keys, batch_id, actor_id, created_at
+               FROM meta_config_revisions WHERE sheet_id = $1 AND entity_type = $2`
+    if (scopePrefix) { params.push(`${scopePrefix}:%`); sql += ` AND entity_id LIKE $${params.length}` }
+    params.push(limit); const limIdx = params.length
+    params.push(offset); const offIdx = params.length
+    sql += ` ORDER BY created_at DESC, id DESC LIMIT $${limIdx} OFFSET $${offIdx}`
+    return ((await pool.query(sql, params)).rows as Array<Record<string, unknown>>)
+  }
+
+  const serializeConfigRevision = (row: Record<string, unknown>) => ({
+    id: String(row.id),
+    entityType: String(row.entity_type),
+    entityId: String(row.entity_id),
+    action: String(row.action),
+    before: (row.before ?? null) as Record<string, unknown> | null,
+    after: (row.after ?? null) as Record<string, unknown> | null,
+    changedKeys: Array.isArray(row.changed_keys) ? (row.changed_keys as unknown[]).map(String) : [],
+    batchId: row.batch_id ? String(row.batch_id) : null,
+    actorId: row.actor_id ? String(row.actor_id) : null,
+    createdAt: row.created_at ?? null,
+  })
+
+  const configHistoryHandler = (
+    entityType: string, scopePrefix: string | null, capKey: ConfigManageCapKey, redactViewLiterals = false,
+  ) => async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
+    const offsetParam = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : 0
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 50
+    const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0
+    if (!sheetId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    try {
+      const pool = poolManager.get()
+      const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ error: 'Authentication required' })
+      if (!capabilities[capKey]) return sendForbidden(res)
+      const rows = await readConfigHistoryRows(sheetId, entityType, scopePrefix, limit, offset)
+      // Fail-closed belt-and-suspenders: only rows whose OWN (entity_type, entity_id) require
+      // EXACTLY this endpoint's capability are returned (a mis-prefixed permission row can't slip).
+      const gated = rows.filter((r) => configHistoryRequiredCapability(String(r.entity_type), String(r.entity_id)) === capKey)
+      let revisions = gated.map(serializeConfigRevision)
+      if (redactViewLiterals) {
+        // VIEW payload projection: filter literals are field-read-sensitive (#2052/R9). Redact
+        // before/after.filterInfo for fields the REQUESTER can't read.
+        const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+        revisions = revisions.map((rev) => ({
+          ...rev,
+          before: rev.before ? redactViewConfigFilterLiterals(rev.before, allowedFieldIds) : rev.before,
+          after: rev.after ? redactViewConfigFilterLiterals(rev.after, allowedFieldIds) : rev.after,
+        }))
+      }
+      const names = await resolveUserDisplayNames(
+        pool.query.bind(pool),
+        revisions.map((r) => r.actorId).filter((x): x is string => !!x),
+      )
+      const enriched = revisions.map((r) => ({ ...r, actorName: r.actorId ? (names.get(r.actorId) ?? null) : null }))
+      return res.json({ ok: true, data: { revisions: enriched, limit, offset } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_config_revisions')) return res.json({ ok: true, data: { revisions: [], limit, offset } })
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] list config history failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list config history' } })
+    }
+  }
+
+  router.get('/sheets/:sheetId/config-history/fields', configHistoryHandler('field', null, 'canManageFields'))
+  router.get('/sheets/:sheetId/config-history/views', configHistoryHandler('view', null, 'canManageViews', true))
+  router.get('/sheets/:sheetId/config-history/sheet-config', configHistoryHandler('sheet_config', null, 'canManageSheetAccess'))
+  router.get('/sheets/:sheetId/config-history/permissions/sheet', configHistoryHandler('permission', 'sheet', 'canManageSheetAccess'))
+  router.get('/sheets/:sheetId/config-history/permissions/view', configHistoryHandler('permission', 'view', 'canManageViews'))
+  router.get('/sheets/:sheetId/config-history/permissions/field', configHistoryHandler('permission', 'field', 'canManageFields'))
 
   // ---------------------------------------------------------------------------
   // History Field-Audit Permission — A1 grant management (issue / list / revoke).
