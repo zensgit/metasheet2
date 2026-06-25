@@ -160,7 +160,7 @@ Run the targeted gates before calling the acceptance pass healthy:
 ```bash
 pnpm --filter @metasheet/core-backend build
 pnpm --filter @metasheet/core-backend test:integration
-pnpm --filter @metasheet/web exec vitest run --watch=false apps/web/tests/multitable-config-history-modal.spec.ts apps/web/tests/multitable-workbench-restore-wiring.spec.ts
+pnpm --filter @metasheet/web exec vitest run --watch=false multitable-config-history-modal multitable-workbench-restore-wiring
 pnpm --filter @metasheet/web build
 ```
 
