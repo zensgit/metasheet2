@@ -25,16 +25,25 @@ against R2's real recorded shape (`multitable-config-history-view-redaction-real
 
 ## Remaining T9 work (each a separate, gated opt-in)
 
-- **T9-W — write side (restore / rollback of config).** The natural next main line, now that the
-  read side is closed. NOT started; it is design-heavy + security-sensitive (a config restore can
-  re-grant permissions, resurrect a deleted field, revert row-deny) and must be its own
-  **design-lock first** (capability gates per entity type, dry-run/preview, idempotency, and the
-  same write-gate symmetry as the read side). Open this last.
+- **T9-W — write side (restore / rollback of config).** **Safe subset SHIPPED via #3164**
+  (design-lock + preview/execute): field name/order + view config-update revert; permission /
+  sheet_config / create / delete restore are GATED (deferred). Write-gate symmetry + dry-run
+  preview→execute + same-transaction recording are in place. **Remaining:**
+  - **preview-redaction follow-up — THIS PR:** #3164's `config-restore-preview` returned the view
+    `current`/`target` raw, leaking `filterInfo` literals to a field-denied `canManageViews` caller
+    (same class as the R3.1 `/config-history` leak, new entry point). Fixed here.
+  - **gated unsafe restore** (permission / sheet_config / create / delete) — each a later opt-in.
+  - **FE** for the restore flow.
 - **Unified timeline** (one list across all entity types, row-gated through the same per-entity
   capability) — deferred; the single endpoint already supports `entityType` filtering within the
   gate, so this is a presentation enhancement, not a security item.
 - **FE polish** on the R4 view — out of scope here.
 
+> Note: the **#3163** design-lock (PROPOSED) is superseded by #3164 (which shipped its own
+> design-lock + the narrower safe subset). Close #3163 or rewrite it as a post-#3164 *delta* design
+> for the still-gated unsafe-restore slices; do NOT land it as the current T9-W design-lock.
+
 ## Discipline note
-T9-W is a separate explicit opt-in: design-lock → review → implement → review, the same cadence R1–R4
+The still-gated T9-W slices (permission/sheet_config/create/delete restore, FE) are each a separate
+explicit opt-in: design-lock → review → implement → review, the same cadence R1–R4
 followed. Do not begin T9-W implementation before its design-lock is reviewed.

@@ -92,4 +92,25 @@ describeIfDatabase('multitable config-history — VIEW filter-literal redaction 
     expect(JSON.stringify(full.body)).toContain(SECRET_LIT) // fully-allowed sees it
     expect(JSON.stringify(full.body)).toContain(VISIBLE_LIT)
   })
+
+  // T9-W preview path (same leak class via config-restore-preview): the view revert preview's
+  // current/target carries filterInfo — must be redacted for a field-denied canManageViews caller.
+  test('config-restore-preview redaction: field-denied canManageViews does NOT see the secret literal in current/target; fully-allowed DOES', async () => {
+    const rev = (await q(
+      `SELECT id FROM meta_config_revisions WHERE sheet_id=$1 AND entity_type='view' AND entity_id=$2 AND action='update' ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [SHEET, e2eViewId],
+    )).rows[0] as { id: string } | undefined
+    expect(rev?.id).toBeTruthy()
+
+    actor = FIELDDENIED
+    const denied = await request(app).post(`/api/multitable/sheets/${SHEET}/config-restore-preview`).send({ revisionId: rev!.id })
+    expect(denied.status).toBe(200)
+    expect(JSON.stringify(denied.body)).not.toContain(SECRET_LIT) // preview leak CLOSED
+    expect(JSON.stringify(denied.body)).toContain(VISIBLE_LIT) // no over-redaction
+
+    actor = FULL
+    const full = await request(app).post(`/api/multitable/sheets/${SHEET}/config-restore-preview`).send({ revisionId: rev!.id })
+    expect(full.status).toBe(200)
+    expect(JSON.stringify(full.body)).toContain(SECRET_LIT) // fully-allowed sees it in the preview
+  })
 })

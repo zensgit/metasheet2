@@ -7637,7 +7637,18 @@ export function univerMetaRouter(): Router {
       if (!cap) return sendForbidden(res)
       const snapshot = await loadEntityConfigSnapshot(pool.query.bind(pool), rev)
       if (!snapshot) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot preview a revert.' } })
-      return res.json({ ok: true, data: { preview: computeRevertPreview(rev, snapshot) } })
+      const preview = computeRevertPreview(rev, snapshot)
+      // T9-W-L7: a VIEW revert preview shows `current`/`target` filterInfo, whose literals are
+      // field-read-sensitive (#2052/R9). canManageViews does NOT imply field-read, so redact them
+      // per the requester before returning (the same projection the /config-history read applies).
+      // EXECUTE re-computes the raw target server-side, so a field-denied restorer reverts correctly
+      // without ever seeing the denied literal.
+      if (rev.entity_type === 'view') {
+        const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+        preview.current = redactViewConfigFilterLiterals(preview.current as { filterInfo?: unknown }, allowedFieldIds) as Record<string, unknown>
+        preview.target = redactViewConfigFilterLiterals(preview.target as { filterInfo?: unknown }, allowedFieldIds) as Record<string, unknown>
+      }
+      return res.json({ ok: true, data: { preview } })
     } catch (err: unknown) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
