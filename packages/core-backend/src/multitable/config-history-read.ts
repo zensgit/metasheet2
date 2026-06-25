@@ -17,10 +17,13 @@ export type ConfigManageCapKey = 'canManageFields' | 'canManageViews' | 'canMana
 /**
  * Permission rows store `entity_id = `${scope}:${JSON.stringify(parts)}`` (R2's
  * `permissionConfigEntityId`); scope ∈ {field, sheet, view}. We read the scope as the substring
- * before the FIRST `:` (the scope is a fixed enum and never contains `:`).
+ * before the FIRST `:` and REQUIRE a real `scope:` boundary — a colonless value (e.g. a bare
+ * `'field'`) is malformed and yields `''` → DENY (fail-closed). The scope is a fixed enum and
+ * never contains `:`.
  */
 function permissionScope(entityId: string): string {
-  return entityId.split(':', 1)[0] ?? ''
+  const idx = entityId.indexOf(':')
+  return idx > 0 ? entityId.slice(0, idx) : '' // no colon, or colon at position 0 → malformed → ''
 }
 
 /**

@@ -40,4 +40,9 @@ describe('configHistoryRequiredCapability — T9-R3 gate口径 (fail-closed)', (
     expect(configHistoryRequiredCapability('permission', 'noscopehere')).toBeNull()
     expect(configHistoryRequiredCapability('permission', ':[]')).toBeNull()
   })
+  test('permission with a COLONLESS scope-looking entity_id → null (DENY) — a real `scope:` boundary is required', () => {
+    expect(configHistoryRequiredCapability('permission', 'field')).toBeNull()
+    expect(configHistoryRequiredCapability('permission', 'view')).toBeNull()
+    expect(configHistoryRequiredCapability('permission', 'sheet')).toBeNull()
+  })
 })

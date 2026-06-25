@@ -55,7 +55,8 @@ fully-allowed reader does; a non-filter key (the view name) survives.
 ## Verification (all green)
 
 - **Unit** — `tests/unit/config-history-read.spec.ts` (9): every entity_type, all 3 permission
-  subtypes, and fail-closed (unknown type → DENY; malformed/empty/unknown-scope permission id → DENY).
+  subtypes, and fail-closed (unknown type → DENY; malformed/empty/unknown-scope permission id → DENY,
+  including a COLONLESS scope-looking id like a bare `'field'` — a real `scope:` boundary is required).
 - **Real-DB goldens** — `tests/integration/multitable-config-history-read-realdb.test.ts` (8):
   - each surface returns only its entity_type/scope rows;
   - **cross-cap 403**: a write-only user (no share) is 403 on `/sheet-config` + `/permissions/sheet`,

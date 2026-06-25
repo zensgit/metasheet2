@@ -79,8 +79,10 @@ describeIfDatabase('multitable config-history READ API — T9-R3 (real DB)', () 
     await insertRev('permission', permId('sheet', ['user', SUBJECT]), 'create', null, { subjectType: 'user', subjectId: SUBJECT, accessLevel: 'read' })
     await insertRev('permission', permId('view', [VIEW_ID, 'user', SUBJECT]), 'create', null, { viewId: VIEW_ID, subjectType: 'user', subjectId: SUBJECT, permission: 'read' })
     await insertRev('permission', permId('field', [FLD_VISIBLE, 'user', SUBJECT]), 'create', null, { fieldId: FLD_VISIBLE, subjectType: 'user', subjectId: SUBJECT, visible: true, readOnly: false })
-    // MALFORMED permission row (no scope prefix) — fail-closed: returned by NO endpoint.
+    // MALFORMED permission rows — fail-closed: returned by NO endpoint. Two shapes: no prefix at
+    // all, and a COLONLESS scope-LOOKING id (a bare 'field') that must still DENY (no `scope:` boundary).
     await insertRev('permission', 'garbage-no-scope-prefix', 'create', null, { x: 1 })
+    await insertRev('permission', 'field', 'create', null, { canary: 'COLONLESS-FIELD-CANARY' })
     // VIEW row whose after.filterInfo carries a literal on the SECRET field + the VISIBLE field.
     await insertRev('view', VIEW_ID, 'update', null, {
       filterInfo: { conjunction: 'and', conditions: [
@@ -200,6 +202,7 @@ describeIfDatabase('multitable config-history READ API — T9-R3 (real DB)', () 
       const r = await get(`/sheets/${SHEET}/config-history/permissions/${sub}`)
       expect(r.status).toBe(200)
       expect(bodyStr(r)).not.toContain('garbage-no-scope-prefix')
+      expect(bodyStr(r)).not.toContain('COLONLESS-FIELD-CANARY') // colonless 'field' must DENY (no scope boundary)
     }
   })
 
