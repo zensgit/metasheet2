@@ -1,6 +1,7 @@
 # Per-row line-subtotal derivation (quantity × unit_price → amount) — Design Lock
 
-Status: RATIFIED — RUNTIME NOT BUILT. One OPEN QUESTION for the owner (read-only vs overridable, below).
+Status: RATIFIED — SHIPPED (read-only v1, PR #3205). The open question is resolved: read-only adopted.
+See the Closeout at the bottom.
 
 Grounding: the amount-tier line shipped a two-stage money chain — the fill UI auto-sums the detail-row
 amount column into the top-level total (read-only, #3198), and the backend total-check rejects any
@@ -35,7 +36,7 @@ detail field; `operation: 'product'` only in v1 (sum / mixed arithmetic are non-
 whose amount column has no `derivedFrom` keeps today's manual column — the behavior engages ONLY on an
 explicit declaration (mirrors `amountConsistencyCheck` / the G-5 discipline).
 
-### 2. Read-only vs overridable — read-only in v1 (OPEN QUESTION for the owner)
+### 2. Read-only vs overridable — READ-ONLY adopted in v1 (SHIPPED #3205)
 Recommend **read-only** for v1 (consistent with the total, simplest). But this is NOT a security
 decision and the lock must say why: the backend total-check enforces `total = Σ amount`, **not**
 `amount = qty × price`, so in v1 the line math is **convenience only, NOT tamper-proof** — a non-browser
@@ -87,10 +88,18 @@ sum the amounts into the total — sequenced inside one place. Implication: **ex
 - Multi-target derivation, cross-row or cross-field references, currency conversion.
 - Retrofitting onto detail columns without a `derivedFrom` declaration.
 
-## Open Question for the owner (do not decide silently)
-**Read-only vs overridable line amount.** Recommend read-only for v1. The one thing that could overturn
-the default is a real workflow need: do the target purchases/reimbursements have **line-level
-discounts / negotiated unit totals** where the applicant must adjust a single line's amount away from
-`qty × price`? If yes, v1 should be overridable (derive-as-default, allow manual override) — still
-FE-only, still feeds the total. If no, read-only is cleaner. This is a product call, flagged here rather
-than baked in.
+## Closeout (PR #3205, shipped 2026-06-25)
+The runtime shipped FE-only, read-only v1, with all six dimensions delivered — including dimension 4
+(hidden operand) implemented ROW-AWARE: `isRowDerivationActive` is the single guard for BOTH the in-place
+derivation and a per-row read-only `:disabled`, so a hidden-operand row is left manual AND editable (not
+read-only-and-stuck). The purchase preset declares `derivedFrom(quantity, unit_price)` on
+`purchase_items.amount`. Helpers in `apps/web/src/approvals/lineDerivation.ts`; wiring in
+`useAutoSumTotal` (derive-then-sum, one pass) + `ApprovalNewView`.
+
+**Resolved open question — read-only adopted.** The owner took read-only for v1 (no line-level-override
+requirement surfaced). Still FUTURE locks, deliberately not built:
+- **Overridable line amount** — derive-as-default but allow a manual override (line-level discounts /
+  negotiated unit totals). Still FE-only; its own lock if a real workflow needs it.
+- **Backend line-math enforcement** (`amount = qty × price` per row) — a backend total-check extension
+  that would make the line math tamper-proof (today it is FE convenience only) and would FORCE read-only.
+- Operations beyond `product`.
