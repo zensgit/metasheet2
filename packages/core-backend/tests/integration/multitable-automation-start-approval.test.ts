@@ -414,6 +414,53 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
     }
   })
 
+  test('W7-1a: backwrite is visible to tail actions (recordData merge) + emits record.updated (realtime parity)', async () => {
+    const webhookBodies: string[] = []
+    const updatedEvents: Array<Record<string, unknown>> = []
+    const subId = eventBus.subscribe('multitable.record.updated', (p: unknown) => { updatedEvents.push(p as Record<string, unknown>) })
+    const svc = makeAutomationService((async (_url: string, opts?: { body?: string }) => {
+      if (opts?.body) webhookBodies.push(opts.body)
+      return new Response('OK', { status: 200 })
+    }) as never)
+    try {
+      const RW = { statusField: 'approval_status' }
+      const templateId = await createPublishedTemplate()
+      const ruleId = await createStartApprovalRule(svc, templateId, RW)
+      await seedSheetRecord('Q4 plan')
+      const execRule = {
+        id: ruleId,
+        name: 'W6 start approval',
+        sheetId: SHEET,
+        trigger: { type: 'record.created', config: {} },
+        actions: [
+          { type: 'start_approval', config: { templateId, formDataMapping: { summary: 'Record {{record.title}} needs approval' }, requester: { mode: 'trigger_actor' }, resultWriteback: RW } },
+          { type: 'send_webhook', config: { url: 'https://example.test/w7a-tail' } },
+        ],
+        enabled: true,
+        createdBy: REQUESTER,
+        createdAt: new Date(TS).toISOString(),
+        executionMode: 'workflow_job_v1',
+      }
+      const execution = await svc.executeRule(execRule as never, { sheetId: SHEET, recordId: RECORD, data: { title: 'Q4 plan' }, actorId: REQUESTER })
+      executionIds.push(execution.id)
+      const bridge = await q(`SELECT approval_instance_id FROM multitable_automation_approval_bridges WHERE execution_id = $1`, [execution.id])
+      approvalIds.push(bridge.rows[0].approval_instance_id)
+      const approvals = new ApprovalProductService()
+      await approvals.dispatchAction(bridge.rows[0].approval_instance_id, { action: 'approve', comment: 'go' }, { userId: APPROVER, userName: APPROVER })
+      await waitForExecutionStatus(svc, execution.id, 'success')
+
+      // gap 1 (recordData merge): the tail send_webhook's recordData snapshot includes the backwrite.
+      expect(webhookBodies.length).toBeGreaterThan(0)
+      const body = JSON.parse(webhookBodies[webhookBodies.length - 1]) as { data?: Record<string, unknown> }
+      expect(body.data?.approval_status).toBe('approved')
+      // gap 2 (realtime/chaining parity): the backwrite emitted multitable.record.updated.
+      expect(updatedEvents.some((e) => (e.changes as Record<string, unknown> | undefined)?.approval_status === 'approved' && e.recordId === RECORD)).toBe(true)
+    } finally {
+      eventBus.unsubscribe(subId)
+      svc.shutdown()
+    }
+  })
+
   test('rejected approval fails the automation and does not run the tail', async () => {
     const calls: string[] = []
     const svc = makeAutomationService((async (url: string) => {

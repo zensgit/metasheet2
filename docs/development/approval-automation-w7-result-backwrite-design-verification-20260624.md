@@ -42,7 +42,21 @@ the writer. Additional inherited guarantees:
   `approved_by=<approver>`, `approved_at=<timestamp>`. Green locally against Postgres.
 - **Validation unit** (`automation-v1.test.ts`): a valid mapping is accepted; an empty mapping and a
   non-string field target are rejected at rule-save (values-constrained — no object/expression).
-- **No regression:** full start-approval integration suite **11/11**; backend **tsc clean**.
+- **No regression:** full start-approval integration suite **12/12** (incl. W7-1a); backend **tsc clean**.
+
+## W7-1a — semantic parity (shipped follow-up to the core write)
+The core write (above) landed the DB write, but a code-semantics review surfaced two gaps the core
+silently left — both now closed:
+- **Tail-action visibility (recordData merge):** the backwrite ran *after* the resume snapshotted
+  `recordData`, so tail actions (send_webhook / update_record / …) read the *pre-approval* record. Fix:
+  `writeApprovalResultBack` returns the patch and the resume merges it into `recordData` before
+  building the tail context — so "审批通过 → 写回状态 → 据此发通知/继续自动化" sees the just-written status.
+- **Realtime / chaining parity:** the bare write emitted no `multitable.record.updated` + no realtime
+  fan-out (unlike `update_record`). Fix: the backwrite now emits the event +
+  `publishMultitableSheetRealtime`, **depth-guarded** (`_automationDepth + 1`) so a backwrite-driven
+  record.updated cascade can't run away.
+- **Verification:** a W7-1a integration test asserts a tail `send_webhook`'s `recordData` carries the
+  backwrite AND that `multitable.record.updated` fired with the change — start-approval suite 12/12.
 
 ## Named follow-ups (gated, not silently skipped)
 - **Rejection backwrite** — write `status='rejected'` on the non-approved path. That path currently
