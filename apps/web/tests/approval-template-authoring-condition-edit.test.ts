@@ -86,6 +86,47 @@ const CONDITION_GRAPH: ApprovalGraph = {
   ],
 }
 
+const CONDITION_FORMULA_GRAPH: ApprovalGraph = {
+  ...CONDITION_GRAPH,
+  nodes: CONDITION_GRAPH.nodes.map((node) => {
+    if (node.key !== 'cond_1' || node.type !== 'condition') return node
+    return {
+      ...node,
+      config: {
+        branches: [
+          {
+            edgeKey: 'edge-cond_1-high',
+            rules: [],
+            formula: { expression: 'SUM({items.amount}) >= 5000' },
+          },
+        ],
+        defaultEdgeKey: 'edge-cond_1-low',
+      },
+    }
+  }),
+}
+
+const CONDITION_FORMULA_WITH_CONJUNCTION_GRAPH: ApprovalGraph = {
+  ...CONDITION_FORMULA_GRAPH,
+  nodes: CONDITION_FORMULA_GRAPH.nodes.map((node) => {
+    if (node.key !== 'cond_1' || node.type !== 'condition') return node
+    return {
+      ...node,
+      config: {
+        branches: [
+          {
+            edgeKey: 'edge-cond_1-high',
+            conjunction: 'or',
+            rules: [],
+            formula: { expression: 'SUM({items.amount}) >= 5000' },
+          },
+        ],
+        defaultEdgeKey: 'edge-cond_1-low',
+      },
+    }
+  }),
+}
+
 // A condition node with NO conjunction on its branch (backend omits it) — proves seeding+rebuild do
 // not resurrect a spurious `conjunction: 'and'`.
 const CONDITION_GRAPH_NO_CONJUNCTION: ApprovalGraph = {
@@ -196,8 +237,19 @@ describe('G-2 conditionEditsFromGraph — seed from preserved condition nodes', 
     const edits = conditionEditsFromGraph(CONDITION_GRAPH)
     expect(Object.keys(edits)).toEqual(['cond_1'])
     expect(edits.cond_1.branches.map((branch) => branch.edgeKey)).toEqual(['edge-cond_1-high'])
+    expect(edits.cond_1.branches[0].predicateMode).toBe('rules')
     expect(edits.cond_1.branches[0].rules).toEqual([{ fieldId: 'amount', operator: 'gte', value: 1000 }])
     expect(edits.cond_1.defaultEdgeKey).toBe('edge-cond_1-low')
+  })
+
+  it('captures formula branches without flattening them back to rules', () => {
+    const edits = conditionEditsFromGraph(CONDITION_FORMULA_GRAPH)
+    expect(edits.cond_1.branches[0]).toMatchObject({
+      edgeKey: 'edge-cond_1-high',
+      predicateMode: 'formula',
+      formulaExpression: 'SUM({items.amount}) >= 5000',
+      rules: [],
+    })
   })
 
   it('is empty for a parallel / cc graph (no condition node)', () => {
@@ -268,6 +320,23 @@ describe('G-2 topology-preservation — editing a condition rule keeps everythin
       { fieldId: 'kind', operator: 'eq', value: 'a' },
     ])
   })
+
+  it('editing a formula branch emits formula + empty rules and preserves topology byte-identical', () => {
+    const template = buildTemplate(CONDITION_FORMULA_GRAPH)
+    const original = structuredClone(template.approvalGraph)
+    const draft = draftFromTemplate(template)
+    draft.conditionEdits!.cond_1.branches[0].formulaExpression = 'SUM({items.amount}) >= 20000'
+    const rebuilt = buildApprovalGraph(draft)
+
+    expectTopologyByteIdentical(rebuilt, original)
+    const cond = rebuilt.nodes.find((node) => node.key === 'cond_1')!
+    expect(cond.config).toEqual({
+      branches: [
+        { edgeKey: 'edge-cond_1-high', rules: [], formula: { expression: 'SUM({items.amount}) >= 20000' } },
+      ],
+      defaultEdgeKey: 'edge-cond_1-low',
+    })
+  })
 })
 
 describe('G-2 untouched round-trip — no spurious diffs from seeding (G-1 floor holds)', () => {
@@ -294,6 +363,16 @@ describe('G-2 untouched round-trip — no spurious diffs from seeding (G-1 floor
   it('applyConditionEditsToGraph with the seeded edits is identity for the condition graph', () => {
     const edits = conditionEditsFromGraph(CONDITION_GRAPH)
     expect(applyConditionEditsToGraph(CONDITION_GRAPH, edits)).toEqual(CONDITION_GRAPH)
+  })
+
+  it('applyConditionEditsToGraph with seeded formula edits is identity for a formula condition graph', () => {
+    const edits = conditionEditsFromGraph(CONDITION_FORMULA_GRAPH)
+    expect(applyConditionEditsToGraph(CONDITION_FORMULA_GRAPH, edits)).toEqual(CONDITION_FORMULA_GRAPH)
+  })
+
+  it('a formula branch with a backend-preserved conjunction stays byte-identical', () => {
+    const edits = conditionEditsFromGraph(CONDITION_FORMULA_WITH_CONJUNCTION_GRAPH)
+    expect(applyConditionEditsToGraph(CONDITION_FORMULA_WITH_CONJUNCTION_GRAPH, edits)).toEqual(CONDITION_FORMULA_WITH_CONJUNCTION_GRAPH)
   })
 })
 
@@ -342,7 +421,7 @@ describe('G-2 validation preview (UX-only; backend normalizeApprovalGraph is fin
     const edits: ConditionEdits = {
       cond_1: {
         nodeKey: 'cond_1',
-        branches: [{ edgeKey: 'edge-cond_1-high', conjunction: 'and', rules: [{ fieldId: 'ghost', operator: 'gte', value: 1 }] }],
+        branches: [{ edgeKey: 'edge-cond_1-high', predicateMode: 'rules', conjunction: 'and', rules: [{ fieldId: 'ghost', operator: 'gte', value: 1 }], formulaExpression: '' }],
         defaultEdgeKey: 'edge-cond_1-low',
       },
     }
@@ -357,7 +436,7 @@ describe('G-2 validation preview (UX-only; backend normalizeApprovalGraph is fin
     const edits: ConditionEdits = {
       cond_1: {
         nodeKey: 'cond_1',
-        branches: [{ edgeKey: 'edge-cond_1-high', conjunction: 'and', rules: [{ fieldId: 'amount', operator: 'gte', value: 1 }] }],
+        branches: [{ edgeKey: 'edge-cond_1-high', predicateMode: 'rules', conjunction: 'and', rules: [{ fieldId: 'amount', operator: 'gte', value: 1 }], formulaExpression: '' }],
         defaultEdgeKey: 'edge-start-cond_1',
       },
     }
@@ -377,7 +456,7 @@ describe('G-2 validation preview (UX-only; backend normalizeApprovalGraph is fin
     const edits: ConditionEdits = {
       cond_1: {
         nodeKey: 'cond_1',
-        branches: [{ edgeKey: 'edge-cond_1-high', conjunction: 'and', rules: [{ fieldId: '', operator: 'gte', value: 1 }] }],
+        branches: [{ edgeKey: 'edge-cond_1-high', predicateMode: 'rules', conjunction: 'and', rules: [{ fieldId: '', operator: 'gte', value: 1 }], formulaExpression: '' }],
         defaultEdgeKey: '',
       },
     }

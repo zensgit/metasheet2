@@ -546,6 +546,18 @@
                 <div class="template-authoring__condition-branch-head">
                   <span>分支 → {{ branch.edgeKey }}</span>
                   <el-select
+                    :model-value="branch.predicateMode"
+                    size="small"
+                    :disabled="readOnly"
+                    style="width: 130px"
+                    data-testid="approval-condition-predicate-mode"
+                    @update:model-value="(mode: string) => setConditionBranchPredicateMode(branch, mode)"
+                  >
+                    <el-option label="简单规则" value="rules" />
+                    <el-option label="公式" value="formula" />
+                  </el-select>
+                  <el-select
+                    v-if="branch.predicateMode === 'rules'"
                     v-model="branch.conjunction"
                     size="small"
                     :disabled="readOnly"
@@ -556,61 +568,64 @@
                     <el-option label="任一满足 (OR)" value="or" />
                   </el-select>
                 </div>
-                <div
-                  v-for="(rule, ruleIndex) in branch.rules"
-                  :key="ruleIndex"
-                  class="template-authoring__condition-rule"
-                  data-testid="approval-condition-rule"
-                >
-                  <el-select
-                    v-model="rule.fieldId"
-                    size="small"
-                    filterable
-                    placeholder="字段"
-                    :disabled="readOnly"
-                    style="width: 160px"
-                    data-testid="approval-condition-rule-field"
+                <template v-if="branch.predicateMode === 'rules'">
+                  <div
+                    v-for="(rule, ruleIndex) in branch.rules"
+                    :key="ruleIndex"
+                    class="template-authoring__condition-rule"
+                    data-testid="approval-condition-rule"
                   >
-                    <el-option
-                      v-for="field in conditionFieldOptions"
-                      :key="field.id"
-                      :label="field.label"
-                      :value="field.id"
+                    <el-select
+                      v-model="rule.fieldId"
+                      size="small"
+                      filterable
+                      placeholder="字段"
+                      :disabled="readOnly"
+                      style="width: 160px"
+                      data-testid="approval-condition-rule-field"
+                    >
+                      <el-option
+                        v-for="field in conditionFieldOptions"
+                        :key="field.id"
+                        :label="field.label"
+                        :value="field.id"
+                      />
+                    </el-select>
+                    <el-select
+                      v-model="rule.operator"
+                      size="small"
+                      :disabled="readOnly"
+                      style="width: 120px"
+                      data-testid="approval-condition-rule-operator"
+                    >
+                      <el-option
+                        v-for="operator in CONDITION_RULE_OPERATORS"
+                        :key="operator"
+                        :label="conditionOperatorLabel(operator)"
+                        :value="operator"
+                      />
+                    </el-select>
+                    <el-input
+                      v-if="rule.operator !== 'isEmpty'"
+                      :model-value="conditionRuleValueText(rule)"
+                      size="small"
+                      placeholder="比较值"
+                      :disabled="readOnly"
+                      style="width: 160px"
+                      data-testid="approval-condition-rule-value"
+                      @update:model-value="(text: string) => setConditionRuleValue(rule, text)"
                     />
-                  </el-select>
-                  <el-select
-                    v-model="rule.operator"
-                    size="small"
-                    :disabled="readOnly"
-                    style="width: 120px"
-                    data-testid="approval-condition-rule-operator"
-                  >
-                    <el-option
-                      v-for="operator in CONDITION_RULE_OPERATORS"
-                      :key="operator"
-                      :label="conditionOperatorLabel(operator)"
-                      :value="operator"
-                    />
-                  </el-select>
-                  <el-input
-                    v-if="rule.operator !== 'isEmpty'"
-                    :model-value="conditionRuleValueText(rule)"
-                    size="small"
-                    placeholder="比较值"
-                    :disabled="readOnly"
-                    style="width: 160px"
-                    data-testid="approval-condition-rule-value"
-                    @update:model-value="(text: string) => setConditionRuleValue(rule, text)"
-                  />
-                  <el-button
-                    size="small"
-                    type="danger"
-                    :disabled="readOnly || branch.rules.length === 1"
-                    data-testid="approval-condition-rule-remove"
-                    @click="removeConditionRule(branch, ruleIndex)"
-                  >删除</el-button>
-                </div>
+                    <el-button
+                      size="small"
+                      type="danger"
+                      :disabled="readOnly || branch.rules.length === 1"
+                      data-testid="approval-condition-rule-remove"
+                      @click="removeConditionRule(branch, ruleIndex)"
+                    >删除</el-button>
+                  </div>
+                </template>
                 <el-button
+                  v-if="branch.predicateMode === 'rules'"
                   size="small"
                   :disabled="readOnly"
                   data-testid="approval-condition-rule-add"
@@ -619,6 +634,55 @@
                   <el-icon><Plus /></el-icon>
                   添加规则
                 </el-button>
+                <div
+                  v-else
+                  class="template-authoring__condition-formula"
+                  data-testid="approval-condition-formula"
+                >
+                  <el-input
+                    v-model="branch.formulaExpression"
+                    type="textarea"
+                    :rows="3"
+                    :disabled="readOnly"
+                    placeholder='例如 SUM({purchase_items.amount}) >= 20000'
+                    data-testid="approval-condition-formula-expression"
+                  />
+                  <div class="template-authoring__condition-formula-tools">
+                    <el-button
+                      v-for="option in conditionFormulaInsertOptions"
+                      :key="option.token"
+                      size="small"
+                      :disabled="readOnly"
+                      :title="option.label"
+                      :data-testid="`approval-condition-formula-insert-${option.token}`"
+                      @click="insertConditionFormulaToken(branch, option.token)"
+                    >{{ option.token }}</el-button>
+                    <el-button
+                      size="small"
+                      :disabled="readOnly"
+                      data-testid="approval-condition-formula-insert-sum"
+                      @click="insertConditionFormulaFunction(branch, 'SUM')"
+                    >SUM()</el-button>
+                    <el-button
+                      size="small"
+                      :disabled="readOnly"
+                      data-testid="approval-condition-formula-insert-count"
+                      @click="insertConditionFormulaFunction(branch, 'COUNT')"
+                    >COUNT()</el-button>
+                    <el-button
+                      size="small"
+                      :disabled="readOnly"
+                      data-testid="approval-condition-formula-insert-min"
+                      @click="insertConditionFormulaFunction(branch, 'MIN')"
+                    >MIN()</el-button>
+                    <el-button
+                      size="small"
+                      :disabled="readOnly"
+                      data-testid="approval-condition-formula-insert-max"
+                      @click="insertConditionFormulaFunction(branch, 'MAX')"
+                    >MAX()</el-button>
+                  </div>
+                </div>
               </div>
               <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
                 <el-select
@@ -988,6 +1052,7 @@ import {
   parseIdsText,
   unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
+  approvalFormulaInsertOptions,
   CONDITION_RULE_OPERATORS,
   PARALLEL_JOIN_MODES,
   CC_TARGET_TYPES,
@@ -1139,6 +1204,9 @@ const conditionFieldOptions = computed(() =>
     .filter((field) => field.id.trim())
     .map((field) => ({ id: field.id.trim(), label: field.label.trim() || field.id.trim() })),
 )
+const conditionFormulaInsertOptions = computed(() =>
+  approvalFormulaInsertOptions(buildFormSchema(draft.value)),
+)
 
 const CONDITION_OPERATOR_LABELS: Record<ConditionRuleOperator, string> = {
   eq: '等于',
@@ -1170,6 +1238,22 @@ function addConditionRule(branch: ConditionBranchEdit): void {
 function removeConditionRule(branch: ConditionBranchEdit, ruleIndex: number): void {
   if (branch.rules.length === 1) return
   branch.rules.splice(ruleIndex, 1)
+}
+function setConditionBranchPredicateMode(branch: ConditionBranchEdit, mode: string): void {
+  branch.predicateMode = mode === 'formula' ? 'formula' : 'rules'
+  if (branch.predicateMode === 'rules' && branch.rules.length === 0) {
+    branch.rules.push({ fieldId: '', operator: 'eq', value: undefined })
+  }
+}
+function appendFormulaText(branch: ConditionBranchEdit, text: string): void {
+  const prefix = branch.formulaExpression.trim() ? ' ' : ''
+  branch.formulaExpression = `${branch.formulaExpression}${prefix}${text}`
+}
+function insertConditionFormulaToken(branch: ConditionBranchEdit, token: string): void {
+  appendFormulaText(branch, token)
+}
+function insertConditionFormulaFunction(branch: ConditionBranchEdit, fn: 'SUM' | 'COUNT' | 'MIN' | 'MAX'): void {
+  appendFormulaText(branch, `${fn}()`)
 }
 
 // Outgoing edge keys of a condition node (from the preserved graph) — the legal default fall-through
@@ -1809,6 +1893,17 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.template-authoring__condition-formula {
+  display: grid;
+  gap: 8px;
+}
+
+.template-authoring__condition-formula-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .template-authoring__condition-default {

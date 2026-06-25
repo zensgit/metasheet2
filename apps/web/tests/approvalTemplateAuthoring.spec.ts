@@ -86,7 +86,7 @@ const ElButton = defineComponent({
 
 const ElInput = defineComponent({
   name: 'ElInput',
-  props: { modelValue: [String, Number], disabled: Boolean, type: String, rows: Number, placeholder: String },
+  props: { modelValue: [String, Number], disabled: Boolean, type: String, rows: Number, placeholder: String, size: String },
   emits: ['update:modelValue'],
   render() {
     return h('input', {
@@ -896,6 +896,52 @@ describe('TemplateAuthoringView', () => {
     await flushUi()
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
     expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches).toHaveLength(2) // the added branch is saved
+  })
+
+  it('FC-2 wiring: switching a condition branch to formula writes formula to the save payload while topology stays byte-identical', async () => {
+    routeParams = { id: 'tpl_formula_condition' }
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'cond_1', type: 'condition', name: '金额判断', config: { branches: [{ edgeKey: 'e-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] }], defaultEdgeKey: 'e-low' } },
+        { key: 'approval_high', type: 'approval', name: '高额审批', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-start-c', source: 'start', target: 'cond_1' },
+        { key: 'e-high', source: 'cond_1', target: 'approval_high' },
+        { key: 'e-low', source: 'cond_1', target: 'end' },
+        { key: 'e-high-end', source: 'approval_high', target: 'end' },
+      ],
+    }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph }))
+    await mountView()
+    await flushUi()
+
+    const modeSelect = container!.querySelector('[data-testid="approval-condition-predicate-mode"]') as HTMLSelectElement
+    expect(modeSelect.value).toBe('rules')
+    modeSelect.value = 'formula'
+    modeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-condition-formula-insert-sum"]')).not.toBeNull()
+    const expression = container!.querySelector('[data-testid="approval-condition-formula-expression"]') as HTMLInputElement
+    expression.value = '{amount} >= 5000'
+    expression.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    const conditionNode = payload.approvalGraph.nodes.find((node: any) => node.key === 'cond_1')
+    expect(conditionNode.config).toEqual({
+      branches: [{ edgeKey: 'e-high', rules: [], formula: { expression: '{amount} >= 5000' } }],
+      defaultEdgeKey: 'e-low',
+    })
+    expect(payload.approvalGraph.nodes.find((node: any) => node.key === 'approval_high')).toEqual(graph.nodes[2])
+    expect(payload.approvalGraph.edges).toEqual(graph.edges)
   })
 
   function buildCanvasConditionGraph() {
