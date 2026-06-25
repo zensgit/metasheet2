@@ -247,3 +247,54 @@ export function verifyConfigRestorePreviewIdentity(token: string, expected: Conf
   if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
   return { valid: true }
 }
+
+// ── T8-2 Reset-to-T (DESTRUCTIVE) preview-identity ────────────────────────────────────────────────────────────
+// Reset = Revert (surviving records to their T-state) + SOFT-DELETE the records CREATED AFTER T. Its identity is
+// DISJOINT from revert (`type: 'restore-preview-pit-reset'`), so a revert token can never trigger a destructive
+// reset (and vice versa). It binds TWO order-invariant hashes: `revertScopeHash` (the reverts, identical to revert)
+// AND `deleteScopeHash` (the EXACT set of post-T-created record ids to delete). Execute RE-ENUMERATES both and
+// re-hashes; a record created between preview and execute re-enumerates into the delete-set → `deleteScopeHash`
+// diverges → rejected. So Reset can NEVER delete a record the actor did not see in the preview (the load-bearing
+// data-safety property for the only path in the line that destroys rows).
+export function hashDeleteSet(recordIds: string[]): string {
+  const canon = [...new Set(recordIds)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+  return createHash('sha256').update(JSON.stringify(canon)).digest('hex')
+}
+
+export interface PitResetPreviewIdentityClaims {
+  sheetId: string
+  /** the point in time the sheet is reset to (ISO). */
+  asOf: string
+  strategy: 'reset'
+  /** sha256 over the sorted revert set (recordId + masked changesHash + version), via hashScope — same as revert. */
+  revertScopeHash: string
+  /** sha256 over the sorted set of post-T-created record ids to delete, via hashDeleteSet. */
+  deleteScopeHash: string
+  actorId: string
+}
+
+export function mintPitResetPreviewIdentity(claims: PitResetPreviewIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
+  return jwt.sign({ type: 'restore-preview-pit-reset', ...claims }, getSecret(), { algorithm: 'HS256', expiresIn } as SignOptions)
+}
+
+export interface PitResetVerifyResult {
+  valid: boolean
+  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_asOf' | 'mismatch_strategy' | 'mismatch_revertScopeHash' | 'mismatch_deleteScopeHash' | 'mismatch_actorId'
+}
+
+export function verifyPitResetPreviewIdentity(token: string, expected: PitResetPreviewIdentityClaims): PitResetVerifyResult {
+  let payload: Partial<PitResetPreviewIdentityClaims> & { type?: string }
+  try {
+    payload = jwt.verify(token, getSecret()) as Partial<PitResetPreviewIdentityClaims> & { type?: string }
+  } catch (e) {
+    return { valid: false, reason: (e as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid' }
+  }
+  if (payload.type !== 'restore-preview-pit-reset') return { valid: false, reason: 'wrong_type' } // revert/single/scoped tokens rejected
+  if (payload.sheetId !== expected.sheetId) return { valid: false, reason: 'mismatch_sheetId' }
+  if (payload.asOf !== expected.asOf) return { valid: false, reason: 'mismatch_asOf' }
+  if (payload.strategy !== expected.strategy) return { valid: false, reason: 'mismatch_strategy' }
+  if (payload.revertScopeHash !== expected.revertScopeHash) return { valid: false, reason: 'mismatch_revertScopeHash' }
+  if (payload.deleteScopeHash !== expected.deleteScopeHash) return { valid: false, reason: 'mismatch_deleteScopeHash' }
+  if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
+  return { valid: true }
+}
