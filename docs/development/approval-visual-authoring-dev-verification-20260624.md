@@ -63,8 +63,9 @@ chosen so the render / operations / layout / validity ARE unit-verifiable in the
   + SVG edges. A `nodePositions` sidecar holds drag overrides and **never reaches the saved graph**
   (the design-lock §6 layout-sidecar decision). The same topology toolbar (add branch / insert /
   remove) sits on the canvas nodes, wired to the same engine + bridge.
-- **D-5 live validity** — `graphValidityIssues` (pure: dangling edge / unreachable node / no-successor)
-  surfaced as a live canvas alert; the backend stays the final arbiter on save.
+- **D-5 live validity** — `graphValidityIssues` (pure: dangling edge / unreachable node / no-successor /
+  **duplicate node+edge key / cannot-reach-end / cycle** — the D-5 hardening pass) surfaced as a live
+  canvas alert; the backend stays the final arbiter on save.
 - **D-6 canvas ⇄ list toggle** — 结构列表 ⇄ 画布视图 on one template; the fail-closed surface (#3129) +
   sentinel hint (#3141) are unchanged (node config is edited in the list view).
 

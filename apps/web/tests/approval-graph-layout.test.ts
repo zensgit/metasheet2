@@ -80,4 +80,38 @@ describe('graphValidityIssues (D-5 preview)', () => {
     }
     expect(graphValidityIssues(stuck).some((i) => /没有后继连线/.test(i))).toBe(true)
   })
+
+  it('D-5: flags duplicate node keys and duplicate edge keys (a canvas key collision)', () => {
+    const dupNode: ApprovalGraph = {
+      nodes: [...LINEAR.nodes, { key: 'a1', type: 'approval', config: {} }], // 'a1' duplicated
+      edges: LINEAR.edges,
+    }
+    expect(graphValidityIssues(dupNode).some((i) => /节点 key 重复：a1/.test(i))).toBe(true)
+    const dupEdge: ApprovalGraph = {
+      nodes: LINEAR.nodes,
+      edges: [...LINEAR.edges, { key: 'e1', source: 'a1', target: 'end' }], // 'e1' duplicated
+    }
+    expect(graphValidityIssues(dupEdge).some((i) => /连线 key 重复：e1/.test(i))).toBe(true)
+  })
+
+  it('D-5: flags a cycle AND the nodes trapped in it (cannot reach end, but not "no-successor")', () => {
+    const cycle: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'a', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'b', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'e-s-a', source: 'start', target: 'a' },
+        { key: 'e-s-e', source: 'start', target: 'end' }, // start can still reach end
+        { key: 'e-a-b', source: 'a', target: 'b' },
+        { key: 'e-b-a', source: 'b', target: 'a' }, // a ↔ b cycle
+      ],
+    }
+    const issues = graphValidityIssues(cycle)
+    expect(issues.some((i) => /存在环/.test(i))).toBe(true) // cycle detected
+    expect(issues.some((i) => /无法到达结束节点/.test(i))).toBe(true) // a, b trapped (can't reach end)
+    expect(issues.some((i) => /没有后继连线/.test(i))).toBe(false) // a/b have out-edges → NOT flagged as stuck
+  })
 })

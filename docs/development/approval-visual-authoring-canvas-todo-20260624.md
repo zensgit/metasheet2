@@ -26,9 +26,10 @@ predecessor lands; ✅ = shipped. Nothing past D-0 starts without the design-loc
 - ✅ `moveItemToIndex` drag-to-position logic + native-drag wiring (logic unit-covered).
 - 🔒 The drag GESTURE (manual/E2E QA) · field-type palette · sections.
 
-## D-5 — live validation preview  ✅
-- ✅ `graphValidityIssues` (dangling edge / unreachable / no-successor) surfaced as a live canvas alert;
-  backend stays final arbiter on save. Unit + mounted (no-false-positive) tested.
+## D-5 — live validation preview  ✅ (hardened)
+- ✅ `graphValidityIssues` (dangling edge / unreachable / no-successor / duplicate node+edge key /
+  cannot-reach-end / cycle) surfaced as a live canvas alert; backend stays final arbiter on save.
+  Unit (incl. the 3 hardening checks) + mounted (no-false-positive) tested.
 
 ## D-6 — canvas ⇄ list parity  ✅
 - ✅ 结构列表 ⇄ 画布视图 toggle on one template; fail-closed (#3129) + sentinel hint (#3141) unchanged.
