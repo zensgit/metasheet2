@@ -1,6 +1,6 @@
 # Global History — T7 Point-In-Time Read-Only View 开发与验证 MD
 
-> The second read-only leaf of the Time Machine program (after T5-1 the reconstructor), built ON the pinned
+> The second read-only leaf of the Global History program (after T5-1 the reconstructor), built ON the pinned
 > `reconstructRecordsAtT`. `GET /sheets/:sheetId/point-in-time?asOf=<ISO>&limit&offset` — "open the table as of
 > T, read-only." Reconstructs over `meta_record_revisions`; **writes nothing**.
 
