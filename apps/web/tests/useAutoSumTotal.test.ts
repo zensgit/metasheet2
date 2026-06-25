@@ -84,3 +84,70 @@ describe('useAutoSumTotal (Gate B — auto-fill wiring)', () => {
     app.unmount()
   })
 })
+
+function makeDerivedTemplate(withHiddenOperand = false): ApprovalTemplateDetailDTO {
+  return {
+    formSchema: {
+      fields: [
+        { id: 'amount', type: 'number', label: '总额' },
+        {
+          id: 'items', type: 'detail', label: '明细', columns: [
+            ...(withHiddenOperand ? [{ id: 'use_quantity', type: 'select' as const, label: '使用数量' }] : []),
+            { id: 'quantity', type: 'number', label: '数量' },
+            { id: 'unit_price', type: 'number', label: '单价' },
+            { id: 'amount', type: 'number', label: '小计', props: { derivedFrom: { operandColumnIds: ['quantity', 'unit_price'], operation: 'product' } } },
+          ],
+        },
+      ],
+      amountConsistencyCheck: { totalFieldId: 'amount', detailFieldId: 'items', amountColumnId: 'amount' },
+    },
+  } as unknown as ApprovalTemplateDetailDTO
+}
+
+describe('useAutoSumTotal — derive-then-sum one pass (line-subtotal #3203)', () => {
+  it('derives each row amount from its operands AND sums the total, in one flush', async () => {
+    const formData = reactive<Record<string, unknown>>({ items: [{ quantity: 3, unit_price: 100 }, { quantity: 2, unit_price: 50 }] })
+    const { app } = harness(ref(makeDerivedTemplate()), formData)
+    await nextTick()
+    expect((formData.items as Array<Record<string, unknown>>)[0].amount).toBe(300)
+    expect((formData.items as Array<Record<string, unknown>>)[1].amount).toBe(100)
+    expect(formData.amount).toBe(400)
+    // edit an operand → that row re-derives + the total updates (same chain)
+    ;(formData.items as Array<Record<string, unknown>>)[0].unit_price = 200
+    await nextTick()
+    expect((formData.items as Array<Record<string, unknown>>)[0].amount).toBe(600)
+    expect(formData.amount).toBe(700)
+    app.unmount()
+  })
+
+  it('a row with a partial operand is left manual (not derived); the total uses its manual amount', async () => {
+    const formData = reactive<Record<string, unknown>>({ items: [{ quantity: 3, unit_price: 100 }, { quantity: 2, amount: 999 }] })
+    const { app } = harness(ref(makeDerivedTemplate()), formData)
+    await nextTick()
+    expect((formData.items as Array<Record<string, unknown>>)[0].amount).toBe(300) // derived
+    expect((formData.items as Array<Record<string, unknown>>)[1].amount).toBe(999) // partial (no unit_price) → manual
+    expect(formData.amount).toBe(1299)
+    app.unmount()
+  })
+
+  it('a row with a hidden operand is left manual; the total uses its manual amount', async () => {
+    const template = makeDerivedTemplate(true)
+    const detail = template.formSchema.fields.find((field) => field.id === 'items')
+    const quantity = detail?.columns?.find((column) => column.id === 'quantity')
+    if (quantity) {
+      quantity.visibilityRule = { fieldId: 'use_quantity', operator: 'eq', value: true }
+    }
+    const formData = reactive<Record<string, unknown>>({
+      items: [
+        { use_quantity: true, quantity: 3, unit_price: 100 },
+        { use_quantity: false, quantity: 2, unit_price: 50, amount: 999 },
+      ],
+    })
+    const { app } = harness(ref(template), formData)
+    await nextTick()
+    expect((formData.items as Array<Record<string, unknown>>)[0].amount).toBe(300)
+    expect((formData.items as Array<Record<string, unknown>>)[1].amount).toBe(999)
+    expect(formData.amount).toBe(1299)
+    app.unmount()
+  })
+})

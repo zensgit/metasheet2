@@ -195,7 +195,11 @@ function purchaseSchema(): FormSchema {
         field('spec', 'text', '规格'),
         field('quantity', 'number', '数量', { required: true, props: { min: 1 } }),
         field('unit_price', 'number', '单价', { required: true, props: { min: 0 } }),
-        field('amount', 'number', '小计', { props: { min: 0 } }),
+        // 小计 = 数量 × 单价, derived read-only in the fill UI (design-lock #3203); it then feeds the
+        // amount-tier total auto-sum (#3198) + the backend total-check (#3176).
+        field('amount', 'number', '小计', {
+          props: { min: 0, derivedFrom: { operandColumnIds: ['quantity', 'unit_price'], operation: 'product' } },
+        }),
         field('note', 'text', '备注'),
       ]),
       field('reason', 'textarea', '采购说明', { required: true, placeholder: '请说明采购必要性' }),

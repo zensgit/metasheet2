@@ -142,6 +142,12 @@ describe('amount-tier presets ship the server-side total-check mapping (#3161)',
       totalFieldId: 'amount', detailFieldId: 'purchase_items', amountColumnId: 'amount',
     })
   })
+  it('purchase_amount_tier declares derivedFrom (qty × unit_price) on purchase_items.amount (#3203)', () => {
+    const { formSchema } = buildCommonApprovalTemplatePresetPayload('purchase_amount_tier')
+    const detail = formSchema.fields.find((field) => field.id === 'purchase_items')
+    const amount = detail?.columns?.find((column) => column.id === 'amount')
+    expect(amount?.props?.derivedFrom).toEqual({ operandColumnIds: ['quantity', 'unit_price'], operation: 'product' })
+  })
   it('reimbursement_amount_tier carries amountConsistencyCheck → expense_items.amount', () => {
     const { formSchema } = buildCommonApprovalTemplatePresetPayload('reimbursement_amount_tier')
     expect(formSchema.amountConsistencyCheck).toEqual({
