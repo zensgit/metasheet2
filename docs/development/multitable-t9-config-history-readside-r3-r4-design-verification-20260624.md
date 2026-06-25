@@ -108,9 +108,13 @@ Plus the **R3↔R4 wire lock** (the drift-prone seam, cf. the `dayIndex` seriali
 unwraps `.data`). Without it, an envelope change could make `getConfigHistory` silently return `[]` while every
 isolated R3 golden and R4 component spec stayed green — each half tested, the wire between them uncovered.
 
+Scope: this locks the **client envelope round-trip** (`getConfigHistory`'s parse of the R3 shape), *not* the full
+workbench-mount button→fetch path — acceptable at current risk; a full mount→fetch wire test is a later hardening if
+the open-config-history wiring grows.
+
 ### 3.3 The full T9 line under test
 
-R1 16 recording goldens + R2 4 transaction-consistency rollback goldens + **R3 8 gate goldens** + **R4 5 FE specs** —
+R1 16 recording goldens + R2 4 transaction-consistency rollback goldens + **R3 8 gate goldens** + **R4 6 FE specs (5 component + 1 wire lock)** —
 the recording side proves *what* is written and that it's bound to the mutation's transaction; the read side proves
 *who* can see it, per entity type, with the gate in the query.
 
