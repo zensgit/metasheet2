@@ -25,6 +25,7 @@ const T0 = '2026-01-01T00:00:00.000Z', T1 = '2026-01-02T00:00:00.000Z', T2 = '20
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
 let curRoles = ['member']
+let curPerms = ['multitable:read', 'multitable:write', 'multitable:share'] // share → canManageSheetAccess (D2 sheet-admin gate)
 const revertPreview = (asOf: string) => request(app).post(`/api/multitable/sheets/${SHEET}/revert-preview`).send({ asOf })
 const revertExecute = (asOf: string, previewIdentity: string) => request(app).post(`/api/multitable/sheets/${SHEET}/revert-execute`).send({ asOf, previewIdentity })
 const recordRow = async (id: string) => (await q('SELECT data, version FROM meta_records WHERE id = $1', [id])).rows[0] as { data: Record<string, unknown>; version: number } | undefined
@@ -47,7 +48,8 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
   beforeAll(async () => {
     app = express()
     app.use(express.json())
-    app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: curRoles, perms: ['multitable:read', 'multitable:write'] }; next() })
+    app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: curRoles, perms: curPerms }; next() })
+    process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '10' // test ceiling: seed = 3 records; the ceiling golden adds 8 → 11 > 10
     app.use('/api/multitable', univerMetaRouter())
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'RV Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'RV Sheet'])
@@ -63,6 +65,7 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
   })
   beforeEach(async () => {
     curRoles = ['member']
+    curPerms = ['multitable:read', 'multitable:write', 'multitable:share']
     await q('UPDATE meta_sheets SET row_level_read_permissions_enabled = false WHERE id = $1', [SHEET])
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET])
@@ -124,5 +127,20 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
     const block = src.slice(start, end)
     expect(block.length).toBeGreaterThan(0)
     expect(block).not.toMatch(/resolveActiveRevealGrant|loadRevealedFieldIds|loadActiveReveal/) // reveal never composes into the write
+  })
+
+  test('[P1] D2: a normal record editor (write but NOT sheet-admin) is FORBIDDEN a sheet-wide revert', async () => {
+    curPerms = ['multitable:read', 'multitable:write'] // no multitable:share → no canManageSheetAccess
+    expect((await revertPreview(T1)).status).toBe(403)
+    expect((await revertExecute(T1, 'whatever')).status).toBe(403)
+  })
+
+  test('[P1] D3/PIT-6: a sheet above the revert ceiling is REFUSED 413 fail-closed', async () => {
+    for (let i = 0; i < 8; i++) {
+      await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [`rec_rv_big_${TS}_${i}`, SHEET, JSON.stringify({ [NAME]: 'x' })])
+    } // seed 3 + 8 = 11 > the test ceiling of 10
+    const res = await revertPreview(T1)
+    expect(res.status).toBe(413)
+    expect(res.body?.error?.code).toBe('SHEET_TOO_LARGE')
   })
 })

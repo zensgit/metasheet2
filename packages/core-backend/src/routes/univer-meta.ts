@@ -8501,14 +8501,20 @@ export function univerMetaRouter(): Router {
   // deletions is CLASSIFIED in the preview but its EXECUTE is deferred to the codebase-wide undelete slice
   // (resurrect + meta_links rebuild is "Slice 2" across the restore routes). The destructive Reset is T8-2.
   type RevertSheetCaps = Awaited<ReturnType<typeof resolveSheetCapabilities>>
+  // D3 / PIT-6 hard ceiling: a whole-sheet revert above this many records is REFUSED fail-closed (not processed
+  // synchronously, never truncated). Async-above-threshold is a follow-up; v1 hard-refuses. Env-overridable.
+  const SHEET_REVERT_MAX_RECORDS = Number(process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS) > 0
+    ? Math.floor(Number(process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS)) : 5000
   const computeSheetRevert = async (
     pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
     access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
-  ) => {
+  ): Promise<null | { tooLarge: true; recordCount: number } | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; undeleteCount: number; keptCreatedAfterT: number; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
     const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
     if (!patchContext) return null
     const { fieldById } = patchContext
+    const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
+    if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount } // D3/PIT-6 fail-closed before the full scan
     const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
     const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
     const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed) // PIT-3 mask; NO reveal (PIT-7)
@@ -8551,9 +8557,10 @@ export function univerMetaRouter(): Router {
       const pool = poolManager.get()
       const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
-      if (!capabilities.canEditRecord) return sendForbidden(res) // restore capability (same as scoped restore)
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: a sheet-wide revert needs a sheet-admin cap, ABOVE plain record-write (interim for a dedicated history-restore cap)
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.` } })
       const { reverts, undeleteCount, keptCreatedAfterT, driftCount } = computed
       const previewIdentity = reverts.length > 0
         ? mintPitRevertPreviewIdentity({ sheetId, asOf: asOfIso, strategy: 'revert', scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))), actorId: access.userId })
@@ -8583,9 +8590,10 @@ export function univerMetaRouter(): Router {
       const pool = poolManager.get()
       const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
-      if (!capabilities.canEditRecord) return sendForbidden(res)
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: sheet-wide revert needs a sheet-admin cap, ABOVE plain record-write
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.` } })
       const { reverts, patchContext } = computed
       const verdict = verifyPitRevertPreviewIdentity(parsed.data.previewIdentity, {
         sheetId, asOf: asOfIso, strategy: 'revert',
