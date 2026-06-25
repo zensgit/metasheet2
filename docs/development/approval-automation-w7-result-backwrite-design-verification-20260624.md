@@ -58,11 +58,28 @@ silently left — both now closed:
 - **Verification:** a W7-1a integration test asserts a tail `send_webhook`'s `recordData` carries the
   backwrite AND that `multitable.record.updated` fired with the change — start-approval suite 12/12.
 
+## W7-1b — target field schema validation (shipped follow-up)
+The core write originally JSONB-merged whatever mapped field id the action declared. W7-1b closes that
+misconfiguration hole at the runtime seam, immediately before the write:
+
+- The mapped target field must exist on the source sheet's current `meta_fields` schema.
+- The target field type must be compatible with the system value being written:
+  - `statusField`: `string` / `longText` / `select`; `select` must include the terminal outcome option
+    being written (currently `approved` on the approved branch).
+  - `approverField`: `string` / `longText` only. Native `person` fields intentionally remain closed
+    because they store `userId[]`, while W7-1 writes one actor id string; supporting person writeback
+    needs an explicit person-shaped writer plus membership guard.
+  - `completedAtField`: `string` / `longText` / `dateTime`.
+- Failure remains fail-closed for the write and consistent with W7-1's best-effort resume semantics:
+  the invalid backwrite is skipped/logged, and W6 continues the approved-tail resume rather than treating
+  schema drift as a second approval-completion failure path.
+- **Verification:** real-DB integration now covers the positive path with real fields (`approval_status`
+  as a select containing `approved`, `approved_by` as string, `approved_at` as dateTime), plus missing-field
+  and incompatible-type cases that prove no schemaless JSONB key is written while the tail still resumes.
+
 ## Named follow-ups (gated, not silently skipped)
 - **Rejection backwrite** — write `status='rejected'` on the non-approved path. That path currently
   fails the automation by design (fingerprint + bridge governance); resume-and-write on rejection is a
   real behavior change with its own governance implications.
 - **Cross-base backwrite** — write to a different base's record (today: the same-base source record).
   Would route through the existing `evaluateCrossBaseWrite` gate, like `update_record`.
-- **Field-exists validation** against the target sheet schema (today the write is schemaless `jsonb`
-  merge, so any field id is accepted — consistent with `update_record`).
