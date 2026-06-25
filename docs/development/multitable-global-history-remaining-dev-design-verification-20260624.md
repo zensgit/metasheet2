@@ -50,7 +50,8 @@ gated.
   failure on the restore-revision insert rolls the config write back, L7). `tsc` clean; allowlisted.
 - **FE** (#3169): 11 jsdom specs — each *update* row gets a **Revert** action → preview → confirm rendering
   `target←current`; `opKind==='gated'` shows the reason and offers no confirm; `driftConflict` disables confirm with a
-  warning; on confirm executes with the preview's baseline hash. **Faithful client** — the gated/drift/safe decision is
+  warning; on confirm executes with the **server-signed preview token** (D5 — not the client-computable baseline hash;
+  that hash-only model was the [P1] fix). **Faithful client** — the gated/drift/safe decision is
   the server's, rendered as-is, never a client cull — locked by a `getConfigRestorePreview` envelope wire-test. `vue-tsc`
   0; in the web-guard.
 
