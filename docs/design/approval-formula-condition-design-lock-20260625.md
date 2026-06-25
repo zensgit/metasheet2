@@ -1,8 +1,8 @@
 # Approval Formula Conditions — Design Lock
 
-Status: RATIFIED — RUNTIME NOT BUILT. Owner decisions resolved:
-`AND/OR/NOT` only in v1; numeric aggregates fail closed; backend evaluator
-ships before dry-run.
+Status: RATIFIED — FC-1 BUILT IN PR #3219; FC-2/FC-3 NOT BUILT. Owner
+decisions resolved: `AND/OR/NOT` only in v1; numeric aggregates fail closed;
+backend evaluator ships before dry-run.
 
 Goal: make approval condition branches more flexible than today's
 `fieldId + operator + value` rules, while keeping the approval backend as the
