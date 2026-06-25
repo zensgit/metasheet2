@@ -127,10 +127,28 @@ const ACTION_KEY: Record<string, MetaRecordLabelKey> = {
 const filterLabel = (opt: string): string => (opt === '' ? l('record.configHistoryFilterAll') : entityLabel(opt))
 const entityLabel = (t: string): string => (ENTITY_KEY[t] ? l(ENTITY_KEY[t]) : t)
 const actionLabel = (a: string): string => (ACTION_KEY[a] ? l(ACTION_KEY[a]) : a)
-function display(value: unknown): string {
+
+// Render config values as compact summaries instead of raw JSON blobs. These are CONFIG values (not record data), so
+// no value masking is applied here; sensitive projection/redaction remains server-owned.
+function summarizeConfigValue(value: unknown, depth = 0): string {
   if (value === null || value === undefined) return '∅'
   if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '[]'
+    const allPrimitive = value.every((v) => v === null || typeof v !== 'object')
+    return allPrimitive ? value.map((v) => summarizeConfigValue(v, depth + 1)).join('; ') : `[${value.length}]`
+  }
+  if (typeof value === 'object') {
+    if (depth >= 2) return JSON.stringify(value)
+    const entries = Object.entries(value as Record<string, unknown>)
+    if (entries.length === 0) return '{}'
+    return entries.map(([k, v]) => `${k}: ${summarizeConfigValue(v, depth + 1)}`).join(', ')
+  }
   return JSON.stringify(value)
+}
+function display(value: unknown): string {
+  return summarizeConfigValue(value)
 }
 
 // --- T9-W revert flow (the gate stays server-side; this only shows the server's preview + confirms) ---

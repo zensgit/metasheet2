@@ -36,6 +36,13 @@ function mountModal(over: Partial<Props>) {
 }
 const q = (s: string) => document.body.querySelector(s) as HTMLElement | null
 const flush = async () => { await Promise.resolve(); await nextTick(); await Promise.resolve(); await nextTick() }
+const waitUntil = async (pred: () => boolean, tries = 100): Promise<void> => {
+  for (let i = 0; i < tries; i++) {
+    if (pred()) return
+    await flush()
+  }
+  throw new Error('waitUntil: condition not met in time')
+}
 afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = '' })
 
 describe('MetaConfigHistoryModal — T9-R4 config-history view', () => {
@@ -50,6 +57,23 @@ describe('MetaConfigHistoryModal — T9-R4 config-history view', () => {
     expect(document.body.textContent).toContain('Old') // before
     expect(document.body.textContent).toContain('New') // after
     expect(document.body.querySelectorAll('.cfg-history__row').length).toBe(2) // BOTH rendered — the FE doesn't drop rows
+  })
+
+  it('renders config objects as a compact k: v summary, not a raw JSON blob (diff-rendering depth)', async () => {
+    mountModal({ items: [
+      rev({
+        id: 'a',
+        entityType: 'permission',
+        entityId: 'fld_1',
+        action: 'update',
+        changedKeys: ['grant'],
+        before: { grant: { visible: true, readOnly: false } },
+        after: { grant: { visible: false, readOnly: true } },
+      }),
+    ] })
+    await nextTick()
+    expect(document.body.textContent).toContain('visible: false, readOnly: true')
+    expect(document.body.textContent).not.toContain('{"visible"')
   })
 
   it('the entity-type filter EMITS filter-change (server re-fetches; the FE never client-filters for security)', async () => {
@@ -119,6 +143,51 @@ describe('MetaConfigHistoryModal — T9-W revert action (server-gated, FE render
     await nextTick(); (q('[data-test="config-history-revert"]') as HTMLButtonElement).click(); await flush()
     expect(q('[data-test="config-restore-drift"]')).toBeTruthy()
     expect((q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('END-TO-END wire: Revert button → real client → config-restore-preview then -execute with the SERVER previewToken', async () => {
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url.includes('config-restore-preview')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            preview: {
+              revisionId: 'a',
+              entityType: 'field',
+              entityId: 'fld_1',
+              changedKeys: ['name'],
+              current: { name: 'New' },
+              target: { name: 'Old' },
+              driftConflict: false,
+              opKind: 'safe',
+              baselineHash: 'h-server',
+            },
+            previewToken: 'server-token-xyz',
+          },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ ok: true, data: { restored: { revisionId: 'a' } } }), { status: 200 })
+    })
+    const client = new MultitableApiClient({ fetchFn })
+    const onReverted = vi.fn()
+    mountModal({
+      items: [updateRev()],
+      onReverted,
+      previewRevert: (id: string) => client.getConfigRestorePreview('sheet_1', id),
+      executeRevert: (id: string, token: string) => client.executeConfigRestore('sheet_1', id, token),
+    })
+    await nextTick()
+    ;(q('[data-test="config-history-revert"]') as HTMLButtonElement).click()
+    await waitUntil(() => !!q('[data-test="config-restore-confirm-btn"]'))
+    ;(q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
+    await waitUntil(() => fetchFn.mock.calls.length >= 2 && onReverted.mock.calls.length >= 1)
+
+    expect(fetchFn.mock.calls[0][0]).toContain('/config-restore-preview')
+    expect(fetchFn.mock.calls[1][0]).toContain('/config-restore-execute')
+    const execBody = JSON.parse((fetchFn.mock.calls[1][1] as RequestInit).body as string)
+    expect(execBody.previewToken).toBe('server-token-xyz')
+    expect(execBody.baselineHash).toBeUndefined()
+    expect(onReverted).toHaveBeenCalledTimes(1)
   })
 })
 
