@@ -36,6 +36,12 @@ function mountModal(over: Partial<Props>) {
 }
 const q = (s: string) => document.body.querySelector(s) as HTMLElement | null
 const flush = async () => { await Promise.resolve(); await nextTick(); await Promise.resolve(); await nextTick() }
+// Poll until a condition holds (CI-robust): the real client's fetch→text→parse→render chain takes a variable number
+// of ticks, so a fixed `flush()` count races in CI. Retry-with-flush until the predicate is true (or time out).
+const waitUntil = async (pred: () => boolean, tries = 100): Promise<void> => {
+  for (let i = 0; i < tries; i++) { if (pred()) return; await flush() }
+  throw new Error('waitUntil: condition not met in time')
+}
 afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = '' })
 
 describe('MetaConfigHistoryModal — T9-R4 config-history view', () => {
@@ -135,9 +141,9 @@ describe('MetaConfigHistoryModal — T9-W revert action (server-gated, FE render
     })
     await nextTick()
     ;(q('[data-test="config-history-revert"]') as HTMLButtonElement).click()
-    await flush(); await flush() // the real client adds fetch→text→parse awaits; let the preview resolve + render
+    await waitUntil(() => !!q('[data-test="config-restore-confirm-btn"]')) // poll until the async preview rendered the confirm panel (CI-robust, not a fixed tick count)
     ;(q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
-    await flush(); await flush()
+    await waitUntil(() => fetchFn.mock.calls.length >= 2 && onReverted.mock.calls.length >= 1) // poll until the execute fetch fired + reverted emitted
     // the two real fetches happened, in order
     expect(fetchFn.mock.calls[0][0]).toContain('/config-restore-preview')
     expect(fetchFn.mock.calls[1][0]).toContain('/config-restore-execute')
