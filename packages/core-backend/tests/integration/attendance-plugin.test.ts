@@ -5700,6 +5700,30 @@ attendanceIntegrationDescribe(
       )
       expect(replayLot.rows).toHaveLength(0)
       expect(await lotsFor(onId)).toHaveLength(1)
+
+      // (4) 加班银行 v1-1b: with overtimeBankPolicy ENABLED, an OT segmentation spanning workday+restday grants
+      // PER-SOURCE pooled comp_time lots (overtime_source tagged, keyed per-source), conserved to the total.
+      // (sections 1–3 above prove the DORMANT path is byte-identical: single overtime_conversion lot.)
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday', 'restday'] } })).status).toBe(200)
+      const bankId = await createOvertime('2026-09-10', 120)
+      await pool.query(
+        `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+        [bankId, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-09-10', dayType: 'workday', segments: { workdayMinutes: 60, restdayMinutes: 60, holidayMinutes: 0 }, totalMinutes: 120, compTimeGrantMinutes: 120 })],
+      )
+      expect((await approve(bankId)).status).toBe(200)
+      const bankLots = (await pool.query(
+        `SELECT amount_minutes, source_key, overtime_source FROM attendance_leave_balances
+          WHERE org_id='default' AND source_id=$1 AND leave_type_code='comp_time' ORDER BY overtime_source`,
+        [bankId],
+      )).rows as { amount_minutes: number; source_key: string; overtime_source: string }[]
+      expect(bankLots).toEqual([
+        { amount_minutes: 60, source_key: `overtime_conversion:${bankId}:restday`, overtime_source: 'restday' },
+        { amount_minutes: 60, source_key: `overtime_conversion:${bankId}:workday`, overtime_source: 'workday' },
+      ])
+      expect(bankLots.reduce((s, l) => s + l.amount_minutes, 0)).toBe(120) // conservation: Σ per-source === total
+      // replay: re-approving is rejected and never adds extra lots.
+      expect((await approve(bankId)).status).toBe(400)
+      expect((await pool.query(`SELECT count(*)::int AS n FROM attendance_leave_balances WHERE source_id=$1 AND leave_type_code='comp_time'`, [bankId])).rows[0].n).toBe(2)
     } finally {
       if (token && Object.keys(originalSettings).length > 0) {
         await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
