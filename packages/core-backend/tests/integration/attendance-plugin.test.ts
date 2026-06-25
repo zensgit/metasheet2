@@ -6017,6 +6017,56 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④ 加班银行 v1-3b — 满勤 flag surfaces on GET /summary when policy ON; ABSENT when OFF (dormant-clean)', async () => {
+    if (!baseUrl) return
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-v13b-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    let token: string | undefined
+    let originalSettings: Record<string, unknown> = {}
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) return
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+      const putSettings = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
+      originalSettings = ((await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })).body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
+      const getSummary = async () => {
+        const r = await requestJson(`${baseUrl}/api/attendance/summary?from=2026-09-01&to=2026-09-30`, { headers: { Authorization: `Bearer ${token}` } })
+        expect(r.status).toBe(200)
+        return ((r.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+      }
+      // (1) policy OFF (default) → field ABSENT — the live summary response is byte-identical to pre-v1-3b.
+      expect((await putSettings({ attendanceBonusPolicy: { enabled: false } })).status).toBe(200)
+      expect('fullAttendanceEligible' in (await getSummary())).toBe(false)
+      // (2) policy ON, clean period (no records/leave/late) → field PRESENT and true.
+      expect((await putSettings({ attendanceBonusPolicy: { enabled: true, anyLeaveBreaksFullAttendance: true, lateBeyondThresholdBreaksFullAttendance: true } })).status).toBe(200)
+      const onSummary = await getSummary()
+      expect('fullAttendanceEligible' in onSummary).toBe(true)
+      expect(onSummary.fullAttendanceEligible).toBe(true)
+      // (3) §P1 false-path through the real route: an approved leave in the period → 满勤 FALSE (the prior route
+      // test only covered OFF-absent + clean-true; this exercises the false branch end-to-end).
+      const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers, body: JSON.stringify({ code: 'personal_leave', name: `PL ${runSuffix}`, paid: false, requiresApproval: true }) })
+      expect([201, 409]).toContain(ltRes.status)
+      let leaveTypeId = (ltRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!leaveTypeId) {
+        const list = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=true`, { headers })
+        leaveTypeId = ((list.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []).find((i) => i.code === 'personal_leave')?.id
+      }
+      expect(leaveTypeId).toBeTruthy()
+      const reqRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers, body: JSON.stringify({ workDate: '2026-09-15', requestType: 'leave', leaveTypeId, minutes: 480 }) })
+      expect(reqRes.status).toBe(201)
+      const reqId = (reqRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+      expect(reqId).toBeTruthy()
+      expect((await requestJson(`${baseUrl}/api/attendance/requests/${reqId}/approve`, { method: 'POST', headers, body: JSON.stringify({ comment: 'ok' }) })).status).toBe(200)
+      expect((await getSummary()).fullAttendanceEligible).toBe(false)
+    } finally {
+      if (token && Object.keys(originalSettings).length > 0) await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS; else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+  })
+
   it('加班三段 O3/O4 — records, report fields, and summary expose approved overtime segment buckets from request snapshots', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
