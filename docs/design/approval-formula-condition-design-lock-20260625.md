@@ -1,6 +1,7 @@
 # Approval Formula Conditions — Design Lock
 
-Status: RATIFIED — FC-1 BUILT IN PR #3219; FC-2/FC-3 NOT BUILT. Owner
+Status: RATIFIED — FC-1 BUILT IN PR #3219; FC-2 BUILT IN A STACKED PR; FC-3
+NOT BUILT. Owner
 decisions resolved: `AND/OR/NOT` only in v1; numeric aggregates fail closed;
 backend evaluator ships before dry-run.
 

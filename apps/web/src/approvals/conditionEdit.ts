@@ -34,8 +34,10 @@ export interface ConditionNodeEdit {
 export interface ConditionBranchEdit {
   // Topology — preserved verbatim; the editor never mutates these.
   edgeKey: string
+  predicateMode: 'rules' | 'formula'
   conjunction: 'and' | 'or'
   rules: ConditionRuleEdit[]
+  formulaExpression: string
 }
 
 export interface ConditionRuleEdit {
@@ -45,6 +47,11 @@ export interface ConditionRuleEdit {
   // surface (text input) writes a string. `undefined` ⇒ the emitted rule omits `value` (matching
   // `isEmpty` and the backend's omit-when-undefined discipline).
   value: unknown
+}
+
+export interface FormulaInsertOption {
+  token: string
+  label: string
 }
 
 /** Map of condition edits keyed by node key, seeded from a preserved graph and edited in place. */
@@ -83,6 +90,7 @@ export function conditionEditsFromGraph(graph: ApprovalGraph | undefined): Condi
       nodeKey: node.key,
       branches: (config.branches ?? []).map((branch) => ({
         edgeKey: branch.edgeKey,
+        predicateMode: branch.formula ? 'formula' : 'rules',
         conjunction: branch.conjunction === 'or' ? 'or' : 'and',
         rules: (branch.rules ?? []).map((rule) => ({
           fieldId: rule.fieldId,
@@ -91,6 +99,7 @@ export function conditionEditsFromGraph(graph: ApprovalGraph | undefined): Condi
           // capture that as `undefined` so the rebuilt rule omits the key too (byte-identical).
           value: 'value' in rule ? rule.value : undefined,
         })),
+        formulaExpression: branch.formula?.expression ?? '',
       })),
       defaultEdgeKey: config.defaultEdgeKey ?? '',
     }
@@ -109,6 +118,61 @@ function buildConditionRule(rule: ConditionRuleEdit): ConditionRule {
     operator: rule.operator,
     ...(rule.value !== undefined ? { value: rule.value } : {}),
   }
+}
+
+export function approvalFormulaInsertOptions(formSchema: FormSchema): FormulaInsertOption[] {
+  const options: FormulaInsertOption[] = []
+  for (const field of formSchema.fields) {
+    if (!field.id) continue
+    options.push({ token: `{${field.id}}`, label: field.label || field.id })
+    if (field.type === 'detail') {
+      for (const column of field.columns ?? []) {
+        if (!column.id) continue
+        options.push({
+          token: `{${field.id}.${column.id}}`,
+          label: `${field.label || field.id}.${column.label || column.id}`,
+        })
+      }
+    }
+  }
+  return options
+}
+
+function validateFormulaReferences(expression: string, formSchema: FormSchema, label: string): string[] {
+  const errors: string[] = []
+  const topFields = new Map(formSchema.fields.map((field) => [field.id, field]))
+  const refPattern = /\{([^{}]+)\}/g
+  let match: RegExpExecArray | null
+  while ((match = refPattern.exec(expression)) !== null) {
+    const rawRef = match[1]?.trim() ?? ''
+    if (!rawRef) {
+      errors.push(`${label} 包含空字段引用`)
+      continue
+    }
+    const parts = rawRef.split('.')
+    if (parts.length === 1) {
+      if (!topFields.has(parts[0])) errors.push(`${label} 引用的字段 ${parts[0]} 不存在`)
+      continue
+    }
+    if (parts.length === 2) {
+      const [fieldId, columnId] = parts
+      const field = topFields.get(fieldId)
+      if (!field) {
+        errors.push(`${label} 引用的明细字段 ${fieldId} 不存在`)
+        continue
+      }
+      if (field.type !== 'detail') {
+        errors.push(`${label} 引用的字段 ${fieldId} 不是明细字段`)
+        continue
+      }
+      if (!(field.columns ?? []).some((column) => column.id === columnId)) {
+        errors.push(`${label} 引用的明细子字段 ${fieldId}.${columnId} 不存在`)
+      }
+      continue
+    }
+    errors.push(`${label} 的字段引用 ${rawRef} 不是 v1 支持的字段或明细子字段`)
+  }
+  return errors
 }
 
 /**
@@ -142,6 +206,16 @@ export function applyConditionEditsToGraph(
       (originalConfig.branches ?? []).map((branch) => [branch.edgeKey, branch]),
     )
     const branches: ConditionBranch[] = edit.branches.map((branchEdit) => {
+      if (branchEdit.predicateMode === 'formula') {
+        const original = originalBranchByEdge.get(branchEdit.edgeKey)
+        const originalHadConjunction = original?.conjunction !== undefined
+        return {
+          edgeKey: branchEdit.edgeKey,
+          ...(originalHadConjunction ? { conjunction: branchEdit.conjunction } : {}),
+          rules: [],
+          formula: { expression: branchEdit.formulaExpression.trim() },
+        }
+      }
       const original = originalBranchByEdge.get(branchEdit.edgeKey)
       // Emit `conjunction` only when the original branch carried one, OR the editor set a value
       // that differs from the original's absent/value — i.e. always emit when the current value is
@@ -204,6 +278,14 @@ export function validateConditionEdits(
   for (const edit of Object.values(edits)) {
     const nodeLabel = edit.nodeKey
     edit.branches.forEach((branch, branchIndex) => {
+      if (branch.predicateMode === 'formula') {
+        const formulaLabel = `条件节点 ${nodeLabel} 分支 ${branchIndex + 1} 公式`
+        if (!branch.formulaExpression.trim()) {
+          errors.push(`${formulaLabel} 需要填写`)
+        }
+        errors.push(...validateFormulaReferences(branch.formulaExpression, formSchema, formulaLabel))
+        return
+      }
       branch.rules.forEach((rule, ruleIndex) => {
         const ruleLabel = `条件节点 ${nodeLabel} 分支 ${branchIndex + 1} 规则 ${ruleIndex + 1}`
         const fieldId = rule.fieldId.trim()
