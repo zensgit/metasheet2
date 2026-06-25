@@ -19,6 +19,10 @@ const {
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const PROD_CANONICAL_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
 const ALLOWED_ROUTES = Object.freeze(['small', 'large', 'both'])
+// Bounded authorization window: a production policy may not be usable more than this far in the future,
+// enforced at apply time against the caller-supplied `now`. Keeps "bounded by time" real even when
+// expiresAt is a valid-but-distant ISO timestamp. Reviewed bound; tighten as needed.
+const MAX_PRODUCTION_POLICY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
 class StockPreparationProductionPolicyError extends Error {
   constructor(status, code, message, details = {}) {
@@ -83,6 +87,11 @@ function normalizeStockPrepApplyProductionPolicy(input) {
 
   const expiresAt = optionalString(input.expiresAt)
   if (!expiresAt) reject('missing_expiry', 'expiresAt is required')
+  // Require strict ISO-8601 with explicit time + zone. Date.parse alone accepts loose forms (e.g. "2999"
+  // → a ~1000-year window), which defeats the bounded-time intent; demand the full timestamp.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(expiresAt)) {
+    reject('invalid_expiry', 'expiresAt must be a strict ISO-8601 timestamp with time and zone')
+  }
   const expiresAtMs = Date.parse(expiresAt)
   if (!Number.isFinite(expiresAtMs)) reject('invalid_expiry', 'expiresAt must be a valid timestamp')
 
@@ -111,11 +120,16 @@ function assertProductionPolicyNotExpired(policy, now) {
   }
   if (!Number.isFinite(now)) reject('missing_now', 'a current timestamp is required for the expiry check')
   if (now >= policy.expiresAtMs) reject('expired', 'production policy has expired')
+  // Bounded-time: reject a policy whose expiry is further out than the reviewed authorization window.
+  if (policy.expiresAtMs > now + MAX_PRODUCTION_POLICY_WINDOW_MS) {
+    reject('expiry_too_far', 'production policy expiry exceeds the bounded authorization window')
+  }
 }
 
 module.exports = {
   PROD_CANONICAL_OBJECT_ID,
   ALLOWED_ROUTES,
+  MAX_PRODUCTION_POLICY_WINDOW_MS,
   StockPreparationProductionPolicyError,
   normalizeStockPrepApplyProductionPolicy,
   assertProductionPolicyNotExpired,

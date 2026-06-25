@@ -74,13 +74,25 @@ rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresA
 rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: 'not-a-date' })), 'invalid_expiry')
 rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ requireFreshDryRun: false })), 'fresh_dry_run_required')
 
-// --- expiry check (caller supplies now; no module clock) ---
-const future = normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2999-01-01T00:00:00.000Z' }))
-assert.doesNotThrow(() => assertProductionPolicyNotExpired(future, Date.parse('2026-06-25T00:00:00.000Z')))
+// --- strict ISO-8601 (reject loose forms Date.parse would otherwise accept) ---
+rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2999' })), 'invalid_expiry') // year-only → ~1000y window
+rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2026-06-25' })), 'invalid_expiry') // date-only, no time/zone
+rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2026-06-25T00:00:00' })), 'invalid_expiry') // no zone
+
+// --- expiry check (caller supplies now; no module clock; bounded authorization window = 7 days) ---
+const nowMs = Date.parse('2026-06-25T00:00:00.000Z')
+const nearFuture = normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2026-06-26T00:00:00.000Z' })) // +1d, in window
+assert.doesNotThrow(() => assertProductionPolicyNotExpired(nearFuture, nowMs))
+const atWindow = normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2026-07-02T00:00:00.000Z' })) // now + exactly 7d
+assert.doesNotThrow(() => assertProductionPolicyNotExpired(atWindow, nowMs)) // boundary is inclusive (> check)
+const justOverWindow = normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2026-07-02T00:00:00.001Z' })) // +7d+1ms
+rejectsWith(() => assertProductionPolicyNotExpired(justOverWindow, nowMs), 'expiry_too_far')
+const tooFar = normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2999-01-01T00:00:00.000Z' })) // valid ISO but distant
+rejectsWith(() => assertProductionPolicyNotExpired(tooFar, nowMs), 'expiry_too_far')
 const past = normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2020-01-01T00:00:00.000Z' }))
-rejectsWith(() => assertProductionPolicyNotExpired(past, Date.parse('2026-06-25T00:00:00.000Z')), 'expired')
-rejectsWith(() => assertProductionPolicyNotExpired({}, Date.parse('2026-06-25T00:00:00.000Z')), 'not_normalized')
-rejectsWith(() => assertProductionPolicyNotExpired(future, Number.NaN), 'missing_now')
+rejectsWith(() => assertProductionPolicyNotExpired(past, nowMs), 'expired')
+rejectsWith(() => assertProductionPolicyNotExpired({}, nowMs), 'not_normalized')
+rejectsWith(() => assertProductionPolicyNotExpired(nearFuture, Number.NaN), 'missing_now')
 
 // --- non-vacuous: a fully valid policy still normalizes (the negatives aren't rejecting everything) ---
 assert.ok(normalizeStockPrepApplyProductionPolicy(validPolicy()), 'valid policy normalizes (non-vacuous)')
