@@ -1009,6 +1009,20 @@ export interface RestoreBatchExecuteResult {
   targetVersion: number
 }
 
+// T9-R4: a config/schema-change history entry (server-gated per entity type; the FE renders it as-is).
+export interface MetaConfigRevision {
+  id: string
+  entityType: 'field' | 'permission' | 'view' | 'sheet_config'
+  entityId: string
+  action: 'create' | 'update' | 'delete'
+  before: Record<string, unknown> | null
+  after: Record<string, unknown> | null
+  changedKeys: string[]
+  batchId: string | null
+  actorId: string | null
+  createdAt: string
+}
+
 export interface AiShortcutPreviewData {
   status: 'succeeded'
   action: 'preview'
@@ -1863,6 +1877,14 @@ export class MultitableApiClient {
     )
     const data = await this.parseJson<{ items?: Array<Partial<MetaRecordRevision>> }>(res)
     return normalizeRecordHistoryEntries(data)
+  }
+
+  // T9-R4: config/schema-change history (read-only). The server gates per entity type (read-gate ≡ write-gate); the
+  // FE is a FAITHFUL CLIENT — it renders exactly what the server returns and never filters for security.
+  async getConfigHistory(sheetId: string, params?: { entityType?: string; limit?: number; offset?: number }): Promise<MetaConfigRevision[]> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/config-history${qs(params ?? {})}`)
+    const data = await this.parseJson<{ items?: MetaConfigRevision[] }>(res)
+    return Array.isArray(data.items) ? data.items : []
   }
 
   // --- Global History & Point-in-Time Restore (read-only) ---

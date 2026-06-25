@@ -55,6 +55,11 @@ export type MetaRecordLabelKey =
   | 'record.batchReasonUnavailable' | 'record.batchReasonVersionUnavailable' | 'record.batchReasonUnsupported'
   | 'record.batchReasonSnapshotUnavailable' | 'record.batchReasonSchemaDrift' | 'record.batchReasonNoChange'
   | 'record.batchReasonDenied' | 'record.batchReasonConflict' | 'record.batchReasonForbidden' | 'record.batchReasonError'
+  // --- T9-R4 config-history view ---
+  | 'record.configHistoryTitle' | 'record.configHistoryClose' | 'record.configHistoryFilterAll'
+  | 'record.configHistoryEntityField' | 'record.configHistoryEntityView' | 'record.configHistoryEntityPermission'
+  | 'record.configHistoryEntitySheetConfig' | 'record.configHistoryActionCreate' | 'record.configHistoryActionUpdate'
+  | 'record.configHistoryActionDelete' | 'record.configHistoryEmpty' | 'record.configHistoryLoading' | 'record.configHistoryBy'
   // FE-owned static fallback strings (the `error?.message ?? l(...)`
   // pattern from T3A2). Backend error.message remains raw when present.
   | 'record.errorHistoryLoad' | 'record.errorWatchLoad' | 'record.errorWatchUpdate'
@@ -154,6 +159,19 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.batchReasonConflict': { en: 'Version conflict', zh: '版本冲突' },
   'record.batchReasonForbidden': { en: 'Field write-denied', zh: '字段不可写' },
   'record.batchReasonError': { en: 'Error', zh: '错误' },
+  'record.configHistoryTitle': { en: 'Config history', zh: '配置历史' },
+  'record.configHistoryClose': { en: 'Close', zh: '关闭' },
+  'record.configHistoryFilterAll': { en: 'All', zh: '全部' },
+  'record.configHistoryEntityField': { en: 'Field', zh: '字段' },
+  'record.configHistoryEntityView': { en: 'View', zh: '视图' },
+  'record.configHistoryEntityPermission': { en: 'Permission', zh: '权限' },
+  'record.configHistoryEntitySheetConfig': { en: 'Sheet config', zh: '表配置' },
+  'record.configHistoryActionCreate': { en: 'Created', zh: '新建' },
+  'record.configHistoryActionUpdate': { en: 'Updated', zh: '更新' },
+  'record.configHistoryActionDelete': { en: 'Deleted', zh: '删除' },
+  'record.configHistoryEmpty': { en: 'No config changes', zh: '暂无配置变更' },
+  'record.configHistoryLoading': { en: 'Loading…', zh: '加载中…' },
+  'record.configHistoryBy': { en: 'by', zh: '操作人' },
   'record.errorRestore': { en: 'Restore failed', zh: '恢复失败' },
   'record.errorHistoryLoad': { en: 'Failed to load history', zh: '加载历史失败' },
   'record.errorWatchLoad': { en: 'Failed to load watch status', zh: '加载关注状态失败' },

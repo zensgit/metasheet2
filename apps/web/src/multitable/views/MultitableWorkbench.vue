@@ -63,6 +63,7 @@
       <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true">&#x1F511; {{ wb('toolbar.apiWebhooks', isZh) }}</button>
       <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" @click="showTrash = true">&#x1F5D1; {{ wb('toolbar.trash', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="showHistory = true">&#x1F570; {{ isZh ? '历史' : 'History' }}</button>
+      <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory">&#x2699; {{ isZh ? '配置历史' : 'Config history' }}</button>
     </div>
     <div v-if="showTemplateLibrary" class="mt-template-library" data-testid="multitable-template-library">
       <div class="mt-template-library__header">
@@ -522,6 +523,16 @@
       :fields="propertyVisibleGridFields"
       @close="showHistory = false"
     />
+    <MetaConfigHistoryModal
+      :visible="configHistory.visible"
+      :items="configHistory.items"
+      :loading="configHistory.loading"
+      :entity-type="configHistory.entityType"
+      :record-label-of="configHistoryLabelOf"
+      :is-zh="isZh"
+      @close="closeConfigHistory"
+      @filter-change="onConfigHistoryFilter"
+    />
   </div>
 </template>
 
@@ -621,6 +632,8 @@ import MetaAiBulkFillDialog from '../components/MetaAiBulkFillDialog.vue'
 import MetaViewManager from '../components/MetaViewManager.vue'
 import TrashModal from '../components/TrashModal.vue'
 import HistoryCenterModal from '../components/HistoryCenterModal.vue'
+import MetaConfigHistoryModal from '../components/MetaConfigHistoryModal.vue'
+import type { MetaConfigRevision } from '../api/client'
 import MetaSheetPermissionManager from '../components/MetaSheetPermissionManager.vue'
 import MetaAutomationManager from '../components/MetaAutomationManager.vue'
 import MetaFormShareManager from '../components/MetaFormShareManager.vue'
@@ -860,6 +873,36 @@ const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
 const showTrash = ref(false)
 const showHistory = ref(false)
+
+// T9-R4: config/schema-change history view. The server gates per entity type — the FE renders what it returns
+// (faithful client; no client-side security filtering). The entity-type filter only narrows within the gated set.
+const configHistory = ref<{ visible: boolean; items: MetaConfigRevision[]; loading: boolean; entityType: string }>({ visible: false, items: [], loading: false, entityType: '' })
+const configHistoryLabelOf = (entityId: string): string => {
+  const f = scopedAllFields.value.find((x) => x.id === entityId)
+  if (f) return f.name
+  const v = (workbench.views.value as Array<{ id: string; name?: string }>).find((x) => x.id === entityId)
+  return v?.name ?? entityId
+}
+async function loadConfigHistory(entityType: string) {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return
+  configHistory.value = { ...configHistory.value, loading: true, entityType }
+  try {
+    const items = await workbench.client.getConfigHistory(sheetId, entityType ? { entityType } : {})
+    configHistory.value = { ...configHistory.value, loading: false, items }
+  } catch (error) {
+    configHistory.value = { ...configHistory.value, loading: false, items: [] }
+    showError((error as Error)?.message ?? recordLabel('record.errorHistoryLoad', isZh.value))
+  }
+}
+function openConfigHistory() {
+  if (!workbench.activeSheetId.value) return
+  configHistory.value = { visible: true, items: [], loading: true, entityType: '' }
+  void loadConfigHistory('')
+}
+function onConfigHistoryFilter(entityType: string) { void loadConfigHistory(entityType) }
+function closeConfigHistory() { configHistory.value = { ...configHistory.value, visible: false } }
+
 // After an undelete, the restored record is back in the sheet → refresh the current page so it appears.
 function onTrashRestored(): void {
   void grid.reloadCurrentPage()
