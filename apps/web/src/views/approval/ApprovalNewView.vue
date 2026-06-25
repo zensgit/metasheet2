@@ -80,6 +80,8 @@
               v-else-if="field.type === 'number'"
               v-model="formData[field.id]"
               :placeholder="field.placeholder"
+              :disabled="isAutoSummedTotal(field.id)"
+              :controls="!isAutoSummedTotal(field.id)"
               style="width: 100%"
             />
 
@@ -300,6 +302,10 @@
               v-model="formData[field.id]"
               :placeholder="field.placeholder || `请输入${field.label}`"
             />
+
+            <span v-if="isAutoSummedTotal(field.id)" class="approval-new__field-hint">
+              由明细自动汇总，无需手填
+            </span>
           </el-form-item>
 
           <el-divider />
@@ -334,6 +340,7 @@ import { useApprovalStore } from '../../approvals/store'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { getVisibleFormFields } from '../../approvals/fieldVisibility'
+import { useAutoSumTotal } from '../../approvals/useAutoSumTotal'
 import {
   createEmptyDetailRow,
   isDetailCellVisible,
@@ -354,6 +361,11 @@ const visibleFields = computed(() => {
   return getVisibleFormFields(template.value.formSchema, formData)
 })
 const visibleFieldIds = computed(() => visibleFields.value.map((field) => field.id))
+
+// Detail-row auto-sum (design-lock #3189, Gate B): when the template declares amountConsistencyCheck the
+// total field is derived from the detail rows (read-only) — auto-fill (UX) + backend total-check
+// (tamper-proof). FE-only. See useAutoSumTotal for the watch + the backend-identical mirror.
+const { isAutoSummedTotal } = useAutoSumTotal(template, formData)
 
 const formRules = computed<FormRules>(() => {
   const rules: FormRules = {}
