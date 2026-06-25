@@ -164,25 +164,29 @@ smoke:
 The check only ever REJECTS; it NEVER mutates `formData` (no auto-fill — that is
 the auto-sum lock). No currency conversion, no multi-detail, no tolerance band.
 
-## Remaining gaps (open follow-ups — #3176 shipped the capability, the gap is NOT fully closed)
+## Remaining gaps (#3176 shipped the capability; §2 since closed by #3183; §1 and §3 open)
 
-Tracked here, none in #3176. Sequence matters: FE preserve FIRST (it is the base
-save-path fix the rest depends on), THEN the preset mapping (a mapping added before
-the FE preserve would be dropped by the editing page on the next save), then the
-visibility policy.
+Status: #3183 landed the preset mapping (§2) BEFORE the FE preserve (§1), INVERTING
+the intended order — so the exposure §1 warned about is now live on shipped preset
+templates. FE preserve (§1) is the active first priority; the auto-sum lock (#3189,
+design-only) rides the same save path and is also blocked on it. Visibility (§3) last.
 
-1. **[P1] FE authoring save silently drops the mapping.** The backend type carries
-   `FormSchema.amountConsistencyCheck`, but `apps/web/src/types/approval.ts`
-   `FormSchema` still has only `fields` and `buildFormSchema()` returns `{ fields }`
-   — so a template saved through the editing page loses the mapping (the G-5
-   silent-drop, now on the FE side). Fix: FE `FormSchema` type + `draftFromTemplate`
-   hydrate + `buildFormSchema` preserve + a mounted round-trip test.
-2. **[P1] Amount-tier presets do not declare the mapping.** `commonTemplatePresets.ts`
-   carries no `amountConsistencyCheck`, so the capability ships unused and the
-   amount-tier preset gap stays open. Wire reimbursement
-   `{ totalFieldId: 'amount', detailFieldId: 'expense_items', amountColumnId: 'amount' }`
-   and purchase `{ totalFieldId: 'amount', detailFieldId: 'purchase_items', amountColumnId: 'amount' }`,
-   with shape + real-DB coverage. DEPENDS on §1 (else an edited preset loses the mapping).
+1. **[P1 — ACTIVE EXPOSURE] FE authoring save silently drops the mapping on a
+   now-SHIPPED control.** With #3183 putting real mappings on the amount-tier presets
+   (§2), this is no longer hypothetical: a preset-created template carries
+   `formSchema.amountConsistencyCheck` (backend-persisted), but `templateAuthoring.ts`
+   has no hydrate/preserve — `draftFromTemplate` reads only `template.formSchema.fields`
+   and `buildFormSchema()` returns `{ fields }`. So the first time an admin opens such
+   a template in the authoring editor and saves, the mapping is silently dropped and
+   the control fails. The FE `FormSchema` TYPE already carries the field; the fix is
+   `draftFromTemplate` hydrate + `buildFormSchema` preserve + a mounted save round-trip
+   test. FIRST PRIORITY.
+2. **[DONE — #3183] Amount-tier presets declare the mapping.** Closed by `4f6cd83b2`
+   (#3183): `commonTemplatePresets.ts` `withAmountConsistency()` wires reimbursement
+   `{ amount, expense_items, amount }` and purchase `{ amount, purchase_items, amount }`,
+   with preset coverage. Retained as a record — the capability is shipped; its
+   durability through the authoring editor depends on §1 (which landed AFTER it, hence
+   the live exposure above).
 3. **[P2] `visibilityRule` policy mismatch.** This lock (Decision 4 / Mapping shape /
    Gate B) asserts a SAVE-TIME reject of `visibilityRule`-bearing mapped fields, but
    `normalizeAmountConsistencyCheck` validates existence + type only — the shipped
