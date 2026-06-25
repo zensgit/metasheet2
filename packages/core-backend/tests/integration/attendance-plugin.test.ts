@@ -6045,6 +6045,22 @@ attendanceIntegrationDescribe(
       const onSummary = await getSummary()
       expect('fullAttendanceEligible' in onSummary).toBe(true)
       expect(onSummary.fullAttendanceEligible).toBe(true)
+      // (3) §P1 false-path through the real route: an approved leave in the period → 满勤 FALSE (the prior route
+      // test only covered OFF-absent + clean-true; this exercises the false branch end-to-end).
+      const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers, body: JSON.stringify({ code: 'personal_leave', name: `PL ${runSuffix}`, paid: false, requiresApproval: true }) })
+      expect([201, 409]).toContain(ltRes.status)
+      let leaveTypeId = (ltRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      if (!leaveTypeId) {
+        const list = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=true`, { headers })
+        leaveTypeId = ((list.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []).find((i) => i.code === 'personal_leave')?.id
+      }
+      expect(leaveTypeId).toBeTruthy()
+      const reqRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers, body: JSON.stringify({ workDate: '2026-09-15', requestType: 'leave', leaveTypeId, minutes: 480 }) })
+      expect(reqRes.status).toBe(201)
+      const reqId = (reqRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+      expect(reqId).toBeTruthy()
+      expect((await requestJson(`${baseUrl}/api/attendance/requests/${reqId}/approve`, { method: 'POST', headers, body: JSON.stringify({ comment: 'ok' }) })).status).toBe(200)
+      expect((await getSummary()).fullAttendanceEligible).toBe(false)
     } finally {
       if (token && Object.keys(originalSettings).length > 0) await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS; else process.env.RBAC_BYPASS = previousRbacBypass

@@ -11623,7 +11623,11 @@ function resolveFullAttendanceEligible(summary, policy) {
   if (!policy || policy.enabled !== true) return null
   const s = summary && typeof summary === 'object' ? summary : {}
   const hasLeave = (Number(s.leave_minutes) || 0) > 0
-  const hasLateOrEarly = (Number(s.late_days) || 0) > 0 || (Number(s.early_leave_days) || 0) > 0
+  // §P1 (owner review): late_early is a SEPARATE status — a same-day both-late-AND-early record is counted in
+  // late_early_days, NOT late_days / early_leave_days. Missing it would wrongly mark such a person 满勤.
+  const hasLateOrEarly = (Number(s.late_days) || 0) > 0
+    || (Number(s.early_leave_days) || 0) > 0
+    || (Number(s.late_early_days) || 0) > 0
   if (policy.anyLeaveBreaksFullAttendance === true && hasLeave) return false
   if (policy.lateBeyondThresholdBreaksFullAttendance === true && hasLateOrEarly) return false
   return true

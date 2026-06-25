@@ -54,6 +54,9 @@ describe('#加班银行 v1-3b — resolveFullAttendanceEligible (满勤 compute,
   it('a late or early-leave day → false (when lateBeyondThresholdBreaksFullAttendance is on)', () => {
     expect(f({ leave_minutes: 0, late_days: 1, early_leave_days: 0 }, ON)).toBe(false)
     expect(f({ leave_minutes: 0, late_days: 0, early_leave_days: 1 }, ON)).toBe(false)
+    // §P1 (owner review): late_early is a SEPARATE status (same-day both late AND early) — it must also break
+    // 满勤, not slip through late_days/early_leave_days both being 0.
+    expect(f({ leave_minutes: 0, late_days: 0, early_leave_days: 0, late_early_days: 1 }, ON)).toBe(false)
   })
 
   it('toggles relax the breaks independently', () => {
