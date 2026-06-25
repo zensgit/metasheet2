@@ -39,19 +39,24 @@ equal the sum of that submission's detail-row amounts:
   malformed mapping → rejected at template-save, no-mapping → unaffected. Green locally against Postgres.
 - No regression (approval-product-service unit suite unchanged); backend tsc clean.
 
-## Named follow-ups (the rest of the plan — not in this PR)
-- **Turn the control on for the presets (FE):** ship `amountConsistencyCheck` on the
-  `purchase_amount_tier` preset's schema (`{totalFieldId:'amount', detailFieldId:'purchase_items',
-  amountColumnId:'amount'}`) so the amount-tier template is protected by default; add the FE
-  `FormSchema.amountConsistencyCheck` type. The control is built and validated; this is the "enable it"
-  step.
-- **W7 observability pair** (lower risk than rejection/cross-base; makes W7 more operable):
-  - *rule-save fail-fast* — validate the `resultWriteback` field existence/type at `createRule` against
-    the source sheet schema (reuse #3157's `assertResultWritebackFields` existence/type half, hoisted to
-    save-time; the outcome-specific select-option check stays at runtime), so a typo'd field id is
-    caught before it silently skips at submit.
-  - *step-result skip-reason* — surface the backwrite skip on the `start_approval` step result output
-    (today it is only a `logger.warn`), so it shows in the run history without log access.
+## Shipped as the rest of this line (separate PRs, all on main)
+- **Preset enablement → #3183.** `purchase_amount_tier` ships `{amount, purchase_items, amount}` and
+  `reimbursement_amount_tier` ships `{amount, expense_items, amount}` (via a `withAmountConsistency`
+  helper); the basic presets (leave/reimbursement/purchase) keep no mapping. The FE
+  `FormSchema.amountConsistencyCheck` type was added (carried verbatim — backend is sole arbiter). So the
+  amount-tier templates are tamper-resistant by default. Preset test +3; vue-tsc clean.
+- **W7 observability pair → #3182.**
+  - *rule-save fail-fast* (`createRule`) — validates the `resultWriteback` target fields against the
+    source sheet at save (reusing #3157's existence/type check). LENIENT on absence (deferred to the
+    runtime skip — record data is schemaless, the field may be added after the rule), FAIL-FAST on a
+    TYPE mismatch for a field that already exists. NOTE: this changes the at-save incompatible-type case
+    from "saved + skipped at runtime" to "rejected at rule-save" (the point of fail-fast); W7-1b's
+    skip-don't-block posture is preserved for missing fields + post-save changes, and that test was
+    updated accordingly.
+  - *step-result skip-reason* — the runtime backwrite skip is surfaced on the `start_approval` step
+    result (`backwriteSkipped`), not only `logger.warn`. 14/14 start_approval integration; automation-v1 186/186.
+
+## Still a follow-up (not built)
 - **Detail-row auto-sum** — the heavier of the two #3161 fixes (compute/auto-fill the total, removing
   the gameable separate total) — its own later lock; pulls in a computed/rollup form-field capability.
 
