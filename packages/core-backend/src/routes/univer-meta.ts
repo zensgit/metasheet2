@@ -7543,6 +7543,57 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  // T9-R3: config/schema-change history READ API. Lists meta_config_revisions for the sheet, gated PER ENTITY TYPE
+  // by the SAME capability the corresponding mutation route checks (read-gate ≡ write-gate): field/field-permission
+  // → canManageFields, view/view-permission → canManageViews, sheet_config/sheet-permission → canManageSheetAccess.
+  // The gate is applied IN THE WHERE CLAUSE (so pagination/has-more never lie), NOT after LIMIT/OFFSET. These rows
+  // are config-only (no record values) and this is its OWN gate — never the record-history mask.
+  router.get('/sheets/:sheetId/config-history', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
+    const offsetParam = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : 0
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 100) : 50
+    const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0
+    const entityTypeFilter = typeof req.query.entityType === 'string' && req.query.entityType.trim() ? req.query.entityType.trim() : null
+    if (!sheetId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    try {
+      const pool = poolManager.get()
+      const sheetCheck = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
+      if (sheetCheck.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+
+      // Per-entity-type gate IN the WHERE clause. Condition strings are STATIC (no user input) — safe to interpolate;
+      // every value (sheetId, entityType, limit, offset) is parameterized. A `permission` row's kind is its entity_id
+      // scope prefix (field:/view:/sheet:), routed to the same capability that authored it.
+      const allowed: string[] = []
+      if (capabilities.canManageFields) allowed.push("entity_type = 'field'", "(entity_type = 'permission' AND entity_id LIKE 'field:%')")
+      if (capabilities.canManageViews) allowed.push("entity_type = 'view'", "(entity_type = 'permission' AND entity_id LIKE 'view:%')")
+      if (capabilities.canManageSheetAccess) allowed.push("entity_type = 'sheet_config'", "(entity_type = 'permission' AND entity_id LIKE 'sheet:%')")
+      if (allowed.length === 0) return res.json({ ok: true, data: { items: [], limit, offset } }) // manages no config → empty
+
+      const params: unknown[] = [sheetId]
+      let where = `sheet_id = $1 AND (${allowed.join(' OR ')})`
+      if (entityTypeFilter) { params.push(entityTypeFilter); where += ` AND entity_type = $${params.length}` }
+      params.push(limit, offset)
+      const rows = (await pool.query(
+        `SELECT id, entity_type, entity_id, action, before, after, changed_keys, batch_id, actor_id, created_at
+         FROM meta_config_revisions WHERE ${where} ORDER BY created_at DESC, id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+        params,
+      )).rows as Array<Record<string, unknown>>
+      return res.json({ ok: true, data: { items: rows.map((r) => ({
+        id: String(r.id), entityType: String(r.entity_type), entityId: String(r.entity_id), action: String(r.action),
+        before: r.before ?? null, after: r.after ?? null, changedKeys: r.changed_keys ?? [],
+        batchId: r.batch_id ?? null, actorId: r.actor_id ?? null, createdAt: r.created_at,
+      })), limit, offset } })
+    } catch (err: unknown) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] config-history list failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to list config history' } })
+    }
+  })
+
   router.get('/bases/:baseId/history-audit-grants', async (req: Request, res: Response) => {
     try {
       const access = await requireHistoryAuditGrantAuthority(req, res)
