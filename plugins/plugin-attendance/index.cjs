@@ -222,6 +222,12 @@ const DEFAULT_SETTINGS = {
     maxMinutesPerPeriod: 0,
     validityDays: null,
   },
+  // 加班银行 v1-2a (design-lock §4 账2): LeaveOffsetPolicy LATENT config. Default OFF / no rules → existing
+  // hardcoded per-type deduction unchanged. v1-2b wiring consumes it.
+  leaveBalanceDeductionPolicy: {
+    enabled: false,
+    rules: [],
+  },
   // 自动对班 (auto shift matching) — A1 preview/manual apply plus A2 scheduler auto-write.
   // Runtime still requires env flags in addition to these org settings.
   autoShiftMatching: {
@@ -11934,6 +11940,7 @@ function normalizeSettings(raw) {
     annualLeavePolicy: normalizeAnnualLeavePolicySetting(raw.annualLeavePolicy),
     overtimeSegmentation: normalizeOvertimeSegmentationSetting(raw.overtimeSegmentation),
     overtimeBankPolicy: normalizeOvertimeBankPolicySetting(raw.overtimeBankPolicy),
+    leaveBalanceDeductionPolicy: normalizeLeaveBalanceDeductionPolicySetting(raw.leaveBalanceDeductionPolicy),
     autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
   }
 }
@@ -12099,6 +12106,38 @@ function normalizeOvertimeBankPolicySetting(raw) {
   }
 }
 
+// 加班银行 v1-2a (design-lock §4 账2 LeaveOffsetPolicy): the configurable leave-balance deduction policy —
+// which余额池 each leave type deducts from, in what order, and how to handle insufficiency. LATENT: default
+// { enabled:false, rules:[] } → the existing hardcoded per-type deduction (comp_time→comp_time, annual→annual)
+// is unchanged. The v1-2b wiring consumes it; v1 LOCKS single-pool (deductFrom[0]); cross-pool order is v2.
+const LEAVE_DEDUCTION_POOLS = Object.freeze(['comp_time', 'annual', 'unpaid'])
+const LEAVE_DEDUCTION_INSUFFICIENT_MODES = Object.freeze(['block', 'partial_unpaid_absence'])
+
+function normalizeLeaveBalanceDeductionPolicySetting(raw) {
+  const value = raw && typeof raw === 'object' ? raw : {}
+  const rules = []
+  for (const rule of Array.isArray(value.rules) ? value.rules : []) {
+    if (!rule || typeof rule !== 'object') continue
+    const requestLeaveType = typeof rule.requestLeaveType === 'string' && rule.requestLeaveType.trim()
+      ? rule.requestLeaveType.trim()
+      : null
+    if (!requestLeaveType) continue
+    // §P2 (owner review): v1 LOCKS single-pool — only the FIRST valid pool persists. The array SHAPE is kept
+    // forward-compatible (v2 will use the full ordered list for cross-pool deduction), but v1-2a must NOT
+    // persist a multi-pool order, or the customer's config would diverge from the v1-2b wiring (which deducts
+    // from one pool). Cross-pool order unlocks in v2. (The PUT zod also rejects >1 element — defense in depth.)
+    let firstPool = null
+    for (const pool of Array.isArray(rule.deductFrom) ? rule.deductFrom : []) {
+      if (typeof pool === 'string' && LEAVE_DEDUCTION_POOLS.includes(pool)) { firstPool = pool; break }
+    }
+    if (!firstPool) continue // a rule must name ≥1 valid pool; unknown pools are dropped (fail-closed)
+    const deductFrom = [firstPool]
+    const insufficient = LEAVE_DEDUCTION_INSUFFICIENT_MODES.includes(rule.insufficient) ? rule.insufficient : 'block'
+    rules.push({ requestLeaveType, deductFrom, insufficient })
+  }
+  return { enabled: parseBoolean(value.enabled, false), rules }
+}
+
 function normalizeOvertimeSegmentationSetting(raw) {
   const config = raw && typeof raw === 'object' ? raw : {}
   return {
@@ -12262,6 +12301,11 @@ function mergeSettings(base, update) {
     overtimeBankPolicy: {
       ...(base?.overtimeBankPolicy || {}),
       ...(update?.overtimeBankPolicy || {}),
+    },
+    // rules is an array → replaced wholesale when an update provides it (partial rule merges are meaningless).
+    leaveBalanceDeductionPolicy: {
+      ...(base?.leaveBalanceDeductionPolicy || {}),
+      ...(update?.leaveBalanceDeductionPolicy || {}),
     },
     autoShiftMatching: {
       ...(base?.autoShiftMatching || {}),
@@ -18417,6 +18461,11 @@ module.exports = {
     resolveOvertimeBankSourceMinutes,
     partitionOvertimeBankGrantLots,
   },
+  __attendanceLeaveOffsetForTests: {
+    LEAVE_DEDUCTION_POOLS,
+    LEAVE_DEDUCTION_INSUFFICIENT_MODES,
+    normalizeLeaveBalanceDeductionPolicySetting,
+  },
   __attendanceReportFieldCatalogForTests: {
     ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS,
     ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
@@ -19518,6 +19567,16 @@ module.exports = {
         pooledSources: z.array(z.enum(['workday', 'restday'])).optional(),
         maxMinutesPerPeriod: z.number().int().min(0).optional(),
         validityDays: z.number().int().positive().nullable().optional(),
+      }).optional(),
+      // 加班银行 v1-2a — LeaveOffsetPolicy latent config. Round-trips through PUT/GET; v1-2b wiring consumes it.
+      // deductFrom enum = the余额池; v1 locks single-pool (deductFrom[0]), cross-pool order is v2.
+      leaveBalanceDeductionPolicy: z.object({
+        enabled: z.boolean().optional(),
+        rules: z.array(z.object({
+          requestLeaveType: z.string().min(1),
+          deductFrom: z.array(z.enum(['comp_time', 'annual', 'unpaid'])).min(1).max(1), // §P2: v1 single-pool; v2 unlocks >1
+          insufficient: z.enum(['block', 'partial_unpaid_absence']).optional(),
+        })).optional(),
       }).optional(),
       // 年假/法定假余额引擎 — L0 latent config (design-lock #2622). Round-trips through PUT/GET; no
       // runtime reads it until L2 (accrual). tiers = org-configurable statutory bands.
