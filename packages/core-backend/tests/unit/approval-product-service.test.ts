@@ -1313,6 +1313,116 @@ describe('ApprovalProductService', () => {
     })
   })
 
+  describe('approval condition formula contract (FC-1)', () => {
+    const formulaFormSchema = {
+      fields: [
+        { id: 'amount', type: 'number', label: 'Amount' },
+        { id: 'items', type: 'detail', label: 'Items', columns: [{ id: 'amount', type: 'number', label: 'Line Amount' }] },
+      ],
+    }
+    const formulaGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [{ edgeKey: 'edge-high', rules: [], formula: { expression: 'SUM({items.amount}) >= 20000' } }],
+            defaultEdgeKey: 'edge-low',
+          },
+        },
+        { key: 'high', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-high', source: 'route', target: 'high' },
+        { key: 'edge-low', source: 'route', target: 'low' },
+        { key: 'edge-high-end', source: 'high', target: 'end' },
+        { key: 'edge-low-end', source: 'low', target: 'end' },
+      ],
+    }
+
+    it('preserves formula branches through createTemplate normalization', async () => {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (statement.startsWith('INSERT INTO approval_templates')) {
+          return { rows: [{ id: 'tpl-formula', key: String(params?.[0]), name: String(params?.[1]), description: null, category: null, visibility_scope: JSON.parse(String(params?.[4])), sla_hours: null, status: 'draft', active_version_id: null, latest_version_id: null, created_at: new Date('2026-06-25T00:00:00.000Z'), updated_at: new Date('2026-06-25T00:00:00.000Z') }], rowCount: 1 }
+        }
+        if (statement.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [{ id: 'ver-formula', template_id: 'tpl-formula', version: 1, status: 'draft', form_schema: JSON.parse(String(params?.[1])), approval_graph: JSON.parse(String(params?.[2])), created_at: new Date('2026-06-25T00:00:00.000Z'), updated_at: new Date('2026-06-25T00:00:00.000Z') }], rowCount: 1 }
+        }
+        if (statement.startsWith('UPDATE approval_templates')) {
+          return { rows: [{ id: 'tpl-formula', key: 'formula-template', name: 'Formula Template', description: null, category: null, visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft', active_version_id: null, latest_version_id: 'ver-formula', created_at: new Date('2026-06-25T00:00:00.000Z'), updated_at: new Date('2026-06-25T00:00:00.000Z') }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${statement}`)
+      })
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const result = await new ApprovalProductService().createTemplate({
+        key: 'formula-template',
+        name: 'Formula Template',
+        formSchema: formulaFormSchema,
+        approvalGraph: formulaGraph,
+      } as never)
+
+      const condition = result.approvalGraph.nodes.find((node) => node.key === 'route')
+      expect((condition?.config as { branches: Array<{ formula?: { expression: string } }> }).branches[0].formula)
+        .toEqual({ expression: 'SUM({items.amount}) >= 20000' })
+      const insertVersionCall = pgState.client.query.mock.calls.find(([sql]) =>
+        normalize(sql as string).startsWith('INSERT INTO approval_template_versions'))
+      const persistedGraph = JSON.parse(String(insertVersionCall?.[1]?.[2]))
+      expect(persistedGraph.nodes[1].config.branches[0].formula).toEqual({ expression: 'SUM({items.amount}) >= 20000' })
+    })
+
+    it('rejects formula branches that mix rules or reference unknown fields before hitting the database', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate({
+        key: 'formula-mix',
+        name: 'Formula Mix',
+        formSchema: formulaFormSchema,
+        approvalGraph: {
+          ...formulaGraph,
+          nodes: formulaGraph.nodes.map((node) => node.key === 'route'
+            ? {
+                ...node,
+                config: {
+                  branches: [{
+                    edgeKey: 'edge-high',
+                    rules: [{ fieldId: 'amount', operator: 'gte', value: 20000 }],
+                    formula: { expression: 'SUM({items.amount}) >= 20000' },
+                  }],
+                  defaultEdgeKey: 'edge-low',
+                },
+              }
+            : node),
+        },
+      } as never)).rejects.toThrow(/cannot mix formula and rules/)
+
+      await expect(service.createTemplate({
+        key: 'formula-unknown',
+        name: 'Formula Unknown',
+        formSchema: formulaFormSchema,
+        approvalGraph: {
+          ...formulaGraph,
+          nodes: formulaGraph.nodes.map((node) => node.key === 'route'
+            ? {
+                ...node,
+                config: {
+                  branches: [{ edgeKey: 'edge-high', rules: [], formula: { expression: '{ghost} == 1' } }],
+                  defaultEdgeKey: 'edge-low',
+                },
+              }
+            : node),
+        },
+      } as never)).rejects.toThrow(/unknown field reference/)
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+  })
+
   it('accepts authoring-MVP form-field-user assignee sources when creating a template', async () => {
     const request = {
       key: 'expense-authoring',
@@ -4202,6 +4312,87 @@ describe('ApprovalProductService', () => {
     expect(deactivateIndex).toBeGreaterThan(lockIndex)
     expect(insertIndex).toBeGreaterThan(deactivateIndex)
     expect(statements.filter((statement) => statement === 'COMMIT')).toHaveLength(1)
+  })
+
+  it('preserves condition formulas through publish runtime_graph and read-back DTO', async () => {
+    const formSchema = {
+      fields: [
+        { id: 'amount', type: 'number', label: 'Amount' },
+        { id: 'items', type: 'detail', label: 'Items', columns: [{ id: 'amount', type: 'number', label: 'Line Amount' }] },
+      ],
+    }
+    const approvalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [{ edgeKey: 'edge-high', rules: [], formula: { expression: 'SUM({items.amount}) >= 20000' } }],
+            defaultEdgeKey: 'edge-low',
+          },
+        },
+        { key: 'high', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-high', source: 'route', target: 'high' },
+        { key: 'edge-low', source: 'route', target: 'low' },
+        { key: 'edge-high-end', source: 'high', target: 'end' },
+        { key: 'edge-low-end', source: 'low', target: 'end' },
+      ],
+    }
+    const template = {
+      id: 'tpl-1',
+      key: 'formula',
+      name: 'Formula Approval',
+      description: null,
+      category: null,
+      visibility_scope: { type: 'all', ids: [] },
+      sla_hours: null,
+      status: 'draft',
+      active_version_id: null,
+      latest_version_id: 'ver-2',
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
+    const version = {
+      id: 'ver-2',
+      template_id: 'tpl-1',
+      version: 2,
+      status: 'draft',
+      form_schema: formSchema,
+      approval_graph: approvalGraph,
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
+
+    pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [template], rowCount: 1 }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
+      if (statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) return { rows: [], rowCount: 0 }
+      if (statement.startsWith('INSERT INTO approval_published_definitions')) {
+        const runtimeGraph = JSON.parse(String(params?.[2]))
+        expect(runtimeGraph.nodes[1].config.branches[0].formula).toEqual({ expression: 'SUM({items.amount}) >= 20000' })
+        return { rows: [{ id: 'pub-2', template_id: 'tpl-1', template_version_id: 'ver-2', runtime_graph: runtimeGraph, is_active: true, published_at: new Date() }], rowCount: 1 }
+      }
+      if (statement.startsWith("UPDATE approval_template_versions SET status = 'published'")) {
+        return { rows: [{ ...version, status: 'published' }], rowCount: 1 }
+      }
+      if (statement.startsWith("UPDATE approval_templates SET status = 'published'")) return { rows: [], rowCount: 1 }
+      throw new Error(`Unhandled query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const result = await new ApprovalProductService().publishTemplate('tpl-1', { policy: { allowRevoke: true } } as never)
+
+    const condition = result.runtimeGraph?.nodes.find((node) => node.key === 'route')
+    expect((condition?.config as { branches: Array<{ formula?: { expression: string } }> }).branches[0].formula)
+      .toEqual({ expression: 'SUM({items.amount}) >= 20000' })
   })
 
   it('snapshots publish-time auto-approval policy into runtime_graph without a migration column', async () => {
