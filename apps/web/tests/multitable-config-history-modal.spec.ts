@@ -8,7 +8,12 @@ import { describe, expect, it, vi, afterEach } from 'vitest'
 import { createApp, nextTick } from 'vue'
 
 import MetaConfigHistoryModal from '../src/multitable/components/MetaConfigHistoryModal.vue'
-import { MultitableApiClient, type MetaConfigRevision } from '../src/multitable/api/client'
+import { MultitableApiClient, type MetaConfigRevision, type ConfigRestorePreview } from '../src/multitable/api/client'
+
+const previewOf = (over: Partial<ConfigRestorePreview>): ConfigRestorePreview => ({
+  revisionId: 'a', entityType: 'field', entityId: 'fld_1', changedKeys: ['name'],
+  current: { name: 'New' }, target: { name: 'Old' }, driftConflict: false, opKind: 'safe', baselineHash: 'h1', ...over,
+})
 
 const rev = (over: Partial<MetaConfigRevision>): MetaConfigRevision => ({
   id: 'r1', entityType: 'field', entityId: 'fld_1', action: 'create', before: null, after: { name: 'X' },
@@ -18,6 +23,7 @@ const rev = (over: Partial<MetaConfigRevision>): MetaConfigRevision => ({
 type Props = {
   visible: boolean; items: MetaConfigRevision[]; loading: boolean; entityType: string
   recordLabelOf: (id: string) => string; isZh: boolean; onClose: () => void; onFilterChange: (t: string) => void
+  previewRevert?: (id: string) => Promise<ConfigRestorePreview>; executeRevert?: (id: string, h: string) => Promise<void>; onReverted?: () => void
 }
 const mounted: Array<{ unmount: () => void }> = []
 function mountModal(over: Partial<Props>) {
@@ -29,6 +35,7 @@ function mountModal(over: Partial<Props>) {
   const c = document.createElement('div'); document.body.appendChild(c); app.mount(c); mounted.push(app); return props
 }
 const q = (s: string) => document.body.querySelector(s) as HTMLElement | null
+const flush = async () => { await Promise.resolve(); await nextTick(); await Promise.resolve(); await nextTick() }
 afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = '' })
 
 describe('MetaConfigHistoryModal — T9-R4 config-history view', () => {
@@ -72,6 +79,49 @@ describe('MetaConfigHistoryModal — T9-R4 config-history view', () => {
   })
 })
 
+describe('MetaConfigHistoryModal — T9-W revert action (server-gated, FE renders the decision)', () => {
+  const updateRev = () => rev({ id: 'a', action: 'update', changedKeys: ['name'], before: { name: 'Old' }, after: { name: 'New' } })
+
+  it('no revert button when previewRevert is not provided (read-only mode)', async () => {
+    mountModal({ items: [updateRev()] }); await nextTick()
+    expect(q('[data-test="config-history-revert"]')).toBeFalsy()
+  })
+
+  it('SAFE: revert → preview → confirm → executeRevert(id, baselineHash) + reverted emitted', async () => {
+    const previewRevert = vi.fn(async () => previewOf({}))
+    const executeRevert = vi.fn(async () => {})
+    const onReverted = vi.fn()
+    mountModal({ items: [updateRev()], previewRevert, executeRevert, onReverted })
+    await nextTick()
+    ;(q('[data-test="config-history-revert"]') as HTMLButtonElement).click()
+    await flush()
+    expect(previewRevert).toHaveBeenCalledWith('a')
+    expect(q('[data-test="config-restore-confirm"]')).toBeTruthy()
+    expect(document.body.textContent).toContain('Old') // target
+    ;(q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
+    await flush()
+    expect(executeRevert).toHaveBeenCalledWith('a', 'h1') // the preview's baselineHash
+    expect(onReverted).toHaveBeenCalledTimes(1)
+  })
+
+  it('GATED: the server says opKind=gated → shows the reason, NO confirm button (FE renders, never overrides)', async () => {
+    const previewRevert = vi.fn(async () => previewOf({ opKind: 'gated', gatedReason: 'field type reverts are not supported in this slice' }))
+    mountModal({ items: [updateRev()], previewRevert, executeRevert: vi.fn() })
+    await nextTick(); (q('[data-test="config-history-revert"]') as HTMLButtonElement).click(); await flush()
+    expect(q('[data-test="config-restore-gated"]')).toBeTruthy()
+    expect(document.body.textContent).toContain('not supported')
+    expect(q('[data-test="config-restore-confirm-btn"]')).toBeFalsy()
+  })
+
+  it('DRIFT: the server flags driftConflict → warning shown + confirm disabled', async () => {
+    const previewRevert = vi.fn(async () => previewOf({ driftConflict: true }))
+    mountModal({ items: [updateRev()], previewRevert, executeRevert: vi.fn() })
+    await nextTick(); (q('[data-test="config-history-revert"]') as HTMLButtonElement).click(); await flush()
+    expect(q('[data-test="config-restore-drift"]')).toBeTruthy()
+    expect((q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
 describe('getConfigHistory — T9-R3↔R4 wire (drift lock)', () => {
   it('round-trips the REAL R3 {ok,data:{items}} envelope (not a fixture) — never silently returns []', async () => {
     // The R3↔R4 seam is drift-prone (cf. dayIndex). R3 returns { ok, data: { items, limit, offset } }; the client's
@@ -92,5 +142,20 @@ describe('getConfigHistory — T9-R3↔R4 wire (drift lock)', () => {
     expect(items[0].changedKeys).toEqual(['name'])
     expect(fetchFn).toHaveBeenCalledWith(expect.stringContaining('/api/multitable/sheets/sheet_1/config-history')) // GET passes the URL only
     expect(fetchFn.mock.calls[0][0]).toContain('entityType=field')
+  })
+
+  it('getConfigRestorePreview unwraps the REAL {ok,data:{preview}} envelope (not a fixture)', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      data: { preview: { revisionId: 'a', entityType: 'field', entityId: 'fld_1', changedKeys: ['name'], current: { name: 'New' }, target: { name: 'Old' }, driftConflict: false, opKind: 'safe', baselineHash: 'h1' } },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const preview = await client.getConfigRestorePreview('sheet_1', 'a')
+
+    expect(preview.baselineHash).toBe('h1') // unwrapped — NOT undefined
+    expect(preview.target).toEqual({ name: 'Old' })
+    expect(preview.opKind).toBe('safe')
+    expect(fetchFn.mock.calls[0][0]).toContain('/config-restore-preview')
   })
 })
