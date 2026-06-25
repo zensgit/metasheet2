@@ -773,6 +773,13 @@ export class AutomationService {
     )
     if (linkValidationError) throw new AutomationRuleValidationError(linkValidationError)
 
+    // W7-obs (rule-save fail-fast): validate the resultWriteback target FIELDS exist + are type-
+    // compatible against the SOURCE sheet schema at save — the same check as the runtime backwrite
+    // (assertResultWritebackFields, outcome 'approved' for the approval-only path), hoisted earlier so a
+    // typo'd field id surfaces at rule-save, not as a silent backwrite skip at submit.
+    const writebackFieldError = await this.assertResultWritebackFieldsAtSave(sheetId, actionsForValidation)
+    if (writebackFieldError) throw new AutomationRuleValidationError(writebackFieldError)
+
     const row = {
       id: ruleId,
       sheet_id: sheetId,
@@ -1446,7 +1453,14 @@ export class AutomationService {
       // update_record / ...) see the just-written result, not the pre-approval record.
       if (backwritten) recordData = { ...recordData, ...backwritten }
     } catch (err) {
-      logger.warn(`approval-result backwrite skipped for bridge ${bridge.id}: ${err instanceof Error ? err.message : String(err)}`)
+      const reason = err instanceof Error ? err.message : String(err)
+      logger.warn(`approval-result backwrite skipped for bridge ${bridge.id}: ${reason}`)
+      // W7-obs: surface the skip on the start_approval step result so it shows in the run history —
+      // an admin shouldn't need log access to see a misconfigured/blocked backwrite.
+      ;(result as { output?: Record<string, unknown> }).output = {
+        ...((result as { output?: Record<string, unknown> }).output ?? {}),
+        backwriteSkipped: reason,
+      }
     }
 
     const triggerEvent = bridge.triggerEvent ?? {}
@@ -1596,6 +1610,46 @@ export class AutomationService {
       const typeError = resultWritebackFieldTypeError(entry.field, target, outcome)
       if (typeError) throw new Error(typeError)
     }
+  }
+
+  // W7-obs rule-save fail-fast: reuse the runtime resultWriteback field check at SAVE-time, against the
+  // rule's source sheet. Returns an error message (→ AutomationRuleValidationError) or null. 'approved'
+  // is the only outcome the backwrite writes (approval-only path), so it matches the runtime check.
+  private async assertResultWritebackFieldsAtSave(
+    sheetId: string,
+    actions: AutomationAction[] | null,
+  ): Promise<string | null> {
+    for (const action of actions ?? []) {
+      if (action.type !== 'start_approval' || !isRecord(action.config)) continue
+      const writeback = isRecord(action.config.resultWriteback) ? action.config.resultWriteback : null
+      if (!writeback) continue
+      const mapped = RESULT_WRITEBACK_FIELDS
+        .map((field) => ({ field, id: resultWritebackFieldId(writeback, field) }))
+        .filter((entry): entry is { field: ResultWritebackField; id: string } => !!entry.id)
+      if (mapped.length === 0) continue
+      const ids = Array.from(new Set(mapped.map((entry) => entry.id)))
+      const res = await this.queryFn(
+        'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
+        [sheetId, ids],
+      )
+      const byId = new Map<string, ResultWritebackTargetField>()
+      for (const row of res.rows as Array<Record<string, unknown>>) {
+        const id = typeof row.id === 'string' ? row.id : ''
+        const type = typeof row.type === 'string' ? row.type : ''
+        if (id && type) byId.set(id, { id, type, property: normalizeFieldProperty(row.property) })
+      }
+      for (const entry of mapped) {
+        const target = byId.get(entry.id)
+        // LENIENT on absence: a not-yet-defined target field is DEFERRED to the runtime check (the
+        // record data is schemaless and the field may be created after the rule — the runtime's
+        // skip-missing posture). We only fail-fast on a TYPE mismatch for a field that ALREADY exists,
+        // which is an unambiguous misconfiguration the admin should fix now.
+        if (!target) continue
+        const typeError = resultWritebackFieldTypeError(entry.field, target, 'approved')
+        if (typeError) return typeError
+      }
+    }
+    return null
   }
 
   private async failApprovalBridgeExecution(

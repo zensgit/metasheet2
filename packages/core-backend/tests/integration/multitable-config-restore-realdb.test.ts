@@ -78,7 +78,7 @@ describeIfDatabase('multitable config-restore — T9-W (real DB)', () => {
 
   test('execute reverts the field rename AND records a source=restore revision (L1)', async () => {
     const pv = await preview(ADMIN, REV_FIELD)
-    const res = await execute(ADMIN, { revisionId: REV_FIELD, baselineHash: pv.body.data.preview.baselineHash })
+    const res = await execute(ADMIN, { revisionId: REV_FIELD, previewToken: pv.body.data.previewToken })
     expect(res.status).toBe(200)
     expect(await fieldName()).toBe('Old') // reverted
     const restoreRevs = await q(`SELECT before, after, source, restored_from_id FROM meta_config_revisions WHERE source = 'restore' AND restored_from_id = $1`, [REV_FIELD])
@@ -92,33 +92,46 @@ describeIfDatabase('multitable config-restore — T9-W (real DB)', () => {
 
   test('a non-manager (canManageFields=false) is FORBIDDEN to preview or execute (L3)', async () => {
     expect((await preview(READER, REV_FIELD)).status).toBe(403)
-    expect((await execute(READER, { revisionId: REV_FIELD, baselineHash: 'x' })).status).toBe(403)
+    expect((await execute(READER, { revisionId: REV_FIELD, previewToken: 'x' })).status).toBe(403)
   })
 
   test('a gated op (field RETYPE) is refused 422, not partially attempted (L6)', async () => {
     const before = await fieldName()
-    const res = await execute(ADMIN, { revisionId: REV_GATED, baselineHash: 'whatever' })
+    const res = await execute(ADMIN, { revisionId: REV_GATED, previewToken: 'whatever' })
     expect(res.status).toBe(422)
     expect(res.body?.error?.code).toBe('RESTORE_NOT_SUPPORTED')
     expect(await fieldName()).toBe(before) // untouched
   })
 
-  test('a wrong baselineHash is rejected PREVIEW_STALE (L4)', async () => {
-    const res = await execute(ADMIN, { revisionId: REV_FIELD, baselineHash: 'definitely-not-the-hash' })
-    expect(res.status).toBe(409)
-    expect(res.body?.error?.code).toBe('PREVIEW_STALE')
+  test('execute REQUIRES a server-minted preview identity — a client-computed hash cannot skip preview (L4/D5)', async () => {
+    const pv = await preview(ADMIN, REV_FIELD)
+    // no token → 400 (cannot execute without previewing)
+    expect((await execute(ADMIN, { revisionId: REV_FIELD })).status).toBe(400)
+    // a forged / non-server token → 401 (signature fails)
+    const forged = await execute(ADMIN, { revisionId: REV_FIELD, previewToken: 'not.a.valid.jwt' })
+    expect(forged.status).toBe(401)
+    expect(forged.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
+    // the load-bearing golden: knowing the correct (client-computable) baselineHash is NOT enough — without the
+    // server-minted token, execute still fails. Preview-first cannot be bypassed.
+    const hashOnly = await execute(ADMIN, { revisionId: REV_FIELD, baselineHash: pv.body.data.preview.baselineHash } as Record<string, unknown>)
+    expect(hashOnly.status).toBe(400)
+    expect(await fieldName()).toBe('New') // nothing reverted by any of the rejected attempts
+    // the genuine server token works
+    expect((await execute(ADMIN, { revisionId: REV_FIELD, previewToken: pv.body.data.previewToken })).status).toBe(200)
+    await q(`UPDATE meta_fields SET name = 'New' WHERE id = $1`, [FIELD])
+    await q(`DELETE FROM meta_config_revisions WHERE source = 'restore'`, [])
   })
 
   test('drift + idempotency: after a revert, replaying the same revision is rejected (L5/L7)', async () => {
     const pv = await preview(ADMIN, REV_FIELD)
-    expect((await execute(ADMIN, { revisionId: REV_FIELD, baselineHash: pv.body.data.preview.baselineHash })).status).toBe(200)
+    expect((await execute(ADMIN, { revisionId: REV_FIELD, previewToken: pv.body.data.previewToken })).status).toBe(200)
     expect(await fieldName()).toBe('Old')
     // replay with the SAME (now-stale) hash → stale
-    expect((await execute(ADMIN, { revisionId: REV_FIELD, baselineHash: pv.body.data.preview.baselineHash })).status).toBe(409)
+    expect((await execute(ADMIN, { revisionId: REV_FIELD, previewToken: pv.body.data.previewToken })).status).toBe(409)
     // a FRESH preview now flags drift (current 'Old' != the revision's after 'New') → execute rejected CONFIG_DRIFT
     const pv2 = await preview(ADMIN, REV_FIELD)
     expect(pv2.body.data.preview.driftConflict).toBe(true)
-    const res = await execute(ADMIN, { revisionId: REV_FIELD, baselineHash: pv2.body.data.preview.baselineHash })
+    const res = await execute(ADMIN, { revisionId: REV_FIELD, previewToken: pv2.body.data.previewToken })
     expect(res.status).toBe(409)
     expect(res.body?.error?.code).toBe('CONFIG_DRIFT')
     await q(`UPDATE meta_fields SET name = 'New' WHERE id = $1`, [FIELD])
@@ -128,7 +141,7 @@ describeIfDatabase('multitable config-restore — T9-W (real DB)', () => {
   test('view config revert restores the prior filter', async () => {
     const pv = await preview(ADMIN, REV_VIEW)
     expect(pv.body.data.preview.opKind).toBe('safe')
-    expect((await execute(ADMIN, { revisionId: REV_VIEW, baselineHash: pv.body.data.preview.baselineHash })).status).toBe(200)
+    expect((await execute(ADMIN, { revisionId: REV_VIEW, previewToken: pv.body.data.previewToken })).status).toBe(200)
     const filter = (await q('SELECT filter_info FROM meta_views WHERE id = $1', [VIEW])).rows[0] as { filter_info: unknown }
     expect(JSON.stringify(filter.filter_info)).toBe(JSON.stringify({ q: 'old' }))
     await q(`UPDATE meta_views SET filter_info = '{"q":"new"}'::jsonb WHERE id = $1`, [VIEW])
@@ -140,7 +153,7 @@ describeIfDatabase('multitable config-restore — T9-W (real DB)', () => {
     await q('CREATE TRIGGER _t9w_fail_trg BEFORE INSERT ON meta_config_revisions FOR EACH ROW EXECUTE FUNCTION _t9w_fail()', [])
     try {
       const pv = await preview(ADMIN, REV_FIELD)
-      const res = await execute(ADMIN, { revisionId: REV_FIELD, baselineHash: pv.body.data.preview.baselineHash })
+      const res = await execute(ADMIN, { revisionId: REV_FIELD, previewToken: pv.body.data.previewToken })
       expect(res.status).not.toBe(200) // the recording threw → whole txn rolled back
       expect(await fieldName()).toBe('New') // the field name did NOT revert — config write rolled back with it
     } finally {

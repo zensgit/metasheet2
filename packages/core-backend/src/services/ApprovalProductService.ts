@@ -18,6 +18,8 @@ import type {
   CreateApprovalRequest,
   CreateApprovalTemplateRequest,
   EmptyAssigneePolicy,
+  AmountConsistencyMapping,
+  FormField,
   FormSchema,
   FormFieldVisibilityOperator,
   FormFieldVisibilityRule,
@@ -40,6 +42,7 @@ import {
   validateApprovalFormData,
 } from './ApprovalGraphExecutor'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
+import { validateAmountTotalConsistency } from './amount-total-check'
 import { resolveApprovalRequesterOrgRelations, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
 import { resolveActiveDelegationMap } from './ApprovalDelegations'
 import type {
@@ -662,7 +665,41 @@ function assertFormSchema(value: unknown, context: ValidationContext = REQUEST_V
   }
   validateFormFieldVisibilityRules(fields, context)
 
-  return { fields }
+  const amountConsistencyCheck = normalizeAmountConsistencyCheck(value.amountConsistencyCheck, fields, context)
+  return amountConsistencyCheck ? { fields, amountConsistencyCheck } : { fields }
+}
+
+// Server-side amount total-check mapping (design-lock #3161). Validated + preserved HERE so it
+// round-trips with form_schema and a malformed mapping is rejected at template-save (fail-closed
+// authoring), not discovered at submit time. References must resolve to the right field TYPES.
+function normalizeAmountConsistencyCheck(
+  value: unknown,
+  fields: FormField[],
+  context: ValidationContext,
+): AmountConsistencyMapping | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) {
+    failValidation(context, 'formSchema.amountConsistencyCheck must be an object')
+  }
+  const totalFieldId = value.totalFieldId
+  const detailFieldId = value.detailFieldId
+  const amountColumnId = value.amountColumnId
+  if (typeof totalFieldId !== 'string' || typeof detailFieldId !== 'string' || typeof amountColumnId !== 'string') {
+    failValidation(context, 'formSchema.amountConsistencyCheck requires string totalFieldId/detailFieldId/amountColumnId')
+  }
+  const totalField = fields.find((field) => field.id === totalFieldId)
+  if (!totalField || totalField.type !== 'number') {
+    failValidation(context, `formSchema.amountConsistencyCheck.totalFieldId must reference a number field: ${totalFieldId}`)
+  }
+  const detailField = fields.find((field) => field.id === detailFieldId)
+  if (!detailField || detailField.type !== 'detail') {
+    failValidation(context, `formSchema.amountConsistencyCheck.detailFieldId must reference a detail field: ${detailFieldId}`)
+  }
+  const amountColumn = (detailField.columns ?? []).find((column) => column.id === amountColumnId)
+  if (!amountColumn || amountColumn.type !== 'number') {
+    failValidation(context, `formSchema.amountConsistencyCheck.amountColumnId must reference a number column: ${amountColumnId}`)
+  }
+  return { totalFieldId, detailFieldId, amountColumnId }
 }
 
 function normalizeFormFieldVisibilityRule(
@@ -2746,6 +2783,18 @@ export class ApprovalProductService {
         'VALIDATION_ERROR',
         { errors: validationErrors },
       )
+    }
+
+    // Server-side amount total-check (design-lock #3161): if the template declares an
+    // amountConsistencyCheck, the applicant total MUST equal the money-safe sum of this submission's
+    // detail-row amounts — fail-closed, on the SAME post-prune formData the graph routes on, BEFORE the
+    // graph is built. Closes the under-stated-total bypass of the amount-tier higher approval. A hidden
+    // line item is already excluded from both sides (it was pruned from normalizedFormData above).
+    if (formSchema.amountConsistencyCheck) {
+      const amountError = validateAmountTotalConsistency(formSchema, normalizedFormData, formSchema.amountConsistencyCheck)
+      if (amountError) {
+        throw new ServiceError(amountError, 400, 'APPROVAL_AMOUNT_TOTAL_MISMATCH')
+      }
     }
 
     // Org-relation plumbing — freeze the requester's org relations (direct manager

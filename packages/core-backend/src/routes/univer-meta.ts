@@ -73,7 +73,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -7638,17 +7638,23 @@ export function univerMetaRouter(): Router {
       const snapshot = await loadEntityConfigSnapshot(pool.query.bind(pool), rev)
       if (!snapshot) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot preview a revert.' } })
       const preview = computeRevertPreview(rev, snapshot)
-      // T9-W-L7: a VIEW revert preview shows `current`/`target` filterInfo, whose literals are
-      // field-read-sensitive (#2052/R9). canManageViews does NOT imply field-read, so redact them
-      // per the requester before returning (the same projection the /config-history read applies).
-      // EXECUTE re-computes the raw target server-side, so a field-denied restorer reverts correctly
-      // without ever seeing the denied literal.
+      // T9-W-L7: a VIEW revert preview shows `current`/`target` filterInfo, whose literals are field-read-sensitive
+      // (#2052/R9). canManageViews does NOT imply field-read, so redact them per the requester before returning.
+      // EXECUTE re-computes the raw target server-side, so a field-denied restorer reverts correctly without ever
+      // seeing the denied literal. The redaction is display-only — it runs AFTER computeRevertPreview, so it does
+      // not affect the baselineHash the token binds (that hash is over the raw config, consistent with execute).
       if (rev.entity_type === 'view') {
         const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
         preview.current = redactViewConfigFilterLiterals(preview.current as { filterInfo?: unknown }, allowedFieldIds) as Record<string, unknown>
         preview.target = redactViewConfigFilterLiterals(preview.target as { filterInfo?: unknown }, allowedFieldIds) as Record<string, unknown>
       }
-      return res.json({ ok: true, data: { preview } })
+      // T9-W-L4/D5: mint a server-signed identity binding this preview to execute. The baselineHash alone is
+      // client-computable, so execute REQUIRES this token — a caller cannot skip the preview by computing the hash.
+      const previewToken = mintConfigRestorePreviewIdentity({
+        sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+        baselineHash: preview.baselineHash, actorId: access.userId,
+      })
+      return res.json({ ok: true, data: { preview, previewToken } })
     } catch (err: unknown) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -7664,8 +7670,8 @@ export function univerMetaRouter(): Router {
   router.post('/sheets/:sheetId/config-restore-execute', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const revisionId = typeof req.body?.revisionId === 'string' ? req.body.revisionId.trim() : ''
-    const baselineHash = typeof req.body?.baselineHash === 'string' ? req.body.baselineHash : ''
-    if (!sheetId || !revisionId || !baselineHash) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, revisionId and baselineHash are required' } })
+    const previewToken = typeof req.body?.previewToken === 'string' ? req.body.previewToken : ''
+    if (!sheetId || !revisionId || !previewToken) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, revisionId and previewToken are required' } })
     try {
       const pool = poolManager.get()
       const revRes = await pool.query('SELECT id, sheet_id, entity_type, entity_id, action, before, after, changed_keys FROM meta_config_revisions WHERE id = $1 AND sheet_id = $2', [revisionId, sheetId])
@@ -7686,7 +7692,18 @@ export function univerMetaRouter(): Router {
         const snapshot = await loadEntityConfigSnapshot(query, rev)
         if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
         const preview = computeRevertPreview(rev, snapshot)
-        if (preview.baselineHash !== baselineHash) return { status: 409, code: 'PREVIEW_STALE', message: 'The config changed since preview; re-preview before restoring.' }
+        // T9-W-L4/D5: REQUIRE + verify the server-minted preview identity. It binds revision/entity/actor, and its
+        // baselineHash claim must equal the CURRENT state — so a forged/absent token fails (no preview-skip) and a
+        // stale token (drift since preview) fails mismatch_baselineHash.
+        const verdict = verifyConfigRestorePreviewIdentity(previewToken, {
+          sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+          baselineHash: preview.baselineHash, actorId: access.userId,
+        })
+        if (!verdict.valid) {
+          return verdict.reason === 'mismatch_baselineHash'
+            ? { status: 409, code: 'PREVIEW_STALE', message: 'The config changed since preview; re-preview before restoring.' }
+            : { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before restoring.' }
+        }
         if (preview.driftConflict) return { status: 409, code: 'CONFIG_DRIFT', message: 'The config was changed after this revision; cannot safely revert without re-previewing.' }
         await applyConfigRevert(query, rev)
         await recordConfigRevision(query, {
@@ -8379,9 +8396,14 @@ export function univerMetaRouter(): Router {
       expectedVersions: z.record(z.string(), z.number().int().nonnegative()),
       previewIdentity: z.string().min(1),
       fieldIds: z.array(z.string().min(1)).min(1).optional(),
+      // BS-3.1 (SR-5 / D2 opt-in): all-or-nothing mode. Default false = the back-compat PARTIAL behavior (each
+      // record restores or is skipped+reported). When true: any single denied/forbidden/conflicted record in scope
+      // blocks the ENTIRE batch (one transaction, ZERO writes) → 409 with the full blocker list. Transactional
+      // callers opt in; the surgical PARTIAL default is unchanged.
+      allOrNothing: z.boolean().optional().default(false),
     }).safeParse(req.body)
     if (!parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
-    const { targetVersion, recordIds: requestedIds, expectedVersions, previewIdentity, fieldIds } = parsed.data
+    const { targetVersion, recordIds: requestedIds, expectedVersions, previewIdentity, fieldIds, allOrNothing } = parsed.data
     const uniqueIds = [...new Set(requestedIds)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)) // ONE canonical source (sorted, deduped)
     for (const id of uniqueIds) if (typeof expectedVersions[id] !== 'number') return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `expectedVersions missing for ${id}` } })
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
@@ -8444,29 +8466,67 @@ export function univerMetaRouter(): Router {
         const status = verdict.reason === 'expired' ? 410 : 409
         return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Batch preview identity rejected (${verdict.reason}); the scope or a record diff changed since preview — re-preview` } })
       }
-      // Step 3: per-record write fan-out (PARTIAL). Each record is its OWN patchRecords (its OWN transaction), so a
-      // row-deny / version-conflict / field-forbidden on one record skips ONLY that record. The in-transaction CAS
-      // (RecordChange.expectedVersion under SELECT FOR UPDATE) is the authoritative concurrency guard.
+      // Shared per-record pre-write FORBIDDEN gate (#1 layer-3): a field that is hidden / field-definition-readOnly
+      // (static) OR per-subject visible=false / read_only=true (layer-3) must not be written. patchRecords enforces
+      // ONLY the static axis, so a visible-but-readOnly field would slip through — gate the WHOLE record here. ONE
+      // source of truth shared by BOTH the PARTIAL loop and the all-or-nothing preflight (no drift across modes).
+      const recordIsForbidden = (diff: RecordChange[]): boolean => diff.some((ch) => {
+        const guard = fieldById.get(ch.fieldId)
+        const perm = fieldPermissions[ch.fieldId]
+        const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
+        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        return !staticOk || !layer3Ok
+      })
       const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
       const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
       if (yjsInvalidator) recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
       type Outcome = { recordId: string; status: 'restored' | 'skipped'; newVersion?: number; restoredFieldIds?: string[]; skipReason?: 'denied' | 'conflict' | 'forbidden' | 'error' }
+
+      // BS-3.1 (SR-5 / D2 opt-in): ALL-OR-NOTHING. Any single denied/forbidden/conflicted record blocks the ENTIRE
+      // batch and writes NOTHING. denied (fresh row-deny) + forbidden (layer-3) are NOT enforced by patchRecords →
+      // preflight them in-route over EVERY contributing record and collect ALL blockers (no write attempted yet, so
+      // zero writes is structural). conflict is the in-transaction CAS: a SINGLE patchRecords over the whole map runs
+      // in ONE transaction (this.pool.transaction) and THROWS on any per-record version conflict / field-forbidden /
+      // validation → the whole transaction rolls back → ZERO writes (no preflight version-compare: that would
+      // duplicate the CAS + open a TOCTOU gap). The success path writes EVERY record atomically.
+      if (allOrNothing) {
+        const blockers: Array<{ recordId: string; reason: 'denied' | 'forbidden' }> = []
+        for (const c of contributing) {
+          if (deniedIds.has(c.recordId)) { blockers.push({ recordId: c.recordId, reason: 'denied' }); continue }
+          if (recordIsForbidden(c.diff)) { blockers.push({ recordId: c.recordId, reason: 'forbidden' }) }
+        }
+        if (blockers.length > 0) {
+          // distinct code from PREVIEW_IDENTITY_INVALID (re-preview) — this means "a record is denied/forbidden"
+          return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: `All-or-nothing batch restore blocked: ${blockers.length} record(s) denied or forbidden; nothing written`, blockers } })
+        }
+        try {
+          const result = await recordWriteService.patchRecords({
+            sheetId, changesByRecord: new Map(contributing.map((c) => [c.recordId, c.diff])), actorId: getRequestActorId(req),
+            fields, visiblePropertyFields: readableEchoFields, visiblePropertyFieldIds: readableEchoFieldIds,
+            attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore',
+          })
+          const versionByRecord = new Map(result.updated.map((u) => [u.recordId, u.version]))
+          const records: Outcome[] = contributing.map((c) => ({ recordId: c.recordId, status: 'restored', newVersion: versionByRecord.get(c.recordId), restoredFieldIds: c.diff.map((d) => d.fieldId) }))
+          return res.json({ ok: true, data: { records, restoredCount: records.length, skippedCount: 0, targetVersion } })
+        } catch (err) {
+          // the WHOLE transaction rolled back → zero writes. The CAS aborts on the FIRST conflicting record, so the
+          // conflict blocker list is first-only BY DESIGN (a full version preflight would reintroduce the TOCTOU we
+          // deliberately avoid). denied/forbidden are reported in full above (those are preflighted, not thrown).
+          if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: 'All-or-nothing batch restore blocked: a record version conflicted; nothing written', blockers: [{ recordId: (err as ServiceVersionConflictError).recordId, reason: 'conflict' }] } })
+          if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: 'All-or-nothing batch restore blocked: a record field is forbidden; nothing written', blockers: [{ recordId: '', reason: 'forbidden' }] } })
+          if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: `All-or-nothing batch restore blocked: ${(err as Error).message}; nothing written`, blockers: [{ recordId: '', reason: 'error' }] } })
+          throw err
+        }
+      }
+
+      // Step 3: per-record write fan-out (PARTIAL). Each record is its OWN patchRecords (its OWN transaction), so a
+      // row-deny / version-conflict / field-forbidden on one record skips ONLY that record. The in-transaction CAS
+      // (RecordChange.expectedVersion under SELECT FOR UPDATE) is the authoritative concurrency guard.
       const outcomes: Outcome[] = []
       for (const c of contributing) {
         // fresh per-record row-deny re-check (the rare deny-added-since-preview edge) → partial-skip, no oracle leak
         if (deniedIds.has(c.recordId)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'denied' }); continue }
-        // #1 layer-3 per-subject WRITE gate (the EXACT derive the legacy /restore gates with): a field that is
-        // hidden / field-definition-readOnly (static) OR per-subject visible=false / read_only=true (layer-3) must
-        // not be written. patchRecords enforces only the static axis, so a visible-but-readOnly field would slip
-        // through — gate the WHOLE record here (skip:forbidden, PARTIAL), the others proceed.
-        const hasForbidden = c.diff.some((ch) => {
-          const guard = fieldById.get(ch.fieldId)
-          const perm = fieldPermissions[ch.fieldId]
-          const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
-          const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
-          return !staticOk || !layer3Ok
-        })
-        if (hasForbidden) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
+        if (recordIsForbidden(c.diff)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
         try {
           const result = await recordWriteService.patchRecords({
             sheetId, changesByRecord: new Map([[c.recordId, c.diff]]), actorId: getRequestActorId(req),
@@ -8489,6 +8549,153 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] restore-batch-execute failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to execute batch restore' } })
+    }
+  })
+
+  // ============================================================================================================
+  // T8-1: Point-in-Time Revert-to-T (non-destructive sheet rollback). Per the T8 design-lock (PIT-1..7):
+  // preview-first + PIT identity (PIT-1), reuse reconstructRecordsAtT (PIT-4, no re-derivation), counts never leak
+  // (PIT-3/LOCK-3 — denied rows invisible), forward-only source=restore (PIT-5), reveal NEVER composes (PIT-7 —
+  // this path calls NO reveal/reveal-grant function; the writable set is the actor's normal mask). Revert undoes
+  // post-T value changes and KEEPS records created after T (non-destructive); it NEVER deletes. Undelete of post-T
+  // deletions is CLASSIFIED in the preview but its EXECUTE is deferred to the codebase-wide undelete slice
+  // (resurrect + meta_links rebuild is "Slice 2" across the restore routes). The destructive Reset is T8-2.
+  type RevertSheetCaps = Awaited<ReturnType<typeof resolveSheetCapabilities>>
+  // D3 / PIT-6 hard ceiling: a whole-sheet revert above this many records is REFUSED fail-closed (not processed
+  // synchronously, never truncated). Async-above-threshold is a follow-up; v1 hard-refuses. Env-overridable.
+  const SHEET_REVERT_MAX_RECORDS = Number(process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS) > 0
+    ? Math.floor(Number(process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS)) : 5000
+  const computeSheetRevert = async (
+    pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
+    access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
+  ): Promise<null | { tooLarge: true; recordCount: number } | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; undeleteCount: number; keptCreatedAfterT: number; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
+    const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
+    const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
+    if (!patchContext) return null
+    const { fieldById } = patchContext
+    const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
+    if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount } // D3/PIT-6 fail-closed before the full scan
+    const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
+    const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+    const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed) // PIT-3 mask; NO reveal (PIT-7)
+    const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
+      ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
+    const liveById = new Map<string, { data: Record<string, unknown>; version: number }>()
+    for (const r of (await pool.query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; data: unknown; version: unknown }>) {
+      liveById.set(String(r.id), { data: asRec(r.data), version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0 })
+    }
+    const stateMap = await reconstructRecordsAtT(pool.query.bind(pool), sheetId, asOfIso) // delete-aware, deterministic (PIT-4)
+    const reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }> = []
+    let undeleteCount = 0, keptCreatedAfterT = 0, driftCount = 0
+    for (const [recordId, target] of stateMap) {
+      if (deniedIds.has(recordId)) continue // PIT-3/LOCK-3 — denied records are invisible (uncounted, never reverted)
+      const live = liveById.get(recordId)
+      if (target.exists) {
+        if (!live) { undeleteCount++; continue } // existed at T, gone now (deleted after T) → undelete (execute-deferred)
+        const targetSnapshot = asRec(target.data)
+        let drift = false
+        for (const fid of Object.keys(targetSnapshot)) if (!fieldById.has(fid)) { drift = true; break }
+        if (drift) { driftCount++; continue } // schema drift → excluded → re-preview
+        const diff = computeRecordRestoreDiff({ fieldById, rawTypeById, targetSnapshot, currentData: live.data, recordId, currentVersion: live.version, normalizeLinkIds })
+        const masked = diff.filter((c) => allowed.has(c.fieldId))
+        if (masked.length === 0) continue // already matches T in the actor's visible fields
+        reverts.push({ recordId, diff: masked, changesHash: hashPreviewChanges(masked.map((c) => ({ fieldId: c.fieldId, op: c.op, value: c.value }))), version: live.version })
+      }
+      // target deleted-at-T: live present → KEPT (non-destructive, never re-delete); live absent → unchanged.
+    }
+    for (const id of liveById.keys()) if (!stateMap.has(id) && !deniedIds.has(id)) keptCreatedAfterT++ // created after T → KEPT
+    return { reverts, undeleteCount, keptCreatedAfterT, driftCount, patchContext }
+  }
+
+  router.post('/sheets/:sheetId/revert-preview', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const parsed = z.object({ asOf: z.string().min(1) }).safeParse(req.body)
+    if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and asOf are required' } })
+    const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
+    if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
+    try {
+      const pool = poolManager.get()
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: a sheet-wide revert needs a sheet-admin cap, ABOVE plain record-write (interim for a dedicated history-restore cap)
+      const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
+      if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.` } })
+      const { reverts, undeleteCount, keptCreatedAfterT, driftCount } = computed
+      const previewIdentity = reverts.length > 0
+        ? mintPitRevertPreviewIdentity({ sheetId, asOf: asOfIso, strategy: 'revert', scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))), actorId: access.userId })
+        : null // empty revert set → no executable token (no hashScope([]) replay)
+      return res.json({ ok: true, data: {
+        asOf: asOfIso, strategy: 'revert',
+        summary: { visibleRevertCount: reverts.length, visibleUndeleteCount: undeleteCount, keptCreatedAfterTCount: keptCreatedAfterT, conflictCount: driftCount },
+        records: reverts.map((r) => ({ recordId: r.recordId, fieldIds: r.diff.map((dd) => dd.fieldId) })),
+        undeleteSupported: false, previewIdentity,
+      } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] revert-preview failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to compute revert preview' } })
+    }
+  })
+
+  router.post('/sheets/:sheetId/revert-execute', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1) }).safeParse(req.body)
+    if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, asOf, previewIdentity required' } })
+    const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
+    if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
+    try {
+      const pool = poolManager.get()
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: sheet-wide revert needs a sheet-admin cap, ABOVE plain record-write
+      const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
+      if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.` } })
+      const { reverts, patchContext } = computed
+      const verdict = verifyPitRevertPreviewIdentity(parsed.data.previewIdentity, {
+        sheetId, asOf: asOfIso, strategy: 'revert',
+        scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))), actorId: access.userId,
+      })
+      if (!verdict.valid) {
+        const status = verdict.reason === 'expired' ? 410 : 409
+        return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Revert preview identity rejected (${verdict.reason}); the sheet changed since preview — re-preview` } })
+      }
+      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions } = patchContext
+      const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
+        ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
+      const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
+      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
+      if (yjsInvalidator) recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
+      type Outcome = { recordId: string; status: 'reverted' | 'skipped'; newVersion?: number; skipReason?: 'denied' | 'conflict' | 'forbidden' | 'error' }
+      const outcomes: Outcome[] = []
+      for (const c of reverts) {
+        if (deniedIds.has(c.recordId)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'denied' }); continue }
+        const hasForbidden = c.diff.some((ch) => {
+          const guard = fieldById.get(ch.fieldId); const perm = fieldPermissions[ch.fieldId]
+          return !(guard && !guard.hidden && guard.readOnly !== true) || !(perm && perm.visible !== false && perm.readOnly !== true)
+        })
+        if (hasForbidden) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
+        try {
+          const result = await recordWriteService.patchRecords({ sheetId, changesByRecord: new Map([[c.recordId, c.diff]]), actorId: getRequestActorId(req), fields, visiblePropertyFields: readableEchoFields, visiblePropertyFieldIds: readableEchoFieldIds, attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore' })
+          outcomes.push({ recordId: c.recordId, status: 'reverted', newVersion: result.updated.find((u) => u.recordId === c.recordId)?.version })
+        } catch (err) {
+          if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'conflict' }); continue }
+          if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
+          if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'error' }); continue }
+          throw err
+        }
+      }
+      const revertedCount = outcomes.filter((o) => o.status === 'reverted').length
+      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] revert-execute failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to execute revert' } })
     }
   })
 
