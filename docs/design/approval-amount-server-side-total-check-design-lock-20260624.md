@@ -56,9 +56,13 @@ rows.
 3. **Exact comparison on a money-safe representation.**
    Compare `total` against `sum(rows[*][amountColumnId])` in integer minor units
    (or a fixed-scale decimal), NEVER raw IEEE float — `0.1 + 0.2` drift must not
-   create a phantom mismatch. The implementation scales each value to a fixed number
-   of decimal places (default 2), sums, and compares exactly. No tolerance band in
-   v1 (a money control is exact); a configurable epsilon is out of scope.
+   create a phantom mismatch. The scale is derived from the mapped number fields'
+   declared precision (approval `FormField.props`, aligned with the multitable
+   `property.decimals` convention where present), not hard-coded to "currency = 2".
+   When no precision is declared, the helper must preserve the submitted decimal
+   precision with an exact decimal parser/normalizer rather than rounding both
+   sides to two places. It then sums and compares exactly. No tolerance band in v1
+   (a money control is exact); a configurable epsilon is out of scope.
 
 4. **Mapped fields must be unconditionally visible; value gaps fail closed.**
    `pruneHiddenFormData` (`ApprovalGraphExecutor`) prunes at TWO granularities —
@@ -86,18 +90,19 @@ rows.
 
 6. **`amountConsistencyCheck` needs an explicit persisted home + an allowlisted
    re-emit — or it is silently dropped (the G-5 lesson).**
-   The mapping is a NEW persisted template field, and the exact audit that drove
-   G-5 applies: the template save/normalization path rebuilds its output from a
-   FIXED set of keys and drops anything it does not re-emit. So the mapping must
-   live in a dedicated, explicitly-normalized slot — a nullable
-   `amount_consistency_check` column on the template (parallel to `form_schema` /
-   `approval_graph`), NOT tucked inside `form_schema` or graph `metadata` where a
-   different normalizer owns the shape and would flatten it. Build scope therefore
-   includes a migration (new nullable column), the create/update-template DTO, and
-   an explicit normalize-and-re-emit of the mapping in the save path (validated per
-   "Mapping shape"). Without this, the control config is dropped on the first save
-   and the check silently never runs — fail-OPEN, the precise failure mode this lock
-   exists to prevent.
+   This is a TEMPLATE-LEVEL field, not a node config. It sits outside the #3129
+   complex-node config allowlist entirely, and the exact audit that drove G-5 still
+   applies: the template save/normalization path rebuilds its output from a FIXED
+   set of keys and drops anything it does not re-emit. So the mapping must live in a
+   dedicated, explicitly-normalized slot — a nullable `amount_consistency_check`
+   column on the template (parallel to `form_schema` / `approval_graph`), NOT tucked
+   inside `form_schema`, approval-node config, or graph `metadata` where a different
+   normalizer owns the shape and would flatten it. Build scope therefore includes a
+   migration (new nullable column), the create/update-template DTO, and an explicit
+   normalize-and-re-emit of the mapping in the save path (validated per "Mapping
+   shape"). Without this, the control config is dropped on the first save and the
+   check silently never runs — fail-OPEN, the precise failure mode this lock exists
+   to prevent.
 
 ## Mapping shape and authoring-time validation
 
@@ -112,11 +117,19 @@ the assignee-source allowlist discipline:
   `columns` (leaf sub-fields; the model already forbids nested `detail`).
 - none of the three referenced fields carries a `visibilityRule` — they must be
   unconditionally present so the check always has its inputs (Decision 4).
+- the comparison scale is derived from the mapped number fields' declared precision;
+  a missing precision declaration does NOT imply "round to two places".
 
 A mapping that points at a missing or wrong-typed field is REJECTED at save — the
 unsupported-config gate, not a runtime surprise. A template carrying an
 `amountConsistencyCheck` whose shape the backend does not re-emit is fail-closed in
 the authoring UI exactly as G-5 handles unknown approval-node keys.
+
+The amount-tier presets that motivated this lock MUST declare the mapping when the
+runtime slice lands. In particular, the shipped purchase amount-tier preset needs
+`{ totalFieldId: 'amount', detailFieldId: 'purchase_items', amountColumnId: 'amount' }`
+so the high-tier route is actually controlled by the line-item total. Presets that
+omit the mapping remain valid drafts, but they do NOT get this control.
 
 ## Build Gates
 
@@ -126,9 +139,11 @@ helper (no DB), unit-tested both directions:
 - matching total ↔ row sum → passes;
 - under-stated total (the bypass) → rejected;
 - over-stated total → rejected;
-- a hidden/pruned row drops out of BOTH sides → still consistent (no false reject);
+- mapped fields with any `visibilityRule` → rejected at template-save (the submit
+  helper never has to guess whether a pruned value should count);
+- decimal precision cases: `0.1 + 0.2` vs `0.3` passes, and a higher-precision
+  mapped amount (for example four decimal places) is not rounded to two places;
 - non-numeric total / non-array detail / non-numeric amount cell → rejected;
-- float-drift case (`0.1 + 0.2` vs `0.3`) → passes (money-safe scaling);
 - no mapping → no check (the helper is never invoked).
 
 ### Gate B — real-DB acceptance
@@ -140,6 +155,7 @@ smoke:
   written;
 - same template + a matching submission → `201` + created;
 - a mapping referencing a `visibilityRule`-bearing field → REJECTED at template-save;
+- the amount-tier preset mapping is persisted on create and survives readback;
 - template WITHOUT the mapping → unaffected (no check path executed).
 
 ### Gate C — no scope creep
