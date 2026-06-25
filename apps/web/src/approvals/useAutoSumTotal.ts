@@ -1,6 +1,7 @@
 import { computed, watch, type Ref } from 'vue'
 import type { ApprovalTemplateDetailDTO } from '../types/approval'
 import { autoSumTotalFromMapping } from './amountAutoSum'
+import { applyRowDerivations } from './lineDerivation'
 
 // Detail-row auto-sum wiring (design-lock #3189, Gate B). Extracted from ApprovalNewView so the watch is
 // unit-testable in isolation. When the active template declares `amountConsistencyCheck`, the total field
@@ -27,6 +28,15 @@ export function useAutoSumTotal(
     () => {
       const mapping = amountConsistency.value
       if (!mapping || !template.value) return
+      // ONE pass (design-lock #3203, dimension 5): derive each row's amount from its operands FIRST, then
+      // sum the now-derived amounts into the total — same composable, no two-watch stale-transient hazard.
+      // (When the amount column declares no derivedFrom, applyRowDerivations is a no-op and this is the
+      // plain total auto-sum.)
+      // TERMINATION: applyRowDerivations mutates row[amount], which IS inside this deep-watched source, so
+      // it re-fires once and converges ONLY because computeRowDerivation is IDEMPOTENT (same operands →
+      // same amount → Vue hasChanged stops the re-fire). A future non-idempotent operation MUST preserve
+      // that invariant, or this must watch the operand columns instead of mutating in-place.
+      applyRowDerivations(template.value.formSchema, formData, mapping.detailFieldId, mapping.amountColumnId)
       formData[mapping.totalFieldId] = autoSumTotalFromMapping(template.value.formSchema, formData, mapping)
     },
     { deep: true, immediate: true },
