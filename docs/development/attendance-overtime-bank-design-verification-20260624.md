@@ -1,7 +1,7 @@
 # 加班调休抵扣与周期结算（加班银行）— 设计与验证记录
 
 > **范围**：把"加班入池 → 请假优先抵扣 → 周期末折算"做成**企业可配置**的薪资/考勤结算规则组。本文是该线的**设计 + 验证**真源；设计锁见 `attendance-overtime-bank-settlement-designlock-20260624.md`（RATIFIED）。
-> **状态（2026-06-24）**：v1-1a 已落 main、v1-1b green（held-for-review）；v1-2…v1-8 已设计、按 money-path 逐刀 review-gated 推进。本记录随每刀落地更新。
+> **状态（2026-06-25）**：v1-1a / v1-1b / v1-2a 三刀已落 main（owner review 驱动，§P1/§P2 已闭环）；v1-3a held（#3167）；v1-2b / v1-4…v1-8 已设计、按 money-path 逐刀 review-gated 推进。本记录随每刀落地更新。
 > **执行纪律**：money-path 切片（碰加班 grant / 请假 deduct 的事务）**绿了也不自动合,逐刀 owner review** —— CI-green-but-wrong 在这条线 = 算错工资。staging smoke 需环境（gated）。
 
 ---
@@ -25,9 +25,11 @@
 | 切片 | 内容 | PR | 状态 | 验证 |
 |---|---|---|---|---|
 | **v1-1a** | OvertimeBankPolicy 休眠 config + enum-strict normalizer + 整条 settings wire | #3145 | ✅ **landed** | unit 6/6 + **real-DB PUT/GET wire 往返**（full shape / partial-preserve siblings / statutory_holiday→400）|
-| **v1-1b** | 账1 来源标签 lot：migration（`overtime_source`）+ gated 按来源 grant | #3158 | 🟡 **green · held-for-review** | unit 7/7（partition）+ **real-DB**（dormant byte-identical via C2 §1–3 + ENABLED 按来源 lot 守恒 + replay 无重复贷记，C2 §4）|
-| v1-2 | LeaveOffsetPolicy：`leaveBalanceDeductionPolicy` config 驱动现有 FIFO `deductLeaveBalance`；保守默认 annual 不抵事假 | — | ⬜ designed | 计划 unit + real-DB（请假按规则扣对池、不足转真实缺勤、年假不被自动抵）|
-| v1-3 | AttendanceBonusPolicy：满勤 flag（任意请假即 false，即便被池抵掉）+ 复用 #5 RT 迟到/早退阈值 | — | ⬜ designed | 计划 unit + real-DB |
+| **v1-1b** | 账1 来源标签 lot：migration（`overtime_source`）+ gated 按来源 grant | #3158 `8862448ed` | ✅ **landed** | unit 8/8（partition）+ **real-DB**（dormant byte-identical via C2 §1–3 + ENABLED 按来源 lot 守恒 + replay 无重复贷记，C2 §4）。**owner review §P1/§P2 已闭环**（见 §3.5）|
+| **v1-2a** | LeaveOffsetPolicy `leaveBalanceDeductionPolicy` 休眠 config + normalizer + wire | #3162 `c4e5944fd` | ✅ **landed** | unit 5/5 + real-DB wire 往返。**§P2 单池锁**：deductFrom 截断到单池 + PUT zod `.max(1)` 拒多池;跨池顺序 = v2 |
+| v1-2b | LeaveOffsetPolicy **扣减 wiring**：按 rule 驱动现有 FIFO `deductLeaveBalance`(读单池);不足按 `insufficient` 转真实缺勤;年假不被自动抵 | — | ⬜ designed（依赖 v1-2a 落地）| 计划 unit + real-DB |
+| **v1-3a** | AttendanceBonusPolicy 满勤休眠 config + normalizer | #3167 | 🟡 **held**（待 review）| unit 2/2 + real-DB wire 往返 |
+| v1-3b | 满勤 flag 计算：任意请假即 false（即便被池抵掉）+ 复用 #5 RT 迟到/早退阈值 | — | ⬜ designed | 计划 unit + real-DB |
 | v1-4 | 账4 PayrollSettlementPolicy 导出契约：周期末各来源剩余 + 可折算/直付标记（**不含金额**） | — | ⬜ designed（依赖 v1-1b 来源标签）| 计划 real-DB |
 | v1-5 | PolicyAssignment + 生效日期 + **结算快照**（改规则不反算已结算周期）| — | ⬜ designed | 计划 unit + real-DB |
 | v1-6 | 授权 UI（克隆审批模板授权 #2296）+ 四档预设克隆 | — | ⬜ designed（frontend）| 计划 vitest 渲染 |
@@ -50,6 +52,15 @@
 **③ 守恒 + rule-once（账面不丢不重）**：grant 按来源分配的是**规则规整后的总额**（rule 只套一次，复用 NS-3 纪律），**最早过期优先** + **末个非零来源吃余数**（0 权重来源得 0，不被误归）→ **Σ 各来源 === 总额**（partition 单测 + C2 §4 real-DB 断言）。
 
 **④ replay 幂等（不双贷记）**：每个按来源 lot 键 `overtime_conversion:${req}:${source}`,`ON CONFLICT (org_id, source_key) DO NOTHING`；重放 final-approval 不新增 lot/event（C2 §3/§4 real-DB 断言）。
+
+### 3.5 owner review 抓到并闭环的合规/薪资 blocker（per-slice 人审的价值证据）
+
+- **§P1（#3158，合规绕过）**：bank enabled 但无 segmentation snapshot（无来源 breakdown）时,早期 fallback 成一整笔 `source:null` 全量入池 —— 会把**法定节假日加班也池化**,绕过 §6 法律下限 + 客户 pooledSources。**已改 fail-closed:enabled 且来源不可判定 → 不生成可抵扣 lot(must-pay,不入池)**;NULL-source 整笔 fallback 仅限 dormant legacy path。
+- **§P2（#3158，allowlist 漂移）**：allowlist 暴露了 v1-1b 产不出的 adjusted_rest_day/company_holiday/special_hours,配了也永不生效。**已收窄到 {workday, restday}**;holiday 子类等日历 dayType 细分后再放。
+- **§P2（#3162,单池口径）**：config 持久化了多池 deductFrom,而 v1 wiring 只读单池 → 配置与实际扣减漂移。**已锁单池**:normalizer 截断到首个有效池 + PUT zod `.max(1)` 拒多池;数组形状留给 v2 跨池顺序。
+- **CI 自查抓到（#3158）**:enabled grant 漏读 reshaped snapshot 字段 → 0 lot(comp-time grant 丢失)。已改读 reshaped 字段。
+
+这三类都是"绿了但算错工资/绕过合规"的缺陷,**只有逐刀人审 + real-DB 才挡得住**,印证本线 money-path 不自动合的纪律。
 
 ---
 
