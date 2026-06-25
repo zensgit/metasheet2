@@ -1408,6 +1408,94 @@ describe('Multitable record and form context API', () => {
     })
   })
 
+  test('recalculates formula fields on patch even when formula_dependencies is empty', async () => {
+    const materializedFormulaPatches: unknown[][] = []
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_calc'])
+          return {
+            rows: [
+              { id: 'fld_a', name: 'A', type: 'number', property: {}, order: 1 },
+              { id: 'fld_b', name: 'B', type: 'number', property: {}, order: 2 },
+              { id: 'fld_sum', name: 'Sum', type: 'formula', property: { expression: '={fld_a}+{fld_b}' }, order: 3 },
+            ],
+          }
+        }
+        if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+          expect(params).toEqual(['sheet_calc', 'rec_1'])
+          return {
+            rows: [{
+              id: 'rec_1',
+              version: 7,
+              data: { fld_a: 10, fld_b: 5, fld_sum: null },
+              created_by: 'user_multitable_2',
+              locked: false,
+              locked_by: null,
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')) {
+          expect(params).toEqual(['sheet_calc', 'rec_1'])
+          return { rows: [{ id: 'rec_1', version: 7, created_by: 'user_multitable_2' }] }
+        }
+        if (sql.includes('UPDATE meta_records') && sql.includes('WHERE sheet_id = $2 AND id = $3')) {
+          expect(params).toEqual([JSON.stringify({ fld_a: 20 }), 'sheet_calc', 'rec_1', 'user_multitable_2'])
+          return { rows: [{ version: 8 }] }
+        }
+        if (sql.includes('INSERT INTO meta_record_revisions')) {
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3')) {
+          expect(params).toEqual([JSON.stringify({ fld_sum: 25 }), 'rec_1', 'sheet_calc'])
+          materializedFormulaPatches.push(params ?? [])
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('FROM meta_record_subscriptions')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (sql.includes('SELECT record_id FROM meta_links WHERE foreign_record_id = ANY($1::text[])')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (sql.includes('SELECT id, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          expect(params).toEqual(['rec_1', 'sheet_calc'])
+          return { rows: [{ id: 'rec_1', data: { fld_a: 20, fld_b: 5, fld_sum: null } }] }
+        }
+        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          expect(params).toEqual(['rec_1', 'sheet_calc'])
+          return {
+            rows: [{
+              id: 'rec_1',
+              version: 8,
+              data: { fld_a: 20, fld_b: 5, fld_sum: null },
+            }],
+          }
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/patch')
+      .send({
+        sheetId: 'sheet_calc',
+        changes: [{
+          recordId: 'rec_1',
+          fieldId: 'fld_a',
+          value: 20,
+          expectedVersion: 7,
+        }],
+      })
+      .expect(200)
+
+    expect(response.body.ok).toBe(true)
+    expect(response.body.data.updated).toEqual([{ recordId: 'rec_1', version: 8 }])
+    expect(response.body.data.records).toEqual([{ recordId: 'rec_1', data: { fld_sum: 25 } }])
+    expect(materializedFormulaPatches).toEqual([[JSON.stringify({ fld_sum: 25 }), 'rec_1', 'sheet_calc']])
+  })
+
   test('returns attachment summaries from patch response for updated multitable attachment fields', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],

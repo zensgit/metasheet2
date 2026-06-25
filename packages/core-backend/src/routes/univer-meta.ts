@@ -1479,6 +1479,24 @@ function formulaExpressionOf(field: { type: string; property?: unknown }): strin
   return null
 }
 
+function formulaFieldsReferencingChangedFields(
+  fields: UniverMetaField[],
+  formulaFieldIds: ReadonlySet<string>,
+  changedFieldIds: ReadonlySet<string>,
+): Set<string> {
+  const dependent = new Set<string>()
+  for (const field of fields) {
+    if (!formulaFieldIds.has(field.id)) continue
+    const expression = formulaExpressionOf(field)
+    if (!expression) continue
+    const refs = multitableFormulaEngine.extractFieldReferences(expression)
+    if (refs.some((ref) => changedFieldIds.has(ref))) {
+      dependent.add(field.id)
+    }
+  }
+  return dependent
+}
+
 async function loadRecordDataById(query: QueryFn, sheetId: string, recordId: string): Promise<Record<string, unknown> | null> {
   const res = await query('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
   const row = (res.rows as Array<{ data: unknown }>)[0]
@@ -2714,11 +2732,19 @@ async function recalculateFormulaFields(
        AND sheet_id = $2`,
     [effectiveChangedFieldIds, sheetId],
   )
-  if (depRes.rows.length === 0) return []
   const formulaFieldIdSet = new Set(formulaFieldIds)
   const dependentFormulaFieldIds = new Set(
     (depRes.rows as any[]).map((row) => String(row.field_id)).filter((id) => formulaFieldIdSet.has(id)),
   )
+  if (dependentFormulaFieldIds.size === 0) {
+    // Older/stale configs can be missing formula_dependencies rows even though
+    // field.property.expression is authoritative for evaluation. Fall back to
+    // expression refs so a PATCH still materializes dependent formulas.
+    const changedIdSet = new Set(effectiveChangedFieldIds)
+    for (const id of formulaFieldsReferencingChangedFields(fields, formulaFieldIdSet, changedIdSet)) {
+      dependentFormulaFieldIds.add(id)
+    }
+  }
   if (dependentFormulaFieldIds.size === 0) return []
 
   // §2a.3 B1 (write-side taint skip-recompute): the write path hydrates rows via applyLookupRollup,
