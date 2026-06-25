@@ -27,9 +27,11 @@ new change, never rewriting history. The dangerous parts and the locks that answ
 - **Read-gate ≡ write-gate ≡ restore-gate (L3)** — restore re-checks, per entity type, the same capability the
   mutation route checks (field/field-perm → `canManageFields`; view/view-perm → `canManageViews`;
   sheet_config/sheet-perm → `canManageSheetAccess`).
-- **Preview-first + baseline identity (L4)** + **schema-drift is a conflict (L5)** — a write-free preview computes the
-  revert and a baseline hash; execute refuses if the live config moved since preview (stale) or diverged from what the
-  change produced (drift), rather than clobbering intervening edits.
+- **Preview-first + signed preview identity (L4/D5)** + **schema-drift is a conflict (L5)** — a write-free preview
+  computes the revert and mints a **server-signed token** binding {sheet, revision, entity, baseline-hash, actor};
+  execute REQUIRES + verifies it, so a caller cannot skip preview by computing the (client-computable) hash itself.
+  Execute refuses if the live config moved since preview (stale token) or diverged from what the change produced
+  (drift). *(The signed token was a review fix-forward, #3172 — the initial pass shipped only the raw hash.)*
 - **Forward-only + `source=restore` (L1)** — execute appends a new revision marked `source=restore` with a
   `restored_from_id` back-reference; the restore is itself inspectable.
 - **Data-loss ops hard-gated (L6)** — field undelete and lossy retype are refused `422` in this slice; they are a
@@ -60,16 +62,20 @@ gated.
 records created after T**. Built over the existing primitives — `reconstructRecordsAtT` (PIT-4: the as-of-T state map
 IS the revert target; no re-derivation), the scoped-restore write path, and a new PIT revert preview-identity.
 
-Locks honored: PIT-1 preview-first + identity binding the full revert set (drift → `409`); PIT-3/LOCK-3 masked counts
-via the tested `loadDeniedRecordIds` + `maskStoredRecordFieldIds` seam (denied rows uncounted, unwritten); PIT-5
-forward-only `source=restore`; PIT-7 reveal-never-composes (the write path calls no reveal function — grep-verifiable
-+ golden).
+Locks honored: PIT-1 preview-first + identity binding the full revert set (drift → `409`); **D2 — gated on
+`canManageSheetAccess` (a sheet-admin cap ABOVE plain record-write; interim for a dedicated history-restore cap), so a
+normal record editor cannot trigger a sheet-wide rollback**; **D3/PIT-6 — a hard record-count ceiling
+(`MULTITABLE_SHEET_REVERT_MAX_RECORDS`), above which the revert is REFUSED `413` fail-closed before the scan** (async
+above threshold is a follow-up); PIT-3/LOCK-3 masked counts via the tested `loadDeniedRecordIds` +
+`maskStoredRecordFieldIds` seam (denied rows uncounted, unwritten); PIT-5 forward-only `source=restore`; PIT-7
+reveal-never-composes (grep-verifiable + golden). *(The D2 gate-elevation + D3 ceiling were a review fix on #3165 — the
+initial pass gated on `canEditRecord` with no ceiling.)*
 
 ### Verification
 
-6 real-DB goldens — preview classify + write-free; execute reverts to the T-state via forward revisions and **KEEPS
-post-T-created**; drift → `409`; atomicity (forced failure leaves data unchanged); PIT-7 no-reveal. `tsc` clean;
-allowlisted.
+8 real-DB goldens — preview classify + write-free; execute reverts to the T-state via forward revisions and **KEEPS
+post-T-created**; drift → `409`; atomicity (forced failure leaves data unchanged); PIT-7 no-reveal; **a normal record
+editor → `403`** (D2) and **a sheet above the ceiling → `413`** (D3/PIT-6). `tsc` clean; allowlisted.
 
 **Deferred (flagged, not dropped):** undelete-*execute* — the codebase defers undelete everywhere (resurrect +
 link-rebuild is its own cross-cutting slice), so preview classifies undeletes but execute reports
