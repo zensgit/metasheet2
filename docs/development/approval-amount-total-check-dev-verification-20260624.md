@@ -40,6 +40,12 @@ equal the sum of that submission's detail-row amounts:
 - No regression (approval-product-service unit suite unchanged); backend tsc clean.
 
 ## Shipped as the rest of this line (separate PRs, all on main)
+- **FE authoring preserve (§1 — the active exposure) → #3197.** The authoring editor does NOT author
+  `amountConsistencyCheck`, but the load→rebuild-on-save path now carries it through VERBATIM (hydrate +
+  re-emit), so a preset-shipped control (#3183) is no longer silently dropped on the first authoring-page
+  save. Tests: §1 round-trip unit (`draftFromTemplate`→`buildFormSchema` preserves it; absent stays absent) +
+  the **active-exposure mounted guard** (open a mapped template + save with no edits → the mapping stays in
+  the PUT payload). FE-only; backend remains the sole arbiter.
 - **Preset enablement → #3183.** `purchase_amount_tier` ships `{amount, purchase_items, amount}` and
   `reimbursement_amount_tier` ships `{amount, expense_items, amount}` (via a `withAmountConsistency`
   helper); the basic presets (leave/reimbursement/purchase) keep no mapping. The FE
@@ -57,8 +63,12 @@ equal the sum of that submission's detail-row amounts:
     result (`backwriteSkipped`), not only `logger.warn`. 14/14 start_approval integration; automation-v1 186/186.
 
 ## Still a follow-up (not built)
-- **Detail-row auto-sum** — the heavier of the two #3161 fixes (compute/auto-fill the total, removing
-  the gameable separate total) — its own later lock; pulls in a computed/rollup form-field capability.
+- **Detail-row auto-sum** — the heavier of the two #3161 fixes (the lighter — §1, the FE authoring
+  silent-drop — is now **closed by #3197**); compute/auto-fill the total, removing the gameable separate
+  total — its own later lock; pulls in a computed/rollup form-field capability.
+- **§3 — `visibilityRule` save-vs-submit policy (P2).** Next move is **doc-only ratify of the shipped
+  behavior** (record what save vs submit actually does today), NOT a rushed backend save-time reject —
+  handled separately from §1.
 
 ## Deferred (need explicit business semantics — per the plan, do not pre-build)
 - **W7 rejection backwrite** — write `status='rejected'` on the non-approved path (which currently fails
