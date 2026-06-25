@@ -64,23 +64,20 @@ rows.
    sides to two places. It then sums and compares exactly. No tolerance band in v1
    (a money control is exact); a configurable epsilon is out of scope.
 
-4. **Mapped fields must be unconditionally visible; value gaps fail closed.**
-   `pruneHiddenFormData` (`ApprovalGraphExecutor`) prunes at TWO granularities —
-   whole top-level fields (by visibility), and individual CELLS within each detail
-   row (a sub-field `visibilityRule` evaluated per row, recursing the sub-schema).
-   It does NOT drop whole rows — the row-array length is preserved. So the dangerous
-   edge is a mapped field/cell being pruned AWAY, not a row vanishing.
-   - To remove that ambiguity entirely, the mapping REQUIRES its three referenced
-     fields — the total field, the detail field, and the amount column — to carry NO
-     `visibilityRule` (unconditionally visible), enforced at template-save
-     (fail-closed authoring). They can then never be pruned, so the check always has
-     well-defined inputs and reads the SAME post-prune `formData` the graph routes
-     on.
-   - With that guaranteed, value gaps still fail closed: a non-numeric/absent total,
-     a non-array detail value, or a row whose amount cell is empty/non-numeric →
-     reject (the control cannot verify a row it cannot read). The form-schema layer
-     enforces field TYPES; this check enforces VALUE consistency on a type-valid
-     submission.
+4. **Structural validity at save; semantic / pruned absence fails closed at submit (as built, #3207).**
+   `pruneHiddenFormData` (`ApprovalGraphExecutor`) prunes at TWO granularities — whole
+   top-level fields (by visibility), and individual CELLS within each detail row (a
+   sub-field `visibilityRule` evaluated per row, recursing the sub-schema). It does NOT
+   drop whole rows — the row-array length is preserved.
+   - SAVE-time is STRUCTURAL: `normalizeAmountConsistencyCheck` validates that the
+     mapped fields exist and have the right types. Mapped fields MAY carry a
+     `visibilityRule` — they are NOT required to be unconditionally visible.
+   - SUBMIT-time is SEMANTIC and fail-closed: the check runs on the same post-prune
+     `formData` the graph routes on, so a `visibilityRule`-hidden mapped field/cell is
+     pruned → its value is absent → reject. A non-numeric/absent total, a non-array
+     detail value, or an empty/non-numeric amount cell likewise rejects (the control
+     cannot verify a field it cannot read). The control can never silently run on data
+     it can't see.
 
 5. **One total ↔ one detail column, v1.**
    v1 maps exactly one top-level total to exactly one `number` column of one
@@ -116,8 +113,6 @@ discipline:
 - `detailFieldId` references a top-level field of `type: 'detail'`.
 - `amountColumnId` references a `type: 'number'` entry in that detail field's
   `columns` (leaf sub-fields; the model already forbids nested `detail`).
-- none of the three referenced fields carries a `visibilityRule` — they must be
-  unconditionally present so the check always has its inputs (Decision 4).
 - the comparison scale is derived from the mapped number fields' declared precision;
   a missing precision declaration does NOT imply "round to two places".
 
@@ -140,8 +135,8 @@ helper (no DB), unit-tested both directions:
 - matching total ↔ row sum → passes;
 - under-stated total (the bypass) → rejected;
 - over-stated total → rejected;
-- mapped fields with any `visibilityRule` → rejected at template-save (the submit
-  helper never has to guess whether a pruned value should count);
+- a `visibilityRule`-hidden mapped field/cell → pruned to absent at submit → rejected
+  (semantic fail-closed; NOT a save-time reject);
 - decimal precision cases: `0.1 + 0.2` vs `0.3` passes, and a higher-precision
   mapped amount (for example four decimal places) is not rounded to two places;
 - non-numeric total / non-array detail / non-numeric amount cell → rejected;
@@ -156,7 +151,7 @@ smoke:
 - template WITH the mapping + a mismatched submission → REJECTED, no approval row
   written;
 - same template + a matching submission → `201` + created;
-- a mapping referencing a `visibilityRule`-bearing field → REJECTED at template-save;
+- a submission whose mapped field is `visibilityRule`-hidden (pruned → absent) → REJECTED at submit;
 - the amount-tier preset mapping is persisted on create and survives readback;
 - template WITHOUT the mapping → unaffected (no check path executed).
 
@@ -164,12 +159,13 @@ smoke:
 The check only ever REJECTS; it NEVER mutates `formData` (no auto-fill — that is
 the auto-sum lock). No currency conversion, no multi-detail, no tolerance band.
 
-## Remaining gaps (#3176 shipped the capability; §1 closed by #3197, §2 by #3183; §3 open)
+## Remaining gaps (all resolved — §1 #3197, §2 #3183, §3 ratified by #3207)
 
-Status: #3183 landed the preset mapping (§2) BEFORE the FE preserve (§1), inverting the
-intended order and briefly exposing shipped preset templates to a save-time drop — now
-CLOSED by #3197 (the §1 exposure is resolved). The auto-sum lock (#3189, design-only)
-rides the same save path and inherits this preserve. Only §3 (visibility) remains.
+Status: §1 (FE preserve) closed by #3197, §2 (preset mapping) by #3183, and §3
+(visibility policy) ratified as-built by #3207 — this lock is now consistent with that
+verification record and has no open gap. The auto-sum lock (#3189, design-only) rides
+the same save path and inherits the §1 preserve. A save-time semantic visibility reject
+remains a deferred P2 hardening (§3 below), not a gap.
 
 1. **[CLOSED — #3197] FE authoring save preserves the mapping.** Closed by #3197
    (merge `fd17ad2e7`): `TemplateAuthoringDraft` now carries `amountConsistencyCheck`,
@@ -183,12 +179,13 @@ rides the same save path and inherits this preserve. Only §3 (visibility) remai
    with preset coverage. Retained as a record — the capability is shipped; its
    durability through the authoring editor depends on §1 (which landed AFTER it, hence
    the live exposure above).
-3. **[P2] `visibilityRule` policy mismatch.** This lock (Decision 4 / Mapping shape /
-   Gate B) asserts a SAVE-TIME reject of `visibilityRule`-bearing mapped fields, but
-   `normalizeAmountConsistencyCheck` validates existence + type only — the shipped
-   behavior is fail-closed at SUBMIT (a pruned mapped field → absent value → reject),
-   not at save. Align one way: add the save-time reject, OR ratify "submit-time
-   fail-closed" and drop the save-time claim from those three places.
+3. **[CLOSED — ratified as-built by #3207] `visibilityRule` policy.** Ratified doc-only
+   (no backend change): SAVE-time is STRUCTURAL (existence + type, via
+   `normalizeAmountConsistencyCheck`); SUBMIT-time is SEMANTIC and fail-closed (a
+   `visibilityRule`-hidden mapped field is pruned → absent → reject). Decision 4 /
+   Mapping shape / Gate A / Gate B above are aligned to that split. A SAVE-time semantic
+   reject of `visibilityRule`-bearing fields is left as a deferred P2 hardening (an
+   earlier authoring-time signal), NOT pursued now. Verification record: #3207.
 
 ## Non-Goals
 - Detail-row auto-sum (computing/auto-filling the total) — separate later lock. It
