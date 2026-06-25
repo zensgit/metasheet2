@@ -11611,6 +11611,28 @@ function buildAttendanceSummaryCountedDaySql(alias = '') {
   return `(${prefix}is_workday = true OR COALESCE(${prefix}work_minutes, 0) > 0 OR ${prefix}status IN ('normal', 'late', 'early_leave', 'late_early', 'partial', 'adjusted'))`
 }
 
+// 加班银行 v1-3b (design-lock §3 账3 AttendanceBonusPolicy): compute the 满勤 (full-attendance) eligibility
+// flag for a period from its leave + late/early facts + the policy. Returns null when the policy is OFF
+// (dormant — the caller omits the field entirely, so the response is byte-identical for orgs that haven't
+// enabled it). §4 KEY: 满勤 breaks on ANY leave EVEN IF the leave was offset by the comp-time pool — so this
+// reads RAW leave EXISTENCE (summary.leave_minutes = Σ approved leave requests, pre-offset), NOT the
+// net-after-deduction. Deduction-INDEPENDENT (real absence = Σleave − deducted belongs to 账4/v1-4). v1 treats
+// any late/early day (beyond grace) as 满勤-breaking when the toggle is on; the finer #5 RT severe-threshold
+// gating is a follow-up.
+function resolveFullAttendanceEligible(summary, policy) {
+  if (!policy || policy.enabled !== true) return null
+  const s = summary && typeof summary === 'object' ? summary : {}
+  const hasLeave = (Number(s.leave_minutes) || 0) > 0
+  // §P1 (owner review): late_early is a SEPARATE status — a same-day both-late-AND-early record is counted in
+  // late_early_days, NOT late_days / early_leave_days. Missing it would wrongly mark such a person 满勤.
+  const hasLateOrEarly = (Number(s.late_days) || 0) > 0
+    || (Number(s.early_leave_days) || 0) > 0
+    || (Number(s.late_early_days) || 0) > 0
+  if (policy.anyLeaveBreaksFullAttendance === true && hasLeave) return false
+  if (policy.lateBeyondThresholdBreaksFullAttendance === true && hasLateOrEarly) return false
+  return true
+}
+
 async function loadAttendanceSummary(db, orgId, userId, from, to) {
   const countedDaySql = buildAttendanceSummaryCountedDaySql()
   const rows = await db.query(
@@ -18497,6 +18519,7 @@ module.exports = {
   },
   __attendanceBonusPolicyForTests: {
     normalizeAttendanceBonusPolicySetting,
+    resolveFullAttendanceEligible,
   },
   __attendanceReportFieldCatalogForTests: {
     ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS,
@@ -23006,6 +23029,11 @@ module.exports = {
           const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
           const summaryFormulaFields = await loadAttendanceSummaryFormulaFields(context, orgId, logger, formulaOptions)
           const data = await enrichAttendanceSummaryWithFormulaValues(context, summary, summaryFormulaFields)
+          // 加班银行 v1-3b (§3 账3): surface the 满勤 flag on this LIVE summary read (gated). DORMANT-CLEAN: when
+          // attendanceBonusPolicy is OFF the field is OMITTED → byte-identical response; the cached/fingerprinted
+          // report-summary table is untouched (that path is not dormant-safe for new fields).
+          const fullAttendanceEligible = resolveFullAttendanceEligible(summary, (await getSettings(db))?.attendanceBonusPolicy)
+          if (fullAttendanceEligible !== null) data.fullAttendanceEligible = fullAttendanceEligible
 	          res.json({ ok: true, success: true, data })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
