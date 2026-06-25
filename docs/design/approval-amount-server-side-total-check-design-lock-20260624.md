@@ -1,6 +1,6 @@
 # Amount Server-Side Total Check — Design Lock
 
-Status: RATIFIED — RUNTIME NOT BUILT
+Status: IMPLEMENTED BY #3176; FOLLOW-UP GAPS TRACKED
 
 Grounding: the amount-tier approval line — design-lock
 `approval-amount-tier-template-presets-design-lock-20260624.md` plus the Gate-A
@@ -88,28 +88,29 @@ rows.
    level regardless), cross-field arithmetic, and currency conversion are out of
    scope.
 
-6. **`amountConsistencyCheck` needs an explicit persisted home + an allowlisted
-   re-emit — or it is silently dropped (the G-5 lesson).**
-   This is a TEMPLATE-LEVEL field, not a node config. It sits outside the #3129
-   complex-node config allowlist entirely, and the exact audit that drove G-5 still
-   applies: the template save/normalization path rebuilds its output from a FIXED
-   set of keys and drops anything it does not re-emit. So the mapping must live in a
-   dedicated, explicitly-normalized slot — a nullable `amount_consistency_check`
-   column on the template (parallel to `form_schema` / `approval_graph`), NOT tucked
-   inside `form_schema`, approval-node config, or graph `metadata` where a different
-   normalizer owns the shape and would flatten it. Build scope therefore includes a
-   migration (new nullable column), the create/update-template DTO, and an explicit
-   normalize-and-re-emit of the mapping in the save path (validated per "Mapping
-   shape"). Without this, the control config is dropped on the first save and the
-   check silently never runs — fail-OPEN, the precise failure mode this lock exists
-   to prevent.
+6. **Persistence: versioned `formSchema.amountConsistencyCheck` (as built in #3176) —
+   the dedicated-column requirement is WITHDRAWN.**
+   An earlier draft of this decision required a dedicated `amount_consistency_check`
+   column on the parent template and argued AGAINST putting it in `form_schema`. That
+   was wrong: `form_schema` (and `approval_graph`) live on
+   `approval_template_versions`, not the parent `approval_templates`, so a
+   parent-template column would DRIFT from the version a running instance is pinned
+   to. #3176 instead put the mapping at `formSchema.amountConsistencyCheck`,
+   normalized + re-emitted in `assertFormSchema` (`normalizeAmountConsistencyCheck`)
+   and read in `createApproval` — version-pinned and explicitly allowlisted (not an
+   un-allowlisted key the form-schema normalizer would drop). This lock adopts that
+   home. The G-5 silent-drop risk does NOT disappear — it MOVES to the FRONTEND save
+   path: the `apps/web` `FormSchema` type and `buildFormSchema()` must carry
+   `amountConsistencyCheck` through, or the editing page rebuilds the schema without
+   it and drops the mapping on first save (Remaining gaps §1).
 
 ## Mapping shape and authoring-time validation
 
 `amountConsistencyCheck?: { totalFieldId: string; detailFieldId: string; amountColumnId: string }`
-sits on the template alongside `formSchema` / `approvalGraph`, is persisted
-verbatim, and is validated at TEMPLATE-SAVE time (fail-closed authoring), mirroring
-the assignee-source allowlist discipline:
+sits at `formSchema.amountConsistencyCheck` (version-pinned with the rest of the
+form schema), is normalized + re-emitted in `assertFormSchema`, and is validated at
+TEMPLATE-SAVE time (fail-closed authoring), mirroring the assignee-source allowlist
+discipline:
 
 - `totalFieldId` references a top-level field of `type: 'number'`.
 - `detailFieldId` references a top-level field of `type: 'detail'`.
@@ -149,8 +150,9 @@ helper (no DB), unit-tested both directions:
 ### Gate B — real-DB acceptance
 A real-DB `createApproval` + create/update-template, mirroring the create-template
 smoke:
-- the `amount_consistency_check` mapping survives a template save→reload round-trip,
-  NOT dropped by normalization (the Decision 6 silent-drop regression);
+- `formSchema.amountConsistencyCheck` survives a template save→reload round-trip AND
+  a FRONTEND editing-page save, NOT dropped by normalization (the Remaining-gaps §1
+  silent-drop regression);
 - template WITH the mapping + a mismatched submission → REJECTED, no approval row
   written;
 - same template + a matching submission → `201` + created;
@@ -161,6 +163,32 @@ smoke:
 ### Gate C — no scope creep
 The check only ever REJECTS; it NEVER mutates `formData` (no auto-fill — that is
 the auto-sum lock). No currency conversion, no multi-detail, no tolerance band.
+
+## Remaining gaps (open follow-ups — #3176 shipped the capability, the gap is NOT fully closed)
+
+Tracked here, none in #3176. Sequence matters: FE preserve FIRST (it is the base
+save-path fix the rest depends on), THEN the preset mapping (a mapping added before
+the FE preserve would be dropped by the editing page on the next save), then the
+visibility policy.
+
+1. **[P1] FE authoring save silently drops the mapping.** The backend type carries
+   `FormSchema.amountConsistencyCheck`, but `apps/web/src/types/approval.ts`
+   `FormSchema` still has only `fields` and `buildFormSchema()` returns `{ fields }`
+   — so a template saved through the editing page loses the mapping (the G-5
+   silent-drop, now on the FE side). Fix: FE `FormSchema` type + `draftFromTemplate`
+   hydrate + `buildFormSchema` preserve + a mounted round-trip test.
+2. **[P1] Amount-tier presets do not declare the mapping.** `commonTemplatePresets.ts`
+   carries no `amountConsistencyCheck`, so the capability ships unused and the
+   amount-tier preset gap stays open. Wire reimbursement
+   `{ totalFieldId: 'amount', detailFieldId: 'expense_items', amountColumnId: 'amount' }`
+   and purchase `{ totalFieldId: 'amount', detailFieldId: 'purchase_items', amountColumnId: 'amount' }`,
+   with shape + real-DB coverage. DEPENDS on §1 (else an edited preset loses the mapping).
+3. **[P2] `visibilityRule` policy mismatch.** This lock (Decision 4 / Mapping shape /
+   Gate B) asserts a SAVE-TIME reject of `visibilityRule`-bearing mapped fields, but
+   `normalizeAmountConsistencyCheck` validates existence + type only — the shipped
+   behavior is fail-closed at SUBMIT (a pruned mapped field → absent value → reject),
+   not at save. Align one way: add the save-time reject, OR ratify "submit-time
+   fail-closed" and drop the save-time claim from those three places.
 
 ## Non-Goals
 - Detail-row auto-sum (computing/auto-filling the total) — separate later lock. It
