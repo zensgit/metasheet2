@@ -97,11 +97,16 @@ bucket (field, view, sheet_config, and field/view/sheet permission), then listin
 **Mutation-proven**: dropping the `canManageSheetAccess` guard (so sheet_config is always allowed) makes the
 write-but-not-share DENY golden fail — the deny assertion has teeth, it isn't allow-only-green.
 
-### 3.2 R4 — 5 jsdom specs
+### 3.2 R4 — 6 jsdom specs (5 component + 1 wire lock)
 
 `multitable-config-history-modal.spec.ts` (in the `multitable-web-guard`): faithful render (both rows kept, incl.
 `before → after`), the entity-type filter **emits** a re-fetch (and does *not* client-cull the list), loading state,
 empty state (an actor who manages no config), and close. `vue-tsc -b` clean.
+
+Plus the **R3↔R4 wire lock** (the drift-prone seam, cf. the `dayIndex` serialization trap): a round-trip asserting
+`getConfigHistory` returns the items off a **real** R3 `{ ok, data: { items } }` envelope (the client's `parseJson`
+unwraps `.data`). Without it, an envelope change could make `getConfigHistory` silently return `[]` while every
+isolated R3 golden and R4 component spec stayed green — each half tested, the wire between them uncovered.
 
 ### 3.3 The full T9 line under test
 
