@@ -562,11 +562,13 @@ function evaluateAst(ast: FormulaAst, formData: Record<string, unknown>): Formul
     case 'binary': {
       if (ast.op === 'AND') {
         const left = assertBoolean(evaluateAst(ast.left, formData), 'AND left operand')
-        return left && assertBoolean(evaluateAst(ast.right, formData), 'AND right operand')
+        const right = assertBoolean(evaluateAst(ast.right, formData), 'AND right operand')
+        return left && right
       }
       if (ast.op === 'OR') {
         const left = assertBoolean(evaluateAst(ast.left, formData), 'OR left operand')
-        return left || assertBoolean(evaluateAst(ast.right, formData), 'OR right operand')
+        const right = assertBoolean(evaluateAst(ast.right, formData), 'OR right operand')
+        return left || right
       }
       const left = assertFiniteNumber(evaluateAst(ast.left, formData), `${ast.op} left operand`)
       const right = assertFiniteNumber(evaluateAst(ast.right, formData), `${ast.op} right operand`)

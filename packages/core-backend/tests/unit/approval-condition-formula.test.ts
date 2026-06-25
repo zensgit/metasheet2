@@ -58,6 +58,17 @@ describe('approval condition formula evaluator (FC-1)', () => {
     expect(() => evaluateApprovalConditionFormula('MIN({items.amount}) >= 1', { items: [] })).toThrow(/at least one/)
   })
 
+  it('does not let boolean short-circuiting hide malformed aggregate data', () => {
+    expect(() => evaluateApprovalConditionFormula(
+      '{expense_type} == "travel" AND SUM({items.amount}) >= 1',
+      { expense_type: 'office', items: [{ amount: 'bad' }] },
+    )).toThrow(/finite number/)
+    expect(() => evaluateApprovalConditionFormula(
+      '{expense_type} == "office" OR SUM({items.amount}) >= 1',
+      { expense_type: 'office', items: [{ amount: 'bad' }] },
+    )).toThrow(/finite number/)
+  })
+
   it('rejects concrete DoS bounds before runtime', () => {
     expect(() => parseApprovalConditionFormula(`${'1+'.repeat(130)}1 > 0`)).toThrow(/AST exceeds/)
     expect(() => parseApprovalConditionFormula(`${'NOT '.repeat(17)}TRUE`)).toThrow(/depth exceeds/)
