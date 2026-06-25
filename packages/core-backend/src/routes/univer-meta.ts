@@ -73,7 +73,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -7638,17 +7638,23 @@ export function univerMetaRouter(): Router {
       const snapshot = await loadEntityConfigSnapshot(pool.query.bind(pool), rev)
       if (!snapshot) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot preview a revert.' } })
       const preview = computeRevertPreview(rev, snapshot)
-      // T9-W-L7: a VIEW revert preview shows `current`/`target` filterInfo, whose literals are
-      // field-read-sensitive (#2052/R9). canManageViews does NOT imply field-read, so redact them
-      // per the requester before returning (the same projection the /config-history read applies).
-      // EXECUTE re-computes the raw target server-side, so a field-denied restorer reverts correctly
-      // without ever seeing the denied literal.
+      // T9-W-L7: a VIEW revert preview shows `current`/`target` filterInfo, whose literals are field-read-sensitive
+      // (#2052/R9). canManageViews does NOT imply field-read, so redact them per the requester before returning.
+      // EXECUTE re-computes the raw target server-side, so a field-denied restorer reverts correctly without ever
+      // seeing the denied literal. The redaction is display-only — it runs AFTER computeRevertPreview, so it does
+      // not affect the baselineHash the token binds (that hash is over the raw config, consistent with execute).
       if (rev.entity_type === 'view') {
         const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
         preview.current = redactViewConfigFilterLiterals(preview.current as { filterInfo?: unknown }, allowedFieldIds) as Record<string, unknown>
         preview.target = redactViewConfigFilterLiterals(preview.target as { filterInfo?: unknown }, allowedFieldIds) as Record<string, unknown>
       }
-      return res.json({ ok: true, data: { preview } })
+      // T9-W-L4/D5: mint a server-signed identity binding this preview to execute. The baselineHash alone is
+      // client-computable, so execute REQUIRES this token — a caller cannot skip the preview by computing the hash.
+      const previewToken = mintConfigRestorePreviewIdentity({
+        sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+        baselineHash: preview.baselineHash, actorId: access.userId,
+      })
+      return res.json({ ok: true, data: { preview, previewToken } })
     } catch (err: unknown) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -7664,8 +7670,8 @@ export function univerMetaRouter(): Router {
   router.post('/sheets/:sheetId/config-restore-execute', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const revisionId = typeof req.body?.revisionId === 'string' ? req.body.revisionId.trim() : ''
-    const baselineHash = typeof req.body?.baselineHash === 'string' ? req.body.baselineHash : ''
-    if (!sheetId || !revisionId || !baselineHash) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, revisionId and baselineHash are required' } })
+    const previewToken = typeof req.body?.previewToken === 'string' ? req.body.previewToken : ''
+    if (!sheetId || !revisionId || !previewToken) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, revisionId and previewToken are required' } })
     try {
       const pool = poolManager.get()
       const revRes = await pool.query('SELECT id, sheet_id, entity_type, entity_id, action, before, after, changed_keys FROM meta_config_revisions WHERE id = $1 AND sheet_id = $2', [revisionId, sheetId])
@@ -7686,7 +7692,18 @@ export function univerMetaRouter(): Router {
         const snapshot = await loadEntityConfigSnapshot(query, rev)
         if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
         const preview = computeRevertPreview(rev, snapshot)
-        if (preview.baselineHash !== baselineHash) return { status: 409, code: 'PREVIEW_STALE', message: 'The config changed since preview; re-preview before restoring.' }
+        // T9-W-L4/D5: REQUIRE + verify the server-minted preview identity. It binds revision/entity/actor, and its
+        // baselineHash claim must equal the CURRENT state — so a forged/absent token fails (no preview-skip) and a
+        // stale token (drift since preview) fails mismatch_baselineHash.
+        const verdict = verifyConfigRestorePreviewIdentity(previewToken, {
+          sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+          baselineHash: preview.baselineHash, actorId: access.userId,
+        })
+        if (!verdict.valid) {
+          return verdict.reason === 'mismatch_baselineHash'
+            ? { status: 409, code: 'PREVIEW_STALE', message: 'The config changed since preview; re-preview before restoring.' }
+            : { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before restoring.' }
+        }
         if (preview.driftConflict) return { status: 409, code: 'CONFIG_DRIFT', message: 'The config was changed after this revision; cannot safely revert without re-previewing.' }
         await applyConfigRevert(query, rev)
         await recordConfigRevision(query, {
@@ -8379,9 +8396,14 @@ export function univerMetaRouter(): Router {
       expectedVersions: z.record(z.string(), z.number().int().nonnegative()),
       previewIdentity: z.string().min(1),
       fieldIds: z.array(z.string().min(1)).min(1).optional(),
+      // BS-3.1 (SR-5 / D2 opt-in): all-or-nothing mode. Default false = the back-compat PARTIAL behavior (each
+      // record restores or is skipped+reported). When true: any single denied/forbidden/conflicted record in scope
+      // blocks the ENTIRE batch (one transaction, ZERO writes) → 409 with the full blocker list. Transactional
+      // callers opt in; the surgical PARTIAL default is unchanged.
+      allOrNothing: z.boolean().optional().default(false),
     }).safeParse(req.body)
     if (!parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
-    const { targetVersion, recordIds: requestedIds, expectedVersions, previewIdentity, fieldIds } = parsed.data
+    const { targetVersion, recordIds: requestedIds, expectedVersions, previewIdentity, fieldIds, allOrNothing } = parsed.data
     const uniqueIds = [...new Set(requestedIds)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)) // ONE canonical source (sorted, deduped)
     for (const id of uniqueIds) if (typeof expectedVersions[id] !== 'number') return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `expectedVersions missing for ${id}` } })
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
@@ -8444,29 +8466,67 @@ export function univerMetaRouter(): Router {
         const status = verdict.reason === 'expired' ? 410 : 409
         return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Batch preview identity rejected (${verdict.reason}); the scope or a record diff changed since preview — re-preview` } })
       }
-      // Step 3: per-record write fan-out (PARTIAL). Each record is its OWN patchRecords (its OWN transaction), so a
-      // row-deny / version-conflict / field-forbidden on one record skips ONLY that record. The in-transaction CAS
-      // (RecordChange.expectedVersion under SELECT FOR UPDATE) is the authoritative concurrency guard.
+      // Shared per-record pre-write FORBIDDEN gate (#1 layer-3): a field that is hidden / field-definition-readOnly
+      // (static) OR per-subject visible=false / read_only=true (layer-3) must not be written. patchRecords enforces
+      // ONLY the static axis, so a visible-but-readOnly field would slip through — gate the WHOLE record here. ONE
+      // source of truth shared by BOTH the PARTIAL loop and the all-or-nothing preflight (no drift across modes).
+      const recordIsForbidden = (diff: RecordChange[]): boolean => diff.some((ch) => {
+        const guard = fieldById.get(ch.fieldId)
+        const perm = fieldPermissions[ch.fieldId]
+        const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
+        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        return !staticOk || !layer3Ok
+      })
       const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
       const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
       if (yjsInvalidator) recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
       type Outcome = { recordId: string; status: 'restored' | 'skipped'; newVersion?: number; restoredFieldIds?: string[]; skipReason?: 'denied' | 'conflict' | 'forbidden' | 'error' }
+
+      // BS-3.1 (SR-5 / D2 opt-in): ALL-OR-NOTHING. Any single denied/forbidden/conflicted record blocks the ENTIRE
+      // batch and writes NOTHING. denied (fresh row-deny) + forbidden (layer-3) are NOT enforced by patchRecords →
+      // preflight them in-route over EVERY contributing record and collect ALL blockers (no write attempted yet, so
+      // zero writes is structural). conflict is the in-transaction CAS: a SINGLE patchRecords over the whole map runs
+      // in ONE transaction (this.pool.transaction) and THROWS on any per-record version conflict / field-forbidden /
+      // validation → the whole transaction rolls back → ZERO writes (no preflight version-compare: that would
+      // duplicate the CAS + open a TOCTOU gap). The success path writes EVERY record atomically.
+      if (allOrNothing) {
+        const blockers: Array<{ recordId: string; reason: 'denied' | 'forbidden' }> = []
+        for (const c of contributing) {
+          if (deniedIds.has(c.recordId)) { blockers.push({ recordId: c.recordId, reason: 'denied' }); continue }
+          if (recordIsForbidden(c.diff)) { blockers.push({ recordId: c.recordId, reason: 'forbidden' }) }
+        }
+        if (blockers.length > 0) {
+          // distinct code from PREVIEW_IDENTITY_INVALID (re-preview) — this means "a record is denied/forbidden"
+          return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: `All-or-nothing batch restore blocked: ${blockers.length} record(s) denied or forbidden; nothing written`, blockers } })
+        }
+        try {
+          const result = await recordWriteService.patchRecords({
+            sheetId, changesByRecord: new Map(contributing.map((c) => [c.recordId, c.diff])), actorId: getRequestActorId(req),
+            fields, visiblePropertyFields: readableEchoFields, visiblePropertyFieldIds: readableEchoFieldIds,
+            attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore',
+          })
+          const versionByRecord = new Map(result.updated.map((u) => [u.recordId, u.version]))
+          const records: Outcome[] = contributing.map((c) => ({ recordId: c.recordId, status: 'restored', newVersion: versionByRecord.get(c.recordId), restoredFieldIds: c.diff.map((d) => d.fieldId) }))
+          return res.json({ ok: true, data: { records, restoredCount: records.length, skippedCount: 0, targetVersion } })
+        } catch (err) {
+          // the WHOLE transaction rolled back → zero writes. The CAS aborts on the FIRST conflicting record, so the
+          // conflict blocker list is first-only BY DESIGN (a full version preflight would reintroduce the TOCTOU we
+          // deliberately avoid). denied/forbidden are reported in full above (those are preflighted, not thrown).
+          if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: 'All-or-nothing batch restore blocked: a record version conflicted; nothing written', blockers: [{ recordId: (err as ServiceVersionConflictError).recordId, reason: 'conflict' }] } })
+          if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: 'All-or-nothing batch restore blocked: a record field is forbidden; nothing written', blockers: [{ recordId: '', reason: 'forbidden' }] } })
+          if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: `All-or-nothing batch restore blocked: ${(err as Error).message}; nothing written`, blockers: [{ recordId: '', reason: 'error' }] } })
+          throw err
+        }
+      }
+
+      // Step 3: per-record write fan-out (PARTIAL). Each record is its OWN patchRecords (its OWN transaction), so a
+      // row-deny / version-conflict / field-forbidden on one record skips ONLY that record. The in-transaction CAS
+      // (RecordChange.expectedVersion under SELECT FOR UPDATE) is the authoritative concurrency guard.
       const outcomes: Outcome[] = []
       for (const c of contributing) {
         // fresh per-record row-deny re-check (the rare deny-added-since-preview edge) → partial-skip, no oracle leak
         if (deniedIds.has(c.recordId)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'denied' }); continue }
-        // #1 layer-3 per-subject WRITE gate (the EXACT derive the legacy /restore gates with): a field that is
-        // hidden / field-definition-readOnly (static) OR per-subject visible=false / read_only=true (layer-3) must
-        // not be written. patchRecords enforces only the static axis, so a visible-but-readOnly field would slip
-        // through — gate the WHOLE record here (skip:forbidden, PARTIAL), the others proceed.
-        const hasForbidden = c.diff.some((ch) => {
-          const guard = fieldById.get(ch.fieldId)
-          const perm = fieldPermissions[ch.fieldId]
-          const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
-          const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
-          return !staticOk || !layer3Ok
-        })
-        if (hasForbidden) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
+        if (recordIsForbidden(c.diff)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
         try {
           const result = await recordWriteService.patchRecords({
             sheetId, changesByRecord: new Map([[c.recordId, c.diff]]), actorId: getRequestActorId(req),

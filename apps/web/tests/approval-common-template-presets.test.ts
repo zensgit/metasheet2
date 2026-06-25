@@ -134,3 +134,23 @@ describe('common approval template presets', () => {
     })
   })
 })
+
+describe('amount-tier presets ship the server-side total-check mapping (#3161)', () => {
+  it('purchase_amount_tier carries amountConsistencyCheck → purchase_items.amount', () => {
+    const { formSchema } = buildCommonApprovalTemplatePresetPayload('purchase_amount_tier')
+    expect(formSchema.amountConsistencyCheck).toEqual({
+      totalFieldId: 'amount', detailFieldId: 'purchase_items', amountColumnId: 'amount',
+    })
+  })
+  it('reimbursement_amount_tier carries amountConsistencyCheck → expense_items.amount', () => {
+    const { formSchema } = buildCommonApprovalTemplatePresetPayload('reimbursement_amount_tier')
+    expect(formSchema.amountConsistencyCheck).toEqual({
+      totalFieldId: 'amount', detailFieldId: 'expense_items', amountColumnId: 'amount',
+    })
+  })
+  it('the basic (non-amount-tier) presets do NOT carry the mapping', () => {
+    for (const id of ['leave', 'reimbursement', 'purchase'] as const) {
+      expect(buildCommonApprovalTemplatePresetPayload(id).formSchema.amountConsistencyCheck).toBeUndefined()
+    }
+  })
+})

@@ -530,8 +530,11 @@
       :entity-type="configHistory.entityType"
       :record-label-of="configHistoryLabelOf"
       :is-zh="isZh"
+      :preview-revert="configRestorePreview"
+      :execute-revert="configRestoreExecute"
       @close="closeConfigHistory"
       @filter-change="onConfigHistoryFilter"
+      @reverted="onConfigReverted"
     />
   </div>
 </template>
@@ -633,6 +636,7 @@ import MetaViewManager from '../components/MetaViewManager.vue'
 import TrashModal from '../components/TrashModal.vue'
 import HistoryCenterModal from '../components/HistoryCenterModal.vue'
 import MetaConfigHistoryModal from '../components/MetaConfigHistoryModal.vue'
+import { refreshAfterConfigRevert } from './config-revert-refresh'
 import type { MetaConfigRevision } from '../api/client'
 import MetaSheetPermissionManager from '../components/MetaSheetPermissionManager.vue'
 import MetaAutomationManager from '../components/MetaAutomationManager.vue'
@@ -894,6 +898,25 @@ async function loadConfigHistory(entityType: string) {
     configHistory.value = { ...configHistory.value, loading: false, items: [] }
     showError((error as Error)?.message ?? recordLabel('record.errorHistoryLoad', isZh.value))
   }
+}
+// T9-W: the modal owns the revert UI; the workbench owns the client. The server gates — these just forward.
+function configRestorePreview(revisionId: string) {
+  return workbench.client.getConfigRestorePreview(workbench.activeSheetId.value, revisionId)
+}
+function configRestoreExecute(revisionId: string, previewToken: string) {
+  return workbench.client.executeConfigRestore(workbench.activeSheetId.value, revisionId, previewToken)
+}
+async function onConfigReverted() {
+  // A revert changes field name/order or view filter/config — reload sheet meta + grid so the field
+  // names / view filter / grid reflect the reverted state, not just the history list (otherwise the
+  // user sees "撤销成功" over stale config until manual refresh). See refreshAfterConfigRevert.
+  await refreshAfterConfigRevert({
+    sheetId: workbench.activeSheetId.value,
+    loadSheetMeta: (id) => workbench.loadSheetMeta(id),
+    loadViewData: (off) => grid.loadViewData(off),
+    offset: grid.page.value.offset,
+  })
+  void loadConfigHistory(configHistory.value.entityType) // a revert added a source=restore row + changed the entity
 }
 function openConfigHistory() {
   if (!workbench.activeSheetId.value) return

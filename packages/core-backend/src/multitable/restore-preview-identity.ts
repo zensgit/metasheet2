@@ -203,3 +203,47 @@ export function verifyPitRevertPreviewIdentity(token: string, expected: PitRever
   if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
   return { valid: true }
 }
+
+// ── T9-W: config-restore preview-identity (D5 / T9-W-L4) ──────────────────────────────────────────────────────
+// A config-restore PREVIEW (T9-W-1) mints an identity binding {sheetId, revisionId, entityType, entityId,
+// baselineHash, actorId}; EXECUTE (T9-W-2) REQUIRES + verifies it. Without this, the baselineHash alone is
+// client-computable (sha256 over the current changed-key config), so a caller could skip the preview entirely —
+// breaking the preview-first contract. `type: 'config-restore-preview'` keeps it disjoint from record/scoped
+// identities. Stateless JWT/HS256: signature defeats forgery, `exp` bounds the window, and the baselineHash claim
+// defeats stale replay (drift since preview → the execute's re-hash diverges → reject → re-preview).
+export interface ConfigRestorePreviewIdentityClaims {
+  sheetId: string
+  revisionId: string
+  entityType: string
+  entityId: string
+  /** the baseline config hash the preview saw (config-restore.ts `configBaselineHash`). */
+  baselineHash: string
+  /** the actor the preview was minted for — a preview minted for A is unusable by B. */
+  actorId: string
+}
+
+export function mintConfigRestorePreviewIdentity(claims: ConfigRestorePreviewIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
+  return jwt.sign({ type: 'config-restore-preview', ...claims }, getSecret(), { algorithm: 'HS256', expiresIn } as SignOptions)
+}
+
+export interface ConfigRestoreVerifyResult {
+  valid: boolean
+  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_revisionId' | 'mismatch_entityType' | 'mismatch_entityId' | 'mismatch_baselineHash' | 'mismatch_actorId'
+}
+
+export function verifyConfigRestorePreviewIdentity(token: string, expected: ConfigRestorePreviewIdentityClaims): ConfigRestoreVerifyResult {
+  let payload: Partial<ConfigRestorePreviewIdentityClaims> & { type?: string }
+  try {
+    payload = jwt.verify(token, getSecret()) as Partial<ConfigRestorePreviewIdentityClaims> & { type?: string }
+  } catch (e) {
+    return { valid: false, reason: (e as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid' }
+  }
+  if (payload.type !== 'config-restore-preview') return { valid: false, reason: 'wrong_type' }
+  if (payload.sheetId !== expected.sheetId) return { valid: false, reason: 'mismatch_sheetId' }
+  if (payload.revisionId !== expected.revisionId) return { valid: false, reason: 'mismatch_revisionId' }
+  if (payload.entityType !== expected.entityType) return { valid: false, reason: 'mismatch_entityType' }
+  if (payload.entityId !== expected.entityId) return { valid: false, reason: 'mismatch_entityId' }
+  if (payload.baselineHash !== expected.baselineHash) return { valid: false, reason: 'mismatch_baselineHash' }
+  if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
+  return { valid: true }
+}

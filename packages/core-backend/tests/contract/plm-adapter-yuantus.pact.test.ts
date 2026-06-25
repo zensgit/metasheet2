@@ -18,9 +18,9 @@
  *      are present, in the documented order.
  *      including `aml/metadata`, now that PLMAdapter calls the dedicated
  *      metadata route for item-type schema discovery.
- *   3. The PLMAdapter actually calls every endpoint declared in the pact, so
- *      the contract cannot drift away from the live consumer code without
- *      this test failing.
+ *   3. PLMAdapter actually calls every adapter-owned endpoint declared in the
+ *      pact. V1.2's embed-token mint is the one parent-host-mediated exception:
+ *      Yuantus calls it before posting the token into the MetaSheet iframe.
  *
  * What this test does NOT yet do:
  *
@@ -65,6 +65,9 @@ interface PactInteraction {
   response: {
     status: number
     body?: unknown
+    matchingRules?: {
+      body?: Record<string, unknown>
+    }
   }
 }
 
@@ -79,7 +82,7 @@ interface PactDocument {
 // "planned" or "anticipated" must NOT live in this list — the contract-first
 // principle requires that pact freezes what is actually used, never aspiration.
 //
-const PACT_PATHS = [
+const PLM_ADAPTER_PACT_PATHS = [
   { method: 'POST', path: '/api/v1/auth/login' },
   { method: 'GET', path: '/api/v1/health' },
   { method: 'GET', path: '/api/v1/search/' },
@@ -115,6 +118,15 @@ const PACT_PATHS = [
   { method: 'GET', path: '/api/v1/bom/multitable/01H000000000000000000000P1/context' },
 ] as const
 
+const PARENT_HOST_PACT_PATHS = [
+  // PLM-COLLAB V1.2: the Yuantus parent host mints the token that powers the MetaSheet embed.
+  // This is intentionally not a PLMAdapter call; it is still part of the broker artifact because
+  // the MetaSheet embed runtime depends on this token envelope.
+  { method: 'POST', path: '/api/v1/bom/multitable/01H000000000000000000000P1/embed-token' },
+] as const
+
+const PACT_PATHS = [...PLM_ADAPTER_PACT_PATHS, ...PARENT_HOST_PACT_PATHS] as const
+
 function loadPact(): PactDocument {
   const raw = readFileSync(PACT_PATH, 'utf8')
   return JSON.parse(raw) as PactDocument
@@ -132,7 +144,7 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
     expect(pact.metadata.pactSpecification.version).toBe('3.0.0')
   })
 
-  it('contains exactly the currently used interactions PLMAdapter calls, in documented order', () => {
+  it('contains exactly the adapter-owned plus V1.2 parent-host-mediated interactions, in documented order', () => {
     const pact = loadPact()
     expect(pact.interactions).toHaveLength(PACT_PATHS.length)
     pact.interactions.forEach((interaction, index) => {
@@ -151,11 +163,13 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
     }
   })
 
-  it('every protected endpoint is also called by the live PLMAdapter source', () => {
+  it('every adapter-owned protected endpoint is also called by the live PLMAdapter source', () => {
     const adapterSrc = loadAdapter()
-    // Every endpoint declared in the pact should appear verbatim in
-    // PLMAdapter.ts (as path segments or helper callsites), so the pact
-    // cannot silently drift away from the live consumer implementation.
+    // Every PLMAdapter-owned endpoint declared in the pact should appear verbatim in
+    // PLMAdapter.ts (as path segments or helper callsites), so the pact cannot silently
+    // drift away from the live consumer implementation. V1.2's embed-token mint is the
+    // one documented exception: the Yuantus parent host calls it before posting the token
+    // into the MetaSheet iframe.
     const endpointsToFind = [
       '/api/v1/auth/login',
       '/api/v1/health',
@@ -192,6 +206,26 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
         `PLMAdapter.ts no longer references ${ep}; pact has drifted from the consumer.`,
       ).toBe(true)
     }
+  })
+
+  it('documents the V1.2 parent-host-mediated embed-token mint contract', () => {
+    const pact = loadPact()
+    const interaction = pact.interactions.find(
+      i => i.request.path === '/api/v1/bom/multitable/01H000000000000000000000P1/embed-token',
+    )
+    expect(interaction).toBeDefined()
+    expect(interaction!.request.method).toBe('POST')
+    expect(interaction!.request.body).toEqual({ origin: 'https://metasheet.example' })
+    const body = interaction!.response.body as Record<string, unknown>
+    expect(body.feature_key).toBe('bom_multitable')
+    expect(body.entitled).toBe(true)
+    expect(body.token_type).toBe('embed')
+    expect(body.aud).toBe('metasheet2.embed')
+    expect(body.embed_origin).toBe('https://metasheet.example')
+    const rules = interaction!.response.matchingRules?.body ?? {}
+    expect(rules).toHaveProperty('$.embed_token')
+    expect(rules).toHaveProperty('$.jti')
+    expect(rules).toHaveProperty('$.expires_in')
   })
 
   it('aml/apply request body documents the RPC envelope shape used by PLMAdapter', () => {

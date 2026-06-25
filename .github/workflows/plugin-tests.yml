@@ -215,6 +215,7 @@ jobs:
             tests/integration/multitable-restore-per-field-realdb.test.ts \
             tests/integration/multitable-restore-batch-preview-realdb.test.ts \
             tests/integration/multitable-restore-batch-execute-realdb.test.ts \
+            tests/integration/multitable-restore-batch-allornothing-realdb.test.ts \
             tests/integration/multitable-config-revisions-realdb.test.ts \
             tests/integration/multitable-config-restore-realdb.test.ts \
             tests/integration/multitable-revert-pit-realdb.test.ts \
@@ -311,6 +312,7 @@ jobs:
             tests/integration/approval-delegation-api.db.test.ts \
             tests/integration/approval-detail-subform.db.test.ts \
             tests/integration/approval-common-template-presets.api.test.ts \
+            tests/integration/approval-amount-total-check.api.test.ts \
             tests/integration/approval-wp1-parallel-gateway.api.test.ts \
             --reporter=dot
 

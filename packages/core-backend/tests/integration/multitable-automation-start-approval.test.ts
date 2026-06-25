@@ -553,7 +553,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
       return new Response('OK', { status: 200 })
     }) as never)
     try {
-      await executeAndApprove(svc, { statusField: 'missing_approval_status' }, 'Missing writeback field')
+      const { executionId } = await executeAndApprove(svc, { statusField: 'missing_approval_status' }, 'Missing writeback field')
 
       const rec = await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [RECORD, SHEET])
       const data = rec.rows[0].data as Record<string, unknown>
@@ -561,29 +561,34 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
       expect(data).not.toHaveProperty('missing_approval_status')
       // Field-validation failure is fail-closed for the write, not a second way to block W6 resume.
       expect(calls).toEqual(['https://example.test/w6-tail'])
+      // W7-obs: the skip reason is surfaced on the start_approval step result (run history), not just logs.
+      const resumed = await waitForExecutionStatus(svc, executionId, 'success')
+      const startStep = resumed.steps.find((step) => step.actionType === 'start_approval')
+      expect(startStep?.output).toMatchObject({ backwriteSkipped: expect.stringContaining('target field not found') })
     } finally {
       svc.shutdown()
     }
   })
 
-  test('W7-1b: resultWriteback skips writes when the mapped target type is incompatible', async () => {
-    const calls: string[] = []
-    const svc = makeAutomationService((async (url: string) => {
-      calls.push(url)
-      return new Response('OK', { status: 200 })
-    }) as never)
+  test('W7-obs: resultWriteback with an incompatible target type is rejected at rule-save (fail-fast)', async () => {
+    const svc = makeAutomationService((async () => new Response('OK', { status: 200 })) as never)
     try {
       await seedSheetRecord('Wrong writeback type')
       await seedWritebackFields([
         { id: 'approval_status_number', name: 'Approval Status Number', type: 'number', order: 30 },
       ])
-      await executeAndApprove(svc, { statusField: 'approval_status_number' }, 'Wrong writeback type')
+      // W7-obs rule-save fail-fast: a statusField mapped to a number column is an unambiguous misconfig
+      // for an EXISTING field, so it is caught at createRule rather than saved and silently skipped at
+      // submit. The runtime skip-don't-block posture (W7-1b) is preserved for MISSING fields (the test
+      // above — createRule stays lenient on absence) and for post-save schema changes.
+      await expect(
+        executeAndApprove(svc, { statusField: 'approval_status_number' }, 'Wrong writeback type'),
+      ).rejects.toThrow(/must be string\/longText\/select/)
 
+      // The rule was rejected, so nothing was written to the record.
       const rec = await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [RECORD, SHEET])
       const data = rec.rows[0].data as Record<string, unknown>
-      expect(data.title).toBe('Wrong writeback type')
       expect(data).not.toHaveProperty('approval_status_number')
-      expect(calls).toEqual(['https://example.test/w6-tail'])
     } finally {
       svc.shutdown()
     }

@@ -165,8 +165,18 @@ export interface FormField {
   maxRows?: number
 }
 
+export interface AmountConsistencyMapping {
+  totalFieldId: string
+  detailFieldId: string
+  amountColumnId: string
+}
+
 export interface FormSchema {
   fields: FormField[]
+  // Server-side amount total-check (design-lock #3161): when present, the backend rejects a create
+  // whose top-level total ≠ the sum of the detail-row amounts. Authored here / preserved by the backend
+  // assertFormSchema; the FE just carries it verbatim (the backend is the sole arbiter).
+  amountConsistencyCheck?: AmountConsistencyMapping
 }
 
 export interface ApprovalRequesterSnapshot {
