@@ -182,6 +182,9 @@ detail array after pruning:
   fail closed in v1;
 - `COUNT({detail})` counts submitted rows;
 - `SUM({detail.amount})` requires every referenced amount cell to be numeric.
+- Boolean `AND`/`OR` must not short-circuit away malformed aggregate operands;
+  aggregate errors fail closed even when the other operand already determines
+  the boolean result.
 
 Reason: approval routing should not silently ignore malformed monetary data.
 
