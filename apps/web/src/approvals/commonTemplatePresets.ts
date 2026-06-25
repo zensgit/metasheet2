@@ -199,6 +199,19 @@ function purchaseSchema(): FormSchema {
   }
 }
 
+// Server-side amount total-check (design-lock #3161): attach the consistency mapping so the amount-tier
+// presets are protected by default — the backend rejects a submission whose top-level total ≠ the sum of
+// the detail-row amounts (closing the under-stated-total bypass of the higher tier). The basic presets
+// keep no mapping. The backend validates + persists it; the FE just declares it.
+function withAmountConsistency(
+  schema: FormSchema,
+  totalFieldId: string,
+  detailFieldId: string,
+  amountColumnId: string,
+): FormSchema {
+  return { ...schema, amountConsistencyCheck: { totalFieldId, detailFieldId, amountColumnId } }
+}
+
 // Amount-tier reimbursement (design-lock #3114): a condition node gates a higher-tier approver on the
 // top-level `amount`. Low amount → end after the direct manager; amount ≥ threshold → a dept-head
 // (higher-tier) approval before end. Default threshold 5000, editable in the condition-node rule
@@ -314,7 +327,7 @@ function presetConfig(id: CommonApprovalTemplatePresetId): {
         name: '报销审批（金额分级）',
         description: '高额报销自动升级审批草稿。金额阈值与各级审批人可在编辑页调整后再发布。',
         category: '报销',
-        formSchema: reimbursementSchema(),
+        formSchema: withAmountConsistency(reimbursementSchema(), 'amount', 'expense_items', 'amount'),
         approvalGraph: reimbursementAmountTierGraph(),
       }
     case 'purchase_amount_tier':
@@ -323,7 +336,7 @@ function presetConfig(id: CommonApprovalTemplatePresetId): {
         name: '采购审批（金额分级）',
         description: '高额采购升级为并行会签草稿。金额阈值、汇聚模式（会签/或签）与各级审批人可在编辑页调整后再发布。',
         category: '采购',
-        formSchema: purchaseSchema(),
+        formSchema: withAmountConsistency(purchaseSchema(), 'amount', 'purchase_items', 'amount'),
         approvalGraph: purchaseAmountTierGraph(),
       }
   }
