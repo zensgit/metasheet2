@@ -530,8 +530,11 @@
       :entity-type="configHistory.entityType"
       :record-label-of="configHistoryLabelOf"
       :is-zh="isZh"
+      :preview-revert="configRestorePreview"
+      :execute-revert="configRestoreExecute"
       @close="closeConfigHistory"
       @filter-change="onConfigHistoryFilter"
+      @reverted="onConfigReverted"
     />
   </div>
 </template>
@@ -894,6 +897,16 @@ async function loadConfigHistory(entityType: string) {
     configHistory.value = { ...configHistory.value, loading: false, items: [] }
     showError((error as Error)?.message ?? recordLabel('record.errorHistoryLoad', isZh.value))
   }
+}
+// T9-W: the modal owns the revert UI; the workbench owns the client. The server gates — these just forward.
+function configRestorePreview(revisionId: string) {
+  return workbench.client.getConfigRestorePreview(workbench.activeSheetId.value, revisionId)
+}
+function configRestoreExecute(revisionId: string, previewToken: string) {
+  return workbench.client.executeConfigRestore(workbench.activeSheetId.value, revisionId, previewToken)
+}
+function onConfigReverted() {
+  void loadConfigHistory(configHistory.value.entityType) // a revert added a source=restore row + changed the entity
 }
 function openConfigHistory() {
   if (!workbench.activeSheetId.value) return

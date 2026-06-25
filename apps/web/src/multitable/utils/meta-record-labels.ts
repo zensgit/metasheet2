@@ -60,6 +60,10 @@ export type MetaRecordLabelKey =
   | 'record.configHistoryEntityField' | 'record.configHistoryEntityView' | 'record.configHistoryEntityPermission'
   | 'record.configHistoryEntitySheetConfig' | 'record.configHistoryActionCreate' | 'record.configHistoryActionUpdate'
   | 'record.configHistoryActionDelete' | 'record.configHistoryEmpty' | 'record.configHistoryLoading' | 'record.configHistoryBy'
+  // --- T9-W config-restore (revert a config change) ---
+  | 'record.configRestoreAction' | 'record.configRestoreTitle' | 'record.configRestoreWillRevert'
+  | 'record.configRestoreDrift' | 'record.configRestoreGated' | 'record.configRestoreConfirm'
+  | 'record.configRestoreCancel' | 'record.configRestoreError'
   // FE-owned static fallback strings (the `error?.message ?? l(...)`
   // pattern from T3A2). Backend error.message remains raw when present.
   | 'record.errorHistoryLoad' | 'record.errorWatchLoad' | 'record.errorWatchUpdate'
@@ -172,6 +176,14 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.configHistoryEmpty': { en: 'No config changes', zh: '暂无配置变更' },
   'record.configHistoryLoading': { en: 'Loading…', zh: '加载中…' },
   'record.configHistoryBy': { en: 'by', zh: '操作人' },
+  'record.configRestoreAction': { en: 'Revert', zh: '撤销' },
+  'record.configRestoreTitle': { en: 'Revert this change', zh: '撤销此变更' },
+  'record.configRestoreWillRevert': { en: 'This will revert:', zh: '将撤销为：' },
+  'record.configRestoreDrift': { en: 'The config changed since this revision — re-preview before reverting.', zh: '此后配置已变更 — 请重新预览后再撤销。' },
+  'record.configRestoreGated': { en: "This change can't be reverted in this version.", zh: '此变更暂不支持撤销。' },
+  'record.configRestoreConfirm': { en: 'Revert', zh: '确认撤销' },
+  'record.configRestoreCancel': { en: 'Cancel', zh: '取消' },
+  'record.configRestoreError': { en: 'Revert failed', zh: '撤销失败' },
   'record.errorRestore': { en: 'Restore failed', zh: '恢复失败' },
   'record.errorHistoryLoad': { en: 'Failed to load history', zh: '加载历史失败' },
   'record.errorWatchLoad': { en: 'Failed to load watch status', zh: '加载关注状态失败' },

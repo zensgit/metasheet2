@@ -1023,6 +1023,22 @@ export interface MetaConfigRevision {
   createdAt: string
 }
 
+// T9-W: the would-be revert of a recorded config change (server-computed; the FE renders it as-is).
+export interface ConfigRestorePreview {
+  revisionId: string
+  entityType: string
+  entityId: string
+  changedKeys: string[]
+  current: Record<string, unknown>
+  target: Record<string, unknown>
+  driftConflict: boolean
+  opKind: 'safe' | 'gated'
+  gatedReason?: string
+  baselineHash: string
+  /** the server-minted preview identity, REQUIRED by execute (preview-first; a client-computed hash is rejected). */
+  previewToken: string
+}
+
 export interface AiShortcutPreviewData {
   status: 'succeeded'
   action: 'preview'
@@ -1885,6 +1901,28 @@ export class MultitableApiClient {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/config-history${qs(params ?? {})}`)
     const data = await this.parseJson<{ items?: MetaConfigRevision[] }>(res)
     return Array.isArray(data.items) ? data.items : []
+  }
+
+  // T9-W: preview a config-restore (read-only) — server computes the revert + drift/gated decision; FE renders as-is.
+  async getConfigRestorePreview(sheetId: string, revisionId: string): Promise<ConfigRestorePreview> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/config-restore-preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revisionId }),
+    })
+    const data = await this.parseJson<{ preview: ConfigRestorePreview; previewToken: string }>(res)
+    return { ...data.preview, previewToken: data.previewToken } // fold the server-minted token into the preview the modal holds
+  }
+
+  // T9-W: execute a config-restore (forward-only write). The server-minted previewToken binds it to the preview and
+  // is REQUIRED — a client-computed hash alone is rejected (preview-first); a stale token → 409.
+  async executeConfigRestore(sheetId: string, revisionId: string, previewToken: string): Promise<void> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/config-restore-execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revisionId, previewToken }),
+    })
+    await this.parseJson<{ restored: unknown }>(res)
   }
 
   // --- Global History & Point-in-Time Restore (read-only) ---
