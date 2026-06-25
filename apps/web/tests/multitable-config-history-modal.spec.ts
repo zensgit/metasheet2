@@ -8,7 +8,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest'
 import { createApp, nextTick } from 'vue'
 
 import MetaConfigHistoryModal from '../src/multitable/components/MetaConfigHistoryModal.vue'
-import type { MetaConfigRevision } from '../src/multitable/api/client'
+import { MultitableApiClient, type MetaConfigRevision } from '../src/multitable/api/client'
 
 const rev = (over: Partial<MetaConfigRevision>): MetaConfigRevision => ({
   id: 'r1', entityType: 'field', entityId: 'fld_1', action: 'create', before: null, after: { name: 'X' },
@@ -69,5 +69,28 @@ describe('MetaConfigHistoryModal — T9-R4 config-history view', () => {
     const props = mountModal({ items: [rev({})] }); await nextTick()
     ;(q('.cfg-history__close') as HTMLButtonElement).click()
     expect(props.onClose).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('getConfigHistory — T9-R3↔R4 wire (drift lock)', () => {
+  it('round-trips the REAL R3 {ok,data:{items}} envelope (not a fixture) — never silently returns []', async () => {
+    // The R3↔R4 seam is drift-prone (cf. dayIndex). R3 returns { ok, data: { items, limit, offset } }; the client's
+    // parseJson unwraps .data, so getConfigHistory reads .items off the unwrapped body. Assert against a real-shaped
+    // envelope so a future envelope change can't make getConfigHistory always-empty while every isolated test stays green.
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      data: { items: [
+        { id: 'cr_1', entityType: 'field', entityId: 'fld_1', action: 'update', before: { name: 'A' }, after: { name: 'B' }, changedKeys: ['name'], batchId: null, actorId: 'u1', createdAt: '2026-06-24T00:00:00Z' },
+      ], limit: 50, offset: 0 },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const items = await client.getConfigHistory('sheet_1', { entityType: 'field' })
+
+    expect(items).toHaveLength(1) // NOT [] — the envelope was unwrapped
+    expect(items[0].entityId).toBe('fld_1')
+    expect(items[0].changedKeys).toEqual(['name'])
+    expect(fetchFn).toHaveBeenCalledWith(expect.stringContaining('/api/multitable/sheets/sheet_1/config-history')) // GET passes the URL only
+    expect(fetchFn.mock.calls[0][0]).toContain('entityType=field')
   })
 })
