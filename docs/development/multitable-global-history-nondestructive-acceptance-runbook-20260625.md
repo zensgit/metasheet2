@@ -104,6 +104,10 @@ The acceptance pass should use at least three actors:
 - [ ] `Config history` opens from the workbench and fetches through the client envelope.
 - [ ] Entity-type filter triggers a server fetch; it is not a client-only cull.
 - [ ] Read gate matches mutation gate per entity type.
+- [ ] A field-denied `canManageViews` actor cannot see denied-field `filterInfo` literals in `/config-history` view
+      revision `before` / `after` payloads.
+- [ ] The same actor cannot see denied-field `filterInfo` literals in `config-restore-preview` view `current` /
+      `target` payloads; execute still applies the raw target server-side.
 - [ ] Field/view safe reverts preview current -> target, then execute with `previewToken`.
 - [ ] A computed or missing token is rejected; baseline hash alone is not accepted.
 - [ ] Drift after preview returns conflict and does not write.
