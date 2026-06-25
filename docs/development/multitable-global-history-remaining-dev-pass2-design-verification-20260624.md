@@ -1,4 +1,4 @@
-# Time Machine remaining-dev (pass 2) — design & verification
+# Global History remaining-dev (pass 2) — design & verification
 
 ## 🚫 BLOCKED ON EXPLICIT SIGN-OFF (not built — by design)
 
@@ -55,7 +55,7 @@ This pass closed the [P1] review findings on the prior pass, then completed the 
 this doc follow. Each new write path is mutation/trigger-proven, allow-and-deny.
 
 ## The honest bottom line
-The read/preview/scoped-write/non-destructive arcs of the Time Machine line are complete and hardened. The **only**
+The read/preview/scoped-write/non-destructive arcs of the Global History / point-in-time restore line are complete and hardened. The **only**
 remaining development is the **destructive Reset (T8-2)** and the **irreversible data-loss config ops** — and those are
 deliberately held at your sign-off, with their decisions resolved and a build plan ready. Say yes to D1–D5 and I build
 T8-2 behind the default-off flag with the full PIT-2 / ceiling / atomicity golden suite.
