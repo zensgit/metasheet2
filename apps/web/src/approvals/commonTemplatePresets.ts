@@ -159,7 +159,9 @@ function reimbursementSchema(): FormSchema {
     fields: [
       selectField('expense_type', '费用类型', ['差旅', '交通', '餐饮', '办公', '其他']),
       field('expense_date', 'date', '费用日期', { required: true }),
-      // Preset v1 does not auto-sum detail rows; admins can keep this as the applicant-entered total.
+      // Amount-tier templates (those declaring amountConsistencyCheck) auto-sum this from the detail
+      // rows in the fill UI (read-only, design-lock #3189); a template without the mapping keeps it
+      // applicant-entered.
       field('amount', 'number', '报销金额', {
         required: true,
         props: { min: 0 },
@@ -180,7 +182,9 @@ function purchaseSchema(): FormSchema {
     fields: [
       selectField('purchase_type', '采购类型', ['办公用品', '设备', '服务', '软件', '其他']),
       field('supplier', 'text', '供应商', { required: true }),
-      // Preset v1 does not auto-sum detail rows; admins can keep this as the applicant-entered total.
+      // Amount-tier templates (those declaring amountConsistencyCheck) auto-sum this from the detail
+      // rows in the fill UI (read-only, design-lock #3189); a template without the mapping keeps it
+      // applicant-entered.
       field('amount', 'number', '预算金额', {
         required: true,
         props: { min: 0 },
