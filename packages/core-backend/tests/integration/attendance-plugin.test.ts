@@ -6067,6 +6067,53 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④ 加班银行 v1-4 — overtimeSettlement on GET /summary when bank ON (convertible by source + must-pay); ABSENT when OFF', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-v14-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    let token: string | undefined
+    let originalSettings: Record<string, unknown> = {}
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) return
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+      const putSettings = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
+      originalSettings = ((await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })).body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
+      const getSummary = async () => {
+        const r = await requestJson(`${baseUrl}/api/attendance/summary?from=2026-09-01&to=2026-09-30`, { headers: { Authorization: `Bearer ${token}` } })
+        expect(r.status).toBe(200)
+        return ((r.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+      }
+      // a banked restday comp_time lot (overtime_source) → should appear under convertibleBySource.restday.
+      await pool.query(
+        `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, overtime_source)
+         VALUES ('default', $1, 'comp_time', 90, 90, 'overtime_conversion', $2, 'active', '2026-01-01', 'restday')`,
+        [userId, `v14:${runSuffix}`],
+      )
+      // (1) bank OFF (default) → no overtimeSettlement field (dormant-clean: response byte-identical).
+      await putSettings({ overtimeBankPolicy: { enabled: false } })
+      expect('overtimeSettlement' in (await getSummary())).toBe(false)
+      // (2) bank ON → overtimeSettlement present; convertibleBySource.restday reflects the banked lot; must-pay present.
+      await putSettings({ overtimeBankPolicy: { enabled: true, pooledSources: ['restday'] } })
+      const s = await getSummary()
+      expect('overtimeSettlement' in s).toBe(true)
+      const settlement = s.overtimeSettlement as { convertibleBySource?: Record<string, number>; mustPayBySource?: Record<string, number> }
+      expect(settlement.convertibleBySource?.restday).toBe(90)
+      expect(settlement.mustPayBySource).toHaveProperty('statutory_holiday')
+    } finally {
+      if (token && Object.keys(originalSettings).length > 0) await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [userId]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS; else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+  })
+
   it('加班三段 O3/O4 — records, report fields, and summary expose approved overtime segment buckets from request snapshots', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL

@@ -11633,6 +11633,48 @@ function resolveFullAttendanceEligible(summary, policy) {
   return true
 }
 
+// 加班银行 v1-4 (design-lock §4 账4 PayrollSettlementPolicy 导出契约): the period-end settlement FACTS —
+// 各来源剩余可折算分钟 + 可折算/必须直付标记, NO amounts (倍率/金额 = payroll). Returns null when
+// overtimeBankPolicy is OFF (dormant — the caller omits the field, response byte-identical). The must-pay
+// marker is an ATTENDANCE fact (§6 legal floor: statutory_holiday OT must be paid, never banked), computed
+// from facts we already have — NOT a payroll inference:
+//   • convertibleBySource = the still-bankable comp_time lot REMAINING by overtime_source (workday/restday,
+//     the v1-1b-poolable sources). disposition = 折算.
+//   • mustPayBySource = OT that must be paid directly. statutory_holiday = the holiday OT total (never banked
+//     by v1-1b → all must-pay). disposition = 直付. (Un-banked workday/restday over-cap must-pay is a later
+//     refinement once cap accounting lands.)
+function buildOvertimeSettlementExport(summary, compTimeRemainingBySource, overtimeBankPolicy) {
+  if (!overtimeBankPolicy || overtimeBankPolicy.enabled !== true) return null
+  const s = summary && typeof summary === 'object' ? summary : {}
+  const banked = compTimeRemainingBySource && typeof compTimeRemainingBySource === 'object' ? compTimeRemainingBySource : {}
+  const minutes = (value) => Math.max(0, Math.floor(Number(value) || 0))
+  return {
+    convertibleBySource: {
+      workday: minutes(banked.workday),
+      restday: minutes(banked.restday),
+    },
+    mustPayBySource: {
+      statutory_holiday: minutes(s.holiday_overtime_minutes),
+    },
+  }
+}
+
+// 加班银行 v1-4: the still-bankable comp_time lot remaining grouped by OT source (workday/restday). A lot's
+// overtime_source is NULL for the dormant/legacy single-lot path → bucketed under 'unsourced' (ignored by the
+// export's known-source keys). statutory_holiday never appears here (v1-1b never banks it).
+async function loadCompTimeRemainingBySource(db, orgId, userId) {
+  const rows = await db.query(
+    `SELECT COALESCE(overtime_source, 'unsourced') AS source, COALESCE(SUM(remaining_minutes), 0)::int AS remaining
+       FROM attendance_leave_balances
+      WHERE org_id = $1 AND user_id = $2 AND leave_type_code = 'comp_time' AND status = 'active'
+      GROUP BY COALESCE(overtime_source, 'unsourced')`,
+    [orgId, userId]
+  )
+  const bySource = {}
+  for (const row of rows) bySource[row.source] = Number(row.remaining) || 0
+  return bySource
+}
+
 async function loadAttendanceSummary(db, orgId, userId, from, to) {
   const countedDaySql = buildAttendanceSummaryCountedDaySql()
   const rows = await db.query(
@@ -18511,6 +18553,7 @@ module.exports = {
     normalizeOvertimeBankPolicySetting,
     resolveOvertimeBankSourceMinutes,
     partitionOvertimeBankGrantLots,
+    buildOvertimeSettlementExport,
   },
   __attendanceLeaveOffsetForTests: {
     LEAVE_DEDUCTION_POOLS,
@@ -23034,6 +23077,15 @@ module.exports = {
           // report-summary table is untouched (that path is not dormant-safe for new fields).
           const fullAttendanceEligible = resolveFullAttendanceEligible(summary, (await getSettings(db))?.attendanceBonusPolicy)
           if (fullAttendanceEligible !== null) data.fullAttendanceEligible = fullAttendanceEligible
+          // 加班银行 v1-4 (§4 账4): surface the period-end settlement FACTS (各来源剩余 + 可折算/直付标记, no
+          // amounts) on this LIVE read, gated on overtimeBankPolicy. DORMANT-CLEAN: the field is OMITTED (and
+          // the lots query is skipped) when the bank is off → byte-identical response; cached report untouched.
+          // must-pay is an attendance fact (§6 legal floor), not a payroll inference.
+          const overtimeBankPolicy = (await getSettings(db))?.overtimeBankPolicy
+          if (overtimeBankPolicy?.enabled === true) {
+            const overtimeSettlement = buildOvertimeSettlementExport(summary, await loadCompTimeRemainingBySource(db, orgId, targetUserId), overtimeBankPolicy)
+            if (overtimeSettlement) data.overtimeSettlement = overtimeSettlement
+          }
 	          res.json({ ok: true, success: true, data })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
