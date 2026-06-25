@@ -314,6 +314,35 @@ describe('data-sources route ownership scope (A0.1)', () => {
 })
 
 describe('DataSourceManager persistence round-trip (A0)', () => {
+  it('loads persisted PLM sources with the PLM adapter surface required by the embed relay', async () => {
+    const m = new DataSourceManager()
+    await m.initialize(fakeDb([
+      {
+        ...dbRecord('plm-v12-staging', 'alice', null, 'plm'),
+        config: {
+          connection: {
+            url: 'http://plm.example.local',
+            headers: { Authorization: 'Bearer token', 'x-tenant-id': 'tenant-demo', 'x-org-id': 'org-demo' },
+          },
+          options: { apiMode: 'yuantus', tenantId: 'tenant-demo', orgId: 'org-demo', itemType: 'Part' },
+        },
+      },
+    ]) as never)
+
+    const adapter = m.getDataSource('plm-v12-staging') as {
+      connect: () => Promise<void>
+      getBomMultitableContext?: unknown
+      getEffectiveTenantId?: () => string | undefined
+      getConfig: () => DataSourceConfig
+    }
+    expect(typeof adapter.getBomMultitableContext).toBe('function')
+    expect(typeof adapter.getEffectiveTenantId).toBe('function')
+
+    await adapter.connect()
+    expect(adapter.getEffectiveTenantId?.()).toBe('tenant-demo')
+    expect(adapter.getConfig().type).toBe('plm')
+  })
+
   it('a source recreated with the same id after deletion still loads after a restart', async () => {
     const { db } = statefulFakeDb()
     const m1 = new DataSourceManager({ db: db as never })
