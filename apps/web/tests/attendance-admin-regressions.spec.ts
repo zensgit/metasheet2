@@ -2632,6 +2632,58 @@ describe('Attendance admin regressions', () => {
     })
   })
 
+  it('loads overtimeBankPolicy into the config card, toggles a source, and PUTs only { overtimeBankPolicy }', async () => {
+    attendanceSettingsData = {
+      overtimeBankPolicy: { enabled: true, pooledSources: ['restday'], maxMinutesPerPeriod: 600, validityDays: 90 },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const enabled = container!.querySelector<HTMLInputElement>('[data-overtime-bank="enabled"]')
+    const workday = container!.querySelector<HTMLInputElement>('[data-overtime-bank-source="workday"]')
+    const restday = container!.querySelector<HTMLInputElement>('[data-overtime-bank-source="restday"]')
+    const cap = container!.querySelector<HTMLInputElement>('[data-overtime-bank="cap"]')
+    const validity = container!.querySelector<HTMLInputElement>('[data-overtime-bank="validity"]')
+    expect(Boolean(enabled && workday && restday && cap && validity)).toBe(true)
+    expect(enabled!.checked).toBe(true)
+    expect(restday!.checked).toBe(true)
+    expect(workday!.checked).toBe(false)
+    expect(cap!.value).toBe('600')
+    expect(validity!.value).toBe('90')
+    // §6 legal floor: statutory_holiday is never offered in the UI.
+    expect(container!.querySelector('[data-overtime-bank-source="statutory_holiday"]')).toBeNull()
+
+    // Edit: add workday to the pool, clear the cap (→ 0 = no cap), shorten validity to 30 days.
+    workday!.click()
+    cap!.value = ''
+    cap!.dispatchEvent(new Event('input'))
+    validity!.value = '30'
+    validity!.dispatchEvent(new Event('input'))
+    await flushUi(2)
+    expect(workday!.checked).toBe(true)
+
+    const saveButton = container!.querySelector<HTMLButtonElement>('[data-overtime-bank="save"]')
+    expect(saveButton).toBeTruthy()
+    saveButton!.click()
+    await flushUi(6)
+
+    // PUT body must be EXACTLY { overtimeBankPolicy: {...} } — toEqual so any other policy leaking in fails.
+    const settingsPuts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(settingsPuts).toHaveLength(1)
+    const body = JSON.parse(String((settingsPuts[0][1] as { body?: string } | undefined)?.body || '{}'))
+    expect(body).toEqual({
+      overtimeBankPolicy: {
+        enabled: true,
+        pooledSources: ['restday', 'workday'],
+        maxMinutesPerPeriod: 0,
+        validityDays: 30,
+      },
+    })
+  })
+
   it('loads multiShiftDay into the config card and PUTs ONLY { multiShiftDay }', async () => {
     attendanceSettingsData = {
       multiShiftDay: { enabled: true, maxSlots: 3 },

@@ -2302,6 +2302,65 @@
                 </button>
               </div>
 
+              <div class="attendance__admin-subsection" data-admin-card="overtime-bank-policy">
+                <h4>{{ tr('Overtime bank (comp-time pool)', '加班银行（调休池）') }}</h4>
+                <p class="attendance__field-hint">
+                  {{ tr('Which overtime sources may enter the comp-time pool, the per-period cap, and lot validity. Statutory-holiday overtime is never poolable — it must be paid.', '哪些加班来源可进入调休池、每周期上限与额度有效期。法定节假日加班永不可入池——必须支付。') }}
+                </p>
+                <label class="attendance__field attendance__field--inline" for="attendance-overtime-bank-enabled">
+                  <input
+                    type="checkbox"
+                    id="attendance-overtime-bank-enabled"
+                    v-model="overtimeBankPolicyForm.enabled"
+                    data-overtime-bank="enabled"
+                  />
+                  <span>{{ tr('Enable overtime bank', '启用加班银行') }}</span>
+                </label>
+                <fieldset class="attendance__field" data-overtime-bank="sources">
+                  <legend>{{ tr('Poolable sources', '可入池来源') }}</legend>
+                  <label class="attendance__field--inline">
+                    <input type="checkbox" value="workday" v-model="overtimeBankPolicyForm.pooledSources" data-overtime-bank-source="workday" />
+                    <span>{{ tr('Workday overtime', '工作日加班') }}</span>
+                  </label>
+                  <label class="attendance__field--inline">
+                    <input type="checkbox" value="restday" v-model="overtimeBankPolicyForm.pooledSources" data-overtime-bank-source="restday" />
+                    <span>{{ tr('Rest-day overtime', '休息日加班') }}</span>
+                  </label>
+                </fieldset>
+                <label class="attendance__field" for="attendance-overtime-bank-cap">
+                  <span>{{ tr('Per-period cap (minutes, 0 = no cap)', '每周期上限（分钟，0＝不限）') }}</span>
+                  <input
+                    id="attendance-overtime-bank-cap"
+                    v-model="overtimeBankPolicyForm.maxMinutesPerPeriod"
+                    type="number"
+                    min="0"
+                    inputmode="numeric"
+                    data-overtime-bank="cap"
+                    :placeholder="tr('0 = no cap', '0＝不限')"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-overtime-bank-validity">
+                  <span>{{ tr('Lot validity (days, empty = no expiry)', '额度有效期（天，留空＝不过期）') }}</span>
+                  <input
+                    id="attendance-overtime-bank-validity"
+                    v-model="overtimeBankPolicyForm.validityDays"
+                    type="number"
+                    min="1"
+                    inputmode="numeric"
+                    data-overtime-bank="validity"
+                    :placeholder="tr('Empty = no expiry', '留空＝不过期')"
+                  />
+                </label>
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="settingsLoading"
+                  data-overtime-bank="save"
+                  @click="saveOvertimeBankPolicy"
+                >
+                  {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save overtime bank', '保存加班银行') }}
+                </button>
+              </div>
+
               <div class="attendance__admin-subsection" data-admin-card="multi-shift-day">
                 <h4>{{ tr('Multi-shift day', '一天多班次') }}</h4>
                 <p class="attendance__field-hint">
@@ -8839,6 +8898,12 @@ interface AttendanceSettings {
     weeklyMaxMinutes?: number | null
     monthlyMaxMinutes?: number | null
   }
+  overtimeBankPolicy?: {
+    enabled?: boolean
+    pooledSources?: string[]
+    maxMinutesPerPeriod?: number | null
+    validityDays?: number | null
+  }
   autoShiftMatching?: {
     enabled?: boolean
     mode?: 'preview' | 'apply' | 'auto'
@@ -13007,6 +13072,16 @@ const shiftComplianceForm = reactive({
   dailyMaxMinutes: '',
   weeklyMaxMinutes: '',
   monthlyMaxMinutes: '',
+})
+
+// 加班银行 v1-6 admin card. Saved via saveOvertimeBankPolicy, which PUTs ONLY { overtimeBankPolicy } so the
+// backend per-key merge leaves every other policy untouched. pooledSources is limited to the v1-1b-producible
+// {workday, restday} (statutory_holiday is never offered — §6 legal floor). '' caps = 0/no-expiry.
+const overtimeBankPolicyForm = reactive({
+  enabled: false,
+  pooledSources: [] as string[],
+  maxMinutesPerPeriod: '',
+  validityDays: '',
 })
 
 // Multi-shift day M4 admin card. Saved via saveMultiShiftDay, which PUTs ONLY { multiShiftDay }.
@@ -18772,6 +18847,7 @@ async function loadSettings() {
     attendanceSettings.value = (data.data as AttendanceSettings | null) ?? null
     applySettingsToForm(data.data || {})
     applyShiftComplianceToForm(data.data || {})
+    applyOvertimeBankPolicyToForm(data.data || {})
     applyMultiShiftDayToForm(data.data || {})
     applyOutdoorToForm(data.data || {})
     applyInOutMergeToForm(data.data || {})
@@ -18794,6 +18870,19 @@ function applyShiftComplianceToForm(settings: AttendanceSettings) {
   shiftComplianceForm.dailyMaxMinutes = capStr(sc.dailyMaxMinutes)
   shiftComplianceForm.weeklyMaxMinutes = capStr(sc.weeklyMaxMinutes)
   shiftComplianceForm.monthlyMaxMinutes = capStr(sc.monthlyMaxMinutes)
+}
+
+function applyOvertimeBankPolicyToForm(settings: AttendanceSettings) {
+  const p = settings.overtimeBankPolicy || {}
+  overtimeBankPolicyForm.enabled = p.enabled === true
+  overtimeBankPolicyForm.pooledSources = Array.isArray(p.pooledSources)
+    ? p.pooledSources.filter((s) => s === 'workday' || s === 'restday')
+    : []
+  // a positive cap/validity shows its number; 0 / null / no-expiry shows empty (placeholder explains the default).
+  const posStr = (value: number | null | undefined) =>
+    typeof value === 'number' && Number.isFinite(value) && value > 0 ? String(value) : ''
+  overtimeBankPolicyForm.maxMinutesPerPeriod = posStr(p.maxMinutesPerPeriod)
+  overtimeBankPolicyForm.validityDays = posStr(p.validityDays)
 }
 
 function normalizeMultiShiftMaxSlots(value: unknown): number {
@@ -19218,6 +19307,48 @@ async function saveShiftCompliance() {
     setStatus(tr('Shift compliance updated.', '排班合规已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save shift compliance', '保存排班合规失败'), 'save-settings')
+  } finally {
+    settingsLoading.value = false
+  }
+}
+
+async function saveOvertimeBankPolicy() {
+  settingsLoading.value = true
+  try {
+    const posInt = (value: string | number): number | null => {
+      const trimmed = String(value).trim()
+      if (!trimmed) return null
+      const n = Number(trimmed)
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : null
+    }
+    // PUT ONLY overtimeBankPolicy — the backend merges per top-level key, so every other policy is preserved.
+    // pooledSources is limited to {workday, restday} (the v1-1b-producible, §6-poolable sources). cap '' -> 0
+    // (no cap); validity '' -> null (no expiry).
+    const payload = {
+      overtimeBankPolicy: {
+        enabled: overtimeBankPolicyForm.enabled === true,
+        pooledSources: overtimeBankPolicyForm.pooledSources.filter((s) => s === 'workday' || s === 'restday'),
+        maxMinutesPerPeriod: posInt(overtimeBankPolicyForm.maxMinutesPerPeriod) ?? 0,
+        validityDays: posInt(overtimeBankPolicyForm.validityDays),
+      },
+    }
+    const response = await apiFetchWithTimeout('/api/attendance/settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw createForbiddenError()
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to save overtime bank', '保存加班银行失败'))
+    }
+    adminForbidden.value = false
+    applyOvertimeBankPolicyToForm((data.data || payload) as AttendanceSettings)
+    setStatus(tr('Overtime bank updated.', '加班银行已更新。'))
+  } catch (error: any) {
+    setStatusFromError(error, tr('Failed to save overtime bank', '保存加班银行失败'), 'save-settings')
   } finally {
     settingsLoading.value = false
   }
