@@ -1,9 +1,10 @@
 # Approval Formula Conditions — Design Lock
 
 Status: RATIFIED — FC-1 BUILT IN PR #3219; FC-2 BUILT IN A STACKED PR; FC-3
-BUILT IN A STACKED PR (purchase/reimbursement examples). Owner
-decisions resolved: `AND/OR/NOT` only in v1; numeric aggregates fail closed;
-backend evaluator ships before dry-run.
+BUILT IN A STACKED PR (purchase/reimbursement examples); FC-4 BUILT IN A
+STACKED PR (approval-specific backend dry-run endpoint). Owner decisions
+resolved: `AND/OR/NOT` only in v1; numeric aggregates fail closed; backend
+evaluator ships before dry-run.
 
 Goal: make approval condition branches more flexible than today's
 `fieldId + operator + value` rules, while keeping the approval backend as the
@@ -291,6 +292,18 @@ example:
 FC-3 applies the purchase and reimbursement examples to the shipped amount-tier
 presets. The leave example remains illustrative until a leave-specific
 multi-branch preset is introduced.
+
+### FC-4 — Approval-Specific Backend Dry-Run
+
+- Add `POST /api/approval-templates/formula-condition/dry-run`.
+- Gate it with `approval-templates:manage`, matching template authoring.
+- Accept `formSchema`, `expression`, and sample `formData`.
+- Use the same approval evaluator used by publish/execution.
+- Return a normal dry-run diagnostic payload for formula errors instead of
+  routing through the sheet-scoped multitable formula dry-run.
+
+This slice intentionally does not add the frontend "Evaluate" button yet. The
+endpoint is the backend truth surface that a later authoring UX can call.
 
 ## Non-Goals
 
