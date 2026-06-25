@@ -20,6 +20,7 @@ Commands run from `/private/tmp/metasheet2-fc5-formula-condition`:
 
 ```sh
 pnpm --filter @metasheet/web exec vitest run approvalTemplateAuthoring approval-template-authoring-condition-edit --reporter=dot
+pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation --reporter=dot
 pnpm --filter @metasheet/web type-check
 pnpm --filter @metasheet/web lint
 pnpm --filter @metasheet/web exec eslint src/views/approval/TemplateAuthoringView.vue tests/approvalTemplateAuthoring.spec.ts --max-warnings=0
@@ -29,6 +30,7 @@ git diff --check
 Results:
 
 - Focused frontend specs: 69/69 passed.
+- Approval web guard equivalent specs: 259/259 passed.
 - `vue-tsc -b`: clean.
 - Repository-configured web lint: clean.
 - Direct lint of the touched SFC/spec: clean.
