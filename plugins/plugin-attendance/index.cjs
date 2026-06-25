@@ -228,6 +228,12 @@ const DEFAULT_SETTINGS = {
     enabled: false,
     rules: [],
   },
+  // 加班银行 v1-3a (design-lock §3 账3): AttendanceBonusPolicy LATENT config. Default OFF → no 满勤 flag yet.
+  attendanceBonusPolicy: {
+    enabled: false,
+    anyLeaveBreaksFullAttendance: true,
+    lateBeyondThresholdBreaksFullAttendance: true,
+  },
   // 自动对班 (auto shift matching) — A1 preview/manual apply plus A2 scheduler auto-write.
   // Runtime still requires env flags in addition to these org settings.
   autoShiftMatching: {
@@ -11941,6 +11947,7 @@ function normalizeSettings(raw) {
     overtimeSegmentation: normalizeOvertimeSegmentationSetting(raw.overtimeSegmentation),
     overtimeBankPolicy: normalizeOvertimeBankPolicySetting(raw.overtimeBankPolicy),
     leaveBalanceDeductionPolicy: normalizeLeaveBalanceDeductionPolicySetting(raw.leaveBalanceDeductionPolicy),
+    attendanceBonusPolicy: normalizeAttendanceBonusPolicySetting(raw.attendanceBonusPolicy),
     autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
   }
 }
@@ -12084,6 +12091,19 @@ const OVERTIME_BANK_POOLABLE_SOURCES = Object.freeze([
 // OvertimeBankPolicy v1-1a LATENT normalizer. Fail-closed enum-strict: only the allowlist survives in
 // pooledSources (statutory_holiday + unknowns dropped = compliance floor §6). Default dormant (enabled
 // false). Nothing enforces this yet; v1-1b source-tagged lots + later slices consume it.
+// 加班银行 v1-3a (design-lock §3 账3 AttendanceBonusPolicy): 满勤 (full-attendance) eligibility rules. LATENT:
+// default OFF; nothing computes the 满勤 flag yet (v1-3b consumes it). 账3's key口径: any leave → not eligible
+// EVEN IF the leave was offset by the comp-time pool (满勤资格 is computed SEPARATELY from 有效工时). Late/early
+// thresholds reuse the #5 RT per-group rule thresholds — this policy only carries the 满勤 toggles.
+function normalizeAttendanceBonusPolicySetting(raw) {
+  const value = raw && typeof raw === 'object' ? raw : {}
+  return {
+    enabled: parseBoolean(value.enabled, false),
+    anyLeaveBreaksFullAttendance: parseBoolean(value.anyLeaveBreaksFullAttendance, true),
+    lateBeyondThresholdBreaksFullAttendance: parseBoolean(value.lateBeyondThresholdBreaksFullAttendance, true),
+  }
+}
+
 function normalizeOvertimeBankPolicySetting(raw) {
   const value = raw && typeof raw === 'object' ? raw : {}
   const seen = new Set()
@@ -12306,6 +12326,10 @@ function mergeSettings(base, update) {
     leaveBalanceDeductionPolicy: {
       ...(base?.leaveBalanceDeductionPolicy || {}),
       ...(update?.leaveBalanceDeductionPolicy || {}),
+    },
+    attendanceBonusPolicy: {
+      ...(base?.attendanceBonusPolicy || {}),
+      ...(update?.attendanceBonusPolicy || {}),
     },
     autoShiftMatching: {
       ...(base?.autoShiftMatching || {}),
@@ -18471,6 +18495,9 @@ module.exports = {
     LEAVE_DEDUCTION_INSUFFICIENT_MODES,
     normalizeLeaveBalanceDeductionPolicySetting,
   },
+  __attendanceBonusPolicyForTests: {
+    normalizeAttendanceBonusPolicySetting,
+  },
   __attendanceReportFieldCatalogForTests: {
     ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS,
     ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
@@ -19582,6 +19609,12 @@ module.exports = {
           deductFrom: z.array(z.enum(['comp_time', 'annual', 'unpaid'])).min(1).max(1), // §P2: v1 single-pool; v2 unlocks >1
           insufficient: z.enum(['block', 'partial_unpaid_absence']).optional(),
         })).optional(),
+      }).optional(),
+      // 加班银行 v1-3a — AttendanceBonusPolicy latent config (满勤). Round-trips through PUT/GET; v1-3b computes it.
+      attendanceBonusPolicy: z.object({
+        enabled: z.boolean().optional(),
+        anyLeaveBreaksFullAttendance: z.boolean().optional(),
+        lateBeyondThresholdBreaksFullAttendance: z.boolean().optional(),
       }).optional(),
       // 年假/法定假余额引擎 — L0 latent config (design-lock #2622). Round-trips through PUT/GET; no
       // runtime reads it until L2 (accrual). tiers = org-configurable statutory bands.

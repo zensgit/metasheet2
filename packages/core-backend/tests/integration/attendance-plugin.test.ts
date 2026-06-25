@@ -8812,6 +8812,29 @@ attendanceIntegrationDescribe(
       }
     })
 
+    it('round-trips attendanceBonusPolicy (wire lock): PUT→GET full shape, partial PUT preserves toggles', async () => {
+      if (!baseUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-bonus-wire-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+      const putSettings = (body: Record<string, unknown>) =>
+        requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
+      const originalSettings = await loadSettingsForTest(adminToken)
+      try {
+        // (1) full PUT → GET returns the full shape (locks DEFAULT_SETTINGS + normalizeSettings + zod + mergeSettings).
+        const full = { enabled: true, anyLeaveBreaksFullAttendance: true, lateBeyondThresholdBreaksFullAttendance: false }
+        expect((await putSettings({ attendanceBonusPolicy: full })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).attendanceBonusPolicy).toEqual(full)
+        // (2) partial PUT preserves the other toggles: PUT only { enabled:false } → the toggles are not reset.
+        expect((await putSettings({ attendanceBonusPolicy: { enabled: false } })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).attendanceBonusPolicy).toEqual({ ...full, enabled: false })
+      } finally {
+        await putSettings({ attendanceBonusPolicy: originalSettings.attendanceBonusPolicy }).catch(() => undefined)
+      }
+    })
+
     it('round-trips overtimeBankPolicy (wire lock): PUT→GET full shape, partial PUT preserves siblings, statutory_holiday → 400', async () => {
       if (!baseUrl) return
       const runSuffix = Date.now().toString(36)
