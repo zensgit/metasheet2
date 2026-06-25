@@ -71,7 +71,7 @@ import {
 } from '../multitable/permission-service'
 import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssignableDirectory } from '../multitable/person-field-restriction'
 import { resolveUserDisplayNames } from '../multitable/user-display'
-import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
+import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity } from '../multitable/restore-preview-identity'
 import {
@@ -7261,23 +7261,39 @@ export function univerMetaRouter(): Router {
       const revealActive = await resolveHistoryRevealActive(pool.query.bind(pool), baseId, access.userId, revealRequested, reason, ticket, 'history.events')
       // LOCK-3 field layer: a base-level list can show any readable sheet, so resolve allowed fields for all.
       const allowedFieldsBySheet = await buildHistoryAllowedFieldsBySheet(req, pool.query.bind(pool), readableSheetIds, access.userId, revealActive)
+      const fieldIdFilter = str(req.query.fieldId)
+      const searchFilter = str(req.query.q)
+      const cursorParam = str(req.query.cursor)
+      const baseParams = {
+        sheetIds: readableSheetIds,
+        allowedFieldsBySheet,
+        actorId: str(req.query.actorId),
+        source: str(req.query.source),
+        action: str(req.query.action),
+        from: str(req.query.from),
+        to: str(req.query.to),
+        fieldId: fieldIdFilter,
+        search: searchFilter,
+        cursor: cursorParam,
+        limit: Number.isFinite(limit) ? limit : 50,
+        offset: Number.isFinite(offset) ? offset : 0,
+      }
+      const access2 = { userId: access.userId, isAdminRole: access.isAdminRole }
+      // T2b-perf opt-in: ?countMode=estimate skips the exact post-LOCK-3 total and answers only `hasMore`
+      // (cheaper — early-stops the scan one batch past the page). SCOPED to the plain newest-first list: a
+      // search / fieldId / cursor request is served by the exact path (estimate does not compose with those).
+      // Default (and any other value) = exact total, byte-for-byte the legacy response (full back-compat).
+      const estimateMode = req.query.countMode === 'estimate' && !searchFilter && !fieldIdFilter && !cursorParam
+      if (estimateMode) {
+        const { batches, hasMore, nextCursor } = await estimateHistoryHasMore(pool.query.bind(pool), baseParams, access2)
+        const names = await resolveUserDisplayNames(pool.query.bind(pool), batches.map((b) => b.actorId).filter((x): x is string => !!x))
+        const enriched = batches.map((b) => ({ ...b, actorName: b.actorId ? names.get(b.actorId) ?? null : null }))
+        return res.json({ ok: true, data: { batches: enriched, hasMore, nextCursor, countMode: 'estimate' } })
+      }
       const { batches, total, nextCursor, searchTruncated } = await loadHistoryBatchSummaries(
         pool.query.bind(pool),
-        {
-          sheetIds: readableSheetIds,
-          allowedFieldsBySheet,
-          actorId: str(req.query.actorId),
-          source: str(req.query.source),
-          action: str(req.query.action),
-          from: str(req.query.from),
-          to: str(req.query.to),
-          fieldId: str(req.query.fieldId),
-          search: str(req.query.q),
-          cursor: str(req.query.cursor),
-          limit: Number.isFinite(limit) ? limit : 50,
-          offset: Number.isFinite(offset) ? offset : 0,
-        },
-        { userId: access.userId, isAdminRole: access.isAdminRole },
+        baseParams,
+        access2,
       )
       const names = await resolveUserDisplayNames(pool.query.bind(pool), batches.map((b) => b.actorId).filter((x): x is string => !!x))
       const enriched = batches.map((b) => ({ ...b, actorName: b.actorId ? names.get(b.actorId) ?? null : null }))

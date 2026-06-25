@@ -67,6 +67,20 @@ export interface HistoryEventsParams {
   cursor?: string
   limit?: number
   offset?: number
+  /**
+   * T2b-perf count mode (opt-in; default `exact`). `exact` (and any unset/unknown value) computes the EXACT
+   * post-LOCK-3 `total` by materializing + sorting the WHOLE filtered batch set — byte-for-byte the legacy
+   * behaviour. `estimate` skips the exact total and answers only the cheap question "are there MORE than
+   * `offset+limit` VISIBLE batches?" via `estimateHistoryHasMore`, early-stopping the scan once it has confirmed
+   * one batch past the page boundary. It is the route's job to dispatch on this; `loadHistoryBatchSummaries`
+   * itself ignores it (the exact path is unchanged). Estimate is scoped to the plain newest-first list: a
+   * `search`/`fieldId`/`cursor` request is NOT served by estimate (the route falls back to exact for those).
+   */
+  countMode?: 'exact' | 'estimate'
+  /** Estimate-path keyset-scan chunk size (rows per round-trip; default ESTIMATE_SCAN_CHUNK). Injectable ONLY so
+   *  a test can force multi-chunk pagination over a tiny seed (exercising the keyset cursor); the route never
+   *  sets it. A non-finite/<1 value falls back to the default. */
+  estimateScanChunk?: number
 }
 
 export interface HistoryBatchSummary {
@@ -292,6 +306,183 @@ export async function loadHistoryBatchSummaries(
     ? encodeHistoryCursor(batches[batches.length - 1])
     : null
   return { batches, total, nextCursor, searchTruncated }
+}
+
+/** Keyset-scan chunk size for the estimate path (rows fetched per round-trip; bounds memory, not correctness). */
+const ESTIMATE_SCAN_CHUNK = 500
+/** Hard ceiling on chunks scanned so a pathological history can't loop unboundedly; reaching it returns the
+ *  scan's verdict so far (which is safe-direction — see the function doc). The route never hits this in practice. */
+const ESTIMATE_MAX_CHUNKS = 10000
+
+/**
+ * T2b-perf: the `?countMode=estimate` alternative to the exact post-LOCK-3 `total` (the long-deferred follow-up
+ * the line ~143 comment marks). Instead of materializing + sorting the WHOLE filtered batch set to count it, it
+ * answers only `hasMore` = "are there MORE than `offset+limit` VISIBLE batches?" and builds JUST the requested
+ * page. It is SCOPED to the plain newest-first list — no `search`/`fieldId`/`cursor` (those keep the exact path);
+ * the route enforces that scoping. `total` is intentionally omitted (the whole point is not to compute it).
+ *
+ * LOCK-3 (the load-bearing contract) is preserved IDENTICALLY to the exact path:
+ *   - Phase 1 (cheap scan) decides batch VISIBILITY using `loadDeniedBySheet` + `isDenied` — the SAME row-level
+ *     deny seam, gated the same way (flag-on + non-admin; admin bypass). A batch counts toward `hasMore` ONLY
+ *     after at least one of its rows survives `isDenied` (`visibleKeys.add` is gated by the deny check), exactly
+ *     mirroring the exact path's `visibleRecords.size === 0 ⇒ skip` rule. So a row-denied record can NEVER flip
+ *     `hasMore` for an actor who can't see it (the leak the goldens guard). The FIELD layer is deliberately NOT
+ *     consulted in Phase 1 because field-mask never removes a batch from the set — it only shrinks counts (the
+ *     exact path drops a batch solely on row-visibility) — so batch CARDINALITY (all `hasMore` needs) depends
+ *     only on row-deny. Counting fewer columns/no field-mask here changes no visibility decision.
+ *   - `hasMore` is an order-FREE cardinality question, and visibility is monotonic-up + deduped by batch key, so
+ *     encounter order, batch row-contiguity across chunks, and created_at ties are all irrelevant to it. A chunk
+ *     boundary can at worst leave a batch partially seen → it is still counted the moment any visible row of it
+ *     appears, and an early stop only ever UNDERCOUNTS not-yet-confirmed batches → it can flip `hasMore` to FALSE
+ *     (safe), never spuriously TRUE.
+ *   - Phase 2 (page build) re-applies BOTH LOCK-3 layers (row-deny AND the field mask) over ONLY the page's
+ *     batches, reusing the exact path's per-batch construction, so the returned summaries carry the same
+ *     post-mask `visibleAffectedRecordCount` / `visibleAffectedFieldCount` as the exact path would.
+ *
+ * Ordering caveat (page CONTENTS only — never `hasMore`, never security): the head order-key is the batch's
+ * FIRST-seen (newest) row, denied or not, so estimate's batch order matches the exact path's `head = g[0]`. The
+ * one residual divergence — a batch whose NEWEST row is denied but an OLDER row is visible, straddling the
+ * early-stop boundary — requires WITHIN-batch created_at spread, which the write path precludes: one bulk action
+ * is one transaction, and Postgres `now()` is transaction-stable, so all rows of a batch share one created_at.
+ * (A page boundary landing on a createdAt TIE across DISTINCT batches has the same "first N, hasMore if an
+ * (N+1)th exists" semantics the record cursor pagination already uses.) Callers needing tie-exact page stability
+ * use `countMode=exact`.
+ */
+export async function estimateHistoryHasMore(
+  query: QueryFn,
+  params: HistoryEventsParams,
+  access: HistoryAccess,
+): Promise<{ batches: HistoryBatchSummary[]; hasMore: boolean; nextCursor: string | null }> {
+  const sheetIds = params.sheetIds
+  const limit = Math.min(Math.max(Number(params.limit ?? 50), 1), 100)
+  const offset = params.offset ? Math.max(Number(params.offset), 0) : 0
+  if (sheetIds.length === 0) return { batches: [], hasMore: false, nextCursor: null }
+  const deniedBySheet = await loadDeniedBySheet(query, sheetIds, access)
+
+  // Filters that the exact path pushes to SQL are pushed here too, so the estimate set == the exact set. Estimate
+  // is scoped (route-enforced) to the plain list: search/fieldId/cursor are absent, so no snapshot is loaded.
+  const baseWhere: string[] = ['sheet_id = ANY($1::text[])']
+  const baseArgs: unknown[] = [sheetIds]
+  const addFilter = (clause: string, val: unknown) => { baseArgs.push(val); baseWhere.push(clause.replace('$N', `$${baseArgs.length}`)) }
+  if (params.actorId) addFilter('actor_id = $N', params.actorId)
+  if (params.source) addFilter('source = $N', params.source)
+  if (params.action) addFilter('action = $N', params.action)
+  if (params.from) addFilter('created_at >= $N', params.from)
+  if (params.to) addFilter('created_at <= $N', params.to)
+
+  // We only need ONE batch past the page to know hasMore; once we have confirmed that many VISIBLE batches we
+  // stop fetching. `heads` records each batch's HEAD order-key from its FIRST-seen row (denied OR visible) so the
+  // ordering matches the exact path EXACTLY (there `head = g[0]` = the newest row of the batch regardless of
+  // denial). `visibleKeys` is the set of batches with ≥1 row surviving LOCK-3 row-deny — these are the ONLY ones
+  // that count toward hasMore (parity with the exact path's `visibleRecords.size === 0 ⇒ skip`).
+  const stopAfter = offset + limit + 1 // confirm one batch beyond the requested page → hasMore=true
+  // Resolve the chunk size (default-first so `??` catches null+undefined; non-finite/<1 → default), mirroring the
+  // searchRowCap guard. SQL-interpolated, so it MUST be a finite positive integer (never `LIMIT NaN`).
+  const numericChunk = Number(params.estimateScanChunk ?? ESTIMATE_SCAN_CHUNK)
+  const scanChunk = Number.isFinite(numericChunk) ? Math.max(Math.floor(numericChunk), 1) : ESTIMATE_SCAN_CHUNK
+  const heads = new Map<string, { createdAt: string; batchId: string }>()
+  const visibleKeys = new Set<string>()
+  // The keyset cursor carries the RAW column text of created_at (microsecond precision) — NOT the JS-Date-derived
+  // ISO, which node-pg truncates to milliseconds. Binding the truncated ms value back as the boundary would skip
+  // any unprocessed row whose created_at lies in the truncated sub-millisecond gap (silent row loss → undercount).
+  let cursorKey: { createdAtRaw: string; version: number; id: string } | null = null
+  let exhausted = false
+  for (let chunk = 0; chunk < ESTIMATE_MAX_CHUNKS && !exhausted && visibleKeys.size < stopAfter; chunk++) {
+    const where = [...baseWhere]
+    const args = [...baseArgs]
+    if (cursorKey) {
+      // Keyset "strictly after" in the LOCK-11 DESC order (created_at DESC, version DESC, id DESC): the row tuple
+      // is lexicographically LESS than the last row's tuple. `createdAtRaw` is the full-precision column text, so
+      // `::timestamptz` re-parses the EXACT stored value (no ms truncation). Casts match the column types.
+      args.push(cursorKey.createdAtRaw, cursorKey.version, cursorKey.id)
+      where.push(`(created_at, version, id) < ($${args.length - 2}::timestamptz, $${args.length - 1}::int, $${args.length}::uuid)`)
+    }
+    // No snapshot column — visibility (row-deny) is all Phase 1 needs; the field layer is applied in Phase 2.
+    // created_at::text aliased as created_at_iso gives the EXACT stored value for the keyset cursor (microsecond
+    // precision); the JS-Date `created_at` is kept only for head order-key/display (parity with the exact path).
+    const res = await query(
+      `SELECT id, sheet_id, record_id, version, batch_id, created_at, created_at::text AS created_at_iso
+       FROM meta_record_revisions
+       WHERE ${where.join(' AND ')}
+       ORDER BY created_at DESC, version DESC, id DESC
+       LIMIT ${scanChunk}`,
+      args,
+    )
+    const rows = res.rows as Array<Record<string, unknown>>
+    if (rows.length < scanChunk) exhausted = true
+    for (const r of rows) {
+      const sheetId = String(r.sheet_id)
+      const recordId = String(r.record_id)
+      const id = String(r.id)
+      const version = Number(r.version ?? 0)
+      const createdAt = r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at ?? '')
+      const createdAtRaw = String(r.created_at_iso ?? createdAt) // full-precision column text for the keyset cursor
+      cursorKey = { createdAtRaw, version, id } // advance the keyset cursor to this (last-processed) row
+      const key = typeof r.batch_id === 'string' ? r.batch_id : id
+      // The head order-key is the FIRST-seen row of the batch (newest, denied or not) — matches exact's `g[0]`.
+      if (!heads.has(key)) heads.set(key, { createdAt, batchId: key })
+      if (isDenied(deniedBySheet, sheetId, recordId)) continue // LOCK-3 row layer: a denied row never confirms a batch
+      if (!visibleKeys.has(key)) {
+        visibleKeys.add(key)
+        if (visibleKeys.size >= stopAfter) break // confirmed enough VISIBLE batches → stop early (the perf win)
+      }
+    }
+  }
+
+  const hasMore = visibleKeys.size > offset + limit
+  // Phase 2: the page's batch keys = the VISIBLE heads sorted by the SAME total order the exact path/cursor use,
+  // sliced to the requested window. (We may have collected up to stopAfter visible batches; slice keeps the page.)
+  const sortedHeads = [...visibleKeys].map((k) => heads.get(k)!).sort(compareBatchKeyDesc)
+  const pageHeads = sortedHeads.slice(offset, offset + limit)
+  if (pageHeads.length === 0) return { batches: [], hasMore, nextCursor: null }
+  const pageKeys = pageHeads.map((h) => h.batchId)
+
+  // Fetch the FULL rows of ONLY the page's batches (complete batches, regardless of where Phase 1 stopped), then
+  // build summaries reusing the exact path's per-batch construction WITH the LOCK-3 field layer (mask counts).
+  const detailRes = await query(
+    `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, created_at
+     FROM meta_record_revisions
+     WHERE sheet_id = ANY($1::text[]) AND COALESCE(batch_id, id::text) = ANY($2::text[])
+     ORDER BY created_at DESC, version DESC, id DESC`,
+    [sheetIds, pageKeys],
+  )
+  const detailRows = normalizeRevRows(detailRes.rows)
+  const groups = new Map<string, RevRow[]>()
+  for (const row of detailRows) {
+    const key = row.batch_id ?? row.id
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key)!.push(row)
+  }
+  const batches: HistoryBatchSummary[] = []
+  for (const head of pageHeads) {
+    const g = groups.get(head.batchId)
+    if (!g || g.length === 0) continue // a batch that vanished between scan and detail (concurrent delete) is skipped
+    const visibleRecords = new Set<string>()
+    const visibleFields = new Set<string>()
+    for (const row of g) {
+      if (isDenied(deniedBySheet, row.sheet_id, row.record_id)) continue // LOCK-3 row layer (same as exact path)
+      visibleRecords.add(row.record_id)
+      const allowed = allowedFieldsFor(params.allowedFieldsBySheet, row.sheet_id) // LOCK-3 field layer (mask counts)
+      for (const f of row.changed_field_ids) if (allowed.has(f)) visibleFields.add(f)
+    }
+    if (visibleRecords.size === 0) continue // fully-denied batch is invisible (parity with the exact path)
+    const headRow = g[0]
+    const actions = new Set(g.map((r) => r.action))
+    batches.push({
+      batchId: head.batchId,
+      sheetId: headRow.sheet_id,
+      actorId: headRow.actor_id,
+      source: headRow.source,
+      action: actions.size === 1 ? headRow.action : 'bulk_update',
+      createdAt: headRow.created_at,
+      visibleAffectedRecordCount: visibleRecords.size,
+      visibleAffectedFieldCount: visibleFields.size,
+      provenanceQuality: g.some((r) => r.batch_id) ? 'stamped' : 'legacy',
+    })
+  }
+  // A next cursor when MORE visible batches exist beyond this page (mirrors the exact path's nextCursor semantics).
+  const nextCursor = hasMore && batches.length > 0 ? encodeHistoryCursor(batches[batches.length - 1]) : null
+  return { batches, hasMore, nextCursor }
 }
 
 export interface HistoryChange {
