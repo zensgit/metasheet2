@@ -6170,6 +6170,99 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④ 加班银行 v1-2b — LeaveOffsetPolicy rule-driven deduction (dormant byte-identical / block / partial / NO double-deduct)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const createdRequestIds: string[] = []
+    const users = {
+      dormant: `attendance-v12b-dormant-${runSuffix}`,
+      block: `attendance-v12b-block-${runSuffix}`,
+      short: `attendance-v12b-short-${runSuffix}`,
+      partial: `attendance-v12b-partial-${runSuffix}`,
+      nodbl: `attendance-v12b-nodbl-${runSuffix}`,
+    }
+    let adminToken: string | undefined
+    let originalSettings: Record<string, unknown> = {}
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenFor = async (uid: string) => {
+        const r = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+        return (r.body as { token?: string } | undefined)?.token
+      }
+      const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
+      adminToken = await tokenFor(`attendance-v12b-admin-${runSuffix}`)
+      if (!adminToken) return
+      const tokens: Record<string, string> = {}
+      for (const [k, uid] of Object.entries(users)) { const t = await tokenFor(uid); if (!t) return; tokens[k] = t }
+      const ensureLeaveType = async (code: string) => {
+        const res = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr(adminToken!), body: JSON.stringify({ code, name: `${code} ${runSuffix}`, paid: false, requiresApproval: true }) })
+        expect([201, 409]).toContain(res.status)
+        let id = (res.body as { data?: { id?: string } } | undefined)?.data?.id
+        if (!id) { const list = await requestJson(`${baseUrl}/api/attendance/leave-types?isActive=true`, { headers: hdr(adminToken!) }); id = ((list.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []).find(i => i.code === code)?.id }
+        expect(id).toBeTruthy(); return id as string
+      }
+      const personalLeaveId = await ensureLeaveType('personal_leave')
+      const compTimeLtId = await ensureLeaveType('comp_time')
+      const insertCompLot = async (userId: string, remaining: number) => (await pool.query(
+        `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at)
+         VALUES ('default', $1, 'comp_time', $2, $2, 'overtime_conversion', $3, 'active', '2026-01-01') RETURNING id`,
+        [userId, remaining, `v12b:${runSuffix}:${userId}`])).rows[0].id as string
+      const compRemaining = async (userId: string) => Number((await pool.query(`SELECT COALESCE(SUM(remaining_minutes),0) AS r FROM attendance_leave_balances WHERE user_id=$1 AND leave_type_code='comp_time'`, [userId])).rows[0].r)
+      const createLeave = async (token: string, leaveTypeId: string, workDate: string, minutes: number) => {
+        const r = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr(token), body: JSON.stringify({ workDate, requestType: 'leave', leaveTypeId, minutes }) })
+        expect(r.status).toBe(201); const id = (r.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id; createdRequestIds.push(id as string); return id as string
+      }
+      const approve = (token: string, id: string) => requestJson(`${baseUrl}/api/attendance/requests/${id}/approve`, { method: 'POST', headers: hdr(token), body: JSON.stringify({ comment: 'ok' }) })
+      const putSettings = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: hdr(adminToken!), body: JSON.stringify(body) })
+      originalSettings = ((await requestJson(`${baseUrl}/api/attendance/settings`, { headers: hdr(adminToken!) })).body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
+
+      // (1) DORMANT (policy off): personal_leave deducts NOWHERE → comp_time untouched (byte-identical floor).
+      await putSettings({ leaveBalanceDeductionPolicy: { enabled: false, rules: [] } })
+      await insertCompLot(users.dormant, 120)
+      expect((await approve(tokens.dormant, await createLeave(tokens.dormant, personalLeaveId, '2026-09-20', 60))).status).toBe(200)
+      expect(await compRemaining(users.dormant)).toBe(120)
+
+      // (2) ENABLED block, sufficient: personal_leave → comp_time pool deducts.
+      await putSettings({ leaveBalanceDeductionPolicy: { enabled: true, rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'block' }] } })
+      await insertCompLot(users.block, 120)
+      expect((await approve(tokens.block, await createLeave(tokens.block, personalLeaveId, '2026-09-20', 60))).status).toBe(200)
+      expect(await compRemaining(users.block)).toBe(60)
+
+      // (3) ENABLED block, insufficient: 422 + rollback (request pending, balance untouched).
+      await insertCompLot(users.short, 60)
+      const rShort = await createLeave(tokens.short, personalLeaveId, '2026-09-20', 120)
+      expect((await approve(tokens.short, rShort)).status).toBe(422)
+      expect((await pool.query('SELECT status FROM attendance_requests WHERE id=$1', [rShort])).rows[0].status).toBe('pending')
+      expect(await compRemaining(users.short)).toBe(60)
+
+      // (4) ENABLED partial, insufficient: deduct AVAILABLE, APPROVE (no throw); shortfall = 200−120 = 账3 absence.
+      await putSettings({ leaveBalanceDeductionPolicy: { enabled: true, rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' }] } })
+      await insertCompLot(users.partial, 120)
+      expect((await approve(tokens.partial, await createLeave(tokens.partial, personalLeaveId, '2026-09-20', 200))).status).toBe(200)
+      expect(await compRemaining(users.partial)).toBe(0)
+
+      // (5) NO DOUBLE-DEDUCT (the load-bearing invariant): a comp_time leave with a comp_time rule → only the
+      // dedicated C3 block deducts; the rule path SKIPS comp_time. Balance drops by 60 ONCE (not to 0).
+      await putSettings({ leaveBalanceDeductionPolicy: { enabled: true, rules: [{ requestLeaveType: 'comp_time', deductFrom: ['comp_time'], insufficient: 'block' }] } })
+      await insertCompLot(users.nodbl, 120)
+      expect((await approve(tokens.nodbl, await createLeave(tokens.nodbl, compTimeLtId, '2026-09-20', 60))).status).toBe(200)
+      expect(await compRemaining(users.nodbl)).toBe(60)
+    } finally {
+      if (adminToken && Object.keys(originalSettings).length > 0) await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
+      for (const uid of Object.values(users)) {
+        await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id=$1', [uid]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_leave_balances WHERE user_id=$1', [uid]).catch(() => undefined)
+      }
+      if (createdRequestIds.length) await pool.query(`DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])`, [createdRequestIds]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS; else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+  })
+
   it('④ C3 — comp_time leave approval deducts balance FIFO; insufficient blocks (422) with no deduction; replay no double-deduct', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
