@@ -164,23 +164,19 @@ smoke:
 The check only ever REJECTS; it NEVER mutates `formData` (no auto-fill — that is
 the auto-sum lock). No currency conversion, no multi-detail, no tolerance band.
 
-## Remaining gaps (#3176 shipped the capability; §2 since closed by #3183; §1 and §3 open)
+## Remaining gaps (#3176 shipped the capability; §1 closed by #3197, §2 by #3183; §3 open)
 
-Status: #3183 landed the preset mapping (§2) BEFORE the FE preserve (§1), INVERTING
-the intended order — so the exposure §1 warned about is now live on shipped preset
-templates. FE preserve (§1) is the active first priority; the auto-sum lock (#3189,
-design-only) rides the same save path and is also blocked on it. Visibility (§3) last.
+Status: #3183 landed the preset mapping (§2) BEFORE the FE preserve (§1), inverting the
+intended order and briefly exposing shipped preset templates to a save-time drop — now
+CLOSED by #3197 (the §1 exposure is resolved). The auto-sum lock (#3189, design-only)
+rides the same save path and inherits this preserve. Only §3 (visibility) remains.
 
-1. **[P1 — ACTIVE EXPOSURE] FE authoring save silently drops the mapping on a
-   now-SHIPPED control.** With #3183 putting real mappings on the amount-tier presets
-   (§2), this is no longer hypothetical: a preset-created template carries
-   `formSchema.amountConsistencyCheck` (backend-persisted), but `templateAuthoring.ts`
-   has no hydrate/preserve — `draftFromTemplate` reads only `template.formSchema.fields`
-   and `buildFormSchema()` returns `{ fields }`. So the first time an admin opens such
-   a template in the authoring editor and saves, the mapping is silently dropped and
-   the control fails. The FE `FormSchema` TYPE already carries the field; the fix is
-   `draftFromTemplate` hydrate + `buildFormSchema` preserve + a mounted save round-trip
-   test. FIRST PRIORITY.
+1. **[CLOSED — #3197] FE authoring save preserves the mapping.** Closed by #3197
+   (merge `fd17ad2e7`): `TemplateAuthoringDraft` now carries `amountConsistencyCheck`,
+   `draftFromTemplate` hydrates it, and `buildFormSchema` re-emits it — so opening a
+   preset-created template in the authoring editor and saving no longer drops the
+   control. Guarded by a unit round-trip and a mounted save round-trip test. The active
+   exposure (a shipped preset control lost on the first authoring-page save) is resolved.
 2. **[DONE — #3183] Amount-tier presets declare the mapping.** Closed by `4f6cd83b2`
    (#3183): `commonTemplatePresets.ts` `withAmountConsistency()` wires reimbursement
    `{ amount, expense_items, amount }` and purchase `{ amount, purchase_items, amount }`,
