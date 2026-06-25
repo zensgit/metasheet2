@@ -62,4 +62,11 @@ describe('#加班银行 v1-1b — partitionOvertimeBankGrantLots (dormant byte-i
     expect(JSON.stringify(a)).toBe(JSON.stringify(b))
     expect(a.lots.map((l) => l.sourceKey)).toEqual(['overtime_conversion:rX:workday', 'overtime_conversion:rX:restday'])
   })
+
+  it('ENABLED but NO source breakdown (segments null / all-zero) → single NULL-source lot (grant never lost)', () => {
+    expect(part({ requestId: 'r6', totalMinutes: 90, segments: null, overtimeBankPolicy: { enabled: true, pooledSources: ['workday', 'restday'] } }).lots)
+      .toEqual([{ source: null, sourceKey: 'overtime_conversion:r6', minutes: 90 }])
+    expect(part({ requestId: 'r6', totalMinutes: 90, segments: segs(0, 0, 0), overtimeBankPolicy: { enabled: true, pooledSources: ['workday', 'restday'] } }).lots)
+      .toEqual([{ source: null, sourceKey: 'overtime_conversion:r6', minutes: 90 }])
+  })
 })

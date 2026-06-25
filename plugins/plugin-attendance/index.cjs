@@ -10238,6 +10238,14 @@ function partitionOvertimeBankGrantLots({ requestId, totalMinutes, segments, ove
   const sourceMinutes = resolveOvertimeBankSourceMinutes(segments)
   const order = ['workday', 'restday', 'statutory_holiday']
   const totalWeight = order.reduce((sum, src) => sum + sourceMinutes[src], 0)
+  // enabled but NO source breakdown (no segmentation snapshot / segmentation off) → fall back to the single
+  // NULL-source lot of the whole total, so the comp-time grant is never LOST (can't tag without sources).
+  if (totalWeight <= 0) {
+    return {
+      lots: total > 0 ? [{ source: null, sourceKey: `overtime_conversion:${requestId}`, minutes: total }] : [],
+      perSource: [],
+    }
+  }
   // the LAST source WITH non-zero weight absorbs the rounding remainder; a zero-weight source must get exactly
   // 0 (else the remainder could be mis-attributed to a source that had no OT — e.g. must-pay statutory_holiday).
   const lastWeighted = [...order].reverse().find((src) => sourceMinutes[src] > 0) ?? null
@@ -25802,7 +25810,12 @@ module.exports = {
                       )
                     }
                   } else {
-                    const segments = readOvertimeSegmentationSnapshot(nextMetadata)?.segments
+                    // readOvertimeSegmentationSnapshot reshapes segments → workday/restday/holidayOvertimeMinutes;
+                    // rebuild the {…Minutes} shape the partition helper expects (no snapshot → null → fallback lot).
+                    const snap = readOvertimeSegmentationSnapshot(nextMetadata)
+                    const segments = snap
+                      ? { workdayMinutes: snap.workdayOvertimeMinutes, restdayMinutes: snap.restdayOvertimeMinutes, holidayMinutes: snap.holidayOvertimeMinutes }
+                      : null
                     const { lots } = partitionOvertimeBankGrantLots({ requestId, totalMinutes: amountMinutes, segments, overtimeBankPolicy: bankPolicy })
                     for (const lot of lots) {
                       const lotRows = await trx.query(
