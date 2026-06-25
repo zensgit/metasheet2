@@ -22,19 +22,19 @@ describe('#8/加班银行 v1-1a — OvertimeBankPolicy normalizer (LATENT, compl
     expect(norm(null)).toEqual(DORMANT)
   })
 
-  it('keeps the poolable allowlist sources, de-duped, preserving order', () => {
+  it('keeps the poolable allowlist sources, de-duped, preserving order; drops not-yet-producible sources', () => {
     const r = norm({ pooledSources: ['restday', 'workday', 'restday', 'special_hours', 'adjusted_rest_day', 'company_holiday'] })
-    expect(r.pooledSources).toEqual(['restday', 'workday', 'special_hours', 'adjusted_rest_day', 'company_holiday'])
+    // §P2: v1-1b only produces workday/restday — the holiday sub-types + special_hours are NOT yet in the
+    // allowlist (they'd silently never pool), so they're dropped here until the calendar exposes the dayType.
+    expect(r.pooledSources).toEqual(['restday', 'workday'])
   })
 
   it('COMPLIANCE FLOOR: statutory_holiday is dropped from pooledSources (法定节假日不可入池, 劳动法 §44)', () => {
     expect(norm({ pooledSources: ['statutory_holiday'] }).pooledSources).toEqual([])
     expect(norm({ pooledSources: ['restday', 'statutory_holiday', 'workday'] }).pooledSources).toEqual(['restday', 'workday'])
-    // the allowlist itself must never contain statutory_holiday.
+    // the allowlist itself must never contain statutory_holiday, and (§P2) only exposes what v1-1b produces.
     expect(helpers.OVERTIME_BANK_POOLABLE_SOURCES).not.toContain('statutory_holiday')
-    expect([...helpers.OVERTIME_BANK_POOLABLE_SOURCES].sort()).toEqual(
-      ['adjusted_rest_day', 'company_holiday', 'restday', 'special_hours', 'workday'],
-    )
+    expect([...helpers.OVERTIME_BANK_POOLABLE_SOURCES].sort()).toEqual(['restday', 'workday'])
   })
 
   it('drops unknown / non-string sources (fail-closed)', () => {

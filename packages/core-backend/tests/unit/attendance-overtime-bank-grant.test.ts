@@ -63,10 +63,12 @@ describe('#加班银行 v1-1b — partitionOvertimeBankGrantLots (dormant byte-i
     expect(a.lots.map((l) => l.sourceKey)).toEqual(['overtime_conversion:rX:workday', 'overtime_conversion:rX:restday'])
   })
 
-  it('ENABLED but NO source breakdown (segments null / all-zero) → single NULL-source lot (grant never lost)', () => {
-    expect(part({ requestId: 'r6', totalMinutes: 90, segments: null, overtimeBankPolicy: { enabled: true, pooledSources: ['workday', 'restday'] } }).lots)
-      .toEqual([{ source: null, sourceKey: 'overtime_conversion:r6', minutes: 90 }])
-    expect(part({ requestId: 'r6', totalMinutes: 90, segments: segs(0, 0, 0), overtimeBankPolicy: { enabled: true, pooledSources: ['workday', 'restday'] } }).lots)
-      .toEqual([{ source: null, sourceKey: 'overtime_conversion:r6', minutes: 90 }])
+  it('§P1 ENABLED but NO source breakdown (segments null / all-zero) → FAIL CLOSED: pool NOTHING (must-pay)', () => {
+    // the NULL-source whole-lot fallback would bypass the §6 floor + pooledSources — so the enabled path pools
+    // nothing when the source is unresolvable (the OT is must-pay, not banked). NULL fallback is dormant-only.
+    expect(part({ requestId: 'r6', totalMinutes: 90, segments: null, overtimeBankPolicy: { enabled: true, pooledSources: ['workday', 'restday'] } }))
+      .toEqual({ lots: [], perSource: [] })
+    expect(part({ requestId: 'r6', totalMinutes: 90, segments: segs(0, 0, 0), overtimeBankPolicy: { enabled: true, pooledSources: ['workday', 'restday'] } }))
+      .toEqual({ lots: [], perSource: [] })
   })
 })

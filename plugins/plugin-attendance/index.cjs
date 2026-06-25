@@ -10238,13 +10238,14 @@ function partitionOvertimeBankGrantLots({ requestId, totalMinutes, segments, ove
   const sourceMinutes = resolveOvertimeBankSourceMinutes(segments)
   const order = ['workday', 'restday', 'statutory_holiday']
   const totalWeight = order.reduce((sum, src) => sum + sourceMinutes[src], 0)
-  // enabled but NO source breakdown (no segmentation snapshot / segmentation off) → fall back to the single
-  // NULL-source lot of the whole total, so the comp-time grant is never LOST (can't tag without sources).
+  // §P1 (owner review): enabled bank but the OT source is UNRESOLVABLE (no segmentation snapshot — e.g. the
+  // org enabled overtimeBankPolicy but not overtimeSegmentation) → FAIL CLOSED: pool NOTHING (the OT is
+  // must-pay, 账4, not banked). The grant-never-lost NULL-source whole-lot fallback is ONLY valid on the
+  // DORMANT legacy path (above); using it here would pool ANY OT — incl. statutory_holiday — into a single
+  // untagged lot, bypassing the §6 legal floor AND the customer's pooledSources config. (Forcing segmentation
+  // when bank is enabled is the cleaner UX — a follow-up; this slice closes the bypass.)
   if (totalWeight <= 0) {
-    return {
-      lots: total > 0 ? [{ source: null, sourceKey: `overtime_conversion:${requestId}`, minutes: total }] : [],
-      perSource: [],
-    }
+    return { lots: [], perSource: [] }
   }
   // the LAST source WITH non-zero weight absorbs the rounding remainder; a zero-weight source must get exactly
   // 0 (else the remainder could be mis-attributed to a source that had no OT — e.g. must-pay statutory_holiday).
@@ -12063,10 +12064,14 @@ function normalizeAnnualLeaveTiers(raw, fallbackTiers) {
 }
 
 // 加班银行可入池来源白名单 (OvertimeBankPolicy.pooledSources allowlist). statutory_holiday 故意缺席:§6 合规
-// 下限 —— 法定节假日加班按《劳动法》§44 必须支付、不得进调休池,无论管理员怎么配。adjusted_rest_day /
-// company_holiday 可配;workday 默认不入池(§11)但企业显式 opt-in 时允许。
+// 下限 —— 法定节假日加班按《劳动法》§44 必须支付、不得进调休池,无论管理员怎么配。
+// §P2 (owner review): v1-1b 的 source classification 只产出 workday / restday / statutory_holiday(holiday 桶
+// 保守映射成 statutory_holiday）。所以白名单**只暴露 v1-1b 真能产出且可入池的 {workday, restday}** —— 否则
+// 客户配 adjusted_rest_day / company_holiday / special_hours 入池会永远不生效,与 §6「非 statutory 可配」口径
+// 不符。这三个来源等日历层能区分 dayType 子类(statutory / adjusted_rest_day / company_holiday）后的后续切片
+// 再放进来。workday 默认不入池(§11)但企业显式 opt-in 时允许。
 const OVERTIME_BANK_POOLABLE_SOURCES = Object.freeze([
-  'workday', 'restday', 'adjusted_rest_day', 'company_holiday', 'special_hours',
+  'workday', 'restday',
 ])
 
 // OvertimeBankPolicy v1-1a LATENT normalizer. Fail-closed enum-strict: only the allowlist survives in
@@ -19510,7 +19515,7 @@ module.exports = {
       // 节假日加班 must be paid, not poolable), so a PUT including it is rejected at the API.
       overtimeBankPolicy: z.object({
         enabled: z.boolean().optional(),
-        pooledSources: z.array(z.enum(['workday', 'restday', 'adjusted_rest_day', 'company_holiday', 'special_hours'])).optional(),
+        pooledSources: z.array(z.enum(['workday', 'restday'])).optional(),
         maxMinutesPerPeriod: z.number().int().min(0).optional(),
         validityDays: z.number().int().positive().nullable().optional(),
       }).optional(),
