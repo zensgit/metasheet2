@@ -73,7 +73,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -7638,17 +7638,23 @@ export function univerMetaRouter(): Router {
       const snapshot = await loadEntityConfigSnapshot(pool.query.bind(pool), rev)
       if (!snapshot) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot preview a revert.' } })
       const preview = computeRevertPreview(rev, snapshot)
-      // T9-W-L7: a VIEW revert preview shows `current`/`target` filterInfo, whose literals are
-      // field-read-sensitive (#2052/R9). canManageViews does NOT imply field-read, so redact them
-      // per the requester before returning (the same projection the /config-history read applies).
-      // EXECUTE re-computes the raw target server-side, so a field-denied restorer reverts correctly
-      // without ever seeing the denied literal.
+      // T9-W-L7: a VIEW revert preview shows `current`/`target` filterInfo, whose literals are field-read-sensitive
+      // (#2052/R9). canManageViews does NOT imply field-read, so redact them per the requester before returning.
+      // EXECUTE re-computes the raw target server-side, so a field-denied restorer reverts correctly without ever
+      // seeing the denied literal. The redaction is display-only — it runs AFTER computeRevertPreview, so it does
+      // not affect the baselineHash the token binds (that hash is over the raw config, consistent with execute).
       if (rev.entity_type === 'view') {
         const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
         preview.current = redactViewConfigFilterLiterals(preview.current as { filterInfo?: unknown }, allowedFieldIds) as Record<string, unknown>
         preview.target = redactViewConfigFilterLiterals(preview.target as { filterInfo?: unknown }, allowedFieldIds) as Record<string, unknown>
       }
-      return res.json({ ok: true, data: { preview } })
+      // T9-W-L4/D5: mint a server-signed identity binding this preview to execute. The baselineHash alone is
+      // client-computable, so execute REQUIRES this token — a caller cannot skip the preview by computing the hash.
+      const previewToken = mintConfigRestorePreviewIdentity({
+        sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+        baselineHash: preview.baselineHash, actorId: access.userId,
+      })
+      return res.json({ ok: true, data: { preview, previewToken } })
     } catch (err: unknown) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -7664,8 +7670,8 @@ export function univerMetaRouter(): Router {
   router.post('/sheets/:sheetId/config-restore-execute', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const revisionId = typeof req.body?.revisionId === 'string' ? req.body.revisionId.trim() : ''
-    const baselineHash = typeof req.body?.baselineHash === 'string' ? req.body.baselineHash : ''
-    if (!sheetId || !revisionId || !baselineHash) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, revisionId and baselineHash are required' } })
+    const previewToken = typeof req.body?.previewToken === 'string' ? req.body.previewToken : ''
+    if (!sheetId || !revisionId || !previewToken) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, revisionId and previewToken are required' } })
     try {
       const pool = poolManager.get()
       const revRes = await pool.query('SELECT id, sheet_id, entity_type, entity_id, action, before, after, changed_keys FROM meta_config_revisions WHERE id = $1 AND sheet_id = $2', [revisionId, sheetId])
@@ -7686,7 +7692,18 @@ export function univerMetaRouter(): Router {
         const snapshot = await loadEntityConfigSnapshot(query, rev)
         if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
         const preview = computeRevertPreview(rev, snapshot)
-        if (preview.baselineHash !== baselineHash) return { status: 409, code: 'PREVIEW_STALE', message: 'The config changed since preview; re-preview before restoring.' }
+        // T9-W-L4/D5: REQUIRE + verify the server-minted preview identity. It binds revision/entity/actor, and its
+        // baselineHash claim must equal the CURRENT state — so a forged/absent token fails (no preview-skip) and a
+        // stale token (drift since preview) fails mismatch_baselineHash.
+        const verdict = verifyConfigRestorePreviewIdentity(previewToken, {
+          sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+          baselineHash: preview.baselineHash, actorId: access.userId,
+        })
+        if (!verdict.valid) {
+          return verdict.reason === 'mismatch_baselineHash'
+            ? { status: 409, code: 'PREVIEW_STALE', message: 'The config changed since preview; re-preview before restoring.' }
+            : { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before restoring.' }
+        }
         if (preview.driftConflict) return { status: 409, code: 'CONFIG_DRIFT', message: 'The config was changed after this revision; cannot safely revert without re-previewing.' }
         await applyConfigRevert(query, rev)
         await recordConfigRevision(query, {
