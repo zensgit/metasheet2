@@ -1,0 +1,96 @@
+// @vitest-environment jsdom
+/**
+ * T9-R4 — MetaConfigHistoryModal: the dedicated config-history view. The server gates per entity type (R3); the FE
+ * is a FAITHFUL CLIENT — it renders exactly the items the server returned and never filters for security. The
+ * entity-type filter only emits a re-fetch (server re-applies the gate). Mounted via createApp + jsdom (Teleport).
+ */
+import { describe, expect, it, vi, afterEach } from 'vitest'
+import { createApp, nextTick } from 'vue'
+
+import MetaConfigHistoryModal from '../src/multitable/components/MetaConfigHistoryModal.vue'
+import { MultitableApiClient, type MetaConfigRevision } from '../src/multitable/api/client'
+
+const rev = (over: Partial<MetaConfigRevision>): MetaConfigRevision => ({
+  id: 'r1', entityType: 'field', entityId: 'fld_1', action: 'create', before: null, after: { name: 'X' },
+  changedKeys: [], batchId: null, actorId: 'u1', createdAt: '2026-06-24T00:00:00Z', ...over,
+})
+
+type Props = {
+  visible: boolean; items: MetaConfigRevision[]; loading: boolean; entityType: string
+  recordLabelOf: (id: string) => string; isZh: boolean; onClose: () => void; onFilterChange: (t: string) => void
+}
+const mounted: Array<{ unmount: () => void }> = []
+function mountModal(over: Partial<Props>) {
+  const props: Props = {
+    visible: true, items: [], loading: false, entityType: '', recordLabelOf: (id) => `name:${id}`, isZh: false,
+    onClose: vi.fn(), onFilterChange: vi.fn(), ...over,
+  }
+  const app = createApp(MetaConfigHistoryModal, props as unknown as Record<string, unknown>)
+  const c = document.createElement('div'); document.body.appendChild(c); app.mount(c); mounted.push(app); return props
+}
+const q = (s: string) => document.body.querySelector(s) as HTMLElement | null
+afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = '' })
+
+describe('MetaConfigHistoryModal — T9-R4 config-history view', () => {
+  it('renders the server revisions FAITHFULLY (action, entity, changed before→after) — no client-side filtering', async () => {
+    mountModal({ items: [
+      rev({ id: 'a', entityType: 'field', entityId: 'fld_1', action: 'update', changedKeys: ['name'], before: { name: 'Old' }, after: { name: 'New' } }),
+      rev({ id: 'b', entityType: 'view', entityId: 'view_1', action: 'create' }),
+    ] })
+    await nextTick()
+    expect(q('[data-test="config-history-list"]')).toBeTruthy()
+    expect(document.body.textContent).toContain('name:fld_1') // recordLabelOf resolved
+    expect(document.body.textContent).toContain('Old') // before
+    expect(document.body.textContent).toContain('New') // after
+    expect(document.body.querySelectorAll('.cfg-history__row').length).toBe(2) // BOTH rendered — the FE doesn't drop rows
+  })
+
+  it('the entity-type filter EMITS filter-change (server re-fetches; the FE never client-filters for security)', async () => {
+    const props = mountModal({ items: [rev({})] })
+    await nextTick()
+    ;(q('[data-test="config-history-filter-view"]') as HTMLButtonElement).click()
+    expect(props.onFilterChange).toHaveBeenCalledWith('view')
+    // the list still shows the (unchanged) items — filtering is the server's job on the next load, not a client cull
+    expect(document.body.querySelectorAll('.cfg-history__row').length).toBe(1)
+  })
+
+  it('shows the loading state', async () => {
+    mountModal({ loading: true }); await nextTick()
+    expect(q('[data-test="config-history-loading"]')).toBeTruthy()
+    expect(q('[data-test="config-history-list"]')).toBeFalsy()
+  })
+
+  it('shows the empty state when the server returns nothing (e.g. an actor who manages no config)', async () => {
+    mountModal({ items: [] }); await nextTick()
+    expect(q('[data-test="config-history-empty"]')).toBeTruthy()
+  })
+
+  it('close emits close', async () => {
+    const props = mountModal({ items: [rev({})] }); await nextTick()
+    ;(q('.cfg-history__close') as HTMLButtonElement).click()
+    expect(props.onClose).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('getConfigHistory — T9-R3↔R4 wire (drift lock)', () => {
+  it('round-trips the REAL R3 {ok,data:{items}} envelope (not a fixture) — never silently returns []', async () => {
+    // The R3↔R4 seam is drift-prone (cf. dayIndex). R3 returns { ok, data: { items, limit, offset } }; the client's
+    // parseJson unwraps .data, so getConfigHistory reads .items off the unwrapped body. Assert against a real-shaped
+    // envelope so a future envelope change can't make getConfigHistory always-empty while every isolated test stays green.
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      data: { items: [
+        { id: 'cr_1', entityType: 'field', entityId: 'fld_1', action: 'update', before: { name: 'A' }, after: { name: 'B' }, changedKeys: ['name'], batchId: null, actorId: 'u1', createdAt: '2026-06-24T00:00:00Z' },
+      ], limit: 50, offset: 0 },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const items = await client.getConfigHistory('sheet_1', { entityType: 'field' })
+
+    expect(items).toHaveLength(1) // NOT [] — the envelope was unwrapped
+    expect(items[0].entityId).toBe('fld_1')
+    expect(items[0].changedKeys).toEqual(['name'])
+    expect(fetchFn).toHaveBeenCalledWith(expect.stringContaining('/api/multitable/sheets/sheet_1/config-history')) // GET passes the URL only
+    expect(fetchFn.mock.calls[0][0]).toContain('entityType=field')
+  })
+})
