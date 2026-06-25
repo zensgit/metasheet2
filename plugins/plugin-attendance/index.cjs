@@ -12055,15 +12055,16 @@ function normalizeLeaveBalanceDeductionPolicySetting(raw) {
       ? rule.requestLeaveType.trim()
       : null
     if (!requestLeaveType) continue
-    const seen = new Set()
-    const deductFrom = []
+    // §P2 (owner review): v1 LOCKS single-pool — only the FIRST valid pool persists. The array SHAPE is kept
+    // forward-compatible (v2 will use the full ordered list for cross-pool deduction), but v1-2a must NOT
+    // persist a multi-pool order, or the customer's config would diverge from the v1-2b wiring (which deducts
+    // from one pool). Cross-pool order unlocks in v2. (The PUT zod also rejects >1 element — defense in depth.)
+    let firstPool = null
     for (const pool of Array.isArray(rule.deductFrom) ? rule.deductFrom : []) {
-      if (typeof pool === 'string' && LEAVE_DEDUCTION_POOLS.includes(pool) && !seen.has(pool)) {
-        seen.add(pool)
-        deductFrom.push(pool)
-      }
+      if (typeof pool === 'string' && LEAVE_DEDUCTION_POOLS.includes(pool)) { firstPool = pool; break }
     }
-    if (deductFrom.length === 0) continue // a rule must name ≥1 valid pool; unknown pools are dropped (fail-closed)
+    if (!firstPool) continue // a rule must name ≥1 valid pool; unknown pools are dropped (fail-closed)
+    const deductFrom = [firstPool]
     const insufficient = LEAVE_DEDUCTION_INSUFFICIENT_MODES.includes(rule.insufficient) ? rule.insufficient : 'block'
     rules.push({ requestLeaveType, deductFrom, insufficient })
   }
@@ -19504,7 +19505,7 @@ module.exports = {
         enabled: z.boolean().optional(),
         rules: z.array(z.object({
           requestLeaveType: z.string().min(1),
-          deductFrom: z.array(z.enum(['comp_time', 'annual', 'unpaid'])).min(1),
+          deductFrom: z.array(z.enum(['comp_time', 'annual', 'unpaid'])).min(1).max(1), // §P2: v1 single-pool; v2 unlocks >1
           insufficient: z.enum(['block', 'partial_unpaid_absence']).optional(),
         })).optional(),
       }).optional(),

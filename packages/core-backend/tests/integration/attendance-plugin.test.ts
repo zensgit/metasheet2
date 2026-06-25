@@ -8688,6 +8688,8 @@ attendanceIntegrationDescribe(
         expect((await loadSettingsForTest(adminToken)).leaveBalanceDeductionPolicy).toEqual({ enabled: false, rules })
         // (3) API enum reject: an unknown deductFrom pool → 400.
         expect((await putSettings({ leaveBalanceDeductionPolicy: { rules: [{ requestLeaveType: 'x', deductFrom: ['bogus'] }] } })).status).toBe(400)
+        // (4) §P2 single-pool lock: a multi-pool deductFrom is rejected at the API (>1 element). Cross-pool is v2.
+        expect((await putSettings({ leaveBalanceDeductionPolicy: { rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time', 'annual'] }] } })).status).toBe(400)
       } finally {
         await putSettings({ leaveBalanceDeductionPolicy: originalSettings.leaveBalanceDeductionPolicy }).catch(() => undefined)
       }

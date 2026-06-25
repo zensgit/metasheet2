@@ -29,8 +29,17 @@ describe('#加班银行 v1-2a — LeaveOffsetPolicy normalizer (LATENT, enum-str
     expect(r.rules).toEqual([
       { requestLeaveType: 'annual', deductFrom: ['annual'], insufficient: 'block' },
       { requestLeaveType: 'comp_time', deductFrom: ['comp_time'], insufficient: 'block' },
-      { requestLeaveType: 'personal_leave', deductFrom: ['comp_time', 'annual'], insufficient: 'partial_unpaid_absence' },
+      // §P2: v1 single-pool — only the FIRST valid pool persists; the multi-pool order is NOT kept (that's v2).
+      { requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' },
     ])
+  })
+
+  it('§P2 single-pool lock: a multi-pool deductFrom is truncated to the first valid pool (cross-pool is v2)', () => {
+    expect(norm({ rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time', 'annual'] }] }).rules)
+      .toEqual([{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'block' }])
+    // a leading invalid pool is skipped; the first VALID pool wins.
+    expect(norm({ rules: [{ requestLeaveType: 'x', deductFrom: ['bogus', 'annual', 'comp_time'] }] }).rules)
+      .toEqual([{ requestLeaveType: 'x', deductFrom: ['annual'], insufficient: 'block' }])
   })
 
   it('drops invalid rules (no requestLeaveType, no valid pool, unknown pool/insufficient → defaults)', () => {
