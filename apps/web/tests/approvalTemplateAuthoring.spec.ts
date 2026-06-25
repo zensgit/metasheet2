@@ -791,6 +791,49 @@ describe('TemplateAuthoringView', () => {
     expect(payload.approvalGraph.edges).toEqual(graph.edges)
   })
 
+  // #3161 §1 — FE authoring preserve. The editor does not author amountConsistencyCheck, so the
+  // load→rebuild it runs on every save must carry it through verbatim or a preset-shipped control
+  // (#3183) is silently dropped on the first authoring-page save.
+  const amtFields = [
+    { id: 'amount', type: 'number', label: '总额', required: true },
+    { id: 'expense_items', type: 'detail', label: '明细', required: false, columns: [{ id: 'amount', type: 'number', label: '金额', required: true }] },
+  ]
+  const amtMapping = { totalFieldId: 'amount', detailFieldId: 'expense_items', amountColumnId: 'amount' }
+  // A graph consistent with amtFields (direct_manager — references no form field), so the mounted
+  // template is valid + editable + saveable (the default buildTemplate graph references a `reviewer`
+  // field amtFields omits).
+  const amtGraph = {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'approval_1', type: 'approval', name: '审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+      { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+    ],
+  }
+
+  it('§1 round-trip (unit): draftFromTemplate→buildFormSchema preserves amountConsistencyCheck; absent stays absent', () => {
+    const mapped = buildTemplate({ formSchema: { fields: amtFields, amountConsistencyCheck: amtMapping } as any })
+    expect(buildFormSchema(draftFromTemplate(mapped)).amountConsistencyCheck).toEqual(amtMapping)
+    const plain = buildTemplate({ formSchema: { fields: amtFields } as any })
+    expect(buildFormSchema(draftFromTemplate(plain)).amountConsistencyCheck).toBeUndefined()
+  })
+
+  it('§1 active-exposure guard (mounted): opening a mapped (preset-shipped) template and saving keeps amountConsistencyCheck in the payload', async () => {
+    routeParams = { id: 'tpl_amt' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ formSchema: { fields: amtFields, amountConsistencyCheck: amtMapping } as any, approvalGraph: amtGraph as any }))
+    await mountView()
+    await flushUi()
+    // No edits — just the load→save an admin does. Before the fix, buildFormSchema dropped the mapping.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.formSchema.amountConsistencyCheck).toEqual(amtMapping)
+  })
+
   it('G-5 wiring: a LEGACY approval node (assigneeType/assigneeIds, no assigneeSources) shows NO source editor but still renders read-only', async () => {
     routeParams = { id: 'tpl_g5_legacy' }
     getTemplateSpy.mockResolvedValue(buildTemplate({
