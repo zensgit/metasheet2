@@ -1,7 +1,7 @@
 # 加班调休抵扣与周期结算（加班银行）— 设计与验证记录
 
 > **范围**：把"加班入池 → 请假优先抵扣 → 周期末折算"做成**企业可配置**的薪资/考勤结算规则组。本文是该线的**设计 + 验证**真源；设计锁见 `attendance-overtime-bank-settlement-designlock-20260624.md`（RATIFIED）。
-> **状态（2026-06-25）**：v1-1a / v1-1b / v1-2a 三刀已落 main（owner review 驱动，§P1/§P2 已闭环）；v1-3a held（#3167）；v1-2b / v1-4…v1-8 已设计、按 money-path 逐刀 review-gated 推进。本记录随每刀落地更新。
+> **状态（2026-06-25 refresh）**：**账1 入池 + 账2 抵扣 + 账3 满勤 + 配置 UI 全部落 main**（v1-1a/1b/2a/2b/3a/3b/6a/6b/6c，9 PR，owner review 驱动，逐刀 §P 闭环）。**账4（v1-4）已 DEFER 到 v1-5**（owner [P1]：live 导出混用「期间事实 must-pay」+「当前余额 convertible」，历史期间查会算错——§7 详述；settlement 导出本质是 period-end/snapshot 概念，需 v1-5 的结算时点快照才温度一致）。**v1-5 = 下一道设计闸**（snapshot-at-close 架构已具备，吸收 账4 导出，待 owner 拍板——§7）；v1-7 需 payout producer、v1-8 需 staging。本记录随每刀落地更新。
 > **执行纪律**：money-path 切片（碰加班 grant / 请假 deduct 的事务）**绿了也不自动合,逐刀 owner review** —— CI-green-but-wrong 在这条线 = 算错工资。staging smoke 需环境（gated）。
 
 ---
@@ -27,12 +27,12 @@
 | **v1-1a** | OvertimeBankPolicy 休眠 config + enum-strict normalizer + 整条 settings wire | #3145 | ✅ **landed** | unit 6/6 + **real-DB PUT/GET wire 往返**（full shape / partial-preserve siblings / statutory_holiday→400）|
 | **v1-1b** | 账1 来源标签 lot：migration（`overtime_source`）+ gated 按来源 grant | #3158 `8862448ed` | ✅ **landed** | unit 8/8（partition）+ **real-DB**（dormant byte-identical via C2 §1–3 + ENABLED 按来源 lot 守恒 + replay 无重复贷记，C2 §4）。**owner review §P1/§P2 已闭环**（见 §3.5）|
 | **v1-2a** | LeaveOffsetPolicy `leaveBalanceDeductionPolicy` 休眠 config + normalizer + wire | #3162 `c4e5944fd` | ✅ **landed** | unit 5/5 + real-DB wire 往返。**§P2 单池锁**：deductFrom 截断到单池 + PUT zod `.max(1)` 拒多池;跨池顺序 = v2 |
-| v1-2b | LeaveOffsetPolicy **扣减 wiring**：按 rule 驱动现有 FIFO `deductLeaveBalance`(读单池);不足按 `insufficient` 转真实缺勤;年假不被自动抵 | — | ⬜ designed（依赖 v1-2a 落地）| 计划 unit + real-DB |
-| **v1-3a** | AttendanceBonusPolicy 满勤休眠 config + normalizer | #3167 | 🟡 **held**（待 review）| unit 2/2 + real-DB wire 往返 |
-| v1-3b | 满勤 flag 计算：任意请假即 false（即便被池抵掉）+ 复用 #5 RT 迟到/早退阈值 | — | ⬜ designed | 计划 unit + real-DB |
-| v1-4 | 账4 PayrollSettlementPolicy 导出契约：周期末各来源剩余 + 可折算/直付标记（**不含金额**） | — | ⬜ designed（依赖 v1-1b 来源标签）| 计划 real-DB |
-| v1-5 | PolicyAssignment + 生效日期 + **结算快照**（改规则不反算已结算周期）| — | ⬜ designed | 计划 unit + real-DB |
-| v1-6 | 授权 UI（克隆审批模板授权 #2296）+ 四档预设克隆 | — | ⬜ designed（frontend）| 计划 vitest 渲染 |
+| **v1-2b** | LeaveOffsetPolicy **扣减 wiring**：按 rule 驱动 FIFO `deductLeaveBalance`(读单池)+ `mode='partial'`;dormant byte-identical | #3173 `fa1a41936` | ✅ **landed** | unit + **real-DB 矩阵**（dormant byte-identical · block 422+rollback · partial 扣可用+审批 · **no-double-deduct**：comp_time/annual 跳过）|
+| **v1-3a** | AttendanceBonusPolicy 满勤休眠 config + normalizer | #3167 `3349c8613` | ✅ **landed** | unit 2/2 + real-DB wire 往返（rebase 修掉 #3158 allowlist 倒退后合）|
+| **v1-3b** | 满勤 flag 计算（live summary,dormant-clean）：任意请假即 false（即便被池抵掉,读 raw leave_minutes）+ 迟到/早退 | #3193 | ✅ **landed** | unit 7/7 + real-DB（off→absent · on→present；**owner [P1]: late_early_days 漏数已修** + false-path 真实库用例）|
+| ~~v1-4~~ | ~~账4 导出契约~~ → **DEFER 到 v1-5** | ~~#3201 closed~~ | ⛔ **deferred** | owner [P1]：live 导出混 period must-pay + current convertible balance（无 asOf/cycle 边界）→ 历史期间查算错可折算余额。settlement 导出 = period-end/snapshot 概念,需 v1-5 结算时点快照才温度一致（§7）|
+| **v1-5** | PolicyAssignment + 生效日期 + **结算快照**（§7）+ **吸收 账4 导出**（snapshot-at-close） | — | 🔶 **设计闸（待 owner 拍板,§7）** | snapshot-at-close 架构已具备（cycle status open/closed/archived 存在）;但 scope 因 v1-4 defer 扩大,需 design-lock-first 拍板,**不自动建 money-path 结算机制** |
+| **v1-6** | 授权 UI（3 卡片：OvertimeBankPolicy + LeaveOffsetPolicy + 满勤）| #3175 + #3194 | ✅ **landed** | vue-tsc -b 0 + vitest（load/toggle/PUT-only-policy-key;§6 UI 不暴露 statutory_holiday）|
 | v1-7 | Ledger：扩 `source_type`（payout/manual_adjust）+ settlement/payroll-export 标记（**不新增 event_type**）| — | ⬜ designed | 计划 unit + real-DB |
 | v1-8 | real-DB 矩阵（三例验收）+ **staging smoke** | — | ⬜ designed | **staging 需环境（gated）** |
 
@@ -81,3 +81,24 @@
 ## 6. 验证矩阵口径（v1-8）
 
 每条最终需：real-DB 矩阵（三例验收 + 守恒 + replay + 休眠回归）+ staging smoke（PASS stamp / deploy SHA / residue=0）。当前 real-DB 已逐刀覆盖（见 §2/§3）；staging smoke 待环境（与 NS-4/TA-4 同闸门）。
+
+---
+
+## 7. 账4 defer 到 v1-5 的理由 + v1-5 设计闸（待 owner 拍板）
+
+### 7.1 为什么 账4（v1-4）defer
+
+v1-4 曾把 settlement 导出挂在 **live `GET /summary?from&to`** 上,但 owner review [P1] 抓到**温度不一致**:
+- `mustPayBySource`（statutory_holiday）来自 **period 事实**（from/to 的 holiday OT）;
+- `convertibleBySource` 来自 `loadCompTimeRemainingBySource` —— **当前所有 active comp_time lot,无 period/asOf/cycle 边界**。
+
+查 9 月 summary 时 must-pay 是 9 月的,但 convertible 可能含 10 月新入池、或被后续请假/过期改过的当前余额 → payroll 消费方天然按 from/to 理解 → **错发/漏发**。settlement 导出本质是 **period-end / snapshot** 概念,无法在 live 混温度读上自洽。故 **#3201 closed,导出归 v1-5**。owner [P2]（must-pay 真实库数值未锁、未证不从 balance lot 推导）也一并归 v1-5 矩阵。
+
+### 7.2 v1-5 设计闸：snapshot-at-close vs reconstruct-as-of（owner 拍板）
+
+核查 `attendance_payroll_cycles`：**已有生命周期**（`status ∈ open/closed/archived`,经 cycle-update route 写）。两条架构:
+
+- **（推荐）snapshot-at-close**：cycle 转 `closed` 时,把各来源 facts（convertible 余额 by source + must-pay from period OT facts）**算一次并持久化**进 cycle/settlement 记录。构造即温度一致、可测;复用 `loadCompTimeRemainingBySource`（close 时点）。无需事件重建。
+- **（后备,不推荐先做）reconstruct-as-of**：从 `attendance_leave_balance_events`（created_at）按 asOf 重建余额。最重、money-path、本地难验;**仅当 owner 要追溯正确性且无 close hook 时才用** —— 但 close hook 已具备。
+
+**这是 owner 的拍板项,不是「continue」可自动建的**：v1-4 defer 让 v1-5 scope 扩大（吸收导出）,按本线 design-lock-first 纪律需 owner ratify。snapshot-at-close 还要定:导出存哪（`cycle.metadata` vs 新 settlement 表）、§7 effectiveFrom 快照哪些 policy、must-pay 必须从 **period OT facts** 算（**不从 balance lot 推导**,锁 owner [P2] 的反推毒测）。待 owner 拍 snapshot-at-close + 落点,再开 v1-5 build。
