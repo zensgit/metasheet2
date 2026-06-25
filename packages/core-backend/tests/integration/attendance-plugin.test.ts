@@ -8665,6 +8665,34 @@ attendanceIntegrationDescribe(
       return ((res.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
     }
 
+    it('round-trips leaveBalanceDeductionPolicy (wire lock): PUT→GET full shape, partial PUT preserves rules, bad pool → 400', async () => {
+      if (!baseUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-leaveoffset-wire-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+      const putSettings = (body: Record<string, unknown>) =>
+        requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
+      const originalSettings = await loadSettingsForTest(adminToken)
+      try {
+        const rules = [
+          { requestLeaveType: 'annual', deductFrom: ['annual'], insufficient: 'block' },
+          { requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' },
+        ]
+        // (1) full PUT → GET returns the full shape (locks DEFAULT_SETTINGS + normalizeSettings + zod + mergeSettings).
+        expect((await putSettings({ leaveBalanceDeductionPolicy: { enabled: true, rules } })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).leaveBalanceDeductionPolicy).toEqual({ enabled: true, rules })
+        // (2) partial PUT preserves rules: PUT only { enabled:false } → rules NOT cleared (mergeSettings whitelist).
+        expect((await putSettings({ leaveBalanceDeductionPolicy: { enabled: false } })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).leaveBalanceDeductionPolicy).toEqual({ enabled: false, rules })
+        // (3) API enum reject: an unknown deductFrom pool → 400.
+        expect((await putSettings({ leaveBalanceDeductionPolicy: { rules: [{ requestLeaveType: 'x', deductFrom: ['bogus'] }] } })).status).toBe(400)
+      } finally {
+        await putSettings({ leaveBalanceDeductionPolicy: originalSettings.leaveBalanceDeductionPolicy }).catch(() => undefined)
+      }
+    })
+
     it('round-trips overtimeBankPolicy (wire lock): PUT→GET full shape, partial PUT preserves siblings, statutory_holiday → 400', async () => {
       if (!baseUrl) return
       const runSuffix = Date.now().toString(36)
