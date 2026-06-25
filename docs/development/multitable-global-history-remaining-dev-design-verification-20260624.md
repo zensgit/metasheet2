@@ -1,7 +1,7 @@
-# Time Machine remaining-dev push (T9-W + T8-1 + sub-features) — design & verification
+# Global History remaining-dev push (T9-W + T8-1 + sub-features) — design & verification
 
 Status: **built and landing.** This documents the development that completed the remaining work on the Global History
-/ Time Machine line after the read side closed (record history T1–T7 + config history T9 R1–R4 shipped). It carries the
+/ point-in-time restore line after the read side closed (record history T1–T7 + config history T9 R1–R4 shipped). It carries the
 line from *read the past* into *write the past* — the config-restore and the non-destructive table-restore — plus two
 deferred sub-features, while keeping the destructive subset gated behind its own sign-off.
 
@@ -95,7 +95,7 @@ link-rebuild is its own cross-cutting slice), so preview classifies undeletes bu
 ## 4. Verification summary — the full line under test
 
 Config side: R1 16 recording + R2 4 transaction-consistency + R3 8 gate (+1 hasMore) goldens + R4 6 FE specs +
-**T9-W 9 restore goldens + 11 FE specs + retention 4**. Data side: the prior T1–T7 suites + **T8-1 6 revert goldens**.
+**T9-W 9 restore goldens + 11 FE specs + retention 4**. Data side: the prior T1–T7 suites + **T8-1 8 revert goldens** (incl. normal-editor→403 + over-ceiling→413).
 Every new write path is mutation- or trigger-proven, not allow-only-green.
 
 ## 5. What remains GATED / deferred (honest ledger)
