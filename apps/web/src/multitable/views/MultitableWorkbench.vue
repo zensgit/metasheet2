@@ -636,6 +636,7 @@ import MetaViewManager from '../components/MetaViewManager.vue'
 import TrashModal from '../components/TrashModal.vue'
 import HistoryCenterModal from '../components/HistoryCenterModal.vue'
 import MetaConfigHistoryModal from '../components/MetaConfigHistoryModal.vue'
+import { refreshAfterConfigRevert } from './config-revert-refresh'
 import type { MetaConfigRevision } from '../api/client'
 import MetaSheetPermissionManager from '../components/MetaSheetPermissionManager.vue'
 import MetaAutomationManager from '../components/MetaAutomationManager.vue'
@@ -905,7 +906,16 @@ function configRestorePreview(revisionId: string) {
 function configRestoreExecute(revisionId: string, previewToken: string) {
   return workbench.client.executeConfigRestore(workbench.activeSheetId.value, revisionId, previewToken)
 }
-function onConfigReverted() {
+async function onConfigReverted() {
+  // A revert changes field name/order or view filter/config — reload sheet meta + grid so the field
+  // names / view filter / grid reflect the reverted state, not just the history list (otherwise the
+  // user sees "撤销成功" over stale config until manual refresh). See refreshAfterConfigRevert.
+  await refreshAfterConfigRevert({
+    sheetId: workbench.activeSheetId.value,
+    loadSheetMeta: (id) => workbench.loadSheetMeta(id),
+    loadViewData: (off) => grid.loadViewData(off),
+    offset: grid.page.value.offset,
+  })
   void loadConfigHistory(configHistory.value.entityType) // a revert added a source=restore row + changed the entity
 }
 function openConfigHistory() {
