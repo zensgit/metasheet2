@@ -99,12 +99,15 @@ const {
   StockPreparationTableActionError,
   __internals: tableActionInternals,
   applyStockPreparationAction,
+  assertProductionCleanRowsWithinBound,
+  assertStockPrepApplyAllowed,
   assertStockPrepApplySandboxAllowed,
   assertStockPreparationTargetReady,
   createStockPreparationTableActionRegistry,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
   normalizeActionParameters,
+  resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
 } = require('./stock-preparation-table-actions.cjs')
 const {
@@ -1989,6 +1992,10 @@ function createHandlers(services, options = {}) {
         // FOS-4b-3 P0 sandbox gate: explicit config OR env (STOCK_PREP_SANDBOX_MODE + allowlist).
         // Absent (e.g. prod default) → undefined → apply fail-closed.
         sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
+        // FOS-4b-3-prod P2: production policy is SERVER-CONFIG-ONLY (dormant by default). Absent → undefined
+        // → sandbox gate (canonical rejected). Request body never supplies it.
+        productionPolicy: resolveStockPrepApplyProductionPolicy(context.config),
+        now: Date.now(),
       }))
     },
 
@@ -2140,10 +2147,21 @@ function createHandlers(services, options = {}) {
         applyJobId: firstString(requestParams(req).applyJobId),
       })
       assertApplyJobMatchesExpansion(pendingJob, jobId)
-      // FOS-4b-3 P0 sandbox gate: the large-BOM checkpoint apply funnels through here. Gate the job's
-      // target (objectId-bearing) before any write — fail-closed when no sandbox config/env, and the prod
-      // canonical is always rejected. Same guard/resolver as the small-BOM apply path.
-      assertStockPrepApplySandboxAllowed(pendingJob.target, resolveStockPrepApplySandboxPolicy(context.config))
+      // FOS-4b-3-prod P2: the large-BOM checkpoint apply funnels through here. Shared apply gate before any
+      // write — no production policy → sandbox gate (canonical rejected, fail-closed); a configured
+      // production policy may authorize the canonical (large route) per the controlled exception.
+      const applyGate = assertStockPrepApplyAllowed(pendingJob.target, {
+        sandboxPolicy: resolveStockPrepApplySandboxPolicy(context.config),
+        productionPolicy: resolveStockPrepApplyProductionPolicy(context.config),
+        now: Date.now(),
+        route: 'large',
+        actionId,
+      })
+      // FOS-4b-3-prod P2: post-plan production bound. The plan's clean (add/update) row count is fixed across
+      // chunked runs, so checking it on each chunk consistently rejects an over-bound run before any write.
+      const planDecisions = (pendingJob && pendingJob.plan && Array.isArray(pendingJob.plan.decisions)) ? pendingJob.plan.decisions : []
+      const largeBomCleanRowCount = planDecisions.filter((d) => d && (d.decision === 'add' || d.decision === 'update')).length
+      assertProductionCleanRowsWithinBound(applyGate, largeBomCleanRowCount)
       const scopedRecordsApi = createTargetScopedRecordsApi(getMultitableRecordsApi(), pendingJob.target)
       const job = await runLargeBomCheckpointApplyJobChunk({
         storage: context.storage,
