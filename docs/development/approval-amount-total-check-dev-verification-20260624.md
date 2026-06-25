@@ -70,6 +70,31 @@ equal the sum of that submission's detail-row amounts:
   behavior** (record what save vs submit actually does today), NOT a rushed backend save-time reject —
   handled separately from §1.
 
+## §3 — `visibilityRule` save-vs-submit policy (ratified as-built; doc-only)
+
+**Shipped behavior (as-built, ratified for v1 — verified on `origin/main`):**
+- **Save** (`ApprovalProductService` `normalizeFormFieldVisibilityRule`, ~580 + the `failValidation` block
+  ~714–744): a field's `visibilityRule` is **structurally validated + normalized** to a canonical shape.
+  `failValidation` rejects a malformed shape — missing `fieldId`, invalid `operator`, `values` only allowed
+  for `in` (and must be a non-empty array), `value` required otherwise. The canonical rule persists on the
+  versioned `formSchema`.
+- **Submit** (`ApprovalGraphExecutor` `evaluateVisibilityRule`, ~238 + the detail per-row drop ~274): the
+  rule is **evaluated against the submitted `formData`** — hidden fields are dropped, and a detail sub-field's
+  `visibilityRule` is evaluated per row (hidden cells dropped) before processing.
+
+**Policy (ratified):** **structural validation at save + semantic evaluation at submit.** A rule that is
+structurally valid at save but semantically problematic *at submit time* (e.g. references a field that no
+longer exists, or hides a field) is resolved at submit by the evaluation (hidden → dropped), NOT rejected at
+save. This is symmetric with the amount total-check's posture: **fail-closed at the runtime/submit chokepoint,
+lenient at save** — the server is the sole arbiter at the moment that matters.
+
+**Deferred (NOT rushed — per owner: do not pre-build a backend save-time reject):** a save-time SEMANTIC reject
+(reject a `visibilityRule` at save when its `fieldId` is unknown in the schema, or when it could hide a
+required / total / amount field) is a P2 hardening. It is NOT built here because a save-time reject changes the
+authoring contract and a wrong one blocks valid saves — it needs the same explicit-semantics care this line
+gives money-path changes, as its own gated slice. This section ratifies the shipped behavior and records the
+gap; it does not change runtime.
+
 ## Deferred (need explicit business semantics — per the plan, do not pre-build)
 - **W7 rejection backwrite** — write `status='rejected'` on the non-approved path (which currently fails
   the automation by design).
