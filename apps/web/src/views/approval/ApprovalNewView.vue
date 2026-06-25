@@ -191,6 +191,7 @@
                       v-else-if="column.type === 'number'"
                       v-model="row[column.id]"
                       :controls="false"
+                      :disabled="isDetailDerivedColumnReadOnly(field, column, row)"
                       style="width: 100%"
                     />
                     <el-date-picker
@@ -341,6 +342,7 @@ import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { getVisibleFormFields } from '../../approvals/fieldVisibility'
 import { useAutoSumTotal } from '../../approvals/useAutoSumTotal'
+import { isRowDerivationActive } from '../../approvals/lineDerivation'
 import {
   createEmptyDetailRow,
   isDetailCellVisible,
@@ -417,6 +419,14 @@ function detailRowsHint(field: FormField): string {
   if (typeof field.minRows === 'number') parts.push(`至少 ${field.minRows} 行`)
   if (typeof field.maxRows === 'number') parts.push(`最多 ${field.maxRows} 行`)
   return parts.join(' · ')
+}
+
+function isDetailDerivedColumnReadOnly(
+  detailField: FormField,
+  column: FormField,
+  row: Record<string, unknown>,
+): boolean {
+  return isRowDerivationActive(detailField.columns, column, row)
 }
 
 function goBack() {
