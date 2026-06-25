@@ -387,7 +387,14 @@ export async function estimateHistoryHasMore(
   // any unprocessed row whose created_at lies in the truncated sub-millisecond gap (silent row loss → undercount).
   let cursorKey: { createdAtRaw: string; version: number; id: string } | null = null
   let exhausted = false
-  for (let chunk = 0; chunk < ESTIMATE_MAX_CHUNKS && !exhausted && visibleKeys.size < stopAfter; chunk++) {
+  // Cluster-complete early-stop (same-ms parity): once `stopAfter` VISIBLE batches are confirmed, `enoughMs` pins the
+  // boundary row's ms; collection then continues only to the end of that same-millisecond cluster (a STRICTLY-older ms
+  // → `done`). Sorting the COMPLETE cluster by the exact-path comparator (below) yields exactly the exact path's page,
+  // so the estimate matches shipped ordering WITHOUT changing the exact path. Stopping mid-cluster (the old unconditional
+  // break) sliced the wrong same-ms batches into the page.
+  let enoughMs: string | null = null
+  let done = false
+  for (let chunk = 0; chunk < ESTIMATE_MAX_CHUNKS && !exhausted && !done; chunk++) {
     const where = [...baseWhere]
     const args = [...baseArgs]
     if (cursorKey) {
@@ -416,6 +423,7 @@ export async function estimateHistoryHasMore(
       const id = String(r.id)
       const version = Number(r.version ?? 0)
       const createdAt = r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at ?? '')
+      if (enoughMs !== null && createdAt < enoughMs) { done = true; break } // crossed past the boundary ms-cluster → stop (the whole cluster is collected)
       const createdAtRaw = String(r.created_at_iso ?? createdAt) // full-precision column text for the keyset cursor
       cursorKey = { createdAtRaw, version, id } // advance the keyset cursor to this (last-processed) row
       const key = typeof r.batch_id === 'string' ? r.batch_id : id
@@ -424,7 +432,7 @@ export async function estimateHistoryHasMore(
       if (isDenied(deniedBySheet, sheetId, recordId)) continue // LOCK-3 row layer: a denied row never confirms a batch
       if (!visibleKeys.has(key)) {
         visibleKeys.add(key)
-        if (visibleKeys.size >= stopAfter) break // confirmed enough VISIBLE batches → stop early (the perf win)
+        if (enoughMs === null && visibleKeys.size >= stopAfter) enoughMs = createdAt // enough → pin the boundary ms; finish its cluster, then `done`
       }
     }
   }

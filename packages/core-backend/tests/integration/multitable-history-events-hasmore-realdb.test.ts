@@ -282,7 +282,11 @@ describeIfDatabase('global-history events — estimate hasMore goldens (real DB)
     const lastPage = await estimateHistoryHasMore(q, { ...base, offset: 4, estimateScanChunk: 1 }, member)
     const exactLast = await loadHistoryBatchSummaries(q, { ...base, offset: 4 }, member)
     expect(lastPage.hasMore).toBe(false) // offset 4 of 5 → nothing past the last batch
-    expect(lastPage.batches).toEqual(exactLast.batches) // the single 5th batch, reached via the keyset cursor
-    expect(lastPage.batches.map((b) => b.batchId)).toEqual([keys[4]]) // the oldest-µs batch
+    expect(lastPage.batches).toEqual(exactLast.batches) // the single last batch, reached via the keyset cursor (parity with exact)
+    // Same-MILLISECOND batches order by batchId DESC (the SHIPPED exact-path comparator: ms-truncated created_at then
+    // batchId) — NOT by µs. So offset-4 of [us_4,us_3,us_2,us_1,us_0] is the LOWEST batchId = keys[0] (batch_ghhm_us_0),
+    // which is exactly what the exact path returns (asserted above). Cursor precision (no µs-adjacent row skipped) is
+    // proven by total=5 + the page-parity assertions, not by which same-ms batch lands last.
+    expect(lastPage.batches.map((b) => b.batchId)).toEqual([keys[0]])
   })
 })
