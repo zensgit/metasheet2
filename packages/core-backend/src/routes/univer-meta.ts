@@ -73,7 +73,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -8489,6 +8489,145 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] restore-batch-execute failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to execute batch restore' } })
+    }
+  })
+
+  // ============================================================================================================
+  // T8-1: Point-in-Time Revert-to-T (non-destructive sheet rollback). Per the T8 design-lock (PIT-1..7):
+  // preview-first + PIT identity (PIT-1), reuse reconstructRecordsAtT (PIT-4, no re-derivation), counts never leak
+  // (PIT-3/LOCK-3 — denied rows invisible), forward-only source=restore (PIT-5), reveal NEVER composes (PIT-7 —
+  // this path calls NO reveal/reveal-grant function; the writable set is the actor's normal mask). Revert undoes
+  // post-T value changes and KEEPS records created after T (non-destructive); it NEVER deletes. Undelete of post-T
+  // deletions is CLASSIFIED in the preview but its EXECUTE is deferred to the codebase-wide undelete slice
+  // (resurrect + meta_links rebuild is "Slice 2" across the restore routes). The destructive Reset is T8-2.
+  type RevertSheetCaps = Awaited<ReturnType<typeof resolveSheetCapabilities>>
+  const computeSheetRevert = async (
+    pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
+    access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
+  ) => {
+    const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
+    const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
+    if (!patchContext) return null
+    const { fieldById } = patchContext
+    const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
+    const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+    const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed) // PIT-3 mask; NO reveal (PIT-7)
+    const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
+      ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
+    const liveById = new Map<string, { data: Record<string, unknown>; version: number }>()
+    for (const r of (await pool.query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; data: unknown; version: unknown }>) {
+      liveById.set(String(r.id), { data: asRec(r.data), version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0 })
+    }
+    const stateMap = await reconstructRecordsAtT(pool.query.bind(pool), sheetId, asOfIso) // delete-aware, deterministic (PIT-4)
+    const reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }> = []
+    let undeleteCount = 0, keptCreatedAfterT = 0, driftCount = 0
+    for (const [recordId, target] of stateMap) {
+      if (deniedIds.has(recordId)) continue // PIT-3/LOCK-3 — denied records are invisible (uncounted, never reverted)
+      const live = liveById.get(recordId)
+      if (target.exists) {
+        if (!live) { undeleteCount++; continue } // existed at T, gone now (deleted after T) → undelete (execute-deferred)
+        const targetSnapshot = asRec(target.data)
+        let drift = false
+        for (const fid of Object.keys(targetSnapshot)) if (!fieldById.has(fid)) { drift = true; break }
+        if (drift) { driftCount++; continue } // schema drift → excluded → re-preview
+        const diff = computeRecordRestoreDiff({ fieldById, rawTypeById, targetSnapshot, currentData: live.data, recordId, currentVersion: live.version, normalizeLinkIds })
+        const masked = diff.filter((c) => allowed.has(c.fieldId))
+        if (masked.length === 0) continue // already matches T in the actor's visible fields
+        reverts.push({ recordId, diff: masked, changesHash: hashPreviewChanges(masked.map((c) => ({ fieldId: c.fieldId, op: c.op, value: c.value }))), version: live.version })
+      }
+      // target deleted-at-T: live present → KEPT (non-destructive, never re-delete); live absent → unchanged.
+    }
+    for (const id of liveById.keys()) if (!stateMap.has(id) && !deniedIds.has(id)) keptCreatedAfterT++ // created after T → KEPT
+    return { reverts, undeleteCount, keptCreatedAfterT, driftCount, patchContext }
+  }
+
+  router.post('/sheets/:sheetId/revert-preview', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const parsed = z.object({ asOf: z.string().min(1) }).safeParse(req.body)
+    if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and asOf are required' } })
+    const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
+    if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
+    try {
+      const pool = poolManager.get()
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (!capabilities.canEditRecord) return sendForbidden(res) // restore capability (same as scoped restore)
+      const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
+      if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      const { reverts, undeleteCount, keptCreatedAfterT, driftCount } = computed
+      const previewIdentity = reverts.length > 0
+        ? mintPitRevertPreviewIdentity({ sheetId, asOf: asOfIso, strategy: 'revert', scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))), actorId: access.userId })
+        : null // empty revert set → no executable token (no hashScope([]) replay)
+      return res.json({ ok: true, data: {
+        asOf: asOfIso, strategy: 'revert',
+        summary: { visibleRevertCount: reverts.length, visibleUndeleteCount: undeleteCount, keptCreatedAfterTCount: keptCreatedAfterT, conflictCount: driftCount },
+        records: reverts.map((r) => ({ recordId: r.recordId, fieldIds: r.diff.map((dd) => dd.fieldId) })),
+        undeleteSupported: false, previewIdentity,
+      } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] revert-preview failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to compute revert preview' } })
+    }
+  })
+
+  router.post('/sheets/:sheetId/revert-execute', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1) }).safeParse(req.body)
+    if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, asOf, previewIdentity required' } })
+    const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
+    if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
+    try {
+      const pool = poolManager.get()
+      const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      if (!capabilities.canEditRecord) return sendForbidden(res)
+      const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
+      if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      const { reverts, patchContext } = computed
+      const verdict = verifyPitRevertPreviewIdentity(parsed.data.previewIdentity, {
+        sheetId, asOf: asOfIso, strategy: 'revert',
+        scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))), actorId: access.userId,
+      })
+      if (!verdict.valid) {
+        const status = verdict.reason === 'expired' ? 410 : 409
+        return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Revert preview identity rejected (${verdict.reason}); the sheet changed since preview — re-preview` } })
+      }
+      const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions } = patchContext
+      const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
+        ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
+      const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
+      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
+      if (yjsInvalidator) recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
+      type Outcome = { recordId: string; status: 'reverted' | 'skipped'; newVersion?: number; skipReason?: 'denied' | 'conflict' | 'forbidden' | 'error' }
+      const outcomes: Outcome[] = []
+      for (const c of reverts) {
+        if (deniedIds.has(c.recordId)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'denied' }); continue }
+        const hasForbidden = c.diff.some((ch) => {
+          const guard = fieldById.get(ch.fieldId); const perm = fieldPermissions[ch.fieldId]
+          return !(guard && !guard.hidden && guard.readOnly !== true) || !(perm && perm.visible !== false && perm.readOnly !== true)
+        })
+        if (hasForbidden) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
+        try {
+          const result = await recordWriteService.patchRecords({ sheetId, changesByRecord: new Map([[c.recordId, c.diff]]), actorId: getRequestActorId(req), fields, visiblePropertyFields: readableEchoFields, visiblePropertyFieldIds: readableEchoFieldIds, attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore' })
+          outcomes.push({ recordId: c.recordId, status: 'reverted', newVersion: result.updated.find((u) => u.recordId === c.recordId)?.version })
+        } catch (err) {
+          if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'conflict' }); continue }
+          if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
+          if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'error' }); continue }
+          throw err
+        }
+      }
+      const revertedCount = outcomes.filter((o) => o.status === 'reverted').length
+      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount } })
+    } catch (err) {
+      if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] revert-execute failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to execute revert' } })
     }
   })
 
