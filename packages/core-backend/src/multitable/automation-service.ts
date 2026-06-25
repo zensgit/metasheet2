@@ -5,6 +5,7 @@ import { Logger } from '../core/logger'
 import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, type AutomationTriggerType } from './automation-triggers'
 import { ensureRecordNotLocked } from './record-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
+import { extractSelectOptions } from './field-codecs'
 import {
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
@@ -74,6 +75,11 @@ const SAFE_BRANCH_KEY = /^[A-Za-z0-9_-]{1,64}$/
 const PARALLEL_BRANCH_ACTION_TYPES = new Set(['update_record', 'send_notification'])
 const MAX_PARALLEL_BRANCHES = 10
 const MAX_PARALLEL_BRANCH_ACTIONS = 20
+const RESULT_WRITEBACK_FIELDS = ['statusField', 'approverField', 'completedAtField'] as const
+type ResultWritebackField = typeof RESULT_WRITEBACK_FIELDS[number]
+const TEXT_RESULT_WRITEBACK_TYPES = new Set(['string', 'longText'])
+const STATUS_RESULT_WRITEBACK_TYPES = new Set([...TEXT_RESULT_WRITEBACK_TYPES, 'select'])
+const COMPLETED_AT_RESULT_WRITEBACK_TYPES = new Set([...TEXT_RESULT_WRITEBACK_TYPES, 'dateTime'])
 
 // A6-1 opt-in (#2130 runtime): a rule may persist one C1 WorkflowJob row per action.
 // `null`/`'legacy'` both mean the legacy fire-and-forget path (no job rows); only
@@ -152,9 +158,8 @@ function validateStartApprovalConfig(config: Record<string, unknown>, path: stri
   // resume-time action-fingerprint drift guard (cannot be swapped after the approval suspends).
   if (config.resultWriteback !== undefined) {
     if (!isRecord(config.resultWriteback)) return `${path}.resultWriteback must be an object`
-    const fields = ['statusField', 'approverField', 'completedAtField'] as const
     let mapped = 0
-    for (const field of fields) {
+    for (const field of RESULT_WRITEBACK_FIELDS) {
       const value = config.resultWriteback[field]
       if (value === undefined) continue
       if (typeof value !== 'string' || value.trim().length === 0) return `${path}.resultWriteback.${field} must be a non-empty string`
@@ -195,6 +200,63 @@ function parseConditionGroupInput(value: unknown): ConditionGroup {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function resultWritebackFieldId(writeback: Record<string, unknown>, field: ResultWritebackField): string | null {
+  const value = writeback[field]
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+type ResultWritebackTargetField = {
+  id: string
+  type: string
+  property?: Record<string, unknown>
+}
+
+function normalizeFieldProperty(value: unknown): Record<string, unknown> | undefined {
+  if (isRecord(value)) return value
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown
+      return isRecord(parsed) ? parsed : undefined
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
+function resultWritebackFieldTypeError(
+  field: ResultWritebackField,
+  target: ResultWritebackTargetField,
+  outcome: string,
+): string | null {
+  if (field === 'statusField') {
+    if (!STATUS_RESULT_WRITEBACK_TYPES.has(target.type)) {
+      return `resultWriteback.statusField target ${target.id} must be string/longText/select, got ${target.type}`
+    }
+    if (target.type === 'select') {
+      const options = new Set((extractSelectOptions(target.property) ?? []).map((option) => option.value))
+      if (!options.has(outcome)) {
+        return `resultWriteback.statusField select ${target.id} does not include option ${outcome}`
+      }
+    }
+    return null
+  }
+  if (field === 'approverField') {
+    if (!TEXT_RESULT_WRITEBACK_TYPES.has(target.type)) {
+      // Native person fields store userId[], while W7-1 writes a single actor id string. Keep this
+      // closed until the writer intentionally emits person-shaped values and reuses the member guard.
+      return `resultWriteback.approverField target ${target.id} must be string/longText, got ${target.type}`
+    }
+    return null
+  }
+  if (!COMPLETED_AT_RESULT_WRITEBACK_TYPES.has(target.type)) {
+    return `resultWriteback.completedAtField target ${target.id} must be string/longText/dateTime, got ${target.type}`
+  }
+  return null
 }
 
 /**
@@ -1450,10 +1512,14 @@ export class AutomationService {
   ): Promise<Record<string, unknown> | null> {
     const writeback = isRecord(startApprovalConfig.resultWriteback) ? startApprovalConfig.resultWriteback : null
     if (!writeback || !bridge.recordId || !bridge.sheetId) return null
+    await this.assertResultWritebackFields(bridge.sheetId, writeback, event.transition.toStatus)
     const patch: Record<string, unknown> = {}
-    if (typeof writeback.statusField === 'string') patch[writeback.statusField] = event.transition.toStatus
-    if (typeof writeback.approverField === 'string') patch[writeback.approverField] = event.actor?.id ?? null
-    if (typeof writeback.completedAtField === 'string') patch[writeback.completedAtField] = event.occurredAt
+    const statusField = resultWritebackFieldId(writeback, 'statusField')
+    const approverField = resultWritebackFieldId(writeback, 'approverField')
+    const completedAtField = resultWritebackFieldId(writeback, 'completedAtField')
+    if (statusField) patch[statusField] = event.transition.toStatus
+    if (approverField) patch[approverField] = event.actor?.id ?? null
+    if (completedAtField) patch[completedAtField] = event.occurredAt
     if (Object.keys(patch).length === 0) return null
 
     const lockRes = await this.queryFn(
@@ -1497,6 +1563,39 @@ export class AutomationService {
       // publishMultitableSheetRealtime swallows its own errors; belt-and-suspenders.
     }
     return patch
+  }
+
+  private async assertResultWritebackFields(
+    sheetId: string,
+    writeback: Record<string, unknown>,
+    outcome: string,
+  ): Promise<void> {
+    const mapped = RESULT_WRITEBACK_FIELDS
+      .map((field) => ({ field, id: resultWritebackFieldId(writeback, field) }))
+      .filter((entry): entry is { field: ResultWritebackField; id: string } => !!entry.id)
+    if (mapped.length === 0) return
+
+    const uniqueIds = Array.from(new Set(mapped.map((entry) => entry.id)))
+    const res = await this.queryFn(
+      'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])',
+      [sheetId, uniqueIds],
+    )
+    const byId = new Map<string, ResultWritebackTargetField>()
+    for (const row of res.rows as Array<Record<string, unknown>>) {
+      const id = typeof row.id === 'string' ? row.id : ''
+      const type = typeof row.type === 'string' ? row.type : ''
+      if (!id || !type) continue
+      byId.set(id, { id, type, property: normalizeFieldProperty(row.property) })
+    }
+
+    for (const entry of mapped) {
+      const target = byId.get(entry.id)
+      if (!target) {
+        throw new Error(`resultWriteback.${entry.field} target field not found: ${entry.id}`)
+      }
+      const typeError = resultWritebackFieldTypeError(entry.field, target, outcome)
+      if (typeError) throw new Error(typeError)
+    }
   }
 
   private async failApprovalBridgeExecution(
