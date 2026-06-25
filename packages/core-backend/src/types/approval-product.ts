@@ -256,23 +256,25 @@ export interface ApprovalRequesterSnapshot {
    * Lane G (P1-A) org-relation plumbing — local user id of the requester's
    * direct manager, frozen at create time from the directory `raw` payload.
    * Absent when unresolvable (no linked directory account, top-of-tree, or
-   * pre-extraction legacy rows). The future `direct_manager` assignee-source
-   * kind reads this; it is purely additive and existing snapshots omit it.
+   * pre-extraction legacy rows). The `direct_manager` assignee-source kind reads
+   * this; it is purely additive and existing snapshots omit it.
    */
   managerId?: string
   /**
    * Lane G (P1-A) org-relation plumbing — local user id of the head of the
    * requester's primary department, frozen at create time. Absent when
-   * unresolvable. Read by the future `dept_head` assignee-source kind.
+   * unresolvable. Read by the `dept_head` assignee-source kind.
    */
   deptHeadId?: string
   /**
    * Org-relation plumbing — ordered local user ids of the requester's management
    * chain, level 1 first (`[0]` equals `managerId`). Frozen at create time only
-   * when the published graph uses the `continuous_managers` source (so it is not
+   * when the published graph uses a manager-chain source — `continuous_managers`
+   * OR `manager_at_level` (gated by runtimeGraphUsesManagerChain, so it is not
    * baked for every approval). Cycle-guarded + capped; absent when unresolvable or
-   * unused. Read by the `continuous_managers` assignee-source kind, which slices it
-   * to its own `levels`. Purely additive; existing snapshots omit it.
+   * unused. Read by `continuous_managers` (slices it to its own `levels`) and by
+   * `manager_at_level` (picks `chain[level - 1]`, dense). Purely additive; existing
+   * snapshots omit it.
    */
   managerChainIds?: string[]
   /**
