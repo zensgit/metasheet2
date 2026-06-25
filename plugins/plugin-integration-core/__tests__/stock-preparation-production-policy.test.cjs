@@ -59,6 +59,7 @@ for (const route of ['small', 'large', 'both']) {
 rejectsWith(() => normalizeStockPrepApplyProductionPolicy(null), 'not_object')
 rejectsWith(() => normalizeStockPrepApplyProductionPolicy('x'), 'not_object')
 rejectsWith(() => normalizeStockPrepApplyProductionPolicy({ allowedTargetObjectIds: ['sandbox_x'], enabled: true }), 'sandbox_shape')
+rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ allowedTargetObjectIds: ['sandbox_x'] })), 'sandbox_shape')
 rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ enabled: false })), 'not_enabled')
 rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ authorizedTargetObjectId: '' })), 'missing_target')
 rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ authorizedTargetObjectId: 'some_sandbox_table' })), 'target_not_canonical')
@@ -78,6 +79,8 @@ rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ requireF
 rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2999' })), 'invalid_expiry') // year-only → ~1000y window
 rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2026-06-25' })), 'invalid_expiry') // date-only, no time/zone
 rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2026-06-25T00:00:00' })), 'invalid_expiry') // no zone
+rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2026-02-31T00:00:00.000Z' })), 'invalid_expiry') // Date.parse rollover
+rejectsWith(() => normalizeStockPrepApplyProductionPolicy(validPolicy({ expiresAt: '2026-06-25T24:00:00.000Z' })), 'invalid_expiry') // Date.parse rollover
 
 // --- expiry check (caller supplies now; no module clock; bounded authorization window = 7 days) ---
 const nowMs = Date.parse('2026-06-25T00:00:00.000Z')

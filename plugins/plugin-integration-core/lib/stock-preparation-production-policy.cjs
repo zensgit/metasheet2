@@ -42,6 +42,28 @@ function optionalString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
+function parseStrictIsoTimestamp(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|([+-])(\d{2}):(\d{2}))$/.exec(value)
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6])
+  const offsetHour = match[9] === undefined ? 0 : Number(match[9])
+  const offsetMinute = match[10] === undefined ? 0 : Number(match[10])
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  if (month < 1 || month > 12) return null
+  if (day < 1 || day > daysInMonth) return null
+  if (hour < 0 || hour > 23) return null
+  if (minute < 0 || minute > 59) return null
+  if (second < 0 || second > 59) return null
+  if (offsetHour < 0 || offsetHour > 23 || offsetMinute < 0 || offsetMinute > 59) return null
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 // Values-free reject: coarse reason only; never echoes target / authorization / action / values.
 function reject(reason, message) {
   throw new StockPreparationProductionPolicyError(422, 'STOCK_PREP_PRODUCTION_POLICY_INVALID', message, { reason })
@@ -54,8 +76,7 @@ function normalizeStockPrepApplyProductionPolicy(input) {
   if (!isPlainObject(input)) reject('not_object', 'production policy must be an object')
   // A sandbox policy is NOT a production policy — reject the sandbox allowlist shape outright so it can
   // never be passed in as a production policy.
-  if (Object.prototype.hasOwnProperty.call(input, 'allowedTargetObjectIds') &&
-      !Object.prototype.hasOwnProperty.call(input, 'authorizedTargetObjectId')) {
+  if (Object.prototype.hasOwnProperty.call(input, 'allowedTargetObjectIds')) {
     reject('sandbox_shape', 'a sandbox policy must not be used as a production policy')
   }
   if (input.enabled !== true) reject('not_enabled', 'production policy must be explicitly enabled')
@@ -89,11 +110,10 @@ function normalizeStockPrepApplyProductionPolicy(input) {
   if (!expiresAt) reject('missing_expiry', 'expiresAt is required')
   // Require strict ISO-8601 with explicit time + zone. Date.parse alone accepts loose forms (e.g. "2999"
   // → a ~1000-year window), which defeats the bounded-time intent; demand the full timestamp.
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(expiresAt)) {
+  const expiresAtMs = parseStrictIsoTimestamp(expiresAt)
+  if (!Number.isFinite(expiresAtMs)) {
     reject('invalid_expiry', 'expiresAt must be a strict ISO-8601 timestamp with time and zone')
   }
-  const expiresAtMs = Date.parse(expiresAt)
-  if (!Number.isFinite(expiresAtMs)) reject('invalid_expiry', 'expiresAt must be a valid timestamp')
 
   // No blind apply: the policy must explicitly require a fresh dry-run/apply token at apply time.
   if (input.requireFreshDryRun !== true) reject('fresh_dry_run_required', 'requireFreshDryRun must be true')
