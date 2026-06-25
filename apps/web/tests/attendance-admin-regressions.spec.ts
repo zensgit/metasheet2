@@ -2684,6 +2684,60 @@ describe('Attendance admin regressions', () => {
     })
   })
 
+  it('loads leaveBalanceDeductionPolicy into the rules editor, adds a rule, and PUTs only { leaveBalanceDeductionPolicy }', async () => {
+    attendanceSettingsData = {
+      leaveBalanceDeductionPolicy: {
+        enabled: true,
+        rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' }],
+      },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    // Load: the existing rule maps into a row (deductFrom array → single-pool select).
+    const enabled = container!.querySelector<HTMLInputElement>('[data-leave-offset="enabled"]')
+    expect(enabled!.checked).toBe(true)
+    const rule0Type = container!.querySelector<HTMLInputElement>('[data-leave-offset-rule="0"] [data-leave-offset-rule-type]')
+    const rule0Pool = container!.querySelector<HTMLSelectElement>('[data-leave-offset-rule="0"] [data-leave-offset-rule-pool]')
+    const rule0Ins = container!.querySelector<HTMLSelectElement>('[data-leave-offset-rule="0"] [data-leave-offset-rule-insufficient]')
+    expect(Boolean(rule0Type && rule0Pool && rule0Ins)).toBe(true)
+    expect(rule0Type!.value).toBe('personal_leave')
+    expect(rule0Pool!.value).toBe('comp_time')
+    expect(rule0Ins!.value).toBe('partial_unpaid_absence')
+
+    // Add a second rule and fill it (sick_leave → annual, block).
+    container!.querySelector<HTMLButtonElement>('[data-leave-offset="add"]')!.click()
+    await flushUi(2)
+    const rule1Type = container!.querySelector<HTMLInputElement>('[data-leave-offset-rule="1"] [data-leave-offset-rule-type]')
+    const rule1Pool = container!.querySelector<HTMLSelectElement>('[data-leave-offset-rule="1"] [data-leave-offset-rule-pool]')
+    expect(Boolean(rule1Type && rule1Pool)).toBe(true)
+    rule1Type!.value = 'sick_leave'
+    rule1Type!.dispatchEvent(new Event('input'))
+    rule1Pool!.value = 'annual'
+    rule1Pool!.dispatchEvent(new Event('change'))
+    await flushUi(2)
+
+    container!.querySelector<HTMLButtonElement>('[data-leave-offset="save"]')!.click()
+    await flushUi(6)
+
+    // PUT body must be EXACTLY { leaveBalanceDeductionPolicy: {...} }; each rule's single pool wrapped to [pool].
+    const settingsPuts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(settingsPuts).toHaveLength(1)
+    const body = JSON.parse(String((settingsPuts[0][1] as { body?: string } | undefined)?.body || '{}'))
+    expect(body).toEqual({
+      leaveBalanceDeductionPolicy: {
+        enabled: true,
+        rules: [
+          { requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' },
+          { requestLeaveType: 'sick_leave', deductFrom: ['annual'], insufficient: 'block' },
+        ],
+      },
+    })
+  })
+
   it('loads multiShiftDay into the config card and PUTs ONLY { multiShiftDay }', async () => {
     attendanceSettingsData = {
       multiShiftDay: { enabled: true, maxSlots: 3 },

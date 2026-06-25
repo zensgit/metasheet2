@@ -2361,6 +2361,58 @@
                 </button>
               </div>
 
+              <div class="attendance__admin-subsection" data-admin-card="leave-offset-policy">
+                <h4>{{ tr('Leave offset (deduction policy)', '请假抵扣（扣减规则）') }}</h4>
+                <p class="attendance__field-hint">
+                  {{ tr('Which leave types deduct from which balance pool, and how to handle an insufficient balance. v1 deducts from one pool per rule. comp_time / annual leave keep their built-in deduction.', '哪些请假类型从哪个余额池扣减、余额不足如何处理。v1 每条规则扣单一池。调休/年假请假沿用内置扣减。') }}
+                </p>
+                <label class="attendance__field attendance__field--inline" for="attendance-leave-offset-enabled">
+                  <input
+                    type="checkbox"
+                    id="attendance-leave-offset-enabled"
+                    v-model="leaveOffsetForm.enabled"
+                    data-leave-offset="enabled"
+                  />
+                  <span>{{ tr('Enable leave offset rules', '启用请假抵扣规则') }}</span>
+                </label>
+                <div
+                  v-for="(rule, index) in leaveOffsetForm.rules"
+                  :key="index"
+                  class="attendance__field"
+                  :data-leave-offset-rule="index"
+                >
+                  <input
+                    type="text"
+                    v-model="rule.requestLeaveType"
+                    :placeholder="tr('Leave type code (e.g. personal_leave)', '请假类型编码（如 personal_leave）')"
+                    data-leave-offset-rule-type
+                  />
+                  <select v-model="rule.deductFrom" data-leave-offset-rule-pool>
+                    <option value="comp_time">{{ tr('Comp-time pool', '调休池') }}</option>
+                    <option value="annual">{{ tr('Annual pool', '年假池') }}</option>
+                    <option value="unpaid">{{ tr('Unpaid (no deduction)', '不付（不扣减）') }}</option>
+                  </select>
+                  <select v-model="rule.insufficient" data-leave-offset-rule-insufficient>
+                    <option value="block">{{ tr('Block if insufficient', '不足则阻断') }}</option>
+                    <option value="partial_unpaid_absence">{{ tr('Partial (rest = unpaid absence)', '部分扣（余下计缺勤）') }}</option>
+                  </select>
+                  <button type="button" class="attendance__btn" data-leave-offset-rule-remove @click="removeLeaveOffsetRule(index)">
+                    {{ tr('Remove', '删除') }}
+                  </button>
+                </div>
+                <button type="button" class="attendance__btn" data-leave-offset="add" @click="addLeaveOffsetRule">
+                  {{ tr('Add rule', '添加规则') }}
+                </button>
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="settingsLoading"
+                  data-leave-offset="save"
+                  @click="saveLeaveOffsetPolicy"
+                >
+                  {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save leave offset', '保存请假抵扣') }}
+                </button>
+              </div>
+
               <div class="attendance__admin-subsection" data-admin-card="multi-shift-day">
                 <h4>{{ tr('Multi-shift day', '一天多班次') }}</h4>
                 <p class="attendance__field-hint">
@@ -8904,6 +8956,10 @@ interface AttendanceSettings {
     maxMinutesPerPeriod?: number | null
     validityDays?: number | null
   }
+  leaveBalanceDeductionPolicy?: {
+    enabled?: boolean
+    rules?: Array<{ requestLeaveType?: string; deductFrom?: string[]; insufficient?: string }>
+  }
   autoShiftMatching?: {
     enabled?: boolean
     mode?: 'preview' | 'apply' | 'auto'
@@ -13083,6 +13139,20 @@ const overtimeBankPolicyForm = reactive({
   maxMinutesPerPeriod: '',
   validityDays: '',
 })
+
+// 加班银行 v1-6b LeaveOffsetPolicy admin card. Each rule = {requestLeaveType, deductFrom (single pool in v1),
+// insufficient}. Saved via saveLeaveOffsetPolicy → PUTs ONLY { leaveBalanceDeductionPolicy }. The UI keeps a
+// single-pool select (v1 §P2); on save each rule's pool is wrapped into the [pool] array the backend expects.
+const leaveOffsetForm = reactive({
+  enabled: false,
+  rules: [] as Array<{ requestLeaveType: string; deductFrom: string; insufficient: string }>,
+})
+function addLeaveOffsetRule() {
+  leaveOffsetForm.rules.push({ requestLeaveType: '', deductFrom: 'comp_time', insufficient: 'block' })
+}
+function removeLeaveOffsetRule(index: number) {
+  leaveOffsetForm.rules.splice(index, 1)
+}
 
 // Multi-shift day M4 admin card. Saved via saveMultiShiftDay, which PUTs ONLY { multiShiftDay }.
 // Default off keeps the assignment editor single-slot and omits slotIndex from assignment writes.
@@ -18848,6 +18918,7 @@ async function loadSettings() {
     applySettingsToForm(data.data || {})
     applyShiftComplianceToForm(data.data || {})
     applyOvertimeBankPolicyToForm(data.data || {})
+    applyLeaveOffsetToForm(data.data || {})
     applyMultiShiftDayToForm(data.data || {})
     applyOutdoorToForm(data.data || {})
     applyInOutMergeToForm(data.data || {})
@@ -18883,6 +18954,19 @@ function applyOvertimeBankPolicyToForm(settings: AttendanceSettings) {
     typeof value === 'number' && Number.isFinite(value) && value > 0 ? String(value) : ''
   overtimeBankPolicyForm.maxMinutesPerPeriod = posStr(p.maxMinutesPerPeriod)
   overtimeBankPolicyForm.validityDays = posStr(p.validityDays)
+}
+
+function applyLeaveOffsetToForm(settings: AttendanceSettings) {
+  const p = settings.leaveBalanceDeductionPolicy || {}
+  leaveOffsetForm.enabled = p.enabled === true
+  const pool = (value: unknown) => (value === 'comp_time' || value === 'annual' || value === 'unpaid' ? value : 'comp_time')
+  leaveOffsetForm.rules = Array.isArray(p.rules)
+    ? p.rules.map((r) => ({
+        requestLeaveType: typeof r?.requestLeaveType === 'string' ? r.requestLeaveType : '',
+        deductFrom: pool(Array.isArray(r?.deductFrom) ? r.deductFrom[0] : undefined),
+        insufficient: r?.insufficient === 'partial_unpaid_absence' ? 'partial_unpaid_absence' : 'block',
+      }))
+    : []
 }
 
 function normalizeMultiShiftMaxSlots(value: unknown): number {
@@ -19349,6 +19433,46 @@ async function saveOvertimeBankPolicy() {
     setStatus(tr('Overtime bank updated.', '加班银行已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save overtime bank', '保存加班银行失败'), 'save-settings')
+  } finally {
+    settingsLoading.value = false
+  }
+}
+
+async function saveLeaveOffsetPolicy() {
+  settingsLoading.value = true
+  try {
+    // PUT ONLY leaveBalanceDeductionPolicy — backend per-key merge preserves every other policy. Rules with a
+    // blank leave-type code are dropped; each rule's single pool is wrapped into the [pool] array (v1 §P2).
+    const rules = leaveOffsetForm.rules
+      .filter((r) => r.requestLeaveType.trim() !== '')
+      .map((r) => ({
+        requestLeaveType: r.requestLeaveType.trim(),
+        deductFrom: [r.deductFrom === 'annual' || r.deductFrom === 'unpaid' ? r.deductFrom : 'comp_time'],
+        insufficient: r.insufficient === 'partial_unpaid_absence' ? 'partial_unpaid_absence' : 'block',
+      }))
+    const payload = {
+      leaveBalanceDeductionPolicy: {
+        enabled: leaveOffsetForm.enabled === true,
+        rules,
+      },
+    }
+    const response = await apiFetchWithTimeout('/api/attendance/settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw createForbiddenError()
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to save leave offset', '保存请假抵扣失败'))
+    }
+    adminForbidden.value = false
+    applyLeaveOffsetToForm((data.data || payload) as AttendanceSettings)
+    setStatus(tr('Leave offset updated.', '请假抵扣已更新。'))
+  } catch (error: any) {
+    setStatusFromError(error, tr('Failed to save leave offset', '保存请假抵扣失败'), 'save-settings')
   } finally {
     settingsLoading.value = false
   }
