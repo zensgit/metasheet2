@@ -25,12 +25,16 @@ export interface ConfigRevisionInput {
   /** groups a mutation with its cascaded derived changes (T9-L7); per-request. */
   batchId: string | null
   actorId: string | null
+  /** T9-W-L1: 'restore' marks a forward-only config-restore (default 'mutation' = an ordinary edit). */
+  source?: 'mutation' | 'restore'
+  /** T9-W-L1: when source='restore', the id of the meta_config_revisions row that was reverted (back-reference). */
+  restoredFromId?: string | null
 }
 
 export async function recordConfigRevision(query: QueryFn, input: ConfigRevisionInput): Promise<void> {
   await query(
-    `INSERT INTO meta_config_revisions (sheet_id, entity_type, entity_id, action, before, after, changed_keys, batch_id, actor_id)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::text[], $8, $9)`,
+    `INSERT INTO meta_config_revisions (sheet_id, entity_type, entity_id, action, before, after, changed_keys, batch_id, actor_id, source, restored_from_id)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::text[], $8, $9, $10, $11)`,
     [
       input.sheetId,
       input.entityType,
@@ -41,6 +45,8 @@ export async function recordConfigRevision(query: QueryFn, input: ConfigRevision
       input.changedKeys,
       input.batchId,
       input.actorId,
+      input.source ?? 'mutation',
+      input.restoredFromId ?? null,
     ],
   )
 }

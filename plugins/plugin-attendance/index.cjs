@@ -10212,6 +10212,69 @@ function resolveCompTimeGrantMinutesFromOvertimeMetadata(metadata) {
   return Math.floor(Number(meta.minutes) || 0)
 }
 
+// 加班银行 v1-1b (design-lock §3 账1/§6): map the overtime segmentation's per-day-type minutes to BANK
+// sources. workday→workday, restday→restday, holiday→statutory_holiday — CONSERVATIVE §6: the segmentation's
+// 'holiday' bucket does not yet distinguish statutory vs adjusted-rest vs company, so v1-1b treats holiday OT
+// as statutory_holiday (never poolable) rather than risk pooling a must-pay statutory day. Finer holiday
+// sub-typing + special_hours are later refinements (need the calendar to expose them).
+function resolveOvertimeBankSourceMinutes(segments) {
+  const s = segments && typeof segments === 'object' ? segments : {}
+  return {
+    workday: Math.max(0, Math.floor(Number(s.workdayMinutes) || 0)),
+    restday: Math.max(0, Math.floor(Number(s.restdayMinutes) || 0)),
+    statutory_holiday: Math.max(0, Math.floor(Number(s.holidayMinutes) || 0)),
+  }
+}
+
+// 加班银行 v1-1b (design-lock §3 账1): partition the rule-normalized comp-time total into per-source
+// comp_time lots, GATED on overtimeBankPolicy. DORMANT (default / not enabled) → a single NULL-source lot of
+// the whole total (caller keeps the byte-identical pre-v1-1b INSERT). ENABLED → partition `totalMinutes` by
+// the per-source weights (rule already applied ONCE upstream → never re-applied), last source absorbs the
+// remainder (exact conservation: Σ perSource === total); only sources in pooledSources become comp_time lots
+// (the rest is must-pay → 账4, not banked; statutory_holiday is never poolable, §6 floor). Each pooled lot
+// keyed `overtime_conversion:${requestId}:${source}` so per-source ON CONFLICT idempotency holds on replay.
+function partitionOvertimeBankGrantLots({ requestId, totalMinutes, segments, overtimeBankPolicy } = {}) {
+  const total = Math.max(0, Math.floor(Number(totalMinutes) || 0))
+  if (!overtimeBankPolicy || overtimeBankPolicy.enabled !== true) {
+    return {
+      lots: total > 0 ? [{ source: null, sourceKey: `overtime_conversion:${requestId}`, minutes: total }] : [],
+      perSource: [],
+    }
+  }
+  const sourceMinutes = resolveOvertimeBankSourceMinutes(segments)
+  const order = ['workday', 'restday', 'statutory_holiday']
+  const totalWeight = order.reduce((sum, src) => sum + sourceMinutes[src], 0)
+  // §P1 (owner review): enabled bank but the OT source is UNRESOLVABLE (no segmentation snapshot — e.g. the
+  // org enabled overtimeBankPolicy but not overtimeSegmentation) → FAIL CLOSED: pool NOTHING (the OT is
+  // must-pay, 账4, not banked). The grant-never-lost NULL-source whole-lot fallback is ONLY valid on the
+  // DORMANT legacy path (above); using it here would pool ANY OT — incl. statutory_holiday — into a single
+  // untagged lot, bypassing the §6 legal floor AND the customer's pooledSources config. (Forcing segmentation
+  // when bank is enabled is the cleaner UX — a follow-up; this slice closes the bypass.)
+  if (totalWeight <= 0) {
+    return { lots: [], perSource: [] }
+  }
+  // the LAST source WITH non-zero weight absorbs the rounding remainder; a zero-weight source must get exactly
+  // 0 (else the remainder could be mis-attributed to a source that had no OT — e.g. must-pay statutory_holiday).
+  const lastWeighted = [...order].reverse().find((src) => sourceMinutes[src] > 0) ?? null
+  const perSource = []
+  let allocated = 0
+  order.forEach((source) => {
+    let minutes = 0
+    if (sourceMinutes[source] > 0) {
+      minutes = source === lastWeighted
+        ? Math.max(0, total - allocated)
+        : (totalWeight > 0 ? Math.floor((total * sourceMinutes[source]) / totalWeight) : 0)
+    }
+    allocated += minutes
+    perSource.push({ source, minutes })
+  })
+  const pooled = new Set(Array.isArray(overtimeBankPolicy.pooledSources) ? overtimeBankPolicy.pooledSources : [])
+  const lots = perSource
+    .filter((p) => p.minutes > 0 && pooled.has(p.source))
+    .map((p) => ({ source: p.source, sourceKey: `overtime_conversion:${requestId}:${p.source}`, minutes: p.minutes }))
+  return { lots, perSource }
+}
+
 function applyOvertimeSegmentationSnapshotToApprovedEntry(entry, snapshot) {
   if (!entry || !snapshot) return
   entry.workdayOvertimeMinutes += snapshot.workdayOvertimeMinutes
@@ -12008,10 +12071,14 @@ function normalizeAnnualLeaveTiers(raw, fallbackTiers) {
 }
 
 // 加班银行可入池来源白名单 (OvertimeBankPolicy.pooledSources allowlist). statutory_holiday 故意缺席:§6 合规
-// 下限 —— 法定节假日加班按《劳动法》§44 必须支付、不得进调休池,无论管理员怎么配。adjusted_rest_day /
-// company_holiday 可配;workday 默认不入池(§11)但企业显式 opt-in 时允许。
+// 下限 —— 法定节假日加班按《劳动法》§44 必须支付、不得进调休池,无论管理员怎么配。
+// §P2 (owner review): v1-1b 的 source classification 只产出 workday / restday / statutory_holiday(holiday 桶
+// 保守映射成 statutory_holiday）。所以白名单**只暴露 v1-1b 真能产出且可入池的 {workday, restday}** —— 否则
+// 客户配 adjusted_rest_day / company_holiday / special_hours 入池会永远不生效,与 §6「非 statutory 可配」口径
+// 不符。这三个来源等日历层能区分 dayType 子类(statutory / adjusted_rest_day / company_holiday）后的后续切片
+// 再放进来。workday 默认不入池(§11)但企业显式 opt-in 时允许。
 const OVERTIME_BANK_POOLABLE_SOURCES = Object.freeze([
-  'workday', 'restday', 'adjusted_rest_day', 'company_holiday', 'special_hours',
+  'workday', 'restday',
 ])
 
 // OvertimeBankPolicy v1-1a LATENT normalizer. Fail-closed enum-strict: only the allowlist survives in
@@ -18391,6 +18458,8 @@ module.exports = {
   __attendanceOvertimeBankForTests: {
     OVERTIME_BANK_POOLABLE_SOURCES,
     normalizeOvertimeBankPolicySetting,
+    resolveOvertimeBankSourceMinutes,
+    partitionOvertimeBankGrantLots,
   },
   __attendanceLeaveOffsetForTests: {
     LEAVE_DEDUCTION_POOLS,
@@ -19495,7 +19564,7 @@ module.exports = {
       // 节假日加班 must be paid, not poolable), so a PUT including it is rejected at the API.
       overtimeBankPolicy: z.object({
         enabled: z.boolean().optional(),
-        pooledSources: z.array(z.enum(['workday', 'restday', 'adjusted_rest_day', 'company_holiday', 'special_hours'])).optional(),
+        pooledSources: z.array(z.enum(['workday', 'restday'])).optional(),
         maxMinutesPerPeriod: z.number().int().min(0).optional(),
         validityDays: z.number().int().positive().nullable().optional(),
       }).optional(),
@@ -25773,29 +25842,65 @@ module.exports = {
               if (compTimeSettings?.compTimeFromOvertime?.enabled === true) {
                 const amountMinutes = resolveCompTimeGrantMinutesFromOvertimeMetadata(nextMetadata)
                 if (amountMinutes > 0) {
-                  const compTimeSourceKey = `overtime_conversion:${requestId}`
                   // ④ C4 (#2267): when expiresInDays is configured (positive int), stamp the grant with
                   // expires_at = granted_at + N×24h — a FIXED 24h-per-day duration, computed in SQL from
                   // the statement's now() (granted_at also defaults to now() → exact). null = no expiry
                   // (unchanged C2 behaviour). The AttendanceExpiryService (C4-1) reaps these.
                   const expiresInDays = compTimeSettings.compTimeFromOvertime.expiresInDays ?? null
-                  const lotRows = await trx.query(
-                    `INSERT INTO attendance_leave_balances
-                       (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status, expires_at)
-                     VALUES ($1, $2, 'comp_time', $3, $3, 'overtime_conversion', $4, $5, 'active',
-                             CASE WHEN $6::int IS NULL THEN NULL ELSE now() + ($6::int * interval '24 hours') END)
-                     ON CONFLICT (org_id, source_key) DO NOTHING
-                     RETURNING id`,
-                    [orgId, requestRow.user_id, amountMinutes, requestId, compTimeSourceKey, expiresInDays]
-                  )
-                  const newLotId = lotRows[0]?.id
-                  if (newLotId) {
-                    await trx.query(
-                      `INSERT INTO attendance_leave_balance_events
-                         (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
-                       VALUES ($1, $2, $3, 'grant', $4, 'overtime_conversion', $5)`,
-                      [orgId, requestRow.user_id, newLotId, amountMinutes, requestId]
+                  // 加班银行 v1-1b (design-lock §3 账1): gate per-source tagging on overtimeBankPolicy. DORMANT
+                  // (default, every current org) keeps the EXISTING single overtime_conversion lot with
+                  // overtime_source NULL — byte-identical to pre-v1-1b. ENABLED splits the rule-normalized
+                  // total into per-source pooled lots (statutory_holiday never pooled, §6); non-pooled OT is
+                  // must-pay (账4), not banked.
+                  const bankPolicy = compTimeSettings?.overtimeBankPolicy
+                  if (!bankPolicy || bankPolicy.enabled !== true) {
+                    const compTimeSourceKey = `overtime_conversion:${requestId}`
+                    const lotRows = await trx.query(
+                      `INSERT INTO attendance_leave_balances
+                         (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status, expires_at)
+                       VALUES ($1, $2, 'comp_time', $3, $3, 'overtime_conversion', $4, $5, 'active',
+                               CASE WHEN $6::int IS NULL THEN NULL ELSE now() + ($6::int * interval '24 hours') END)
+                       ON CONFLICT (org_id, source_key) DO NOTHING
+                       RETURNING id`,
+                      [orgId, requestRow.user_id, amountMinutes, requestId, compTimeSourceKey, expiresInDays]
                     )
+                    const newLotId = lotRows[0]?.id
+                    if (newLotId) {
+                      await trx.query(
+                        `INSERT INTO attendance_leave_balance_events
+                           (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+                         VALUES ($1, $2, $3, 'grant', $4, 'overtime_conversion', $5)`,
+                        [orgId, requestRow.user_id, newLotId, amountMinutes, requestId]
+                      )
+                    }
+                  } else {
+                    // readOvertimeSegmentationSnapshot reshapes segments → workday/restday/holidayOvertimeMinutes;
+                    // rebuild the {…Minutes} shape the partition helper expects (no snapshot → null → fallback lot).
+                    const snap = readOvertimeSegmentationSnapshot(nextMetadata)
+                    const segments = snap
+                      ? { workdayMinutes: snap.workdayOvertimeMinutes, restdayMinutes: snap.restdayOvertimeMinutes, holidayMinutes: snap.holidayOvertimeMinutes }
+                      : null
+                    const { lots } = partitionOvertimeBankGrantLots({ requestId, totalMinutes: amountMinutes, segments, overtimeBankPolicy: bankPolicy })
+                    for (const lot of lots) {
+                      const lotRows = await trx.query(
+                        `INSERT INTO attendance_leave_balances
+                           (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status, expires_at, overtime_source)
+                         VALUES ($1, $2, 'comp_time', $3, $3, 'overtime_conversion', $4, $5, 'active',
+                                 CASE WHEN $6::int IS NULL THEN NULL ELSE now() + ($6::int * interval '24 hours') END, $7)
+                         ON CONFLICT (org_id, source_key) DO NOTHING
+                         RETURNING id`,
+                        [orgId, requestRow.user_id, lot.minutes, requestId, lot.sourceKey, expiresInDays, lot.source]
+                      )
+                      const newLotId = lotRows[0]?.id
+                      if (newLotId) {
+                        await trx.query(
+                          `INSERT INTO attendance_leave_balance_events
+                             (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+                           VALUES ($1, $2, $3, 'grant', $4, 'overtime_conversion', $5)`,
+                          [orgId, requestRow.user_id, newLotId, lot.minutes, requestId]
+                        )
+                      }
+                    }
                   }
                 }
               }
