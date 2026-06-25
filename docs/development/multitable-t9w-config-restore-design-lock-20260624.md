@@ -1,10 +1,13 @@
 # T9-W — Config / Schema-Change RESTORE (WRITE-SIDE) — DESIGN-LOCK
 
-> Status: **DESIGN-LOCK, docs-only. Runtime GATED behind ratification of §6 (D1–D6) + an explicit owner opt-in per
-> slice.** This is the **write half** of T9, deferred out of the read-side lock
-> (`multitable-t9-config-history-readside-designlock-20260623.md`) exactly as the record line deferred the restore
-> write (T6/BS) behind the read+preview (T5/T7). The read side (R1–R4: record + display config history) is shipped;
-> this locks **mutating config back toward a prior recorded state**.
+> Status: **DESIGN-LOCK + IMPLEMENTED THROUGH THE SAFE SUBSET.** T9-W-1/2 (preview + execute) shipped in #3164;
+> the **signed preview identity (D5 / T9-W-L4)** was a follow-up fix (#review-fix) after an initial pass shipped only
+> a client-computable baseline hash — execute now REQUIRES a server-minted token. The **gated subset stays deferred**
+> behind separate sign-off: data-loss ops (field undelete / lossy retype, L6) and permission + sheet_config reverts
+> (R-W2). This is the **write half** of T9, mirroring the record line's read+preview→write discipline.
+>
+> (Historical note: this file was authored as a docs-only lock; runtime landed in the same arc. The §7 TODO markers
+> below are kept as the original plan — T9-W-1/2/3 are now DONE; the `(separate) data-loss` row remains gated.)
 >
 > Mirror of the record-restore discipline: **preview (read-only) → execute (forward-only write) → FE**, with the
 > destructive subset hard-gated behind a separate sign-off (as T8 Reset is to T8 Revert).
