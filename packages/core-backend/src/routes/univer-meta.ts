@@ -84,6 +84,13 @@ import {
   fieldUpdateDiff,
   fieldDeleteDiff,
 } from '../multitable/config-revision-recorder'
+import {
+  type ConfigRevisionRow,
+  classifyRevert,
+  computeRevertPreview,
+  loadEntityConfigSnapshot,
+  applyConfigRevert,
+} from '../multitable/config-restore'
 import { computeRecordRestoreDiff } from '../multitable/record-restore-diff'
 import {
   HISTORY_FIELD_AUDIT_GRANT_PERMISSION,
@@ -7540,6 +7547,136 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] issue history-audit grant failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to issue grant' } })
+    }
+  })
+
+  // T9-R3: config/schema-change history READ API. Lists meta_config_revisions for the sheet, gated PER ENTITY TYPE
+  // by the SAME capability the corresponding mutation route checks (read-gate ≡ write-gate): field/field-permission
+  // → canManageFields, view/view-permission → canManageViews, sheet_config/sheet-permission → canManageSheetAccess.
+  // The gate is applied IN THE WHERE CLAUSE (so pagination/has-more never lie), NOT after LIMIT/OFFSET. These rows
+  // are config-only (no record values) and this is its OWN gate — never the record-history mask.
+  router.get('/sheets/:sheetId/config-history', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
+    const offsetParam = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : 0
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 100) : 50
+    const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam, 0) : 0
+    const entityTypeFilter = typeof req.query.entityType === 'string' && req.query.entityType.trim() ? req.query.entityType.trim() : null
+    if (!sheetId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    try {
+      const pool = poolManager.get()
+      const sheetCheck = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
+      if (sheetCheck.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+
+      // Per-entity-type gate IN the WHERE clause. Condition strings are STATIC (no user input) — safe to interpolate;
+      // every value (sheetId, entityType, limit, offset) is parameterized. A `permission` row's kind is its entity_id
+      // scope prefix (field:/view:/sheet:), routed to the same capability that authored it.
+      const allowed: string[] = []
+      if (capabilities.canManageFields) allowed.push("entity_type = 'field'", "(entity_type = 'permission' AND entity_id LIKE 'field:%')")
+      if (capabilities.canManageViews) allowed.push("entity_type = 'view'", "(entity_type = 'permission' AND entity_id LIKE 'view:%')")
+      if (capabilities.canManageSheetAccess) allowed.push("entity_type = 'sheet_config'", "(entity_type = 'permission' AND entity_id LIKE 'sheet:%')")
+      if (allowed.length === 0) return res.json({ ok: true, data: { items: [], limit, offset } }) // manages no config → empty
+
+      const params: unknown[] = [sheetId]
+      let where = `sheet_id = $1 AND (${allowed.join(' OR ')})`
+      if (entityTypeFilter) { params.push(entityTypeFilter); where += ` AND entity_type = $${params.length}` }
+      params.push(limit, offset)
+      const rows = (await pool.query(
+        `SELECT id, entity_type, entity_id, action, before, after, changed_keys, batch_id, actor_id, created_at
+         FROM meta_config_revisions WHERE ${where} ORDER BY created_at DESC, id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+        params,
+      )).rows as Array<Record<string, unknown>>
+      return res.json({ ok: true, data: { items: rows.map((r) => ({
+        id: String(r.id), entityType: String(r.entity_type), entityId: String(r.entity_id), action: String(r.action),
+        before: r.before ?? null, after: r.after ?? null, changedKeys: r.changed_keys ?? [],
+        batchId: r.batch_id ?? null, actorId: r.actor_id ?? null, createdAt: r.created_at,
+      })), limit, offset } })
+    } catch (err: unknown) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] config-history list failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to list config history' } })
+    }
+  })
+
+  // T9-W-1: config-restore PREVIEW (read-only). Given a recorded config revision, compute the would-be revert diff,
+  // the schema-drift conflict flag (T9-W-L5), and the safe-vs-gated classification (T9-W-L6). Writes nothing.
+  // Gated per entity type by the SAME capability that authored the change (read-gate ≡ write-gate ≡ restore-gate, L3).
+  router.post('/sheets/:sheetId/config-restore-preview', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const revisionId = typeof req.body?.revisionId === 'string' ? req.body.revisionId.trim() : ''
+    if (!sheetId || !revisionId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and revisionId are required' } })
+    try {
+      const pool = poolManager.get()
+      const revRes = await pool.query('SELECT id, sheet_id, entity_type, entity_id, action, before, after, changed_keys FROM meta_config_revisions WHERE id = $1 AND sheet_id = $2', [revisionId, sheetId])
+      const rev = revRes.rows[0] as ConfigRevisionRow | undefined
+      if (!rev) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Config revision not found: ${revisionId}` } })
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      const cap = rev.entity_type === 'field' ? capabilities.canManageFields
+        : rev.entity_type === 'view' ? capabilities.canManageViews
+        : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
+        : (capabilities.canManageFields || capabilities.canManageViews || capabilities.canManageSheetAccess)
+      if (!cap) return sendForbidden(res)
+      const snapshot = await loadEntityConfigSnapshot(pool.query.bind(pool), rev)
+      if (!snapshot) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot preview a revert.' } })
+      return res.json({ ok: true, data: { preview: computeRevertPreview(rev, snapshot) } })
+    } catch (err: unknown) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] config-restore preview failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to preview config restore' } })
+    }
+  })
+
+  // T9-W-2: config-restore EXECUTE (forward-only write). Re-gate (L3) → classify (L6, gated → 422) → atomic txn:
+  // re-read current, baseline-match (L4, stale → 409) + drift re-check (L5, drift → 409), apply the revert, and record
+  // a source=restore revision back-referencing the reverted one (L1). Config write + restore revision commit together
+  // (L7). Idempotent: after a revert the state no longer matches the preview's baseline hash, so a replay is rejected.
+  router.post('/sheets/:sheetId/config-restore-execute', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const revisionId = typeof req.body?.revisionId === 'string' ? req.body.revisionId.trim() : ''
+    const baselineHash = typeof req.body?.baselineHash === 'string' ? req.body.baselineHash : ''
+    if (!sheetId || !revisionId || !baselineHash) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, revisionId and baselineHash are required' } })
+    try {
+      const pool = poolManager.get()
+      const revRes = await pool.query('SELECT id, sheet_id, entity_type, entity_id, action, before, after, changed_keys FROM meta_config_revisions WHERE id = $1 AND sheet_id = $2', [revisionId, sheetId])
+      const rev = revRes.rows[0] as ConfigRevisionRow | undefined
+      if (!rev) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Config revision not found: ${revisionId}` } })
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      const cap = rev.entity_type === 'field' ? capabilities.canManageFields
+        : rev.entity_type === 'view' ? capabilities.canManageViews
+        : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
+        : (capabilities.canManageFields || capabilities.canManageViews || capabilities.canManageSheetAccess)
+      if (!cap) return sendForbidden(res)
+      const classify = classifyRevert(rev)
+      if (classify.kind === 'gated') return res.status(422).json({ ok: false, error: { code: 'RESTORE_NOT_SUPPORTED', message: classify.reason ?? 'This config restore is not supported in this slice.' } })
+
+      // null = applied; a failure object = a guard tripped (the txn made no write either way).
+      const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+        const snapshot = await loadEntityConfigSnapshot(query, rev)
+        if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
+        const preview = computeRevertPreview(rev, snapshot)
+        if (preview.baselineHash !== baselineHash) return { status: 409, code: 'PREVIEW_STALE', message: 'The config changed since preview; re-preview before restoring.' }
+        if (preview.driftConflict) return { status: 409, code: 'CONFIG_DRIFT', message: 'The config was changed after this revision; cannot safely revert without re-previewing.' }
+        await applyConfigRevert(query, rev)
+        await recordConfigRevision(query, {
+          sheetId, entityType: rev.entity_type, entityId: rev.entity_id, action: 'update',
+          before: preview.current, after: preview.target, changedKeys: rev.changed_keys,
+          batchId: randomUUID(), actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id,
+        })
+        return null
+      })
+      if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+      return res.json({ ok: true, data: { restored: { revisionId, entityType: rev.entity_type, entityId: rev.entity_id, changedKeys: rev.changed_keys } } })
+    } catch (err: unknown) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] config-restore execute failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL', message: 'Failed to execute config restore' } })
     }
   })
 

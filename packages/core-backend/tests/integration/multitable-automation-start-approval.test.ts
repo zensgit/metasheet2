@@ -151,7 +151,7 @@ async function createPublishedTemplate(
   return template.id
 }
 
-async function createStartApprovalRule(svc: AutomationService, templateId: string): Promise<string> {
+async function createStartApprovalRule(svc: AutomationService, templateId: string, resultWriteback?: Record<string, string>): Promise<string> {
   const startApproval = {
     type: 'start_approval',
     config: {
@@ -160,6 +160,7 @@ async function createStartApprovalRule(svc: AutomationService, templateId: strin
         summary: 'Record {{record.title}} needs approval',
       },
       requester: { mode: 'trigger_actor' },
+      ...(resultWriteback ? { resultWriteback } : {}),
     },
   } as const
   const created = await svc.createRule(SHEET, {
@@ -202,12 +203,94 @@ async function seedSheetRecord(title: string): Promise<void> {
   )
 }
 
+async function seedWritebackFields(fields: Array<{ id: string; name: string; type: string; property?: Record<string, unknown>; order: number }>): Promise<void> {
+  for (const field of fields) {
+    await q(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+       ON CONFLICT (id) DO UPDATE
+          SET name = EXCLUDED.name,
+              type = EXCLUDED.type,
+              property = EXCLUDED.property,
+              "order" = EXCLUDED."order"`,
+      [field.id, SHEET, field.name, field.type, JSON.stringify(field.property ?? {}), field.order],
+    )
+  }
+}
+
+async function seedDefaultWritebackFields(): Promise<void> {
+  await seedWritebackFields([
+    {
+      id: 'approval_status',
+      name: 'Approval Status',
+      type: 'select',
+      property: { options: [{ value: 'approved' }, { value: 'rejected' }] },
+      order: 10,
+    },
+    { id: 'approved_by', name: 'Approved By', type: 'string', order: 11 },
+    { id: 'approved_at', name: 'Approved At', type: 'dateTime', order: 12 },
+  ])
+}
+
 async function waitForExecutionStatus(svc: AutomationService, id: string, status: string) {
   await vi.waitFor(async () => {
     const execution = await svc.logs.getById(id)
     expect(execution?.status, JSON.stringify(execution)).toBe(status)
   }, { timeout: 5000, interval: 50 })
   return (await svc.logs.getById(id))!
+}
+
+async function executeAndApprove(
+  svc: AutomationService,
+  resultWriteback: Record<string, string>,
+  title = 'Q4 plan',
+): Promise<{ executionId: string; approvalInstanceId: string }> {
+  const templateId = await createPublishedTemplate()
+  const ruleId = await createStartApprovalRule(svc, templateId, resultWriteback)
+  await seedSheetRecord(title)
+  const execRule = {
+    id: ruleId,
+    name: 'W6 start approval',
+    sheetId: SHEET,
+    trigger: { type: 'record.created', config: {} },
+    actions: [
+      {
+        type: 'start_approval',
+        config: {
+          templateId,
+          formDataMapping: { summary: 'Record {{record.title}} needs approval' },
+          requester: { mode: 'trigger_actor' },
+          resultWriteback,
+        },
+      },
+      { type: 'send_webhook', config: { url: 'https://example.test/w6-tail' } },
+    ],
+    enabled: true,
+    createdBy: REQUESTER,
+    createdAt: new Date(TS).toISOString(),
+    executionMode: 'workflow_job_v1',
+  }
+  const execution = await svc.executeRule(execRule as never, {
+    sheetId: SHEET,
+    recordId: RECORD,
+    data: { title },
+    actorId: REQUESTER,
+  })
+  executionIds.push(execution.id)
+  const bridge = await q(
+    `SELECT approval_instance_id FROM multitable_automation_approval_bridges WHERE execution_id = $1`,
+    [execution.id],
+  )
+  const approvalInstanceId = bridge.rows[0].approval_instance_id as string
+  approvalIds.push(approvalInstanceId)
+  const approvals = new ApprovalProductService()
+  await approvals.dispatchAction(
+    approvalInstanceId,
+    { action: 'approve', comment: 'go' },
+    { userId: APPROVER, userName: APPROVER },
+  )
+  await waitForExecutionStatus(svc, execution.id, 'success')
+  return { executionId: execution.id, approvalInstanceId }
 }
 
 describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)', () => {
@@ -232,6 +315,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
       await q('DELETE FROM automation_rules WHERE id = $1', [id])
     }
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET])
+    await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET])
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE])
     for (const id of templateIds) {
@@ -344,6 +428,162 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
       expect(finalJobs.map((job) => job.status)).toEqual(['resolved', 'resolved'])
       expect(finalJobs[0].result).toMatchObject({ outcome: 'approved' })
       finalJobs.forEach((job) => expect(() => normalizeWorkflowJob(job)).not.toThrow())
+    } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('W7-1: approval.approved writes the result back to the source record (declared fixed mapping)', async () => {
+    const svc = makeAutomationService((async () => new Response('OK', { status: 200 })) as never)
+    try {
+      const RW = { statusField: 'approval_status', approverField: 'approved_by', completedAtField: 'approved_at' }
+      const templateId = await createPublishedTemplate()
+      const ruleId = await createStartApprovalRule(svc, templateId, RW)
+      await seedSheetRecord('Q4 plan')
+      await seedDefaultWritebackFields()
+      const execRule = {
+        id: ruleId,
+        name: 'W6 start approval',
+        sheetId: SHEET,
+        trigger: { type: 'record.created', config: {} },
+        actions: [
+          {
+            type: 'start_approval',
+            config: {
+              templateId,
+              formDataMapping: { summary: 'Record {{record.title}} needs approval' },
+              requester: { mode: 'trigger_actor' },
+              resultWriteback: RW,
+            },
+          },
+          { type: 'send_webhook', config: { url: 'https://example.test/w6-tail' } },
+        ],
+        enabled: true,
+        createdBy: REQUESTER,
+        createdAt: new Date(TS).toISOString(),
+        executionMode: 'workflow_job_v1',
+      }
+      const execution = await svc.executeRule(execRule as never, {
+        sheetId: SHEET,
+        recordId: RECORD,
+        data: { title: 'Q4 plan' },
+        actorId: REQUESTER,
+      })
+      executionIds.push(execution.id)
+
+      const bridge = await q(
+        `SELECT approval_instance_id FROM multitable_automation_approval_bridges WHERE execution_id = $1`,
+        [execution.id],
+      )
+      approvalIds.push(bridge.rows[0].approval_instance_id)
+
+      const approvals = new ApprovalProductService()
+      const after = await approvals.dispatchAction(
+        bridge.rows[0].approval_instance_id,
+        { action: 'approve', comment: 'go' },
+        { userId: APPROVER, userName: APPROVER },
+      )
+      expect(after.status).toBe('approved')
+      await waitForExecutionStatus(svc, execution.id, 'success')
+
+      // W7-1: the SOURCE record now carries the approval result — values from the completion event,
+      // written via the declared fixed mapping (NOT a templated expression into the write path).
+      const rec = await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [RECORD, SHEET])
+      const data = rec.rows[0].data as Record<string, unknown>
+      expect(data.approval_status).toBe('approved')
+      expect(data.approved_by).toBe(APPROVER)
+      expect(typeof data.approved_at).toBe('string') // the completion timestamp
+    } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('W7-1a: backwrite is visible to tail actions (recordData merge) + emits record.updated (realtime parity)', async () => {
+    const webhookBodies: string[] = []
+    const updatedEvents: Array<Record<string, unknown>> = []
+    const subId = eventBus.subscribe('multitable.record.updated', (p: unknown) => { updatedEvents.push(p as Record<string, unknown>) })
+    const svc = makeAutomationService((async (_url: string, opts?: { body?: string }) => {
+      if (opts?.body) webhookBodies.push(opts.body)
+      return new Response('OK', { status: 200 })
+    }) as never)
+    try {
+      const RW = { statusField: 'approval_status' }
+      const templateId = await createPublishedTemplate()
+      const ruleId = await createStartApprovalRule(svc, templateId, RW)
+      await seedSheetRecord('Q4 plan')
+      await seedDefaultWritebackFields()
+      const execRule = {
+        id: ruleId,
+        name: 'W6 start approval',
+        sheetId: SHEET,
+        trigger: { type: 'record.created', config: {} },
+        actions: [
+          { type: 'start_approval', config: { templateId, formDataMapping: { summary: 'Record {{record.title}} needs approval' }, requester: { mode: 'trigger_actor' }, resultWriteback: RW } },
+          { type: 'send_webhook', config: { url: 'https://example.test/w7a-tail' } },
+        ],
+        enabled: true,
+        createdBy: REQUESTER,
+        createdAt: new Date(TS).toISOString(),
+        executionMode: 'workflow_job_v1',
+      }
+      const execution = await svc.executeRule(execRule as never, { sheetId: SHEET, recordId: RECORD, data: { title: 'Q4 plan' }, actorId: REQUESTER })
+      executionIds.push(execution.id)
+      const bridge = await q(`SELECT approval_instance_id FROM multitable_automation_approval_bridges WHERE execution_id = $1`, [execution.id])
+      approvalIds.push(bridge.rows[0].approval_instance_id)
+      const approvals = new ApprovalProductService()
+      await approvals.dispatchAction(bridge.rows[0].approval_instance_id, { action: 'approve', comment: 'go' }, { userId: APPROVER, userName: APPROVER })
+      await waitForExecutionStatus(svc, execution.id, 'success')
+
+      // gap 1 (recordData merge): the tail send_webhook's recordData snapshot includes the backwrite.
+      expect(webhookBodies.length).toBeGreaterThan(0)
+      const body = JSON.parse(webhookBodies[webhookBodies.length - 1]) as { data?: Record<string, unknown> }
+      expect(body.data?.approval_status).toBe('approved')
+      // gap 2 (realtime/chaining parity): the backwrite emitted multitable.record.updated.
+      expect(updatedEvents.some((e) => (e.changes as Record<string, unknown> | undefined)?.approval_status === 'approved' && e.recordId === RECORD)).toBe(true)
+    } finally {
+      eventBus.unsubscribe(subId)
+      svc.shutdown()
+    }
+  })
+
+  test('W7-1b: resultWriteback skips writes when the mapped target field is missing', async () => {
+    const calls: string[] = []
+    const svc = makeAutomationService((async (url: string) => {
+      calls.push(url)
+      return new Response('OK', { status: 200 })
+    }) as never)
+    try {
+      await executeAndApprove(svc, { statusField: 'missing_approval_status' }, 'Missing writeback field')
+
+      const rec = await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [RECORD, SHEET])
+      const data = rec.rows[0].data as Record<string, unknown>
+      expect(data.title).toBe('Missing writeback field')
+      expect(data).not.toHaveProperty('missing_approval_status')
+      // Field-validation failure is fail-closed for the write, not a second way to block W6 resume.
+      expect(calls).toEqual(['https://example.test/w6-tail'])
+    } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('W7-1b: resultWriteback skips writes when the mapped target type is incompatible', async () => {
+    const calls: string[] = []
+    const svc = makeAutomationService((async (url: string) => {
+      calls.push(url)
+      return new Response('OK', { status: 200 })
+    }) as never)
+    try {
+      await seedSheetRecord('Wrong writeback type')
+      await seedWritebackFields([
+        { id: 'approval_status_number', name: 'Approval Status Number', type: 'number', order: 30 },
+      ])
+      await executeAndApprove(svc, { statusField: 'approval_status_number' }, 'Wrong writeback type')
+
+      const rec = await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [RECORD, SHEET])
+      const data = rec.rows[0].data as Record<string, unknown>
+      expect(data.title).toBe('Wrong writeback type')
+      expect(data).not.toHaveProperty('approval_status_number')
+      expect(calls).toEqual(['https://example.test/w6-tail'])
     } finally {
       svc.shutdown()
     }

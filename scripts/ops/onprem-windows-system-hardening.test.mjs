@@ -46,6 +46,16 @@ test('Windows apply helper retries post-PM2 healthcheck during warmup and remain
 test('Windows apply helper resolves extracted package root by package markers, not first child directory', () => {
   const script = readScript('scripts/ops/multitable-onprem-apply-package.ps1')
 
+  assert.match(
+    script,
+    /function Write-Info \{\s+param\(\[string\]\$Message\)\s+Write-Host "\[multitable-onprem-apply-package\] \$Message"\s+\}/,
+    'apply-helper logging must not use Write-Output because success-stream output pollutes helper return values',
+  )
+  assert.doesNotMatch(
+    script,
+    /Write-Output "\[multitable-onprem-apply-package\] \$Message"/,
+    'apply-helper logging must not emit informational lines on the success output stream',
+  )
   assert.match(script, /defaulting to short Windows staging root \$tempBase/)
   assert.match(script, /C:\\ms-tmp/)
   assert.match(script, /System\.IO\.Compression\.ZipFile/)
@@ -69,6 +79,16 @@ test('Windows apply helper resolves extracted package root by package markers, n
 test('Windows deploy launcher resolves staged package root by package markers, not first child directory', () => {
   const script = readScript('scripts/ops/multitable-onprem-deploy-launcher.ps1')
 
+  assert.match(
+    script,
+    /function Write-LauncherInfo \{\s+param\(\[string\]\$Message\)\s+# Use the host stream,[\s\S]+Write-Host \("\[multitable-onprem-deploy-launcher\] \{0\}" -f \$Message\)\s+\}/,
+    'launcher logging must not use Write-Output because success-stream output pollutes helper return values',
+  )
+  assert.doesNotMatch(
+    script,
+    /Write-Output \("\[multitable-onprem-deploy-launcher\] \{0\}" -f \$Message\)/,
+    'launcher logging must not emit informational lines on the success output stream',
+  )
   assert.match(script, /defaulting to short Windows staging root \$base/)
   assert.match(script, /C:\\ms-tmp/)
   assert.match(script, /System\.IO\.Compression\.ZipFile/)
