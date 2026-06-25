@@ -16,6 +16,12 @@ const completionEventState = vi.hoisted(() => ({
   emitApprovalCompletionEvent: vi.fn(),
 }))
 
+const orgRelationsState = vi.hoisted(() => ({
+  // Default returns {} so existing createApproval tests behave exactly as before
+  // (when the real resolver threw on the un-stubbed pool and the error was swallowed).
+  resolveApprovalRequesterOrgRelations: vi.fn(async () => ({})),
+}))
+
 vi.mock('../../src/db/pg', () => ({
   pool: pgState.pool,
 }))
@@ -28,6 +34,17 @@ vi.mock('../../src/services/ApprovalCompletionEvent', async () => {
   return {
     ...actual,
     emitApprovalCompletionEvent: completionEventState.emitApprovalCompletionEvent,
+  }
+})
+
+vi.mock('../../src/services/ApprovalDirectoryOrg', async () => {
+  const actual = await vi.importActual<typeof import('../../src/services/ApprovalDirectoryOrg')>(
+    '../../src/services/ApprovalDirectoryOrg',
+  )
+
+  return {
+    ...actual,
+    resolveApprovalRequesterOrgRelations: orgRelationsState.resolveApprovalRequesterOrgRelations,
   }
 })
 
@@ -213,6 +230,8 @@ describe('ApprovalProductService', () => {
     pgState.client.release.mockReset()
     pgState.pool.connect.mockResolvedValue(pgState.client)
     completionEventState.emitApprovalCompletionEvent.mockReset()
+    orgRelationsState.resolveApprovalRequesterOrgRelations.mockReset()
+    orgRelationsState.resolveApprovalRequesterOrgRelations.mockResolvedValue({})
   })
 
   it('blocks revoke when the published runtime policy disables it', async () => {
@@ -2021,6 +2040,119 @@ describe('ApprovalProductService', () => {
       normalize(sql as string).startsWith('INSERT INTO approval_instances'))
     expect(insertInstance?.[1]?.[11]).toBe('ver-2')
     expect(insertInstance?.[1]?.[12]).toBe('pub-2')
+  })
+
+  it('bakes the manager chain into the persisted requester snapshot for a manager_at_level graph', async () => {
+    // Regression for the bake-gate gap: prove createApproval ITSELF wires the
+    // scanner result through to the snapshot — not just the resolver. The org
+    // directory walk is mocked (covered by approval-manager-chain tests); it
+    // returns the chain ONLY when createApproval passes includeManagerChain:true,
+    // so this also goes red if that wiring (includeManagerChain: needsManagerChain)
+    // is removed.
+    orgRelationsState.resolveApprovalRequesterOrgRelations.mockImplementation(
+      async (_userId: string, _query: unknown, options?: { includeManagerChain?: boolean }) =>
+        options?.includeManagerChain
+          ? { managerId: 'u-m1', managerChainIds: ['u-m1', 'u-m2'] }
+          : {},
+    )
+
+    const runtimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          config: {
+            assigneeSources: [{ kind: 'manager_at_level', level: 1 }],
+            emptyAssigneePolicy: 'auto-approve',
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    pgState.pool.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'tpl-1', key: 'travel', name: 'Travel Approval', description: null,
+            category: null, visibility_scope: { type: 'all', ids: [] }, sla_hours: null,
+            status: 'published', active_version_id: 'ver-2', latest_version_id: 'ver-2',
+            created_at: new Date(), updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'ver-2', template_id: 'tpl-1', version: 2, status: 'published',
+            form_schema: { fields: [] }, approval_graph: runtimeGraph,
+            created_at: new Date(), updated_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+        return {
+          rows: [{
+            id: 'pub-2', template_id: 'tpl-1', template_version_id: 'ver-2',
+            runtime_graph: runtimeGraph, is_active: true, published_at: new Date(),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+        return { rows: [{ request_no: 'AP-101001' }], rowCount: 1 }
+      }
+      throw new Error(`Unhandled pool query: ${statement}`)
+    })
+
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT assignment_type, assignee_id, node_key FROM approval_assignments')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('INSERT INTO approval_instances')) return { rows: [], rowCount: 1 }
+      if (statement.startsWith('INSERT INTO approval_assignments')) return { rows: [], rowCount: 1 }
+      if (statement.startsWith('INSERT INTO approval_records')) return { rows: [], rowCount: 1 }
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+      templateVersionId: 'ver-2',
+      publishedDefinitionId: 'pub-2',
+    }))
+
+    await service.createApproval(
+      { templateId: 'tpl-1', formData: {} },
+      { userId: 'requester-1' },
+    )
+
+    // Scanner saw manager_at_level -> createApproval asked the resolver for the chain.
+    expect(orgRelationsState.resolveApprovalRequesterOrgRelations).toHaveBeenCalledWith(
+      'requester-1',
+      expect.anything(),
+      { includeManagerChain: true },
+    )
+
+    // And the chain is baked into the PERSISTED requester snapshot (INSERT param $5 / index 4),
+    // not merely present on a transient resolver return.
+    const insertInstance = pgState.client.query.mock.calls.find(([sql]) =>
+      normalize(sql as string).startsWith('INSERT INTO approval_instances'))
+    const requesterSnapshot = JSON.parse(String(insertInstance?.[1]?.[4]))
+    expect(requesterSnapshot.managerChainIds).toEqual(['u-m1', 'u-m2'])
   })
 
   it('auto-approves requester-owned initial nodes from the runtime policy snapshot', async () => {

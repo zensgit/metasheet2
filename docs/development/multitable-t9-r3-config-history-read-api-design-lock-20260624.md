@@ -121,7 +121,7 @@ types (`field`, `permission`, `sheet_config`) are returned in full to the endpoi
 
 - **L-R1 fail-closed gating** — unknown `entity_type` or unparseable permission scope → DENY.
 - **L-R2 deterministic pagination** — `(sheet_id, created_at DESC, id DESC)`; stable cursor/offset.
-- **L-R3 read-only** — R3 never mutates. Restore/rollback is the *parked* Time-Machine write-side, NOT R3.
+- **L-R3 read-only** — R3 never mutates. Restore/rollback is the *parked* Global History write-side, NOT R3.
 - **L-R4 actor enrichment read-only** — display names only; no PII beyond the existing record-history read.
 - **L-R5 view filter-literal redaction** — view rows' `before`/`after.filterInfo` literals are redacted per-requester via `loadAllowedFieldIds` + `redactViewConfigFilterLiterals` (#2052/R9) before return; the manage gate alone is NOT sufficient for view payloads.
 

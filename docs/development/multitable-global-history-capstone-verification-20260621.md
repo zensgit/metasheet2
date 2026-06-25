@@ -1,6 +1,6 @@
-# Global History / Time Machine — Program Capstone (T5-2 verification + program summary)
+# Global History — Program Capstone (T5-2 verification + program summary)
 
-> The capstone for the /goal「完成 timemachine 剩余开发，给设计及验证MD」. Records the final read-only leaf
+> The capstone for the /goal「完成 Global History 剩余开发，给设计及验证MD」. Records the final read-only leaf
 > (T5-2 restore-preview) and ties together the whole program: **read-only half BUILT + verified, write half
 > DESIGNED + gated.**
 
