@@ -52,6 +52,16 @@ describe('MetaConfigHistoryModal — T9-R4 config-history view', () => {
     expect(document.body.querySelectorAll('.cfg-history__row').length).toBe(2) // BOTH rendered — the FE doesn't drop rows
   })
 
+  it('renders config objects as a compact k: v summary, not a raw JSON blob (diff-rendering depth)', async () => {
+    mountModal({ items: [
+      rev({ id: 'a', entityType: 'permission', entityId: 'fld_1', action: 'update', changedKeys: ['grant'],
+        before: { grant: { visible: true, readOnly: false } }, after: { grant: { visible: false, readOnly: true } } }),
+    ] })
+    await nextTick()
+    expect(document.body.textContent).toContain('visible: false, readOnly: true') // compact human summary
+    expect(document.body.textContent).not.toContain('{"visible"') // NOT the raw JSON blob
+  })
+
   it('the entity-type filter EMITS filter-change (server re-fetches; the FE never client-filters for security)', async () => {
     const props = mountModal({ items: [rev({})] })
     await nextTick()
@@ -101,6 +111,40 @@ describe('MetaConfigHistoryModal — T9-W revert action (server-gated, FE render
     ;(q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
     await flush()
     expect(executeRevert).toHaveBeenCalledWith('a', 'tok1') // the server-minted previewToken, NOT a client hash
+    expect(onReverted).toHaveBeenCalledTimes(1)
+  })
+
+  it('END-TO-END wire: Revert button → real client → config-restore-preview then -execute with the SERVER previewToken', async () => {
+    // The FULL mount→button→fetch path through a real MultitableApiClient (mocked fetchFn) — not the callback shim —
+    // so the token actually flows preview→execute over the wire and execute carries the server token, not a client hash.
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url.includes('config-restore-preview')) {
+        return new Response(JSON.stringify({ ok: true, data: {
+          preview: { revisionId: 'a', entityType: 'field', entityId: 'fld_1', changedKeys: ['name'], current: { name: 'New' }, target: { name: 'Old' }, driftConflict: false, opKind: 'safe', baselineHash: 'h-server' },
+          previewToken: 'server-token-xyz',
+        } }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ ok: true, data: { restored: { revisionId: 'a' } } }), { status: 200 }) // execute
+    })
+    const client = new MultitableApiClient({ fetchFn })
+    const onReverted = vi.fn()
+    mountModal({
+      items: [updateRev()], onReverted,
+      previewRevert: (id: string) => client.getConfigRestorePreview('sheet_1', id),
+      executeRevert: (id: string, token: string) => client.executeConfigRestore('sheet_1', id, token),
+    })
+    await nextTick()
+    ;(q('[data-test="config-history-revert"]') as HTMLButtonElement).click()
+    await flush(); await flush() // the real client adds fetch→text→parse awaits; let the preview resolve + render
+    ;(q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
+    await flush(); await flush()
+    // the two real fetches happened, in order
+    expect(fetchFn.mock.calls[0][0]).toContain('/config-restore-preview')
+    expect(fetchFn.mock.calls[1][0]).toContain('/config-restore-execute')
+    // the execute body carries the SERVER-minted token (not a client hash) — preview-first can't be bypassed via the UI
+    const execBody = JSON.parse((fetchFn.mock.calls[1][1] as RequestInit).body as string)
+    expect(execBody.previewToken).toBe('server-token-xyz')
+    expect(execBody.baselineHash).toBeUndefined()
     expect(onReverted).toHaveBeenCalledTimes(1)
   })
 
