@@ -24,7 +24,11 @@ endpoints plus the 3 document-semantics endpoints, the release-readiness
 governance endpoint, the 5 BOM-analysis / ECO-approval endpoints, and the 5
 approval-detail / BOM-substitute endpoints, while Wave 5 adds the 9 CAD
 properties / review / diff endpoints as exact fixture examples that
-`PLMAdapter.ts` currently calls for `apiMode='yuantus'`.
+`PLMAdapter.ts` currently calls for `apiMode='yuantus'`. PLM-Collab V1.2 adds one
+parent-host-mediated interaction, `POST /api/v1/bom/multitable/{part_id}/embed-token`:
+the Yuantus parent page calls it and posts the returned token into the MetaSheet iframe.
+It is intentionally not a `PLMAdapter.ts` call, but it belongs in this broker artifact
+because the MetaSheet embed runtime depends on the token envelope.
 (Codex's PACT_FIRST plan lists 7 endpoints in Wave 1, and the consumer now
 calls all 7.)
 
@@ -40,10 +44,11 @@ because adding that npm dependency requires explicit approval.
 The `plm-adapter-yuantus.pact.test.ts` vitest test guards six things:
 
 1. The pact JSON exists and parses as Pact v3.
-2. It contains the 30 currently used interactions in the documented order.
-3. Every endpoint named in the pact is also referenced by the live
-   `packages/core-backend/src/data-adapters/PLMAdapter.ts` source — so the
-   pact cannot drift away from what the adapter actually calls.
+2. It contains the adapter-owned interactions plus the one V1.2 parent-host-mediated
+   embed-token interaction in the documented order.
+3. Every adapter-owned endpoint named in the pact is also referenced by the live
+   `packages/core-backend/src/data-adapters/PLMAdapter.ts` source — so those pact
+   entries cannot drift away from what the adapter actually calls.
 4. The Wave 3 additions lock the exact envelope for `where-used`,
    `bom compare schema`, `approval history`, `approve`, and `reject`.
 5. The Wave 4 additions lock the exact envelope for approval list/detail and
@@ -52,6 +57,9 @@ The `plm-adapter-yuantus.pact.test.ts` vitest test guards six things:
    `GET /api/v1/release-readiness/items/{id}`.
 7. The Wave 5 additions lock the exact envelope for CAD properties, CAD view
    state, CAD review, CAD history, CAD diff, and CAD mesh stats.
+8. The V1.2 addition locks the parent-host mint envelope: request `{origin}` and
+   response `embed_token`, `token_type`, `expires_in`, `jti`, `aud`, and
+   `embed_origin`. Token and `jti` are matched by shape, never exact value.
 
 ## aml/metadata is now live on main
 
@@ -92,9 +100,10 @@ cd /Users/huazhou/Downloads/Github/Yuantus
 
 ### Current verifier handoff state (2026-04-11)
 
-The consumer artifact now contains all 30 Wave 1-5 interactions. To verify
-Yuantus against the current artifact, copy this JSON into the Yuantus repo and
-rerun the provider verifier there.
+The consumer artifact now contains the Wave 1-5 adapter interactions plus the
+V1.2 parent-host-mediated embed-token interaction. To verify Yuantus against the
+current artifact, copy this JSON into the Yuantus repo and rerun the provider
+verifier there.
 
 This worktree did **not** rerun provider verification, so do not treat the old
 Wave 3 verifier count as evidence for the new Wave 4 interactions.
@@ -163,8 +172,11 @@ specification of what the generated pact must contain.
 ## Still intentionally outside the pact
 
 No additional `aml/*` schema-discovery surfaces are parked right now. Future
-schema endpoints should follow the same rule: add the consumer call site first,
-then add the pact interaction in the same change.
+adapter-owned schema endpoints should follow the same rule: add the consumer call
+site first, then add the pact interaction in the same change. Do not add dead
+`PLMAdapter` methods just to satisfy the pact sanity test; if a future interaction is
+parent-host-mediated like the V1.2 embed-token mint, document that exception explicitly
+and keep its own source-grounding test.
 
 ## Forward compatibility note
 
