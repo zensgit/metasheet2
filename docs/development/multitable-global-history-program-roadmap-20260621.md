@@ -1,6 +1,6 @@
-# Multitable Global History / Time Machine — Program Roadmap (T5–T9)
+# Multitable Global History — Program Roadmap (T5–T9)
 
-> The 规划 for "complete the remaining history-records + Time Machine development plan." It records the staged
+> The 规划 for "complete the remaining history-records + Global History development plan." It records the staged
 > execution, the build-vs-design-lock split, and the ratification gates. The read-only foundation is built; the
 > write/destructive slices are design-locked (the 设计 deliverable) and held for explicit owner ratification.
 
