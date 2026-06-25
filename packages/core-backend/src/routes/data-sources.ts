@@ -44,7 +44,12 @@ const DataSourceCreateSchema = z.object({
     readOnly: z.boolean().optional(),
     // C6 external-write target marker. When set, raw /query is disabled even if readOnly=false.
     c6WriteTarget: z.boolean().optional(),
-    genericQueryDisabled: z.boolean().optional()
+    genericQueryDisabled: z.boolean().optional(),
+    // PLMAdapter runtime options for persisted Yuantus PLM sources.
+    apiMode: z.string().optional(),
+    tenantId: z.string().optional(),
+    orgId: z.string().optional(),
+    itemType: z.string().optional()
   }).optional(),
   credentials: z.object({
     username: z.string().optional(),
@@ -71,7 +76,12 @@ const DataSourceUpdateSchema = z.object({
     readOnly: z.boolean().optional(),
     // C6 external-write target marker. When set, raw /query is disabled even if readOnly=false.
     c6WriteTarget: z.boolean().optional(),
-    genericQueryDisabled: z.boolean().optional()
+    genericQueryDisabled: z.boolean().optional(),
+    // PLMAdapter runtime options for persisted Yuantus PLM sources.
+    apiMode: z.string().optional(),
+    tenantId: z.string().optional(),
+    orgId: z.string().optional(),
+    itemType: z.string().optional()
   }).optional(),
   poolConfig: z.object({
     min: z.number().min(0).optional(),
