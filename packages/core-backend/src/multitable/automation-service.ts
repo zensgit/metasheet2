@@ -4,6 +4,7 @@ import type { EventBus } from '../integration/events/event-bus'
 import { Logger } from '../core/logger'
 import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, type AutomationTriggerType } from './automation-triggers'
 import { ensureRecordNotLocked } from './record-lock'
+import { publishMultitableSheetRealtime } from './realtime-publish'
 import {
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
@@ -1378,7 +1379,10 @@ export class AutomationService {
     // event, through the lock guard). Best-effort — a locked/missing record logs + skips rather than
     // crashing the resume, so the automation's remaining actions still run.
     try {
-      await this.writeApprovalResultBack(bridge, execRule.actions[bridge.stepIndex]?.config ?? {}, event)
+      const backwritten = await this.writeApprovalResultBack(bridge, execRule.actions[bridge.stepIndex]?.config ?? {}, event)
+      // W7-1a: merge the backwrite into the resume snapshot so the TAIL actions (send_webhook /
+      // update_record / ...) see the just-written result, not the pre-approval record.
+      if (backwritten) recordData = { ...recordData, ...backwritten }
     } catch (err) {
       logger.warn(`approval-result backwrite skipped for bridge ${bridge.id}: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -1443,21 +1447,21 @@ export class AutomationService {
     bridge: AutomationApprovalBridgeRow,
     startApprovalConfig: Record<string, unknown>,
     event: ApprovalCompletionEventV1,
-  ): Promise<void> {
+  ): Promise<Record<string, unknown> | null> {
     const writeback = isRecord(startApprovalConfig.resultWriteback) ? startApprovalConfig.resultWriteback : null
-    if (!writeback || !bridge.recordId) return
+    if (!writeback || !bridge.recordId || !bridge.sheetId) return null
     const patch: Record<string, unknown> = {}
     if (typeof writeback.statusField === 'string') patch[writeback.statusField] = event.transition.toStatus
     if (typeof writeback.approverField === 'string') patch[writeback.approverField] = event.actor?.id ?? null
     if (typeof writeback.completedAtField === 'string') patch[writeback.completedAtField] = event.occurredAt
-    if (Object.keys(patch).length === 0) return
+    if (Object.keys(patch).length === 0) return null
 
     const lockRes = await this.queryFn(
       'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
       [bridge.recordId, bridge.sheetId],
     )
     const lockRow = lockRes.rows[0] as { locked?: unknown; locked_by?: unknown; created_by?: unknown } | undefined
-    if (!lockRow) return // record gone — the resume's own missing-record path already handled it
+    if (!lockRow) return null // record gone — the resume's own missing-record path already handled it
     ensureRecordNotLocked(event.actor?.id ?? null, lockRow, () => new Error('source record is locked'))
     // rich-longText SAFE: patch carries ONLY system outcome values (status enum / approver id / ISO
     // timestamp), never user-supplied longText — classified SAFE in the rich-longText write-sink guard.
@@ -1468,6 +1472,31 @@ export class AutomationService {
        WHERE id = $2 AND sheet_id = $3`,
       [JSON.stringify(patch), bridge.recordId, bridge.sheetId],
     )
+
+    // W7-1a parity: emit the chaining event + realtime fan-out, matching update_record, so UI /
+    // subscribers / downstream record.updated automations see the backwrite live. Depth-guarded
+    // (inherits the trigger's _automationDepth + 1) so a backwrite-driven cascade can't run away.
+    const actorId = event.actor?.id ?? null
+    const automationDepth = (((bridge.triggerEvent as Record<string, unknown> | null)?._automationDepth as number) ?? 0) + 1
+    this.eventBus.emit('multitable.record.updated', {
+      sheetId: bridge.sheetId,
+      recordId: bridge.recordId,
+      changes: patch,
+      actorId,
+      _automationDepth: automationDepth,
+    })
+    try {
+      publishMultitableSheetRealtime({
+        spreadsheetId: bridge.sheetId,
+        source: 'multitable',
+        kind: 'record-updated',
+        recordId: bridge.recordId,
+        actorId: actorId ?? undefined,
+      })
+    } catch {
+      // publishMultitableSheetRealtime swallows its own errors; belt-and-suspenders.
+    }
+    return patch
   }
 
   private async failApprovalBridgeExecution(
