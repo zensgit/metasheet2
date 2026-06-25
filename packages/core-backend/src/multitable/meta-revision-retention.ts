@@ -130,6 +130,57 @@ export async function sweepMetaRevisionRetention(
   return result.rowCount ?? 0
 }
 
+export const META_CONFIG_REVISION_RETENTION_TABLE = 'meta_config_revisions'
+
+/**
+ * T9 D4 — prune old CONFIG/schema-change history (`meta_config_revisions`) by the SAME policy as record revisions
+ * (one knob set ages both; disabled by default). The latest revision per (sheet_id, entity_type, entity_id) is ALWAYS
+ * retained (row_number=1 over created_at DESC, id DESC), so the current config is always inspectable and the most
+ * recent change stays revertible (T9-W). Bounded per pass by batchSize.
+ */
+export async function sweepConfigRevisionRetention(
+  query: RetentionQueryFn,
+  config: MetaRevisionRetentionConfig,
+): Promise<number> {
+  if (!config.enabled) return 0
+  const batchSize = Math.max(1, Math.floor(config.batchSize))
+
+  if (config.policy === 'keep-days') {
+    const days = Math.max(META_REVISION_RETENTION_MIN_DAYS, Math.floor(config.retentionDays))
+    const result = await query(
+      `DELETE FROM ${META_CONFIG_REVISION_RETENTION_TABLE}
+        WHERE id IN (
+          SELECT id FROM (
+            SELECT id, created_at,
+                   row_number() OVER (PARTITION BY sheet_id, entity_type, entity_id ORDER BY created_at DESC, id DESC) AS rn
+            FROM ${META_CONFIG_REVISION_RETENTION_TABLE}
+          ) ranked
+          WHERE ranked.rn > 1
+            AND ranked.created_at < now() - ($1::int * interval '1 day')
+          LIMIT $2
+        )`,
+      [days, batchSize],
+    )
+    return result.rowCount ?? 0
+  }
+
+  const keepN = Math.max(META_REVISION_RETENTION_MIN_KEEP_N, Math.floor(config.keepN))
+  const result = await query(
+    `DELETE FROM ${META_CONFIG_REVISION_RETENTION_TABLE}
+      WHERE id IN (
+        SELECT id FROM (
+          SELECT id,
+                 row_number() OVER (PARTITION BY sheet_id, entity_type, entity_id ORDER BY created_at DESC, id DESC) AS rn
+          FROM ${META_CONFIG_REVISION_RETENTION_TABLE}
+        ) ranked
+        WHERE ranked.rn > $1
+        LIMIT $2
+      )`,
+    [keepN, batchSize],
+  )
+  return result.rowCount ?? 0
+}
+
 /** Default sweep cadence (24h), env-overridable, clamped to [1m, 24h]. */
 export const META_REVISION_RETENTION_DEFAULT_INTERVAL_MS = 24 * 60 * 60 * 1000
 
