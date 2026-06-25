@@ -155,6 +155,45 @@ describeIfDatabase('multitable config-history READ API — T9-R3 (real DB)', () 
     expect(bodyStr(denied)).toContain(VISIBLE_LIT) // no over-redaction
   })
 
+  test('VIEW redaction END-TO-END (REAL recorder shape): a view filtered on a denied field is written via the route, recorded by R2, and the denied manager does NOT see the literal (non-filter config survives)', async () => {
+    // Create + patch a view THROUGH the real routes so R2 records the actual shape (not a fixture).
+    as(U_FULL, ['multitable:read', 'multitable:write', 'multitable:share'])
+    const created = await request(app).post('/api/multitable/views').send({ sheetId: SHEET, name: 'E2E Redact View', type: 'grid' })
+    expect(created.status).toBe(201)
+    const e2eViewId = created.body?.data?.view?.id as string
+    expect(e2eViewId).toBeTruthy()
+    const patched = await request(app).patch(`/api/multitable/views/${e2eViewId}`).send({
+      filterInfo: { conjunction: 'and', conditions: [
+        { fieldId: FLD_VISIBLE, operator: 'is', value: VISIBLE_LIT },
+        { fieldId: FLD_SECRET, operator: 'is', value: SECRET_LIT },
+      ] },
+    })
+    expect(patched.status).toBe(200)
+
+    // Sanity: the RAW recorded row holds the secret literal in the path the redactor must walk
+    // (if this is absent, R2 stores a different shape and the redaction proof would be vacuous).
+    const recorded = (await q(
+      `SELECT after FROM meta_config_revisions WHERE sheet_id=$1 AND entity_type='view' AND entity_id=$2 ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [SHEET, e2eViewId],
+    )).rows[0] as { after: any } | undefined
+    expect(JSON.stringify(recorded?.after)).toContain(SECRET_LIT)
+
+    // KEYSTONE: the field-denied view-manager reads it back through the API → literal redacted.
+    as(U_FIELDDENIED, ['multitable:read', 'multitable:write'])
+    const denied = await get(`/sheets/${SHEET}/config-history/views?limit=200`)
+    expect(denied.status).toBe(200)
+    const deniedRow = revisions(denied).find((r) => r.entityId === e2eViewId && r.action === 'update')
+    expect(deniedRow).toBeTruthy()
+    expect(JSON.stringify(deniedRow)).not.toContain(SECRET_LIT) // no leak through REAL-recorded history
+    expect(JSON.stringify(deniedRow)).toContain(VISIBLE_LIT) // no over-redaction
+
+    // Non-filter config survives redaction (the create revision's name round-trips, not stripped).
+    as(U_FULL, ['multitable:read', 'multitable:write', 'multitable:share'])
+    const all = await get(`/sheets/${SHEET}/config-history/views?limit=200`)
+    const createRow = revisions(all).find((r) => r.entityId === e2eViewId && r.action === 'create')
+    expect(JSON.stringify(createRow?.after)).toContain('E2E Redact View')
+  })
+
   test('fail-closed: a malformed permission entity_id is returned by NO permission endpoint', async () => {
     as(U_FULL, ['multitable:read', 'multitable:write', 'multitable:share'])
     for (const sub of ['sheet', 'view', 'field']) {
