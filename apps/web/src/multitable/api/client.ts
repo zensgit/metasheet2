@@ -1035,6 +1035,8 @@ export interface ConfigRestorePreview {
   opKind: 'safe' | 'gated'
   gatedReason?: string
   baselineHash: string
+  /** the server-minted preview identity, REQUIRED by execute (preview-first; a client-computed hash is rejected). */
+  previewToken: string
 }
 
 export interface AiShortcutPreviewData {
@@ -1908,16 +1910,17 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ revisionId }),
     })
-    const data = await this.parseJson<{ preview: ConfigRestorePreview }>(res)
-    return data.preview
+    const data = await this.parseJson<{ preview: ConfigRestorePreview; previewToken: string }>(res)
+    return { ...data.preview, previewToken: data.previewToken } // fold the server-minted token into the preview the modal holds
   }
 
-  // T9-W: execute a config-restore (forward-only write). baselineHash binds it to the previewed state (stale → 409).
-  async executeConfigRestore(sheetId: string, revisionId: string, baselineHash: string): Promise<void> {
+  // T9-W: execute a config-restore (forward-only write). The server-minted previewToken binds it to the preview and
+  // is REQUIRED — a client-computed hash alone is rejected (preview-first); a stale token → 409.
+  async executeConfigRestore(sheetId: string, revisionId: string, previewToken: string): Promise<void> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/config-restore-execute`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ revisionId, baselineHash }),
+      body: JSON.stringify({ revisionId, previewToken }),
     })
     await this.parseJson<{ restored: unknown }>(res)
   }

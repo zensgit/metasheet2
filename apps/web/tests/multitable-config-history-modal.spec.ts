@@ -12,7 +12,7 @@ import { MultitableApiClient, type MetaConfigRevision, type ConfigRestorePreview
 
 const previewOf = (over: Partial<ConfigRestorePreview>): ConfigRestorePreview => ({
   revisionId: 'a', entityType: 'field', entityId: 'fld_1', changedKeys: ['name'],
-  current: { name: 'New' }, target: { name: 'Old' }, driftConflict: false, opKind: 'safe', baselineHash: 'h1', ...over,
+  current: { name: 'New' }, target: { name: 'Old' }, driftConflict: false, opKind: 'safe', baselineHash: 'h1', previewToken: 'tok1', ...over,
 })
 
 const rev = (over: Partial<MetaConfigRevision>): MetaConfigRevision => ({
@@ -87,7 +87,7 @@ describe('MetaConfigHistoryModal — T9-W revert action (server-gated, FE render
     expect(q('[data-test="config-history-revert"]')).toBeFalsy()
   })
 
-  it('SAFE: revert → preview → confirm → executeRevert(id, baselineHash) + reverted emitted', async () => {
+  it('SAFE: revert → preview → confirm → executeRevert(id, previewToken) + reverted emitted', async () => {
     const previewRevert = vi.fn(async () => previewOf({}))
     const executeRevert = vi.fn(async () => {})
     const onReverted = vi.fn()
@@ -100,7 +100,7 @@ describe('MetaConfigHistoryModal — T9-W revert action (server-gated, FE render
     expect(document.body.textContent).toContain('Old') // target
     ;(q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
     await flush()
-    expect(executeRevert).toHaveBeenCalledWith('a', 'h1') // the preview's baselineHash
+    expect(executeRevert).toHaveBeenCalledWith('a', 'tok1') // the server-minted previewToken, NOT a client hash
     expect(onReverted).toHaveBeenCalledTimes(1)
   })
 
@@ -147,13 +147,14 @@ describe('getConfigHistory — T9-R3↔R4 wire (drift lock)', () => {
   it('getConfigRestorePreview unwraps the REAL {ok,data:{preview}} envelope (not a fixture)', async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({
       ok: true,
-      data: { preview: { revisionId: 'a', entityType: 'field', entityId: 'fld_1', changedKeys: ['name'], current: { name: 'New' }, target: { name: 'Old' }, driftConflict: false, opKind: 'safe', baselineHash: 'h1' } },
+      data: { preview: { revisionId: 'a', entityType: 'field', entityId: 'fld_1', changedKeys: ['name'], current: { name: 'New' }, target: { name: 'Old' }, driftConflict: false, opKind: 'safe', baselineHash: 'h1' }, previewToken: 'tok1' },
     }), { status: 200 }))
     const client = new MultitableApiClient({ fetchFn })
 
     const preview = await client.getConfigRestorePreview('sheet_1', 'a')
 
     expect(preview.baselineHash).toBe('h1') // unwrapped — NOT undefined
+    expect(preview.previewToken).toBe('tok1') // the server token folded in — the execute wire depends on it
     expect(preview.target).toEqual({ name: 'Old' })
     expect(preview.opKind).toBe('safe')
     expect(fetchFn.mock.calls[0][0]).toContain('/config-restore-preview')

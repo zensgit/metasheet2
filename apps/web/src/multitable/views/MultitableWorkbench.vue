@@ -902,8 +902,8 @@ async function loadConfigHistory(entityType: string) {
 function configRestorePreview(revisionId: string) {
   return workbench.client.getConfigRestorePreview(workbench.activeSheetId.value, revisionId)
 }
-function configRestoreExecute(revisionId: string, baselineHash: string) {
-  return workbench.client.executeConfigRestore(workbench.activeSheetId.value, revisionId, baselineHash)
+function configRestoreExecute(revisionId: string, previewToken: string) {
+  return workbench.client.executeConfigRestore(workbench.activeSheetId.value, revisionId, previewToken)
 }
 function onConfigReverted() {
   void loadConfigHistory(configHistory.value.entityType) // a revert added a source=restore row + changed the entity

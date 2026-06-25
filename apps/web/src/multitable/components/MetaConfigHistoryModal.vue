@@ -110,7 +110,7 @@ const props = defineProps<{
   isZh: boolean
   /** T9-W: when provided, an update row gets a Revert action wired through these (the workbench owns the client). */
   previewRevert?: (revisionId: string) => Promise<ConfigRestorePreview>
-  executeRevert?: (revisionId: string, baselineHash: string) => Promise<void>
+  executeRevert?: (revisionId: string, previewToken: string) => Promise<void>
 }>()
 
 const emit = defineEmits<{ (e: 'close'): void; (e: 'filter-change', entityType: string): void; (e: 'reverted'): void }>()
@@ -153,7 +153,7 @@ async function confirmRevert(): Promise<void> {
   if (!preview || !props.executeRevert) return
   revert.value = { ...revert.value, executing: true, error: '' }
   try {
-    await props.executeRevert(preview.revisionId, preview.baselineHash)
+    await props.executeRevert(preview.revisionId, preview.previewToken)
     revert.value = { visible: false, loading: false, executing: false, error: '', preview: null }
     emit('reverted')
   } catch (e) {
