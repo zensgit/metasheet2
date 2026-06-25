@@ -2738,6 +2738,39 @@ describe('Attendance admin regressions', () => {
     })
   })
 
+  it('loads attendanceBonusPolicy into the 满勤 card, toggles a break, and PUTs only { attendanceBonusPolicy }', async () => {
+    attendanceSettingsData = {
+      attendanceBonusPolicy: { enabled: true, anyLeaveBreaksFullAttendance: true, lateBeyondThresholdBreaksFullAttendance: false },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const enabled = container!.querySelector<HTMLInputElement>('[data-bonus-policy="enabled"]')
+    const leaveBreaks = container!.querySelector<HTMLInputElement>('[data-bonus-policy="leave-breaks"]')
+    const lateBreaks = container!.querySelector<HTMLInputElement>('[data-bonus-policy="late-breaks"]')
+    expect(Boolean(enabled && leaveBreaks && lateBreaks)).toBe(true)
+    expect(enabled!.checked).toBe(true)
+    expect(leaveBreaks!.checked).toBe(true)
+    expect(lateBreaks!.checked).toBe(false)
+
+    // Re-enable the late-break toggle, then save.
+    lateBreaks!.click()
+    await flushUi(2)
+    expect(lateBreaks!.checked).toBe(true)
+    container!.querySelector<HTMLButtonElement>('[data-bonus-policy="save"]')!.click()
+    await flushUi(6)
+
+    const settingsPuts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(settingsPuts).toHaveLength(1)
+    const body = JSON.parse(String((settingsPuts[0][1] as { body?: string } | undefined)?.body || '{}'))
+    expect(body).toEqual({
+      attendanceBonusPolicy: { enabled: true, anyLeaveBreaksFullAttendance: true, lateBeyondThresholdBreaksFullAttendance: true },
+    })
+  })
+
   it('loads multiShiftDay into the config card and PUTs ONLY { multiShiftDay }', async () => {
     attendanceSettingsData = {
       multiShiftDay: { enabled: true, maxSlots: 3 },
