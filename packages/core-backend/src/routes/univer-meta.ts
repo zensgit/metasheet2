@@ -7581,11 +7581,26 @@ export function univerMetaRouter(): Router {
          FROM meta_config_revisions WHERE ${where} ORDER BY created_at DESC, id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
         params,
       )).rows as Array<Record<string, unknown>>
-      return res.json({ ok: true, data: { items: rows.map((r) => ({
-        id: String(r.id), entityType: String(r.entity_type), entityId: String(r.entity_id), action: String(r.action),
-        before: r.before ?? null, after: r.after ?? null, changedKeys: r.changed_keys ?? [],
-        batchId: r.batch_id ?? null, actorId: r.actor_id ?? null, createdAt: r.created_at,
-      })), limit, offset } })
+      // T9-R3.1: VIEW rows carry filter literals (filterInfo.conditions[].value) that are
+      // field-read-sensitive (#2052/R9) — canManageViews does NOT imply field-read, so returning
+      // before/after.filterInfo raw would leak a denied field's literal through history. Redact per
+      // the requester's allowed fields, mirroring redactViewConfigFilterLiterals on the live view read.
+      const hasViewRow = rows.some((r) => String(r.entity_type) === 'view')
+      const allowedFieldIds = hasViewRow
+        ? await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+        : null
+      const redactViewPayload = (val: unknown): unknown =>
+        allowedFieldIds && val ? redactViewConfigFilterLiterals(val as { filterInfo?: unknown }, allowedFieldIds) : (val ?? null)
+      return res.json({ ok: true, data: { items: rows.map((r) => {
+        const isView = String(r.entity_type) === 'view'
+        return {
+          id: String(r.id), entityType: String(r.entity_type), entityId: String(r.entity_id), action: String(r.action),
+          before: isView ? redactViewPayload(r.before) : (r.before ?? null),
+          after: isView ? redactViewPayload(r.after) : (r.after ?? null),
+          changedKeys: r.changed_keys ?? [],
+          batchId: r.batch_id ?? null, actorId: r.actor_id ?? null, createdAt: r.created_at,
+        }
+      }), limit, offset } })
     } catch (err: unknown) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })

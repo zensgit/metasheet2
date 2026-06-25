@@ -64,6 +64,23 @@ Deterministic order (`created_at DESC, id DESC`); `limit` clamped 1–100 (defau
 **narrows within** the allowed set and **cannot bypass** the gate (it is `AND`-ed onto the WHERE, so an actor filtering
 for a type they can't manage still gets empty). 401 if unauthenticated; 404 if the sheet doesn't exist.
 
+### 1.4 View payload projection — filter-literal redaction (T9-R3.1)
+
+The gate above decides which ROWS a caller sees; it does NOT decide which fields WITHIN a row. A
+`view` row's `before`/`after.filterInfo.conditions[].value` literals are **field-read-sensitive**
+(#2052/R9): the live view read already redacts them per-requester via
+`redactViewConfigFilterLiterals`, and `canManageViews` does **not** imply field-read. Config-history
+therefore MUST redact them too — otherwise a field-denied view-manager would read a denied field's
+filter literal through history (the gap this hotfix closes; R3 #3153 returned them raw). The single
+`/config-history` endpoint, for `view` rows, runs `before`/`after` through the requester's
+`loadAllowedFieldIds` + `redactViewConfigFilterLiterals` before returning. Other entity types
+(`field`, `permission`, `sheet_config`) are returned in full to the endpoint's cap-holder — config
+history has no per-record-value mask; this projection is view-filter-literal-specific. Proven
+end-to-end against R2's real recorded shape in
+`multitable-config-history-view-redaction-realdb.test.ts`: a view filtered on a denied field is
+written through the route (so R2 records the real shape), then a field-denied `canManageViews`
+reader does NOT see the literal while a fully-allowed reader does.
+
 ## 2. T9-R4 — FE config-history view
 
 A **dedicated** sheet-level **Config history** modal (`MetaConfigHistoryModal.vue`) — not folded into the per-record

@@ -217,6 +217,7 @@ jobs:
             tests/integration/multitable-restore-batch-execute-realdb.test.ts \
             tests/integration/multitable-config-revisions-realdb.test.ts \
             tests/integration/multitable-config-history-api-realdb.test.ts \
+            tests/integration/multitable-config-history-view-redaction-realdb.test.ts \
             tests/integration/yjs-scalar-seed-realdb.test.ts \
             tests/integration/yjs-scalar-flush-realdb.test.ts \
             tests/integration/yjs-scalar-strdate-migration-realdb.test.ts \
