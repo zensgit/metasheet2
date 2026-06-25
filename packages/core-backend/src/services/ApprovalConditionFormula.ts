@@ -176,6 +176,7 @@ class FormulaParser {
   private astNodes = 0
   private fieldReferences = 0
   private functionCalls = 0
+  private parenDepth = 0
 
   constructor(private readonly tokens: Token[]) {}
 
@@ -343,9 +344,17 @@ class FormulaParser {
         return this.parseFunction(token.value)
       case 'paren': {
         if (token.value !== '(') fail('unexpected closing parenthesis')
-        const expr = this.parseOr()
-        if (!this.matchParen(')')) fail('missing closing parenthesis')
-        return expr
+        this.parenDepth += 1
+        if (this.parenDepth > APPROVAL_CONDITION_FORMULA_LIMITS.maxDepth) {
+          fail(`formula nesting depth exceeds ${APPROVAL_CONDITION_FORMULA_LIMITS.maxDepth}`)
+        }
+        try {
+          const expr = this.parseOr()
+          if (!this.matchParen(')')) fail('missing closing parenthesis')
+          return expr
+        } finally {
+          this.parenDepth -= 1
+        }
       }
       case 'operator':
         fail(`unexpected operator: ${token.value}`)

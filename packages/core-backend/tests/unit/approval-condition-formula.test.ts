@@ -72,6 +72,7 @@ describe('approval condition formula evaluator (FC-1)', () => {
   it('rejects concrete DoS bounds before runtime', () => {
     expect(() => parseApprovalConditionFormula(`${'1+'.repeat(130)}1 > 0`)).toThrow(/AST exceeds/)
     expect(() => parseApprovalConditionFormula(`${'NOT '.repeat(17)}TRUE`)).toThrow(/depth exceeds/)
+    expect(() => parseApprovalConditionFormula(`${'('.repeat(17)}TRUE${')'.repeat(17)}`)).toThrow(/nesting depth exceeds/)
     expect(() => parseApprovalConditionFormula(`${'1'.repeat(513)} == 1`)).toThrow(/exceeds 512/)
   })
 
