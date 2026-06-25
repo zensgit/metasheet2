@@ -2,9 +2,10 @@
 
 Status: RATIFIED — FC-1 BUILT IN PR #3219; FC-2 BUILT IN A STACKED PR; FC-3
 BUILT IN A STACKED PR (purchase/reimbursement examples); FC-4 BUILT IN A
-STACKED PR (approval-specific backend dry-run endpoint). Owner decisions
-resolved: `AND/OR/NOT` only in v1; numeric aggregates fail closed; backend
-evaluator ships before dry-run.
+STACKED PR (approval-specific backend dry-run endpoint); FC-5 BUILT IN A
+STACKED PR (frontend dry-run preview button). Owner decisions resolved:
+`AND/OR/NOT` only in v1; numeric aggregates fail closed; backend evaluator
+ships before dry-run.
 
 Goal: make approval condition branches more flexible than today's
 `fieldId + operator + value` rules, while keeping the approval backend as the
@@ -302,8 +303,19 @@ multi-branch preset is introduced.
 - Return a normal dry-run diagnostic payload for formula errors instead of
   routing through the sheet-scoped multitable formula dry-run.
 
-This slice intentionally does not add the frontend "Evaluate" button yet. The
-endpoint is the backend truth surface that a later authoring UX can call.
+This slice intentionally did not add the frontend "Evaluate" button. The
+endpoint is the backend truth surface that FC-5 calls.
+
+### FC-5 — Authoring Dry-Run Preview
+
+- Add an explicit "测试公式" button to the formula predicate authoring block.
+- Accept per-branch sample JSON and call the FC-4 approval-specific dry-run
+  endpoint with `{ formSchema, expression, formData }`.
+- Show success/error text inline for author feedback.
+- Keep the preview informational only: it is not a save/publish gate and its
+  sample data never enters the template payload.
+- Add a mounted wiring test proving button -> endpoint payload -> result display,
+  then save still emits only the formula graph config and preserves topology.
 
 ## Non-Goals
 

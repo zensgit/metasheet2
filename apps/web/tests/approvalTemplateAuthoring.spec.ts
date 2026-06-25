@@ -51,12 +51,14 @@ const createTemplateSpy = vi.fn()
 const updateTemplateSpy = vi.fn()
 const publishTemplateSpy = vi.fn()
 const getTemplateSpy = vi.fn()
+const dryRunApprovalConditionFormulaSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
   createTemplate: (payload: unknown) => createTemplateSpy(payload),
   updateTemplate: (id: string, payload: unknown) => updateTemplateSpy(id, payload),
   publishTemplate: (id: string, payload: unknown) => publishTemplateSpy(id, payload),
   getTemplate: (id: string) => getTemplateSpy(id),
+  dryRunApprovalConditionFormula: (payload: unknown) => dryRunApprovalConditionFormulaSpy(payload),
 }))
 
 vi.mock('element-plus', () => ({
@@ -623,6 +625,7 @@ describe('TemplateAuthoringView', () => {
     updateTemplateSpy.mockReset()
     publishTemplateSpy.mockReset()
     getTemplateSpy.mockReset()
+    dryRunApprovalConditionFormulaSpy.mockReset()
     pushSpy.mockClear()
     replaceSpy.mockClear()
     createTemplateSpy.mockImplementation(async (payload) => ({
@@ -637,6 +640,7 @@ describe('TemplateAuthoringView', () => {
       ...payload,
     }))
     publishTemplateSpy.mockResolvedValue({})
+    dryRunApprovalConditionFormulaSpy.mockResolvedValue({ success: true, result: true })
   })
 
   afterEach(() => {
@@ -941,6 +945,65 @@ describe('TemplateAuthoringView', () => {
       defaultEdgeKey: 'e-low',
     })
     expect(payload.approvalGraph.nodes.find((node: any) => node.key === 'approval_high')).toEqual(graph.nodes[2])
+    expect(payload.approvalGraph.edges).toEqual(graph.edges)
+  })
+
+  it('FC-5 wiring: formula dry-run calls the dry-run endpoint and does not change the saved graph payload', async () => {
+    routeParams = { id: 'tpl_formula_dry_run' }
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'cond_1', type: 'condition', name: '金额判断', config: { branches: [{ edgeKey: 'e-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] }], defaultEdgeKey: 'e-low' } },
+        { key: 'approval_high', type: 'approval', name: '高额审批', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-start-c', source: 'start', target: 'cond_1' },
+        { key: 'e-high', source: 'cond_1', target: 'approval_high' },
+        { key: 'e-low', source: 'cond_1', target: 'end' },
+        { key: 'e-high-end', source: 'approval_high', target: 'end' },
+      ],
+    }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph }))
+    await mountView()
+    await flushUi()
+
+    const modeSelect = container!.querySelector('[data-testid="approval-condition-predicate-mode"]') as HTMLSelectElement
+    modeSelect.value = 'formula'
+    modeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    const expression = container!.querySelector('[data-testid="approval-condition-formula-expression"]') as HTMLInputElement
+    expression.value = '{amount} >= 5000'
+    expression.dispatchEvent(new Event('input'))
+    const sample = container!.querySelector('[data-testid="approval-condition-formula-dry-run-sample"]') as HTMLInputElement
+    sample.value = '{"amount":6000}'
+    sample.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-condition-formula-dry-run-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(dryRunApprovalConditionFormulaSpy).toHaveBeenCalledTimes(1)
+    expect(dryRunApprovalConditionFormulaSpy).toHaveBeenCalledWith({
+      formSchema: expect.objectContaining({
+        fields: expect.arrayContaining([expect.objectContaining({ id: 'amount', type: 'number' })]),
+      }),
+      expression: '{amount} >= 5000',
+      formData: { amount: 6000 },
+    })
+    expect(container!.querySelector('[data-testid="approval-condition-formula-dry-run-result"]')?.textContent).toContain('true')
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    const conditionNode = payload.approvalGraph.nodes.find((node: any) => node.key === 'cond_1')
+    expect(conditionNode.config).toEqual({
+      branches: [{ edgeKey: 'e-high', rules: [], formula: { expression: '{amount} >= 5000' } }],
+      defaultEdgeKey: 'e-low',
+    })
+    expect(JSON.stringify(payload)).not.toContain('6000')
     expect(payload.approvalGraph.edges).toEqual(graph.edges)
   })
 
