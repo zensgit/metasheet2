@@ -87,3 +87,47 @@ describe('approval condition formula evaluator (FC-1)', () => {
     }
   })
 })
+
+describe('requester namespace (RA-1a — department only)', () => {
+  it('evaluates requester.department ==/!= from the frozen context', () => {
+    expect(evaluateApprovalConditionFormula('requester.department == "财务"', {}, { department: '财务' })).toBe(true)
+    expect(evaluateApprovalConditionFormula('requester.department == "财务"', {}, { department: '技术' })).toBe(false)
+    expect(evaluateApprovalConditionFormula('requester.department != "财务"', {}, { department: '技术' })).toBe(true)
+  })
+
+  it('combines with form fields (AND)', () => {
+    expect(evaluateApprovalConditionFormula('requester.department == "财务" AND {amount} >= 5000', { amount: 6000 }, { department: '财务' })).toBe(true)
+    expect(evaluateApprovalConditionFormula('requester.department == "财务" AND {amount} >= 5000', { amount: 6000 }, { department: '技术' })).toBe(false)
+  })
+
+  it('PARSE-rejects every attr outside {department} — fail-closed, never runtime-absent', () => {
+    expect(() => parseApprovalConditionFormula('requester.level >= 5')).toThrow(/unsupported requester attribute/)
+    expect(() => parseApprovalConditionFormula('requester.role == "x"')).toThrow(/unsupported requester attribute/)
+    expect(() => parseApprovalConditionFormula('requester.title == "经理"')).toThrow(/unsupported requester attribute/)
+    expect(() => parseApprovalConditionFormula('requester.foo == "x"')).toThrow(/unsupported requester attribute/)
+  })
+
+  it('PARSE-rejects the `in` operator + array literals (RA-1b grammar), bare requester, and empty attr', () => {
+    expect(() => parseApprovalConditionFormula('requester.department in ["a", "b"]')).toThrow()
+    expect(() => parseApprovalConditionFormula('requester.department == ["a"]')).toThrow()
+    expect(() => parseApprovalConditionFormula('requester == "x"')).toThrow()
+    expect(() => parseApprovalConditionFormula('requester. == "x"')).toThrow(/missing an attribute/)
+  })
+
+  it('RUNTIME fail-closed: absent context / missing department rejects (no phantom routing)', () => {
+    expect(() => evaluateApprovalConditionFormula('requester.department == "财务"', {}, null)).toThrow(/context unavailable/)
+    expect(() => evaluateApprovalConditionFormula('requester.department == "财务"', {}, {})).toThrow(/department is missing/)
+    expect(() => evaluateApprovalConditionFormula('requester.department == "财务"', {}, { department: '' })).toThrow(/department is missing/)
+    expect(() => evaluateApprovalConditionFormula('requester.department == "财务"', {}, { department: null })).toThrow(/department is missing/)
+  })
+
+  it('a form field named `requester` cannot spoof it — token reads context, never formData', () => {
+    expect(evaluateApprovalConditionFormula('requester.department == "财务"', { requester: { department: '财务' } }, { department: '技术' })).toBe(false)
+  })
+
+  it('publish: compared requester.department → boolean OK; bare → non-boolean reject; level → unsupported', () => {
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.department == "财务"', schema)).not.toThrow()
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.department', schema)).toThrow(/must return boolean/)
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.level >= 5', schema)).toThrow(/unsupported requester attribute/)
+  })
+})

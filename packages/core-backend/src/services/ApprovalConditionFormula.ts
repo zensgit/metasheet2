@@ -21,6 +21,7 @@ type Token =
   | { kind: 'boolean'; value: boolean }
   | { kind: 'null' }
   | { kind: 'field'; path: string[]; raw: string }
+  | { kind: 'requester'; attr: string; raw: string }
   | { kind: 'identifier'; value: string }
   | { kind: 'operator'; value: '+' | '-' | '*' | '/' | '==' | '!=' | '>' | '>=' | '<' | '<=' }
   | { kind: 'paren'; value: '(' | ')' }
@@ -34,6 +35,7 @@ type FormulaAst =
   | { kind: 'boolean'; value: boolean }
   | { kind: 'null' }
   | { kind: 'field'; path: string[]; raw: string }
+  | { kind: 'requester'; attr: string; raw: string }
   | { kind: 'aggregate'; fn: 'SUM' | 'COUNT' | 'MIN' | 'MAX'; path: string[]; raw: string }
   | { kind: 'unary'; op: 'NEG' | 'NOT'; expr: FormulaAst }
   | { kind: 'binary'; op: '+' | '-' | '*' | '/' | 'AND' | 'OR'; left: FormulaAst; right: FormulaAst }
@@ -41,6 +43,14 @@ type FormulaAst =
 
 type FormulaValue = number | string | boolean | null
 type FormulaType = 'number' | 'string' | 'boolean' | 'null'
+
+/** RA-1a: the frozen, server-resolved requester attributes the evaluator may read. DEPARTMENT-ONLY in
+ *  RA-1a; every other attribute (level/role/title/unknown) is rejected at PARSE (see parsePrimary), so it
+ *  never reaches runtime. Values come from ApprovalDirectoryOrg's directory snapshot, NOT actor/JWT. */
+export interface RequesterFormulaContext {
+  department?: string | null
+}
+const RA1A_REQUESTER_ATTRS: Record<string, FormulaType> = { department: 'string' }
 
 function fail(message: string): never {
   throw new ApprovalConditionFormulaError(message)
@@ -142,6 +152,17 @@ function tokenize(expression: string): Token[] {
         tokens.push({ kind: 'boolean', value: upper === 'TRUE' })
       } else if (upper === 'NULL') {
         tokens.push({ kind: 'null' })
+      } else if (raw === 'requester' && expression[i] === '.') {
+        // RA-1a requester namespace: `requester.<attr>` — a reserved token resolved from the frozen
+        // requester context, never from formData (so a form field named `requester` cannot spoof it).
+        i += 1 // consume '.'
+        let attr = ''
+        while (i < expression.length && isIdentifierPart(expression[i])) {
+          attr += expression[i]
+          i += 1
+        }
+        if (!attr) fail('requester reference is missing an attribute (e.g. requester.department)')
+        tokens.push({ kind: 'requester', attr, raw: `requester.${attr}` })
       } else {
         tokens.push({ kind: 'identifier', value: upper })
       }
@@ -340,6 +361,13 @@ class FormulaParser {
         return this.node({ kind: 'null' })
       case 'field':
         return this.node({ kind: 'field', path: token.path, raw: token.raw })
+      case 'requester':
+        // RA-1a allowlist IS the parse/publish fail-closed gate: anything outside {department}
+        // (level/role/title/unknown) is rejected here, so it never reaches runtime as absent-in-context.
+        if (!(token.attr in RA1A_REQUESTER_ATTRS)) {
+          fail(`unsupported requester attribute: ${token.raw} (RA-1a supports requester.department only)`)
+        }
+        return this.node({ kind: 'requester', attr: token.attr, raw: token.raw })
       case 'identifier':
         return this.parseFunction(token.value)
       case 'paren': {
@@ -442,6 +470,11 @@ function inferFormulaType(ast: FormulaAst, schema: FormSchema): FormulaType {
       const type = formFieldTypeToFormulaType(field)
       if (type === 'unsupported') fail(`field type is not supported in formula: ${field.id}`)
       return type
+    }
+    case 'requester': {
+      const requesterType = RA1A_REQUESTER_ATTRS[ast.attr]
+      if (!requesterType) fail(`unsupported requester attribute: ${ast.raw}`)
+      return requesterType
     }
     case 'aggregate':
       validateAggregateReference(ast, schema)
@@ -551,7 +584,21 @@ function evaluateAggregate(ast: Extract<FormulaAst, { kind: 'aggregate' }>, form
   return ast.fn === 'MIN' ? Math.min(...numbers) : Math.max(...numbers)
 }
 
-function evaluateAst(ast: FormulaAst, formData: Record<string, unknown>): FormulaValue {
+/** Resolve a `requester.<attr>` value from the frozen, server-resolved requester context. RA-1a:
+ *  `department` only (the parser already rejected every other attr). Fail-closed on ROW-LEVEL absence: a
+ *  null/undefined context, or a missing/blank department, rejects rather than routing on a phantom. */
+function evaluateRequester(attr: string, raw: string, requester: RequesterFormulaContext | null): FormulaValue {
+  if (!requester) fail(`requester context unavailable for ${raw}`)
+  if (attr === 'department') {
+    const value = requester.department
+    if (value === null || value === undefined || value === '') fail(`requester department is missing for ${raw}`)
+    if (typeof value !== 'string') fail(`requester department has an unsupported value for ${raw}`)
+    return value
+  }
+  fail(`unsupported requester attribute: ${raw}`)
+}
+
+function evaluateAst(ast: FormulaAst, formData: Record<string, unknown>, requester: RequesterFormulaContext | null): FormulaValue {
   switch (ast.kind) {
     case 'number':
     case 'string':
@@ -563,24 +610,26 @@ function evaluateAst(ast: FormulaAst, formData: Record<string, unknown>): Formul
       return evaluateField(ast.path, ast.raw, formData)
     case 'aggregate':
       return evaluateAggregate(ast, formData)
+    case 'requester':
+      return evaluateRequester(ast.attr, ast.raw, requester)
     case 'unary': {
-      const value = evaluateAst(ast.expr, formData)
+      const value = evaluateAst(ast.expr, formData, requester)
       if (ast.op === 'NOT') return !assertBoolean(value, 'NOT operand')
       return assertFiniteNumber(-assertFiniteNumber(value, 'unary operand'), 'unary result')
     }
     case 'binary': {
       if (ast.op === 'AND') {
-        const left = assertBoolean(evaluateAst(ast.left, formData), 'AND left operand')
-        const right = assertBoolean(evaluateAst(ast.right, formData), 'AND right operand')
+        const left = assertBoolean(evaluateAst(ast.left, formData, requester), 'AND left operand')
+        const right = assertBoolean(evaluateAst(ast.right, formData, requester), 'AND right operand')
         return left && right
       }
       if (ast.op === 'OR') {
-        const left = assertBoolean(evaluateAst(ast.left, formData), 'OR left operand')
-        const right = assertBoolean(evaluateAst(ast.right, formData), 'OR right operand')
+        const left = assertBoolean(evaluateAst(ast.left, formData, requester), 'OR left operand')
+        const right = assertBoolean(evaluateAst(ast.right, formData, requester), 'OR right operand')
         return left || right
       }
-      const left = assertFiniteNumber(evaluateAst(ast.left, formData), `${ast.op} left operand`)
-      const right = assertFiniteNumber(evaluateAst(ast.right, formData), `${ast.op} right operand`)
+      const left = assertFiniteNumber(evaluateAst(ast.left, formData, requester), `${ast.op} left operand`)
+      const right = assertFiniteNumber(evaluateAst(ast.right, formData, requester), `${ast.op} right operand`)
       if (ast.op === '/' && right === 0) fail('division by zero')
       const result = ast.op === '+'
         ? left + right
@@ -592,8 +641,8 @@ function evaluateAst(ast: FormulaAst, formData: Record<string, unknown>): Formul
       return assertFiniteNumber(result, `${ast.op} result`)
     }
     case 'compare': {
-      const left = evaluateAst(ast.left, formData)
-      const right = evaluateAst(ast.right, formData)
+      const left = evaluateAst(ast.left, formData, requester)
+      const right = evaluateAst(ast.right, formData, requester)
       if (ast.op === '==') return left === right
       if (ast.op === '!=') return left !== right
       const numericLeft = assertFiniteNumber(left, `${ast.op} left operand`)
@@ -620,8 +669,12 @@ export function assertApprovalConditionFormulaValidForSchema(expression: string,
   }
 }
 
-export function evaluateApprovalConditionFormula(expression: string, formData: Record<string, unknown>): boolean {
-  const result = evaluateAst(parseFormula(expression), formData)
+export function evaluateApprovalConditionFormula(
+  expression: string,
+  formData: Record<string, unknown>,
+  requester: RequesterFormulaContext | null = null,
+): boolean {
+  const result = evaluateAst(parseFormula(expression), formData, requester)
   if (typeof result !== 'boolean') {
     fail('formula must return boolean')
   }
