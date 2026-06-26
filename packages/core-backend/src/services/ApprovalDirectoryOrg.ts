@@ -44,6 +44,9 @@
 type QueryFn = <Row>(text: string, params?: unknown[]) => Promise<{ rows: Row[] }>
 
 export interface ApprovalRequesterOrgRelations {
+  /** RA-1a: the requester's directory-resolved primary department NAME (directory_departments.name) —
+   *  the tamper-resistant source for `requester.department`. Omitted when unresolvable. */
+  primaryDepartmentName?: string
   /** Local user id of the requester's direct manager, if resolvable. */
   managerId?: string
   /** Local user id of the head of the requester's primary department, if resolvable. */
@@ -147,6 +150,7 @@ interface RequesterDirectoryRow {
   raw: unknown
   primary_external_department_id: string | null
   primary_department_raw: unknown
+  primary_department_name: string | null
 }
 
 /**
@@ -172,7 +176,8 @@ export async function resolveApprovalRequesterOrgRelations(
             a.external_user_id           AS external_user_id,
             a.raw                        AS raw,
             d.external_department_id     AS primary_external_department_id,
-            d.raw                        AS primary_department_raw
+            d.raw                        AS primary_department_raw,
+            d.name                       AS primary_department_name
        FROM directory_account_links l
        JOIN directory_accounts a
          ON a.id = l.directory_account_id
@@ -234,6 +239,8 @@ export async function resolveApprovalRequesterOrgRelations(
   const relations: ApprovalRequesterOrgRelations = {}
   if (managerId) relations.managerId = managerId
   if (deptHeadId) relations.deptHeadId = deptHeadId
+  const primaryDepartmentName = requester.primary_department_name?.trim()
+  if (primaryDepartmentName) relations.primaryDepartmentName = primaryDepartmentName
 
   // 4) Manager chain (opt-in): walk leader_in_dept hop-by-hop up the org tree,
   //    starting from the requester. Only runs when the caller opts in — i.e. a
