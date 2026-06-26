@@ -271,6 +271,26 @@ Required tests:
 - `SUM({detail.amount}) >= threshold` routes correctly;
 - malformed runtime data fails closed, not default-branch.
 
+Acceptance criteria (FC-1 merge gate — the 3 review pins, made concrete + measurable):
+
+- **AC-1 — DoS caps enforced fail-closed at publish.** Each bound is a hard publish reject (not a warning),
+  checked on the parsed AST before evaluation, at its exact boundary: `> 512` code units, `> 128` AST nodes,
+  depth `> 16`, `> 64` field refs, `> 32` function calls. A boundary test per cap asserts the value AT the cap
+  publishes and `cap + 1` is rejected.
+- **AC-2 — formula branches survive the full graph round-trip.** A graph carrying a formula branch is
+  structurally identical after `normalizeApprovalGraph` → publish → reload: the predicate is neither dropped
+  nor flattened to a simple rule, and its sibling `defaultEdgeKey` edge is preserved. A round-trip test
+  asserts the formula branch reloads intact — reusing the fail-closed-allowlist / never-flatten discipline the
+  attendance + approval authoring lines already run on.
+- **AC-3 — the trust model does not widen.** A formula routes on the *submitted* values only; it never
+  re-derives, re-sums authoritatively, or re-authorizes them. `SUM({detail.amount}) >= threshold` decides a
+  branch from what was submitted — it is NOT a consistency/truthfulness check (that stays the separate amount
+  total-check, #3161). A test asserts a submitted-but-inconsistent total still routes by the submitted value,
+  and that the formula path performs no write-back and claims no authority over the data.
+
+Ordering (ratified): **FC-1 ships the backend evaluator only — no dry-run.** The dry-run endpoint is **FC-2**
+and must reuse this exact evaluator. Evaluator-first.
+
 ### FC-2 — Authoring UI
 
 - Add branch predicate mode switch: simple rule vs formula.
