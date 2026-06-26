@@ -6017,6 +6017,69 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('④ 加班银行 v1-5b-ii — cycle close snapshots settlement (convertible · poison-lot · idempotent replay · balance-only population)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-v15b2-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    let token: string | undefined
+    let cycleId: string | undefined
+    let originalSettings: Record<string, unknown> = {}
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) return
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+      const putSettings = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
+      originalSettings = ((await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })).body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
+      await putSettings({ overtimeBankPolicy: { enabled: true, pooledSources: ['restday'] } })
+
+      const lot = (src: string, mins: number) => pool.query(
+        `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, overtime_source)
+         VALUES ('default', $1, 'comp_time', $2, $2, 'overtime_conversion', $3, 'active', '2026-01-01', $4)`,
+        [userId, mins, `v15b2:${runSuffix}:${src}`, src])
+      await lot('restday', 90)
+      await lot('statutory_holiday', 9999) // POISON: a bogus statutory balance lot — must NOT become must-pay/convertible.
+
+      const createRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles`, { method: 'POST', headers, body: JSON.stringify({ startDate: '2026-09-01', endDate: '2026-09-30', status: 'open' }) })
+      expect(createRes.status).toBe(201)
+      cycleId = (createRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      expect(cycleId).toBeTruthy()
+      const settlements = async () => (await pool.query(
+        `SELECT source, convertible_minutes, must_pay_minutes, period_start_date FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1 AND user_id = $2 ORDER BY source`,
+        [cycleId, userId])).rows as { source: string; convertible_minutes: number; must_pay_minutes: number; period_start_date: string }[]
+      const closeCycle = () => requestJson(`${baseUrl}/api/attendance/payroll-cycles/${cycleId}`, { method: 'PUT', headers, body: JSON.stringify({ status: 'closed' }) })
+
+      // before close → nothing written.
+      expect(await settlements()).toHaveLength(0)
+      // close → snapshot written in the same txn.
+      expect((await closeCycle()).status).toBe(200)
+      const afterClose = await settlements()
+      const bySource = Object.fromEntries(afterClose.map((r) => [r.source, r]))
+      expect(Number(bySource.restday?.convertible_minutes)).toBe(90)          // banked restday → convertible
+      expect(bySource.statutory_holiday).toBeUndefined()                      // POISON lot → no statutory row (no period OT, never convertible)
+      expect(bySource.restday?.period_start_date).toBeTruthy()                // frozen period stamped on the row
+      // idempotent replay: re-close → ON CONFLICT DO NOTHING, no new/changed rows.
+      expect((await closeCycle()).status).toBe(200)
+      const afterReplay = await settlements()
+      expect(afterReplay).toHaveLength(afterClose.length)
+      expect(Number(Object.fromEntries(afterReplay.map((r) => [r.source, r])).restday?.convertible_minutes)).toBe(90)
+      // NOTE: the must-pay-from-period-OT-facts end-to-end (the [P1] un-pooled case) is unit-proven in
+      // attendance-settlement-compute.test.ts; a wired must-pay e2e needs the OT-segmentation harness — a v1-5b-iii follow-up.
+    } finally {
+      if (token && Object.keys(originalSettings).length > 0) await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
+      if (cycleId) await pool.query('DELETE FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1', [cycleId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [userId]).catch(() => undefined)
+      if (cycleId) await pool.query('DELETE FROM attendance_payroll_cycles WHERE id = $1', [cycleId]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS; else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+  })
+
   it('④ 加班银行 v1-3b — 满勤 flag surfaces on GET /summary when policy ON; ABSENT when OFF (dormant-clean)', async () => {
     if (!baseUrl) return
     const runSuffix = Date.now().toString(36)

@@ -11685,6 +11685,62 @@ async function loadCompTimeRemainingBySource(db, orgId, userId) {
   return bySource
 }
 
+// 加班银行 v1-5b-ii — snapshot the period-end settlement at cycle close (design-lock §3/§5/§8a). Called from
+// BOTH close entries (create-as-closed + update→closed), in the SAME transaction as the status write, ONLY on
+// the transition to closed. Idempotent: ON CONFLICT (org,cycle,user,source) DO NOTHING, so a replay-close
+// never overwrites the immutable snapshot. UNCONDITIONAL (advisor #1 / §6) — fires regardless of
+// overtimeBankPolicy.enabled, so statutory must-pay is never silently dropped.
+//   population (§8a): users with attendance/leave-offset/OT facts in the cycle period UNION users with active
+//     comp_time balance — NOT just the active roster (offboarded-with-facts/balance must still settle).
+//   per user: period OT facts by source (from loadAttendanceSummary over the cycle [start,end]) + close-time
+//     comp_time remaining by source + the snapshotted pooledSources → buildCycleSettlementRows → typed rows.
+//   the row carries the cycle's FROZEN period (period_start/end_date) + closed_at, so a later cycle PUT can't
+//     hang it under a new period (§2 [P1]). must-pay comes from PERIOD FACTS only (poison-lot safe). No amounts.
+async function snapshotCycleSettlementOnClose(trx, cycle) {
+  const orgId = cycle.org_id
+  const cycleId = cycle.id
+  const periodStart = cycle.start_date
+  const periodEnd = cycle.end_date
+  const settings = await getSettings(trx)
+  const bankPolicy = (settings && settings.overtimeBankPolicy) || {}
+  const pooledSources = Array.isArray(bankPolicy.pooledSources) ? bankPolicy.pooledSources : []
+  // §4 snapshot: fix the effective policies at close so a later policy change can't reback this settlement.
+  const snapshot = JSON.stringify({
+    overtimeBankPolicy: bankPolicy,
+    leaveBalanceDeductionPolicy: (settings && settings.leaveBalanceDeductionPolicy) || {},
+    attendanceBonusPolicy: (settings && settings.attendanceBonusPolicy) || {},
+  })
+  const userRows = await trx.query(
+    `SELECT DISTINCT user_id FROM (
+       SELECT user_id FROM attendance_records WHERE org_id = $1 AND work_date >= $2 AND work_date <= $3
+       UNION
+       SELECT user_id FROM attendance_requests WHERE org_id = $1 AND status = 'approved' AND work_date >= $2 AND work_date <= $3
+       UNION
+       SELECT user_id FROM attendance_leave_balances WHERE org_id = $1 AND leave_type_code = 'comp_time' AND status = 'active' AND remaining_minutes > 0
+     ) pop WHERE user_id IS NOT NULL`,
+    [orgId, periodStart, periodEnd],
+  )
+  for (const { user_id: userId } of userRows) {
+    const summary = await loadAttendanceSummary(trx, orgId, userId, periodStart, periodEnd)
+    const periodOtBySource = {
+      workday: summary.workday_overtime_minutes,
+      restday: summary.restday_overtime_minutes,
+      statutory_holiday: summary.holiday_overtime_minutes,
+    }
+    const compTimeRemainingBySource = await loadCompTimeRemainingBySource(trx, orgId, userId)
+    const settlementRows = buildCycleSettlementRows({ periodOtBySource, compTimeRemainingBySource, pooledSources })
+    for (const row of settlementRows) {
+      await trx.query(
+        `INSERT INTO attendance_payroll_cycle_settlements
+           (org_id, cycle_id, period_start_date, period_end_date, closed_at, user_id, source, convertible_minutes, must_pay_minutes, snapshot)
+         VALUES ($1, $2, $3, $4, now(), $5, $6, $7, $8, $9::jsonb)
+         ON CONFLICT (org_id, cycle_id, user_id, source) DO NOTHING`,
+        [orgId, cycleId, periodStart, periodEnd, userId, row.source, row.convertibleMinutes, row.mustPayMinutes, snapshot],
+      )
+    }
+  }
+}
+
 async function loadAttendanceSummary(db, orgId, userId, from, to) {
   const countedDaySql = buildAttendanceSummaryCountedDaySql()
   const rows = await db.query(
@@ -33189,22 +33245,30 @@ module.exports = {
         }
 
         try {
-          const rows = await db.query(
-            `INSERT INTO attendance_payroll_cycles
-             (id, org_id, template_id, name, start_date, end_date, status, metadata)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
-             RETURNING *`,
-            [
-              randomUUID(),
-              orgId,
-              payload.templateId,
-              payload.name,
-              payload.startDate,
-              payload.endDate,
-              payload.status,
-              JSON.stringify(payload.metadata),
-            ]
-          )
+          const rows = await db.transaction(async (trx) => {
+            const created = await trx.query(
+              `INSERT INTO attendance_payroll_cycles
+               (id, org_id, template_id, name, start_date, end_date, status, metadata)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+               RETURNING *`,
+              [
+                randomUUID(),
+                orgId,
+                payload.templateId,
+                payload.name,
+                payload.startDate,
+                payload.endDate,
+                payload.status,
+                JSON.stringify(payload.metadata),
+              ],
+            )
+            // 加班银行 v1-5b-ii: create-as-closed must NOT bypass the close-snapshot path (§3) — snapshot in
+            // the SAME txn.
+            if (payload.status === 'closed' && created[0]) {
+              await snapshotCycleSettlementOnClose(trx, created[0])
+            }
+            return created
+          })
 
           const mapped = mapPayrollCycleRow(rows[0])
           emitEvent('attendance.payrollCycle.created', { orgId, payrollCycleId: mapped.id })
@@ -33309,6 +33373,10 @@ module.exports = {
               )
               if (rows.length) {
                 created.push(mapPayrollCycleRow(rows[0]))
+                // 加班银行 v1-5b-ii: generate-as-closed must NOT bypass the close-snapshot path (§3); same txn.
+                if (status === 'closed') {
+                  await snapshotCycleSettlementOnClose(trx, rows[0])
+                }
               } else {
                 skipped.push({ startDate: window.startDate, endDate: window.endDate })
               }
@@ -33414,28 +33482,36 @@ module.exports = {
             metadata: parsed.data.metadata ?? normalizeMetadata(existing.metadata),
           }
 
-          const rows = await db.query(
-            `UPDATE attendance_payroll_cycles
-             SET template_id = $3,
-                 name = $4,
-                 start_date = $5,
-                 end_date = $6,
-                 status = $7,
-                 metadata = $8::jsonb,
-                 updated_at = now()
-             WHERE id = $1 AND org_id = $2
-             RETURNING *`,
-            [
-              payrollCycleId,
-              orgId,
-              payload.templateId,
-              payload.name,
-              payload.startDate,
-              payload.endDate,
-              payload.status,
-              JSON.stringify(payload.metadata),
-            ]
-          )
+          const rows = await db.transaction(async (trx) => {
+            const updated = await trx.query(
+              `UPDATE attendance_payroll_cycles
+               SET template_id = $3,
+                   name = $4,
+                   start_date = $5,
+                   end_date = $6,
+                   status = $7,
+                   metadata = $8::jsonb,
+                   updated_at = now()
+               WHERE id = $1 AND org_id = $2
+               RETURNING *`,
+              [
+                payrollCycleId,
+                orgId,
+                payload.templateId,
+                payload.name,
+                payload.startDate,
+                payload.endDate,
+                payload.status,
+                JSON.stringify(payload.metadata),
+              ],
+            )
+            // 加班银行 v1-5b-ii: ONLY on the TRANSITION to closed, snapshot the settlement in the SAME txn
+            // (atomic with the status write). A re-PUT of an already-closed cycle does NOT re-snapshot.
+            if (existing.status !== 'closed' && payload.status === 'closed' && updated[0]) {
+              await snapshotCycleSettlementOnClose(trx, updated[0])
+            }
+            return updated
+          })
 
           const mapped = mapPayrollCycleRow(rows[0])
           emitEvent('attendance.payrollCycle.updated', { orgId, payrollCycleId: mapped.id })
