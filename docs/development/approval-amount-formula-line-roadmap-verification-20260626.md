@@ -25,7 +25,7 @@ design-lock-first / staged-opt-in discipline this line has held throughout.)
 | `manager_at_level` chain-bake regression pin | — | #3084 |
 
 The money chain is closed end-to-end: **derive line (qty × unit_price) → sum total → backend
-total-check**; formula conditions route on those backend-verified values; the backend remains the sole
+total-check**; formula conditions route on those consistency-checked values; the backend remains the sole
 consistency boundary (binds total to detail sum).
 
 ## Remaining development — the plan (each item: its unblocker + who owns the call)
