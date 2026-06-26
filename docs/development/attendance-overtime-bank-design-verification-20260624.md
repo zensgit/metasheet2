@@ -1,7 +1,7 @@
 # 加班调休抵扣与周期结算（加班银行）— 设计与验证记录
 
 > **范围**：把"加班入池 → 请假优先抵扣 → 周期末折算"做成**企业可配置**的薪资/考勤结算规则组。本文是该线的**设计 + 验证**真源；设计锁见 `attendance-overtime-bank-settlement-designlock-20260624.md`（RATIFIED）。
-> **状态（2026-06-26 refresh）**：**账1 入池 + 账2 抵扣 + 账3 满勤 + 配置 UI + 账4 周期结算（v1-5 snapshot-at-close）全部落 main** —— **加班银行四账模型 + 结算机制完整闭环**。**v1-5 settlement 线 = design-lock #3206 → 表 #3211 → 纯计算 #3228 → 写路径+冻结守卫 #3233（全 merged，逐刀 owner review，约 13 个 money-path/会计 finding pre-merge 闭环）**：cycle→`closed` 同事务快照（三入口 update/create/generate 都不绕过 §3），§8a population = 期间 facts ∪ active comp_time 余额（不漏离职带余额），must-pay 从 **period OT facts**（statutory 永付 + 非 pooledSources 来源；**不从 balance lot 推导**，poison-lot 已证）、convertible 从 close 时点余额；`closed`/`archived`/有结算行 = period 冻结（PUT 改 period/template + DELETE 都 409）。**named follow-up = v1-5b-iii**（must-pay-from-period-OT 的 e2e 实库测试——纯计算已 unit 证，wiring 的 convertible/守卫已实库矩阵证，仅 must-pay 经 OT-segmentation harness 的端到端待补）；v1-7 需 payout producer、v1-8 需 staging。本记录随每刀落地更新。
+> **状态（2026-06-26 refresh）**：**账1 入池 + 账2 抵扣 + 账3 满勤 + 配置 UI + 账4 周期结算（v1-5 snapshot-at-close）全部落 main** —— **加班银行四账模型 + 结算机制完整闭环**。**v1-5 settlement 线 = design-lock #3206 → 表 #3211 → 纯计算 #3228 → 写路径+冻结守卫 #3233 → must-pay e2e #3255（全 merged，逐刀 owner review，约 13 个 money-path/会计 finding pre-merge 闭环）**：cycle→`closed` 同事务快照（三入口 update/create/generate 都不绕过 §3），§8a population = 期间 facts ∪ active comp_time 余额（不漏离职带余额），must-pay 从 **period OT facts**（statutory 永付 + 非 pooledSources 来源；**不从 balance lot 推导**，poison-lot 已证且 #3255 已经 OT-segmentation harness 端到端验证）、convertible 从 close 时点余额；`closed`/`archived`/有结算行 = period 冻结（PUT 改 period/template + DELETE 都 409）。v1-7 需 payout producer、v1-8 需 staging。本记录随每刀落地更新。
 > **执行纪律**：money-path 切片（碰加班 grant / 请假 deduct 的事务）**绿了也不自动合,逐刀 owner review** —— CI-green-but-wrong 在这条线 = 算错工资。staging smoke 需环境（gated）。
 
 ---
@@ -35,10 +35,10 @@
 | **v1-5a** | 结算快照表 `attendance_payroll_cycle_settlements`（typed，休眠） | #3211 | ✅ **landed** | real-DB schema 锁：frozen-period cols + source NOT NULL + UNIQUE 幂等键 + **FK ON DELETE RESTRICT**（owner [P2]：不级联删不可变结算行） |
 | **v1-5b-i** | 结算纯计算 `buildCycleSettlementRows`（§5，休眠） | #3228 | ✅ **landed** | unit 7/7：**poison-lot**（伪 statutory balance lot 不动 must_pay）· **无条件 must-pay**（bank-off 仍结算）· **un-pooled→must-pay**（owner [P1]）· convertible-by-source · legacy_unsourced |
 | **v1-5b-ii** | 结算写路径 `snapshotCycleSettlementOnClose` + 三入口 close hooks + §8a population + **冻结守卫** | #3233 | ✅ **landed** | real-DB 矩阵：convertible · poison-lot-no-row · 幂等 replay · frozen-period-reject · DELETE-closed-reject · **create/generate-as-closed** · **archived-freeze**（owner [P1] + [P2]×2 闭环）|
-| **v1-5b-iii** | must-pay-from-period-OT **e2e 实库测试** | — | 🔶 **named follow-up** | 纯计算已 unit 证、wiring 的 convertible/守卫已实库矩阵证；仅 must-pay 端到端需 OT-segmentation harness（owner 决定是否单开） |
+| **v1-5b-iii** | must-pay-from-period-OT **e2e 实库测试** | #3255 `cc00066b6` | ✅ **landed** | real-DB attendance integration：period OT facts 经 OT-segmentation harness → settlement summary；workday un-pooled `must_pay=120`、statutory holiday `must_pay=480`、poison statutory balance lot `9999` 不污染 must-pay |
 | **v1-6** | 授权 UI（3 卡片：OvertimeBankPolicy + LeaveOffsetPolicy + 满勤）| #3175 + #3194 | ✅ **landed** | vue-tsc -b 0 + vitest（load/toggle/PUT-only-policy-key;§6 UI 不暴露 statutory_holiday）|
 | v1-7 | Ledger：扩 `source_type`（payout/manual_adjust）+ settlement/payroll-export 标记（**不新增 event_type**）| — | ⬜ designed | 计划 unit + real-DB |
-| v1-8 | real-DB 矩阵（三例验收）+ **staging smoke** | — | ⬜ designed | **staging 需环境（gated）** |
+| v1-8 | **staging smoke**（三例验收 + residue=0） | — | ⬜ gated | **staging 需环境（gated）**；real-DB money-path 矩阵已由逐刀 PR 覆盖到 #3255 |
 
 ---
 
@@ -84,7 +84,7 @@
 
 ## 6. 验证矩阵口径（v1-8）
 
-每条最终需：real-DB 矩阵（三例验收 + 守恒 + replay + 休眠回归）+ staging smoke（PASS stamp / deploy SHA / residue=0）。当前 real-DB 已逐刀覆盖（见 §2/§3）；staging smoke 待环境（与 NS-4/TA-4 同闸门）。
+每条最终需：real-DB 矩阵（三例验收 + 守恒 + replay + 休眠回归）+ staging smoke（PASS stamp / deploy SHA / residue=0）。当前 real-DB 已逐刀覆盖到 #3255（见 §2/§3/§7.3）；v1-8 只剩 staging smoke，待环境（与 NS-4/TA-4 同闸门）。
 
 ---
 
@@ -114,6 +114,6 @@ owner 拍板 **snapshot-at-close**，落点 = **新 typed 表 `attendance_payrol
 - **v1-5a 表**（#3211）：frozen-period cols、`source NOT NULL`、`UNIQUE(org,cycle,user,source)` 幂等键、**FK ON DELETE RESTRICT**（owner [P2]：cycle 删不级联抹结算）。
 - **v1-5b-i 纯计算**（#3228）：`buildCycleSettlementRows`(periodOtBySource + pooledSources)；must-pay = statutory 永付 + **非 pooledSources 来源**（owner [P1]：漏 un-pooled 会**少发**工资）；**poison-lot** 与**无条件 must-pay**（bank-off 仍结算）unit 锁。
 - **v1-5b-ii 写路径 + 守卫**（#3233）：`snapshotCycleSettlementOnClose` 挂三入口 close（update/create/generate→closed，同事务、仅 transition、`ON CONFLICT DO NOTHING` 幂等）；§8a population 实库；**冻结守卫**：`closed`/`archived`/有结算行 → PUT 改 period/template + DELETE 都 409（owner [P1] 我误 defer 守卫 + [P2] create/generate 未测 + [P2] archived-once-closed 绕过，三 finding 闭环）。
-- **named follow-up = v1-5b-iii**：must-pay-from-period-OT 的 **e2e 实库**（纯计算已 unit 证、convertible/守卫已矩阵证；must-pay 端到端需 OT-segmentation harness）。
+- **v1-5b-iii must-pay e2e**（#3255）：period OT facts 经 OT-segmentation harness 进入 settlement summary；精确断言 `workday.must_pay_minutes=120`（un-pooled 来源必付）、`statutory_holiday.must_pay_minutes=480`（期间法定假 OT 必付）、`convertible=0`，且 `9999` poison statutory balance lot 不污染 must-pay。
 
 **这条线 money-path 纪律的回报**：v1-5 单段 owner per-slice review 抓到并 pre-merge 闭环约 **13 个 money-path/会计 finding**（un-pooled 少发、FK 级联删、误 defer 守卫、create/generate 未覆盖、archived 绕过…），全部「CI 绿但算错工资」类——design-lock-first + 逐刀 review 正是为此存在。
