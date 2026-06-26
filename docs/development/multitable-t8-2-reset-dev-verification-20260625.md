@@ -65,6 +65,17 @@ Goldens:
 - source grep proves Reset does not compose reveal grants;
 - plain record editor without sheet-access management -> forbidden.
 
+### Coverage note — delete-permission branch (deliberately not separately golden-pinned)
+
+Delete-permission branch is intentionally not separately golden-pinned: `!canDeleteRecord` is shadowed
+by canWrite/canEditRecord, and `!ensureRecordWriteAllowed` is only reachable through narrow write-own
+scope setup. The mechanism it relies on, throw -> RESET_BLOCKED -> single-transaction rollback, is
+covered by locked-target and forced mid-write atomicity goldens.
+
+(Context: a no-write actor blocks at the revert field-forbidden preflight and 409s at PREVIEW before
+reaching the delete branch, so a dedicated golden would require a brittle write-own-scope + foreign
+`created_by` fixture for low marginal value — the safety property is already proven. No runtime change.)
+
 ## Remaining work
 
 Not part of T8-2 v1:
