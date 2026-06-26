@@ -58,10 +58,16 @@ This resolves the [P2] that the original draft assumed a FE flag signal that doe
 
 ## Component design (where it lives)
 
-Alongside the existing Revert surface in `MultitableWorkbench.vue` (the Revert panel is the structural model). A new
-`ResetConfirmDialog.vue` (destructive variant of the revert-confirm panel) + `MultitableApiClient.resetPreview` /
-`resetExecute` (mirroring the `revertPreview`/`revertExecute` client methods, carrying `confirm:'reset'` +
-`previewIdentity`). The Reset action is visually separated from Revert (distinct destructive styling), not a mode flag.
+**Model correction (from the impl, #3250):** there is **no** sheet-wide Revert FE panel to mirror — the sheet-wide PIT
+Revert is operator/API-only. So `ResetConfirmDialog.vue` is modeled on the existing destructive-confirm dialog
+**`RestorePreviewDialog.vue`** (the per-record restore dialog), with new `MultitableApiClient.resetPreview` /
+`resetExecute` (carrying `confirm:'reset'` + `previewIdentity`). Distinct destructive styling.
+
+**Entry wiring needs a T-source (open product decision):** the workbench has no point-in-time picker — the whole
+sheet-wide restore line is operator/API-only, so there is no selected `asOf` to mount the Reset entry against. The
+dialog is a ready drop-in once a T-selection UX exists ("reset to *which* point in time?"); building that picker is a
+product/design decision, tracked as the follow-up. #3250 lands the inert component + the `pitResetEnabled` signal; the
+user-facing entry waits on the picker.
 
 ## Verification plan (for the impl, when un-gated)
 
