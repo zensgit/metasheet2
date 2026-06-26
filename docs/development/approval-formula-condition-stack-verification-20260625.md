@@ -1,18 +1,19 @@
 # Approval Formula Conditions — Stack Verification Snapshot
 
-Status: draft stack, not merged. This record documents the FC-1..FC-5 stacked
-implementation state as of 2026-06-25. It is intentionally a snapshot, not a
-"shipped" declaration.
+Status: LANDING VERIFICATION — FC-1..FC-4 SHIPPED; FC-5 PENDING IN #3223.
+This record documents the FC-1..FC-5 implementation and the verification used
+to land the stack serially. It is not the final shipped closeout until the FC-5
+squash SHA is stamped.
 
 ## Stack
 
 | Slice | PR | Base | Head | State |
 | --- | --- | --- | --- | --- |
-| FC-1 evaluator | #3219 | `main` | `7b0cb4f08` | open draft, GitHub checks green |
-| FC-2 authoring | #3220 | `codex/approval-formula-condition-fc1-20260625` | `b5d8b2230` | open draft, GitHub checks green |
-| FC-3 preset examples | #3221 | `codex/approval-formula-condition-fc2-20260625` | `bf0e30124` | open draft, GitHub checks green |
-| FC-4 backend dry-run | #3222 | `codex/approval-formula-condition-fc3-20260625` | `e446d4095` | open draft, GitHub checks green |
-| FC-5 dry-run preview | #3223 | `codex/approval-formula-condition-fc4-20260625` | this verification commit | open draft, GitHub checks green |
+| FC-1 evaluator | #3219 | `main` | `38b1b98d0` | shipped on main |
+| FC-2 authoring | #3220 | `main` | `c0a875193` | shipped on main |
+| FC-3 preset examples | #3221 | `main` | `a0071602b` | shipped on main |
+| FC-4 backend dry-run | #3222 | `main` | `34644ba26` | shipped on main |
+| FC-5 dry-run preview | #3223 | `main` | pending squash | this PR |
 
 ## FC-1 Rebase Hardening
 
@@ -58,7 +59,7 @@ Results:
 - Backend `tsc --noEmit`: clean.
 - `git diff --check`: clean.
 
-GitHub state after the restack:
+GitHub state during the original draft-stack restack:
 
 - FC-1 #3219: all required checks green; `Strict E2E with Enhanced Gates`
   skipped as expected.
@@ -66,7 +67,8 @@ GitHub state after the restack:
 - FC-3 #3221: `approval-web-guard` and `pr-validate` green.
 - FC-4 #3222: `pr-validate` green.
 - FC-5 #3223: `approval-web-guard` and `pr-validate` green.
-- All five PRs remain draft and unmerged.
+These entries are historical evidence from the draft-stack review. Current
+state is the shipped/pending table above.
 
 ## FC-5 Verification
 
@@ -104,10 +106,8 @@ covered by `vue-tsc -b` and the mounted wiring test.
 - The mounted wiring test proves button -> endpoint payload -> result display,
   then save still emits only the formula graph config and preserves topology.
 
-## Remaining Before Shipping
+## Remaining Before Final Closeout
 
-- Keep the stack order: FC-1 -> FC-2 -> FC-3 -> FC-4 -> FC-5.
-- Rebase each slice after the previous one lands.
-- Re-run that slice's gates on the rebased head before marking ready.
-- After the full stack lands, update this record or the design-lock status from
-  draft-stack to shipped.
+- Land FC-5 after rebasing onto the FC-4 squash and re-running its gates.
+- Stamp the FC-5 squash SHA in this record and the design-lock.
+- Update the design-lock status to `RATIFIED + SHIPPED`.
