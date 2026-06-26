@@ -1467,6 +1467,10 @@ describe('Attendance admin regressions', () => {
         roleTags: ['tag-x'],
       },
     })
+    const calledUrls = vi.mocked(apiFetch).mock.calls.map(call => String(call[0]))
+    expect(calledUrls.some(url => url.includes('/roles/assign'))).toBe(false)
+    expect(calledUrls.some(url => url === '/api/permissions/grant')).toBe(false)
+    expect(calledUrls.some(url => url.startsWith('/api/permissions/user/'))).toBe(false)
   })
 
   it('refuses to create a scheduler scope without a target and explains why', async () => {
