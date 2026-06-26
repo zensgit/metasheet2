@@ -15,6 +15,7 @@ import type {
   ApprovalGraph,
   ApprovalMode,
   ApprovalRequesterSnapshot,
+  ConditionFormulaPredicate,
   CreateApprovalRequest,
   CreateApprovalTemplateRequest,
   EmptyAssigneePolicy,
@@ -43,6 +44,11 @@ import {
 } from './ApprovalGraphExecutor'
 import { resolveApprovalAssignees } from './ApprovalAssigneeResolver'
 import { validateAmountTotalConsistency } from './amount-total-check'
+import {
+  ApprovalConditionFormulaError,
+  assertApprovalConditionFormulaValidForSchema,
+  parseApprovalConditionFormula,
+} from './ApprovalConditionFormula'
 import { resolveApprovalRequesterOrgRelations, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
 import { resolveActiveDelegationMap } from './ApprovalDelegations'
 import type {
@@ -482,6 +488,31 @@ function validateApprovalAssigneeSourcesAgainstFormSchema(
   })
 }
 
+function validateApprovalConditionFormulasAgainstFormSchema(
+  approvalGraph: ApprovalGraph,
+  formSchema: FormSchema,
+  context: ValidationContext,
+): void {
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'condition') continue
+    const config = node.config as { branches?: unknown }
+    if (!Array.isArray(config.branches)) continue
+
+    config.branches.forEach((branch, branchIndex) => {
+      if (!isRecord(branch) || !isRecord(branch.formula) || typeof branch.formula.expression !== 'string') return
+      try {
+        assertApprovalConditionFormulaValidForSchema(branch.formula.expression, formSchema)
+      } catch (error) {
+        const message = error instanceof ApprovalConditionFormulaError ? error.message : String(error)
+        failValidation(
+          context,
+          `approvalGraph node ${node.key} condition formula branch ${branchIndex + 1} is invalid: ${message}`,
+        )
+      }
+    })
+  }
+}
+
 function failValidation(context: ValidationContext, message: string): never {
   throw new ServiceError(message, context.status, context.code)
 }
@@ -868,6 +899,25 @@ function normalizeNodeFieldPermissions(
   return normalized
 }
 
+function normalizeConditionFormulaPredicate(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): ConditionFormulaPredicate | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value) || !isNonEmptyString(value.expression)) {
+    failValidation(context, `${path}.expression is required`)
+  }
+  const expression = value.expression.trim()
+  try {
+    parseApprovalConditionFormula(expression)
+  } catch (error) {
+    const message = error instanceof ApprovalConditionFormulaError ? error.message : String(error)
+    failValidation(context, `${path}.expression is invalid: ${message}`)
+  }
+  return { expression }
+}
+
 /**
  * P1-C cross-reference: every `fieldPermissions[].fieldId` on an approval node
  * must reference a field that exists in the version's formSchema. Runs after
@@ -1027,9 +1077,21 @@ function normalizeApprovalGraph(
             if (branch.conjunction !== undefined && branch.conjunction !== 'and' && branch.conjunction !== 'or') {
               failValidation(context, `approvalGraph.nodes[${index}].config.branches[${branchIndex}].conjunction is invalid`)
             }
+            const formula = normalizeConditionFormulaPredicate(
+              branch.formula,
+              context,
+              `approvalGraph.nodes[${index}].config.branches[${branchIndex}].formula`,
+            )
+            if (formula && branch.rules.length > 0) {
+              failValidation(
+                context,
+                `approvalGraph.nodes[${index}].config.branches[${branchIndex}] cannot mix formula and rules`,
+              )
+            }
             return {
               edgeKey: branch.edgeKey.trim(),
               ...(branch.conjunction ? { conjunction: branch.conjunction } : {}),
+              ...(formula ? { formula } : {}),
               rules: branch.rules.map((rule, ruleIndex) => {
                 if (!isRecord(rule) || !isNonEmptyString(rule.fieldId) || !CONDITION_OPERATORS.has(String(rule.operator))) {
                   failValidation(
@@ -2290,6 +2352,7 @@ export class ApprovalProductService {
     const approvalGraph = assertApprovalGraph(request.approvalGraph)
     validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
 
     let client: ApprovalDbClient | null = null
     try {
@@ -2444,6 +2507,7 @@ export class ApprovalProductService {
         const nextApprovalGraph = approvalGraph ?? asApprovalGraph(latestVersion.approval_graph)
         validateApprovalAssigneeSourcesAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeFieldPermissionsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
+        validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
 
         const versionResult = await client.query<TemplateVersionRow>(
           `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
@@ -2531,6 +2595,7 @@ export class ApprovalProductService {
       const approvalGraph = asApprovalGraph(version.approval_graph)
       validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
+      validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT)
       // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
       // otherwise the high path stalls at runtime on an unclaimable role assignment (nobody holds the
       // placeholder role). See APPROVAL_ROLE_CONFIGURE_SENTINEL.
