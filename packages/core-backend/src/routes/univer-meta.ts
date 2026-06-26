@@ -4368,6 +4368,29 @@ export function redactViewConfigFilterLiterals<T extends { filterInfo?: unknown 
   return { ...(view as object), filterInfo: redacted.node } as T
 }
 
+// T9-W U-1a: sheet_config history carries conditionalReadRules whose `value` literals are field-read-sensitive
+// (same class as view filterInfo / #2052-R9) — canManageSheetAccess does NOT imply field-read. Redact the value of
+// any rule whose fieldId the requester can't read (drop the key, mirroring the filterInfo redaction). Returns the
+// payload unchanged if nothing was redacted.
+export function redactConditionalReadRuleLiterals<T extends { conditionalReadRules?: unknown } | null | undefined>(payload: T, allowedFieldIds: Set<string>): T {
+  if (!payload || typeof payload !== 'object') return payload
+  const rules = (payload as { conditionalReadRules?: unknown }).conditionalReadRules
+  if (!Array.isArray(rules)) return payload
+  let changed = false
+  const redacted = rules.map((rule) => {
+    if (!rule || typeof rule !== 'object') return rule
+    const fieldId = (rule as { fieldId?: unknown }).fieldId
+    if (typeof fieldId === 'string' && !allowedFieldIds.has(fieldId) && 'value' in (rule as object)) {
+      changed = true
+      const { value: _redacted, ...rest } = rule as Record<string, unknown>
+      return rest
+    }
+    return rule
+  })
+  if (!changed) return payload
+  return { ...(payload as object), conditionalReadRules: redacted } as T
+}
+
 // #2068 re-save guard: PURE merge of an incoming PATCH filterInfo against the current DB filterInfo, so a
 // field-denied user re-saving a view (whose denied conditions came back from #2059 redaction with NO `value`
 // key) does not silently erase the literal they were never allowed to see. Value-only, mirroring #2059 —
@@ -7634,18 +7657,24 @@ export function univerMetaRouter(): Router {
       // field-read-sensitive (#2052/R9) — canManageViews does NOT imply field-read, so returning
       // before/after.filterInfo raw would leak a denied field's literal through history. Redact per
       // the requester's allowed fields, mirroring redactViewConfigFilterLiterals on the live view read.
-      const hasViewRow = rows.some((r) => String(r.entity_type) === 'view')
-      const allowedFieldIds = hasViewRow
+      // T9-W U-1a: sheet_config rows ALSO carry field-read-sensitive literals (conditionalReadRules[].value), so
+      // load the allowed fields when EITHER a view or a sheet_config row is present, and redact each per its shape.
+      const hasSensitiveRow = rows.some((r) => String(r.entity_type) === 'view' || String(r.entity_type) === 'sheet_config')
+      const allowedFieldIds = hasSensitiveRow
         ? await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
         : null
-      const redactViewPayload = (val: unknown): unknown =>
-        allowedFieldIds && val ? redactViewConfigFilterLiterals(val as { filterInfo?: unknown }, allowedFieldIds) : (val ?? null)
+      const redactPayload = (entityType: string, val: unknown): unknown => {
+        if (!allowedFieldIds || !val) return val ?? null
+        if (entityType === 'view') return redactViewConfigFilterLiterals(val as { filterInfo?: unknown }, allowedFieldIds)
+        if (entityType === 'sheet_config') return redactConditionalReadRuleLiterals(val as { conditionalReadRules?: unknown }, allowedFieldIds)
+        return val
+      }
       return res.json({ ok: true, data: { items: rows.map((r) => {
-        const isView = String(r.entity_type) === 'view'
+        const et = String(r.entity_type)
         return {
-          id: String(r.id), entityType: String(r.entity_type), entityId: String(r.entity_id), action: String(r.action),
-          before: isView ? redactViewPayload(r.before) : (r.before ?? null),
-          after: isView ? redactViewPayload(r.after) : (r.after ?? null),
+          id: String(r.id), entityType: et, entityId: String(r.entity_id), action: String(r.action),
+          before: redactPayload(et, r.before),
+          after: redactPayload(et, r.after),
           changedKeys: r.changed_keys ?? [],
           batchId: r.batch_id ?? null, actorId: r.actor_id ?? null, createdAt: r.created_at,
         }
