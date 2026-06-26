@@ -207,11 +207,16 @@ Capture the in-scope selected record id:
 RECORD_ID="$(jq -r '.data.items[] | select(.selectedByDefault == true) | .recordId' /tmp/hmr5-scoped-candidates.json | head -1)"
 ```
 
-### 3. UI smoke: confirm snapshot and enqueue
+### 3. UI smoke: central-admin confirm snapshot and enqueue
+
+The manual reminder UI lives in the Attendance admin console. Run this UI smoke
+as `$ADMIN_ID` or an equivalent central attendance admin. The scope-only actor is
+covered by the API checks in steps 2, 4, and 8; do not use `$SCOPED_ID` for this
+admin-console UI step.
 
 In the staging browser:
 
-1. Log in as `$SCOPED_ID` or an equivalent scoped user.
+1. Log in as `$ADMIN_ID` or an equivalent central attendance admin.
 2. Open Attendance admin → Notification deliveries.
 3. In **Manual missed-punch reminders**, load the candidate range.
 4. Verify the pending-request candidate is visible but not selected by default.
@@ -227,6 +232,9 @@ Expected:
 - DB payload body remains `HMR-5 snapshot $STAMP`, proving the confirm snapshot
   was authoritative;
 - no attendance record/request/event is mutated by the reminder operation.
+- this step proves the admin UI behavior only. Scheduler-scope `remind`
+  authority is proven by the scoped API calls, because the scoped actor does not
+  have the central admin console surface.
 
 ### 4. API enqueue assertion
 
