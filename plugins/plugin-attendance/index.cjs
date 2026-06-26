@@ -11633,6 +11633,43 @@ function resolveFullAttendanceEligible(summary, policy) {
   return true
 }
 
+// 加班银行 v1-5b — pure settlement-row compute (design-lock §5). Per-user, at cycle close.
+// UNCONDITIONAL (advisor #1 / §6): must-pay (statutory_holiday OT) is a LEGAL fact, NOT a bank feature — it is
+// NOT gated on overtimeBankPolicy.enabled, so a bank-off org with statutory holiday OT still gets a must-pay
+// row. convertible = banked comp_time REMAINING by source (workday / restday / legacy_unsourced; statutory is
+// NEVER convertible — never banked). must-pay = the cycle-PERIOD statutory holiday OT, computed FROM PERIOD
+// FACTS (holidayOvertimeMinutes), NEVER from a balance lot — the poison-lot proof: a bogus statutory_holiday
+// balance lot in compTimeRemainingBySource cannot move must_pay (this loop never reads it for must-pay, and
+// statutory isn't a convertible source). NO amounts (倍率/金额 = payroll).
+function buildCycleSettlementRows({ holidayOvertimeMinutes, compTimeRemainingBySource } = {}) {
+  const banked = compTimeRemainingBySource && typeof compTimeRemainingBySource === 'object' ? compTimeRemainingBySource : {}
+  const m = (v) => Math.max(0, Math.floor(Number(v) || 0))
+  const rows = []
+  for (const source of ['workday', 'restday', 'legacy_unsourced']) {
+    const convertible = m(banked[source])
+    if (convertible > 0) rows.push({ source, convertibleMinutes: convertible, mustPayMinutes: 0 })
+  }
+  const mustPay = m(holidayOvertimeMinutes)
+  if (mustPay > 0) rows.push({ source: 'statutory_holiday', convertibleMinutes: 0, mustPayMinutes: mustPay })
+  return rows
+}
+
+// 加班银行 v1-5b — banked comp_time REMAINING by overtime_source, at the close instant. NULL/legacy source
+// COALESCEs to 'legacy_unsourced' (design-lock §2 [P2]) so dormant balance is never dropped from the group.
+async function loadCompTimeRemainingBySource(db, orgId, userId) {
+  const rows = await db.query(
+    `SELECT COALESCE(NULLIF(overtime_source, ''), 'legacy_unsourced') AS source,
+            COALESCE(SUM(remaining_minutes), 0)::int AS remaining
+       FROM attendance_leave_balances
+      WHERE org_id = $1 AND user_id = $2 AND leave_type_code = 'comp_time' AND status = 'active'
+      GROUP BY COALESCE(NULLIF(overtime_source, ''), 'legacy_unsourced')`,
+    [orgId, userId],
+  )
+  const bySource = {}
+  for (const row of rows) bySource[row.source] = Number(row.remaining) || 0
+  return bySource
+}
+
 async function loadAttendanceSummary(db, orgId, userId, from, to) {
   const countedDaySql = buildAttendanceSummaryCountedDaySql()
   const rows = await db.query(
@@ -18511,6 +18548,7 @@ module.exports = {
     normalizeOvertimeBankPolicySetting,
     resolveOvertimeBankSourceMinutes,
     partitionOvertimeBankGrantLots,
+    buildCycleSettlementRows,
   },
   __attendanceLeaveOffsetForTests: {
     LEAVE_DEDUCTION_POOLS,
