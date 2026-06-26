@@ -70,11 +70,14 @@ Normalizer:
 resolveAttendanceReportDigestJob()
 ```
 
-env gate：
+env gate 分层：
 
 ```text
+ATTENDANCE_SCHEDULER_ENABLED=true
 ATTENDANCE_REPORT_DIGEST_ENABLED=true
 ```
+
+`ATTENDANCE_REPORT_DIGEST_ENABLED` 只控制本 producer 是否注册 / 写 outbox。它不替代共享 scheduler 进程 gate。真实投递仍由既有 C5 delivery worker 控制，需另行满足 `ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED=true` 以及对应 channel 的环境配置；RD-5 staging smoke 必须分别证明“producer 写 row”和“worker 可见地发送 / 失败”。
 
 运行口径：
 
@@ -82,8 +85,8 @@ ATTENDANCE_REPORT_DIGEST_ENABLED=true
 - 命中后，为 org 内目标用户写 C5 outbox rows。
 - source_type: `attendance_report_digest`
 - source_id: `orgId:cadence:periodKey`
-- source_key: `attendance_report_digest:{orgId}:{cadence}:{periodKey}:{recipientRole}:{recipientUserId}`
-- outbox row 幂等由 `source_key` unique 保护；repeat tick 不重复。
+- source_key: `attendance_report_digest:{orgId}:{cadence}:{periodKey}:{recipientRole}:{recipientUserId}:channel:{deliveryChannel}`
+- outbox row 幂等由 `source_key` unique 保护；repeat tick 不重复。幂等粒度包含最终 delivery channel，沿用现有 C5 producer 的 per-channel source_key 习惯，避免 channel 变更时静默复用旧 row。
 - producer 不直接发送、不调用 channel SDK。
 
 Period:
@@ -138,8 +141,11 @@ v1 目标用户来源：
 
 Recipient roles：
 
-- `self`: 目标员工本人。
-- `owner` / `sub_owner`: 复用 C5 owner fan-out 的既有解析能力；解析失败只跳过对应 role，不影响 self。
+- `self`: 配置层词表；RD-3 producer 写 C5 row 时映射成既有 `recipient_role='subject'`，`recipient_user_id` 为目标员工本人。
+- `owner` / `sub_owner`: RD-3 producer 必须自己解析 active attendance group membership + active group manager / sub-manager，再写入具体 `recipient_user_id`。C5 delivery worker 只投递已 materialize 的 row，不做 owner/sub_owner fan-out。
+- 目标员工没有 active attendance group 时：`self` 仍可发，`owner` / `sub_owner` 跳过并计入 producer summary，不把整次 digest 判失败。
+- 目标员工同时属于多个 active attendance groups 时：RD-3 必须去重 recipient_user_id；同一 recipient 对同一 subject/period/channel 只写一 row。若不同组解析到不同负责人，则分别写 row。
+- 解析失败只跳过对应 role，不影响 `self` row。
 
 Scope：
 
@@ -192,9 +198,9 @@ v1 不做：
 | RD-0 | 本设计锁 | docs-only, owner 拍板后 merge |
 | RD-1 | latent config + settings PUT/GET round-trip | default-off；invalid timezone/channel/sendAt/recipients 400/422；partial PUT preserves siblings |
 | RD-2 | digest period + payload builder | pure tests：daily/weekly/monthly period、month-end clamp、summary/request payload shape |
-| RD-3 | scheduler producer + C5 outbox | real-DB tests：source_key idempotency、self-only default、owner fan-out opt-in、no direct send |
+| RD-3 | scheduler producer + C5 outbox | real-DB tests：source_key idempotency、self→subject mapping、producer-resolved owner fan-out opt-in、zero/multiple group cases、no direct send |
 | RD-4 | admin UI config card | web tests：hydrate from settings、invalid sendAt blocks PUT、empty recipients rejected, anchor-nav updated if needed |
-| RD-5 | staging smoke runbook | owner-run：enable daily, force/run scheduler tick, delivery row created, worker sends/fails visibly, residue=0 |
+| RD-5 | staging smoke runbook | owner-run：enable scheduler + digest producer + delivery worker/channel gates, force/run scheduler tick, delivery row created, worker sends/fails visibly, residue=0 |
 
 ---
 
@@ -220,8 +226,12 @@ RD-3:
 - scheduler tick when disabled writes zero rows.
 - enabled daily writes one self row per active user/org member.
 - repeat tick writes zero duplicates.
-- owner/sub_owner rows only when configured.
+- source_key includes normalized delivery channel and repeat tick on the same channel writes zero duplicates.
+- `self` config writes C5 `recipient_role='subject'`.
+- owner/sub_owner rows are resolved by the producer only when configured; worker never resolves those roles.
 - missing owner does not fail self row.
+- user with zero active attendance group still gets self row and skips owner/sub_owner.
+- user with multiple groups deduplicates the same recipient_user_id and writes distinct rows for distinct managers.
 - channel value stamped from normalized policy and never interpolated from arbitrary input.
 
 RD-4:
