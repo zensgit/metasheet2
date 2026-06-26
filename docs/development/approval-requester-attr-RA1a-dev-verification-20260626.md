@@ -45,6 +45,12 @@ server-resolved and frozen — tamper-resistant by provenance, unlike applicant-
 - `tsc --noEmit` on `@metasheet/core-backend` — **clean**.
 - Affected backend suites (condition-formula / directory-org / graph-executor / product-service) —
   **113/113**, no regression.
+- **Dispatch round-trip — safe by construction.** The dispatch paths read `directoryDepartment` from the
+  reloaded `instance.requester_snapshot`; that column is a whole-object `JSON.stringify(requesterSnapshot)`
+  at create (`ApprovalProductService.ts:2964`), so the field persists + reloads (NOT a field-by-field
+  projection that would silently drop it). Residual gap: no end-to-end create→action→dispatch *integration*
+  test exercises a formula via the reload path (the unit tests use a hand-built context) — recommended
+  follow-up; the round-trip is structurally safe today.
 
 ## Scope boundary (deliberate, per #3259)
 - **`requester.level`** — DEFERRED (no directory source). Parse-rejects.
