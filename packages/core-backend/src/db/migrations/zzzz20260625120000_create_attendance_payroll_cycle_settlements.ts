@@ -16,6 +16,10 @@ import { sql } from 'kysely'
 //        source would let the idempotency key be bypassed (duplicate writes on replay-close) and drop dormant
 //        balance from the group.
 //   The UNIQUE (org_id, cycle_id, user_id, source) is the idempotency key (replay-close = ON CONFLICT DO NOTHING).
+//   [P2 owner #3211] the cycle FK is ON DELETE RESTRICT, NOT CASCADE: a closed settlement snapshot is an
+//        immutable accounting fact (#3206) — deleting its cycle must be REFUSED while settlement rows exist, so
+//        a cycle delete can't cascade-wipe the snapshots and bypass the archive/reopen-recompute discipline.
+//        (v1-5b adds the route-layer closed-cycle delete/update guard; this FK is the DB-level backstop.)
 //
 // NO amounts: convertible_minutes / must_pay_minutes are MINUTES only; 倍率 / 工资基数 / 金额 = payroll.
 export async function up(db: Kysely<unknown>): Promise<void> {
@@ -23,7 +27,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     CREATE TABLE IF NOT EXISTS attendance_payroll_cycle_settlements (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       org_id text NOT NULL,
-      cycle_id uuid NOT NULL REFERENCES attendance_payroll_cycles(id) ON DELETE CASCADE,
+      cycle_id uuid NOT NULL REFERENCES attendance_payroll_cycles(id) ON DELETE RESTRICT,
       period_start_date date NOT NULL,
       period_end_date date NOT NULL,
       closed_at timestamptz NOT NULL,

@@ -42,6 +42,9 @@ describe('#加班银行 v1-5a — attendance_payroll_cycle_settlements schema (d
       await insert('legacy_unsourced')
       // [P2] source NOT NULL → a NULL source row is rejected (so the UNIQUE key can't be NULL-bypassed).
       await expect(insert(null)).rejects.toThrow()
+      // [P2 owner #3211] FK is ON DELETE RESTRICT, NOT cascade: with a settlement row present, deleting the
+      // cycle is REFUSED at the DB — a cycle delete can't cascade-wipe immutable closed settlement snapshots.
+      await expect(pool.query('DELETE FROM attendance_payroll_cycles WHERE id = $1', [cycleId])).rejects.toThrow()
     } finally {
       await pool.query('DELETE FROM attendance_payroll_cycle_settlements WHERE user_id = $1', [userId]).catch(() => undefined)
       if (cycleId) await pool.query('DELETE FROM attendance_payroll_cycles WHERE id = $1', [cycleId]).catch(() => undefined)
