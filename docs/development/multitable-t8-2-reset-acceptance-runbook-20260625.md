@@ -25,7 +25,7 @@ Harness: `packages/core-backend/scripts/reset-acceptance.mjs` (Node ≥18, uses 
 | d | flag ON, admin, a **locked** post-T target in scope | `409 RESET_BLOCKED`, **zero writes** |
 | e | flag ON, admin, a record **created after the preview** (drift) | `409` (delete-set re-enumeration), nothing deleted |
 | f | flag ON, admin, sheet **above** `MULTITABLE_SHEET_REVERT_MAX_RECORDS` | `413 SHEET_TOO_LARGE` |
-| g | flag ON, admin, **happy path** | post-T records soft-deleted (in trash, gone from live); survivors reverted to T; `source=restore` revisions |
+| g | flag ON, admin, **happy path** | post-T records soft-deleted (gone from live), survivors reverted to T. *Harness asserts the LIVE effect (post-T leave the delete-set + `visibleRevertCount=0`); the `source=restore` revision write + trash landing are golden-covered, confirm trash once by hand.* |
 
 ## Run
 
@@ -47,7 +47,8 @@ Exit 0 = all run scenarios passed; 1 = a failure; 2 = config/setup error.
 ### What the harness provisions (API-automated) vs manual prerequisites
 - **Automated** (HTTP, isolated per run): a fresh acceptance base + sheet + a `number` field; pre-T records A,B; an
   `asOf` T; post-T records C,D (the delete-set) + a post-T change to A (to prove the revert); record lock (d);
-  drift record (e); ceiling seeding (f, only if `RESET_MAX_RECORDS` is small).
+  drift record (e); ceiling seeding for (f) on a **separate throwaway sheet** (only if `RESET_MAX_RECORDS` is small) —
+  it never touches the main sheet, so **(g) still runs in the same flag-on run**: one run covers (b)–(g).
 - **Manual prerequisites** (do NOT fake): the two JWTs (`ADMIN_TOKEN` = sheet-admin/`multitable:share`,
   `EDITOR_TOKEN` = `multitable:write` without share); toggling `MULTITABLE_ENABLE_PIT_RESET`; setting a small
   `MULTITABLE_SHEET_REVERT_MAX_RECORDS` if you want (f) (default 5000 is impractical to seed). Scenario (b) skips

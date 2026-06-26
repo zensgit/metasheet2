@@ -140,12 +140,20 @@ async function run() {
     ok('(d) ZERO writes — C,D still live (in the delete-set)', delAfter.includes(ctx.C) && delAfter.includes(ctx.D), `deleteRecordIds=${JSON.stringify(delAfter)}`)
   }
 
-  // (f) ceiling → 413 (env-dependent; only if RESET_MAX_RECORDS is provided and small)
+  // (f) ceiling → 413 — provisioned on a SEPARATE throwaway sheet so it NEVER pollutes the main sheet over-ceiling;
+  // (g) then still runs on the clean main sheet → one flag-on run truly covers (b)–(g). (env-dependent on RESET_MAX_RECORDS.)
   if (MAXREC && MAXREC > 0 && MAXREC < 200) {
-    for (let i = 0; i <= MAXREC; i++) await api('POST', '/records', ADMIN, { sheetId: ctx.sheetId, data: ctx.salaryId ? { [ctx.salaryId]: i } : { name: `big${i}` } })
-    const pv = await api('POST', `/sheets/${ctx.sheetId}/reset-preview`, ADMIN, { asOf: ctx.T })
-    ok('(f) above-ceiling → 413 SHEET_TOO_LARGE', pv.status === 413, `got ${pv.status}/${code(pv)}`)
-    return finish() // the sheet is now over-ceiling; do not run (g) on it
+    const cs = await api('POST', '/sheets', ADMIN, { baseId: ctx.baseId, name: `RS-CEIL ${Date.now()}` })
+    const csId = cs.body?.data?.id || cs.body?.data?.sheet?.id || cs.body?.id
+    const cf = await api('POST', '/fields', ADMIN, { sheetId: csId, name: 'N', type: 'number' })
+    const cfId = cf.body?.data?.id || cf.body?.data?.field?.id || cf.body?.id || null
+    if (!csId) ok('(f) above-ceiling → 413 SHEET_TOO_LARGE', false, 'could not provision a separate ceiling sheet')
+    else {
+      for (let i = 0; i <= MAXREC; i++) await api('POST', '/records', ADMIN, { sheetId: csId, data: cfId ? { [cfId]: i } : { name: `big${i}` } })
+      const pv = await api('POST', `/sheets/${csId}/reset-preview`, ADMIN, { asOf: ctx.T })
+      ok('(f) above-ceiling → 413 SHEET_TOO_LARGE (on a dedicated ceiling sheet)', pv.status === 413, `got ${pv.status}/${code(pv)}`)
+    }
+    // NO early return — fall through to (g) on the still-clean main sheet.
   } else skipped('(f) ceiling → 413', 'set RESET_MAX_RECORDS=<small> (matching staging MULTITABLE_SHEET_REVERT_MAX_RECORDS) to enable')
 
   // (g) HAPPY PATH → post-T soft-deleted (trash) + survivors reverted
@@ -161,7 +169,9 @@ async function run() {
     const revertAfter = after.body?.data?.summary?.visibleRevertCount ?? -1
     ok('(g) post-T C,D soft-deleted (no longer in the delete-set after reset)', !delAfter.includes(ctx.C) && !delAfter.includes(ctx.D), `deleteRecordIds=${JSON.stringify(delAfter)}`)
     ok('(g) survivors reverted (no pending reverts at T after reset)', revertAfter === 0, `visibleRevertCount=${revertAfter}`)
-    log('\n  NOTE: verify C/D appear in the recycle bin (meta_records_trash) via the trash UI/API — recoverable, not hard-deleted.')
+    log('\n  NOTE: (g) asserts the LIVE effect only (post-T left the live delete-set + survivors reverted). Two things are')
+    log('  covered by backend goldens, not re-asserted here: the `source=restore` revision write, and that C/D land in the')
+    log('  recycle bin (`meta_records_trash`) — confirm the trash side once by hand; recoverable, not hard-deleted.')
   }
   return finish()
 }
