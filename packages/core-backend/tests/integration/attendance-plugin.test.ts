@@ -6068,6 +6068,11 @@ attendanceIntegrationDescribe(
       const afterReplay = await settlements()
       expect(afterReplay).toHaveLength(afterClose.length)
       expect(Number(Object.fromEntries(afterReplay.map((r) => [r.source, r])).restday?.convertible_minutes)).toBe(90)
+      // [P1 owner #3233] a closed cycle's period is FROZEN: PUT changing start/end → 409; DELETE closed → 409;
+      // a status-only transition (closed→archived) is still allowed.
+      expect((await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${cycleId}`, { method: 'PUT', headers, body: JSON.stringify({ startDate: '2026-10-01', endDate: '2026-10-31' }) })).status).toBe(409)
+      expect((await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${cycleId}`, { method: 'DELETE', headers })).status).toBe(409)
+      expect((await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${cycleId}`, { method: 'PUT', headers, body: JSON.stringify({ status: 'archived' }) })).status).toBe(200)
       // NOTE: the must-pay-from-period-OT-facts end-to-end (the [P1] un-pooled case) is unit-proven in
       // attendance-settlement-compute.test.ts; a wired must-pay e2e needs the OT-segmentation harness — a v1-5b-iii follow-up.
     } finally {
@@ -6075,6 +6080,62 @@ attendanceIntegrationDescribe(
       if (cycleId) await pool.query('DELETE FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1', [cycleId]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [userId]).catch(() => undefined)
       if (cycleId) await pool.query('DELETE FROM attendance_payroll_cycles WHERE id = $1', [cycleId]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS; else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+  })
+
+  it('④ 加班银行 v1-5b-ii [P2] — create-as-closed AND generate-as-closed both snapshot settlement (§3 no-bypass)', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-v15b2p2-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+    const cycleIds: string[] = []
+    let token: string | undefined
+    let originalSettings: Record<string, unknown> = {}
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) return
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+      const putSettings = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
+      originalSettings = ((await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })).body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
+      await putSettings({ overtimeBankPolicy: { enabled: true, pooledSources: ['restday'] } })
+      await pool.query(
+        `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at, overtime_source)
+         VALUES ('default', $1, 'comp_time', 90, 90, 'overtime_conversion', $2, 'active', '2026-01-01', 'restday')`,
+        [userId, `v15b2p2:${runSuffix}`])
+      const convertibleFor = async (cycleId: string) => Number((await pool.query(
+        `SELECT COALESCE(SUM(convertible_minutes),0) AS c FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1 AND user_id = $2`,
+        [cycleId, userId])).rows[0].c)
+
+      // (1) create-as-closed (POST status:'closed') → settlement written in the create txn (must not bypass §3).
+      const createRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles`, { method: 'POST', headers, body: JSON.stringify({ startDate: '2026-11-01', endDate: '2026-11-30', status: 'closed' }) })
+      expect(createRes.status).toBe(201)
+      const createdId = (createRes.body as { data?: { id?: string } } | undefined)?.data?.id as string
+      expect(createdId).toBeTruthy(); cycleIds.push(createdId)
+      expect(await convertibleFor(createdId)).toBe(90)
+
+      // (2) generate-as-closed (POST /generate status:'closed') → settlement written for the generated closed cycle.
+      const tmplRes = await requestJson(`${baseUrl}/api/attendance/payroll-templates`, { method: 'POST', headers, body: JSON.stringify({ name: `T ${runSuffix}`, timezone: 'UTC', startDay: 1, endDay: 28, endMonthOffset: 0, autoGenerate: false }) })
+      expect([201, 409]).toContain(tmplRes.status)
+      const tmplId = (tmplRes.body as { data?: { id?: string } } | undefined)?.data?.id as string
+      const genRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/generate`, { method: 'POST', headers, body: JSON.stringify({ templateId: tmplId, anchorDate: '2026-12-15', count: 1, status: 'closed', namePrefix: `Gen ${runSuffix}` }) })
+      expect(genRes.status).toBe(201)
+      const generated = (genRes.body as { data?: { created?: { id?: string }[] } } | undefined)?.data?.created ?? []
+      expect(generated.length).toBeGreaterThanOrEqual(1)
+      const genId = generated[0]?.id as string
+      expect(genId).toBeTruthy(); cycleIds.push(genId)
+      expect(await convertibleFor(genId)).toBe(90)
+    } finally {
+      if (token && Object.keys(originalSettings).length > 0) await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
+      for (const id of cycleIds) await pool.query('DELETE FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1', [id]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [userId]).catch(() => undefined)
+      for (const id of cycleIds) await pool.query('DELETE FROM attendance_payroll_cycles WHERE id = $1', [id]).catch(() => undefined)
       await pool.end().catch(() => undefined)
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS; else process.env.RBAC_BYPASS = previousRbacBypass
     }
