@@ -22,9 +22,9 @@ action with its own destructive framing.
 
 ## Flow (preview → typed confirm → execute)
 
-1. **Entry** — a distinct "Reset to T" action, shown only when the actor has the sheet-admin cap AND the feature is
-   enabled (the FE hides/disables it otherwise — mirrors the backend's `canManageSheetAccess` + `MULTITABLE_ENABLE_PIT_RESET`;
-   a hidden action when the flag is off is the FE's half of "inert until enabled").
+1. **Entry** — a distinct "Reset to T" action. The sheet-admin cap (`canManageSheetAccess`, already in FE capabilities)
+   always gates it. Whether it is *hidden when the flag is off* depends on the **Flag visibility contract** (below) —
+   the FE has no reset-flag signal today, so that behavior must be resolved at impl, not assumed here.
 2. **Preview** — call `reset-preview`; render `summary.deleteCount` (post-T → trash), `summary.visibleRevertCount`
    (survivors reverted), and the destructive warning. If `deleteCount === 0` show "nothing to delete" and treat it as a
    plain Revert-equivalent (no destructive confirm needed). Drift/`409` on a stale preview → re-preview.
@@ -36,6 +36,25 @@ action with its own destructive framing.
    Map the gated codes to clear copy, never "failed": `403`→not permitted / feature off; `409 RESET_BLOCKED`→"a target
    is locked or denied — nothing was changed"; `409` drift→"the sheet changed since preview — re-preview"; `413`→"too
    many records for a one-shot reset"; `400`→"type reset to confirm".
+
+## Flag visibility contract (resolve at impl — there is NO FE reset-flag signal today)
+
+The FE capabilities/context expose record/sheet permissions (e.g. `canManageSheetAccess`) but **no**
+`MULTITABLE_ENABLE_PIT_RESET` signal — so "hide the entry when the flag is off" has no real source yet. Pick one at impl:
+
+- **v1 recommended — add a backend signal.** Expose a flag-derived boolean in the sheet capabilities/context (e.g.
+  `pitResetEnabled` / `canUsePitReset`, true only when `MULTITABLE_ENABLE_PIT_RESET` is on AND the actor has the cap).
+  Then the FE genuinely hides/greys the Reset entry when off — the FE half of "inert until enabled", with no
+  dead/confusing control and no leak of the feature's existence to admins on a flag-off tenant. A small additive
+  backend slice, built as part of the #2 impl (when un-gated) — not a separate gate.
+- **v1 fallback — don't hide; handle `RESET_DISABLED`.** Show the entry by `canManageSheetAccess` only; on click the
+  preview returns `403 RESET_DISABLED` and the FE renders a clear "Reset is not enabled here" state. Simpler (no backend
+  change) but the entry is visible-but-inert when off — explicitly **NOT** "flag-off hidden". Acceptable for v1 only if
+  that dead-entry tradeoff is accepted.
+
+This resolves the [P2] that the original draft assumed a FE flag signal that doesn't exist. The Verification-plan spec
+(1) ("hidden when the cap/flag is absent") presumes the **recommended** path; under the fallback it narrows to "shows a
+`RESET_DISABLED` state when the flag is off."
 
 ## Component design (where it lives)
 
