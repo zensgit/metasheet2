@@ -21,6 +21,11 @@ import {
   type ApprovalTemplateVisibilityActor,
 } from '../services/ApprovalProductService'
 import {
+  ApprovalConditionFormulaError,
+  assertApprovalConditionFormulaValidForSchema,
+  evaluateApprovalConditionFormula,
+} from '../services/ApprovalConditionFormula'
+import {
   APPROVAL_ERROR_CODES,
   type ApprovalBridgePlmAdapter,
 } from '../services/approval-bridge-types'
@@ -28,6 +33,7 @@ import { publishApprovalCountsUpdate } from '../services/approval-realtime'
 import { searchDirectoryUsers, listDirectoryRoles } from '../services/approval-directory'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation } from '../services/ApprovalDelegationConfig'
+import type { FormSchema } from '../types/approval-product'
 
 const logger = new Logger('ApprovalsRouter')
 const MAX_APPROVAL_PAGE_SIZE = 200
@@ -178,6 +184,14 @@ function approvalErrorResponse(code: string, message: string) {
       message,
     },
   }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isFormSchemaLike(value: unknown): value is FormSchema {
+  return isPlainRecord(value) && Array.isArray(value.fields)
 }
 
 function sendServiceError(res: Response, error: ServiceError): void {
@@ -354,6 +368,60 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       res.json({ roles })
     } catch (error) {
       handleApprovalsError(res, error, 'APPROVAL_DIRECTORY_ROLES_FAILED', 'Failed to list directory roles')
+    }
+  })
+
+  // FC-4 — approval-specific formula-condition dry-run. This intentionally uses the
+  // exact approval evaluator from publish/execution and stays separate from the
+  // sheet-scoped multitable formula dry-run API.
+  r.post('/api/approval-templates/formula-condition/dry-run', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+    try {
+      const body = isPlainRecord(req.body) ? req.body : {}
+      const expression = typeof body.expression === 'string' ? body.expression : ''
+      const formSchema = body.formSchema
+      const formData = body.formData
+
+      if (!expression.trim()) {
+        return res.status(400).json(
+          approvalErrorResponse('APPROVAL_FORMULA_DRY_RUN_INVALID_REQUEST', 'expression is required'),
+        )
+      }
+      if (!isFormSchemaLike(formSchema)) {
+        return res.status(400).json(
+          approvalErrorResponse('APPROVAL_FORMULA_DRY_RUN_INVALID_REQUEST', 'formSchema.fields is required'),
+        )
+      }
+      if (!isPlainRecord(formData)) {
+        return res.status(400).json(
+          approvalErrorResponse('APPROVAL_FORMULA_DRY_RUN_INVALID_REQUEST', 'formData object is required'),
+        )
+      }
+
+      try {
+        assertApprovalConditionFormulaValidForSchema(expression, formSchema)
+        const result = evaluateApprovalConditionFormula(expression, formData)
+        return res.json({ data: { success: true, result } })
+      } catch (error) {
+        if (error instanceof ApprovalConditionFormulaError) {
+          return res.json({
+            data: {
+              success: false,
+              error: {
+                code: 'APPROVAL_FORMULA_CONDITION_DRY_RUN_FAILED',
+                message: error.message,
+              },
+            },
+          })
+        }
+        throw error
+      }
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_FORMULA_DRY_RUN_FAILED',
+        'Failed to dry-run approval condition formula',
+      )
     }
   })
 
