@@ -1,6 +1,6 @@
 # Gate A — K3 PoC conclusion + read/list runtime decision (2026-06-25)
 
-> Status: **PoC concluded (evidence closed) · read runtime ALREADY BUILT + verified (#1868), ratified · LIST half open**. First basis from the connection-line gate-closure plan (`data-factory-connection-line-gate-closure-plan-20260625.md`): turns the K3 PoC from "experiment done" into "evidence closed + decision recorded." Check-before-build finding: the read smallest-unlock is already shipped (#1868, `80c2f7bcd`) — this Gate A ratifies it as complete and records that the LIST half remains a separate decision. Authorizes **no write of any kind**; opens no customer GATE.
+> Status: **PoC concluded (evidence closed) · read runtime ALREADY BUILT + verified (#1868), ratified · WebAPI LIST deferred by default (reopen-triggered)**. First basis from the connection-line gate-closure plan (`data-factory-connection-line-gate-closure-plan-20260625.md`): turns the K3 PoC from "experiment done" into "evidence closed + decision recorded." Check-before-build finding: the read smallest-unlock is already shipped (#1868, `80c2f7bcd`) — this Gate A ratifies it as complete and records that the LIST half remains a separate decision. Authorizes **no write of any kind**; opens no customer GATE.
 
 ## 1. What the K3 PoC proved (values-free evidence)
 
@@ -33,7 +33,9 @@ runbook      : operator steps + values-free evidence template
 exit         : ACHIEVED for the read — dev complete (#1868); only entity-machine / customer testing remains (live)
 ```
 
-Rationale: the read is the narrow, vendor-documented, low-risk capability — and it is **already built dormant/read-only** (#1868), matching the ratified posture, adding no write and requiring no customer GATE to exist. Live execution still needs the customer GATE (credentials/network/PLM source/mapping — Gate B). The LIST half was deliberately excluded from the smoke and is a separate larger slice.
+Rationale: the read is the narrow, vendor-documented, low-risk capability — and it is **already built dormant/read-only** (#1868), matching the ratified posture, adding no write and requiring no customer GATE to exist. Live execution still needs the customer GATE (credentials/network/PLM source/mapping — Gate B).
+
+**LIST decision — DEFER BY DEFAULT (not a permanent skip):** *Defer WebAPI LIST reads by default. Current read/list need is satisfied by Material/GetDetail single-detail read plus the SQL-Server bulk read channel. Reopen LIST only if customer constraints make SQL bulk read unavailable or explicitly require WebAPI-only list semantics.*
 
 ## 3. Freeze held (high-risk writes stay closed)
 
@@ -51,9 +53,10 @@ These may exist as contract/runtime **dormant**, but the **first real write of a
 ```text
 this Gate A          : closes the PoC evidence + ratifies the EXISTING read runtime (#1868) as complete
 read (single detail) : DONE (#1868 80c2f7bcd) — dormant/read-only/fail-closed + wire-vs-fixture + design/verif
-read LIST (open)      : multi-record list reads / pagination / broad filters — deliberately excluded from the
-                       smoke; a SEPARATE larger slice + decision if wanted (NOT built)
-live                  : gated on the customer GATE packet (Gate B) — for the existing read and any list slice
+WebAPI LIST           : DEFERRED BY DEFAULT (not built) — need is met by GetDetail single read + SQL bulk read.
+                       REOPEN-TRIGGER: customer constraints make SQL bulk read unavailable, OR explicitly
+                       require WebAPI-only list semantics. Then it becomes a separate design-locked slice.
+live                  : gated on the customer GATE packet (Gate B) — for the existing read and any reopened list
 Stage-2 (DF-N3/N4)   : still deferred; this evidence is an input, each a separate gated opt-in later
 ```
 
