@@ -28,8 +28,17 @@ un-create one). Each is gated today and refused fail-closed; none ships without 
 - **U-L4 atomicity** — the config write + its forward `meta_config_revisions` row commit in ONE
   transaction; a mid-write failure rolls back fully (the BAR-1 / T8-2 atomicity model).
 - **U-L5 append-only / forward** — a restore is a NEW recorded revision (never edits history).
-- **U-L6 view-literal redaction** — any view payload in a preview redacts `filterInfo` literals per
-  requester (#2052/R9), as the read API does. EXECUTE applies the real server-side target.
+- **U-L6 config-literal redaction (WIDENED)** — any preview payload redacts field-read-sensitive
+  literals per requester: view `filterInfo` **AND** sheet_config `conditional_read_rules[].value`. Both
+  are field-read-sensitive, and `canManageViews` / `canManageSheetAccess` do **NOT** imply field-read.
+  Reuse/extend `redactViewConfigFilterLiterals` + `loadAllowedFieldIds`. EXECUTE applies the real
+  server-side target (raw); only the PREVIEW read is redacted.
+  > **Pre-existing leak (advisor, 2026-06-26):** the live `/config-history` read redacts only **view**
+  > rows (`hasViewRow`/`isView`/`filterInfo`); sheet_config rows' `conditional_read_rules` literals have
+  > **zero** redaction → a `canManageSheetAccess` actor who can't read a field sees its rule literal
+  > today. This is the sheet_config twin of the R3.1 view fix, **unpatched on main**. T1 plan: land a
+  > small standalone redaction hotfix to the read endpoint FIRST (R3.1 precedent — bugfix separate from
+  > feature), then T1's revert-preview reuses the shared redactor, keeping read + preview consistent.
 - **U-L7 no oracle** — refuse/block responses leak no denied count/existence; preview surfaces only
   what the caller may see.
 
@@ -98,7 +107,8 @@ Undelete-execute (Tier 4 defer); cross-base config restore; any FE; bulk/multi-e
 
 ## TODO (gated)
 - 🔒 **U-0** this design-lock — APPROVED 2026-06-26 with the Decisions above (greenlight T1+T2, per-tier flags, U-L8).
-- ⬜ **U-1 (GREENLIT)** Tier 1 sheet_config revert — behind `MULTITABLE_ENABLE_SHEET_CONFIG_REVERT`; preview shows rule before→after; U-L1..L7; real-DB goldens (flag-off, gate, drift, atomicity, no-oracle).
+- ⬜ **U-1a (GREENLIT, PREREQ)** read-endpoint redaction hotfix — redact sheet_config `conditional_read_rules[].value` in the `/config-history` read per requester (R3.1 twin; fixes the pre-existing leak; a shared redactor T1 reuses) + golden: `canManageSheetAccess` + a field-deny → rule literal redacted, not revealed.
+- ⬜ **U-1b (GREENLIT)** Tier 1 sheet_config revert — behind `MULTITABLE_ENABLE_SHEET_CONFIG_REVERT`; `classifyRevert` stays pure (flag/cap/apply handled at the route+apply layer, NOT threaded into classifyRevert); preview shows rule before→after **redacted per U-L6**; U-L1..L7; real-DB goldens (flag-off, gate, drift, atomicity, no-oracle, **+ preview literal-redaction**).
 - ⬜ **U-2 (GREENLIT)** Tier 2 lossy retype — behind `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT`; data-loss preview **read-scoped per U-L8** + typed confirm; refuse on total/unknown loss; goldens incl. the **U-L8 no-hidden-count-inference** golden.
 - 🔒 **U-3 (HOLD)** Tier 3 un-create — held until a separate destructive-delete sign-off.
 - 🔒 **U-4 (DEFER/HOLD)** undelete deferred (its own line); permission-revert held entirely until a per-grant re-grant policy.
