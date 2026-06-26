@@ -18,6 +18,7 @@ interface FakeDb {
     raw: unknown
     primary_external_department_id: string | null
     primary_department_raw: unknown
+    primary_department_name?: string | null
   } | null
   // candidate accounts in the requester's primary department (for manager scan)
   deptCandidates?: Array<{ account_id: string; raw: unknown; external_user_id?: string }>
@@ -75,6 +76,28 @@ describe('resolveApprovalRequesterOrgRelations', () => {
     }
     const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db))
     expect(result).toEqual({ managerId: 'local-mgr', deptHeadId: 'local-head' })
+  })
+
+  it('RA-1a: resolves the primary department NAME into primaryDepartmentName (server-resolved source)', async () => {
+    const db: FakeDb = {
+      requester: {
+        integration_id: 'int-1', account_id: 'acc-req', external_user_id: 'ext-req', raw: {},
+        primary_external_department_id: 'D1', primary_department_raw: {}, primary_department_name: '财务',
+      },
+    }
+    const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db))
+    expect(result.primaryDepartmentName).toBe('财务')
+  })
+
+  it('RA-1a: omits primaryDepartmentName when the directory has no department name (→ requester.department fails closed at runtime)', async () => {
+    const db: FakeDb = {
+      requester: {
+        integration_id: 'int-1', account_id: 'acc-req', external_user_id: 'ext-req', raw: {},
+        primary_external_department_id: 'D1', primary_department_raw: {}, primary_department_name: null,
+      },
+    }
+    const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db))
+    expect(result.primaryDepartmentName).toBeUndefined()
   })
 
   it('excludes the requester from their own dept leaders (self-exclusion <> $3): a leader requester is not their own manager', async () => {
