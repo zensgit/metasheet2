@@ -66,8 +66,8 @@ async function setup() {
   // fields (best-effort; the revert assertion in (g) needs at least one editable field)
   const f = await api('POST', '/fields', ADMIN, { sheetId, name: 'Salary', type: 'number' })
   const salaryId = f.body?.data?.id || f.body?.data?.field?.id || f.body?.id || null
-  const mkRec = async (data) => {
-    const r = await api('POST', '/records', ADMIN, { sheetId, data })
+  const mkRec = async (data, token = ADMIN) => {
+    const r = await api('POST', '/records', token, { sheetId, data })
     return r.body?.data?.id || r.body?.data?.record?.id || r.body?.id || null
   }
   // pre-T records A,B
@@ -79,8 +79,11 @@ async function setup() {
   // post-T: change A (to test revert), create C,D (the delete-set)
   if (salaryId && A) await api('PATCH', `/records/${A}`, ADMIN, { sheetId, data: { [salaryId]: 999 } })
   const C = await mkRec(salaryId ? { [salaryId]: 300 } : { name: 'c' })
-  const D = await mkRec(salaryId ? { [salaryId]: 400 } : { name: 'd' })
-  return { baseId, sheetId, salaryId, A, B, C, D, T }
+  // D is the lock-target scenario. When EDITOR_TOKEN is available, create it as the editor so an admin Reset is blocked
+  // by a lock held by another actor. If D is admin-created/admin-locked, current lock semantics allow the creator/locker
+  // to proceed, which would be a harness false negative rather than a Reset bug.
+  const D = await mkRec(salaryId ? { [salaryId]: 400 } : { name: 'd' }, EDITOR || ADMIN)
+  return { baseId, sheetId, salaryId, A, B, C, D, T, dLockedByEditor: Boolean(EDITOR) }
 }
 
 async function run() {
@@ -128,17 +131,17 @@ async function run() {
   }
 
   // (d) locked post-T target → 409 RESET_BLOCKED + ZERO writes
-  {
-    await api('POST', `/records/${ctx.D}/lock`, ADMIN, { sheetId: ctx.sheetId, locked: true })
+  if (EDITOR && ctx.dLockedByEditor) {
+    await api('POST', `/records/${ctx.D}/lock`, EDITOR, { sheetId: ctx.sheetId, locked: true })
     const pv = await api('POST', `/sheets/${ctx.sheetId}/reset-preview`, ADMIN, { asOf: ctx.T })
     const id = pv.body?.data?.previewIdentity
     const ex = await api('POST', `/sheets/${ctx.sheetId}/reset-execute`, ADMIN, { asOf: ctx.T, previewIdentity: id, confirm: 'reset' })
     ok('(d) locked target → 409 RESET_BLOCKED', ex.status === 409 && /BLOCKED/.test(code(ex)), `got ${ex.status}/${code(ex)}`)
-    await api('POST', `/records/${ctx.D}/lock`, ADMIN, { sheetId: ctx.sheetId, locked: false }) // unlock before re-checking + for (g)
+    await api('POST', `/records/${ctx.D}/lock`, EDITOR, { sheetId: ctx.sheetId, locked: false }) // unlock before re-checking + for (g)
     const after = await api('POST', `/sheets/${ctx.sheetId}/reset-preview`, ADMIN, { asOf: ctx.T })
     const delAfter = after.body?.data?.deleteRecordIds || []
     ok('(d) ZERO writes — C,D still live (in the delete-set)', delAfter.includes(ctx.C) && delAfter.includes(ctx.D), `deleteRecordIds=${JSON.stringify(delAfter)}`)
-  }
+  } else skipped('(d) locked target → 409 RESET_BLOCKED', 'EDITOR_TOKEN not provided; admin-created/admin-locked records are editable by the locker/creator')
 
   // (f) ceiling → 413 — provisioned on a SEPARATE throwaway sheet so it NEVER pollutes the main sheet over-ceiling;
   // (g) then still runs on the clean main sheet → one flag-on run truly covers (b)–(g). (env-dependent on RESET_MAX_RECORDS.)
