@@ -11633,6 +11633,58 @@ function resolveFullAttendanceEligible(summary, policy) {
   return true
 }
 
+// 加班银行 v1-5b — pure settlement-row compute (design-lock §5). Per-user, at cycle close.
+// Inputs: `periodOtBySource` = the cycle-PERIOD OT facts by source (workday/restday/statutory_holiday minutes);
+// `compTimeRemainingBySource` = the close-time banked comp_time remaining by source; `pooledSources` = the
+// EFFECTIVE pooledSources from the snapshotted overtimeBankPolicy.
+//   convertible = banked comp_time REMAINING by source (workday/restday/legacy_unsourced; statutory NEVER
+//     convertible — never banked).
+//   must-pay = period OT that was NOT banked, computed FROM PERIOD FACTS (never balance lots):
+//     • statutory_holiday: ALWAYS must-pay (§6 legal floor, never poolable) — UNCONDITIONAL (advisor #1):
+//       not gated on policy.enabled, so a bank-off org with holiday OT still gets a must-pay row;
+//     • workday/restday: must-pay = the period source OT IFF that source is NOT in the effective pooledSources
+//       (un-pooled OT was never granted as comp_time → must be paid). pooled → it became comp_time
+//       (convertible), so 0 must-pay. [P1 owner #3228: this is what was missing — un-pooled non-statutory OT.]
+//       bank-off / pooledSources=[] → every non-statutory source is un-pooled → all must-pay.
+//   POISON-LOT (§7): must-pay reads ONLY period facts; a bogus statutory_holiday BALANCE lot in
+//   compTimeRemainingBySource cannot move must_pay (statutory is computed from period facts + never convertible).
+//   NO amounts (倍率/金额 = payroll).
+function buildCycleSettlementRows({ periodOtBySource, compTimeRemainingBySource, pooledSources } = {}) {
+  const period = periodOtBySource && typeof periodOtBySource === 'object' ? periodOtBySource : {}
+  const banked = compTimeRemainingBySource && typeof compTimeRemainingBySource === 'object' ? compTimeRemainingBySource : {}
+  const pooled = new Set(Array.isArray(pooledSources) ? pooledSources : [])
+  const m = (v) => Math.max(0, Math.floor(Number(v) || 0))
+  const rows = []
+  for (const source of ['workday', 'restday']) {
+    const convertible = m(banked[source])
+    const mustPay = pooled.has(source) ? 0 : m(period[source])
+    if (convertible > 0 || mustPay > 0) rows.push({ source, convertibleMinutes: convertible, mustPayMinutes: mustPay })
+  }
+  // statutory_holiday: always must-pay from period facts; never convertible (poison-lot guard).
+  const statutoryMustPay = m(period.statutory_holiday)
+  if (statutoryMustPay > 0) rows.push({ source: 'statutory_holiday', convertibleMinutes: 0, mustPayMinutes: statutoryMustPay })
+  // legacy_unsourced: historical banked balance only (no period fact) → convertible.
+  const legacyConvertible = m(banked.legacy_unsourced)
+  if (legacyConvertible > 0) rows.push({ source: 'legacy_unsourced', convertibleMinutes: legacyConvertible, mustPayMinutes: 0 })
+  return rows
+}
+
+// 加班银行 v1-5b — banked comp_time REMAINING by overtime_source, at the close instant. NULL/legacy source
+// COALESCEs to 'legacy_unsourced' (design-lock §2 [P2]) so dormant balance is never dropped from the group.
+async function loadCompTimeRemainingBySource(db, orgId, userId) {
+  const rows = await db.query(
+    `SELECT COALESCE(NULLIF(overtime_source, ''), 'legacy_unsourced') AS source,
+            COALESCE(SUM(remaining_minutes), 0)::int AS remaining
+       FROM attendance_leave_balances
+      WHERE org_id = $1 AND user_id = $2 AND leave_type_code = 'comp_time' AND status = 'active'
+      GROUP BY COALESCE(NULLIF(overtime_source, ''), 'legacy_unsourced')`,
+    [orgId, userId],
+  )
+  const bySource = {}
+  for (const row of rows) bySource[row.source] = Number(row.remaining) || 0
+  return bySource
+}
+
 async function loadAttendanceSummary(db, orgId, userId, from, to) {
   const countedDaySql = buildAttendanceSummaryCountedDaySql()
   const rows = await db.query(
@@ -18511,6 +18563,7 @@ module.exports = {
     normalizeOvertimeBankPolicySetting,
     resolveOvertimeBankSourceMinutes,
     partitionOvertimeBankGrantLots,
+    buildCycleSettlementRows,
   },
   __attendanceLeaveOffsetForTests: {
     LEAVE_DEDUCTION_POOLS,
