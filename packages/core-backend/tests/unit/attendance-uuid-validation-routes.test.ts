@@ -471,6 +471,7 @@ function fixedScheduleQueryResult(sql: string) {
 }
 
 function rbacQueryResult(sql: string, params: unknown[] = [], admin = false) {
+  if (sql.includes('pg_advisory_xact_lock')) return []
   if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return admin ? [{ ok: 1 }] : []
   if (sql.includes('FROM user_permissions')) return []
   if (sql.includes('JOIN role_permissions')) return []
@@ -2208,8 +2209,14 @@ describe('attendance UUID route validation', () => {
     expect(replay.statusCode).toBe(202)
     expect(replay.body).toMatchObject({ ok: true, data: { created: 0, existing: 1 } })
     expect(insertCalls).toBe(1)
-    expect(sourceKey).toBe('manual_missed_punch_reminder:key-1:recipient:worker-1')
-    expect(db.query.mock.calls.map(([sql]) => String(sql)).filter(sql => sql.includes('FROM attendance_records r'))).toHaveLength(1)
+    expect(sourceKey).toBe('manual_missed_punch_reminder:key-1:recipient:worker-1:channel:dingtalk_work_notification')
+    const sqlCalls = db.query.mock.calls.map(([sql]) => String(sql))
+    const lockIndex = sqlCalls.findIndex(sql => sql.includes('pg_advisory_xact_lock'))
+    const sourceReplayIndex = sqlCalls.findIndex(sql => sql.includes('FROM attendance_notification_deliveries') && sql.includes('source_type = $2'))
+    expect(lockIndex).toBeGreaterThanOrEqual(0)
+    expect(sourceReplayIndex).toBeGreaterThan(lockIndex)
+    expect(sqlCalls.filter(sql => sql.includes('FROM attendance_records r'))).toHaveLength(1)
+    expect(sqlCalls.find(sql => sql.includes('FROM attendance_records r'))).toContain('FOR UPDATE OF r')
   })
 
   it('replays existing missed-punch reminders even when the candidate is no longer remindable', async () => {
@@ -2224,7 +2231,7 @@ describe('attendance UUID route validation', () => {
           org_id: 'default',
           source_type: 'manual_missed_punch_reminder',
           source_id: 'manual_missed_punch_reminder:key-1',
-          source_key: 'manual_missed_punch_reminder:key-1:recipient:worker-1',
+          source_key: 'manual_missed_punch_reminder:key-1:recipient:worker-1:channel:dingtalk_work_notification',
           recipient_user_id: 'worker-1',
           recipient_role: 'subject',
           channel: 'dingtalk_work_notification',
@@ -2272,7 +2279,7 @@ describe('attendance UUID route validation', () => {
           org_id: 'default',
           source_type: 'manual_missed_punch_reminder',
           source_id: 'manual_missed_punch_reminder:key-alpha',
-          source_key: 'manual_missed_punch_reminder:key-alpha:recipient:worker-1',
+          source_key: 'manual_missed_punch_reminder:key-alpha:recipient:worker-1:channel:dingtalk_work_notification',
           recipient_user_id: 'worker-1',
           recipient_role: 'subject',
           channel: 'dingtalk_work_notification',
@@ -2396,7 +2403,7 @@ describe('attendance UUID route validation', () => {
     })
     expect(replay.statusCode).toBe(202)
     expect(replay.body).toMatchObject({ ok: true, data: { channel: 'email_smtp', created: 0, existing: 1 } })
-    expect(sourceKey).toBe('manual_missed_punch_reminder:key-email:recipient:worker-1')
+    expect(sourceKey).toBe('manual_missed_punch_reminder:key-email:recipient:worker-1:channel:email_smtp')
   })
 
   it('rejects missed-punch reminder idempotency-key payload conflicts', async () => {
@@ -2411,7 +2418,7 @@ describe('attendance UUID route validation', () => {
           org_id: 'default',
           source_type: 'manual_missed_punch_reminder',
           source_id: 'manual_missed_punch_reminder:key-1',
-          source_key: 'manual_missed_punch_reminder:key-1:recipient:worker-1',
+          source_key: 'manual_missed_punch_reminder:key-1:recipient:worker-1:channel:dingtalk_work_notification',
           recipient_user_id: 'worker-1',
           recipient_role: 'subject',
           channel: 'dingtalk_work_notification',

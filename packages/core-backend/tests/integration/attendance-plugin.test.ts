@@ -15907,7 +15907,7 @@ attendanceIntegrationDescribe(
         channel: 'dingtalk_work_notification',
         status: 'pending',
       })
-      expect(rows.rows[0].source_key).toBe(`manual_missed_punch_reminder:${idempotencyKey}:recipient:${workerId}`)
+      expect(rows.rows[0].source_key).toBe(`manual_missed_punch_reminder:${idempotencyKey}:recipient:${workerId}:channel:dingtalk_work_notification`)
       expect(rows.rows[0].payload).toMatchObject({
         kind: 'manual_missed_punch_reminder',
         body: 'Please submit a missed-punch request.',

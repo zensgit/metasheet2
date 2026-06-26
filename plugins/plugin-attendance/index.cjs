@@ -23180,6 +23180,11 @@ module.exports = {
 
 	        try {
 	          const result = await db.transaction(async (trx) => {
+	            // Serialize the whole idempotency group before looking for source_id rows.
+	            await trx.query(
+	              'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+	              [orgId, sourceId]
+	            )
 	            const existingSourceRows = await trx.query(
 	              `SELECT *
 	               FROM attendance_notification_deliveries
@@ -23203,7 +23208,8 @@ module.exports = {
 	                   (r.status = 'partial' AND (r.first_in_at IS NULL OR r.last_out_at IS NULL))
 	                   OR r.status = 'absent'
 	                 )
-	               ORDER BY r.work_date DESC, r.user_id ASC, r.id ASC`,
+	               ORDER BY r.work_date DESC, r.user_id ASC, r.id ASC
+	               FOR UPDATE OF r`,
 	              [orgId, recordIds]
 	            )
 	            if (candidateRows.length !== recordIds.length) {
@@ -23252,7 +23258,7 @@ module.exports = {
 	                candidates,
 	              }
 	              return {
-	                sourceKey: `${MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE}:${idempotencyKey}:recipient:${recipientUserId}`,
+	                sourceKey: `${MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE}:${idempotencyKey}:recipient:${recipientUserId}:channel:${channel}`,
 	                recipientUserId,
 	                payload,
 	              }
