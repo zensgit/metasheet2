@@ -21,6 +21,7 @@ import type {
   CreateApprovalTemplateRequest,
   UpdateApprovalTemplateRequest,
   PublishApprovalTemplateRequest,
+  FormSchema,
 } from '../types/approval'
 
 // ---------------------------------------------------------------------------
@@ -505,6 +506,34 @@ export async function publishTemplate(
     }
   }
   return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/publish`, payload)
+}
+
+export interface ApprovalFormulaConditionDryRunRequest {
+  formSchema: FormSchema
+  expression: string
+  formData: Record<string, unknown>
+}
+
+export interface ApprovalFormulaConditionDryRunResult {
+  success: boolean
+  result?: boolean
+  error?: {
+    code: string
+    message: string
+  }
+}
+
+export async function dryRunApprovalConditionFormula(
+  payload: ApprovalFormulaConditionDryRunRequest,
+): Promise<ApprovalFormulaConditionDryRunResult> {
+  if (USE_MOCK) {
+    return { success: false, error: { code: 'APPROVAL_FORMULA_DRY_RUN_MOCK', message: 'Mock mode does not evaluate formulas' } }
+  }
+  const response = await apiPost<{ data: ApprovalFormulaConditionDryRunResult }>(
+    '/api/approval-templates/formula-condition/dry-run',
+    payload,
+  )
+  return response.data
 }
 
 // ---------------------------------------------------------------------------
