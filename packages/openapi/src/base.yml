@@ -2571,6 +2571,9 @@ components:
           type: boolean
         canExport:
           type: boolean
+        pitResetEnabled:
+          type: boolean
+          description: True only when MULTITABLE_ENABLE_PIT_RESET is on AND the actor has canManageSheetAccess; populated by GET /context (absent on other capability responses). Drives the FE Reset entry visibility.
       required:
         - canRead
         - canCreateRecord

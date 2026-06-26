@@ -6301,7 +6301,10 @@ export function univerMetaRouter(): Router {
             && readableSheetRows.some((visibleRow) => String(visibleRow.id) === String(row.id)),
           ),
           views: serializedViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)),
-          capabilities,
+          // T8-2 Reset UI flag-visibility contract (#3239): a flag-derived, FE-readable signal so the Reset entry can be
+          // truly HIDDEN when off (not a phantom flag read on the client). True iff MULTITABLE_ENABLE_PIT_RESET is on AND
+          // the actor is a sheet-admin — mirrors the reset routes' PIT_RESET_ENABLED() + canManageSheetAccess gate.
+          capabilities: { ...capabilities, pitResetEnabled: (String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true') && capabilities.canManageSheetAccess === true },
           capabilityOrigin,
           fieldPermissions,
           viewPermissions,

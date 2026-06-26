@@ -8162,6 +8162,8 @@ export interface paths {
                 query?: {
                     /** @description Optional view guard. The route verifies the view belongs to the sheet. */
                     viewId?: string;
+                    /** @description Optional column selection. A comma-joined string (`a,c`) or repeated param (`fieldIds=a&fieldIds=c`) naming the field ids to export. The selection is INTERSECTED with the already-permitted/masked field set (field permissions, view-hidden, and §2a.3 formula-taint) — it can only NARROW the export, never widen it; denied/masked/tainted or unknown ids are dropped. Omit to export all permitted columns. A selection that resolves to zero exportable columns → 400. */
+                    fieldIds?: string | string[];
                 };
                 header?: never;
                 path: {
@@ -8398,6 +8400,107 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/multitable/sheets/{sheetId}/records/{recordId}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore a multitable record to a prior revision (Layer 1)
+         * @description Restores a live record's user-data fields to a prior revision's recorded values, including link fields (re-synced through meta_links + the twoWay mirror). Forward-change semantics — a value-changing restore emits a new revision (source=restore) and bumps version; an empty diff is a no-op. Computed / system-auto / attachment fields are excluded by type. Atomically rejected if any restorable differing field is not writable.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sheetId: string;
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description The record version to restore to. */
+                        targetVersion: number;
+                        /** @description Optimistic-concurrency token; must equal the current server version. */
+                        expectedVersion: number;
+                        /** @description Optional per-field (column-level) restore. When provided, only these fields are restored (still atomic over the subset); omitted = full-record restore. A requested field that is unchanged / non-restorable / unknown is simply not restored. */
+                        fieldIds?: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description Restore applied, or a no-op when the current state already matches the target. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                recordId: string;
+                                newVersion: number;
+                                /** @description true when the restorable diff was empty (no write, no new revision). */
+                                noop: boolean;
+                                restoredFieldIds: string[];
+                                /** @description Always empty under atomic reject; reserved for a future partial-restore mode. */
+                                skippedFieldIds: string[];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+                /** @description VERSION_EXPIRED — the target version is older than the retained floor and has been pruned by the meta-revision retention policy (distinct from VERSION_NOT_FOUND for a version that never existed). */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            error: {
+                                /** @enum {string} */
+                                code: "VERSION_EXPIRED";
+                                message: string;
+                            };
+                        };
+                    };
+                };
+                /** @description Restore not possible — RESTORE_UNSUPPORTED (target is a delete revision), SNAPSHOT_UNAVAILABLE (revision has a null snapshot), or SCHEMA_DRIFT (a snapshot field no longer exists in the current schema). */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            error: {
+                                /** @enum {string} */
+                                code: "RESTORE_UNSUPPORTED" | "SNAPSHOT_UNAVAILABLE" | "SCHEMA_DRIFT";
+                                message: string;
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/sheets/{sheetId}/records/{recordId}/subscriptions": {
         parameters: {
             query?: never;
@@ -8567,6 +8670,162 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/record-subscription-notifications/unread-count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Unread notification count for the current user (bell badge)
+         * @description Self-scoped — counts only the authenticated user's unread (read_at IS NULL) notifications.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Unread count for the authenticated user */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: {
+                                count: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/record-subscription-notifications/mark-read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark a set of the current user's notifications read
+         * @description Self-scoped — only the authenticated user's own notifications are affected; ids belonging to other users are silently ignored. Idempotent (already-read rows are not re-counted).
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        ids: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description Number of notifications transitioned to read */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: {
+                                updated: number;
+                            };
+                        };
+                    };
+                };
+                /** @description ids missing or not an array */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            error?: {
+                                code?: string;
+                                message?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/record-subscription-notifications/mark-all-read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark all of the current user's notifications read
+         * @description Self-scoped — transitions every unread notification belonging to the authenticated user.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Number of notifications transitioned to read */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            data: {
+                                updated: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -15070,7 +15329,7 @@ export interface components {
         /** @enum {string} */
         MultitableViewType: "grid" | "form" | "kanban" | "gallery" | "calendar" | "timeline" | "gantt" | "hierarchy";
         /** @enum {string} */
-        MultitableFieldType: "string" | "number" | "boolean" | "date" | "dateTime" | "formula" | "select" | "multiSelect" | "link" | "person" | "lookup" | "rollup" | "attachment" | "currency" | "percent" | "rating" | "url" | "email" | "phone" | "barcode" | "location" | "longText" | "autoNumber" | "createdTime" | "modifiedTime" | "createdBy" | "modifiedBy";
+        MultitableFieldType: "string" | "number" | "boolean" | "date" | "dateTime" | "formula" | "select" | "multiSelect" | "link" | "person" | "lookup" | "rollup" | "attachment" | "currency" | "percent" | "rating" | "duration" | "url" | "email" | "phone" | "barcode" | "qrcode" | "location" | "longText" | "autoNumber" | "createdTime" | "modifiedTime" | "createdBy" | "modifiedBy";
         MultitableView: {
             id?: string;
             sheetId?: string;
@@ -15095,6 +15354,26 @@ export interface components {
             name?: string;
             type?: components["schemas"]["MultitableFieldType"];
             property?: {
+                /** @description Cross-base opt-in claim for a `link` field (②b). When present, the link is permitted to target a foreign sheet in a DIFFERENT base IFF this value equals the foreign sheet's actual base_id (claim == truth); a mismatched or absent value keeps the cross-base link rejected. Immutable after create. Cross-base READ additionally requires foreign-base read permission; a reader lacking it sees foreign data masked (and a 403 on the explicit link-options pull). Omitted for same-base links. */
+                foreignBaseId?: string;
+                /** @description Rich-text opt-in for a `longText` field. When `true`, the field stores sanitized HTML (constrained allow-list: b/strong/i/em/u/s, a[http|https|mailto] with forced rel=noopener target=_blank, ul/ol/li, h1-h3, p/br/blockquote/code/pre) — every value is sanitized SERVER-SIDE on write (the authoritative XSS defense), so the stored value is inert by construction. Default/absent = `false` = plain text (legacy behavior). Toggling `rich` ON is rejected on a field that already holds data (historical plain values were never sanitized). Omitted for plain longText and all non-longText fields. */
+                rich?: boolean;
+                /** @description Bidirectional / mirror links MVP. When `true`, this `link` field participates in a paired (two-way) relationship: the foreign sheet has a paired field that surfaces the reverse of the SAME `meta_links` edge (a derived read-projection — no materialized mirror row, no write-back). Same-base only in the MVP. Omitted for ordinary one-directional links. */
+                twoWay?: boolean;
+                /** @description Bidirectional / mirror links MVP. Id of the paired `link` field on the foreign sheet. The pairing is symmetric (each side's `mirrorFieldId` names the other) and validated at field create/patch; the two sides must be same-base. */
+                mirrorFieldId?: string;
+                /** @description Bidirectional / mirror links MVP — present ONLY on the DERIVED (mirror) side. Its value is the paired FORWARD field's id. A field with `mirrorOf` set resolves the reverse projection of the forward edge (`WHERE field_id=mirrorOf AND foreign_record_id=<record>`) and is forced READ-ONLY (mirror-side editing is deferred), so the single canonical edge never gains a second row. */
+                mirrorOf?: string;
+                /** @description Conditional field-VISIBILITY (form-conditional-fields MVP, 2026-06-14). When present, presentation surfaces (the form view) show/hide THIS field based on a condition evaluated against ANOTHER field's value in the SAME record being entered. Absent ⇒ always visible (backward-compatible). The `operator` vocabulary is shared with conditional formatting (`gt`/`gte`/`lt`/`lte`/`eq`/`neq`/`between`/`contains`/`not_contains`/`is_empty`/ `is_not_empty`/`is_today`/`is_in_last_n_days`/`is_in_next_n_days`/`is_overdue`/`is_true`/ `is_false`); value-less operators omit `value`. PRESENTATION ONLY — a field hidden by this rule is NOT a security boundary; the value is still masked (or not) by the normal field-permission layer. Never a substitute for field permissions. */
+                visibilityRule?: {
+                    /** @description Id of the OTHER field in the same record whose value the condition reads. */
+                    fieldId: string;
+                    /** @description Condition operator (shared with conditional-formatting vocabulary). */
+                    operator: string;
+                    /** @description Comparison operand. Omitted for value-less operators (the `is_*` family); a 2-element array for `between`; a positive integer for the `*_n_days` operators; otherwise a scalar. */
+                    value?: unknown;
+                };
+            } & {
                 [key: string]: unknown;
             };
             options?: {
@@ -15109,6 +15388,14 @@ export interface components {
             data?: {
                 [key: string]: unknown;
             };
+            /** @description Whole-record lock flag (record-locking storage contract). Top-level metadata, never a data field. */
+            locked?: boolean;
+            /** @description User id (or 'system') that locked the record. */
+            lockedBy?: string | null;
+            /** @description ISO timestamp when the record was locked. */
+            lockedAt?: string | null;
+            /** @description Server-authoritative per-row unlock gate (locker / owner / sheet-admin). Only meaningful when locked. */
+            canUnlock?: boolean;
         };
         MultitableRecordSubscription: {
             /** Format: uuid */
@@ -15266,6 +15553,8 @@ export interface components {
             canComment: boolean;
             canManageAutomation: boolean;
             canExport: boolean;
+            /** @description True only when MULTITABLE_ENABLE_PIT_RESET is on AND the actor has canManageSheetAccess; populated by GET /context (absent on other capability responses). Drives the FE Reset entry visibility. */
+            pitResetEnabled?: boolean;
         };
         /** @enum {string} */
         MultitableSheetPermissionAccessLevel: "read" | "write" | "write-own" | "admin";
