@@ -1,8 +1,8 @@
 # Approval Formula Conditions — Design Lock
 
-Status: RATIFIED — FC-1 shipped #3219 `38b1b98d0`; FC-2 shipped #3220
-`c0a875193`; FC-3 shipped #3221 `a0071602b`; FC-4 shipped #3222
-`34644ba26`; FC-5 is this pending PR #3223 (frontend dry-run preview button).
+Status: RATIFIED + SHIPPED — FC-1 shipped #3219 `38b1b98d0`; FC-2 shipped
+#3220 `c0a875193`; FC-3 shipped #3221 `a0071602b`; FC-4 shipped #3222
+`34644ba26`; FC-5 shipped #3234 `be9ad83a4` (frontend dry-run preview button).
 Owner decisions resolved: `AND/OR/NOT` only in v1; numeric aggregates fail
 closed; backend evaluator ships before dry-run.
 
