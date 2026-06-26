@@ -64,6 +64,46 @@ Non-goals for v1:
 - no manager fan-out;
 - no automatic daily job. This is manual/admin-triggered only.
 
+### 2.1a Candidate read API
+
+HMR-2 should add a dedicated read route instead of stretching the existing
+single-user `/api/attendance/anomalies` route:
+
+```text
+GET /api/attendance/manual-missed-punch-reminders/candidates
+```
+
+Query shape:
+
+- `from` / `to`: required date range for v1; the UI may default both to today.
+- `userId`: optional narrowing filter. If omitted, the route returns an
+  org-scoped candidate pool across users.
+- normal pagination (`page` / `pageSize`).
+
+Authority:
+
+- central `attendance:admin` may read the candidate pool;
+- scoped actors must have scheduler-scope action `remind`;
+- scoped filtering happens **before pagination** and must not reveal
+  out-of-scope candidate existence;
+- `attendance:read` by itself is not enough for this candidate pool because the
+  next step is an external-notification side effect.
+
+Response rows should be explainable and stable enough for HMR-3 stale-candidate
+checks:
+
+- `recordId`, `userId`, `workDate`, `status`;
+- `missingSide`: `check_in`, `check_out`, or `both`;
+- punch timestamps;
+- `pendingRequest` / `latestRequest` summary;
+- `selectedByDefault`: false when a pending request exists, true otherwise;
+- optional `workdayContext` carried from the existing anomalies path.
+
+The route is read-only: it writes no delivery row, sends no message, and must not
+invoke the delivery worker. HMR-3 must re-check every submitted `recordId` under
+the same candidate predicate so a stale browser result cannot enqueue a reminder
+for a record that was fixed meanwhile.
+
 ### 2.2 Recipient and channel
 
 - Recipient v1 = the affected employee only.
@@ -153,7 +193,7 @@ surprises.
 |---|---|---|
 | HMR-0 | This design-lock + tracker proposal | docs-only |
 | HMR-1 | Add scheduler-scope action `remind` | allowlist, mapping, UI labels, regression proving existing actions unchanged |
-| HMR-2 | Candidate read/filter | records-backed owed-punch candidates, pending-request flag, scoped/central authority tests |
+| HMR-2 | Dedicated candidate read/filter route | records-backed owed-punch pool, pending-request flag, `remind` scope filtering before pagination, central/scoped authority tests |
 | HMR-3 | Enqueue route | idempotent outbox producer; no direct send; real-DB tests for replay/conflict/scope/stale candidate |
 | HMR-4 | Admin UI | anomalies quick filter + selected remind confirm/result; web regression tests |
 | HMR-5 | Staging smoke | seed owed-punch record, scoped actor, enqueue, worker delivery, repeat no duplicate, residue=0 |
@@ -164,6 +204,10 @@ HMR-3 must wait for the authority contract from HMR-1. HMR-4 waits for HMR-2/3.
 ## 5. Verification plan
 
 - Unit / route tests:
+  - candidate read is read-only and does not write `attendance_notification_deliveries`;
+  - candidate read filters out-of-scope users before pagination for scoped
+    `remind` actors;
+  - actor with only `attendance:read` cannot read the cross-user candidate pool;
   - scope-only actor with `remind` can remind an in-scope user;
   - same actor cannot remind an out-of-scope user;
   - actor with only `view` cannot send;
