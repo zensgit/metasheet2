@@ -256,6 +256,10 @@ export interface ApprovalRequesterSnapshot {
   id?: string
   name?: string
   department?: string
+  /** RA-1a: directory-resolved primary department NAME (via ApprovalDirectoryOrg, NOT the JWT/session
+   *  `department` above) — the tamper-resistant source `requester.department` reads; frozen at create,
+   *  reloaded at dispatch. */
+  directoryDepartment?: string | null
   title?: string
   /**
    * Lane G (P1-A) org-relation plumbing — local user id of the requester's

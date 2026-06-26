@@ -2909,6 +2909,7 @@ export class ApprovalProductService {
       name: actor.userName || actor.userId,
       email: actor.email,
       department: actor.department,
+      ...(orgRelations.primaryDepartmentName ? { directoryDepartment: orgRelations.primaryDepartmentName } : {}),
       roles: actor.roles || [],
       permissions: actor.permissions || [],
       ...(orgRelations.managerId ? { managerId: orgRelations.managerId } : {}),
@@ -2922,6 +2923,7 @@ export class ApprovalProductService {
         formSnapshot: normalizedFormData,
         requesterSnapshot,
       }),
+      requesterContext: { department: requesterSnapshot.directoryDepartment ?? null },
     })
     const instanceId = crypto.randomUUID()
     const initialResolution = executor.resolveInitialState()
@@ -3159,6 +3161,8 @@ export class ApprovalProductService {
           formSnapshot,
           requesterSnapshot,
         }),
+        // RA-1a: re-thread the frozen directory department at dispatch (loaded requester_snapshot record).
+        requesterContext: ((d) => ({ department: typeof d === 'string' && d ? d : null }))(requesterSnapshot?.directoryDepartment),
       })
       const jumpResolution = executor.resolveReturnToNode(targetNodeKey)
       const requesterId = requesterSnapshot?.id
@@ -3323,6 +3327,8 @@ export class ApprovalProductService {
           formSnapshot,
           requesterSnapshot,
         }),
+        // RA-1a: re-thread the frozen directory department at dispatch (loaded requester_snapshot record).
+        requesterContext: ((d) => ({ department: typeof d === 'string' && d ? d : null }))(requesterSnapshot?.directoryDepartment),
       })
       const storedCurrentNodeKey = instance.current_node_key
       const actorRoles = actor.roles || []
