@@ -6125,7 +6125,7 @@ attendanceIntegrationDescribe(
       expect([201, 409]).toContain(tmplRes.status)
       const tmplId = (tmplRes.body as { data?: { id?: string } } | undefined)?.data?.id as string
       const genRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/generate`, { method: 'POST', headers, body: JSON.stringify({ templateId: tmplId, anchorDate: '2026-12-15', count: 1, status: 'closed', namePrefix: `Gen ${runSuffix}` }) })
-      expect(genRes.status).toBe(201)
+      expect(genRes.status).toBe(200) // generate responds 200 with { created, skipped } (not 201)
       const generated = (genRes.body as { data?: { created?: { id?: string }[] } } | undefined)?.data?.created ?? []
       expect(generated.length).toBeGreaterThanOrEqual(1)
       const genId = generated[0]?.id as string
