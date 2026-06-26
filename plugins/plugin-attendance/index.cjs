@@ -277,6 +277,31 @@ const DEFAULT_SETTINGS = {
       monthly: { enabled: false, dayOfMonth: 1, sendAt: '09:00', recipients: ['self'] },
     },
   },
+  // 补卡规则 (makeup punch policy) — MP-1 LATENT config
+  // (design-lock attendance-makeup-punch-policy-design-lock-20260626). Default OFF; no request
+  // path reads it until MP-2. This only round-trips the bounded org policy shape.
+  makeupPunchPolicy: {
+    enabled: false,
+    timezone: 'Asia/Shanghai',
+    cycle: { type: 'calendar_month', startDay: 1 },
+    quota: {
+      maxRequestsPerCycle: 3,
+      countStatuses: ['pending', 'approved'],
+      principal: 'self_service_user',
+    },
+    submitWindow: { unit: 'calendar_day', days: 30 },
+    allowedAnomalyTypes: [
+      'missing_check_in',
+      'missing_check_out',
+      'late',
+      'severe_late',
+      'absence_late',
+      'early_leave',
+    ],
+    allowedRequestTypes: ['missed_check_in', 'missed_check_out', 'time_correction'],
+    requireReason: true,
+    requireAttachment: false,
+  },
   // 自动对班 (auto shift matching) — A1 preview/manual apply plus A2 scheduler auto-write.
   // Runtime still requires env flags in addition to these org settings.
   autoShiftMatching: {
@@ -12123,6 +12148,7 @@ function normalizeSettings(raw) {
     leaveBalanceDeductionPolicy: normalizeLeaveBalanceDeductionPolicySetting(raw.leaveBalanceDeductionPolicy),
     attendanceBonusPolicy: normalizeAttendanceBonusPolicySetting(raw.attendanceBonusPolicy),
     attendanceReportDigestPolicy: normalizeAttendanceReportDigestPolicySetting(raw.attendanceReportDigestPolicy),
+    makeupPunchPolicy: normalizeMakeupPunchPolicySetting(raw.makeupPunchPolicy),
     autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
   }
 }
@@ -12597,6 +12623,89 @@ function normalizeLeaveBalanceDeductionPolicySetting(raw) {
   return { enabled: parseBoolean(value.enabled, false), rules }
 }
 
+const MAKEUP_PUNCH_ALLOWED_ANOMALY_TYPES = Object.freeze([
+  'missing_check_in',
+  'missing_check_out',
+  'late',
+  'severe_late',
+  'absence_late',
+  'early_leave',
+  'normal',
+])
+const MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES = Object.freeze(['missed_check_in', 'missed_check_out', 'time_correction'])
+const MAKEUP_PUNCH_COUNT_STATUSES = Object.freeze(['pending', 'approved'])
+
+function normalizeMakeupPunchStringArray(raw, allowed, fallback) {
+  if (!Array.isArray(raw)) return [...fallback]
+  const seen = new Set()
+  const values = []
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const value = item.trim()
+    if (allowed.includes(value) && !seen.has(value)) {
+      seen.add(value)
+      values.push(value)
+    }
+  }
+  return values.length ? values : [...fallback]
+}
+
+// 补卡规则 MP-1: dormant bounded config only. Supplied invalid values are rejected by the PUT zod
+// schema; this normalizer is the persisted/default fallback so a malformed stored value cannot alter
+// request behavior. MP-2 is the first slice that reads this policy on request create/update.
+function normalizeMakeupPunchPolicySetting(raw) {
+  const value = raw && typeof raw === 'object' ? raw : {}
+  const fallback = DEFAULT_SETTINGS.makeupPunchPolicy
+  const cycle = value.cycle && typeof value.cycle === 'object' ? value.cycle : {}
+  const quota = value.quota && typeof value.quota === 'object' ? value.quota : {}
+  const submitWindow = value.submitWindow && typeof value.submitWindow === 'object' ? value.submitWindow : {}
+  const startDayRaw = Number(cycle.startDay)
+  const maxRequestsRaw = Number(quota.maxRequestsPerCycle)
+  const submitWindowDaysRaw = Number(submitWindow.days)
+  const timezoneRaw = typeof value.timezone === 'string' && value.timezone.trim()
+    ? value.timezone.trim()
+    : fallback.timezone
+  return {
+    enabled: parseBoolean(value.enabled, fallback.enabled),
+    timezone: isValidTimeZoneIdentifier(timezoneRaw) ? timezoneRaw : fallback.timezone,
+    cycle: {
+      type: cycle.type === 'calendar_month' ? cycle.type : fallback.cycle.type,
+      startDay: Number.isInteger(startDayRaw) && startDayRaw >= 1 && startDayRaw <= 31
+        ? startDayRaw
+        : fallback.cycle.startDay,
+    },
+    quota: {
+      maxRequestsPerCycle: Number.isInteger(maxRequestsRaw) && maxRequestsRaw >= 1 && maxRequestsRaw <= 99
+        ? maxRequestsRaw
+        : fallback.quota.maxRequestsPerCycle,
+      countStatuses: normalizeMakeupPunchStringArray(
+        quota.countStatuses,
+        MAKEUP_PUNCH_COUNT_STATUSES,
+        fallback.quota.countStatuses,
+      ),
+      principal: quota.principal === 'self_service_user' ? quota.principal : fallback.quota.principal,
+    },
+    submitWindow: {
+      unit: submitWindow.unit === 'calendar_day' ? submitWindow.unit : fallback.submitWindow.unit,
+      days: Number.isInteger(submitWindowDaysRaw) && submitWindowDaysRaw >= 0 && submitWindowDaysRaw <= 180
+        ? submitWindowDaysRaw
+        : fallback.submitWindow.days,
+    },
+    allowedAnomalyTypes: normalizeMakeupPunchStringArray(
+      value.allowedAnomalyTypes,
+      MAKEUP_PUNCH_ALLOWED_ANOMALY_TYPES,
+      fallback.allowedAnomalyTypes,
+    ),
+    allowedRequestTypes: normalizeMakeupPunchStringArray(
+      value.allowedRequestTypes,
+      MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES,
+      fallback.allowedRequestTypes,
+    ),
+    requireReason: parseBoolean(value.requireReason, fallback.requireReason),
+    requireAttachment: parseBoolean(value.requireAttachment, fallback.requireAttachment),
+  }
+}
+
 function normalizeOvertimeSegmentationSetting(raw) {
   const config = raw && typeof raw === 'object' ? raw : {}
   return {
@@ -12786,6 +12895,22 @@ function mergeSettings(base, update) {
           ...(base?.attendanceReportDigestPolicy?.cadences?.monthly || {}),
           ...(update?.attendanceReportDigestPolicy?.cadences?.monthly || {}),
         },
+      },
+    },
+    makeupPunchPolicy: {
+      ...(base?.makeupPunchPolicy || {}),
+      ...(update?.makeupPunchPolicy || {}),
+      cycle: {
+        ...(base?.makeupPunchPolicy?.cycle || {}),
+        ...(update?.makeupPunchPolicy?.cycle || {}),
+      },
+      quota: {
+        ...(base?.makeupPunchPolicy?.quota || {}),
+        ...(update?.makeupPunchPolicy?.quota || {}),
+      },
+      submitWindow: {
+        ...(base?.makeupPunchPolicy?.submitWindow || {}),
+        ...(update?.makeupPunchPolicy?.submitWindow || {}),
       },
     },
     autoShiftMatching: {
@@ -20461,6 +20586,37 @@ module.exports = {
             recipients: reportDigestRecipientsSchema.optional(),
           }).optional(),
         }).optional(),
+      }).optional(),
+      // 补卡规则 MP-1: dormant bounded config. The runtime request path does not read this until MP-2.
+      // Supplied invalid values fail the PUT with 400; omitted values resolve through DEFAULT_SETTINGS.
+      makeupPunchPolicy: z.object({
+        enabled: z.boolean().optional(),
+        timezone: z.string().min(1).refine(isValidTimeZoneIdentifier, { message: 'Invalid IANA timezone' }).optional(),
+        cycle: z.object({
+          type: z.enum(['calendar_month']).optional(),
+          startDay: z.number().int().min(1).max(31).optional(),
+        }).optional(),
+        quota: z.object({
+          maxRequestsPerCycle: z.number().int().min(1).max(99).optional(),
+          countStatuses: z.array(z.enum(['pending', 'approved'])).min(1).optional(),
+          principal: z.enum(['self_service_user']).optional(),
+        }).optional(),
+        submitWindow: z.object({
+          unit: z.enum(['calendar_day']).optional(),
+          days: z.number().int().min(0).max(180).optional(),
+        }).optional(),
+        allowedAnomalyTypes: z.array(z.enum([
+          'missing_check_in',
+          'missing_check_out',
+          'late',
+          'severe_late',
+          'absence_late',
+          'early_leave',
+          'normal',
+        ])).min(1).optional(),
+        allowedRequestTypes: z.array(z.enum(['missed_check_in', 'missed_check_out', 'time_correction'])).min(1).optional(),
+        requireReason: z.boolean().optional(),
+        requireAttachment: z.boolean().optional(),
       }).optional(),
       // 年假/法定假余额引擎 — L0 latent config (design-lock #2622). Round-trips through PUT/GET; no
       // runtime reads it until L2 (accrual). tiers = org-configurable statutory bands.
