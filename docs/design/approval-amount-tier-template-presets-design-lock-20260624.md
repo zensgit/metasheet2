@@ -29,7 +29,9 @@ approval-result write-back.
    The branch condition reads the top-level total field (`amount`). AS BUILT (updated 2026-06-26,
    post-closeout): the detail total is now read-only **auto-filled** from the detail rows (#3198) and a
    server-side **total-check** (#3176) rejects any total ≠ the detail sum — so the backend total-check is
-   the consistency boundary (binds the total to the detail-row sum) and the amount tier routes on a verified value. The control gap described
+   the consistency boundary (binds the total to the detail-row sum) and the amount tier routes on a
+   consistency-checked total — one verified only against the submitted detail-row sum, not for
+   truthfulness. The control gap described
    below is CLOSED.
 
    (Historical — the framing this slice shipped with at authoring time: detail-row amounts were not
