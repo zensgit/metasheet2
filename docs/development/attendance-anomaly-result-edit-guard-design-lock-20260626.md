@@ -56,7 +56,7 @@ POST /api/attendance/anomaly-result-edits
   "evidence": [
     { "type": "url", "label": "现场签到照片", "url": "https://..." }
   ],
-  "idempotencyKey": "optional-client-key"
+  "idempotencyKey": "client-generated-key"
 }
 ```
 
@@ -64,7 +64,8 @@ v1 route 权限：
 
 - `withPermission('attendance:admin')`。
 - 目标 row 必须满足 `attendance_records.id = recordId AND org_id = orgId`。
-- 不新增“组负责人/排班范围管理员”权限；scheduler-scope / group-scope edit 是后续单独设计。v1 先用全局 admin，避免把结果写权限扩散到不完整的 org-admin 模型。
+- 不新增“组负责人/排班范围管理员”权限；scheduler-scope / group-scope edit 是后续单独设计。v1 先用 attendance admin，避免把结果写权限扩散到不完整的 org-admin 模型。
+- `idempotencyKey` **必填**，trim 后 `1..200`。前端可以在打开 modal 时生成，但请求必须携带；缺失返回 `400 VALIDATION_ERROR`，后端不生成随机 key。
 
 ### 3.2 状态流
 
@@ -109,7 +110,7 @@ v1 只允许**异常 → 可解释结果**：
 证据：
 
 - v1 不做二进制上传；只接受**证据引用 metadata**，例如 URL / attachmentId / label。
-- URL 必须按现有安全文本规则和 URL allowlist 校验；如果没有可用文件服务，前端只展示 URL/文本证据输入。
+- AE-1 必须新增并测试一个 evidence validator。当前 main 没有 attendance-specific URL allowlist；因此 v1 要么只接受 `attachmentId` / 安全文本 label，要么在 AE-1 同步落一个 HTTPS-only URL allowlist（含长度上限、禁止脚本/HTML、禁止空 host）。不能把任意 URL 字符串直接写入 audit row。
 - 未来接入文件上传时，必须先落文件存储与权限设计，不在本锁里顺手做。
 
 ### 3.5 记录更新不是裸改 status
@@ -171,7 +172,7 @@ attendance_record_result_edits (
 )
 ```
 
-`idempotency_key` 请求为空时 route 生成随机 key 后再入库；表内始终 `NOT NULL`，避免 Postgres nullable unique 的绕过语义。同一 `(org_id, idempotency_key)` 重放必须对比关键字段，完全一致才返回 `alreadyApplied=true`，不一致返回 `409 ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT`。
+`idempotency_key` 来自请求里的必填 `idempotencyKey`；route 不生成随机 key。表内始终 `NOT NULL`，避免 Postgres nullable unique 的绕过语义。同一 `(org_id, idempotency_key)` 重放必须对比关键字段，完全一致才返回 `alreadyApplied=true`，不一致返回 `409 ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT`。
 
 ### 4.2 只通知被影响员工
 
@@ -199,7 +200,7 @@ v1 通知口径：
 
 ## 5. 前端 v1
 
-位置：现有 anomalies 表格的 Action 列。
+位置：现有 anomalies 表格的 Action 列，包括主 `AttendanceView.vue` surface 和抽出的 `AttendanceRequestCenterSection.vue` surface。两个 surface 都已有 `Create request` / `prefillRequestFromAnomaly(item)` 动作；AE-3 必须同时处理或明确只保留一个 canonical surface，避免一个入口能编辑、另一个入口仍旧只能申请。
 
 新增按钮：
 
@@ -232,7 +233,7 @@ v1 不做：
 - 二进制照片上传 / OCR / AI 图片识别。
 - 员工自助修改结果。
 - 直接编辑原始 punch event。
-- 重新结算已关闭 payroll cycle；若记录属于已关闭周期，v1 route 应拒绝或返回 `409 ATTENDANCE_RESULT_EDIT_CYCLE_CLOSED`，后续另做 payroll adjustment 流。
+- 重新结算已关闭 payroll cycle。v1 route 必须先查 `attendance_payroll_cycles`，只要同 org 存在任一 `status IN ('closed','archived')` 且 `work_date BETWEEN start_date AND end_date` 的周期，就返回 `409 ATTENDANCE_RESULT_EDIT_CYCLE_CLOSED`；不要求 settlement row 存在。若周期表不可用，按 DB_NOT_READY/503 fail-closed，不允许绕过。
 - 组负责人 / scope-admin 编辑权限。
 
 ---
@@ -260,7 +261,9 @@ AE-1 必测：
 - target record from another org returns 404/403 without leaking cross-org details.
 - same idempotency key + same payload returns `alreadyApplied=true` and does not double-write audit.
 - same idempotency key + different target/status/reason returns 409.
-- closed payroll cycle containing `work_date` returns 409 if the cycle table can identify it.
+- missing idempotency key returns 400 and writes nothing.
+- closed or archived payroll cycle containing `work_date` returns 409 even when no settlement row exists.
+- overlapping cycles: any matching closed/archived cycle wins over open cycles and rejects the edit.
 
 AE-2 必测：
 
@@ -281,7 +284,7 @@ AE-3 必测：
 
 1. v1 `editWindowDays` 默认是否锁 180 天？是否允许企业改到最多 366 天？
 2. v1 目标状态是否允许 `adjusted`？还是只允许改成 `normal`？
-3. v1 evidence 是否接受 URL/文本引用即可，文件上传后置？
+3. v1 evidence 是否只接受 attachmentId/文本引用，还是 AE-1 同步落 HTTPS-only URL allowlist？
 4. 关闭 payroll cycle 后的历史记录修改：v1 是否一律 409，还是允许但只写 audit、不改 payroll facts？
 5. 通知是否可被企业关闭？如果可关闭，是否仍必须在 audit row 记录 skipped reason？
 
