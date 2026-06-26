@@ -12,8 +12,34 @@ const READ_SMOKE_PRESETS = Object.freeze({
     presetId: 'k3wise.material-detail.v1',
     requiredKind: 'erp:k3-wise-webapi',
     object: 'material',
+    readConfigOverlay: Object.freeze({
+      objects: Object.freeze({
+        material: Object.freeze({
+          operations: Object.freeze(['read']),
+          readPath: '/K3API/Material/GetDetail',
+          readMethod: 'POST',
+        }),
+      }),
+    }),
   }),
 })
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function mergeOperations(existing, required) {
+  const values = []
+  for (const source of [existing, required]) {
+    if (!Array.isArray(source)) continue
+    for (const item of source) {
+      if (typeof item !== 'string' || item.trim().length === 0) continue
+      const operation = item.trim()
+      if (!values.includes(operation)) values.push(operation)
+    }
+  }
+  return values
+}
 
 // Built-in catalog lookup. Returns undefined for anything not in the catalog (→ route fail-closes). Uses an
 // own-property check so prototype keys ('toString', '__proto__', …) can never resolve to a preset.
@@ -25,6 +51,36 @@ function getReadSmokePreset(presetId) {
 // Forced single-record read request. Single explicit key only — no list/pagination/cursor/watermark/BOM.
 function buildReadSmokeRequest(preset, key) {
   return { object: preset.object, filters: { FNumber: key } }
+}
+
+// Non-persisted preset overlay for the credentialed read-smoke route. Entity-machine validation
+// showed that target-side K3 systems often have only Save/upsert config persisted; the smoke
+// preset owns the single read endpoint and merges it into an in-memory system clone before
+// adapter creation. It never mutates or persists the stored external system.
+function applyReadSmokePresetOverlay(system, preset) {
+  if (!isPlainObject(system) || !isPlainObject(preset) || !isPlainObject(preset.readConfigOverlay)) {
+    return system
+  }
+  const currentConfig = isPlainObject(system.config) ? system.config : {}
+  const currentObjects = isPlainObject(currentConfig.objects) ? currentConfig.objects : {}
+  const overlayObjects = isPlainObject(preset.readConfigOverlay.objects) ? preset.readConfigOverlay.objects : {}
+  const nextObjects = { ...currentObjects }
+  for (const [objectName, overlay] of Object.entries(overlayObjects)) {
+    if (!isPlainObject(overlay)) continue
+    const currentObject = isPlainObject(currentObjects[objectName]) ? currentObjects[objectName] : {}
+    nextObjects[objectName] = {
+      ...currentObject,
+      ...overlay,
+      operations: mergeOperations(currentObject.operations, overlay.operations),
+    }
+  }
+  return {
+    ...system,
+    config: {
+      ...currentConfig,
+      objects: nextObjects,
+    },
+  }
 }
 
 // Values-free evidence from a successful read. Extracts ONLY recordPresent (boolean) + referenceObjectCount
@@ -67,6 +123,7 @@ module.exports = {
   READ_SMOKE_PRESETS,
   getReadSmokePreset,
   buildReadSmokeRequest,
+  applyReadSmokePresetOverlay,
   readSmokeSuccessEvidence,
   readSmokeErrorEvidence,
 }

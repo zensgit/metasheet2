@@ -78,7 +78,13 @@ const { projectRecordForBody, findUnfilledPlaceholders, applyReferenceShape, isB
 const { resolveReferenceRuleValue } = require('./reference-mapping-resolver.cjs')
 // DF-T3b-2b: live mapping-sheet bulk-read → referenceMappingIndexes for the preview seam (read-only).
 const { buildReferenceMappingIndexes } = require('./reference-mapping-source.cjs')
-const { getReadSmokePreset, buildReadSmokeRequest, readSmokeSuccessEvidence, readSmokeErrorEvidence } = require('./read-smoke.cjs')
+const {
+  getReadSmokePreset,
+  buildReadSmokeRequest,
+  applyReadSmokePresetOverlay,
+  readSmokeSuccessEvidence,
+  readSmokeErrorEvidence,
+} = require('./read-smoke.cjs')
 const { K3_REFERENCE_MAPPING_TEMPLATES } = require('./reference-mapping-templates.cjs')
 const { listReferenceIntegrationTemplates } = require('./reference-integration-templates.cjs')
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
@@ -1631,7 +1637,8 @@ function createHandlers(services, options = {}) {
       if (!system || system.kind !== preset.requiredKind) {
         throw new HttpRouteError(409, 'READ_SMOKE_KIND_MISMATCH', 'external system kind does not match the preset')
       }
-      const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
+      const adapterSystem = applyReadSmokePresetOverlay(system, preset)
+      const adapter = adapterRegistry.createAdapter(adapterSystem, { principal: requestPrincipal(req) })
       // Forced single read only; values-free evidence on success or failure (never key/raw/values/credentials).
       try {
         const result = await adapter.read(buildReadSmokeRequest(preset, key))
