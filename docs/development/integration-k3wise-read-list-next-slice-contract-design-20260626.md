@@ -182,6 +182,22 @@ When the next implementation slice is opened, it must prove:
 - read users cannot trigger the credentialed probe if the route remains
   operator-gated.
 
+Status: C1 (#3245, normalizer + preset metadata) and C2 (#3246, normalizer wired into the route) shipped and
+met these locks. The route now accepts both `{ presetId, key }` and `{ presetId, intent }`, single allowlisted
+read, write-gated, fail-closed before any credentialed call, values-free.
+
+## 7a. C3 acceptance lock - multi-object/mode dispatch
+
+The C1 normalizer already carries `contract.object`/`contract.mode` to the route, but the single-object read
+shape currently lives in `buildReadSmokeRequest`, which builds `{ object: preset.object, filters: { FNumber:
+key } }` and ignores them. This is provably safe today because the allowlist is exactly one object + one mode
+(`material` / `single_record_detail`), so `contract.object === preset.object` always.
+
+Before `allowedObjects`/`allowedModes` is widened beyond `material` / `single_record_detail`,
+`buildReadSmokeRequest` MUST consume `contract.object`/`contract.mode` (or dispatch by mode) rather than
+`preset.object`. The single-object read shape must not silently carry into a multi-object/mode C3; the C3
+slice must prove the issued read request matches the normalized contract object + mode.
+
 ## 8. Non-goals
 
 - No runtime code in this C0.
