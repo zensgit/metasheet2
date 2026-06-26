@@ -1,6 +1,9 @@
 # Detail-row auto-sum — Design Lock
 
-Status: RATIFIED — RUNTIME NOT BUILT
+Status: RATIFIED — SHIPPED (PR #3198, read-only auto-fill v1). FE-only runtime: `useAutoSumTotal` derives
+the top-level total from the detail rows (money-safe, round-each-cell-then-sum), read-only; the backend
+total-check (#3176) remains the tamper-proof backstop. Per-row line-subtotal derivation followed as its
+own lock (#3203) + runtime (#3205).
 
 Grounding: the server-side amount total-check (design-lock #3161, shipped #3176/#3183) made amount-tier
 routing tamper-resistant — the backend rejects a `createApproval` whose top-level total ≠ the money-safe
