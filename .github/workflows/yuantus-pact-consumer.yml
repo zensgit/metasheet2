@@ -90,10 +90,13 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest run tests/unit/plm-adapter-yuantus.test.ts --reporter=dot
 
       - name: Publish consumer pact to broker (advisory, Phase A)
-        # Auto-gate Phase A: a SHELL guard (below) skips this until ops provisions the broker secret —
-        # NOT a step `if:` (the `secrets` context is unavailable to `steps.if`, so it would skip even
-        # after the secret is set). Non-blocking; strictly additive (test:contract above is unchanged).
-        # UNVERIFIED until a live PactFlow instance + secrets exist — see the Yuantus dev & verification MD.
+        # Off-main hygiene: publish ONLY on push:main, so PR runs never create off-main pact versions in
+        # the broker. A stray off-main "latest" once false-no'd Yuantus can-i-deploy; Yuantus #869 pinned
+        # the provider to --main-branch (neutralizing the effect), and this removes the cause at source.
+        # github.event_name/github.ref ARE available to steps.if (unlike `secrets`), so this gate is reliable.
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        # The SHELL guard (below) still skips until ops provisions the broker secret — NOT a step `if:`
+        # (the `secrets` context is unavailable to `steps.if`). Non-blocking; strictly additive.
         continue-on-error: true
         env:
           PACT_BROKER_BASE_URL: ${{ secrets.PACT_BROKER_BASE_URL }}
