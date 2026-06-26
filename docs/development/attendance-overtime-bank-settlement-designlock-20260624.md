@@ -119,14 +119,14 @@ normalizer 同时是 fail-closed 合规护栏，**法律下限高于管理员 co
 
 ### 落地 TODO（gated checklist）
 - ✅ §11 owner 拍板（2026-06-24，配置契约 + 七条收敛值已锁；v1 解锁）
-- ⬜ v1-1 OvertimeBankPolicy + 账1 来源标签 lot（含特殊工时制）+ normalizer
-- ⬜ v1-2 LeaveOffsetPolicy `leaveBalanceDeductionPolicy` config（驱动现有 `deductLeaveBalance`）+ 保守默认
-- ⬜ v1-3 AttendanceBonusPolicy 满勤 flag（复用 RT 阈值）
-- ⬜ v1-4 账4 PayrollSettlementPolicy 导出契约（剩余 + 可折算/直付，不含金额）
-- ⬜ v1-5 PolicyAssignment + 生效日期 + 结算快照
-- ⬜ v1-6 授权 UI（克隆审批模板授权那套）+ 预设清单
-- ⬜ v1-7 Ledger 扩 `source_type`（`overtime_conversion`/`settlement_payout`/`manual_adjust`）+ settlement-item/payroll-export 标记（复用现有 `event_type` `grant/deduct/expire/revoke`；新增 `event_type` = 单独 migration 决策,不在本锁）
-- ⬜ v1-8 real-DB 矩阵（三例 §9）+ staging smoke
+- ✅ v1-1 OvertimeBankPolicy + 账1 来源标签 lot（含特殊工时制）+ normalizer（#3145/#3158）
+- ✅ v1-2 LeaveOffsetPolicy `leaveBalanceDeductionPolicy` config（驱动现有 `deductLeaveBalance`）+ 保守默认（#3162/#3173）
+- ✅ v1-3 AttendanceBonusPolicy 满勤 flag（复用 RT 阈值）（#3167/#3193）
+- ✅ v1-4 账4结算读取口径已吸收到 v1-5 snapshot-at-close（#3201 关闭，#3206 锁定）
+- ✅ v1-5 PolicyAssignment / 生效日期 / 结算快照的 v1 范围：snapshot-at-close 表、计算、写路径、冻结守卫、must-pay e2e 均已落（#3206/#3211/#3228/#3233/#3255）
+- ✅ v1-6 授权 UI（克隆审批模板授权那套）+ 预设清单（#3175/#3194）
+- ⬜ v1-7 Ledger 扩 `source_type`（`overtime_conversion`/`settlement_payout`/`manual_adjust`）+ settlement-item/payroll-export 标记（复用现有 `event_type` `grant/deduct/expire/revoke`；新增 `event_type` = 单独 migration 决策,不在本锁；需 payout producer/consumer，另起 gated design）
+- ⬜ v1-8 staging smoke（real-DB money-path 矩阵已逐刀覆盖到 #3255；staging 需环境）
 - 🔒 v2 跨池扣减顺序（v1 绿 + 显式 opt-in 后另起）
 
 ---
