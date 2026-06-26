@@ -5503,6 +5503,113 @@ async function testTemplatesCrudRoutes() {
   assert.equal(res.statusCode, 403, 'read-only user cannot instantiate')
 }
 
+// #1709 follow-up: read-smoke preset route. Built-in preset only; read-only; values-free; backend credential
+// context; no write path; system role/config untouched.
+async function testReadSmokeRoute() {
+  const readArgs = []
+  const writeCalls = []
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return { id: input.id, tenantId: 'tenant_1', kind: 'erp:k3-wise-webapi', role: 'target', credentials: { bearerToken: 'secret-token' } }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(input) {
+        calls.push(['createAdapter', input])
+        return {
+          async read(req) {
+            readArgs.push(req)
+            return {
+              records: [{ _k3ReferenceObjects: { unit: {} }, FName: 'SECRET-NAME', FNumber: req.filters.FNumber }],
+              metadata: { requestedNumber: req.filters.FNumber, readPath: 'https://k3host/x' },
+            }
+          },
+          async upsert(b) { writeCalls.push(['upsert', b]); return {} },
+          async save(b) { writeCalls.push(['save', b]); return {} },
+          async submit(b) { writeCalls.push(['submit', b]); return {} },
+          async audit(b) { writeCalls.push(['audit', b]); return {} },
+        }
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+
+  // success: read once, values-free evidence, backend credential context, no write, system untouched
+  const ok = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: READ_USER, params: { id: 'sys_1' }, query: { workspaceId: 'workspace_1' },
+    body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
+  })
+  assertOkResponse(ok, 200)
+  assert.equal(ok.body.data.ok, true)
+  assert.equal(ok.body.data.presetId, 'k3wise.material-detail.v1')
+  assert.equal(ok.body.data.object, 'material')
+  assert.equal(ok.body.data.recordPresent, true)
+  assert.equal(ok.body.data.referenceObjectCount, 1)
+  assert.equal(readArgs.length, 1, 'adapter.read called exactly once')
+  assert.deepEqual(readArgs[0], { object: 'material', filters: { FNumber: 'M-001' } })
+  assert.equal(writeCalls.length, 0, 'no upsert/save/submit/audit called')
+  assert.ok(findCall(calls, 'getExternalSystemForAdapter'), 'used backend getExternalSystemForAdapter')
+  assert.deepEqual(findCall(calls, 'createAdapter')[1].credentials, { bearerToken: 'secret-token' })
+  assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0, 'read-smoke never persists/alters the system')
+  const okStr = JSON.stringify(ok.body.data)
+  for (const leak of ['M-001', 'SECRET-NAME', 'secret-token', 'k3host']) {
+    assert.ok(!okStr.includes(leak), `read-smoke response must not leak ${leak}`)
+  }
+
+  // wrong preset → 400 fail-closed
+  const badPreset = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: READ_USER, params: { id: 'sys_1' }, body: { presetId: 'evil.custom.v1', key: 'M-001' },
+  })
+  assert.equal(badPreset.statusCode, 400, 'unknown preset is fail-closed')
+
+  // missing/blank key → 400 fail-closed
+  const blankKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: READ_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: '   ' },
+  })
+  assert.equal(blankKey.statusCode, 400, 'blank key is fail-closed')
+
+  // extra body keys → 400 (no custom-preset / object smuggling)
+  const extra = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: READ_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001', object: 'bom' },
+  })
+  assert.equal(extra.statusCode, 400, 'extra body keys are fail-closed')
+
+  // wrong adapter kind → 409 fail-closed
+  const wrong = createMockServices({
+    externalSystemRegistry: { async getExternalSystemForAdapter(input) { return { id: input.id, kind: 'http' } } },
+  })
+  const { routes: wkRoutes } = mountRoutes(wrong.services)
+  const wk = await invoke(wkRoutes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: READ_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
+  })
+  assert.equal(wk.statusCode, 409, 'wrong adapter kind is fail-closed')
+
+  // adapter read failure → values-free error (ok:false), no write
+  const failWrite = []
+  const failSvc = createMockServices({
+    externalSystemRegistry: { async getExternalSystemForAdapter(input) { return { id: input.id, kind: 'erp:k3-wise-webapi', credentials: {} } } },
+    adapterRegistry: { createAdapter() { return {
+      async read() { const e = new Error('material M-001 secret 42'); e.name = 'K3WiseWebApiAdapterError'; e.code = 'K3_WISE_READ_BUSINESS_ERROR'; throw e },
+      async upsert(b) { failWrite.push(b); return {} },
+    } } },
+  })
+  const { routes: fRoutes } = mountRoutes(failSvc.services)
+  const fail = await invoke(fRoutes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: READ_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
+  })
+  assertOkResponse(fail, 200)
+  assert.equal(fail.body.data.ok, false)
+  assert.equal(fail.body.data.errorCode, 'K3_WISE_READ_BUSINESS_ERROR')
+  assert.equal(fail.body.data.errorType, 'K3WiseWebApiAdapterError')
+  const failStr = JSON.stringify(fail.body.data)
+  assert.ok(!failStr.includes('M-001') && !failStr.includes('42'), 'read failure evidence is values-free')
+  assert.equal(failWrite.length, 0, 'no write attempted on read failure')
+
+  console.log('  testReadSmokeRoute OK')
+}
+
 async function main() {
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
@@ -5523,6 +5630,7 @@ async function main() {
   await testTemplatePreviewLiveBulkRead()
   await testTemplatePreviewBulkReadGuards()
   await testExternalSystemRoutes()
+  await testReadSmokeRoute()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()
