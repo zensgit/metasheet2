@@ -1429,6 +1429,11 @@ describe('Attendance admin regressions', () => {
     subjectRef.value = 'attendance_admin'
     subjectRef.dispatchEvent(new Event('input', { bubbles: true }))
     section.querySelector<HTMLInputElement>('[data-attendance-scheduler-scope-actions] input[data-action="view"]')!.click()
+    await flushUi(1)
+    const remindAction = section.querySelector<HTMLInputElement>('[data-attendance-scheduler-scope-actions] input[data-action="remind"]')!
+    expect(remindAction.closest('label')?.textContent || '').toContain('Remind')
+    remindAction.click()
+    await flushUi(1)
 
     // Distinct sentinel per target field — catches a field wired to the wrong scope key
     // (the backend normalizer silently drops unknown keys; this is the A2 round-trip guard).
@@ -1457,7 +1462,7 @@ describe('Attendance admin regressions', () => {
     expect(created[0]).toEqual({
       subjectType: 'role',
       subjectRef: 'attendance_admin',
-      actions: ['view'],
+      actions: ['view', 'remind'],
       scope: {
         departments: ['dept-x'],
         attendanceGroupIds: ['group-a'],

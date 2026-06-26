@@ -168,10 +168,14 @@ describe('attendance advanced scheduling scope foundation', () => {
   })
 
   it('normalizes explicit scheduler actions and fails closed on empty scope', () => {
+    expect(helpers.ATTENDANCE_SCHEDULER_SCOPE_ACTIONS.has('remind')).toBe(true)
+    expect(pluginSource).toContain("const ATTENDANCE_SCHEDULER_SCOPE_ACTION_VALUES = ['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch', 'remind']")
+    expect(pluginSource).toContain('z.enum(ATTENDANCE_SCHEDULER_SCOPE_ACTION_VALUES)')
+
     const scope = helpers.normalizeAttendanceSchedulerScopeInput({
       subjectType: 'role_tag',
       subjectRef: 'line_scheduler',
-      actions: ['view', 'edit'],
+      actions: ['view', 'edit', 'remind'],
       scope: {
         scheduleGroupIds: ['sg-1'],
         userIds: ['u-1', 'u-2'],
@@ -181,7 +185,7 @@ describe('attendance advanced scheduling scope foundation', () => {
     expect(scope).toEqual({
       subjectType: 'role_tag',
       subjectRef: 'line_scheduler',
-      actions: ['view', 'edit'],
+      actions: ['view', 'edit', 'remind'],
       scope: {
         scheduleGroupIds: ['sg-1'],
         attendanceGroupIds: [],
@@ -210,13 +214,19 @@ describe('attendance advanced scheduling scope foundation', () => {
       actions: ['view'],
       scope: {},
     })).toThrow(/scope must include at least one target/)
+    expect(() => helpers.normalizeAttendanceSchedulerScopeInput({
+      subjectType: 'user',
+      subjectRef: 'scheduler-1',
+      actions: ['notify'],
+      scope: { userIds: ['u-1'] },
+    })).toThrow(/actions must contain valid scheduler actions/)
   })
 
   it('matches scheduler scopes by actor subject, action, and target for runtime enforcement', () => {
     const scope = {
       subjectType: 'role_tag',
       subjectRef: 'line_scheduler',
-      actions: ['dispatch'],
+      actions: ['dispatch', 'remind'],
       scope: {
         scheduleGroupIds: ['sg-1'],
         attendanceGroupIds: [],
@@ -235,6 +245,10 @@ describe('attendance advanced scheduling scope foundation', () => {
 
     expect(helpers.attendanceSchedulerScopeMatchesActor(scope, actor)).toBe(true)
     expect(helpers.attendanceSchedulerScopeAllowsActorActionTarget(scope, actor, 'dispatch', {
+      scheduleGroupIds: ['sg-1'],
+      userIds: ['u-1'],
+    })).toBe(true)
+    expect(helpers.attendanceSchedulerScopeAllowsActorActionTarget(scope, actor, 'remind', {
       scheduleGroupIds: ['sg-1'],
       userIds: ['u-1'],
     })).toBe(true)
