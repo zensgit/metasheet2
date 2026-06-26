@@ -84,10 +84,26 @@ describe('common approval template presets', () => {
     },
   )
 
-  it('reimbursement_amount_tier gates a higher-tier approver on amount >= 5000', () => {
+  it('reimbursement_amount_tier gates a higher-tier approver with a formula condition', () => {
     const payload = buildCommonApprovalTemplatePresetPayload('reimbursement_amount_tier', { keySuffix: 'unit' })
     const gate = payload.approvalGraph.nodes.find((node) => node.type === 'condition')
-    expect(gate?.config).toMatchObject({ branches: [{ rules: [{ fieldId: 'amount', operator: 'gte', value: 5000 }] }] })
+    expect(gate?.config).toMatchObject({
+      branches: [{
+        rules: [],
+        formula: { expression: '{expense_type} == "差旅" AND {amount} >= 5000' },
+      }],
+    })
+  })
+
+  it('purchase_amount_tier gates the high path with a detail aggregate formula condition', () => {
+    const payload = buildCommonApprovalTemplatePresetPayload('purchase_amount_tier', { keySuffix: 'unit' })
+    const gate = payload.approvalGraph.nodes.find((node) => node.type === 'condition')
+    expect(gate?.config).toMatchObject({
+      branches: [{
+        rules: [],
+        formula: { expression: 'SUM({purchase_items.amount}) >= 20000' },
+      }],
+    })
   })
 
   it('purchase_amount_tier forks a parallel会签 (join at end) with one user-resolving + one static_role branch — distinct-typed, no dynamic conflict', () => {

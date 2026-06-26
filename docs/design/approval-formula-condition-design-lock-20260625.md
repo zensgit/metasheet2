@@ -1,7 +1,7 @@
 # Approval Formula Conditions — Design Lock
 
 Status: RATIFIED — FC-1 BUILT IN PR #3219; FC-2 BUILT IN A STACKED PR; FC-3
-NOT BUILT. Owner
+BUILT IN A STACKED PR (purchase/reimbursement examples). Owner
 decisions resolved: `AND/OR/NOT` only in v1; numeric aggregates fail closed;
 backend evaluator ships before dry-run.
 
@@ -288,9 +288,9 @@ example:
 - reimbursement high path: `{expense_type} == "差旅" AND {amount} >= 5000`;
 - leave high path: `{leave_days} + {used_leave_days} > 5`.
 
-This is optional. Existing amount-tier presets can remain on simple
-`amount >= threshold` rules because the shipped total auto-sum and backend
-total-check already make `amount` reliable.
+FC-3 applies the purchase and reimbursement examples to the shipped amount-tier
+presets. The leave example remains illustrative until a leave-specific
+multi-branch preset is introduced.
 
 ## Non-Goals
 
