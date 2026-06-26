@@ -1,12 +1,12 @@
 # Approval Formula Conditions — Stack Review
 
-Status: LANDING REVIEW RECORD — FC-1..FC-4 SHIPPED; FC-5 PENDING IN #3223.
+Status: REVIEWED + SHIPPED — FC-1..FC-5 ON MAIN.
 
 Date: 2026-06-25
 
 This record reviews the FC-1..FC-5 implementation against the ratified
 design-lock. It began as a draft-stack landing aid; after the serial landing,
-FC-1..FC-4 are on `origin/main` and FC-5 is the remaining PR in this slice.
+all five slices are on `origin/main`.
 
 ## Stack State
 
@@ -16,14 +16,13 @@ FC-1..FC-4 are on `origin/main` and FC-5 is the remaining PR in this slice.
 | FC-2 authoring | #3220 | `c0a875193` | shipped on main |
 | FC-3 preset examples | #3221 | `a0071602b` | shipped on main |
 | FC-4 backend dry-run | #3222 | `34644ba26` | shipped on main |
-| FC-5 dry-run preview | #3223 | pending squash | this PR |
+| FC-5 dry-run preview | #3234 | `be9ad83a4` | shipped on main |
 
 The stack order was preserved: FC-1 -> FC-2 -> FC-3 -> FC-4 -> FC-5.
 
 Current base/drift check:
 
-- `origin/main` contains FC-1..FC-4 at the SHAs listed above.
-- FC-5 is rebased onto the FC-4 squash and remains the final landing slice.
+- `origin/main` contains FC-1..FC-5 at the SHAs listed above.
 - PR comments on the original draft stack only contained non-actionable Gemini
   quota warnings; no actionable review remained when FC-1 landing began.
 
@@ -237,31 +236,30 @@ evidence; do not read unchecked items below as current work for FC-1..FC-4.
 5. Squash-merge #3222.
 6. Record the squash SHA.
 
-### FC-5 #3223
+### FC-5 #3234 (replacement for closed #3223)
 
 1. Rebase FC-5 onto the merged FC-4 squash commit.
 2. Confirm the preview remains explicit-button UX only and sample JSON still
    does not enter the template payload.
 3. Re-run/confirm `approval-web-guard`, `pr-validate`, and the mounted wiring
    spec.
-4. Convert #3223 from draft to ready.
-5. Squash-merge #3223.
+4. Open replacement PR #3234 because original #3223 was closed against the
+   deleted FC-4 branch.
+5. Squash-merge #3234.
 6. Record the squash SHA.
 
 ### Closeout
 
-1. After FC-5 lands, update
-   `docs/design/approval-formula-condition-design-lock-20260625.md` from
-   stacked-built wording to `RATIFIED + SHIPPED`, with all five squash SHAs.
-2. Update this review record or the stack verification record with the FC-5
-   squash SHA.
-3. Confirm no FC branches remain open unless intentionally retained for audit.
+1. `docs/design/approval-formula-condition-design-lock-20260625.md` now reads
+   `RATIFIED + SHIPPED` with all five squash SHAs.
+2. This review record and the stack verification record stamp the FC-5 squash.
+3. Closed #3223 is superseded by shipped #3234; no FC runtime branch remains
+   intentionally open for this stack.
 
 ## Review Verdict
 
-APPROVE FOR FC-5 LANDING.
+APPROVE — STACK SHIPPED.
 
 I found no remaining blocker in FC-5 after the FC-1 parenthesis-depth
-hardening and the serial FC-1..FC-4 landing. The feature is fully shipped only
-after FC-5 lands and the final shipped-state documentation stamps its squash
-SHA.
+hardening and the serial FC-1..FC-4 landing. FC-5 shipped as #3234
+`be9ad83a4`; the shipped-state documentation now stamps the full stack.

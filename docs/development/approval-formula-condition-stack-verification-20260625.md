@@ -1,9 +1,8 @@
 # Approval Formula Conditions — Stack Verification Snapshot
 
-Status: LANDING VERIFICATION — FC-1..FC-4 SHIPPED; FC-5 PENDING IN #3223.
+Status: SHIPPED VERIFICATION — FC-1..FC-5 ON MAIN.
 This record documents the FC-1..FC-5 implementation and the verification used
-to land the stack serially. It is not the final shipped closeout until the FC-5
-squash SHA is stamped.
+to land the stack serially.
 
 ## Stack
 
@@ -13,7 +12,7 @@ squash SHA is stamped.
 | FC-2 authoring | #3220 | `main` | `c0a875193` | shipped on main |
 | FC-3 preset examples | #3221 | `main` | `a0071602b` | shipped on main |
 | FC-4 backend dry-run | #3222 | `main` | `34644ba26` | shipped on main |
-| FC-5 dry-run preview | #3223 | `main` | pending squash | this PR |
+| FC-5 dry-run preview | #3234 | `main` | `be9ad83a4` | shipped on main |
 
 ## FC-1 Rebase Hardening
 
@@ -66,7 +65,8 @@ GitHub state during the original draft-stack restack:
 - FC-2 #3220: `approval-web-guard` and `pr-validate` green.
 - FC-3 #3221: `approval-web-guard` and `pr-validate` green.
 - FC-4 #3222: `pr-validate` green.
-- FC-5 #3223: `approval-web-guard` and `pr-validate` green.
+- Original FC-5 #3223: `approval-web-guard` and `pr-validate` green before it
+  was closed against the deleted FC-4 branch; shipped replacement is #3234.
 These entries are historical evidence from the draft-stack review. Current
 state is the shipped/pending table above.
 
@@ -106,8 +106,8 @@ covered by `vue-tsc -b` and the mounted wiring test.
 - The mounted wiring test proves button -> endpoint payload -> result display,
   then save still emits only the formula graph config and preserves topology.
 
-## Remaining Before Final Closeout
+## Closeout
 
-- Land FC-5 after rebasing onto the FC-4 squash and re-running its gates.
-- Stamp the FC-5 squash SHA in this record and the design-lock.
-- Update the design-lock status to `RATIFIED + SHIPPED`.
+- FC-5 landed after rebasing onto the FC-4 squash and re-running its gates.
+- The FC-5 squash SHA is stamped in this record and the design-lock.
+- The design-lock status is `RATIFIED + SHIPPED`.
