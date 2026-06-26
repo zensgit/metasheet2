@@ -49,13 +49,15 @@ Exit 0 = all run scenarios passed; 1 = a failure; 2 = config/setup error.
 
 ### What the harness provisions (API-automated) vs manual prerequisites
 - **Automated** (HTTP, isolated per run): a fresh acceptance base + sheet + a `number` field; pre-T records A,B; an
-  `asOf` T; post-T records C,D (the delete-set) + a post-T change to A (to prove the revert); record lock (d);
+  `asOf` T; post-T records C,D (the delete-set; D is editor-created when `EDITOR_TOKEN` is present so scenario (d)
+  exercises a lock held by another actor) + a post-T change to A (to prove the revert); record lock (d);
   drift record (e); ceiling seeding for (f) on a **separate throwaway sheet** (only if `RESET_MAX_RECORDS` is small) —
   it never touches the main sheet, so **(g) still runs in the same flag-on run**: one run covers (b)–(g).
 - **Manual prerequisites** (do NOT fake): the two JWTs (`ADMIN_TOKEN` = sheet-admin/`multitable:share`,
   `EDITOR_TOKEN` = `multitable:write` without share); toggling `MULTITABLE_ENABLE_PIT_RESET`; setting a small
   `MULTITABLE_SHEET_REVERT_MAX_RECORDS` if you want (f) (default 5000 is impractical to seed). Scenario (b) skips
-  without `EDITOR_TOKEN`; (f) skips without a small `RESET_MAX_RECORDS`.
+  without `EDITOR_TOKEN`; scenario (d) also skips without `EDITOR_TOKEN` because admin-created/admin-locked records are
+  editable by the locker/creator under current lock semantics; (f) skips without a small `RESET_MAX_RECORDS`.
 - **Verify by hand after (g):** C/D appear in the recycle bin (`meta_records_trash` / trash UI) — recoverable, not
   hard-deleted. The harness asserts they are gone from live; confirm the trash side visually.
 
