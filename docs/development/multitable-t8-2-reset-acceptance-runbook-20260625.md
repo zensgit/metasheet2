@@ -9,6 +9,9 @@ only.
 
 Harness: `packages/core-backend/scripts/reset-acceptance.mjs` (Node ≥18, uses built-in `fetch`, no deps).
 
+> **Scope of this acceptance:** Passing this harness authorizes staging-scope validation only. It is not production
+> enablement approval; production requires a separate owner decision and environment-specific retention confirmation.
+
 ## Reset vs Revert (state this in any future UI, hard)
 - **Revert** (T8-1, non-destructive): surviving records → their state at T; records created after T are **kept**.
 - **Reset** (T8-2, destructive): same revert **plus** records created after T are **moved to the recycle bin**.
@@ -61,6 +64,10 @@ Enable `MULTITABLE_ENABLE_PIT_RESET` for the chosen scope **only if**: (a) passe
 gated error codes with **zero writes** on the deny/drift paths; (g) soft-deleted the post-T set (recoverable in trash)
 and reverted survivors; and either (f) returned 413 or the ceiling was consciously deferred. Any deny/drift path that
 *wrote* (a non-409, or records actually deleted under (d)/(e)) is a **stop-ship** — do not enable.
+
+**STOP-SHIP (trash-retention hard gate):** before any staging flag flip, confirm `meta_records_trash` retention/aging
+keeps Reset-created trash rows recoverable for the approved recovery window. If retention is shorter, disabled,
+unknown, or unverified, do not enable `MULTITABLE_ENABLE_PIT_RESET`.
 
 ## Staging caveats (don't misread these as Reset bugs)
 - **Pending migrations** — diff staging vs prod-track migrations first; a Reset 500 right after deploy is usually a
