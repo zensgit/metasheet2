@@ -57,3 +57,21 @@ test('yuantus pact consumer broker publish uses git SHA and broker branch semant
   assert.match(raw, /--broker-token "\$PACT_BROKER_TOKEN"/)
   assert.doesNotMatch(raw, /--tag\b/)
 })
+
+test('yuantus pact consumer broker publish is gated to push:main (off-main hygiene)', () => {
+  const raw = readWorkflow()
+
+  // Off-main hygiene: the publish step must be gated to push:main via a reliable step-level `if`
+  // (github.event_name / github.ref ARE available to steps.if, unlike `secrets`), so PR runs never
+  // publish off-main pact versions to the broker (a stray off-main "latest" once false-no'd Yuantus
+  // can-i-deploy; pinned out by Yuantus #869 --main-branch, removed at the source here).
+  const publishIdx = raw.indexOf('Publish consumer pact to broker (advisory, Phase A)')
+  assert.ok(publishIdx >= 0, 'publish step must exist')
+  const continueIdx = raw.indexOf('continue-on-error: true', publishIdx)
+  const publishHead = raw.slice(publishIdx, continueIdx)
+  assert.match(
+    publishHead,
+    /if: \$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' \}\}/,
+    'publish step must be gated to push:main',
+  )
+})

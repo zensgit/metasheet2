@@ -5508,11 +5508,27 @@ async function testTemplatesCrudRoutes() {
 async function testReadSmokeRoute() {
   const readArgs = []
   const writeCalls = []
+  const storedK3System = {
+    id: 'sys_1',
+    tenantId: 'tenant_1',
+    kind: 'erp:k3-wise-webapi',
+    role: 'target',
+    credentials: { bearerToken: 'secret-token' },
+    config: {
+      objects: {
+        material: {
+          operations: ['upsert'],
+          savePath: '/K3API/Material/Save',
+        },
+      },
+    },
+  }
+  const storedK3SystemBefore = clone(storedK3System)
   const { calls, services } = createMockServices({
     externalSystemRegistry: {
       async getExternalSystemForAdapter(input) {
         calls.push(['getExternalSystemForAdapter', input])
-        return { id: input.id, tenantId: 'tenant_1', kind: 'erp:k3-wise-webapi', role: 'target', credentials: { bearerToken: 'secret-token' } }
+        return storedK3System
       },
     },
     adapterRegistry: {
@@ -5551,12 +5567,44 @@ async function testReadSmokeRoute() {
   assert.deepEqual(readArgs[0], { object: 'material', filters: { FNumber: 'M-001' } })
   assert.equal(writeCalls.length, 0, 'no upsert/save/submit/audit called')
   assert.ok(findCall(calls, 'getExternalSystemForAdapter'), 'used backend getExternalSystemForAdapter')
-  assert.deepEqual(findCall(calls, 'createAdapter')[1].credentials, { bearerToken: 'secret-token' })
+  const adapterSystem = findCall(calls, 'createAdapter')[1]
+  assert.deepEqual(adapterSystem.credentials, { bearerToken: 'secret-token' })
+  assert.deepEqual(adapterSystem.config.objects.material, {
+    operations: ['upsert', 'read'],
+    savePath: '/K3API/Material/Save',
+    readPath: '/K3API/Material/GetDetail',
+    readMethod: 'POST',
+  }, 'read-smoke applies a non-persisted Material/GetDetail overlay before adapter creation')
+  assert.deepEqual(storedK3System, storedK3SystemBefore, 'stored external system object is not mutated')
   assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0, 'read-smoke never persists/alters the system')
   const okStr = JSON.stringify(ok.body.data)
   for (const leak of ['M-001', 'SECRET-NAME', 'secret-token', 'k3host']) {
     assert.ok(!okStr.includes(leak), `read-smoke response must not leak ${leak}`)
   }
+
+  // C2: the forward { presetId, intent } shape is accepted and drives the SAME single read as { presetId, key }
+  const okIntent = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: WRITE_USER, params: { id: 'sys_1' },
+    body: { presetId: 'k3wise.material-detail.v1', intent: { object: 'material', mode: 'single_record_detail', key: 'M-002' } },
+  })
+  assertOkResponse(okIntent, 200)
+  assert.equal(okIntent.body.data.ok, true)
+  assert.equal(okIntent.body.data.recordPresent, true)
+  assert.deepEqual(readArgs[readArgs.length - 1], { object: 'material', filters: { FNumber: 'M-002' } }, 'intent shape drives the same single FNumber read')
+  assert.ok(!JSON.stringify(okIntent.body.data).includes('M-002'), 'intent-shape response is values-free')
+
+  // C2: LIST/BOM cannot enter via intent — fail-closed before any system load
+  const intentBom = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: WRITE_USER, params: { id: 'sys_1' },
+    body: { presetId: 'k3wise.material-detail.v1', intent: { object: 'bom', mode: 'single_record_detail', key: 'M-003' } },
+  })
+  assert.equal(intentBom.statusCode, 400, 'intent.object=bom is fail-closed (not allowlisted)')
+  // C2: raw config in intent (readPath) cannot ride in
+  const intentRaw = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: WRITE_USER, params: { id: 'sys_1' },
+    body: { presetId: 'k3wise.material-detail.v1', intent: { object: 'material', mode: 'single_record_detail', key: 'M-004', readPath: '/evil' } },
+  })
+  assert.equal(intentRaw.statusCode, 400, 'raw config in intent is fail-closed')
 
   // write-gated: a read-only integration user cannot trigger the credentialed probe (existence-oracle risk)
   const denied = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {

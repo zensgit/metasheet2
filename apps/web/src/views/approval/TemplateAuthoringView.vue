@@ -682,6 +682,33 @@
                       @click="insertConditionFormulaFunction(branch, 'MAX')"
                     >MAX()</el-button>
                   </div>
+                  <div class="template-authoring__condition-formula-dryrun">
+                    <el-input
+                      :model-value="conditionFormulaDryRunSample(node.key, branch.edgeKey)"
+                      type="textarea"
+                      :rows="2"
+                      :disabled="readOnly"
+                      placeholder='样例数据 JSON，例如 {"amount": 5000}'
+                      data-testid="approval-condition-formula-dry-run-sample"
+                      @update:model-value="(text: string) => setConditionFormulaDryRunSample(node.key, branch.edgeKey, text)"
+                    />
+                    <div class="template-authoring__condition-formula-dryrun-actions">
+                      <el-button
+                        size="small"
+                        :loading="conditionFormulaDryRunLoading(node.key, branch.edgeKey)"
+                        :disabled="readOnly || conditionFormulaDryRunLoading(node.key, branch.edgeKey)"
+                        data-testid="approval-condition-formula-dry-run-button"
+                        @click="dryRunConditionFormula(node.key, branch)"
+                      >测试公式</el-button>
+                      <span
+                        v-if="conditionFormulaDryRunResult(node.key, branch.edgeKey)"
+                        class="template-authoring__condition-formula-dryrun-result"
+                        data-testid="approval-condition-formula-dry-run-result"
+                      >
+                        {{ conditionFormulaDryRunResult(node.key, branch.edgeKey) }}
+                      </span>
+                    </div>
+                  </div>
                 </div>
               </div>
               <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
@@ -1033,6 +1060,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import {
   createTemplate,
+  dryRunApprovalConditionFormula,
   getTemplate,
   publishTemplate,
   updateTemplate,
@@ -1110,6 +1138,9 @@ const unsupportedReason = ref<string | null>(null)
 // unsupported — the form/metadata stay editable and save preserves the graph verbatim.
 const graphReadOnlyMessage = ref<string | null>(null)
 const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
+const conditionFormulaDryRunSamples = ref<Record<string, string>>({})
+const conditionFormulaDryRunResults = ref<Record<string, string>>({})
+const conditionFormulaDryRunBusy = ref<Record<string, boolean>>({})
 
 const templateId = computed(() => typeof route.params.id === 'string' ? route.params.id : '')
 const isEditMode = computed(() => templateId.value.length > 0)
@@ -1254,6 +1285,79 @@ function insertConditionFormulaToken(branch: ConditionBranchEdit, token: string)
 }
 function insertConditionFormulaFunction(branch: ConditionBranchEdit, fn: 'SUM' | 'COUNT' | 'MIN' | 'MAX'): void {
   appendFormulaText(branch, `${fn}()`)
+}
+
+function conditionFormulaDryRunKey(nodeKey: string, edgeKey: string): string {
+  return `${nodeKey}:${edgeKey}`
+}
+function conditionFormulaDryRunSample(nodeKey: string, edgeKey: string): string {
+  return conditionFormulaDryRunSamples.value[conditionFormulaDryRunKey(nodeKey, edgeKey)] ?? '{}'
+}
+function setConditionFormulaDryRunSample(nodeKey: string, edgeKey: string, text: string): void {
+  conditionFormulaDryRunSamples.value = {
+    ...conditionFormulaDryRunSamples.value,
+    [conditionFormulaDryRunKey(nodeKey, edgeKey)]: text,
+  }
+}
+function conditionFormulaDryRunResult(nodeKey: string, edgeKey: string): string {
+  return conditionFormulaDryRunResults.value[conditionFormulaDryRunKey(nodeKey, edgeKey)] ?? ''
+}
+function setConditionFormulaDryRunResult(nodeKey: string, edgeKey: string, text: string): void {
+  conditionFormulaDryRunResults.value = {
+    ...conditionFormulaDryRunResults.value,
+    [conditionFormulaDryRunKey(nodeKey, edgeKey)]: text,
+  }
+}
+function conditionFormulaDryRunLoading(nodeKey: string, edgeKey: string): boolean {
+  return Boolean(conditionFormulaDryRunBusy.value[conditionFormulaDryRunKey(nodeKey, edgeKey)])
+}
+function setConditionFormulaDryRunLoading(nodeKey: string, edgeKey: string, loadingValue: boolean): void {
+  conditionFormulaDryRunBusy.value = {
+    ...conditionFormulaDryRunBusy.value,
+    [conditionFormulaDryRunKey(nodeKey, edgeKey)]: loadingValue,
+  }
+}
+async function dryRunConditionFormula(nodeKey: string, branch: ConditionBranchEdit): Promise<void> {
+  const expression = branch.formulaExpression.trim()
+  const resultKey = conditionFormulaDryRunKey(nodeKey, branch.edgeKey)
+  if (!expression) {
+    setConditionFormulaDryRunResult(nodeKey, branch.edgeKey, '请输入公式')
+    return
+  }
+  let formData: Record<string, unknown>
+  try {
+    const parsed = JSON.parse(conditionFormulaDryRunSamples.value[resultKey] ?? '{}') as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('样例数据必须是 JSON 对象')
+    }
+    formData = parsed as Record<string, unknown>
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '样例数据不是有效 JSON'
+    setConditionFormulaDryRunResult(nodeKey, branch.edgeKey, `样例数据错误：${message}`)
+    return
+  }
+  setConditionFormulaDryRunLoading(nodeKey, branch.edgeKey, true)
+  try {
+    const result = await dryRunApprovalConditionFormula({
+      formSchema: buildFormSchema(draft.value),
+      expression,
+      formData,
+    })
+    if (result.success) {
+      setConditionFormulaDryRunResult(nodeKey, branch.edgeKey, `结果：${result.result ? 'true' : 'false'}`)
+    } else {
+      setConditionFormulaDryRunResult(
+        nodeKey,
+        branch.edgeKey,
+        `错误：${result.error?.message ?? '公式测试失败'}`,
+      )
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '公式测试失败'
+    setConditionFormulaDryRunResult(nodeKey, branch.edgeKey, `错误：${message}`)
+  } finally {
+    setConditionFormulaDryRunLoading(nodeKey, branch.edgeKey, false)
+  }
 }
 
 // Outgoing edge keys of a condition node (from the preserved graph) — the legal default fall-through
@@ -1904,6 +2008,24 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.template-authoring__condition-formula-dryrun {
+  display: grid;
+  gap: 6px;
+}
+
+.template-authoring__condition-formula-dryrun-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.template-authoring__condition-formula-dryrun-result {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-regular, #606266);
 }
 
 .template-authoring__condition-default {

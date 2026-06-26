@@ -220,17 +220,16 @@ function withAmountConsistency(
   return { ...schema, amountConsistencyCheck: { totalFieldId, detailFieldId, amountColumnId } }
 }
 
-// Amount-tier reimbursement (design-lock #3114): a condition node gates a higher-tier approver on the
-// top-level `amount`. Low amount → end after the direct manager; amount ≥ threshold → a dept-head
-// (higher-tier) approval before end. Default threshold 5000, editable in the condition-node rule
-// (Gate-A). The branch reads the top-level `amount` total (detail-row auto-sum is a separate
-// form-field capability, not this slice — design-lock Decision 1).
+// Amount-tier reimbursement (design-lock #3114 + FC-3): a condition node gates a higher-tier
+// approver with a formula example. Non-travel, or travel below the threshold, ends after the direct
+// manager; travel amount >= threshold adds a dept-head approval before end. The formula reads the
+// top-level `amount` total (protected by amountConsistencyCheck) plus the declared expense type.
 function reimbursementAmountTierGraph(): ApprovalGraph {
   return {
     nodes: [
       { key: 'start', type: 'start', name: '发起', config: {} },
       { key: 'approval_1', type: 'approval', name: '直属上级审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
-      { key: 'amount_gate', type: 'condition', name: '金额分级判断', config: { branches: [{ edgeKey: 'edge-gate-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 5000 }] }], defaultEdgeKey: 'edge-gate-end' } },
+      { key: 'amount_gate', type: 'condition', name: '金额分级判断', config: { branches: [{ edgeKey: 'edge-gate-high', rules: [], formula: { expression: '{expense_type} == "差旅" AND {amount} >= 5000' } }], defaultEdgeKey: 'edge-gate-end' } },
       { key: 'approval_high', type: 'approval', name: '部门主管审批（高额）', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
       { key: 'end', type: 'end', name: '结束', config: {} },
     ],
@@ -244,9 +243,10 @@ function reimbursementAmountTierGraph(): ApprovalGraph {
   }
 }
 
-// Amount-tier purchase (design-lock #3114): the condition node routes on the top-level `amount` —
-// below threshold → a single direct-manager approval; at/above threshold → a PARALLEL fork (joinMode
-// 'all' = 会签 by default; 'any' = 或签 editable) joining at `end`. Default threshold 20000.
+// Amount-tier purchase (design-lock #3114 + FC-3): the condition node routes with a detail aggregate
+// formula. Below threshold → a single direct-manager approval; at/above SUM(purchase_items.amount)
+// threshold → a PARALLEL fork (joinMode 'all' = 会签 by default; 'any' = 或签 editable) joining at
+// `end`. The same amountConsistencyCheck still protects top-level amount = detail sum.
 // The two parallel branches MUST resolve to DISTINCT assignment TYPES: a user-resolving manager
 // (manager_at_level → `user:X`) + a static_role (the design's "Configured Role / Person" → `role:Y`).
 // The runtime parallel-conflict key is `${assignmentType}:${assigneeId}` (ApprovalProductService.ts
@@ -262,7 +262,7 @@ function purchaseAmountTierGraph(): ApprovalGraph {
     nodes: [
       { key: 'start', type: 'start', name: '发起', config: {} },
       { key: 'budget_owner_approval', type: 'approval', name: '预算负责人审批', config: { assigneeSources: [{ kind: 'form_field_user', fieldId: 'budget_owner' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
-      { key: 'amount_gate', type: 'condition', name: '金额分级判断', config: { branches: [{ edgeKey: 'edge-gate-fork', rules: [{ fieldId: 'amount', operator: 'gte', value: 20000 }] }], defaultEdgeKey: 'edge-gate-manager' } },
+      { key: 'amount_gate', type: 'condition', name: '金额分级判断', config: { branches: [{ edgeKey: 'edge-gate-fork', rules: [], formula: { expression: 'SUM({purchase_items.amount}) >= 20000' } }], defaultEdgeKey: 'edge-gate-manager' } },
       { key: 'manager_approval', type: 'approval', name: '直属上级审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
       { key: 'parallel_fork', type: 'parallel', name: '高额并行审批（会签）', config: { branches: ['edge-fork-mgr', 'edge-fork-role'], joinMode: 'all', joinNodeKey: 'end' } },
       { key: 'higher_manager_approval', type: 'approval', name: '上级经理审批（高额）', config: { assigneeSources: [{ kind: 'manager_at_level', level: 2 }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },

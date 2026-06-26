@@ -94,6 +94,21 @@ function noPermsUser() {
   return { id: 'u-none', name: 'NoPerm', permissions: [] }
 }
 
+const formulaDryRunBody = {
+  expression: 'SUM({items.amount}) >= 100',
+  formSchema: {
+    fields: [{
+      id: 'items',
+      type: 'detail',
+      label: 'Items',
+      columns: [{ id: 'amount', type: 'number', label: 'Amount' }],
+    }],
+  },
+  formData: {
+    items: [{ amount: 60 }, { amount: 50 }],
+  },
+}
+
 // ---------------------------------------------------------------------------
 // Test suite
 // ---------------------------------------------------------------------------
@@ -134,6 +149,13 @@ describe('Approval RBAC boundary verification', () => {
       const res = await request(app)
         .post('/api/approval-templates')
         .send({ name: 'test', key: 'test-key' })
+      expect(res.status).toBe(401)
+    })
+
+    it('POST /api/approval-templates/formula-condition/dry-run without auth → 401', async () => {
+      const res = await request(app)
+        .post('/api/approval-templates/formula-condition/dry-run')
+        .send(formulaDryRunBody)
       expect(res.status).toBe(401)
     })
 
@@ -198,10 +220,42 @@ describe('Approval RBAC boundary verification', () => {
       expect(res.status).toBe(403)
     })
 
+    it('POST /api/approval-templates/formula-condition/dry-run with only approvals:read → 403', async () => {
+      const res = await request(app)
+        .post('/api/approval-templates/formula-condition/dry-run')
+        .send(formulaDryRunBody)
+      expect(res.status).toBe(403)
+    })
+
     it('GET /api/approval-templates with approval-templates:manage → 200', async () => {
       authState.user = templateManager()
       const res = await request(app).get('/api/approval-templates')
       expect(res.status).toBe(200)
+    })
+
+    it('POST /api/approval-templates/formula-condition/dry-run with approval-templates:manage → 200 success', async () => {
+      authState.user = templateManager()
+      const res = await request(app)
+        .post('/api/approval-templates/formula-condition/dry-run')
+        .send(formulaDryRunBody)
+
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ data: { success: true, result: true } })
+    })
+
+    it('POST /api/approval-templates/formula-condition/dry-run returns diagnostics for runtime formula errors', async () => {
+      authState.user = templateManager()
+      const res = await request(app)
+        .post('/api/approval-templates/formula-condition/dry-run')
+        .send({
+          ...formulaDryRunBody,
+          formData: { items: [{ amount: 'bad' }] },
+        })
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.success).toBe(false)
+      expect(res.body.data.error.code).toBe('APPROVAL_FORMULA_CONDITION_DRY_RUN_FAILED')
+      expect(res.body.data.error.message).toContain('must be a finite number')
     })
   })
 

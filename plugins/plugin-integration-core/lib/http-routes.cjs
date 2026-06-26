@@ -78,7 +78,14 @@ const { projectRecordForBody, findUnfilledPlaceholders, applyReferenceShape, isB
 const { resolveReferenceRuleValue } = require('./reference-mapping-resolver.cjs')
 // DF-T3b-2b: live mapping-sheet bulk-read → referenceMappingIndexes for the preview seam (read-only).
 const { buildReferenceMappingIndexes } = require('./reference-mapping-source.cjs')
-const { getReadSmokePreset, buildReadSmokeRequest, readSmokeSuccessEvidence, readSmokeErrorEvidence } = require('./read-smoke.cjs')
+const {
+  getReadSmokePreset,
+  buildReadSmokeRequest,
+  applyReadSmokePresetOverlay,
+  readSmokeSuccessEvidence,
+  readSmokeErrorEvidence,
+  normalizeReadSmokeContract,
+} = require('./read-smoke.cjs')
 const { K3_REFERENCE_MAPPING_TEMPLATES } = require('./reference-mapping-templates.cjs')
 const { listReferenceIntegrationTemplates } = require('./reference-integration-templates.cjs')
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
@@ -1607,21 +1614,18 @@ function createHandlers(services, options = {}) {
       // probe of K3 and returns an existence signal (recordPresent) a read user could enumerate against keys.
       // Per the conservative discipline it is a connection/probe action → operator/integration-write only.
       requireAccess(req, 'write')
-      // Strict body: only { presetId, key }. The preset (kind/object/read shape) comes from the catalog, not
-      // the request, so a custom preset config can never be smuggled in.
-      const body = isPlainObject(requestBody(req)) ? requestBody(req) : {}
-      const extraKeys = Object.keys(body).filter((k) => k !== 'presetId' && k !== 'key')
-      if (extraKeys.length > 0) {
-        throw new HttpRouteError(400, 'READ_SMOKE_BODY_INVALID', 'read-smoke body allows only presetId and key')
+      // C2: normalize the contract via the C1 normalizer — accepts the shipped { presetId, key } subset AND
+      // the forward { presetId, intent:{ object, mode, key } } shape, normalizing both to one output. The
+      // normalizer is fail-closed + values-free: a raw path/method/payload/config can never ride in, and an
+      // unknown preset/object/mode is rejected before any system load or adapter creation.
+      let contract
+      try {
+        contract = normalizeReadSmokeContract(requestBody(req))
+      } catch (error) {
+        // Map to a 400 with a coarse, values-free reason only (never the key or submitted values).
+        throw new HttpRouteError(400, 'READ_SMOKE_CONTRACT_INVALID', 'read-smoke contract is invalid', { reason: error && typeof error.reason === 'string' ? error.reason : 'invalid' })
       }
-      const preset = getReadSmokePreset(firstString(body.presetId))
-      if (!preset) {
-        throw new HttpRouteError(400, 'READ_SMOKE_PRESET_UNKNOWN', 'unknown read-smoke preset')
-      }
-      const key = firstString(body.key)
-      if (!key) {
-        throw new HttpRouteError(400, 'READ_SMOKE_KEY_REQUIRED', 'read-smoke key is required')
-      }
+      const preset = getReadSmokePreset(contract.presetId)
       // Backend credential context — NOT the public, credential-stripped system response.
       const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
@@ -1631,10 +1635,11 @@ function createHandlers(services, options = {}) {
       if (!system || system.kind !== preset.requiredKind) {
         throw new HttpRouteError(409, 'READ_SMOKE_KIND_MISMATCH', 'external system kind does not match the preset')
       }
-      const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
+      const adapterSystem = applyReadSmokePresetOverlay(system, preset)
+      const adapter = adapterRegistry.createAdapter(adapterSystem, { principal: requestPrincipal(req) })
       // Forced single read only; values-free evidence on success or failure (never key/raw/values/credentials).
       try {
-        const result = await adapter.read(buildReadSmokeRequest(preset, key))
+        const result = await adapter.read(buildReadSmokeRequest(preset, contract.key))
         return sendOk(res, readSmokeSuccessEvidence(preset, result))
       } catch (error) {
         return sendOk(res, readSmokeErrorEvidence(preset, error))

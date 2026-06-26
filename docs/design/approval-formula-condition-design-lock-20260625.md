@@ -1,9 +1,10 @@
 # Approval Formula Conditions — Design Lock
 
-Status: RATIFIED — FC-1 BUILT IN PR #3219; FC-2 BUILT IN A STACKED PR; FC-3
-NOT BUILT. Owner
-decisions resolved: `AND/OR/NOT` only in v1; numeric aggregates fail closed;
-backend evaluator ships before dry-run.
+Status: RATIFIED + SHIPPED — FC-1 shipped #3219 `38b1b98d0`; FC-2 shipped
+#3220 `c0a875193`; FC-3 shipped #3221 `a0071602b`; FC-4 shipped #3222
+`34644ba26`; FC-5 shipped #3234 `be9ad83a4` (frontend dry-run preview button).
+Owner decisions resolved: `AND/OR/NOT` only in v1; numeric aggregates fail
+closed; backend evaluator ships before dry-run.
 
 Goal: make approval condition branches more flexible than today's
 `fieldId + operator + value` rules, while keeping the approval backend as the
@@ -270,6 +271,26 @@ Required tests:
 - `SUM({detail.amount}) >= threshold` routes correctly;
 - malformed runtime data fails closed, not default-branch.
 
+Acceptance criteria (FC-1 merge gate — the 3 review pins, made concrete + measurable):
+
+- **AC-1 — DoS caps enforced fail-closed at publish.** Each bound is a hard publish reject (not a warning),
+  checked on the parsed AST before evaluation, at its exact boundary: `> 512` code units, `> 128` AST nodes,
+  depth `> 16`, `> 64` field refs, `> 32` function calls. A boundary test per cap asserts the value AT the cap
+  publishes and `cap + 1` is rejected.
+- **AC-2 — formula branches survive the full graph round-trip.** A graph carrying a formula branch is
+  structurally identical after `normalizeApprovalGraph` → publish → reload: the predicate is neither dropped
+  nor flattened to a simple rule, and its sibling `defaultEdgeKey` edge is preserved. A round-trip test
+  asserts the formula branch reloads intact — reusing the fail-closed-allowlist / never-flatten discipline the
+  attendance + approval authoring lines already run on.
+- **AC-3 — the trust model does not widen.** A formula routes on the *submitted* values only; it never
+  re-derives, re-sums authoritatively, or re-authorizes them. `SUM({detail.amount}) >= threshold` decides a
+  branch from what was submitted — it is NOT a consistency/truthfulness check (that stays the separate amount
+  total-check, #3161). A test asserts a submitted-but-inconsistent total still routes by the submitted value,
+  and that the formula path performs no write-back and claims no authority over the data.
+
+Ordering (ratified): **FC-1 ships the backend evaluator only — no dry-run.** The dry-run endpoint is **FC-2**
+and must reuse this exact evaluator. Evaluator-first.
+
 ### FC-2 — Authoring UI
 
 - Add branch predicate mode switch: simple rule vs formula.
@@ -288,9 +309,32 @@ example:
 - reimbursement high path: `{expense_type} == "差旅" AND {amount} >= 5000`;
 - leave high path: `{leave_days} + {used_leave_days} > 5`.
 
-This is optional. Existing amount-tier presets can remain on simple
-`amount >= threshold` rules because the shipped total auto-sum and backend
-total-check already make `amount` reliable.
+FC-3 applies the purchase and reimbursement examples to the shipped amount-tier
+presets. The leave example remains illustrative until a leave-specific
+multi-branch preset is introduced.
+
+### FC-4 — Approval-Specific Backend Dry-Run
+
+- Add `POST /api/approval-templates/formula-condition/dry-run`.
+- Gate it with `approval-templates:manage`, matching template authoring.
+- Accept `formSchema`, `expression`, and sample `formData`.
+- Use the same approval evaluator used by publish/execution.
+- Return a normal dry-run diagnostic payload for formula errors instead of
+  routing through the sheet-scoped multitable formula dry-run.
+
+This slice intentionally did not add the frontend "Evaluate" button. The
+endpoint is the backend truth surface that FC-5 calls.
+
+### FC-5 — Authoring Dry-Run Preview
+
+- Add an explicit "测试公式" button to the formula predicate authoring block.
+- Accept per-branch sample JSON and call the FC-4 approval-specific dry-run
+  endpoint with `{ formSchema, expression, formData }`.
+- Show success/error text inline for author feedback.
+- Keep the preview informational only: it is not a save/publish gate and its
+  sample data never enters the template payload.
+- Add a mounted wiring test proving button -> endpoint payload -> result display,
+  then save still emits only the formula graph config and preserves topology.
 
 ## Non-Goals
 
