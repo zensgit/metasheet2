@@ -140,6 +140,11 @@ export interface ConditionBranch {
   edgeKey: string
   rules: ConditionRule[]
   conjunction?: 'and' | 'or'
+  formula?: ConditionFormulaPredicate
+}
+
+export interface ConditionFormulaPredicate {
+  expression: string
 }
 
 export interface ConditionRule {

@@ -547,14 +547,16 @@ function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): b
 }
 
 // The COMPLEX-path config shapes the backend re-emits for the OTHER node types (same silent-drop
-// risk as approval): cc → {targetType, targetIds} (ApprovalProductService.ts:920-923); parallel →
-// {branches, joinMode, joinNodeKey} (:946-950); condition → {branches, defaultEdgeKey} with each
-// branch {edgeKey, conjunction?, rules} and each rule {fieldId, operator, value?} (:956-985 — the
-// rule `value` is a free leaf, NOT shape-checked); start/end → {} (default, :988).
+// risk as approval): cc → {targetType, targetIds}; parallel → {branches, joinMode, joinNodeKey};
+// condition → {branches, defaultEdgeKey} with each branch {edgeKey, conjunction?, rules, formula?}
+// and each rule {fieldId, operator, value?} (the rule `value` is a free leaf, NOT shape-checked);
+// start/end → {}. Formula branches are backend-preserved after FC-1, but the current G-2 editor
+// cannot round-trip them, so they remain fail-closed here until FC-2 formula authoring ships.
 const BACKEND_CC_CONFIG_KEYS = ['targetType', 'targetIds']
 const BACKEND_PARALLEL_CONFIG_KEYS = ['branches', 'joinMode', 'joinNodeKey']
 const BACKEND_CONDITION_CONFIG_KEYS = ['branches', 'defaultEdgeKey']
-const BACKEND_CONDITION_BRANCH_KEYS = ['edgeKey', 'conjunction', 'rules']
+const BACKEND_CONDITION_BRANCH_KEYS = ['edgeKey', 'conjunction', 'rules', 'formula']
+const BACKEND_CONDITION_FORMULA_KEYS = ['expression']
 const BACKEND_CONDITION_RULE_KEYS = ['fieldId', 'operator', 'value']
 
 /**
@@ -579,6 +581,10 @@ function complexNodeConfigHasBackendDrop(node: ApprovalNode): boolean {
       if (Array.isArray(branches)) {
         for (const branch of branches) {
           if (!isPlainRecord(branch) || hasKeyOutside(branch, BACKEND_CONDITION_BRANCH_KEYS)) return true
+          if (branch.formula !== undefined) {
+            if (!isPlainRecord(branch.formula) || hasKeyOutside(branch.formula, BACKEND_CONDITION_FORMULA_KEYS)) return true
+            return true
+          }
           const rules = branch.rules
           if (Array.isArray(rules)) {
             for (const rule of rules) {

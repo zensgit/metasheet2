@@ -14,6 +14,7 @@ import type {
   RuntimeGraph,
 } from '../types/approval-product'
 import { ServiceError } from './ApprovalBridgeService'
+import { evaluateApprovalConditionFormula } from './ApprovalConditionFormula'
 
 export interface ApprovalGraphAssignment {
   assignmentType: 'user' | 'role'
@@ -1045,10 +1046,14 @@ export class ApprovalGraphExecutor {
       : []
 
     for (const branch of branches) {
-      const conjunction = branch.conjunction === 'or' ? 'or' : 'and'
-      const result = conjunction === 'or'
-        ? branch.rules.some((rule) => evaluateRule(rule, this.formData))
-        : branch.rules.every((rule) => evaluateRule(rule, this.formData))
+      const result = branch.formula
+        ? evaluateApprovalConditionFormula(branch.formula.expression, this.formData)
+        : (() => {
+            const conjunction = branch.conjunction === 'or' ? 'or' : 'and'
+            return conjunction === 'or'
+              ? branch.rules.some((rule) => evaluateRule(rule, this.formData))
+              : branch.rules.every((rule) => evaluateRule(rule, this.formData))
+          })()
       if (result) {
         return this.targetForEdge(branch.edgeKey)
       }

@@ -62,6 +62,80 @@ describe('ApprovalGraphExecutor', () => {
     ])
   })
 
+  it('routes condition formula branches and keeps default as no-match only', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [
+              {
+                edgeKey: 'edge-high',
+                rules: [],
+                formula: { expression: 'SUM({items.amount}) >= 20000 AND {expense_type} == "travel"' },
+              },
+            ],
+            defaultEdgeKey: 'edge-low',
+          },
+        },
+        { key: 'high-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-high', source: 'route', target: 'high-review' },
+        { key: 'edge-low', source: 'route', target: 'low-review' },
+        { key: 'edge-high-end', source: 'high-review', target: 'end' },
+        { key: 'edge-low-end', source: 'low-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    const high = new ApprovalGraphExecutor(runtimeGraph, {
+      expense_type: 'travel',
+      items: [{ amount: 15000 }, { amount: 6000 }],
+    }).resolveInitialState()
+    expect(high.currentNodeKey).toBe('high-review')
+
+    const low = new ApprovalGraphExecutor(runtimeGraph, {
+      expense_type: 'office',
+      items: [{ amount: 21000 }],
+    }).resolveInitialState()
+    expect(low.currentNodeKey).toBe('low-review')
+  })
+
+  it('fails closed on condition formula runtime errors instead of taking defaultEdgeKey', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [{ edgeKey: 'edge-high', rules: [], formula: { expression: '10 / {amount} > 1' } }],
+            defaultEdgeKey: 'edge-low',
+          },
+        },
+        { key: 'high-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-high', source: 'route', target: 'high-review' },
+        { key: 'edge-low', source: 'route', target: 'low-review' },
+        { key: 'edge-high-end', source: 'high-review', target: 'end' },
+        { key: 'edge-low-end', source: 'low-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, { amount: 0 }).resolveInitialState()).toThrow(/division by zero/)
+  })
+
   it('advances to approved when the next node is end', () => {
     const runtimeGraph: RuntimeGraph = {
       nodes: [

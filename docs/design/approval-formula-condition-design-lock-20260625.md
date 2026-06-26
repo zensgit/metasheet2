@@ -1,8 +1,8 @@
 # Approval Formula Conditions — Design Lock
 
-Status: RATIFIED — RUNTIME NOT BUILT. Owner decisions resolved:
-`AND/OR/NOT` only in v1; numeric aggregates fail closed; backend evaluator
-ships before dry-run.
+Status: RATIFIED — FC-1 BUILT IN PR #3219; FC-2/FC-3 NOT BUILT. Owner
+decisions resolved: `AND/OR/NOT` only in v1; numeric aggregates fail closed;
+backend evaluator ships before dry-run.
 
 Goal: make approval condition branches more flexible than today's
 `fieldId + operator + value` rules, while keeping the approval backend as the
@@ -182,6 +182,9 @@ detail array after pruning:
   fail closed in v1;
 - `COUNT({detail})` counts submitted rows;
 - `SUM({detail.amount})` requires every referenced amount cell to be numeric.
+- Boolean `AND`/`OR` must not short-circuit away malformed aggregate operands;
+  aggregate errors fail closed even when the other operand already determines
+  the boolean result.
 
 Reason: approval routing should not silently ignore malformed monetary data.
 
