@@ -1,11 +1,12 @@
-# T9-W unsafe config-restore — design-lock (PROPOSED) — 2026-06-26
+# T9-W unsafe config-restore — design-lock (owner-approved; greenlight Tier 1+2) — 2026-06-26
 
-> **Design-lock (PROPOSED).** The config-restore safe subset is shipped (`classifyRevert` →
-> `safe` for view config-updates + field name/order updates; everything else `gated`/refused). This
-> doc locks how the **gated/unsafe** reverts would ship — tiered by risk, behind the existing
-> default-off discipline — **before any code**. It does NOT authorize building; it makes the
-> per-slice safety bar and the greenlight decision concrete. Anchored on current `main`
-> (`config-restore.ts` `classifyRevert`, `SAFE_FIELD_KEYS = {name, order}`).
+> **Design-lock — owner-approved 2026-06-26.** The config-restore safe subset is shipped
+> (`classifyRevert` → `safe` for view config-updates + field name/order updates; everything else
+> `gated`/refused). This doc locks how the **gated/unsafe** reverts ship — tiered by risk, behind the
+> default-off discipline. The owner greenlit **Tier 1 (sheet_config) + Tier 2 (lossy retype) ONLY**
+> (see Decisions) — authorized to build contract/goldens-first behind per-tier flags; Tier 3/4 stay
+> held/deferred. Anchored on current `main` (`config-restore.ts` `classifyRevert`,
+> `SAFE_FIELD_KEYS = {name, order}`).
 
 ## The four gated reasons (what "unsafe" covers)
 From `classifyRevert`: (1) **field lossy retype** — changed_keys beyond name/order (e.g. `type`,
@@ -14,8 +15,10 @@ From `classifyRevert`: (1) **field lossy retype** — changed_keys beyond name/o
 un-create one). Each is gated today and refused fail-closed; none ships without this lock + a greenlight.
 
 ## Shared locks (apply to EVERY unsafe slice — reuse the proven patterns, don't reinvent)
-- **U-L1 default-off flag** — ship behind a flag (per-slice or a shared `MULTITABLE_ENABLE_UNSAFE_CONFIG_RESTORE`),
-  off by default; runtime-gated (preview AND execute 403 when off), like `MULTITABLE_ENABLE_PIT_RESET`.
+- **U-L1 default-off PER-TIER flags (LOCKED)** — each tier behind its OWN default-off flag (e.g.
+  `MULTITABLE_ENABLE_SHEET_CONFIG_REVERT`, `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT`) — NOT one shared
+  `MULTITABLE_ENABLE_UNSAFE_CONFIG_RESTORE` (too coarse: the tiers have different blast radii + need
+  independent rollout). Runtime-gated (preview AND execute 403 when off), like `MULTITABLE_ENABLE_PIT_RESET`.
 - **U-L2 write-symmetric gate** — the read/restore gate = the capability that gates WRITING that config
   (R3 symmetry): field/field-perm → `canManageFields`; view/view-perm → `canManageViews`;
   sheet_config/sheet-perm → `canManageSheetAccess`. Fail-closed on unknown.
@@ -43,7 +46,19 @@ Reverting a field's `type`/`property` can **coerce or drop cell values** that do
 type (the "lossy" gate reason). Gated by `canManageFields`. **Bar:** the preview MUST quantify the
 data-loss impact (how many records' cell values would be coerced/emptied by the type round-trip) and
 require a typed confirm; the revert is recorded forward; if loss is total/unknowable, refuse rather
-than silently drop. Recommend: **second slice, only with the data-loss preview.**
+than silently drop.
+
+> **U-L8 (Tier-2 hidden-data oracle — [P1], LOCKED).** The data-loss scan is itself a leak vector — a
+> count of coerced/emptied cells over rows/fields the actor CANNOT read would expose hidden
+> invalid-value counts (generic U-L7 is too broad to cover this). The loss stat MUST be computed in
+> ONE of two locked ways: **(a) scope-to-readable** — count only over records/fields the actor can read
+> (row-deny + field visibility + read-only field perms applied) and surface any out-of-scope rows/fields
+> as an **undisclosed** bucket (no number); OR **(b) require a full-read capability** before preview AND
+> execute. **Required golden:** a `canManageFields` actor with a field-denial AND a row-denial CANNOT
+> infer the hidden invalid-value count from the preview (readable-scoped count + an undisclosed marker,
+> never the true total).
+
+Recommend: **second slice, only with the data-loss preview + U-L8.**
 
 ### Tier 3 — un-create (revert a `create`) — destructive but bounded
 Reverting a field/view *create* = **deleting** the created entity (+ its column data / view). This is
@@ -73,17 +88,20 @@ Each tier is a separate greenlight + (for the dangerous ones) a separate sign-of
 ## Out of scope (each a later opt-in)
 Undelete-execute (Tier 4 defer); cross-base config restore; any FE; bulk/multi-entity unsafe restore.
 
-## Open questions (decide before any code)
-1. Which tiers to greenlight for a first build — recommend Tier 1 + Tier 2 only; hold Tier 3/4.
-2. Permission-revert: in scope at all, or held entirely until a per-grant re-grant policy exists?
-3. One shared flag, or per-tier flags (finer rollout control)?
+## Decisions (owner-locked 2026-06-26)
+- **Greenlight: Tier 1 (sheet_config revert) + Tier 2 (lossy field retype) ONLY** — build these contract/goldens-first, each behind its own per-tier flag.
+- **Hold: Tier 3 (un-create)** until a separate destructive-delete sign-off.
+- **Defer: undelete** (its own resurrect+link-rebuild line).
+- **Hold permission-revert ENTIRELY** until a per-grant re-grant policy exists (a capability alone is not sufficient).
+- **Per-tier flags** (U-L1), not one shared flag.
+- **Tier 2 [P1]:** U-L8 (hidden-data oracle) is a hard requirement — the data-loss preview is read-scoped (or full-read-gated), with the no-hidden-count-inference golden.
 
 ## TODO (gated)
-- 🔒 **U-0** this design-lock — review/approve the tiers, the per-slice bars, and the greenlight set.
-- ⬜ **U-1** Tier 1 sheet_config revert (preview shows rule before→after; U-L1..L7; real-DB goldens incl. flag-off, gate, drift, atomicity, no-oracle).
-- ⬜ **U-2** Tier 2 lossy retype (data-loss preview + typed confirm; refuse on total/unknown loss; goldens).
-- ⬜ **U-3** Tier 3 un-create (T8-2 delete discipline) — separate greenlight.
-- ⬜ **U-4** Tier 4 permission-revert + undelete — deferred, each its own design-lock + sign-off.
+- 🔒 **U-0** this design-lock — APPROVED 2026-06-26 with the Decisions above (greenlight T1+T2, per-tier flags, U-L8).
+- ⬜ **U-1 (GREENLIT)** Tier 1 sheet_config revert — behind `MULTITABLE_ENABLE_SHEET_CONFIG_REVERT`; preview shows rule before→after; U-L1..L7; real-DB goldens (flag-off, gate, drift, atomicity, no-oracle).
+- ⬜ **U-2 (GREENLIT)** Tier 2 lossy retype — behind `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT`; data-loss preview **read-scoped per U-L8** + typed confirm; refuse on total/unknown loss; goldens incl. the **U-L8 no-hidden-count-inference** golden.
+- 🔒 **U-3 (HOLD)** Tier 3 un-create — held until a separate destructive-delete sign-off.
+- 🔒 **U-4 (DEFER/HOLD)** undelete deferred (its own line); permission-revert held entirely until a per-grant re-grant policy.
 
 > Nothing here ships without (a) approving this lock and (b) a per-tier greenlight; the dangerous
 > tiers (3/4) additionally need their own sign-off, mirroring the T8-2 destructive discipline.
