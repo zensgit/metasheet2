@@ -7709,6 +7709,17 @@ export function univerMetaRouter(): Router {
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
         : (capabilities.canManageFields || capabilities.canManageViews || capabilities.canManageSheetAccess)
       if (!cap) return sendForbidden(res)
+      // T9-W Tier 1 (U-L1): sheet_config revert is behind a per-tier flag (default off) — refuse preview AND execute.
+      if (rev.entity_type === 'sheet_config') {
+        if (process.env.MULTITABLE_ENABLE_SHEET_CONFIG_REVERT !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'SHEET_CONFIG_REVERT_DISABLED', message: 'sheet_config revert is disabled (MULTITABLE_ENABLE_SHEET_CONFIG_REVERT off).' } })
+        }
+        // Fail-closed: a sheet_config revision's entity_id IS its sheet — a mismatch is a malformed/forged revision
+        // that must never point a restore at another sheet.
+        if (rev.entity_id !== rev.sheet_id) {
+          return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'sheet_config revision entity_id does not match its sheet.' } })
+        }
+      }
       const snapshot = await loadEntityConfigSnapshot(pool.query.bind(pool), rev)
       if (!snapshot) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot preview a revert.' } })
       const preview = computeRevertPreview(rev, snapshot)
@@ -7721,6 +7732,19 @@ export function univerMetaRouter(): Router {
         const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
         preview.current = redactViewConfigFilterLiterals(preview.current as { filterInfo?: unknown }, allowedFieldIds) as Record<string, unknown>
         preview.target = redactViewConfigFilterLiterals(preview.target as { filterInfo?: unknown }, allowedFieldIds) as Record<string, unknown>
+      } else if (rev.entity_type === 'sheet_config') {
+        // T9-W Tier 1 (U-L6): conditionalReadRules `value` literals are field-read-sensitive — redact per requester
+        // (same discipline as view filterInfo; reuses the U-1a redactor). EXECUTE applies the raw server-side target.
+        const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
+        preview.current = redactConditionalReadRuleLiterals(preview.current as { conditionalReadRules?: unknown }, allowedFieldIds) as Record<string, unknown>
+        preview.target = redactConditionalReadRuleLiterals(preview.target as { conditionalReadRules?: unknown }, allowedFieldIds) as Record<string, unknown>
+      }
+      // T9-W Tier 1: classifyRevert stays PURE (sheet_config = intrinsically gated), but the flag is ON here (flag-off
+      // already 403'd above), so the ROUTE supports this revert — surface it as confirmable so the FE shows the confirm
+      // path (the FE hides confirm unless opKind === 'safe'). EXECUTE applies the same flag+guard gate, not opKind.
+      if (rev.entity_type === 'sheet_config') {
+        preview.opKind = 'safe'
+        delete preview.gatedReason
       }
       // T9-W-L4/D5: mint a server-signed identity binding this preview to execute. The baselineHash alone is
       // client-computable, so execute REQUIRES this token — a caller cannot skip the preview by computing the hash.
@@ -7758,8 +7782,19 @@ export function univerMetaRouter(): Router {
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
         : (capabilities.canManageFields || capabilities.canManageViews || capabilities.canManageSheetAccess)
       if (!cap) return sendForbidden(res)
+      // T9-W Tier 1 (U-L1): sheet_config revert behind the per-tier flag (default off) + fail-closed entity_id guard.
+      if (rev.entity_type === 'sheet_config') {
+        if (process.env.MULTITABLE_ENABLE_SHEET_CONFIG_REVERT !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'SHEET_CONFIG_REVERT_DISABLED', message: 'sheet_config revert is disabled (MULTITABLE_ENABLE_SHEET_CONFIG_REVERT off).' } })
+        }
+        if (rev.entity_id !== rev.sheet_id) {
+          return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'sheet_config revision entity_id does not match its sheet.' } })
+        }
+      }
       const classify = classifyRevert(rev)
-      if (classify.kind === 'gated') return res.status(422).json({ ok: false, error: { code: 'RESTORE_NOT_SUPPORTED', message: classify.reason ?? 'This config restore is not supported in this slice.' } })
+      // classifyRevert stays PURE; the route SUPPORTS flag-on sheet_config (already flag/guard-gated above), so it must
+      // NOT 422 it. Every other gated kind (permission, lossy field, create/delete) is still refused here.
+      if (classify.kind === 'gated' && rev.entity_type !== 'sheet_config') return res.status(422).json({ ok: false, error: { code: 'RESTORE_NOT_SUPPORTED', message: classify.reason ?? 'This config restore is not supported in this slice.' } })
 
       // null = applied; a failure object = a guard tripped (the txn made no write either way).
       const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {

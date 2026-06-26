@@ -111,9 +111,24 @@ export async function loadViewConfigSnapshot(query: QueryFn, viewId: string): Pr
   }
 }
 
+export async function loadSheetConfigSnapshot(query: QueryFn, sheetId: string): Promise<Record<string, unknown> | null> {
+  const res = await query('SELECT conditional_read_rules, row_level_read_permissions_enabled FROM meta_sheets WHERE id = $1', [sheetId])
+  const row = res.rows[0] as Record<string, unknown> | undefined
+  if (!row) return null
+  // Return the RAW jsonb value (NOT re-parsed): the recorder stored before/after as jsonb too, so both go through the
+  // same Postgres key-ordering. stable() is a plain JSON.stringify (no key-sort), so re-parsing here (which rebuilds
+  // objects in JS key order) would mismatch the recorded `after` and trip a FALSE drift. `?? []` matches the recorder's
+  // empty shape.
+  return {
+    conditionalReadRules: row.conditional_read_rules ?? [],
+    rowLevelReadPermissionsEnabled: row.row_level_read_permissions_enabled === true,
+  }
+}
+
 export async function loadEntityConfigSnapshot(query: QueryFn, rev: ConfigRevisionRow): Promise<Record<string, unknown> | null> {
   if (rev.entity_type === 'field') return loadFieldConfigSnapshot(query, rev.entity_id)
   if (rev.entity_type === 'view') return loadViewConfigSnapshot(query, rev.entity_id)
+  if (rev.entity_type === 'sheet_config') return loadSheetConfigSnapshot(query, rev.entity_id)
   return null
 }
 
@@ -127,11 +142,16 @@ const VIEW_COLUMN: Record<string, ColumnMap> = {
   groupInfo: { col: 'group_info', jsonb: true }, hiddenFieldIds: { col: 'hidden_field_ids', jsonb: true },
   config: { col: 'config', jsonb: true },
 }
+// T9-W Tier 1: sheet_config revert columns on meta_sheets (camelCase keys match the recorder's before/after shape).
+const SHEET_CONFIG_COLUMN: Record<string, ColumnMap> = {
+  conditionalReadRules: { col: 'conditional_read_rules', jsonb: true },
+  rowLevelReadPermissionsEnabled: { col: 'row_level_read_permissions_enabled' },
+}
 
 /** Apply the revert: UPDATE the entity's changed columns to the revision's `before` values. Safe-op only (caller gates). */
 export async function applyConfigRevert(query: QueryFn, rev: ConfigRevisionRow): Promise<void> {
-  const map = rev.entity_type === 'field' ? FIELD_COLUMN : rev.entity_type === 'view' ? VIEW_COLUMN : null
-  const table = rev.entity_type === 'field' ? 'meta_fields' : rev.entity_type === 'view' ? 'meta_views' : null
+  const map = rev.entity_type === 'field' ? FIELD_COLUMN : rev.entity_type === 'view' ? VIEW_COLUMN : rev.entity_type === 'sheet_config' ? SHEET_CONFIG_COLUMN : null
+  const table = rev.entity_type === 'field' ? 'meta_fields' : rev.entity_type === 'view' ? 'meta_views' : rev.entity_type === 'sheet_config' ? 'meta_sheets' : null
   if (!map || !table) throw new Error(`config revert not supported for entity_type=${rev.entity_type}`)
   const before = rev.before ?? {}
   const sets: string[] = []
