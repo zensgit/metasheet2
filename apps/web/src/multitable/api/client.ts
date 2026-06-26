@@ -974,6 +974,23 @@ export interface RestorePreviewResult {
   previewIdentity: string | null
 }
 
+// T8-2 Reset-to-T (DESTRUCTIVE sheet-wide PIT restore). `summary.deleteCount` = records created after T that go to the
+// recycle bin; `visibleRevertCount` = survivors reverted to T. `previewIdentity` is null when there is nothing to do.
+export interface ResetPreview {
+  asOf: string
+  strategy: string
+  summary: { visibleRevertCount: number; deleteCount: number; visibleUndeleteCount?: number; conflictCount?: number }
+  deleteRecordIds: string[]
+  previewIdentity: string | null
+}
+export interface ResetResult {
+  asOf: string
+  strategy: string
+  records?: Array<{ recordId: string; status?: string }>
+  revertedCount?: number
+  deletedRecordIds?: string[]
+}
+
 // BS-4: scoped (multi-record) restore preview/execute results — a faithful client of the BS-2/BS-3 wire.
 export interface RestoreBatchPreviewRecord {
   recordId: string
@@ -1923,6 +1940,27 @@ export class MultitableApiClient {
       body: JSON.stringify({ revisionId, previewToken }),
     })
     await this.parseJson<{ restored: unknown }>(res)
+  }
+
+  // T8-2: preview a sheet-wide Reset-to-T (DESTRUCTIVE — records created after T → recycle bin; survivors reverted).
+  // Server computes the revert set + delete-set + a signed previewIdentity binding BOTH scopes. Behind
+  // MULTITABLE_ENABLE_PIT_RESET; `403 RESET_DISABLED` when off, `403` for non-sheet-admin, `413` over the size ceiling.
+  async resetPreview(sheetId: string, asOf: string): Promise<ResetPreview> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/reset-preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ asOf }),
+    })
+    return this.parseJson<ResetPreview>(res)
+  }
+
+  // T8-2: execute Reset-to-T. REQUIRES the typed `confirm:'reset'` (D4) + the server `previewIdentity` (binds the
+  // delete-set; a record created since preview re-enumerates → `409`). Single-transaction all-or-nothing on the server;
+  // `409 RESET_BLOCKED` if any target is locked/denied (zero writes).
+  async resetExecute(sheetId: string, asOf: string, previewIdentity: string): Promise<ResetResult> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/reset-execute`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ asOf, previewIdentity, confirm: 'reset' }),
+    })
+    return this.parseJson<ResetResult>(res)
   }
 
   // --- Global History & Point-in-Time Restore (read-only) ---
