@@ -15804,6 +15804,136 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('HMR-3: enqueues manual missed-punch reminders into the notification outbox idempotently', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const orgId = `hmr3-${runSuffix}`
+    const adminId = `hmr3-admin-${runSuffix}`
+    const workerId = `hmr3-worker-${runSuffix}`
+    const recordId = randomUUID()
+    const sourceBatchId = randomUUID()
+    const workDate = '2037-04-15'
+    const idempotencyKey = `hmr3-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const previousDefaultChannel = process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL
+    const pool = new Pool({ connectionString: dbUrl })
+
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      delete process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL
+      await requireAttendanceTable(pool, 'attendance_notification_deliveries')
+      await pool.query(
+        `INSERT INTO attendance_records
+         (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'Asia/Shanghai', NULL, $5::timestamptz, 480, 0, 0, 'partial', true, $6::jsonb, $7, now(), now())`,
+        [
+          recordId,
+          workerId,
+          orgId,
+          workDate,
+          `${workDate}T10:00:00.000Z`,
+          JSON.stringify({ source: 'hmr3-integration' }),
+          sourceBatchId,
+        ],
+      )
+
+      const tokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&roles=admin&perms=attendance:read,attendance:admin`,
+      )
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+      const payload = {
+        recordIds: [recordId],
+        message: 'Please submit a missed-punch request.',
+        idempotencyKey,
+      }
+
+      const first = await requestJson(`${baseUrl}/api/attendance/manual-missed-punch-reminders/enqueue?orgId=${encodeURIComponent(orgId)}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      })
+      expect(first.status, first.raw).toBe(202)
+      expect(first.body).toMatchObject({
+        ok: true,
+        data: {
+          channel: 'dingtalk_work_notification',
+          created: 1,
+          existing: 0,
+          candidates: [
+            {
+              recordId,
+              userId: workerId,
+              workDate,
+              missingSide: 'check_in',
+              selectedByDefault: true,
+            },
+          ],
+        },
+      })
+
+      await pool.query(
+        `UPDATE attendance_records
+         SET status = 'normal', first_in_at = $2::timestamptz, updated_at = now()
+         WHERE id = $1`,
+        [recordId, `${workDate}T01:00:00.000Z`],
+      )
+
+      const replay = await requestJson(`${baseUrl}/api/attendance/manual-missed-punch-reminders/enqueue?orgId=${encodeURIComponent(orgId)}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      })
+      expect(replay.status, replay.raw).toBe(202)
+      expect(replay.body).toMatchObject({ ok: true, data: { created: 0, existing: 1 } })
+
+      const rows = await pool.query(
+        `SELECT source_type, source_id, source_key, recipient_user_id, channel, status, payload
+         FROM attendance_notification_deliveries
+         WHERE org_id = $1
+         ORDER BY created_at ASC`,
+        [orgId],
+      )
+      expect(rows.rows).toHaveLength(1)
+      expect(rows.rows[0]).toMatchObject({
+        source_type: 'manual_missed_punch_reminder',
+        source_id: `manual_missed_punch_reminder:${idempotencyKey}`,
+        recipient_user_id: workerId,
+        channel: 'dingtalk_work_notification',
+        status: 'pending',
+      })
+      expect(rows.rows[0].source_key).toBe(`manual_missed_punch_reminder:${idempotencyKey}:recipient:${workerId}`)
+      expect(rows.rows[0].payload).toMatchObject({
+        kind: 'manual_missed_punch_reminder',
+        body: 'Please submit a missed-punch request.',
+        actorUserId: adminId,
+        recipientUserId: workerId,
+        recordIds: [recordId],
+        candidates: [
+          {
+            recordId,
+            userId: workerId,
+            workDate,
+            missingSide: 'check_in',
+          },
+        ],
+      })
+    } finally {
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      if (previousDefaultChannel === undefined) delete process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL
+      else process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL = previousDefaultChannel
+      await pool.query(`DELETE FROM attendance_notification_deliveries WHERE org_id = $1`, [orgId]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_records WHERE id = $1`, [recordId]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   // #7 销假 (design-lock #3034) — §5 real-DB matrix: approve → deduct → cancel → reverse, idempotency, §3a expired.
   it('#7 销假 — cancelling an APPROVED comp_time leave reverses the deducted balance; idempotent; expired lot not resurrected', async () => {
     if (!baseUrl) return
