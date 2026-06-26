@@ -1,6 +1,8 @@
 # Requester / org-attribute formula conditions — Design Lock
 
-Status: PROPOSED — RUNTIME NOT BUILT. Owner picks the v1 attribute set (below) before build.
+Status: RATIFIED — RUNTIME NOT BUILT. Owner decisions RESOLVED 2026-06-26 (see bottom): v1 set =
+level + department + role; level provider-native-ordered; department = name. First build slice = RA-1a
+(level + department); role + `in` + array literals = RA-1b.
 
 Grounding: formula conditions (shipped FC-1..FC-5) let a branch route on **form fields** and **detail
 aggregates** — all applicant-controlled, submitted values. This lock adds the next layer: routing on
@@ -91,10 +93,28 @@ or the form — they live only in the frozen snapshot the evaluator reads.)
 - `requester.orgPath` subtree routing (cut, §3).
 - Normalizing level scales across providers (v1 is provider-native).
 
-## Owner Decisions Before Build
-1. **The v1 attribute set** — recommend `requester.level` + `requester.department` + `requester.role`
-   (membership). `managerLevel` deferred, `orgPath` cut.
-2. **`requester.level` scale** — confirm the target directory providers expose a comparable, ordered
-   level; if some don't, those orgs simply can't author a level formula (caught at publish, §2) — is that
-   acceptable, or should level be normalized first (a bigger, separate piece)?
-3. **`requester.department`** — name (readable, mutable) vs stable id (opaque, stable) for v1.
+## Owner Decisions — RESOLVED 2026-06-26
+The owner delegated these to the implementer with the recommendations below; recorded here as the durable
+decision of record (was "Before Build"; resolved before RA-1a starts).
+1. **v1 attribute set = `requester.level` + `requester.department` + `requester.role` (membership).**
+   `managerLevel` deferred, `orgPath` cut. Delivered in two slices (boundary below): RA-1a = `level` +
+   `department`; RA-1b = `role`.
+2. **`requester.level` scale = provider-native, ordered, higher = more senior; NOT normalized in v1.**
+   A provider that exposes no comparable ordered level → a `level` formula simply **fails publish** for
+   that org (§2 structural-absence), never bricks a create. Accepted; cross-provider normalization is a
+   separate future piece.
+3. **`requester.department` = name** (readable authoring — `requester.department == "财务"` is writable, an
+   id is not). Rename-mutability is the accepted tradeoff; a stable-id variant is a future option.
+
+## RA-1a / RA-1b slice boundary (so the v1 set is never half-claimed)
+- **RA-1a — `requester.level` + `requester.department` ONLY.** `level`: numeric comparisons.
+  `department`: `==` / `!=` ONLY.
+- **Everything not in RA-1a fails closed at PARSE/PUBLISH — never silent runtime-absent:**
+  - `requester.role` (and any attr ∉ {`level`, `department`}) → **parse/publish reject**
+    ("unknown/unsupported requester attribute") until RA-1b. It must NOT reach runtime as
+    absent-in-context, and must NOT be silently ignored.
+  - `requester.department in [...]`, the `in` operator, and array literals → **parse reject** (the grammar
+    has none yet); they land with `role` membership in RA-1b.
+- **RA-1b — `requester.role` membership + the `in` operator + array literals.** Only after RA-1b is the
+  full v1 attribute set authorable; until then the lock's §3 `department` "`in`" and the `role` row are
+  design intent, not yet runtime.
