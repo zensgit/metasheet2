@@ -20,6 +20,7 @@ const EMPTY_CAPABILITIES: MetaCapabilities = {
   canDeleteRecord: false,
   canManageFields: false,
   canManageSheetAccess: false,
+  pitResetEnabled: false,
   canManageViews: false,
   canComment: false,
   canManageAutomation: false,
