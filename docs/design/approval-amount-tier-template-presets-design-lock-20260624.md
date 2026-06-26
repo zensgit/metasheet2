@@ -26,13 +26,18 @@ approval-result write-back.
 
 1. Use amount fields that already exist in the preset form schema.
 
-   The branch condition reads the top-level total field (`amount`). Detail-row amounts are not
-   auto-summed in v1; the applicant-entered total remains the branch input. Auto-sum/calculated
-   total is a separate form-field capability, not hidden inside this template slice. KNOWN
-   CONTROL LIMITATION: because the gate reads the applicant-entered `amount`, the routing is
-   only as trustworthy as that value — an applicant can under-state the total to route around
-   the higher-amount tier. The amount tier is an authoring/routing aid, not a tamper-proof
-   financial control, until auto-sum or a server-side total check closes the gap.
+   The branch condition reads the top-level total field (`amount`). AS BUILT (updated 2026-06-26,
+   post-closeout): the detail total is now read-only **auto-filled** from the detail rows (#3198) and a
+   server-side **total-check** (#3176) rejects any total ≠ the detail sum — so the backend total-check is
+   the tamper-proof boundary and the amount tier routes on a verified value. The control gap described
+   below is CLOSED.
+
+   (Historical — the framing this slice shipped with at authoring time: detail-row amounts were not
+   auto-summed in v1 and the applicant-entered total was the branch input; that was a KNOWN CONTROL
+   LIMITATION — an applicant could under-state the total to route around the higher-amount tier, making
+   the amount tier an authoring/routing aid, not a tamper-proof financial control, until auto-sum or a
+   server-side total-check closed the gap. Auto-sum #3198 + total-check #3176 have now closed it; see the
+   amount/formula line roadmap #3237.)
 
 2. Use existing assignee sources first.
 

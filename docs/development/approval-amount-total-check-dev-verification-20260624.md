@@ -62,10 +62,12 @@ equal the sum of that submission's detail-row amounts:
   - *step-result skip-reason* — the runtime backwrite skip is surfaced on the `start_approval` step
     result (`backwriteSkipped`), not only `logger.warn`. 14/14 start_approval integration; automation-v1 186/186.
 
-## Still a follow-up (not built)
-- **Detail-row auto-sum** — the heavier of the two #3161 fixes (the lighter — §1, the FE authoring
-  silent-drop — is now **closed by #3197**); compute/auto-fill the total, removing the gameable separate
-  total — its own later lock; pulls in a computed/rollup form-field capability.
+## Follow-ups (status as of the 2026-06-26 amount/formula line closeout)
+- **Detail-row auto-sum — SHIPPED post-closeout by #3198** (read-only auto-fill; design-lock #3189, line
+  roadmap #3237). It was the heavier of the two #3161 fixes (the lighter — §1, the FE authoring
+  silent-drop — was closed by #3197); it is now BUILT — the detail total is read-only auto-filled from the
+  rows and the server-side total-check is the tamper-proof boundary, so the gameable-separate-total gap is
+  closed. (Per-row line-subtotal derivation then shipped too: #3203 lock + #3205 runtime.)
 - **§3 — `visibilityRule` save-vs-submit policy (P2).** Next move is **doc-only ratify of the shipped
   behavior** (record what save vs submit actually does today), NOT a rushed backend save-time reject —
   handled separately from §1.
