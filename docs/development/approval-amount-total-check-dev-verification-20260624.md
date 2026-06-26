@@ -1,9 +1,9 @@
 # Server-side amount total-check — development + verification
 
-Executes the plan after the #3161 design-lock review: the narrow server-side total-check that makes
-amount-tier approval routing tamper-resistant. Closes the KNOWN CONTROL LIMITATION the amount-tier
+Executes the plan after the #3161 design-lock review: the narrow server-side total-check that **binds
+amount-tier routing to the submitted detail-row total**. Closes the KNOWN CONTROL LIMITATION the amount-tier
 line shipped with — the gate trusts the applicant-entered top-level `amount`, so a submitter could
-**under-state the total to dodge the higher-amount approval tier**.
+**under-state the total to dodge the higher-amount approval tier**. It closes the decoupled-total bypass; it does NOT prove the line items themselves are truthful.
 
 ## What shipped (PR #3176 — control + createApproval wiring + real-DB)
 
@@ -50,7 +50,7 @@ equal the sum of that submission's detail-row amounts:
   `reimbursement_amount_tier` ships `{amount, expense_items, amount}` (via a `withAmountConsistency`
   helper); the basic presets (leave/reimbursement/purchase) keep no mapping. The FE
   `FormSchema.amountConsistencyCheck` type was added (carried verbatim — backend is sole arbiter). So the
-  amount-tier templates are tamper-resistant by default. Preset test +3; vue-tsc clean.
+  amount-tier templates bind routing to the submitted detail-row total by default. Preset test +3; vue-tsc clean.
 - **W7 observability pair → #3182.**
   - *rule-save fail-fast* (`createRule`) — validates the `resultWriteback` target fields against the
     source sheet at save (reusing #3157's existence/type check). LENIENT on absence (deferred to the
@@ -66,7 +66,7 @@ equal the sum of that submission's detail-row amounts:
 - **Detail-row auto-sum — SHIPPED post-closeout by #3198** (read-only auto-fill; design-lock #3189, line
   roadmap #3237). It was the heavier of the two #3161 fixes (the lighter — §1, the FE authoring
   silent-drop — was closed by #3197); it is now BUILT — the detail total is read-only auto-filled from the
-  rows and the server-side total-check is the tamper-proof boundary, so the gameable-separate-total gap is
+  rows and the server-side total-check binds the routing amount to that detail-row total, so the decoupled-total bypass is
   closed. (Per-row line-subtotal derivation then shipped too: #3203 lock + #3205 runtime.)
 - **§3 — `visibilityRule` save-vs-submit policy (P2).** Next move is **doc-only ratify of the shipped
   behavior** (record what save vs submit actually does today), NOT a rushed backend save-time reject —
