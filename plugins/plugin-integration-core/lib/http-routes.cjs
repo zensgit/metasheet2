@@ -1603,7 +1603,10 @@ function createHandlers(services, options = {}) {
     // backend getExternalSystemForAdapter context (never the public, credential-stripped response) and never
     // modifies the system's role/config. Evidence is values-free.
     async externalSystemReadSmoke(req, res) {
-      requireAccess(req, 'read')
+      // Requires WRITE access: although the operation is read-only, this is an active credentialed outbound
+      // probe of K3 and returns an existence signal (recordPresent) a read user could enumerate against keys.
+      // Per the conservative discipline it is a connection/probe action → operator/integration-write only.
+      requireAccess(req, 'write')
       // Strict body: only { presetId, key }. The preset (kind/object/read shape) comes from the catalog, not
       // the request, so a custom preset config can never be smuggled in.
       const body = isPlainObject(requestBody(req)) ? requestBody(req) : {}

@@ -5538,7 +5538,7 @@ async function testReadSmokeRoute() {
 
   // success: read once, values-free evidence, backend credential context, no write, system untouched
   const ok = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
-    user: READ_USER, params: { id: 'sys_1' }, query: { workspaceId: 'workspace_1' },
+    user: WRITE_USER, params: { id: 'sys_1' }, query: { workspaceId: 'workspace_1' },
     body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
   })
   assertOkResponse(ok, 200)
@@ -5558,21 +5558,27 @@ async function testReadSmokeRoute() {
     assert.ok(!okStr.includes(leak), `read-smoke response must not leak ${leak}`)
   }
 
+  // write-gated: a read-only integration user cannot trigger the credentialed probe (existence-oracle risk)
+  const denied = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: READ_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
+  })
+  assert.equal(denied.statusCode, 403, 'read user cannot trigger read-smoke (requires integration write)')
+
   // wrong preset → 400 fail-closed
   const badPreset = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
-    user: READ_USER, params: { id: 'sys_1' }, body: { presetId: 'evil.custom.v1', key: 'M-001' },
+    user: WRITE_USER, params: { id: 'sys_1' }, body: { presetId: 'evil.custom.v1', key: 'M-001' },
   })
   assert.equal(badPreset.statusCode, 400, 'unknown preset is fail-closed')
 
   // missing/blank key → 400 fail-closed
   const blankKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
-    user: READ_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: '   ' },
+    user: WRITE_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: '   ' },
   })
   assert.equal(blankKey.statusCode, 400, 'blank key is fail-closed')
 
   // extra body keys → 400 (no custom-preset / object smuggling)
   const extra = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
-    user: READ_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001', object: 'bom' },
+    user: WRITE_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001', object: 'bom' },
   })
   assert.equal(extra.statusCode, 400, 'extra body keys are fail-closed')
 
@@ -5582,7 +5588,7 @@ async function testReadSmokeRoute() {
   })
   const { routes: wkRoutes } = mountRoutes(wrong.services)
   const wk = await invoke(wkRoutes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
-    user: READ_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
+    user: WRITE_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
   })
   assert.equal(wk.statusCode, 409, 'wrong adapter kind is fail-closed')
 
@@ -5597,7 +5603,7 @@ async function testReadSmokeRoute() {
   })
   const { routes: fRoutes } = mountRoutes(failSvc.services)
   const fail = await invoke(fRoutes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
-    user: READ_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
+    user: WRITE_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
   })
   assertOkResponse(fail, 200)
   assert.equal(fail.body.data.ok, false)
