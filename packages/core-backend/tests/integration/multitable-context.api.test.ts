@@ -175,6 +175,7 @@ describe('Multitable context API', () => {
       canManageAutomation: true,
       canExport: true,
       canSendNotification: false,
+      pitResetEnabled: false,
     })
     expect(response.body.data.capabilityOrigin).toEqual({
       source: 'global-rbac',
@@ -360,7 +361,15 @@ describe('Multitable context API', () => {
       canManageAutomation: true,
       canExport: true,
       canSendNotification: true,
+      pitResetEnabled: false,
     })
+    // Route-level contract lock for the new FE signal: flag ON + sheet-admin → pitResetEnabled true (its only true source).
+    // The flag-off cases (false for both admin and non-admin) are locked by the two capabilities exact-matches above.
+    process.env.MULTITABLE_ENABLE_PIT_RESET = 'true'
+    try {
+      const onResp = await request(app).get('/api/multitable/context').query({ sheetId: 'sheet_ops' }).expect(200)
+      expect(onResp.body.data.capabilities.pitResetEnabled).toBe(true)
+    } finally { delete process.env.MULTITABLE_ENABLE_PIT_RESET }
     expect(response.body.data.viewPermissions).toEqual({
       view_grid: {
         canAccess: true,

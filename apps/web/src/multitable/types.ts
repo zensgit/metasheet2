@@ -434,6 +434,9 @@ export interface MetaCapabilities {
   canDeleteRecord: boolean
   canManageFields: boolean
   canManageSheetAccess: boolean
+  /** T8-2 Reset flag-visibility signal (#3239): flag-derived (MULTITABLE_ENABLE_PIT_RESET ∧ sheet-admin), set by
+   *  /context. Optional — absent/false ⇒ the Reset entry is HIDDEN (the FE half of "inert until enabled"). */
+  pitResetEnabled?: boolean
   canManageViews: boolean
   canComment: boolean
   canManageAutomation: boolean
