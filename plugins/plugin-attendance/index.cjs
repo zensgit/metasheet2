@@ -33482,12 +33482,15 @@ module.exports = {
             metadata: parsed.data.metadata ?? normalizeMetadata(existing.metadata),
           }
 
-          // 加班银行 v1-5b-ii [P1 owner #3233]: a CLOSED cycle's period is FROZEN — its settlement snapshot was
-          // computed against this period (v1-5 design-lock §3). Reject changing start_date / end_date /
-          // template_id once status === 'closed' (only a status transition, e.g. closed→archived, is allowed),
-          // so a closed cycle can't be re-hung to a new period while the snapshot stays on the old one. The FK
-          // RESTRICT is the DB backstop; this is the route guard the lock mandates.
-          if (existing.status === 'closed') {
+          // 加班银行 v1-5b-ii [P1/P2 owner #3233]: a POST-CLOSE cycle's period is FROZEN — the settlement snapshot
+          // was computed against this period (v1-5 design-lock §3). The freeze covers BOTH 'closed' AND
+          // 'archived' (archived is ONCE-CLOSED: closed→archived must NOT reopen the period), PLUS a durable
+          // backstop — any cycle that already has settlement rows (covers a reopened-with-settlements edge and a
+          // zero-row closed cycle's later states). Otherwise close→archive→change re-hangs the old snapshot under
+          // a new period. Only status-only transitions and name/metadata edits stay allowed.
+          const cycleIsFrozen = existing.status === 'closed' || existing.status === 'archived'
+            || (await db.query('SELECT 1 FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1 AND org_id = $2 LIMIT 1', [payrollCycleId, orgId])).length > 0
+          if (cycleIsFrozen) {
             const sameDate = (a, b) => {
               const pa = parseDateInput(a)
               const pb = parseDateInput(b)
@@ -33497,7 +33500,7 @@ module.exports = {
               || !sameDate(payload.endDate, existing.end_date)
               || (payload.templateId ?? null) !== (existing.template_id ?? null)
             if (periodChanged) {
-              res.status(409).json({ ok: false, error: { code: 'CYCLE_CLOSED_PERIOD_FROZEN', message: 'A closed payroll cycle has a settled snapshot; start_date / end_date / template_id cannot be changed. Reopen/recompute explicitly.' } })
+              res.status(409).json({ ok: false, error: { code: 'CYCLE_CLOSED_PERIOD_FROZEN', message: 'A settled (closed/archived) payroll cycle has a snapshot; start_date / end_date / template_id cannot be changed. Reopen/recompute explicitly.' } })
               return
             }
           }
@@ -33559,15 +33562,20 @@ module.exports = {
         }
 
         try {
-          // 加班银行 v1-5b-ii [P1 owner #3233]: a CLOSED cycle has (or anchors) an immutable settlement snapshot.
-          // Refuse to delete it (the FK RESTRICT blocks it once settlement rows exist; this guard also covers a
-          // closed cycle that produced no rows yet). Reopen/archive explicitly instead of deleting accounting facts.
+          // 加班银行 v1-5b-ii [P1/P2 owner #3233]: a POST-CLOSE cycle has (or anchors) an immutable settlement
+          // snapshot. Refuse to delete it for status 'closed' OR 'archived' (archived is ONCE-CLOSED:
+          // closed→archived→delete must not fall through), PLUS the durable settlement-rows backstop (the FK
+          // RESTRICT blocks it once rows exist; this also covers a zero-row closed/archived cycle). Reopen/archive
+          // explicitly instead of deleting accounting facts.
           const statusRows = await db.query(
             'SELECT status FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
             [payrollCycleId, orgId]
           )
-          if (statusRows.length && statusRows[0].status === 'closed') {
-            res.status(409).json({ ok: false, error: { code: 'CYCLE_CLOSED_NOT_DELETABLE', message: 'A closed payroll cycle has a settled snapshot and cannot be deleted. Reopen/archive explicitly.' } })
+          const delStatus = statusRows.length ? statusRows[0].status : null
+          const cycleIsFrozen = delStatus === 'closed' || delStatus === 'archived'
+            || (await db.query('SELECT 1 FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1 AND org_id = $2 LIMIT 1', [payrollCycleId, orgId])).length > 0
+          if (cycleIsFrozen) {
+            res.status(409).json({ ok: false, error: { code: 'CYCLE_CLOSED_NOT_DELETABLE', message: 'A settled (closed/archived) payroll cycle has a snapshot and cannot be deleted. Reopen/archive explicitly.' } })
             return
           }
           const rows = await db.query(

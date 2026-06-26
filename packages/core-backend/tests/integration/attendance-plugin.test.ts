@@ -6073,6 +6073,10 @@ attendanceIntegrationDescribe(
       expect((await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${cycleId}`, { method: 'PUT', headers, body: JSON.stringify({ startDate: '2026-10-01', endDate: '2026-10-31' }) })).status).toBe(409)
       expect((await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${cycleId}`, { method: 'DELETE', headers })).status).toBe(409)
       expect((await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${cycleId}`, { method: 'PUT', headers, body: JSON.stringify({ status: 'archived' }) })).status).toBe(200)
+      // [P2 owner #3233] the freeze SURVIVES archive — 'archived' is ONCE-CLOSED, so close→archive must NOT
+      // reopen the period or allow delete: archived period change → 409; archived delete → 409.
+      expect((await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${cycleId}`, { method: 'PUT', headers, body: JSON.stringify({ startDate: '2026-10-01', endDate: '2026-10-31' }) })).status).toBe(409)
+      expect((await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${cycleId}`, { method: 'DELETE', headers })).status).toBe(409)
       // NOTE: the must-pay-from-period-OT-facts end-to-end (the [P1] un-pooled case) is unit-proven in
       // attendance-settlement-compute.test.ts; a wired must-pay e2e needs the OT-segmentation harness — a v1-5b-iii follow-up.
     } finally {
