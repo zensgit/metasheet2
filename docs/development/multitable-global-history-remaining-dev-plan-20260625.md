@@ -12,8 +12,8 @@ So this plan **completes what's authorised or non-destructive** and **plans + pr
 
 | Item | Nature | This plan |
 |---|---|---|
-| T8-2 Reset-to-T | destructive (deletes post-T-created) | **BUILT** — authorised by "开T8-2"; PR #3214, default-OFF flag |
-| record-history `hasMore` keyset | non-destructive (read perf) | **BUILDING** — completable, no semantics change (§3) |
+| T8-2 Reset-to-T | destructive (deletes post-T-created) | **MERGED** (#3214 `f911ed66`) — default-OFF flag; *enabling it is separately gated* |
+| record-history `hasMore` keyset | non-destructive (read perf) | **MERGED** (#3217 `a77b2148`) — no semantics change (§3) |
 | Undelete-execute (resurrect + link-rebuild) | irreversible-adjacent / corruption-risk | **GATED** — plan + sign-off ask (§4a) |
 | T9-W data-loss config ops (field undelete / lossy retype) | irreversible | **GATED** — plan + sign-off ask (§4b) |
 
@@ -24,7 +24,7 @@ T9-W signed-identity-gated + non-destructive T8-1 Revert, `canManageSheetAccess`
 fixes, BS-3.1 all-or-nothing batch restore, R4 diff-render + wire test); docs (canonical design+verification #3178,
 debranded historical docs #3192, acceptance runbook #3196). base-config history resolved N/A.
 
-## 2. T8-2 Reset-to-T — BUILT (PR #3214, behind default-OFF flag)
+## 2. T8-2 Reset-to-T — MERGED (#3214 `f911ed66`, behind default-OFF flag)
 
 **Design.** Reset = T8-1 Revert (revert survivors to their state at T) **+ soft-delete the records created after T**.
 Routes `reset-preview` / `reset-execute` alongside the revert routes. D1 default-OFF flag `MULTITABLE_ENABLE_PIT_RESET`
@@ -39,16 +39,17 @@ Routes `reset-preview` / `reset-execute` alongside the revert routes. D1 default
   diverges → 409, nothing deleted. Prevents deleting a record the actor never saw.
 - *PIT-2 all-or-nothing preflight* — every revert AND every delete target permission/lock-checked before any write;
   one blocker → 409 `RESET_BLOCKED`, zero writes (no partial-skip, unlike Revert).
-- *Atomicity — honest* — revert-first (one `patchRecords` txn) / delete-second (`deleteRecord` per target).
-  `patchRecords` owns its txn, so this is **not** single-tx "untouched"; a delete-phase failure → 500
-  `RESET_DELETE_INCOMPLETE`, sheet **data-safe** (reverts applied + remaining post-T records intact-or-in-trash,
-  re-runnable to convergence). Stated as such, not overclaimed.
+- *Atomicity — single-transaction all-or-nothing* — the survivor reverts (in-tx `UPDATE meta_records` with a
+  version-CAS) AND the post-T-created soft-deletes (to trash) run inside ONE `pool.transaction`; a forced mid-write
+  failure rolls back BOTH → 409, **nothing written** (true "untouched"). *(The merged impl was strengthened past the
+  earlier revert-first/delete-second draft to a single transaction before merge — golden (h) below proves it.)*
 
-**Verification.** 10/10 real-DB goldens (flag-off inert · flag-on soft-delete+revert · PIT-2 zero-writes · ceiling 413 ·
-confirm-absent 400 · delete-set-divergence 409 · revert-first atomicity · PIT-7 no-reveal · D2 editor-forbidden). T8-1
-revert suite 8/8 unregressed. tsc 0. Independently reviewed; the **PIT-2 golden is mutation-proven** (neutering the
-lock check makes golden (c) fail). **Status: awaiting owner review/merge of #3214 + a separate decision to flip the
-flag in any real env.**
+**Verification.** Real-DB goldens (flag-off inert · flag-on soft-delete+revert · PIT-2 zero-writes · ceiling 413 ·
+confirm-absent 400 · delete-set-divergence 409 · **single-transaction atomicity — golden (h): a forced DELETE-revision
+trigger failure rolls back both the reverts AND the delete** · PIT-7 no-reveal · D2 editor-forbidden). T8-1 revert
+suite 8/8 unregressed. tsc 0. Independently reviewed; the **PIT-2 golden is mutation-proven** (neutering the lock check
+makes golden (c) fail). **Status: MERGED (#3214 `f911ed66`). The flag stays default-off — enabling
+`MULTITABLE_ENABLE_PIT_RESET` in any real env is a separate decision (runtime merged ≠ prod enabled).**
 
 ## 3. record-history `hasMore` keyset estimate — DONE (PR #3217)
 
@@ -78,7 +79,8 @@ data-loss. Refused `422` today. **Ask** — explicit sign-off; field-undelete li
 (4a) and may be only partially achievable (schema restored, values not).
 
 ## 5. Bottom line
-T8-2 (authorised) is built + verified + behind a default-OFF flag awaiting your review/merge (#3214); `hasMore`
-(non-destructive) is complete + verified (#3217). Undelete-execute and T9-W data-loss remain **gated on an explicit,
-item-specific sign-off** — this doc resolves their design questions so each is a concrete yes/no when you choose.
-That is the whole remaining-dev map: two built, two planned-and-gated.
+T8-2 (authorised) is **MERGED** (#3214 `f911ed66`) — single-transaction all-or-nothing, behind the default-off flag
+(*enabling `MULTITABLE_ENABLE_PIT_RESET` in any real env is a separate decision*); `hasMore` (non-destructive) is
+**MERGED** (#3217 `a77b2148`). Undelete-execute and T9-W data-loss remain **gated on an explicit, item-specific
+sign-off** — `#3214` merging does NOT open them — and this doc resolves their design questions so each is a concrete
+yes/no when you choose. That is the whole remaining-dev map: two merged, two planned-and-gated.
