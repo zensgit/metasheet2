@@ -15083,6 +15083,170 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('H1 scheduler-scope smoke keeps approve/import reachable for scope-only actors', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const orgId = 'default'
+    const actorId = `attendance-h1-scope-actor-${runSuffix}`
+    const targetId = `attendance-h1-scope-target-${runSuffix}`
+    const outsideTargetId = `attendance-h1-scope-outside-${runSuffix}`
+    const requestIds: string[] = []
+    const approvalIds: string[] = []
+    const scopeIds: string[] = []
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const pool = new Pool({ connectionString: dbUrl })
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(actorId)}&roles=user&perms=attendance:read,attendance:write`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) {
+      await pool.end()
+      return
+    }
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+
+    const createPendingLeaveRequest = async (userId: string, workDate: string): Promise<string> => {
+      const approvalId = `attendance-h1-scope-approval-${randomUUID()}`
+      const requestId = randomUuidV4()
+      approvalIds.push(approvalId)
+      requestIds.push(requestId)
+      await pool.query(
+        `INSERT INTO approval_instances
+           (id, status, version, current_step, total_steps, current_node_key, metadata)
+         VALUES ($1, 'pending', 0, 0, 0, 'attendance_request_step_0', '{}'::jsonb)`,
+        [approvalId]
+      )
+      await pool.query(
+        `INSERT INTO attendance_requests
+           (id, org_id, user_id, work_date, request_type, status, reason, metadata, approval_instance_id)
+         VALUES ($1, $2, $3, $4, 'leave', 'pending', $5, $6::jsonb, $7)`,
+        [
+          requestId,
+          orgId,
+          userId,
+          workDate,
+          `H1 scheduler scope smoke ${runSuffix}`,
+          JSON.stringify({ minutes: 60, leaveType: { code: 'personal_leave' } }),
+          approvalId,
+        ]
+      )
+      return requestId
+    }
+
+    try {
+      process.env.RBAC_BYPASS = 'false'
+      await pool.query(
+        `INSERT INTO permissions (code, name, description)
+         VALUES
+           ('attendance:read', 'Attendance Read', 'Read attendance data'),
+           ('attendance:write', 'Attendance Write', 'Write attendance data'),
+           ('attendance:approve', 'Attendance Approve', 'Approve attendance requests'),
+           ('attendance:import', 'Attendance Import', 'Import attendance data'),
+           ('attendance:admin', 'Attendance Admin', 'Administer attendance')
+         ON CONFLICT (code) DO NOTHING`
+      )
+      await pool.query('DELETE FROM user_permissions WHERE user_id = $1', [actorId])
+      await pool.query('DELETE FROM user_roles WHERE user_id = $1', [actorId])
+
+      const centralGrantsBefore = await pool.query(
+        `SELECT permission_code
+         FROM user_permissions
+         WHERE user_id = $1
+           AND permission_code = ANY($2::text[])`,
+        [actorId, ['attendance:approve', 'attendance:import', 'attendance:admin']]
+      )
+      expect(centralGrantsBefore.rows).toHaveLength(0)
+      const adminRolesBefore = await pool.query(
+        `SELECT role_id FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
+        [actorId]
+      )
+      expect(adminRolesBefore.rows).toHaveLength(0)
+
+      const targetRequestId = await createPendingLeaveRequest(targetId, '2036-06-26')
+      const noScopeApprove = await requestJson(`${baseUrl}/api/attendance/requests/${targetRequestId}/approve`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ comment: 'no scope yet' }),
+      })
+      expect(noScopeApprove.status, noScopeApprove.raw).toBe(403)
+      expect((noScopeApprove.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULER_SCOPE_FORBIDDEN')
+
+      const scopeId = randomUuidV4()
+      scopeIds.push(scopeId)
+      await pool.query(
+        `INSERT INTO attendance_scheduler_scopes
+           (id, org_id, subject_type, subject_ref, actions, scope, is_active, created_by, updated_by)
+         VALUES ($1, $2, 'user', $3, ARRAY['approve','import']::text[], $4::jsonb, true, 'integration-test', 'integration-test')`,
+        [scopeId, orgId, actorId, JSON.stringify({ userIds: [targetId] })]
+      )
+
+      const approveInsideScope = await requestJson(`${baseUrl}/api/attendance/requests/${targetRequestId}/approve`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ comment: 'scope-only approve' }),
+      })
+      expect(approveInsideScope.status, approveInsideScope.raw).toBe(200)
+      expect((approveInsideScope.body as { data?: { status?: string } } | undefined)?.data?.status).toBe('approved')
+
+      const outsideRequestId = await createPendingLeaveRequest(outsideTargetId, '2036-06-27')
+      const approveOutsideScope = await requestJson(`${baseUrl}/api/attendance/requests/${outsideRequestId}/approve`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ comment: 'outside scope' }),
+      })
+      expect(approveOutsideScope.status, approveOutsideScope.raw).toBe(403)
+      expect((approveOutsideScope.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULER_SCOPE_FORBIDDEN')
+      const outsideStatus = (await pool.query('SELECT status FROM attendance_requests WHERE id = $1', [outsideRequestId])).rows[0]?.status
+      expect(outsideStatus).toBe('pending')
+
+      const prepareImport = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+        method: 'POST',
+        headers,
+        body: '{}',
+      })
+      expect(prepareImport.status, prepareImport.raw).toBe(200)
+      expect((prepareImport.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken).toEqual(expect.any(String))
+
+      const centralGrantsAfter = await pool.query(
+        `SELECT permission_code
+         FROM user_permissions
+         WHERE user_id = $1
+           AND permission_code = ANY($2::text[])`,
+        [actorId, ['attendance:approve', 'attendance:import', 'attendance:admin']]
+      )
+      expect(centralGrantsAfter.rows).toHaveLength(0)
+      const adminRolesAfter = await pool.query(
+        `SELECT role_id FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
+        [actorId]
+      )
+      expect(adminRolesAfter.rows).toHaveLength(0)
+    } finally {
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await pool.query('DELETE FROM attendance_import_tokens WHERE user_id = $1', [actorId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_scheduler_scopes WHERE id = ANY($1::uuid[])', [scopeIds]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id = ANY($1::text[])', [[targetId, outsideTargetId]]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = ANY($1::text[])', [[targetId, outsideTargetId]]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_events WHERE user_id = ANY($1::text[])', [[targetId, outsideTargetId]]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_records WHERE user_id = ANY($1::text[])', [[targetId, outsideTargetId]]).catch(() => undefined)
+      if (requestIds.length) {
+        await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [requestIds]).catch(() => undefined)
+      }
+      if (approvalIds.length) {
+        await pool.query('DELETE FROM approval_records WHERE instance_id = ANY($1::text[])', [approvalIds]).catch(() => undefined)
+        await pool.query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [approvalIds]).catch(() => undefined)
+      }
+      await pool.query('DELETE FROM user_permissions WHERE user_id = $1', [actorId]).catch(() => undefined)
+      await pool.query('DELETE FROM user_roles WHERE user_id = $1', [actorId]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('effective-calendar role/roleTags override matches DB-backed role context in resolver mode', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL

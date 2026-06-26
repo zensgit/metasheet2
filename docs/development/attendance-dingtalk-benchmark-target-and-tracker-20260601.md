@@ -11,7 +11,7 @@
 
 | 视野 | 范围 | 量级 | 现在做？ |
 |---|---|---|---|
-| **H1 — scheduler-scope 收尾** | 把已建成的子管理员范围/enforcement 线收干净 | **3–7 人天** | 是，零散收尾（§4） |
+| **H1 — scheduler-scope 收尾** | 把已建成的子管理员范围/enforcement 线收干净 | **3–7 人天** | ✅ scope-only smoke 已补（§4）；剩余仅 demand-gated picker / import 扩面 |
 | **H2 — 考勤核心成熟度** | **不追全量钉钉**，只补"真实客户会痛"的核心（MUST/SHOULD，§1） | **3–5 周** | **是，最值得做的下一阶段** |
 | **H3 — 钉钉级高级** | 调度/换班/多门店/设备围栏/人脸/算薪… | **2–4 月+** | 否，不一口吞（拆 3a 可建 / 3b 不自研，§6 末） |
 
@@ -322,7 +322,7 @@
 
 | 项 | 量 | 备注（含审计 `/tmp/attendance-scheduler-scope-enforcement-audit-20260601.md` 收紧） |
 |---|---|---|
-| scoped 非管理员真实 UX smoke | **0.5–1.5 天** | 必须 seed "**有 scope、无中央 `attendance:import`/`approve`**" 的子管理员——证明 scope 分支**可达、非死代码**（`fullImport`/`canAccessOtherUsers` 会短路）；并核 provisioning 不会给同一人同时发中央权限+scope（否则 scope 在 import/approve 上被静默忽略） |
+| scoped 非管理员真实 UX smoke | ✅ **closed 2026-06-26** | Real-DB route smoke seeds a scope-only actor with **no central `attendance:approve` / `attendance:import` / `attendance:admin` DB grants and no `admin` role**, proves no-scope approve 403 → scoped approve 200 → out-of-scope approve 403, and scoped `/api/attendance/import/prepare` 200; frontend regression also proves scheduler-scope creation does **not** call provisioning role/permission grant endpoints. This locks the `fullImport` / `canAccessOtherUsers` non-short-circuit branch as reachable. |
 | dept/roles/roleTags 真 picker | **0–4 天** | **roles/roleTags 当前无可枚举源**（开放词汇）→ 大概率停在 chips、性价比低、可不做；departments 若有部门树才值得做 |
 | async import/batches/rollback/templates/integrations 开放给 scoped actor | design-lock **0.5–1 天**；接线另 **3–6 天** | 当前是 `withAttendanceImportPermission`（中央权限）专属、自洽两层模型。**倾向 design-lock 拍板后 DEFER 接线**（YAGNI，除非客户明确要） |
 
