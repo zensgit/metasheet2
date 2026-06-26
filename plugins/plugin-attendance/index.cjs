@@ -11634,23 +11634,38 @@ function resolveFullAttendanceEligible(summary, policy) {
 }
 
 // 加班银行 v1-5b — pure settlement-row compute (design-lock §5). Per-user, at cycle close.
-// UNCONDITIONAL (advisor #1 / §6): must-pay (statutory_holiday OT) is a LEGAL fact, NOT a bank feature — it is
-// NOT gated on overtimeBankPolicy.enabled, so a bank-off org with statutory holiday OT still gets a must-pay
-// row. convertible = banked comp_time REMAINING by source (workday / restday / legacy_unsourced; statutory is
-// NEVER convertible — never banked). must-pay = the cycle-PERIOD statutory holiday OT, computed FROM PERIOD
-// FACTS (holidayOvertimeMinutes), NEVER from a balance lot — the poison-lot proof: a bogus statutory_holiday
-// balance lot in compTimeRemainingBySource cannot move must_pay (this loop never reads it for must-pay, and
-// statutory isn't a convertible source). NO amounts (倍率/金额 = payroll).
-function buildCycleSettlementRows({ holidayOvertimeMinutes, compTimeRemainingBySource } = {}) {
+// Inputs: `periodOtBySource` = the cycle-PERIOD OT facts by source (workday/restday/statutory_holiday minutes);
+// `compTimeRemainingBySource` = the close-time banked comp_time remaining by source; `pooledSources` = the
+// EFFECTIVE pooledSources from the snapshotted overtimeBankPolicy.
+//   convertible = banked comp_time REMAINING by source (workday/restday/legacy_unsourced; statutory NEVER
+//     convertible — never banked).
+//   must-pay = period OT that was NOT banked, computed FROM PERIOD FACTS (never balance lots):
+//     • statutory_holiday: ALWAYS must-pay (§6 legal floor, never poolable) — UNCONDITIONAL (advisor #1):
+//       not gated on policy.enabled, so a bank-off org with holiday OT still gets a must-pay row;
+//     • workday/restday: must-pay = the period source OT IFF that source is NOT in the effective pooledSources
+//       (un-pooled OT was never granted as comp_time → must be paid). pooled → it became comp_time
+//       (convertible), so 0 must-pay. [P1 owner #3228: this is what was missing — un-pooled non-statutory OT.]
+//       bank-off / pooledSources=[] → every non-statutory source is un-pooled → all must-pay.
+//   POISON-LOT (§7): must-pay reads ONLY period facts; a bogus statutory_holiday BALANCE lot in
+//   compTimeRemainingBySource cannot move must_pay (statutory is computed from period facts + never convertible).
+//   NO amounts (倍率/金额 = payroll).
+function buildCycleSettlementRows({ periodOtBySource, compTimeRemainingBySource, pooledSources } = {}) {
+  const period = periodOtBySource && typeof periodOtBySource === 'object' ? periodOtBySource : {}
   const banked = compTimeRemainingBySource && typeof compTimeRemainingBySource === 'object' ? compTimeRemainingBySource : {}
+  const pooled = new Set(Array.isArray(pooledSources) ? pooledSources : [])
   const m = (v) => Math.max(0, Math.floor(Number(v) || 0))
   const rows = []
-  for (const source of ['workday', 'restday', 'legacy_unsourced']) {
+  for (const source of ['workday', 'restday']) {
     const convertible = m(banked[source])
-    if (convertible > 0) rows.push({ source, convertibleMinutes: convertible, mustPayMinutes: 0 })
+    const mustPay = pooled.has(source) ? 0 : m(period[source])
+    if (convertible > 0 || mustPay > 0) rows.push({ source, convertibleMinutes: convertible, mustPayMinutes: mustPay })
   }
-  const mustPay = m(holidayOvertimeMinutes)
-  if (mustPay > 0) rows.push({ source: 'statutory_holiday', convertibleMinutes: 0, mustPayMinutes: mustPay })
+  // statutory_holiday: always must-pay from period facts; never convertible (poison-lot guard).
+  const statutoryMustPay = m(period.statutory_holiday)
+  if (statutoryMustPay > 0) rows.push({ source: 'statutory_holiday', convertibleMinutes: 0, mustPayMinutes: statutoryMustPay })
+  // legacy_unsourced: historical banked balance only (no period fact) → convertible.
+  const legacyConvertible = m(banked.legacy_unsourced)
+  if (legacyConvertible > 0) rows.push({ source: 'legacy_unsourced', convertibleMinutes: legacyConvertible, mustPayMinutes: 0 })
   return rows
 }
 
