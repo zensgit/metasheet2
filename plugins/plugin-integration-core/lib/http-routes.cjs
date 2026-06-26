@@ -16,6 +16,7 @@ const ROUTES = [
   ['GET', '/api/integration/external-systems/:id', 'externalSystemsGet'],
   ['DELETE', '/api/integration/external-systems/:id', 'externalSystemsDelete'],
   ['POST', '/api/integration/external-systems/:id/test', 'externalSystemsTest'],
+  ['POST', '/api/integration/external-systems/:id/read-smoke', 'externalSystemReadSmoke'],
   ['GET', '/api/integration/external-systems/:id/objects', 'externalSystemObjects'],
   ['GET', '/api/integration/external-systems/:id/schema', 'externalSystemSchema'],
   ['GET', '/api/integration/pipelines', 'pipelinesList'],
@@ -77,6 +78,7 @@ const { projectRecordForBody, findUnfilledPlaceholders, applyReferenceShape, isB
 const { resolveReferenceRuleValue } = require('./reference-mapping-resolver.cjs')
 // DF-T3b-2b: live mapping-sheet bulk-read → referenceMappingIndexes for the preview seam (read-only).
 const { buildReferenceMappingIndexes } = require('./reference-mapping-source.cjs')
+const { getReadSmokePreset, buildReadSmokeRequest, readSmokeSuccessEvidence, readSmokeErrorEvidence } = require('./read-smoke.cjs')
 const { K3_REFERENCE_MAPPING_TEMPLATES } = require('./reference-mapping-templates.cjs')
 const { listReferenceIntegrationTemplates } = require('./reference-integration-templates.cjs')
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
@@ -1593,6 +1595,50 @@ function createHandlers(services, options = {}) {
         ...result,
         system: redactSystemForTest(updatedSystem),
       })
+    },
+
+    // #1709 follow-up: generic read-smoke preset route (v1: K3 Material/GetDetail preset only). Built-in
+    // preset catalog ONLY — no user/request-supplied preset. Read-only: forced single read, no list/
+    // pagination/cursor/watermark/BOM, no Save/Submit/Audit, no production write. Loads credentials via the
+    // backend getExternalSystemForAdapter context (never the public, credential-stripped response) and never
+    // modifies the system's role/config. Evidence is values-free.
+    async externalSystemReadSmoke(req, res) {
+      // Requires WRITE access: although the operation is read-only, this is an active credentialed outbound
+      // probe of K3 and returns an existence signal (recordPresent) a read user could enumerate against keys.
+      // Per the conservative discipline it is a connection/probe action → operator/integration-write only.
+      requireAccess(req, 'write')
+      // Strict body: only { presetId, key }. The preset (kind/object/read shape) comes from the catalog, not
+      // the request, so a custom preset config can never be smuggled in.
+      const body = isPlainObject(requestBody(req)) ? requestBody(req) : {}
+      const extraKeys = Object.keys(body).filter((k) => k !== 'presetId' && k !== 'key')
+      if (extraKeys.length > 0) {
+        throw new HttpRouteError(400, 'READ_SMOKE_BODY_INVALID', 'read-smoke body allows only presetId and key')
+      }
+      const preset = getReadSmokePreset(firstString(body.presetId))
+      if (!preset) {
+        throw new HttpRouteError(400, 'READ_SMOKE_PRESET_UNKNOWN', 'unknown read-smoke preset')
+      }
+      const key = firstString(body.key)
+      if (!key) {
+        throw new HttpRouteError(400, 'READ_SMOKE_KEY_REQUIRED', 'read-smoke key is required')
+      }
+      // Backend credential context — NOT the public, credential-stripped system response.
+      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
+        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+        : externalSystems.getExternalSystem.bind(externalSystems)
+      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      // Kind must match the preset (fail-closed). Read-only: the system role/config is never modified here.
+      if (!system || system.kind !== preset.requiredKind) {
+        throw new HttpRouteError(409, 'READ_SMOKE_KIND_MISMATCH', 'external system kind does not match the preset')
+      }
+      const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
+      // Forced single read only; values-free evidence on success or failure (never key/raw/values/credentials).
+      try {
+        const result = await adapter.read(buildReadSmokeRequest(preset, key))
+        return sendOk(res, readSmokeSuccessEvidence(preset, result))
+      } catch (error) {
+        return sendOk(res, readSmokeErrorEvidence(preset, error))
+      }
     },
 
     async externalSystemObjects(req, res) {
