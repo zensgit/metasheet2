@@ -10,7 +10,7 @@ remaining boundaries that should not be silently expanded.
 - `#3114` ratified the amount-tier design lock.
 - `#3120` restored the review fixes: applicant-entered amount is a known control limitation, the
   reimbursement higher-tier node defaults to `dept_head`, and the non-goals clarify that this is not a
-  tamper-proof financial control.
+  consistency guard, not a truthfulness guarantee.
 - `#3124` shipped Gate-A / G-5: approval-node sources inside preserved complex graphs are editable
   without changing topology.
 - `#3132` shipped the amount-tier runtime presets and backend acceptance coverage.
@@ -123,9 +123,9 @@ The complex-graph authoring chain is documented in
 
 ## Known limits
 
-- The amount gate reads the applicant-entered top-level `amount`. Until detail-row auto-sum or a
-  server-side total check exists, this is an authoring/routing aid, not a tamper-proof financial
-  control.
+- The amount gate reads the applicant-entered top-level `amount`. The server-side total check binds that
+  total to the detail-row sum — a consistency guard, not a truthfulness guarantee — and detail-row
+  auto-sum makes the total read-only, so the decoupled-total bypass is closed.
 - No `job_title` or `rank` resolver was added. Teams that need title-like approval should model it as
   a configured role.
 - Topology add/remove is available through the explicit visual-authoring tools; the amount-tier preset

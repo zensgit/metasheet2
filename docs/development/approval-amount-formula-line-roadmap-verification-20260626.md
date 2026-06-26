@@ -16,7 +16,7 @@ design-lock-first / staged-opt-in discipline this line has held throughout.)
 ### Shipped (design-lock → runtime, all on main)
 | Capability | Design-lock | Runtime |
 |---|---|---|
-| Server-side amount total-check (tamper-proof routing) | #3161 (open draft; see closeout below) | #3176 |
+| Server-side amount total-check (consistency-checked routing) | #3161 (open draft; see closeout below) | #3176 |
 | W7 observability (rule-save fail-fast + step-result skip-reason) | — | #3182 |
 | Amount-tier presets (purchase / reimbursement) | amount-tier-presets lock | #3132 / #3183 |
 | Detail-row **total** auto-sum (read-only auto-fill) | #3189 | #3198 |
@@ -26,7 +26,7 @@ design-lock-first / staged-opt-in discipline this line has held throughout.)
 
 The money chain is closed end-to-end: **derive line (qty × unit_price) → sum total → backend
 total-check**; formula conditions route on those backend-verified values; the backend remains the sole
-tamper-proof boundary.
+consistency boundary (binds total to detail sum).
 
 ## Remaining development — the plan (each item: its unblocker + who owns the call)
 
