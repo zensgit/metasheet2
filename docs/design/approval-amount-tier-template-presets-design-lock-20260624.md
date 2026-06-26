@@ -29,13 +29,13 @@ approval-result write-back.
    The branch condition reads the top-level total field (`amount`). AS BUILT (updated 2026-06-26,
    post-closeout): the detail total is now read-only **auto-filled** from the detail rows (#3198) and a
    server-side **total-check** (#3176) rejects any total ≠ the detail sum — so the backend total-check is
-   the tamper-proof boundary and the amount tier routes on a verified value. The control gap described
+   the consistency boundary (binds the total to the detail-row sum) and the amount tier routes on a verified value. The control gap described
    below is CLOSED.
 
    (Historical — the framing this slice shipped with at authoring time: detail-row amounts were not
    auto-summed in v1 and the applicant-entered total was the branch input; that was a KNOWN CONTROL
    LIMITATION — an applicant could under-state the total to route around the higher-amount tier, making
-   the amount tier an authoring/routing aid, not a tamper-proof financial control, until auto-sum or a
+   the amount tier an authoring/routing aid, a consistency guard, not a truthfulness guarantee, until auto-sum or a
    server-side total-check closed the gap. Auto-sum #3198 + total-check #3176 have now closed it; see the
    amount/formula line roadmap #3237.)
 
@@ -174,7 +174,7 @@ fields. W7 remains gated on a concrete write-back scenario.
 ## Non-Goals
 
 - No job-title/rank resolver in this slice.
-- No automatic detail-row sum (so the amount gate is not a tamper-proof control — see Decision 1).
+- No automatic detail-row sum (so the amount gate is a consistency guard, not a truthfulness guarantee — see Decision 1).
 - No topology add/remove UI.
 - No generic rule builder outside approval template authoring.
 - No approval-result write-back.

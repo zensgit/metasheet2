@@ -2,16 +2,16 @@
 
 Status: RATIFIED — SHIPPED (PR #3198, read-only auto-fill v1). FE-only runtime: `useAutoSumTotal` derives
 the top-level total from the detail rows (money-safe, round-each-cell-then-sum), read-only; the backend
-total-check (#3176) remains the tamper-proof backstop. Per-row line-subtotal derivation followed as its
+total-check (#3176) remains the consistency backstop (binds total to detail sum). Per-row line-subtotal derivation followed as its
 own lock (#3203) + runtime (#3205).
 
 Grounding: the server-side amount total-check (design-lock #3161, shipped #3176/#3183) made amount-tier
-routing tamper-resistant — the backend rejects a `createApproval` whose top-level total ≠ the money-safe
+routing consistency-checked — the backend rejects a `createApproval` whose top-level total ≠ the money-safe
 sum of the detail-row amounts, and the amount-tier presets declare the
 `amountConsistencyCheck { totalFieldId, detailFieldId, amountColumnId }` mapping. That closed the
 *defense* side. This lock adds the *ergonomics* side: the submitter no longer types the total at all — the
 fill UI sums the detail rows into the total automatically. Together they form one loop: **auto-fill
-(convenience) + total-check (tamper-proof)**. This lock does NOT relax or replace the backend check.
+(convenience) + total-check (binds total to detail sum)**. This lock does NOT relax or replace the backend check.
 
 ## Goal
 
