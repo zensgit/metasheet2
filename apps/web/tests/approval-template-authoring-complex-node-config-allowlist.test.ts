@@ -7,8 +7,8 @@ import { unsupportedTemplateAuthoringReason } from '../src/approvals/templateAut
 // rebuilds each from a fixed per-type shape (ApprovalProductService.ts) and DROPS any other key —
 // top-level OR nested (condition branches[].rules[]). `complexNodeConfigHasBackendDrop` now fails
 // closed for EVERY node type, so an unknown key can't silently flatten on save while the FE
-// deep-equal round-trip looks clean. FC-1 formula branches are backend-preserved but still
-// fail-closed here until FC-2 authoring can round-trip them. Pure helper test (no .vue) → runs
+// deep-equal round-trip looks clean. FC-2 formula branches are authorable and therefore allowed
+// when they match the backend-preserved shape. Pure helper test (no .vue) → runs
 // under approval-web-guard.
 
 function tpl(approvalGraph: ApprovalGraph): ApprovalTemplateDetailDTO {
@@ -66,8 +66,11 @@ describe('complex node config fail-closed — condition (recurses config → bra
   it('flags an unknown rule key', () => {
     expect(cond({ edgeKey: 'e', rules: [{ fieldId: 'amount', operator: 'gt', value: 1, futureFlag: true }] })).not.toBeNull()
   })
-  it('flags a backend-supported formula branch until FC-2 can round-trip it', () => {
-    expect(cond({ edgeKey: 'e', rules: [], formula: { expression: '{amount} >= 1000' } })).not.toBeNull()
+  it('allows a known formula branch shape now that FC-2 can round-trip it', () => {
+    expect(cond({ edgeKey: 'e', rules: [], formula: { expression: '{amount} >= 1000' } })).toBeNull()
+  })
+  it('flags an unknown formula key', () => {
+    expect(cond({ edgeKey: 'e', rules: [], formula: { expression: '{amount} >= 1000', futureFlag: true } })).not.toBeNull()
   })
   it('allows a known condition (conjunction + a FREE-FORM rule value — value is a leaf, not shape-checked)', () => {
     expect(cond({ edgeKey: 'e', conjunction: 'and', rules: [{ fieldId: 'amount', operator: 'in', value: { complex: ['object', 'leaf'] } }] })).toBeNull()

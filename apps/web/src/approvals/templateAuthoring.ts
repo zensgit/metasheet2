@@ -58,6 +58,7 @@ export type {
   ConditionRuleOperator,
 } from './conditionEdit'
 export { CONDITION_RULE_OPERATORS } from './conditionEdit'
+export { approvalFormulaInsertOptions } from './conditionEdit'
 export type { ParallelEdits, ParallelNodeEdit } from './parallelEdit'
 export { PARALLEL_JOIN_MODES } from './parallelEdit'
 export type { CcEdits, CcNodeEdit } from './ccEdit'
@@ -550,8 +551,7 @@ function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): b
 // risk as approval): cc → {targetType, targetIds}; parallel → {branches, joinMode, joinNodeKey};
 // condition → {branches, defaultEdgeKey} with each branch {edgeKey, conjunction?, rules, formula?}
 // and each rule {fieldId, operator, value?} (the rule `value` is a free leaf, NOT shape-checked);
-// start/end → {}. Formula branches are backend-preserved after FC-1, but the current G-2 editor
-// cannot round-trip them, so they remain fail-closed here until FC-2 formula authoring ships.
+// start/end → {}. Formula branches are FC-2 authorable and round-trip through `conditionEdit.ts`.
 const BACKEND_CC_CONFIG_KEYS = ['targetType', 'targetIds']
 const BACKEND_PARALLEL_CONFIG_KEYS = ['branches', 'joinMode', 'joinNodeKey']
 const BACKEND_CONDITION_CONFIG_KEYS = ['branches', 'defaultEdgeKey']
@@ -583,7 +583,6 @@ function complexNodeConfigHasBackendDrop(node: ApprovalNode): boolean {
           if (!isPlainRecord(branch) || hasKeyOutside(branch, BACKEND_CONDITION_BRANCH_KEYS)) return true
           if (branch.formula !== undefined) {
             if (!isPlainRecord(branch.formula) || hasKeyOutside(branch.formula, BACKEND_CONDITION_FORMULA_KEYS)) return true
-            return true
           }
           const rules = branch.rules
           if (Array.isArray(rules)) {
