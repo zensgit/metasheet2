@@ -5508,11 +5508,27 @@ async function testTemplatesCrudRoutes() {
 async function testReadSmokeRoute() {
   const readArgs = []
   const writeCalls = []
+  const storedK3System = {
+    id: 'sys_1',
+    tenantId: 'tenant_1',
+    kind: 'erp:k3-wise-webapi',
+    role: 'target',
+    credentials: { bearerToken: 'secret-token' },
+    config: {
+      objects: {
+        material: {
+          operations: ['upsert'],
+          savePath: '/K3API/Material/Save',
+        },
+      },
+    },
+  }
+  const storedK3SystemBefore = clone(storedK3System)
   const { calls, services } = createMockServices({
     externalSystemRegistry: {
       async getExternalSystemForAdapter(input) {
         calls.push(['getExternalSystemForAdapter', input])
-        return { id: input.id, tenantId: 'tenant_1', kind: 'erp:k3-wise-webapi', role: 'target', credentials: { bearerToken: 'secret-token' } }
+        return storedK3System
       },
     },
     adapterRegistry: {
@@ -5551,7 +5567,15 @@ async function testReadSmokeRoute() {
   assert.deepEqual(readArgs[0], { object: 'material', filters: { FNumber: 'M-001' } })
   assert.equal(writeCalls.length, 0, 'no upsert/save/submit/audit called')
   assert.ok(findCall(calls, 'getExternalSystemForAdapter'), 'used backend getExternalSystemForAdapter')
-  assert.deepEqual(findCall(calls, 'createAdapter')[1].credentials, { bearerToken: 'secret-token' })
+  const adapterSystem = findCall(calls, 'createAdapter')[1]
+  assert.deepEqual(adapterSystem.credentials, { bearerToken: 'secret-token' })
+  assert.deepEqual(adapterSystem.config.objects.material, {
+    operations: ['upsert', 'read'],
+    savePath: '/K3API/Material/Save',
+    readPath: '/K3API/Material/GetDetail',
+    readMethod: 'POST',
+  }, 'read-smoke applies a non-persisted Material/GetDetail overlay before adapter creation')
+  assert.deepEqual(storedK3System, storedK3SystemBefore, 'stored external system object is not mutated')
   assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0, 'read-smoke never persists/alters the system')
   const okStr = JSON.stringify(ok.body.data)
   for (const leak of ['M-001', 'SECRET-NAME', 'secret-token', 'k3host']) {

@@ -10,6 +10,7 @@ const {
   READ_SMOKE_PRESETS,
   getReadSmokePreset,
   buildReadSmokeRequest,
+  applyReadSmokePresetOverlay,
   readSmokeSuccessEvidence,
   readSmokeErrorEvidence,
 } = require(path.join(__dirname, '..', 'lib', 'read-smoke.cjs'))
@@ -20,6 +21,15 @@ const PRESET = getReadSmokePreset('k3wise.material-detail.v1')
 assert.ok(PRESET, 'k3wise.material-detail.v1 is registered')
 assert.equal(PRESET.requiredKind, 'erp:k3-wise-webapi')
 assert.equal(PRESET.object, 'material')
+assert.deepEqual(PRESET.readConfigOverlay, {
+  objects: {
+    material: {
+      operations: ['read'],
+      readPath: '/K3API/Material/GetDetail',
+      readMethod: 'POST',
+    },
+  },
+})
 // unknown / empty / non-string / prototype keys → undefined (route fail-closes)
 assert.equal(getReadSmokePreset('evil.custom.v1'), undefined)
 assert.equal(getReadSmokePreset(''), undefined)
@@ -36,6 +46,38 @@ assert.equal(reqObj.cursor, undefined)
 assert.equal(reqObj.limit, undefined)
 assert.equal(reqObj.watermark, undefined)
 assert.equal(reqObj.pagination, undefined)
+
+// --- non-persisted read config overlay: target-side Save config is preserved, read config is in-memory only ---
+const storedSystem = {
+  id: 'sys_1',
+  kind: 'erp:k3-wise-webapi',
+  role: 'target',
+  credentials: { bearerToken: 'secret-token' },
+  config: {
+    objects: {
+      material: {
+        operations: ['upsert'],
+        savePath: '/K3API/Material/Save',
+      },
+      salesOrder: {
+        operations: ['upsert'],
+        savePath: '/K3API/SalesOrder/Save',
+      },
+    },
+  },
+}
+const storedBefore = JSON.parse(JSON.stringify(storedSystem))
+const overlayedSystem = applyReadSmokePresetOverlay(storedSystem, PRESET)
+assert.notEqual(overlayedSystem, storedSystem, 'overlay returns an in-memory clone')
+assert.deepEqual(storedSystem, storedBefore, 'stored system is not mutated')
+assert.deepEqual(overlayedSystem.config.objects.material, {
+  operations: ['upsert', 'read'],
+  savePath: '/K3API/Material/Save',
+  readPath: '/K3API/Material/GetDetail',
+  readMethod: 'POST',
+})
+assert.deepEqual(overlayedSystem.config.objects.salesOrder, storedSystem.config.objects.salesOrder, 'unrelated objects are preserved')
+assert.equal(applyReadSmokePresetOverlay(null, PRESET), null)
 
 // --- success evidence: recordPresent + referenceObjectCount; values-free ---
 const okResult = {
