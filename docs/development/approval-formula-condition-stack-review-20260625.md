@@ -111,7 +111,8 @@ Evidence:
 
 - Formula-condition preset examples sit on top of the FC-1/FC-2 contract.
 - They do not introduce a new evaluator or a new graph model.
-- The stack remains draft, so these examples are not yet a shipped user promise.
+- Now shipped on main as illustrative presets riding the FC-1/FC-2 contract — not a new capability;
+  whether they become a committed user-facing default remains a separate product decision.
 
 Verification:
 
