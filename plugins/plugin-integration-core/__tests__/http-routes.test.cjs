@@ -5582,6 +5582,30 @@ async function testReadSmokeRoute() {
     assert.ok(!okStr.includes(leak), `read-smoke response must not leak ${leak}`)
   }
 
+  // C2: the forward { presetId, intent } shape is accepted and drives the SAME single read as { presetId, key }
+  const okIntent = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: WRITE_USER, params: { id: 'sys_1' },
+    body: { presetId: 'k3wise.material-detail.v1', intent: { object: 'material', mode: 'single_record_detail', key: 'M-002' } },
+  })
+  assertOkResponse(okIntent, 200)
+  assert.equal(okIntent.body.data.ok, true)
+  assert.equal(okIntent.body.data.recordPresent, true)
+  assert.deepEqual(readArgs[readArgs.length - 1], { object: 'material', filters: { FNumber: 'M-002' } }, 'intent shape drives the same single FNumber read')
+  assert.ok(!JSON.stringify(okIntent.body.data).includes('M-002'), 'intent-shape response is values-free')
+
+  // C2: LIST/BOM cannot enter via intent — fail-closed before any system load
+  const intentBom = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: WRITE_USER, params: { id: 'sys_1' },
+    body: { presetId: 'k3wise.material-detail.v1', intent: { object: 'bom', mode: 'single_record_detail', key: 'M-003' } },
+  })
+  assert.equal(intentBom.statusCode, 400, 'intent.object=bom is fail-closed (not allowlisted)')
+  // C2: raw config in intent (readPath) cannot ride in
+  const intentRaw = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: WRITE_USER, params: { id: 'sys_1' },
+    body: { presetId: 'k3wise.material-detail.v1', intent: { object: 'material', mode: 'single_record_detail', key: 'M-004', readPath: '/evil' } },
+  })
+  assert.equal(intentRaw.statusCode, 400, 'raw config in intent is fail-closed')
+
   // write-gated: a read-only integration user cannot trigger the credentialed probe (existence-oracle risk)
   const denied = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
     user: READ_USER, params: { id: 'sys_1' }, body: { presetId: 'k3wise.material-detail.v1', key: 'M-001' },
