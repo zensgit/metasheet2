@@ -1,8 +1,10 @@
 # Requester / org-attribute formula conditions — Design Lock
 
-Status: RATIFIED — RUNTIME NOT BUILT. Owner decisions RESOLVED 2026-06-26 (see bottom): v1 set =
-level + department + role; level provider-native-ordered; department = name. First build slice = RA-1a
-(level + department); role + `in` + array literals = RA-1b.
+Status: RATIFIED — RUNTIME NOT BUILT. Owner decisions RESOLVED 2026-06-26 + a SCOPE CORRECTION 2026-06-26
+(see bottom): RA-1a ships **`requester.department` ONLY** — `requester.level` is DEFERRED because the
+directory has no seniority-level source (Decision 2). `level`/`role`/`title`/`in`/array literals/unknown
+attr all parse/publish fail-closed in RA-1a; seniority (`title` vs `level`) and `role` follow in their own
+locks.
 
 Grounding: formula conditions (shipped FC-1..FC-5) let a branch route on **form fields** and **detail
 aggregates** — all applicant-controlled, submitted values. This lock adds the next layer: routing on
@@ -96,25 +98,31 @@ or the form — they live only in the frozen snapshot the evaluator reads.)
 ## Owner Decisions — RESOLVED 2026-06-26
 The owner delegated these to the implementer with the recommendations below; recorded here as the durable
 decision of record (was "Before Build"; resolved before RA-1a starts).
-1. **v1 attribute set = `requester.level` + `requester.department` + `requester.role` (membership).**
-   `managerLevel` deferred, `orgPath` cut. Delivered in two slices (boundary below): RA-1a = `level` +
-   `department`; RA-1b = `role`.
-2. **`requester.level` scale = provider-native, ordered, higher = more senior; NOT normalized in v1.**
-   A provider that exposes no comparable ordered level → a `level` formula simply **fails publish** for
-   that org (§2 structural-absence), never bricks a create. Accepted; cross-provider normalization is a
-   separate future piece.
+1. **Target set = a seniority attribute + `requester.department` + `requester.role` (membership).**
+   `managerLevel` deferred, `orgPath` cut. **SCOPE CORRECTION 2026-06-26: RA-1a ships `requester.department`
+   ONLY** — see Decision 2 for why `level` defers and how seniority lands.
+2. **`requester.level` = DEFERRED (SCOPE CORRECTION 2026-06-26 — no current directory source).** The
+   pre-build code investigation found `directory_accounts` carries `name / nick / email / mobile /
+   job_number / title / avatar_url / is_active / raw` — **no numeric seniority level** (the `level` fields
+   in the codebase are sync-alert severity + department tree-depth, both unrelated). So `requester.level
+   >= 5` has nothing to read and would fail publish for every DingTalk org. A numeric level needs a
+   `title→rank` mapping or a real rank sync field FIRST. `requester.title` (string `==`/`!=`, a real
+   directory source) is the leading seniority candidate — both go to a **separate title-vs-level
+   design-lock**, NOT RA-1a.
 3. **`requester.department` = name** (readable authoring — `requester.department == "财务"` is writable, an
    id is not). Rename-mutability is the accepted tradeoff; a stable-id variant is a future option.
 
-## RA-1a / RA-1b slice boundary (so the v1 set is never half-claimed)
-- **RA-1a — `requester.level` + `requester.department` ONLY.** `level`: numeric comparisons.
-  `department`: `==` / `!=` ONLY.
-- **Everything not in RA-1a fails closed at PARSE/PUBLISH — never silent runtime-absent:**
-  - `requester.role` (and any attr ∉ {`level`, `department`}) → **parse/publish reject**
-    ("unknown/unsupported requester attribute") until RA-1b. It must NOT reach runtime as
-    absent-in-context, and must NOT be silently ignored.
+## RA-1a / follow-on slice boundary (SCOPE-CORRECTED 2026-06-26)
+- **RA-1a — `requester.department` ONLY.** `department`: `==` / `!=` ONLY, sourced from the
+  directory-resolved primary department **name** (NOT the JWT/session `actor.department`).
+- **Everything else fails closed at PARSE/PUBLISH — never silent runtime-absent:**
+  - `requester.level`, `requester.role`, `requester.title`, and any attr ∉ {`department`} →
+    **parse/publish reject** ("unknown/unsupported requester attribute"). None reach runtime as
+    absent-in-context or silently ignored.
   - `requester.department in [...]`, the `in` operator, and array literals → **parse reject** (the grammar
-    has none yet); they land with `role` membership in RA-1b.
-- **RA-1b — `requester.role` membership + the `in` operator + array literals.** Only after RA-1b is the
-  full v1 attribute set authorable; until then the lock's §3 `department` "`in`" and the `role` row are
-  design intent, not yet runtime.
+    has none yet).
+- **After RA-1a, in their own locks (NOT mixed with department):**
+  - a **title-vs-level design-lock** — `requester.title` (string `==`/`!=`, real source) is the leading
+    seniority candidate; numeric `requester.level` needs a `title→rank` map or a real rank sync field.
+  - **RA-1b** — `requester.role` membership + the `in` operator + array literals.
+  Until each lands, its tokens parse/publish fail-closed.
