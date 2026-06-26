@@ -7,7 +7,9 @@
  * Goldens: (a) all-permitted → applies ALL (every row written, versions bumped) · (b) one row-DENIED → 409,
  * NOTHING written (every version unchanged — preflight blocks before any write) · (c) one CONFLICT (version moved
  * since preview) → 409, NOTHING written (the TRANSACTION-ROLLBACK keystone: the write phase started but rolled the
- * whole batch back) · (d) default PARTIAL still skips-and-applies-the-rest (back-compat). Runs only with DATABASE_URL.
+ * whole batch back) · (d)/(e) default & explicit-false stay PARTIAL skip-and-apply-the-rest (back-compat) · (f) one
+ * FORBIDDEN field (layer-3 read_only) → 409, NOTHING written (the third blocker reason, distinct from denied/conflict).
+ * Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -173,5 +175,24 @@ describeIfDatabase('multitable scoped restore batch-execute — BS-3.1 all-or-no
     const byId = Object.fromEntries((res.body?.data?.records ?? []).map((r: { recordId: string }) => [r.recordId, r]))
     expect(byId[B].skipReason).toBe('conflict')
     expect(res.body?.data?.restoredCount).toBe(2) // A,C applied; B skipped
+  })
+
+  test('(f) one FORBIDDEN field (layer-3 read_only) → 409 BATCH_RESTORE_BLOCKED reason=forbidden, NOTHING written', async () => {
+    // Pins the THIRD blocker reason distinctly from denied (b) and conflict (c): the in-route `recordIsForbidden`
+    // preflight (a field hidden / definition-readOnly / layer-3 readOnly|invisible in the restore diff). Mint clean,
+    // then make SALARY layer-3 read-only AFTER preview — the restore diff touches SALARY (data-based, so the scopeHash
+    // still matches → identity valid), so the block can only come from the forbidden preflight, before any write.
+    const { token } = await freshIdentity([A, B, C])
+    await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)', [SHEET, SALARY, 'user', ACTOR, true, true])
+    const res = await batchExecute([A, B, C], { [A]: 2, [B]: 2, [C]: 2 }, token, { allOrNothing: true })
+    expect(res.status).toBe(409)
+    expect(res.body?.error?.code).toBe('BATCH_RESTORE_BLOCKED')
+    const blockers = (res.body?.error?.blockers ?? []) as Array<{ recordId: string; reason: string }>
+    expect(blockers.length).toBeGreaterThanOrEqual(1)
+    expect(blockers.every((b) => b.reason === 'forbidden')).toBe(true) // the forbidden preflight reason, not denied/conflict
+    // ATOMIC: NOTHING written — all unchanged at v2, zero forward 'restore' revisions
+    for (const id of [A, B, C]) { const r = await recordRow(id); expect(r?.version).toBe(2); expect(r?.data?.[NAME]).toBe('b') }
+    const restoreRevs = await q(`SELECT count(*)::int AS n FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`, [SHEET])
+    expect((restoreRevs.rows[0] as { n: number }).n).toBe(0)
   })
 })
