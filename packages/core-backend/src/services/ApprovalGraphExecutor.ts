@@ -14,7 +14,7 @@ import type {
   RuntimeGraph,
 } from '../types/approval-product'
 import { ServiceError } from './ApprovalBridgeService'
-import { evaluateApprovalConditionFormula } from './ApprovalConditionFormula'
+import { evaluateApprovalConditionFormula, type RequesterFormulaContext } from './ApprovalConditionFormula'
 
 export interface ApprovalGraphAssignment {
   assignmentType: 'user' | 'role'
@@ -527,7 +527,7 @@ export class ApprovalGraphExecutor {
   constructor(
     private readonly runtimeGraph: RuntimeGraph,
     private readonly formData: Record<string, unknown>,
-    private readonly options: { assignmentResolver?: ApprovalGraphAssignmentResolver } = {},
+    private readonly options: { assignmentResolver?: ApprovalGraphAssignmentResolver; requesterContext?: RequesterFormulaContext | null } = {},
   ) {
     for (const node of runtimeGraph.nodes) {
       this.nodeMap.set(node.key, node)
@@ -1047,7 +1047,7 @@ export class ApprovalGraphExecutor {
 
     for (const branch of branches) {
       const result = branch.formula
-        ? evaluateApprovalConditionFormula(branch.formula.expression, this.formData)
+        ? evaluateApprovalConditionFormula(branch.formula.expression, this.formData, this.options.requesterContext ?? null)
         : (() => {
             const conjunction = branch.conjunction === 'or' ? 'or' : 'and'
             return conjunction === 'or'

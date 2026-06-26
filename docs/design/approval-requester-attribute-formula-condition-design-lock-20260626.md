@@ -42,6 +42,13 @@ amount total-check already ships (validate-at-publish vs reject-at-runtime):
   schema / provider capability before the template can publish. The author fixes it where they authored
   it. A template referencing an attribute the org cannot supply MUST fail publish — NOT brick every
   requester's create.
+  - **RA-1a deviation (recorded 2026-06-26):** RA-1a does the ATTRIBUTE half at publish (the `{department}`
+    allowlist parse/publish-rejects `level`/`role`/`title`/unknown) but DEFERS the org-DATA half (does this
+    org's directory actually carry department names) to RA-2 — that check needs the org's directory context
+    at publish, which the form-schema validator lacks. Safe for `department`: an org with no department
+    names has `requester.department` formulas fail-closed at RUNTIME (reject the create, never
+    phantom-route), just caught later than this paragraph's general promise. RA-2 adds the publish-time
+    org-capability check.
 - **Row-level absence — attribute supported, but absent for THIS requester.** That is the **runtime
   fail-closed**: reject this `createApproval` rather than route on a phantom value (never default-to-0,
   never silently take `defaultEdgeKey` — error vs no-match, same as the FC-1 evaluator).
