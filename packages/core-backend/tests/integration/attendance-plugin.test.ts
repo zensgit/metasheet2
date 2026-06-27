@@ -16192,10 +16192,15 @@ attendanceIntegrationDescribe(
         expect(await putDigestPolicy(adminToken, digestPolicy({ enabled: true, daily: { enabled: true, recipients: ['self', 'owner'] } }))).toBe(200)
 
         const res = await withEnv('true', () => runDigest(pool, org, now))
-        // 2 self rows (A,B) + 2 owner rows (manager for subject A and for subject B) = 4.
-        expect(res.cadences[0]).toMatchObject({ rowsCreated: 4, ownerSkipped: 0 })
+        // The manager is also an active org member → also a digest subject (own 'subject' self row); as a
+        // non-member they are owner-skipped once for themselves. 3 self (A, B, manager) + 2 owner = 5.
+        expect(res.cadences[0]).toMatchObject({ rowsCreated: 5, ownerSkipped: 1 })
 
-        const ownerRows = (await fetchDeliveries(pool, org)).filter((r) => r.recipient_role === 'owner')
+        const all = await fetchDeliveries(pool, org)
+        // The manager gets their OWN 'subject' self row alongside being the resolved owner for A and B.
+        expect(all.filter((r) => r.recipient_role === 'subject').map((r) => r.recipient_user_id).sort())
+          .toEqual([subjectA, subjectB, manager].sort())
+        const ownerRows = all.filter((r) => r.recipient_role === 'owner')
         expect(ownerRows).toHaveLength(2)
         // Both owner rows go to the SAME manager but carry DISTINCT subject ids in the key.
         for (const row of ownerRows) {
@@ -16241,12 +16246,14 @@ attendanceIntegrationDescribe(
         expect(await putDigestPolicy(adminToken, digestPolicy({ enabled: true, daily: { enabled: true, recipients: ['self', 'owner', 'sub_owner'] } }))).toBe(200)
 
         const res = await withEnv('true', () => runDigest(pool, org, now))
-        // self rows: 2 (both subjects). sub_owner row: 1 (subjectGroup → subOwner). owner: 0 (skipped twice).
-        expect(res.cadences[0]).toMatchObject({ rowsCreated: 3, ownerSkipped: 2, subOwnerSkipped: 1 })
+        // subOwner is also an active org member → also a subject (own self row), and as a NON-member is
+        // owner+sub_owner-skipped for themselves. self:3 (subjectGroup, subjectNoGroup, subOwner),
+        // sub_owner row:1 (subjectGroup→subOwner); ownerSkipped:3, subOwnerSkipped:2; rowsCreated 3+1=4.
+        expect(res.cadences[0]).toMatchObject({ rowsCreated: 4, ownerSkipped: 3, subOwnerSkipped: 2 })
 
         const rows = await fetchDeliveries(pool, org)
         const byRole = (role: string) => rows.filter((r) => r.recipient_role === role)
-        expect(byRole('subject').map((r) => r.recipient_user_id).sort()).toEqual([subjectGroup, subjectNoGroup].sort())
+        expect(byRole('subject').map((r) => r.recipient_user_id).sort()).toEqual([subjectGroup, subjectNoGroup, subOwner].sort())
         expect(byRole('owner')).toHaveLength(0)
         expect(byRole('sub_owner')).toHaveLength(1)
         expect(byRole('sub_owner')[0].recipient_user_id).toBe(subOwner)
@@ -16287,19 +16294,22 @@ attendanceIntegrationDescribe(
         await seedUser(pool, mgrN, org)
         const g1 = await seedGroup(pool, org, 'mg-g1')
         const g2 = await seedGroup(pool, org, 'mg-g2')
-        // subjectShared ∈ g1,g2; both owned by M → dedup to ONE owner row.
+        const g3 = await seedGroup(pool, org, 'mg-g3')
+        // subjectShared ∈ g1,g2; both owned ONLY by M → dedup to ONE owner row.
         await seedMember(pool, org, g1, subjectShared)
         await seedMember(pool, org, g2, subjectShared)
         await seedManager(pool, org, g1, mgrM, 'owner')
         await seedManager(pool, org, g2, mgrM, 'owner')
-        // subjectDistinct ∈ g1 (owner M), g2 (owner N) → TWO distinct owner rows.
+        // subjectDistinct ∈ g1 (owner M), g3 (owner N) → TWO distinct owner rows. mgrN owns g3 (NOT g2),
+        // so subjectShared's groups carry only M and the shared-manager dedup stays isolated.
         await seedMember(pool, org, g1, subjectDistinct)
-        await seedMember(pool, org, g2, subjectDistinct)
-        await seedManager(pool, org, g2, mgrN, 'owner')
+        await seedMember(pool, org, g3, subjectDistinct)
+        await seedManager(pool, org, g3, mgrN, 'owner')
         expect(await putDigestPolicy(adminToken, digestPolicy({ enabled: true, daily: { enabled: true, recipients: ['self', 'owner'] } }))).toBe(200)
 
         const res = await withEnv('true', () => runDigest(pool, org, now))
-        expect(res.cadences[0].ownerSkipped).toBe(0)
+        // mgrM/mgrN are active org members → also subjects, owner-skipped for themselves (not group members).
+        expect(res.cadences[0].ownerSkipped).toBe(2)
 
         const rows = await fetchDeliveries(pool, org)
         const ownerRowsShared = rows.filter((r) => r.recipient_role === 'owner' && r.source_key.includes(`:subject:${subjectShared}:`))
