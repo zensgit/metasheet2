@@ -9250,6 +9250,56 @@ attendanceIntegrationDescribe(
       }
     })
 
+    it('round-trips attendanceReportDigestPolicy (wire lock): PUT→GET, nested partial merge, invalid supplied values reject', async () => {
+      if (!baseUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-report-digest-wire-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+      const putSettings = (body: Record<string, unknown>) =>
+        requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
+      const originalSettings = await loadSettingsForTest(adminToken)
+      try {
+        const full = {
+          enabled: true,
+          timezone: 'America/Los_Angeles',
+          channel: 'email_smtp',
+          cadences: {
+            daily: { enabled: true, sendAt: '18:30', recipients: ['self'] },
+            weekly: { enabled: true, weekday: 5, sendAt: '09:15', recipients: ['self', 'owner'] },
+            monthly: { enabled: true, dayOfMonth: 31, sendAt: '08:45', recipients: ['sub_owner'] },
+          },
+        }
+        // (1) full PUT → GET returns the complete latent shape — locks DEFAULT_SETTINGS + normalizeSettings
+        // + zod + mergeSettings. No scheduler producer reads this policy until RD-3.
+        expect((await putSettings({ attendanceReportDigestPolicy: full })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).attendanceReportDigestPolicy).toEqual(full)
+        // (2) top-level partial PUT preserves siblings.
+        expect((await putSettings({ attendanceReportDigestPolicy: { enabled: false } })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).attendanceReportDigestPolicy).toEqual({ ...full, enabled: false })
+        // (3) nested cadence partial PUT preserves the other cadence fields and sibling cadences.
+        expect((await putSettings({ attendanceReportDigestPolicy: { cadences: { weekly: { sendAt: '10:05' } } } })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).attendanceReportDigestPolicy).toEqual({
+          ...full,
+          enabled: false,
+          cadences: {
+            ...full.cadences,
+            weekly: { ...full.cadences.weekly, sendAt: '10:05' },
+          },
+        })
+        // (4) supplied-invalid values reject at the API layer instead of silently normalizing.
+        expect((await putSettings({ attendanceReportDigestPolicy: { timezone: 'Not/AZone' } })).status).toBe(400)
+        expect((await putSettings({ attendanceReportDigestPolicy: { channel: 'sms' } })).status).toBe(400)
+        expect((await putSettings({ attendanceReportDigestPolicy: { cadences: { daily: { sendAt: '25:00' } } } })).status).toBe(400)
+        expect((await putSettings({ attendanceReportDigestPolicy: { cadences: { daily: { recipients: [] } } } })).status).toBe(400)
+        expect((await putSettings({ attendanceReportDigestPolicy: { cadences: { weekly: { weekday: 0 } } } })).status).toBe(400)
+        expect((await putSettings({ attendanceReportDigestPolicy: { cadences: { monthly: { dayOfMonth: 32 } } } })).status).toBe(400)
+      } finally {
+        await putSettings({ attendanceReportDigestPolicy: originalSettings.attendanceReportDigestPolicy }).catch(() => undefined)
+      }
+    })
+
     it('round-trips overtimeBankPolicy (wire lock): PUT→GET full shape, partial PUT preserves siblings, statutory_holiday → 400', async () => {
       if (!baseUrl) return
       const runSuffix = Date.now().toString(36)
