@@ -9300,6 +9300,65 @@ attendanceIntegrationDescribe(
       }
     })
 
+    it('round-trips makeupPunchPolicy (wire lock): full shape, nested merge, array replacement, invalid supplied values → 400', async () => {
+      if (!baseUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await getAdminToken(`attendance-makeup-policy-wire-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+      const putSettings = (body: Record<string, unknown>) =>
+        requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
+      const originalSettings = await loadSettingsForTest(adminToken)
+      try {
+        const full = {
+          enabled: true,
+          timezone: 'Asia/Shanghai',
+          cycle: { type: 'calendar_month', startDay: 15 },
+          quota: { maxRequestsPerCycle: 5, countStatuses: ['pending', 'approved'], principal: 'self_service_user' },
+          submitWindow: { unit: 'calendar_day', days: 14 },
+          allowedAnomalyTypes: ['missing_check_in', 'late', 'early_leave'],
+          allowedRequestTypes: ['missed_check_in', 'time_correction'],
+          requireReason: true,
+          requireAttachment: true,
+        }
+
+        // (1) full PUT → GET returns the whole shape (DEFAULT_SETTINGS + normalizeSettings + zod + mergeSettings).
+        expect((await putSettings({ makeupPunchPolicy: full })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).makeupPunchPolicy).toEqual(full)
+
+        // (2) top-level partial PUT preserves siblings.
+        expect((await putSettings({ makeupPunchPolicy: { enabled: false } })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).makeupPunchPolicy).toEqual({ ...full, enabled: false })
+
+        // (3) nested partial quota merge preserves countStatuses/principal.
+        expect((await putSettings({ makeupPunchPolicy: { quota: { maxRequestsPerCycle: 9 } } })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).makeupPunchPolicy).toMatchObject({
+          quota: { maxRequestsPerCycle: 9, countStatuses: ['pending', 'approved'], principal: 'self_service_user' },
+        })
+
+        // (4) nested partial submitWindow merge preserves unit.
+        expect((await putSettings({ makeupPunchPolicy: { submitWindow: { days: 7 } } })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).makeupPunchPolicy).toMatchObject({
+          submitWindow: { unit: 'calendar_day', days: 7 },
+        })
+
+        // (5) arrays are replaced only when supplied.
+        expect((await putSettings({ makeupPunchPolicy: { allowedRequestTypes: ['missed_check_out'] } })).status).toBe(200)
+        expect((await loadSettingsForTest(adminToken)).makeupPunchPolicy).toMatchObject({
+          allowedRequestTypes: ['missed_check_out'],
+          allowedAnomalyTypes: ['missing_check_in', 'late', 'early_leave'],
+        })
+
+        // (6) supplied-invalid values reject at the API wire, not just by normalizer fallback.
+        expect((await putSettings({ makeupPunchPolicy: { enabled: true, timezone: 'Mars/Phobos' } })).status).toBe(400)
+        expect((await putSettings({ makeupPunchPolicy: { quota: { maxRequestsPerCycle: 0 } } })).status).toBe(400)
+        expect((await putSettings({ makeupPunchPolicy: { allowedAnomalyTypes: ['secret_admin_only'] } })).status).toBe(400)
+      } finally {
+        await putSettings({ makeupPunchPolicy: originalSettings.makeupPunchPolicy }).catch(() => undefined)
+      }
+    })
+
     it('round-trips overtimeBankPolicy (wire lock): PUT→GET full shape, partial PUT preserves siblings, statutory_holiday → 400', async () => {
       if (!baseUrl) return
       const runSuffix = Date.now().toString(36)
