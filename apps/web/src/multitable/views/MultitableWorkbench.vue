@@ -65,6 +65,14 @@
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="showHistory = true">&#x1F570; {{ isZh ? '历史' : 'History' }}</button>
       <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory">&#x2699; {{ isZh ? '配置历史' : 'Config history' }}</button>
     </div>
+    <ResetToPointPicker
+      v-if="workbench.activeSheetId.value"
+      :pit-reset-enabled="pitResetEnabled"
+      :sheet-id="workbench.activeSheetId.value"
+      :reset-preview="resetPreviewWire"
+      :reset-execute="resetExecuteWire"
+      :on-done="onResetDone"
+    />
     <div v-if="showTemplateLibrary" class="mt-template-library" data-testid="multitable-template-library">
       <div class="mt-template-library__header">
         <div>
@@ -636,6 +644,7 @@ import MetaViewManager from '../components/MetaViewManager.vue'
 import TrashModal from '../components/TrashModal.vue'
 import HistoryCenterModal from '../components/HistoryCenterModal.vue'
 import MetaConfigHistoryModal from '../components/MetaConfigHistoryModal.vue'
+import ResetToPointPicker from '../components/ResetToPointPicker.vue'
 import { refreshAfterConfigRevert } from './config-revert-refresh'
 import type { MetaConfigRevision } from '../api/client'
 import MetaSheetPermissionManager from '../components/MetaSheetPermissionManager.vue'
@@ -716,6 +725,14 @@ const canOpenWorkflowDesigner = computed(
   () => caps.canManageAutomation.value && featureFlags.hasFeature('workflow'),
 )
 const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workbench.activeViewId })
+
+// T8-2 Reset UI T-source entry wiring (#3250/#3251 flagged the missing T-source). Gate on the flag-derived
+// pitResetEnabled signal alone (it already encodes canManageSheetAccess); pass the raw client signatures so the
+// picker owns + tests the (sheetId, asOf) composition; refresh the grid after a successful reset.
+const pitResetEnabled = computed(() => capabilitySource.value?.pitResetEnabled === true)
+const resetPreviewWire = (sid: string, asOf: string) => workbench.client.resetPreview(sid, asOf)
+const resetExecuteWire = (sid: string, asOf: string, previewIdentity: string) => workbench.client.resetExecute(sid, asOf, previewIdentity)
+const onResetDone = () => { void grid.reloadCurrentPage() }
 const commentsState = useMultitableComments()
 const commentPresenceState = useMultitableCommentPresence()
 const commentInboxState = useMultitableCommentInbox()
