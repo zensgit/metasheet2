@@ -10063,7 +10063,7 @@ type AttendanceSchedulerScopeForm = {
 const schedulerScopes = ref<AttendanceSchedulerScope[]>([])
 const schedulerScopesLoading = ref(false)
 const schedulerScopesTotal = ref(0)
-const ATTENDANCE_SCHEDULER_SCOPE_ALL_ACTIONS = ['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'] as const
+const ATTENDANCE_SCHEDULER_SCOPE_ALL_ACTIONS = ['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch', 'remind'] as const
 // Scheduler-scope form targets are arrays so the UI can render pickers/chips while preserving the
 // backend's six-key scope contract exactly.
 const schedulerScopeForm = reactive<AttendanceSchedulerScopeForm>({
@@ -24106,6 +24106,7 @@ const ATTENDANCE_SCHEDULER_SCOPE_ACTION_LABELS: Record<string, [string, string]>
   clear: ['Clear', '清空'],
   approve: ['Approve', '审批'],
   dispatch: ['Dispatch', '调度'],
+  remind: ['Remind', '提醒'],
 }
 function schedulerScopeActionLabel(action: string): string {
   const pair = ATTENDANCE_SCHEDULER_SCOPE_ACTION_LABELS[action]

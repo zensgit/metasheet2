@@ -22,7 +22,7 @@ The line's plan gates the broader surfaces on purpose. So "complete the unfinish
 
 **Standardization:**
 - `#3257` (`2f7f82323`) — K3 read/list **GATE v2** + reusable values-free evidence checklist.
-- `#3260` — general **external-system read onboarding template** (system-agnostic G0–G5 playbook; K3 as the worked reference). *(merging at time of writing.)*
+- `#3260` (`c0966702c`) — general **external-system read onboarding template** (system-agnostic G0–G5 playbook; K3 as the worked reference).
 
 ## 2. Verification
 
