@@ -12276,6 +12276,7 @@ function normalizeAttendanceBonusPolicySetting(raw) {
 const ATTENDANCE_REPORT_DIGEST_CHANNELS = Object.freeze(['work_notification', 'email_smtp'])
 const ATTENDANCE_REPORT_DIGEST_RECIPIENTS = Object.freeze(['self', 'owner', 'sub_owner'])
 const ATTENDANCE_REPORT_DIGEST_SEND_AT_RE = /^([01]\d|2[0-3]):[0-5]\d$/
+const ATTENDANCE_REPORT_DIGEST_CADENCES = Object.freeze(['daily', 'weekly', 'monthly'])
 
 function normalizeAttendanceReportDigestRecipients(raw, fallback = ['self']) {
   const seen = new Set()
@@ -12328,6 +12329,158 @@ function normalizeAttendanceReportDigestPolicySetting(raw) {
       daily: normalizeAttendanceReportDigestCadence(cadences.daily, fallback.cadences.daily),
       weekly: normalizeAttendanceReportDigestCadence(cadences.weekly, fallback.cadences.weekly, { weekday: true }),
       monthly: normalizeAttendanceReportDigestCadence(cadences.monthly, fallback.cadences.monthly, { dayOfMonth: true }),
+    },
+  }
+}
+
+function attendanceReportDigestDateKey(year, month, day) {
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+function attendanceReportDigestDateParts(dateKey) {
+  const normalized = normalizeDateOnlyStrict(dateKey)
+  if (!normalized) return null
+  const [year, month, day] = normalized.split('-').map((part) => Number(part))
+  return { year, month, day }
+}
+
+function attendanceReportDigestDaysInMonth(year, month) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate()
+}
+
+function attendanceReportDigestLocalDateKey(now, timezone) {
+  const date = now instanceof Date ? now : new Date(now)
+  if (Number.isNaN(date.getTime())) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'now must be a valid timestamp')
+  }
+  const zone = typeof timezone === 'string' && timezone.trim() ? timezone.trim() : 'UTC'
+  const parts = getZonedParts(date, zone)
+  return attendanceReportDigestDateKey(parts.year, parts.month, parts.day)
+}
+
+function attendanceReportDigestIsoWeekMonday(dateKey) {
+  const normalized = normalizeDateOnlyStrict(dateKey)
+  if (!normalized) throw new HttpError(400, 'VALIDATION_ERROR', 'dateKey must be YYYY-MM-DD')
+  const weekday = getWeekdayFromDateKey(normalized)
+  const offsetToMonday = (weekday + 6) % 7
+  return addDaysToDateKey(normalized, -offsetToMonday)
+}
+
+function clampAttendanceReportDigestDayOfMonth(year, month, dayOfMonth) {
+  const y = Number(year)
+  const m = Number(month)
+  const d = Number(dayOfMonth)
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d) || m < 1 || m > 12 || d < 1 || d > 31) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid attendance report digest month/day')
+  }
+  return attendanceReportDigestDateKey(y, m, Math.min(d, attendanceReportDigestDaysInMonth(y, m)))
+}
+
+function resolveAttendanceReportDigestPeriod(cadence, options = {}) {
+  const normalizedCadence = typeof cadence === 'string' ? cadence.trim().toLowerCase() : ''
+  if (!ATTENDANCE_REPORT_DIGEST_CADENCES.includes(normalizedCadence)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'Unsupported attendance report digest cadence')
+  }
+  const timezone = typeof options.timezone === 'string' && options.timezone.trim() ? options.timezone.trim() : 'UTC'
+  if (!isValidTimeZoneIdentifier(timezone)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'attendance report digest timezone must be a valid IANA time zone')
+  }
+  const todayKey = options.todayKey
+    ? normalizeDateOnlyStrict(options.todayKey)
+    : attendanceReportDigestLocalDateKey(options.now ?? new Date(), timezone)
+  if (!todayKey) throw new HttpError(400, 'VALIDATION_ERROR', 'todayKey must be YYYY-MM-DD')
+
+  if (normalizedCadence === 'daily') {
+    const day = addDaysToDateKey(todayKey, -1)
+    return {
+      cadence: normalizedCadence,
+      timezone,
+      from: day,
+      to: day,
+      periodKey: `daily:${day}`,
+      label: day,
+    }
+  }
+
+  if (normalizedCadence === 'weekly') {
+    const currentMonday = attendanceReportDigestIsoWeekMonday(todayKey)
+    const from = addDaysToDateKey(currentMonday, -7)
+    const to = addDaysToDateKey(currentMonday, -1)
+    return {
+      cadence: normalizedCadence,
+      timezone,
+      from,
+      to,
+      periodKey: `weekly:${from}:${to}`,
+      label: `${from}..${to}`,
+    }
+  }
+
+  const parts = attendanceReportDigestDateParts(todayKey)
+  let year = parts.year
+  let month = parts.month - 1
+  if (month < 1) {
+    year -= 1
+    month = 12
+  }
+  const from = attendanceReportDigestDateKey(year, month, 1)
+  const to = attendanceReportDigestDateKey(year, month, attendanceReportDigestDaysInMonth(year, month))
+  return {
+    cadence: normalizedCadence,
+    timezone,
+    from,
+    to,
+    periodKey: `monthly:${from}:${to}`,
+    label: `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`,
+  }
+}
+
+function attendanceReportDigestNumber(summary, ...keys) {
+  for (const key of keys) {
+    if (summary && Object.prototype.hasOwnProperty.call(summary, key)) {
+      return attendanceSummaryNumber(summary, key)
+    }
+  }
+  return 0
+}
+
+function buildAttendanceReportDigestPayload(input = {}) {
+  const summary = input.summary && typeof input.summary === 'object' ? input.summary : {}
+  const period = input.period && typeof input.period === 'object' ? input.period : {}
+  const requestTotals = input.requestTotals && typeof input.requestTotals === 'object' ? input.requestTotals : {}
+  const fullAttendanceEligible = summary.fullAttendanceEligible ?? summary.full_attendance_eligible
+  const payloadSummary = {
+    totalMinutes: attendanceReportDigestNumber(summary, 'total_minutes', 'totalMinutes'),
+    lateDays: attendanceReportDigestNumber(summary, 'late_days', 'lateDays'),
+    lateEarlyDays: attendanceReportDigestNumber(summary, 'late_early_days', 'lateEarlyDays'),
+    earlyLeaveDays: attendanceReportDigestNumber(summary, 'early_leave_days', 'earlyLeaveDays'),
+    absentDays: attendanceReportDigestNumber(summary, 'absent_days', 'absentDays'),
+    leaveMinutes: attendanceReportDigestNumber(summary, 'leave_minutes', 'leaveMinutes'),
+    overtimeMinutes: attendanceReportDigestNumber(summary, 'overtime_minutes', 'overtimeMinutes'),
+    workdayOvertimeMinutes: attendanceReportDigestNumber(summary, 'workday_overtime_minutes', 'workdayOvertimeMinutes'),
+    restdayOvertimeMinutes: attendanceReportDigestNumber(summary, 'restday_overtime_minutes', 'restdayOvertimeMinutes'),
+    holidayOvertimeMinutes: attendanceReportDigestNumber(summary, 'holiday_overtime_minutes', 'holidayOvertimeMinutes'),
+  }
+  if (typeof fullAttendanceEligible === 'boolean') {
+    payloadSummary.fullAttendanceEligible = fullAttendanceEligible
+  }
+  return {
+    kind: 'attendance_report_digest',
+    cadence: input.cadence,
+    period: {
+      from: period.from,
+      to: period.to,
+      label: period.label,
+      periodKey: period.periodKey,
+    },
+    summary: payloadSummary,
+    requestTotals: {
+      pending: attendanceReportDigestNumber(requestTotals, 'pending', 'pendingCount'),
+      approved: attendanceReportDigestNumber(requestTotals, 'approved', 'approvedCount'),
+      rejected: attendanceReportDigestNumber(requestTotals, 'rejected', 'rejectedCount'),
+      leaveMinutes: attendanceReportDigestNumber(requestTotals, 'leave_minutes', 'leaveMinutes'),
+      overtimeMinutes: attendanceReportDigestNumber(requestTotals, 'overtime_minutes', 'overtimeMinutes'),
+      makeupPunchCount: attendanceReportDigestNumber(requestTotals, 'makeup_punch_count', 'makeupPunchCount'),
     },
   }
 }
@@ -18925,6 +19078,12 @@ module.exports = {
   __attendanceBonusPolicyForTests: {
     normalizeAttendanceBonusPolicySetting,
     resolveFullAttendanceEligible,
+  },
+  __attendanceReportDigestForTests: {
+    ATTENDANCE_REPORT_DIGEST_CADENCES,
+    buildAttendanceReportDigestPayload,
+    clampAttendanceReportDigestDayOfMonth,
+    resolveAttendanceReportDigestPeriod,
   },
   __attendanceReportFieldCatalogForTests: {
     ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS,
