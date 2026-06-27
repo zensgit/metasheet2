@@ -2011,6 +2011,148 @@
               </p>
             </div>
             <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.reportDigestPolicy)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.reportDigestPolicy)"
+              data-attendance-report-digest-policy
+            >
+              <div class="attendance__admin-section-header">
+                <h4>{{ tr('Report digest subscription', '统计通知订阅') }}</h4>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field attendance__field--checkbox" for="attendance-report-digest-enabled">
+                  <span>{{ tr('Enable report digest subscription', '启用统计通知订阅') }}</span>
+                  <input
+                    id="attendance-report-digest-enabled"
+                    v-model="reportDigestPolicyForm.enabled"
+                    type="checkbox"
+                    data-report-digest="enabled"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-report-digest-timezone">
+                  <span>{{ tr('Timezone', '时区') }}</span>
+                  <input
+                    id="attendance-report-digest-timezone"
+                    v-model.trim="reportDigestPolicyForm.timezone"
+                    type="text"
+                    placeholder="Asia/Shanghai"
+                    data-report-digest="timezone"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-report-digest-channel">
+                  <span>{{ tr('Channel', '通知渠道') }}</span>
+                  <select
+                    id="attendance-report-digest-channel"
+                    v-model="reportDigestPolicyForm.channel"
+                    data-report-digest="channel"
+                  >
+                    <option value="work_notification">{{ tr('Work notification', '工作通知') }}</option>
+                    <option value="email_smtp">{{ tr('Email SMTP', '邮件 SMTP') }}</option>
+                  </select>
+                </label>
+              </div>
+              <div class="attendance__admin-subsection" data-report-digest-cadence="daily">
+                <h5>{{ tr('Daily digest', '日报') }}</h5>
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field attendance__field--checkbox" for="attendance-report-digest-daily-enabled">
+                    <span>{{ tr('Enabled', '启用') }}</span>
+                    <input id="attendance-report-digest-daily-enabled" v-model="reportDigestPolicyForm.cadences.daily.enabled" type="checkbox" data-report-digest-daily="enabled" />
+                  </label>
+                  <label class="attendance__field" for="attendance-report-digest-daily-send-at">
+                    <span>{{ tr('Send at', '发送时间') }}</span>
+                    <input id="attendance-report-digest-daily-send-at" v-model="reportDigestPolicyForm.cadences.daily.sendAt" type="time" data-report-digest-daily="send-at" />
+                  </label>
+                  <fieldset class="attendance__field">
+                    <legend>{{ tr('Recipients', '收件人') }}</legend>
+                    <label class="attendance__field--inline">
+                      <input v-model="reportDigestPolicyForm.cadences.daily.recipients" type="checkbox" value="self" data-report-digest-daily-recipient="self" />
+                      <span>{{ tr('Self', '本人') }}</span>
+                    </label>
+                    <label class="attendance__field--inline">
+                      <input v-model="reportDigestPolicyForm.cadences.daily.recipients" type="checkbox" value="owner" data-report-digest-daily-recipient="owner" />
+                      <span>{{ tr('Owner', '负责人') }}</span>
+                    </label>
+                    <label class="attendance__field--inline">
+                      <input v-model="reportDigestPolicyForm.cadences.daily.recipients" type="checkbox" value="sub_owner" data-report-digest-daily-recipient="sub_owner" />
+                      <span>{{ tr('Sub-owner', '副负责人') }}</span>
+                    </label>
+                  </fieldset>
+                </div>
+              </div>
+              <div class="attendance__admin-subsection" data-report-digest-cadence="weekly">
+                <h5>{{ tr('Weekly digest', '周报') }}</h5>
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field attendance__field--checkbox" for="attendance-report-digest-weekly-enabled">
+                    <span>{{ tr('Enabled', '启用') }}</span>
+                    <input id="attendance-report-digest-weekly-enabled" v-model="reportDigestPolicyForm.cadences.weekly.enabled" type="checkbox" data-report-digest-weekly="enabled" />
+                  </label>
+                  <label class="attendance__field" for="attendance-report-digest-weekly-weekday">
+                    <span>{{ tr('Weekday', '星期') }}</span>
+                    <input id="attendance-report-digest-weekly-weekday" v-model.number="reportDigestPolicyForm.cadences.weekly.weekday" type="number" min="1" max="7" data-report-digest-weekly="weekday" />
+                  </label>
+                  <label class="attendance__field" for="attendance-report-digest-weekly-send-at">
+                    <span>{{ tr('Send at', '发送时间') }}</span>
+                    <input id="attendance-report-digest-weekly-send-at" v-model="reportDigestPolicyForm.cadences.weekly.sendAt" type="time" data-report-digest-weekly="send-at" />
+                  </label>
+                  <fieldset class="attendance__field">
+                    <legend>{{ tr('Recipients', '收件人') }}</legend>
+                    <label class="attendance__field--inline">
+                      <input v-model="reportDigestPolicyForm.cadences.weekly.recipients" type="checkbox" value="self" data-report-digest-weekly-recipient="self" />
+                      <span>{{ tr('Self', '本人') }}</span>
+                    </label>
+                    <label class="attendance__field--inline">
+                      <input v-model="reportDigestPolicyForm.cadences.weekly.recipients" type="checkbox" value="owner" data-report-digest-weekly-recipient="owner" />
+                      <span>{{ tr('Owner', '负责人') }}</span>
+                    </label>
+                    <label class="attendance__field--inline">
+                      <input v-model="reportDigestPolicyForm.cadences.weekly.recipients" type="checkbox" value="sub_owner" data-report-digest-weekly-recipient="sub_owner" />
+                      <span>{{ tr('Sub-owner', '副负责人') }}</span>
+                    </label>
+                  </fieldset>
+                </div>
+              </div>
+              <div class="attendance__admin-subsection" data-report-digest-cadence="monthly">
+                <h5>{{ tr('Monthly digest', '月报') }}</h5>
+                <div class="attendance__admin-grid">
+                  <label class="attendance__field attendance__field--checkbox" for="attendance-report-digest-monthly-enabled">
+                    <span>{{ tr('Enabled', '启用') }}</span>
+                    <input id="attendance-report-digest-monthly-enabled" v-model="reportDigestPolicyForm.cadences.monthly.enabled" type="checkbox" data-report-digest-monthly="enabled" />
+                  </label>
+                  <label class="attendance__field" for="attendance-report-digest-monthly-day">
+                    <span>{{ tr('Day of month', '每月日期') }}</span>
+                    <input id="attendance-report-digest-monthly-day" v-model.number="reportDigestPolicyForm.cadences.monthly.dayOfMonth" type="number" min="1" max="31" data-report-digest-monthly="day" />
+                  </label>
+                  <label class="attendance__field" for="attendance-report-digest-monthly-send-at">
+                    <span>{{ tr('Send at', '发送时间') }}</span>
+                    <input id="attendance-report-digest-monthly-send-at" v-model="reportDigestPolicyForm.cadences.monthly.sendAt" type="time" data-report-digest-monthly="send-at" />
+                  </label>
+                  <fieldset class="attendance__field">
+                    <legend>{{ tr('Recipients', '收件人') }}</legend>
+                    <label class="attendance__field--inline">
+                      <input v-model="reportDigestPolicyForm.cadences.monthly.recipients" type="checkbox" value="self" data-report-digest-monthly-recipient="self" />
+                      <span>{{ tr('Self', '本人') }}</span>
+                    </label>
+                    <label class="attendance__field--inline">
+                      <input v-model="reportDigestPolicyForm.cadences.monthly.recipients" type="checkbox" value="owner" data-report-digest-monthly-recipient="owner" />
+                      <span>{{ tr('Owner', '负责人') }}</span>
+                    </label>
+                    <label class="attendance__field--inline">
+                      <input v-model="reportDigestPolicyForm.cadences.monthly.recipients" type="checkbox" value="sub_owner" data-report-digest-monthly-recipient="sub_owner" />
+                      <span>{{ tr('Sub-owner', '副负责人') }}</span>
+                    </label>
+                  </fieldset>
+                </div>
+              </div>
+              <button
+                class="attendance__btn attendance__btn--primary"
+                :disabled="settingsLoading"
+                data-report-digest="save"
+                @click="saveReportDigestPolicy"
+              >
+                {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save report digest subscription', '保存统计通知订阅') }}
+              </button>
+            </div>
+            <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
               class="attendance__admin-section"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
@@ -9190,6 +9332,16 @@ interface AttendanceSettings {
     anyLeaveBreaksFullAttendance?: boolean
     lateBeyondThresholdBreaksFullAttendance?: boolean
   }
+  attendanceReportDigestPolicy?: {
+    enabled?: boolean
+    timezone?: string
+    channel?: 'work_notification' | 'email_smtp'
+    cadences?: {
+      daily?: { enabled?: boolean; sendAt?: string; recipients?: string[] }
+      weekly?: { enabled?: boolean; weekday?: number; sendAt?: string; recipients?: string[] }
+      monthly?: { enabled?: boolean; dayOfMonth?: number; sendAt?: string; recipients?: string[] }
+    }
+  }
   autoShiftMatching?: {
     enabled?: boolean
     mode?: 'preview' | 'apply' | 'auto'
@@ -13422,6 +13574,33 @@ const attendanceBonusPolicyForm = reactive({
   enabled: false,
   anyLeaveBreaksFullAttendance: true,
   lateBeyondThresholdBreaksFullAttendance: true,
+})
+
+type AttendanceReportDigestChannel = 'work_notification' | 'email_smtp'
+type AttendanceReportDigestRecipient = 'self' | 'owner' | 'sub_owner'
+type AttendanceReportDigestCadenceKey = 'daily' | 'weekly' | 'monthly'
+type AttendanceReportDigestCadenceForm = {
+  enabled: boolean
+  sendAt: string
+  recipients: AttendanceReportDigestRecipient[]
+  weekday?: number
+  dayOfMonth?: number
+}
+
+const reportDigestPolicyForm = reactive<{
+  enabled: boolean
+  timezone: string
+  channel: AttendanceReportDigestChannel
+  cadences: Record<AttendanceReportDigestCadenceKey, AttendanceReportDigestCadenceForm>
+}>({
+  enabled: false,
+  timezone: 'Asia/Shanghai',
+  channel: 'work_notification',
+  cadences: {
+    daily: { enabled: true, sendAt: '18:30', recipients: ['self'] },
+    weekly: { enabled: false, weekday: 1, sendAt: '09:00', recipients: ['self', 'owner'] },
+    monthly: { enabled: false, dayOfMonth: 1, sendAt: '09:00', recipients: ['self', 'owner'] },
+  },
 })
 
 // Multi-shift day M4 admin card. Saved via saveMultiShiftDay, which PUTs ONLY { multiShiftDay }.
@@ -19322,6 +19501,7 @@ async function loadSettings() {
     applyOvertimeBankPolicyToForm(data.data || {})
     applyLeaveOffsetToForm(data.data || {})
     applyAttendanceBonusToForm(data.data || {})
+    applyReportDigestPolicyToForm(data.data || {})
     applyMultiShiftDayToForm(data.data || {})
     applyOutdoorToForm(data.data || {})
     applyInOutMergeToForm(data.data || {})
@@ -19378,6 +19558,124 @@ function applyAttendanceBonusToForm(settings: AttendanceSettings) {
   // the two break-toggles default ON (matches the backend normalizer default).
   attendanceBonusPolicyForm.anyLeaveBreaksFullAttendance = p.anyLeaveBreaksFullAttendance !== false
   attendanceBonusPolicyForm.lateBeyondThresholdBreaksFullAttendance = p.lateBeyondThresholdBreaksFullAttendance !== false
+}
+
+function normalizeReportDigestRecipients(value: unknown, fallback: AttendanceReportDigestRecipient[]): AttendanceReportDigestRecipient[] {
+  const allowed = new Set<AttendanceReportDigestRecipient>(['self', 'owner', 'sub_owner'])
+  const seen = new Set<AttendanceReportDigestRecipient>()
+  const result: AttendanceReportDigestRecipient[] = []
+  for (const item of Array.isArray(value) ? value : []) {
+    if (allowed.has(item as AttendanceReportDigestRecipient) && !seen.has(item as AttendanceReportDigestRecipient)) {
+      seen.add(item as AttendanceReportDigestRecipient)
+      result.push(item as AttendanceReportDigestRecipient)
+    }
+  }
+  return result.length ? result : [...fallback]
+}
+
+function applyReportDigestCadenceToForm(
+  target: AttendanceReportDigestCadenceForm,
+  source: { enabled?: boolean; sendAt?: string; recipients?: string[]; weekday?: number; dayOfMonth?: number } | undefined,
+  fallback: AttendanceReportDigestCadenceForm,
+): void {
+  target.enabled = source?.enabled === true
+  target.sendAt = typeof source?.sendAt === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(source.sendAt)
+    ? source.sendAt
+    : fallback.sendAt
+  target.recipients = normalizeReportDigestRecipients(source?.recipients, fallback.recipients)
+  if ('weekday' in target) {
+    const weekday = Number(source?.weekday)
+    target.weekday = Number.isInteger(weekday) && weekday >= 1 && weekday <= 7
+      ? weekday
+      : (fallback.weekday ?? 1)
+  }
+  if ('dayOfMonth' in target) {
+    const dayOfMonth = Number(source?.dayOfMonth)
+    target.dayOfMonth = Number.isInteger(dayOfMonth) && dayOfMonth >= 1 && dayOfMonth <= 31
+      ? dayOfMonth
+      : (fallback.dayOfMonth ?? 1)
+  }
+}
+
+function applyReportDigestPolicyToForm(settings: AttendanceSettings) {
+  const p = settings.attendanceReportDigestPolicy || {}
+  reportDigestPolicyForm.enabled = p.enabled === true
+  reportDigestPolicyForm.timezone = p.timezone || 'Asia/Shanghai'
+  reportDigestPolicyForm.channel = p.channel === 'email_smtp' ? 'email_smtp' : 'work_notification'
+  applyReportDigestCadenceToForm(reportDigestPolicyForm.cadences.daily, p.cadences?.daily, { enabled: true, sendAt: '18:30', recipients: ['self'] })
+  applyReportDigestCadenceToForm(reportDigestPolicyForm.cadences.weekly, p.cadences?.weekly, { enabled: false, weekday: 1, sendAt: '09:00', recipients: ['self', 'owner'] })
+  applyReportDigestCadenceToForm(reportDigestPolicyForm.cadences.monthly, p.cadences?.monthly, { enabled: false, dayOfMonth: 1, sendAt: '09:00', recipients: ['self', 'owner'] })
+}
+
+function reportDigestPolicyError(): string | null {
+  const sendAtRe = /^([01]\d|2[0-3]):[0-5]\d$/
+  if (reportDigestPolicyForm.enabled && !reportDigestPolicyForm.timezone.trim()) {
+    return tr('Timezone is required when report digests are enabled', '启用统计通知时必须填写时区')
+  }
+  for (const cadence of Object.values(reportDigestPolicyForm.cadences)) {
+    if (!sendAtRe.test(cadence.sendAt.trim())) return tr('Send time must use HH:mm', '发送时间必须使用 HH:mm')
+    if (cadence.recipients.length === 0) return tr('Each cadence needs at least one recipient', '每个周期至少需要一个收件人')
+  }
+  const weekday = Number(reportDigestPolicyForm.cadences.weekly.weekday)
+  if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7) return tr('Weekly weekday must be 1-7', '周报星期须为 1-7')
+  const dayOfMonth = Number(reportDigestPolicyForm.cadences.monthly.dayOfMonth)
+  if (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31) return tr('Monthly day must be 1-31', '月报日期须为 1-31')
+  return null
+}
+
+function reportDigestCadencePayload(cadence: AttendanceReportDigestCadenceForm) {
+  return {
+    enabled: cadence.enabled,
+    sendAt: cadence.sendAt.trim(),
+    recipients: [...cadence.recipients],
+  }
+}
+
+async function saveReportDigestPolicy(): Promise<void> {
+  const error = reportDigestPolicyError()
+  if (error) {
+    setStatus(error, 'error')
+    return
+  }
+  settingsLoading.value = true
+  try {
+    const payload: AttendanceSettings = {
+      attendanceReportDigestPolicy: {
+        enabled: reportDigestPolicyForm.enabled,
+        timezone: reportDigestPolicyForm.timezone.trim(),
+        channel: reportDigestPolicyForm.channel,
+        cadences: {
+          daily: reportDigestCadencePayload(reportDigestPolicyForm.cadences.daily),
+          weekly: {
+            ...reportDigestCadencePayload(reportDigestPolicyForm.cadences.weekly),
+            weekday: Number(reportDigestPolicyForm.cadences.weekly.weekday) || 1,
+          },
+          monthly: {
+            ...reportDigestCadencePayload(reportDigestPolicyForm.cadences.monthly),
+            dayOfMonth: Number(reportDigestPolicyForm.cadences.monthly.dayOfMonth) || 1,
+          },
+        },
+      },
+    }
+    const response = await apiFetch('/api/attendance/settings', { method: 'PUT', body: JSON.stringify(payload) })
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw createForbiddenError()
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to save report digest subscription', '保存统计通知订阅失败'))
+    }
+    adminForbidden.value = false
+    const savedSettings = (data.data || payload) as AttendanceSettings
+    attendanceSettings.value = savedSettings
+    applyReportDigestPolicyToForm(savedSettings)
+    setStatus(tr('Report digest subscription saved', '统计通知订阅已保存'), 'info')
+  } catch (error: any) {
+    setStatusFromError(error, tr('Failed to save report digest subscription', '保存统计通知订阅失败'), 'save-settings')
+  } finally {
+    settingsLoading.value = false
+  }
 }
 
 function normalizeMultiShiftMaxSlots(value: unknown): number {

@@ -2902,6 +2902,81 @@ describe('Attendance admin regressions', () => {
     })
   })
 
+  it('loads attendanceReportDigestPolicy on first screen, blocks invalid recipients, and PUTs only the digest policy', async () => {
+    attendanceSettingsData = {
+      attendanceReportDigestPolicy: {
+        enabled: true,
+        timezone: 'America/Los_Angeles',
+        channel: 'email_smtp',
+        cadences: {
+          daily: { enabled: true, sendAt: '18:45', recipients: ['self'] },
+          weekly: { enabled: true, weekday: 5, sendAt: '09:15', recipients: ['self', 'owner'] },
+          monthly: { enabled: false, dayOfMonth: 31, sendAt: '08:45', recipients: ['sub_owner'] },
+        },
+      },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-report-digest-policy"]')!.click()
+    await flushUi(4)
+
+    const section = container!.querySelector<HTMLElement>('[data-attendance-report-digest-policy]')
+    expect(section).toBeTruthy()
+    const enabled = section!.querySelector<HTMLInputElement>('[data-report-digest="enabled"]')
+    const timezone = section!.querySelector<HTMLInputElement>('[data-report-digest="timezone"]')
+    const channel = section!.querySelector<HTMLSelectElement>('[data-report-digest="channel"]')
+    const dailySendAt = section!.querySelector<HTMLInputElement>('[data-report-digest-daily="send-at"]')
+    const weeklyWeekday = section!.querySelector<HTMLInputElement>('[data-report-digest-weekly="weekday"]')
+    const weeklySendAt = section!.querySelector<HTMLInputElement>('[data-report-digest-weekly="send-at"]')
+    const monthlyDay = section!.querySelector<HTMLInputElement>('[data-report-digest-monthly="day"]')
+    const monthlySubOwner = section!.querySelector<HTMLInputElement>('[data-report-digest-monthly-recipient="sub_owner"]')
+    expect(Boolean(enabled && timezone && channel && dailySendAt && weeklyWeekday && weeklySendAt && monthlyDay && monthlySubOwner)).toBe(true)
+
+    // Hydrated by loadSettings() on the first screen; no "reload section" action is required.
+    expect(enabled!.checked).toBe(true)
+    expect(timezone!.value).toBe('America/Los_Angeles')
+    expect(channel!.value).toBe('email_smtp')
+    expect(dailySendAt!.value).toBe('18:45')
+    expect(weeklyWeekday!.value).toBe('5')
+    expect(weeklySendAt!.value).toBe('09:15')
+    expect(monthlyDay!.value).toBe('31')
+    expect(monthlySubOwner!.checked).toBe(true)
+
+    // Invalid: each cadence must keep at least one recipient. This must stop before PUT.
+    const dailySelf = section!.querySelector<HTMLInputElement>('[data-report-digest-daily-recipient="self"]')
+    expect(dailySelf).toBeTruthy()
+    dailySelf!.click()
+    await flushUi(2)
+    section!.querySelector<HTMLButtonElement>('[data-report-digest="save"]')!.click()
+    await flushUi(6)
+    const settingsPutsAfterInvalid = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(settingsPutsAfterInvalid).toHaveLength(0)
+
+    dailySelf!.click()
+    channel!.value = 'work_notification'
+    channel!.dispatchEvent(new Event('change'))
+    await flushUi(2)
+    section!.querySelector<HTMLButtonElement>('[data-report-digest="save"]')!.click()
+    await flushUi(6)
+
+    expect(lastSettingsPutBody()).toEqual({
+      attendanceReportDigestPolicy: {
+        enabled: true,
+        timezone: 'America/Los_Angeles',
+        channel: 'work_notification',
+        cadences: {
+          daily: { enabled: true, sendAt: '18:45', recipients: ['self'] },
+          weekly: { enabled: true, sendAt: '09:15', recipients: ['self', 'owner'], weekday: 5 },
+          monthly: { enabled: false, sendAt: '08:45', recipients: ['sub_owner'], dayOfMonth: 31 },
+        },
+      },
+    })
+  })
+
   it('loads multiShiftDay into the config card and PUTs ONLY { multiShiftDay }', async () => {
     attendanceSettingsData = {
       multiShiftDay: { enabled: true, maxSlots: 3 },
