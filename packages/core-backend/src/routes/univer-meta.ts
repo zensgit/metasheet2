@@ -87,6 +87,7 @@ import {
 import {
   type ConfigRevisionRow,
   classifyRevert,
+  isSupportedSheetConfigRevert,
   computeRevertPreview,
   loadEntityConfigSnapshot,
   applyConfigRevert,
@@ -7739,10 +7740,12 @@ export function univerMetaRouter(): Router {
         preview.current = redactConditionalReadRuleLiterals(preview.current as { conditionalReadRules?: unknown }, allowedFieldIds) as Record<string, unknown>
         preview.target = redactConditionalReadRuleLiterals(preview.target as { conditionalReadRules?: unknown }, allowedFieldIds) as Record<string, unknown>
       }
-      // T9-W Tier 1: classifyRevert stays PURE (sheet_config = intrinsically gated), but the flag is ON here (flag-off
-      // already 403'd above), so the ROUTE supports this revert — surface it as confirmable so the FE shows the confirm
-      // path (the FE hides confirm unless opKind === 'safe'). EXECUTE applies the same flag+guard gate, not opKind.
-      if (rev.entity_type === 'sheet_config') {
+      // T9-W Tier 1: classifyRevert stays PURE (sheet_config = intrinsically gated). The flag is ON here (flag-off
+      // already 403'd above), but it opens ONLY the Tier-1 subset — isSupportedSheetConfigRevert (an `update` whose
+      // changed keys are all Tier-1 keys). A create/delete or unknown-key sheet_config is Tier 3/4 (HOLD, #3254): it
+      // stays gated, so leave opKind as classifyRevert set it (the FE hides confirm) and EXECUTE 422s it below. Only
+      // the supported subset is surfaced confirmable.
+      if (isSupportedSheetConfigRevert(rev)) {
         preview.opKind = 'safe'
         delete preview.gatedReason
       }
@@ -7792,9 +7795,11 @@ export function univerMetaRouter(): Router {
         }
       }
       const classify = classifyRevert(rev)
-      // classifyRevert stays PURE; the route SUPPORTS flag-on sheet_config (already flag/guard-gated above), so it must
-      // NOT 422 it. Every other gated kind (permission, lossy field, create/delete) is still refused here.
-      if (classify.kind === 'gated' && rev.entity_type !== 'sheet_config') return res.status(422).json({ ok: false, error: { code: 'RESTORE_NOT_SUPPORTED', message: classify.reason ?? 'This config restore is not supported in this slice.' } })
+      // classifyRevert stays PURE; the route SUPPORTS only the flag-opened Tier-1 sheet_config subset
+      // (isSupportedSheetConfigRevert: an `update` whose changed keys are all Tier-1 keys), so it must NOT 422 that.
+      // Every other gated kind — permission, lossy field, create/delete, AND any non-Tier-1 sheet_config
+      // (create/delete/unknown changed_key = Tier 3/4 HOLD, #3254) — is still refused here.
+      if (classify.kind === 'gated' && !isSupportedSheetConfigRevert(rev)) return res.status(422).json({ ok: false, error: { code: 'RESTORE_NOT_SUPPORTED', message: classify.reason ?? 'This config restore is not supported in this slice.' } })
 
       // null = applied; a failure object = a guard tripped (the txn made no write either way).
       const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {

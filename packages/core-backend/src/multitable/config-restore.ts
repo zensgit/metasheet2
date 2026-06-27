@@ -3,8 +3,11 @@
  * FORWARD (re-applies its `before` state as a new change), drift-guarded (T9-W-L5) and forward-only (T9-W-L1).
  *
  * v1 SAFE subset (T9-W-L6): field `name`/`order` reverts + all view config reverts (display-only, non-lossy).
- * Everything else — field `type`/`property` (potentially lossy), create/delete (undelete), permission, sheet_config —
- * is GATED in this slice and refused fail-closed. No record-data is ever touched (T9-W-L2).
+ * Everything else — field `type`/`property` (potentially lossy), create/delete (undelete), permission — is GATED in
+ * this slice and refused fail-closed. sheet_config is also `gated` at the classify layer (classifyRevert); the ROUTE
+ * opens only a narrow Tier-1 subset (an `update` whose changed keys ⊆ {conditionalReadRules,
+ * rowLevelReadPermissionsEnabled}, per isSupportedSheetConfigRevert) behind MULTITABLE_ENABLE_SHEET_CONFIG_REVERT —
+ * a sheet_config create/delete/unknown-key stays gated. No record-data is ever touched (T9-W-L2).
  */
 import { createHash } from 'node:crypto'
 
@@ -35,6 +38,25 @@ export function classifyRevert(rev: Pick<ConfigRevisionRow, 'entity_type' | 'act
     return { kind: 'safe' }
   }
   return { kind: 'gated', reason: `${rev.entity_type} reverts are not supported in this slice` }
+}
+
+/**
+ * T9-W Tier 1 scope — the ONLY sheet_config reverts the flag opens: an `update` whose changed keys are ALL Tier-1
+ * keys (the row-deny toggle + conditional-read rules). classifyRevert returns `gated` for EVERY sheet_config
+ * (intrinsically gated), so preview/execute must use THIS predicate — NOT `entity_type === 'sheet_config'` — to
+ * decide what the flag actually permits. A `create`/`delete` (un-create / undelete = Tier 3/4, #3254 HOLD) or an
+ * unknown changed_key stays gated (preview not confirmable, execute 422). These keys MUST stay equal to
+ * SHEET_CONFIG_COLUMN's (the columns applyConfigRevert can actually write).
+ */
+export const SUPPORTED_SHEET_CONFIG_REVERT_KEYS: ReadonlySet<string> = new Set(['conditionalReadRules', 'rowLevelReadPermissionsEnabled'])
+export function isSupportedSheetConfigRevert(rev: Pick<ConfigRevisionRow, 'entity_type' | 'action' | 'changed_keys'>): boolean {
+  return (
+    rev.entity_type === 'sheet_config' &&
+    rev.action === 'update' &&
+    Array.isArray(rev.changed_keys) &&
+    rev.changed_keys.length > 0 &&
+    rev.changed_keys.every((k) => SUPPORTED_SHEET_CONFIG_REVERT_KEYS.has(k))
+  )
 }
 
 const stable = (v: unknown): string => JSON.stringify(v ?? null)
