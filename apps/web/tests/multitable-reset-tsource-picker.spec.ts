@@ -88,4 +88,31 @@ describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
     expect(new Date(body.asOf).getTime()).toBe(new Date(local).getTime())
     expect(body.asOf).toBe(new Date(local).toISOString())
   })
+
+  it('(g) POST-EXECUTE SEAM: a successful reset fires onDone (→ workbench grid refresh) and hits reset-execute with the picker sheetId', async () => {
+    const onDone = vi.fn()
+    const fetchFn = vi.fn(async (url: string) => {
+      // deleteCount:0 → the dialog's revert-equivalent path (no typed confirm) so we can drive execute simply.
+      if (String(url).includes('reset-preview')) return new Response(JSON.stringify({ ok: true, data: {
+        asOf: '', strategy: 'reset', summary: { visibleRevertCount: 1, deleteCount: 0 }, deleteRecordIds: [], previewIdentity: 'srv',
+      } }), { status: 200 })
+      return new Response(JSON.stringify({ ok: true, data: { asOf: '', strategy: 'reset', revertedCount: 1, deletedRecordIds: [] } }), { status: 200 })
+    })
+    const client = new MultitableApiClient({ fetchFn })
+    mount({
+      sheetId: 'sheet_xyz', onDone,
+      resetPreview: (sid: string, asOf: string) => client.resetPreview(sid, asOf),
+      resetExecute: (sid: string, asOf: string, id: string) => client.resetExecute(sid, asOf, id),
+    })
+    await nextTick()
+    setInput('[data-test="reset-picker-input"]', '2020-01-15T10:30'); await flush()
+    await waitUntil(() => !!q('[data-test="reset-entry"]'))
+    ;(q('[data-test="reset-entry"]') as HTMLButtonElement).click()
+    await waitUntil(() => !!q('[data-test="reset-confirm-btn"]')) // revert-equivalent confirm (deleteCount 0)
+    ;(q('[data-test="reset-confirm-btn"]') as HTMLButtonElement).click()
+    await waitUntil(() => fetchFn.mock.calls.length >= 2)
+    expect(String(fetchFn.mock.calls[1][0])).toContain('sheet_xyz')
+    expect(String(fetchFn.mock.calls[1][0])).toContain('/reset-execute')
+    await waitUntil(() => onDone.mock.calls.length >= 1) // the seam back to the workbench (grid refresh) fired
+  })
 })

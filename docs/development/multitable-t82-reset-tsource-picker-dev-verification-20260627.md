@@ -20,14 +20,16 @@
 |---|---|---|
 | Picker logic (gating, valid-past, future-reject, target display) | `multitable-reset-tsource-picker.spec.ts` (jsdom, `createApp`) | ✅ 5/5 local |
 | **The (sheetId, asOf) WIRE** — picker → client → `reset-preview` | same spec, **fake `fetchFn`** asserts URL carries the picker's `sheetId` + body `asOf` = UTC-ISO of the input, round-tripping to the same instant | ✅ (this is the real check, not a fixture) |
+| **Post-execute seam** — `execute → dialog.onDone → picker onDone → grid refresh` | picker spec test (g): drives execute (revert-equiv path) and asserts `onDone` fires + `reset-execute` carries the sheetId | ✅ (the "does the entry close the loop" check) |
 | The workbench **mount** (binding `pitResetEnabled`/`sheetId`/client) | `vue-tsc -b` (authoritative; `--noEmit` can false-green) | ✅ exit 0 |
-| Reuse didn't break the dialog | `multitable-reset-confirm-dialog.spec.ts` + `multitable-workbench-restore-wiring.spec.ts` | ✅ 6/6 + 13/13 |
-| **Live app with the flag ON** (the entry actually renders + a real reset round-trips) | not run here (flag default-off; needs a flag-enabled env) | ⬜ **honest gap** — recommend a flag-on smoke before enabling rollout |
+| Reuse didn't break anything | full `multitable-web-guard` set | ✅ **372/372** (38 files) |
+| **Live app with the flag ON** — the entry actually *renders* + a real reset round-trips through a real grid | not run here (flag default-off; needs a flag-enabled env) | ⬜ **honest gap** (narrow): the wire + onDone seam are unit-covered; only the live render + real-grid round-trip is unverified. Recommend a flag-on smoke before rollout. |
 
 ## Scope boundary
 This is **item #1** of the owner's reordered list. **Not** included (each is destructive and needs its own design-lock + owner gate, per the given order): T8-1 undelete-execute · T9-W Tier 3 un-create · Tier 4 undelete · permission-revert. The `value-transforming/destructive retype option II` is also separate.
 
 ## Follow-ups (non-blocking)
 - Flag-on smoke (the ⬜ above).
+- **Post-destructive page offset:** `onResetDone` calls `grid.reloadCurrentPage()`; after a Reset moves post-T records to trash the total shrinks, so the current offset can land on a now-empty page. The config-revert path reloaded more deliberately — consider resetting the offset to 0 (or clamping) on reset-done.
 - Swap the T-source seam to history-timestamp options if the owner prefers the richer picker.
 - Visual placement polish (currently a gated strip under the toolbar) + i18n (matches `ResetConfirmDialog`'s current raw-string state; a later i18n sweep covers both).
