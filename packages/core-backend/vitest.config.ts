@@ -27,6 +27,7 @@ export default defineConfig({
       'tests/integration/approval-postgate-acceptance.api.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
+      'tests/integration/approval-requester-attr-dispatch.db.test.ts',
       'tests/integration/approval-delegation-seam.db.test.ts',
       'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-detail-subform.db.test.ts',
