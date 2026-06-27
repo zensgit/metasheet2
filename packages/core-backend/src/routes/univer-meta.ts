@@ -73,7 +73,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { hashPreviewChanges, hashScope, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -8708,7 +8708,7 @@ export function univerMetaRouter(): Router {
   const computeSheetRevert = async (
     pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
     access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
-  ): Promise<null | { tooLarge: true; recordCount: number } | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
+  ): Promise<null | { tooLarge: true; recordCount: number } | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
     const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
     if (!patchContext) return null
@@ -8726,12 +8726,20 @@ export function univerMetaRouter(): Router {
     }
     const stateMap = await reconstructRecordsAtT(pool.query.bind(pool), sheetId, asOfIso) // delete-aware, deterministic (PIT-4)
     const reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }> = []
+    const resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }> = []
     let undeleteCount = 0, keptCreatedAfterT = 0, driftCount = 0
     for (const [recordId, target] of stateMap) {
-      if (deniedIds.has(recordId)) continue // PIT-3/LOCK-3 — denied records are invisible (uncounted, never reverted)
+      if (deniedIds.has(recordId)) continue // PIT-3/LOCK-3 — denied records are invisible (uncounted, never reverted/resurrected — no denied-record oracle)
       const live = liveById.get(recordId)
       if (target.exists) {
-        if (!live) { undeleteCount++; continue } // existed at T, gone now (deleted after T) → undelete (execute-deferred)
+        if (!live) {
+          // existed at T, gone now (deleted after T) → T8-1 undelete. Collect the FULL server-side T-snapshot (NOT a
+          // masked diff — undelete re-creates the whole record; read-masking still applies on later reads). The
+          // snapshotHash binds the exact target into the resurrect identity (a deleted record has no live version).
+          const snap = asRec(target.data)
+          resurrects.push({ recordId, snapshot: snap, snapshotHash: hashPreviewChanges(Object.entries(snap).map(([fieldId, value]) => ({ fieldId, op: 'set', value }))) })
+          undeleteCount++; continue
+        }
         const targetSnapshot = asRec(target.data)
         let drift = false
         for (const fid of Object.keys(targetSnapshot)) if (!fieldById.has(fid)) { drift = true; break }
@@ -8745,7 +8753,7 @@ export function univerMetaRouter(): Router {
     }
     const createdAfterTIds: string[] = []
     for (const id of liveById.keys()) if (!stateMap.has(id) && !deniedIds.has(id)) { keptCreatedAfterT++; createdAfterTIds.push(id) } // created after T (visible) → KEPT by revert; the DELETE-SET for reset (T8-2)
-    return { reverts, undeleteCount, keptCreatedAfterT, createdAfterTIds, driftCount, patchContext }
+    return { reverts, resurrects, undeleteCount, keptCreatedAfterT, createdAfterTIds, driftCount, patchContext }
   }
 
   type PitResetRevert = { recordId: string; diff: RecordChange[]; changesHash: string; version: number }
@@ -8817,6 +8825,13 @@ export function univerMetaRouter(): Router {
     return res.status(409).json({ ok: false, error: { code: 'RESET_BLOCKED', message: 'Reset is all-or-nothing: a target is denied or forbidden, so nothing was written.' } })
   }
 
+  // T8-1 undelete: PIT Revert resurrects records that existed at T but are deleted now. Default-OFF flag (ON TOP of
+  // canManageSheetAccess), and at execute the undelete-specific floor is canDeleteRecord (NEVER canEditRecord) + a
+  // typed confirm:'undelete'. The resurrect set is bound into the SAME pit-revert identity (resurrectScopeHash); the
+  // resurrects run in ONE transaction (all-or-nothing) while field-reverts stay best-effort per-record. Inbound links
+  // are NOT rebuilt (design-lock L4 A) — they re-appear when the linking record is next saved.
+  const PIT_UNDELETE_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_UNDELETE ?? '').trim().toLowerCase() === 'true'
+
   router.post('/sheets/:sheetId/revert-preview', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const parsed = z.object({ asOf: z.string().min(1) }).safeParse(req.body)
@@ -8831,15 +8846,21 @@ export function univerMetaRouter(): Router {
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.` } })
-      const { reverts, undeleteCount, keptCreatedAfterT, driftCount } = computed
-      const previewIdentity = reverts.length > 0
-        ? mintPitRevertPreviewIdentity({ sheetId, asOf: asOfIso, strategy: 'revert', scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))), actorId: access.userId })
-        : null // empty revert set → no executable token (no hashScope([]) replay)
+      const { reverts, resurrects, undeleteCount, keptCreatedAfterT, driftCount } = computed
+      const previewIdentity = (reverts.length > 0 || resurrects.length > 0)
+        ? mintPitRevertPreviewIdentity({
+            sheetId, asOf: asOfIso, strategy: 'revert',
+            scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
+            resurrectScopeHash: hashResurrectSet(resurrects.map((r) => ({ recordId: r.recordId, snapshotHash: r.snapshotHash }))),
+            actorId: access.userId,
+          })
+        : null // nothing to revert AND nothing to resurrect → no-op, no executable token
       return res.json({ ok: true, data: {
         asOf: asOfIso, strategy: 'revert',
         summary: { visibleRevertCount: reverts.length, visibleUndeleteCount: undeleteCount, keptCreatedAfterTCount: keptCreatedAfterT, conflictCount: driftCount },
         records: reverts.map((r) => ({ recordId: r.recordId, fieldIds: r.diff.map((dd) => dd.fieldId) })),
-        undeleteSupported: false, previewIdentity,
+        undeleteRecordIds: resurrects.map((r) => r.recordId),
+        undeleteSupported: PIT_UNDELETE_ENABLED(), previewIdentity,
       } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
@@ -8852,7 +8873,7 @@ export function univerMetaRouter(): Router {
 
   router.post('/sheets/:sheetId/revert-execute', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
-    const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1) }).safeParse(req.body)
+    const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1), confirm: z.string().optional() }).safeParse(req.body)
     if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, asOf, previewIdentity required' } })
     const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
     if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
@@ -8864,10 +8885,19 @@ export function univerMetaRouter(): Router {
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.` } })
-      const { reverts, patchContext } = computed
+      const { reverts, resurrects, patchContext } = computed
+      // T8-1 undelete gate: a revert that would resurrect deleted records needs the default-off flag, the
+      // canDeleteRecord floor (NEVER canEditRecord — record resurrection, not edit), and a typed confirm:'undelete'.
+      if (resurrects.length > 0) {
+        if (!PIT_UNDELETE_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'UNDELETE_DISABLED', message: 'PIT undelete is disabled (MULTITABLE_ENABLE_PIT_UNDELETE is off).' } })
+        if (!capabilities.canDeleteRecord) return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Undelete requires delete permission (canDeleteRecord).' } })
+        if ((parsed.data.confirm ?? '').trim() !== 'undelete') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "undelete" to confirm resurrecting deleted records.' } })
+      }
       const verdict = verifyPitRevertPreviewIdentity(parsed.data.previewIdentity, {
         sheetId, asOf: asOfIso, strategy: 'revert',
-        scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))), actorId: access.userId,
+        scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
+        resurrectScopeHash: hashResurrectSet(resurrects.map((r) => ({ recordId: r.recordId, snapshotHash: r.snapshotHash }))),
+        actorId: access.userId,
       })
       if (!verdict.valid) {
         const status = verdict.reason === 'expired' ? 410 : 409
@@ -8899,7 +8929,47 @@ export function univerMetaRouter(): Router {
         }
       }
       const revertedCount = outcomes.filter((o) => o.status === 'reverted').length
-      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount } })
+      // T8-1 undelete (design-lock L1/L3/L4/L6/L7): resurrect the deleted-at-T records in ONE transaction —
+      // all-or-nothing, DISTINCT from the best-effort field-reverts above (MIXED semantics; see the dev MD). Each
+      // resurrect re-inserts the FULL T-snapshot under its ORIGINAL id with a FOR UPDATE id-collision reject (L1),
+      // rebuilds OUTBOUND meta_links from the snapshot (L3; NO inbound — L4 A: inbound re-appears when the linking
+      // record is next saved), and appends a 'rest' create-revision. Realtime create events fire post-commit (L7).
+      const resurrectedIds: string[] = []
+      if (resurrects.length > 0) {
+        const linkFieldIds = fields.filter((f) => f.type === 'link').map((f) => f.id)
+        const undeleteActorId = getRequestActorId(req)
+        try {
+          await pool.transaction(async ({ query }) => {
+            const sheetAlive = await query('SELECT 1 FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
+            if ((sheetAlive.rows as unknown[]).length === 0) throw new RecordServiceRestoreConflictError(`Cannot undelete: sheet no longer exists: ${sheetId}`)
+            for (const r of resurrects) {
+              const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [r.recordId])
+              if ((occupied.rows as unknown[]).length > 0) throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
+              try {
+                await query('INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, created_at, updated_at) VALUES ($1, $2, $3::jsonb, 1, $4, $4, now(), now())', [r.recordId, sheetId, JSON.stringify(r.snapshot), undeleteActorId])
+              } catch (e) {
+                if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
+                throw e
+              }
+              for (const fieldId of linkFieldIds) {
+                for (const foreignId of normalizeLinkIds(r.snapshot[fieldId])) {
+                  await query('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING', [`lnk_${randomUUID()}`.slice(0, 50), fieldId, r.recordId, foreignId])
+                }
+              }
+              await recordRecordRevision(query, { sheetId, recordId: r.recordId, version: 1, action: 'create', source: 'rest', changedFieldIds: Object.keys(r.snapshot), patch: r.snapshot, snapshot: r.snapshot, actorId: undeleteActorId })
+              resurrectedIds.push(r.recordId)
+            }
+          })
+        } catch (err) {
+          if (err instanceof RecordServiceRestoreConflictError) return res.status(409).json({ ok: false, error: { code: 'UNDELETE_CONFLICT', message: `${err.message}; the sheet changed since preview — re-preview` } })
+          throw err
+        }
+        for (const recordId of resurrectedIds) { // post-commit realtime, mirrors restoreRecord
+          publishMultitableSheetRealtime({ spreadsheetId: sheetId, actorId: undeleteActorId, source: 'multitable', kind: 'record-created', recordId, recordIds: [recordId] })
+          eventBus.emit('multitable.record.created', { sheetId, recordId, actorId: undeleteActorId })
+        }
+      }
+      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount, resurrectedCount: resurrectedIds.length, undeleteRecordIds: resurrectedIds } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
       const hint = getDbNotReadyMessage(err)
