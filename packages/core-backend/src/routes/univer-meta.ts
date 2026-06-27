@@ -1390,13 +1390,16 @@ async function resolveRelationAggregation(
   const readableForeignSheetIds = await resolveReadableSheetIds(req, query, [foreignSheetId])
   if (!readableForeignSheetIds.has(foreignSheetId)) return REL_AGG_PERM_SENTINEL
 
-  // Foreign-FIELD readability + cross-base. Cross-base ranges are out of scope at lock time → #PERM!
-  // (fail-closed). Both the TARGET and the CRITERIA field must be readable; either unreadable → #PERM!
-  // (a criteria over an unreadable field is a side-channel — the match count would leak it).
+  // Foreign-FIELD readability — cross-base flows through the SAME per-field gate as lookup/rollup, not a
+  // blanket bail: resolveForeignFieldReadability empties the readable set when the actor can't read the
+  // foreign base (resolveBaseReadable, ②b §3.2), so shouldMaskForeignField masks every field of an unreadable
+  // cross-base sheet → #PERM!. An AUTHORIZED cross-base reader (base-read + field readable) is NOT
+  // blanket-denied (the prior `crossBase → #PERM!` was an out-of-scope-at-lock-time placeholder, now
+  // redundant). Both the TARGET and the CRITERIA field must be readable; either unreadable → #PERM! (a
+  // criteria over an unreadable field is a side-channel — the match count would leak it).
   const sourceSheet = await loadSheetRowShared(query, sourceSheetId)
   const sourceBaseId = sourceSheet?.baseId ?? null
   const readability = await resolveForeignFieldReadability(req, query, sourceBaseId, [foreignSheetId])
-  if (readability.get(foreignSheetId)?.crossBase) return REL_AGG_PERM_SENTINEL
   if (shouldMaskForeignField(readability, foreignSheetId, call.targetFieldId, false)) return REL_AGG_PERM_SENTINEL
   if (shouldMaskForeignField(readability, foreignSheetId, call.criteria.fieldId, false)) return REL_AGG_PERM_SENTINEL
 
@@ -3087,15 +3090,17 @@ async function resolveTaintedFormulaFieldIds(
     if (leaks) tainted.add(formulaFieldId)
   }
 
-  // 1b Slice A leak edge: taint a relation-aggregation formula when its FOREIGN target or criteria field
-  // is unreadable for this actor (or the foreign sheet is cross-base — out of scope at lock time). This is
-  // the read-path mask (maskStoredRecordFieldIds → here) that makes materialize-at-write safe: a restricted
-  // reader gets the field dropped, never the writer's materialized aggregate. A misconfigured call (no
-  // foreign sheet) is left to resolveRelationAggregation's #ERROR! — not a leak.
+  // 1b Slice A leak edge: taint a relation-aggregation formula when its FOREIGN target or criteria field is
+  // unreadable for this actor. Cross-base flows through the SAME per-field gate (shouldMaskForeignField: an
+  // unreadable cross-base sheet has its readable set emptied by resolveForeignFieldReadability's base-read
+  // gate → every field masks → tainted); an AUTHORIZED cross-base reader is NOT blanket-tainted, mirroring the
+  // resolveRelationAggregation gate so the formula-consumed value matches the standalone field. This is the
+  // read-path mask (maskStoredRecordFieldIds → here) that makes materialize-at-write safe: a restricted reader
+  // gets the field dropped, never the writer's materialized aggregate. A misconfigured call (no foreign
+  // sheet) is left to resolveRelationAggregation's #ERROR! — not a leak.
   for (const [fieldId, { call, foreignSheetId }] of relAggByField) {
     if (!foreignSheetId) continue
     if (
-      readability.get(foreignSheetId)?.crossBase ||
       shouldMaskForeignField(readability, foreignSheetId, call.targetFieldId, false) ||
       shouldMaskForeignField(readability, foreignSheetId, call.criteria.fieldId, false)
     ) {
