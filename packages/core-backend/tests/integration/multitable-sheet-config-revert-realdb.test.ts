@@ -159,4 +159,43 @@ describeIfDatabase('multitable sheet_config revert — T9-W Tier 1 (real DB)', (
     const full = await preview(rev, FULL)
     expect(JSON.stringify(full.body)).toContain(SECRET_LIT) // fully-allowed sees it
   })
+
+  // (g) U-L4 atomicity: execute applies the config UPDATE (applyConfigRevert) and the forward source=restore
+  // revision (recordConfigRevision) inside ONE pool.transaction. Force the revision INSERT to fail AFTER the
+  // UPDATE has run, and assert the sheet is byte-for-byte unchanged + no revision was added → single-transaction
+  // all-or-nothing (not revert-first/record-second with a half-write). The trigger is scoped to THIS sheet and
+  // source='restore', so it fires only on this restore insert — never on setRules or any parallel suite's row.
+  test('(g) U-L4 atomicity: a forced revision-insert failure rolls back the config UPDATE — nothing written', async () => {
+    process.env[FLAG] = 'true'
+    // two DISTINCT states so a fresh revision is recorded: before=[g1], after=[g2]; reverting would restore [g1].
+    await setRules([rule('rv', FLD_VISIBLE, 'g1-restore-target')])
+    await setRules([rule('rv', FLD_VISIBLE, 'g2-current')])
+    const rev = await latestRevId()
+    const p = await preview(rev, FULL)
+    expect(p.status).toBe(200)
+    const token = p.body?.data?.previewToken
+    const liveBefore = JSON.stringify(await liveRules())
+    const countBefore = ((await q('SELECT count(*)::int AS n FROM meta_config_revisions WHERE sheet_id=$1', [SHEET])).rows[0] as { n: number }).n
+    const FN = `scr_atomic_fail_${TS}`
+    const TRG = `scr_atomic_fail_trg_${TS}`
+    await q(`CREATE OR REPLACE FUNCTION ${FN}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'forced restore-revision insert failure (atomicity golden)'; END; $fn$`, [])
+    await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_config_revisions`, [])
+    await q(`CREATE TRIGGER ${TRG} BEFORE INSERT ON meta_config_revisions FOR EACH ROW WHEN (NEW.sheet_id = '${SHEET}' AND NEW.source = 'restore') EXECUTE FUNCTION ${FN}()`, [])
+    try {
+      const x = await execute(rev, token, FULL)
+      expect(x.status).toBe(500) // forced failure aborts the txn → INTERNAL
+      expect(x.body?.error?.code).toBe('INTERNAL')
+      // the config UPDATE rolled back: live rules byte-for-byte unchanged (still g2), NOT reverted to g1
+      const liveAfter = JSON.stringify(await liveRules())
+      expect(liveAfter).toBe(liveBefore)
+      expect(liveAfter).toContain('g2-current')
+      expect(liveAfter).not.toContain('g1-restore-target')
+      // and NO forward restore revision was committed (count unchanged)
+      const countAfter = ((await q('SELECT count(*)::int AS n FROM meta_config_revisions WHERE sheet_id=$1', [SHEET])).rows[0] as { n: number }).n
+      expect(countAfter).toBe(countBefore)
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_config_revisions`, []).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${FN}()`, []).catch(() => {})
+    }
+  })
 })
