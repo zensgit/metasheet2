@@ -530,8 +530,12 @@ describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', 
       const before = await reqRow(id)
       const snapBefore = before?.metadata?.makeupPunchPolicySnapshot as Record<string, unknown> | undefined
       expect(snapBefore?.version).toBe(1)
+      expect((snapBefore?.quota as Record<string, unknown> | undefined)?.maxRequestsPerCycle).toBe(3) // base cap at create time
       expect(before?.metadata?.attachmentUrl).toBe('https://example.com/a.png')
 
+      // CHANGE a snapshot-visible field between create and edit so the snapshot must visibly differ if it
+      // is recomputed — a stale-inherit bug (carrying the create-time snapshot) would leave cap=3 and fail.
+      await setMakeup({ enabled: true, quota: { maxRequestsPerCycle: 7 } })
       // edit reason only; do not resend attachmentUrl → sibling must be preserved, snapshot recomputed fresh
       const e = await updateReq(tU, id, { requestType: 'missed_check_in', workDate: wd, requestedInAt: at(wd, '09:01'), reason: 'forgot (edited)' })
       expect(e.status).toBe(200)
@@ -539,6 +543,7 @@ describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', 
       const snapAfter = after?.metadata?.makeupPunchPolicySnapshot as Record<string, unknown> | undefined
       expect(snapAfter?.version).toBe(1)
       expect(snapAfter?.matchedAnomalyTypes).toEqual(['missing_check_in'])
+      expect((snapAfter?.quota as Record<string, unknown> | undefined)?.maxRequestsPerCycle).toBe(7) // proves recompute, not stale-inherit
       expect(after?.metadata?.attachmentUrl).toBe('https://example.com/a.png') // not silently dropped
     } finally {
       await cleanupUser(u)
