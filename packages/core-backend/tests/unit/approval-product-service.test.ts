@@ -2152,6 +2152,76 @@ describe('ApprovalProductService', () => {
     expect(insertInstance?.[1]?.[12]).toBe('pub-2')
   })
 
+  // RA-1a wedge guard (error-vs-empty split): a transient directory-read failure must not freeze an
+  // absent department into a downstream requester.department condition (which would wedge every later
+  // approval, admin-cancel only). A read that THROWS fails the create fast; a read that SUCCEEDS with no
+  // department proceeds (genuine absence — runtime fail-closes per the lock, never blocks the requester).
+  const wedgeGraph = {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      { key: 'approval_1', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['mgr-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'condition_1', type: 'condition', config: { branches: [{ edgeKey: 'eng', rules: [], formula: { expression: "requester.department == 'Eng'" } }], defaultEdgeKey: 'other' } },
+      { key: 'approval_eng', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['eng-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'approval_other', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['oth-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    edges: [
+      { key: 'e1', source: 'start', target: 'approval_1' },
+      { key: 'e2', source: 'approval_1', target: 'condition_1' },
+      { key: 'eng', source: 'condition_1', target: 'approval_eng' },
+      { key: 'other', source: 'condition_1', target: 'approval_other' },
+      { key: 'e3', source: 'approval_eng', target: 'end' },
+      { key: 'e4', source: 'approval_other', target: 'end' },
+    ],
+    policy: { allowRevoke: true },
+  }
+  function mountWedgeSql() {
+    pgState.pool.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+        return { rows: [{ id: 'tpl-1', key: 'travel', name: 'Travel', description: null, category: null, visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'published', active_version_id: 'ver-2', latest_version_id: 'ver-2', created_at: new Date(), updated_at: new Date() }], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+        return { rows: [{ id: 'ver-2', template_id: 'tpl-1', version: 2, status: 'published', form_schema: { fields: [] }, approval_graph: wedgeGraph, created_at: new Date(), updated_at: new Date() }], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+        return { rows: [{ id: 'pub-2', template_id: 'tpl-1', template_version_id: 'ver-2', runtime_graph: wedgeGraph, is_active: true, published_at: new Date() }], rowCount: 1 }
+      }
+      if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+        return { rows: [{ request_no: 'AP-101050' }], rowCount: 1 }
+      }
+      throw new Error(`Unhandled pool query: ${statement}`)
+    })
+    pgState.client.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+      if (statement.startsWith('SELECT assignment_type, assignee_id, node_key FROM approval_assignments')) return { rows: [], rowCount: 0 }
+      if (statement.startsWith('INSERT INTO approval_instances')) return { rows: [], rowCount: 1 }
+      if (statement.startsWith('INSERT INTO approval_assignments')) return { rows: [], rowCount: 1 }
+      if (statement.startsWith('INSERT INTO approval_records')) return { rows: [], rowCount: 1 }
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+  }
+
+  it('RA-1a wedge guard: fails create fast (503) when the directory read THROWS and the graph routes on requester.department', async () => {
+    orgRelationsState.resolveApprovalRequesterOrgRelations.mockRejectedValue(new Error('transient directory read failure'))
+    mountWedgeSql()
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-2', publishedDefinitionId: 'pub-2' }))
+    await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+      .rejects.toMatchObject({ statusCode: 503, code: 'APPROVAL_REQUESTER_DEPARTMENT_UNRESOLVED' })
+  })
+
+  it('RA-1a wedge guard: a SUCCESSFUL read with no department still creates (genuine absence proceeds; runtime fail-closes later)', async () => {
+    orgRelationsState.resolveApprovalRequesterOrgRelations.mockResolvedValue({})
+    mountWedgeSql()
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-2', publishedDefinitionId: 'pub-2' }))
+    await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' })).resolves.toBeTruthy()
+  })
+
   it('bakes the manager chain into the persisted requester snapshot for a manager_at_level graph', async () => {
     // Regression for the bake-gate gap: prove createApproval ITSELF wires the
     // scanner result through to the snapshot — not just the resolver. The org

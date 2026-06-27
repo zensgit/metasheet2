@@ -1767,6 +1767,27 @@ export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolea
   })
 }
 
+/**
+ * RA-1a: does the published runtime graph route on `requester.department`? Used by the create-time
+ * wedge guard — a transient directory-read failure must fail the create fast (retryable) when a
+ * `requester.department` condition exists, rather than freezing an absent department that would
+ * wedge every later approval at the condition (the snapshot is frozen; admin-cancel only).
+ */
+export function runtimeGraphUsesRequesterDepartment(runtimeGraph: RuntimeGraph): boolean {
+  return runtimeGraph.nodes.some((node) => {
+    if (node.type !== 'condition') return false
+    const config: unknown = node.config
+    const branches = isRecord(config) ? config.branches : undefined
+    if (!Array.isArray(branches)) return false
+    return branches.some((branch) => {
+      if (!isRecord(branch)) return false
+      const formula = isRecord(branch.formula) ? branch.formula : undefined
+      const expression = formula && typeof formula.expression === 'string' ? formula.expression : ''
+      return /\brequester\s*\.\s*department\b/.test(expression)
+    })
+  })
+}
+
 function getEffectiveAutoApprovalPolicy(
   runtimeGraph: RuntimeGraph,
   nodeKey: string,
@@ -2873,15 +2894,31 @@ export class ApprovalProductService {
     const runtimeGraph = asRuntimeGraph(bundle.publishedDefinition.runtime_graph)
     const needsManagerChain = runtimeGraphUsesManagerChain(runtimeGraph)
     let orgRelations: ApprovalRequesterOrgRelations = {}
+    let orgReadFailed = false
     try {
       orgRelations = await resolveApprovalRequesterOrgRelations(actor.userId, pool.query.bind(pool), {
         includeManagerChain: needsManagerChain,
       })
     } catch (error) {
+      orgReadFailed = true
       metricsLogger.warn(
         `Failed to resolve requester org relations for ${actor.userId}: ${
           error instanceof Error ? error.message : 'unknown error'
         }`,
+      )
+    }
+
+    // RA-1a wedge guard (error-vs-empty split): a directory read that THREW leaves the department
+    // unknown. If the template routes on `requester.department`, freezing an absent department would
+    // wedge every later approval at the condition (the snapshot is frozen — admin-cancel only). Fail the
+    // create fast (retryable) instead. A read that SUCCEEDED with no department is genuine row-level
+    // absence — proceed, and runtime fail-closes per the ratified lock (never block a requester who
+    // genuinely has no department). Only fires when the graph actually routes on requester.department.
+    if (orgReadFailed && !orgRelations.primaryDepartmentName && runtimeGraphUsesRequesterDepartment(runtimeGraph)) {
+      throw new ServiceError(
+        'Could not resolve the requester department required by this approval template. Please retry.',
+        503,
+        'APPROVAL_REQUESTER_DEPARTMENT_UNRESOLVED',
       )
     }
 
