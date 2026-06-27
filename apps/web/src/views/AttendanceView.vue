@@ -13597,9 +13597,9 @@ const reportDigestPolicyForm = reactive<{
   timezone: 'Asia/Shanghai',
   channel: 'work_notification',
   cadences: {
-    daily: { enabled: true, sendAt: '18:30', recipients: ['self'] },
-    weekly: { enabled: false, weekday: 1, sendAt: '09:00', recipients: ['self', 'owner'] },
-    monthly: { enabled: false, dayOfMonth: 1, sendAt: '09:00', recipients: ['self', 'owner'] },
+    daily: { enabled: false, sendAt: '18:30', recipients: ['self'] },
+    weekly: { enabled: false, weekday: 1, sendAt: '09:00', recipients: ['self'] },
+    monthly: { enabled: false, dayOfMonth: 1, sendAt: '09:00', recipients: ['self'] },
   },
 })
 
@@ -19602,9 +19602,9 @@ function applyReportDigestPolicyToForm(settings: AttendanceSettings) {
   reportDigestPolicyForm.enabled = p.enabled === true
   reportDigestPolicyForm.timezone = p.timezone || 'Asia/Shanghai'
   reportDigestPolicyForm.channel = p.channel === 'email_smtp' ? 'email_smtp' : 'work_notification'
-  applyReportDigestCadenceToForm(reportDigestPolicyForm.cadences.daily, p.cadences?.daily, { enabled: true, sendAt: '18:30', recipients: ['self'] })
-  applyReportDigestCadenceToForm(reportDigestPolicyForm.cadences.weekly, p.cadences?.weekly, { enabled: false, weekday: 1, sendAt: '09:00', recipients: ['self', 'owner'] })
-  applyReportDigestCadenceToForm(reportDigestPolicyForm.cadences.monthly, p.cadences?.monthly, { enabled: false, dayOfMonth: 1, sendAt: '09:00', recipients: ['self', 'owner'] })
+  applyReportDigestCadenceToForm(reportDigestPolicyForm.cadences.daily, p.cadences?.daily, { enabled: false, sendAt: '18:30', recipients: ['self'] })
+  applyReportDigestCadenceToForm(reportDigestPolicyForm.cadences.weekly, p.cadences?.weekly, { enabled: false, weekday: 1, sendAt: '09:00', recipients: ['self'] })
+  applyReportDigestCadenceToForm(reportDigestPolicyForm.cadences.monthly, p.cadences?.monthly, { enabled: false, dayOfMonth: 1, sendAt: '09:00', recipients: ['self'] })
 }
 
 function reportDigestPolicyError(): string | null {
