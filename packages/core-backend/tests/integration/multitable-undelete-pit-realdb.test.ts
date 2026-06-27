@@ -22,7 +22,7 @@ const L = `rec_un_l_${TS}`        // a LIVE record whose data links to U (inboun
 const ACTOR = `user_un_${TS}`
 const FLAG = 'MULTITABLE_ENABLE_PIT_UNDELETE'
 const T0 = '2026-01-01T00:00:00.000Z', T1 = '2026-01-02T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
-const SNAP = { [NAME]: 'u-at-T1', [LINK]: [] as string[] }
+const SNAP = { [NAME]: 'u-at-T1', [LINK]: [L] } // U's T-snapshot links OUTBOUND to L → rebuilt on undelete (proves the rebuild ran)
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
@@ -127,23 +127,29 @@ describeIfDatabase('multitable T8-1 PIT undelete-execute (real DB)', () => {
     expect(await revCount(U)).toBeGreaterThanOrEqual(3) // create + delete + the new resurrect 'create'
   })
 
-  test('(f) inbound (A): undelete writes NO inbound edge; L still references U in data but reads no edge until re-saved', async () => {
+  test('(f) inbound (A): undelete REBUILDS outbound (U→L) but writes NO inbound edge (→U), even though L\'s data references U', async () => {
     process.env[FLAG] = 'true'
+    expect(await inboundEdges(U)).toBe(0) // baseline: U's delete dropped the L→U edge (L's data still references U)
     const pv = await preview(T1)
     expect((await execute(T1, pv.body?.data?.previewIdentity, 'undelete')).status).toBe(200)
-    expect(await inboundEdges(U)).toBe(0) // L→U edge NOT re-created by the undelete (design-lock L4 A)
-    expect(await outboundEdges(U)).toBe(0) // U's own snapshot had an empty link array → no outbound either
+    // OUTBOUND rebuilt from U's snapshot → proves the link-rebuild code actually ran (not a vacuous assertion):
+    expect(await outboundEdges(U)).toBe(1)
+    // INBOUND stays absent: a naive impl that scanned L's data and re-materialized L→U would make this 1 and FAIL.
+    expect(await inboundEdges(U)).toBe(0) // design-lock L4 (A)
     const l = await liveRow(L)
-    expect(l?.data?.[LINK]).toEqual([U]) // L's data still references U — re-materializes on L's next save
+    expect(l?.data?.[LINK]).toEqual([U]) // L's data still references U — the edge re-materializes only on L's next save
   })
 
-  test('(g) id-collision: a LIVE record already occupies U\'s id → 409 UNDELETE_CONFLICT, no overwrite', async () => {
+  test('(g) id occupied between preview and execute → 409, no overwrite (via re-enumeration drift; the in-txn FOR UPDATE is the TOCTOU backstop)', async () => {
     process.env[FLAG] = 'true'
     const pv = await preview(T1)
-    // a concurrent create takes U's id between preview and execute
+    // A concurrent create takes U's id after preview. At execute, computeSheetRevert re-enumerates: U is now LIVE, so
+    // it reclassifies as a revert (not a resurrect) → resurrectScopeHash mismatch → 409 BEFORE the in-txn collision
+    // check. (The FOR UPDATE / unique-violation→409 guard is the deeper TOCTOU backstop, not reached here.) Either way:
+    // 409 and the squatter is never overwritten.
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,7)', [U, SHEET, JSON.stringify({ [NAME]: 'squatter' })])
     const x = await execute(T1, pv.body?.data?.previewIdentity, 'undelete')
-    expect([409]).toContain(x.status)
+    expect([409, 410]).toContain(x.status)
     const live = await liveRow(U)
     expect(live?.data?.[NAME]).toBe('squatter') // never overwritten
     expect(live?.version).toBe(7)
