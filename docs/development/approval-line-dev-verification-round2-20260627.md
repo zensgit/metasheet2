@@ -23,7 +23,7 @@ D-title = **YES** · D-level = **DEFER** · D-role-provenance = **fresh `user_ro
 
 ## 4. Remaining roadmap (each gated)
 - **`requester.title`** — RATIFIED; **next runtime slice** (cheapest, real source, no new grammar).
-- **RA-1b `requester.role`** — PROPOSED; needs the `in`-grammar build after title.
+- **RA-1b `requester.role`** — RATIFIED — RUNTIME NOT BUILT; needs the `in`-grammar build after title.
 - **`requester.level`** — DEFERRED (no source; needs a title→rank mapping decision).
 - **W7 write-back** — approved-path same-base shipped; rejection / cross-base / approverField-native-person remain (cross-base is NOT small — redo permission/lock/audit/target-resolution). Each demand-gated.
 - **Amount line** (optional, product/security decisions) — overridable line amount, backend strict `amount = qty × price`, discount/tax row math, mixed `rules`+`formula` branches.
