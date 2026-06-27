@@ -12706,6 +12706,190 @@ function normalizeMakeupPunchPolicySetting(raw) {
   }
 }
 
+// 补卡规则 MP-2 §4.4: static request-type → allowed anomaly-fact table. This is the FIRST of three
+// intersected allow-lists (static table ∩ org policy.allowedAnomalyTypes ∩ server-derived facts). A
+// `late_early` record matches both `late` and `early_leave`; `severe_late`/`absence_late` are RT-1a tiers.
+const MAKEUP_REQUEST_TYPE_ANOMALY_TABLE = Object.freeze({
+  missed_check_in: Object.freeze(['missing_check_in']),
+  missed_check_out: Object.freeze(['missing_check_out']),
+  time_correction: Object.freeze(['late', 'severe_late', 'absence_late', 'early_leave', 'normal']),
+})
+
+// 补卡规则 MP-2 §4.4: derive the anomaly facts for a (org,user,workDate) from SERVER-SIDE TRUTH —
+// attendance_records.status / missing-side / late+early minutes / RT-1a tier meta — never from client
+// anomaly prefill. Returns an ARRAY of fact tokens (a record can match several, e.g. late_early). This
+// is intentionally a plain read (no FOR UPDATE): it observes truth, it does not mutate the record, so it
+// must not contend with the concurrent punch/approval write paths. Shared by the MP-2 type gate and the
+// MP-3 snapshot.matchedAnomalyTypes. Fail-closed: an unresolvable / fact-less day yields [].
+async function deriveMakeupAnomalyFacts(trx, { orgId, userId, workDate }) {
+  const facts = new Set()
+  const rows = await trx.query(
+    `SELECT status, first_in_at, last_out_at, late_minutes, early_leave_minutes, is_workday, meta
+     FROM attendance_records
+     WHERE org_id = $1 AND user_id = $2 AND work_date = $3
+     LIMIT 1`,
+    [orgId, userId, workDate]
+  )
+  const record = rows[0] ?? null
+  if (record) {
+    const status = record.status ? String(record.status) : ''
+    const lateMinutes = Number(record.late_minutes ?? 0)
+    const earlyLeaveMinutes = Number(record.early_leave_minutes ?? 0)
+    const severeLateCount = Number(readAttendanceRecordMeta(record, ['severe_late_count', 'severeLateCount']) ?? 0)
+    const absenceLateCount = Number(readAttendanceRecordMeta(record, ['absence_late_count', 'absenceLateCount']) ?? 0)
+    // 'partial' = exactly one side punched → the absent side is a genuine missing-punch makeup candidate.
+    // 'absent' (a materialized zero-punch row) is NOT makeup-able here: §4.4 routes whole-day absence to
+    // leave, so it must fail-closed rather than be auto-corrected by a missed-check request.
+    if (status === 'partial') {
+      if (!record.first_in_at) facts.add('missing_check_in')
+      if (!record.last_out_at) facts.add('missing_check_out')
+    }
+    if (status === 'late' || status === 'late_early' || lateMinutes > 0) facts.add('late')
+    if (status === 'early_leave' || status === 'late_early' || earlyLeaveMinutes > 0) facts.add('early_leave')
+    if (severeLateCount > 0) facts.add('severe_late')
+    if (absenceLateCount > 0) facts.add('absence_late')
+    if (status === 'normal') facts.add('normal')
+  } else {
+    // No record at all but the day should be attended → both sides missing (§4.4 "记录不存在但当日应出勤
+    // 且缺某侧打卡，可判为 missing"). Resolve the workday truth; if it cannot be resolved, fail-closed (no
+    // facts) so an undeterminable day is never auto-correctable.
+    try {
+      const context = await resolveWorkContext({ db: trx, orgId, userId, workDate })
+      if (context && context.isWorkingDay) {
+        facts.add('missing_check_in')
+        facts.add('missing_check_out')
+      }
+    } catch (_error) {
+      // fail-closed: leave facts empty
+    }
+  }
+  return [...facts]
+}
+
+// 补卡规则 MP-2 §4.2: compute the calendar_month quota cycle [cycleStart, cycleEnd] (inclusive, local
+// YYYY-MM-DD) that the WORK DATE falls into — anchored on workDate in policy timezone, NOT submit time.
+// startDay 1..31 is clamped to the month's last day on short months (Q3 ratified), so a startDay=31 policy
+// yields Jan 31..Feb 27, Feb 28..Mar 30, etc. Each date maps to exactly one cycle.
+function computeMakeupCycleWindow(policy, workDateLocal) {
+  const normalized = normalizeDateOnly(workDateLocal) ?? String(workDateLocal ?? '').slice(0, 10)
+  const startDay = Number(policy?.cycle?.startDay) || 1
+  const [yStr, mStr, dStr] = String(normalized).split('-')
+  const year = Number(yStr)
+  const month0 = Number(mStr) - 1
+  const day = Number(dStr)
+  const startThisMonth = Math.min(startDay, daysInMonthUtc(year, month0))
+  let startYear = year
+  let startMonth0 = month0
+  if (day < startThisMonth) {
+    if (month0 === 0) { startYear = year - 1; startMonth0 = 11 } else { startYear = year; startMonth0 = month0 - 1 }
+  }
+  const cycleStart = formatDateOnly(buildUtcDate(startYear, startMonth0, startDay))
+  let nextYear = startYear
+  let nextMonth0 = startMonth0 + 1
+  if (nextMonth0 > 11) { nextMonth0 = 0; nextYear += 1 }
+  const nextStart = buildUtcDate(nextYear, nextMonth0, startDay)
+  const cycleEnd = formatDateOnly(new Date(nextStart.getTime() - 86400000))
+  return { cycleStart, cycleEnd }
+}
+
+// 补卡规则 MP-3 §5: build the per-write policy snapshot persisted on the request metadata. Recomputed
+// fresh on every successful create/update; final approval audits THIS snapshot, never the current policy.
+function buildMakeupPunchPolicySnapshot(policy, { matchedAnomalyTypes, requestEvaluatedAt }) {
+  return {
+    version: 1,
+    enabled: policy.enabled === true,
+    timezone: policy.timezone,
+    cycle: { type: policy.cycle.type, startDay: policy.cycle.startDay },
+    quota: {
+      maxRequestsPerCycle: policy.quota.maxRequestsPerCycle,
+      countStatuses: [...policy.quota.countStatuses],
+      principal: policy.quota.principal,
+    },
+    submitWindow: { unit: policy.submitWindow.unit, days: policy.submitWindow.days },
+    allowedAnomalyTypes: [...policy.allowedAnomalyTypes],
+    requestEvaluatedAt: requestEvaluatedAt.toISOString(),
+    matchedAnomalyTypes: [...matchedAnomalyTypes],
+  }
+}
+
+// 补卡规则 MP-2: the single create/update enforcement gate. Throws HttpError(422, MAKEUP_PUNCH_*) on the
+// first violation, else returns { matchedAnomalyTypes, requestEvaluatedAt } for the MP-3 snapshot (so the
+// type facts are derived exactly once). MUST run INSIDE the request transaction, after
+// acquireAttendanceRequestLock, alongside the duplicate guard — quota counting + the eventual insert must
+// be consistent with the per-(org,user,workDate,requestType) lock. Only ever called when policy.enabled
+// and draft.requestType is one of the three makeup types.
+// Order is load-bearing: future-date FIRST (a future workDate is not `< earliestAllowed`, so the window
+// check cannot catch it), then window, then type (fail-closed), then reason/attachment, then quota.
+// Quota TOCTOU (accepted slack, documented — NOT mitigated with a cycle lock): the advisory lock is keyed
+// on (org,user,workDate,requestType); the quota counts across the whole cycle. Two concurrent creates for
+// DIFFERENT workDates in the same cycle take different locks and can both pass the count, so the cycle cap
+// can be exceeded by the number of racing distinct-workDate submissions. This is bounded and acceptable
+// for v1; the duplicate guard (same workDate) is still strictly serialized by the lock.
+async function enforceMakeupPunchPolicy(trx, { policy, orgId, subjectUserId, requesterId, requestId, draft }) {
+  void requesterId
+  const requestEvaluatedAt = new Date()
+  const timezone = policy.timezone
+  const workDate = draft.workDate
+  const todayLocal = toWorkDate(requestEvaluatedAt, timezone)
+
+  // §4.3 future date: workDate must not be after today (policy-tz local).
+  if (workDate > todayLocal) {
+    throw new HttpError(422, 'MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED', 'Makeup punch cannot target a future work date')
+  }
+
+  // §4.3 submit window: todayLocal - workDate <= submitWindow.days (calendar_day). days=0 → today only.
+  const earliestAllowed = addDaysToDateKey(todayLocal, -Number(policy.submitWindow.days || 0))
+  if (earliestAllowed && workDate < earliestAllowed) {
+    throw new HttpError(422, 'MAKEUP_PUNCH_WINDOW_EXPIRED', 'Makeup punch submit window has expired for this work date')
+  }
+
+  // §4.4 type gate (fail-closed): static table ∩ org allowedAnomalyTypes ∩ server-derived facts.
+  const facts = await deriveMakeupAnomalyFacts(trx, { orgId, userId: subjectUserId, workDate })
+  const staticAllowed = MAKEUP_REQUEST_TYPE_ANOMALY_TABLE[draft.requestType] || []
+  const orgAllowed = new Set(Array.isArray(policy.allowedAnomalyTypes) ? policy.allowedAnomalyTypes : [])
+  const factSet = new Set(facts)
+  const matchedAnomalyTypes = staticAllowed.filter((type) => orgAllowed.has(type) && factSet.has(type))
+  if (matchedAnomalyTypes.length === 0) {
+    throw new HttpError(422, 'MAKEUP_PUNCH_TYPE_NOT_ALLOWED', 'This work date has no makeup-eligible anomaly for the requested type')
+  }
+
+  // §4.5 reason / attachment.
+  if (policy.requireReason === true && !draft.reason) {
+    throw new HttpError(422, 'MAKEUP_PUNCH_REASON_REQUIRED', 'A reason is required for this makeup punch request')
+  }
+  if (policy.requireAttachment === true && !(draft.metadata && draft.metadata.attachmentUrl)) {
+    throw new HttpError(422, 'MAKEUP_PUNCH_ATTACHMENT_REQUIRED', 'An attachment is required for this makeup punch request')
+  }
+
+  // §4.2 quota: count subject's pending+approved makeup requests whose workDate falls in the cycle. On
+  // update, exclude the current request id. Subject = attendance_requests.user_id, never the actor.
+  const { cycleStart, cycleEnd } = computeMakeupCycleWindow(policy, workDate)
+  const params = [orgId, subjectUserId, MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES, policy.quota.countStatuses, cycleStart, cycleEnd]
+  let excludeClause = ''
+  if (requestId) {
+    params.push(requestId)
+    excludeClause = `AND id <> $${params.length}`
+  }
+  const quotaRows = await trx.query(
+    `SELECT COUNT(*)::int AS total
+     FROM attendance_requests
+     WHERE org_id = $1
+       AND user_id = $2
+       AND request_type = ANY($3)
+       AND status = ANY($4)
+       AND work_date >= $5
+       AND work_date <= $6
+       ${excludeClause}`,
+    params
+  )
+  const used = Number(quotaRows[0]?.total ?? 0)
+  if (used >= Number(policy.quota.maxRequestsPerCycle)) {
+    throw new HttpError(422, 'MAKEUP_PUNCH_QUOTA_EXCEEDED', 'Makeup punch quota for this cycle has been reached')
+  }
+
+  return { matchedAnomalyTypes, requestEvaluatedAt }
+}
+
 function normalizeOvertimeSegmentationSetting(raw) {
   const config = raw && typeof raw === 'object' ? raw : {}
   return {
