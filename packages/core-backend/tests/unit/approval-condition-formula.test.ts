@@ -130,4 +130,14 @@ describe('requester namespace (RA-1a — department only)', () => {
     expect(() => assertApprovalConditionFormulaValidForSchema('requester.department', schema)).toThrow(/must return boolean/)
     expect(() => assertApprovalConditionFormulaValidForSchema('requester.level >= 5', schema)).toThrow(/unsupported requester attribute/)
   })
+
+  it('pins the operator restriction: department is ==/!= only (ordering ops fail publish type-check)', () => {
+    // department is string-typed, so ordering operators fail the numeric-operand check at publish.
+    // This is enforced via typing, not an explicit operator allowlist — RA-1b will auto-enable ordering
+    // for any future numeric attr, so this pin guards the RA-1a as-built contract.
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.department >= "财务"', schema)).toThrow(/numeric operands/)
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.department > "财务"', schema)).toThrow(/numeric operands/)
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.department < "财务"', schema)).toThrow(/numeric operands/)
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.department <= "财务"', schema)).toThrow(/numeric operands/)
+  })
 })
