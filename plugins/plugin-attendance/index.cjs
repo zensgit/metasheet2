@@ -267,9 +267,9 @@ const DEFAULT_SETTINGS = {
     timezone: 'Asia/Shanghai',
     channel: 'work_notification',
     cadences: {
-      daily: { enabled: true, sendAt: '18:30', recipients: ['self'] },
-      weekly: { enabled: false, weekday: 1, sendAt: '09:00', recipients: ['self', 'owner'] },
-      monthly: { enabled: false, dayOfMonth: 1, sendAt: '09:00', recipients: ['self', 'owner'] },
+      daily: { enabled: false, sendAt: '18:30', recipients: ['self'] },
+      weekly: { enabled: false, weekday: 1, sendAt: '09:00', recipients: ['self'] },
+      monthly: { enabled: false, dayOfMonth: 1, sendAt: '09:00', recipients: ['self'] },
     },
   },
   // 自动对班 (auto shift matching) — A1 preview/manual apply plus A2 scheduler auto-write.
