@@ -220,6 +220,48 @@ describe('ApprovalGraphExecutor', () => {
       .resolveInitialState()).toThrow(/context unavailable/)
   })
 
+  it('routes a requester.role membership branch from threaded requesterContext, fail-closed on absent', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [{ edgeKey: 'edge-fin', rules: [], formula: { expression: 'requester.role in ["finance_approver","admin"]' } }],
+            defaultEdgeKey: 'edge-other',
+          },
+        },
+        { key: 'fin-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['finance'] } },
+        { key: 'other-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-fin', source: 'route', target: 'fin-review' },
+        { key: 'edge-other', source: 'route', target: 'other-review' },
+        { key: 'edge-fin-end', source: 'fin-review', target: 'end' },
+        { key: 'edge-other-end', source: 'other-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    // match (intersection non-empty) → finance branch, resolved from the frozen role set (not formData)
+    expect(new ApprovalGraphExecutor(runtimeGraph, {}, { requesterContext: { roles: ['admin', 'eng'] } })
+      .resolveInitialState().currentNodeKey).toBe('fin-review')
+    // no-match (held roles disjoint from the literal set) → default edge (genuine no-match, not fail-closed)
+    expect(new ApprovalGraphExecutor(runtimeGraph, {}, { requesterContext: { roles: ['eng', 'sales'] } })
+      .resolveInitialState().currentNodeKey).toBe('other-review')
+    // absent context → FAIL-CLOSED throw, never silently take defaultEdgeKey (no phantom route)
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, {}, { requesterContext: null })
+      .resolveInitialState()).toThrow(/context unavailable/)
+    // null role set (read-throw / unresolved) → fail-closed throw
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, {}, { requesterContext: { roles: null } })
+      .resolveInitialState()).toThrow(/roles are missing/)
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, {}, { requesterContext: {} })
+      .resolveInitialState()).toThrow(/roles are missing/)
+  })
+
   it('advances to approved when the next node is end', () => {
     const runtimeGraph: RuntimeGraph = {
       nodes: [

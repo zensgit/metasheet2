@@ -263,6 +263,11 @@ export interface ApprovalRequesterSnapshot {
   /** Directory-resolved job title (via ApprovalDirectoryOrg, NOT the JWT/session `title` below) — the
    *  tamper-resistant source `requester.title` reads; frozen at create, reloaded at dispatch. */
   directoryTitle?: string | null
+  /** RA-1b: the requester's frozen ROLE-ID SET, resolved by a FRESH `user_roles` SELECT at create (NOT the
+   *  login-time token claim `roles` below) — the tamper-resistant source `requester.role in [...]` reads;
+   *  frozen at create, reloaded at dispatch. Populated only when the published graph routes on
+   *  `requester.role`. */
+  directoryRoles?: string[] | null
   title?: string
   /**
    * Lane G (P1-A) org-relation plumbing — local user id of the requester's

@@ -100,10 +100,11 @@ describe('requester namespace (RA-1a — department only)', () => {
     expect(evaluateApprovalConditionFormula('requester.department == "财务" AND {amount} >= 5000', { amount: 6000 }, { department: '技术' })).toBe(false)
   })
 
-  it('PARSE-rejects every attr outside {department, title} — fail-closed, never runtime-absent', () => {
+  it('PARSE-rejects every attr outside {department, title, role} — fail-closed, never runtime-absent', () => {
     expect(() => parseApprovalConditionFormula('requester.level >= 5')).toThrow(/unsupported requester attribute/)
-    expect(() => parseApprovalConditionFormula('requester.role == "x"')).toThrow(/unsupported requester attribute/)
     expect(() => parseApprovalConditionFormula('requester.foo == "x"')).toThrow(/unsupported requester attribute/)
+    // RA-1b: `requester.role` is now an accepted token (LHS of `in`); a scalar `requester.role == "x"`
+    // type-rejects at publish (asserted in the role block), so it is no longer an unknown-attr parse error.
   })
 
   it('PARSE-rejects the `in` operator + array literals (RA-1b grammar), bare requester, and empty attr', () => {
@@ -153,11 +154,12 @@ describe('requester namespace (requester.title — string ==/!= only)', () => {
     expect(evaluateApprovalConditionFormula('requester.title == "经理" AND {amount} >= 5000', { amount: 6000 }, { title: '专员' })).toBe(false)
   })
 
-  it('PARSE-allowlist now PERMITS title but still rejects level/role/unknown', () => {
+  it('PARSE-allowlist now PERMITS title but still rejects level/unknown', () => {
     expect(() => parseApprovalConditionFormula('requester.title == "经理"')).not.toThrow()
     expect(() => parseApprovalConditionFormula('requester.level >= 5')).toThrow(/unsupported requester attribute/)
-    expect(() => parseApprovalConditionFormula('requester.role == "x"')).toThrow(/unsupported requester attribute/)
     expect(() => parseApprovalConditionFormula('requester.grade == "x"')).toThrow(/unsupported requester attribute/)
+    // RA-1b: `requester.role` now parses as a token (it is the LHS of `in`); a SCALAR use like
+    // `requester.role == "x"` is a TYPE-reject at publish, not a parse-reject (covered in the role block).
   })
 
   it('RUNTIME fail-closed: absent context / missing title rejects (no phantom routing)', () => {
@@ -182,5 +184,78 @@ describe('requester namespace (requester.title — string ==/!= only)', () => {
     expect(() => assertApprovalConditionFormulaValidForSchema('requester.title > "经理"', schema)).toThrow(/numeric operands/)
     expect(() => assertApprovalConditionFormulaValidForSchema('requester.title < "经理"', schema)).toThrow(/numeric operands/)
     expect(() => assertApprovalConditionFormulaValidForSchema('requester.title <= "经理"', schema)).toThrow(/numeric operands/)
+  })
+})
+
+describe('requester namespace (requester.role — membership via `in [...]`)', () => {
+  it('evaluates requester.role in [...] as role-set INTERSECTION (at least one held)', () => {
+    // intersection non-empty -> true
+    expect(evaluateApprovalConditionFormula('requester.role in ["a","b"]', {}, { roles: ['a'] })).toBe(true)
+    expect(evaluateApprovalConditionFormula('requester.role in ["a","b"]', {}, { roles: ['x', 'b'] })).toBe(true)
+    expect(evaluateApprovalConditionFormula('requester.role in ["a","b"]', {}, { roles: ['a', 'b'] })).toBe(true)
+    // intersection empty -> false (held but none listed)
+    expect(evaluateApprovalConditionFormula('requester.role in ["a","b"]', {}, { roles: ['x', 'y'] })).toBe(false)
+    // genuinely-empty held set -> false (no match; create-time guard prevents this on a role-routed graph)
+    expect(evaluateApprovalConditionFormula('requester.role in ["a","b"]', {}, { roles: [] })).toBe(false)
+    // single-element literal
+    expect(evaluateApprovalConditionFormula('requester.role in ["admin"]', {}, { roles: ['admin'] })).toBe(true)
+  })
+
+  it('combines with form fields + AND/OR/NOT (membership yields boolean)', () => {
+    expect(evaluateApprovalConditionFormula('requester.role in ["finance"] AND {amount} >= 5000', { amount: 6000 }, { roles: ['finance'] })).toBe(true)
+    expect(evaluateApprovalConditionFormula('requester.role in ["finance"] AND {amount} >= 5000', { amount: 6000 }, { roles: ['eng'] })).toBe(false)
+    expect(evaluateApprovalConditionFormula('NOT (requester.role in ["finance"])', {}, { roles: ['eng'] })).toBe(true)
+  })
+
+  it('RUNTIME fail-closed: absent context / null role set rejects (no phantom routing)', () => {
+    expect(() => evaluateApprovalConditionFormula('requester.role in ["a"]', {}, null)).toThrow(/context unavailable/)
+    expect(() => evaluateApprovalConditionFormula('requester.role in ["a"]', {}, {})).toThrow(/roles are missing/)
+    expect(() => evaluateApprovalConditionFormula('requester.role in ["a"]', {}, { roles: null })).toThrow(/roles are missing/)
+  })
+
+  it('type-checks the role-in form to boolean at publish', () => {
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.role in ["a","b"]', schema)).not.toThrow()
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.role in ["a"] AND {amount} >= 5', schema)).not.toThrow()
+  })
+
+  it('PARSE/TYPE-rejects every malformed form, fail-closed', () => {
+    // `requester.role` with any operator OTHER than `in` -> TYPE-reject at publish (parses as a token first)
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.role == "x"', schema)).toThrow(/can only be used with the `in` operator/)
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.role != "x"', schema)).toThrow(/can only be used with the `in` operator/)
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.role', schema)).toThrow(/can only be used with the `in` operator/)
+    // `in` on a NON-role LHS -> PARSE-reject
+    expect(() => parseApprovalConditionFormula('requester.department in ["a"]')).toThrow(/only supported for requester.role/)
+    expect(() => parseApprovalConditionFormula('requester.title in ["a"]')).toThrow(/only supported for requester.role/)
+    expect(() => parseApprovalConditionFormula('{amount} in ["a"]')).toThrow(/only supported for requester.role/)
+    expect(() => parseApprovalConditionFormula('5 in ["a"]')).toThrow(/only supported for requester.role/)
+    // non-array RHS -> PARSE-reject
+    expect(() => parseApprovalConditionFormula('requester.role in "a"')).toThrow(/requires a bracketed array literal/)
+    expect(() => parseApprovalConditionFormula('requester.role in 5')).toThrow(/requires a bracketed array literal/)
+    // empty array -> PARSE-reject
+    expect(() => parseApprovalConditionFormula('requester.role in []')).toThrow(/must not be empty/)
+    // non-string element -> PARSE-reject
+    expect(() => parseApprovalConditionFormula('requester.role in [1, 2]')).toThrow(/string literals only/)
+    expect(() => parseApprovalConditionFormula('requester.role in ["a", 2]')).toThrow(/string literals only/)
+    // nested array -> PARSE-reject
+    expect(() => parseApprovalConditionFormula('requester.role in [["a"]]')).toThrow(/string literals only/)
+    expect(() => parseApprovalConditionFormula('requester.role in ["a", ["b"]]')).toThrow(/string literals only/)
+    // malformed separators -> PARSE-reject
+    expect(() => parseApprovalConditionFormula('requester.role in ["a" "b"]')).toThrow(/comma-separated/)
+    expect(() => parseApprovalConditionFormula('requester.role in ["a",]')).toThrow(/string literals only/)
+  })
+
+  it('caps the array literal length at maxInArrayElements (DoS bound)', () => {
+    const within = Array.from({ length: APPROVAL_CONDITION_FORMULA_LIMITS.maxInArrayElements }, (_, i) => `"r${i}"`).join(',')
+    const over = Array.from({ length: APPROVAL_CONDITION_FORMULA_LIMITS.maxInArrayElements + 1 }, (_, i) => `"r${i}"`).join(',')
+    expect(() => parseApprovalConditionFormula(`requester.role in [${within}]`)).not.toThrow()
+    expect(() => parseApprovalConditionFormula(`requester.role in [${over}]`)).toThrow(/exceeds .* elements/)
+  })
+
+  it('token-aware: a quoted "requester.role" literal is NOT a requester token', () => {
+    // A quoted "requester.role" is just a string; as an `in` LHS it is a string literal, so the whole
+    // expression PARSE-rejects (LHS not a requester.role token) rather than reading the role set.
+    expect(() => parseApprovalConditionFormula('"requester.role" in ["a"]')).toThrow(/only supported for requester.role/)
+    // and a bare quoted literal evaluates as a plain string (no context read, no formData spoof).
+    expect(evaluateApprovalConditionFormula('"requester.role" == "requester.role"', {}, { roles: ['a'] })).toBe(true)
   })
 })

@@ -51,6 +51,7 @@ import {
   parseApprovalConditionFormula,
 } from './ApprovalConditionFormula'
 import { resolveApprovalRequesterOrgRelations, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
+import { resolveApprovalRequesterRoleIds } from './ApprovalRequesterRoles'
 import { resolveActiveDelegationMap } from './ApprovalDelegations'
 import type {
   ApprovalAssignmentDTO,
@@ -2910,6 +2911,27 @@ export class ApprovalProductService {
       )
     }
 
+    // RA-1b: `requester.role in [...]` routes on the requester's CURRENT role membership. Resolve it with a
+    // FRESH `user_roles` SELECT (NOT the token-claim actor.roles) and freeze it into the snapshot — but only
+    // when the published graph actually routes on requester.role, so the extra read stays off every approval
+    // (same gating precedent as includeManagerChain). Best-effort read; the wedge guard below turns an
+    // unresolved set into a fail-closed create rejection (transient-read 503 vs genuine-empty 422).
+    const needsRequesterRoles = runtimeGraphUsesRequesterAttribute(runtimeGraph, 'role')
+    let requesterRoleIds: string[] = []
+    let roleReadFailed = false
+    if (needsRequesterRoles) {
+      try {
+        requesterRoleIds = await resolveApprovalRequesterRoleIds(actor.userId, pool.query.bind(pool))
+      } catch (error) {
+        roleReadFailed = true
+        metricsLogger.warn(
+          `Failed to resolve requester roles for ${actor.userId}: ${
+            error instanceof Error ? error.message : 'unknown error'
+          }`,
+        )
+      }
+    }
+
     // RA-1a wedge guard: if the template routes on `requester.department` but it could NOT be resolved,
     // fail-closed AT CREATE — the ratified lock says absence "reject this createApproval rather than route
     // on a phantom value". Without this, a condition downstream of an approval node only rejects at
@@ -2953,6 +2975,26 @@ export class ApprovalProductService {
       )
     }
 
+    // Same wedge guard for `requester.role` (membership routing). An unresolved role set on a role-routed
+    // condition downstream of an approval node would otherwise freeze an empty set into the snapshot and
+    // wedge every later approval at the condition; reject at create instead. Distinguish a thrown read
+    // (transient/infra -> 503, retryable) from a successful empty read (genuine row-level absence — the
+    // requester holds no roles -> 422). Only fires when the graph actually routes on requester.role.
+    if (needsRequesterRoles && requesterRoleIds.length === 0) {
+      if (roleReadFailed) {
+        throw new ServiceError(
+          'Could not resolve the requester roles required by this approval template. Please retry.',
+          503,
+          'APPROVAL_REQUESTER_ROLE_UNRESOLVED',
+        )
+      }
+      throw new ServiceError(
+        'This approval template routes on the requester roles, which are not set for you. Contact an administrator.',
+        422,
+        'APPROVAL_REQUESTER_ROLE_REQUIRED',
+      )
+    }
+
     // Delegation (委托) — freeze the active delegator->delegatee map (scoped to this
     // template + the create instant) into the snapshot BEFORE the executor resolves the
     // initial state, so the resolver's pushResolved substitution reads a frozen set and an
@@ -2979,6 +3021,7 @@ export class ApprovalProductService {
       department: actor.department,
       ...(orgRelations.primaryDepartmentName ? { directoryDepartment: orgRelations.primaryDepartmentName } : {}),
       ...(orgRelations.primaryTitle ? { directoryTitle: orgRelations.primaryTitle } : {}),
+      ...(requesterRoleIds.length > 0 ? { directoryRoles: requesterRoleIds } : {}),
       roles: actor.roles || [],
       permissions: actor.permissions || [],
       ...(orgRelations.managerId ? { managerId: orgRelations.managerId } : {}),
@@ -2995,6 +3038,7 @@ export class ApprovalProductService {
       requesterContext: {
         department: requesterSnapshot.directoryDepartment ?? null,
         title: requesterSnapshot.directoryTitle ?? null,
+        roles: requesterSnapshot.directoryRoles ?? null,
       },
     })
     const instanceId = crypto.randomUUID()
@@ -3233,11 +3277,12 @@ export class ApprovalProductService {
           formSnapshot,
           requesterSnapshot,
         }),
-        // Re-thread the frozen directory department + title at dispatch (loaded requester_snapshot record).
-        requesterContext: ((d, t) => ({
+        // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
+        requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,
           title: typeof t === 'string' && t ? t : null,
-        }))(requesterSnapshot?.directoryDepartment, requesterSnapshot?.directoryTitle),
+          roles: Array.isArray(r) ? r.filter((role): role is string => typeof role === 'string') : null,
+        }))(requesterSnapshot?.directoryDepartment, requesterSnapshot?.directoryTitle, requesterSnapshot?.directoryRoles),
       })
       const jumpResolution = executor.resolveReturnToNode(targetNodeKey)
       const requesterId = requesterSnapshot?.id
@@ -3402,11 +3447,12 @@ export class ApprovalProductService {
           formSnapshot,
           requesterSnapshot,
         }),
-        // Re-thread the frozen directory department + title at dispatch (loaded requester_snapshot record).
-        requesterContext: ((d, t) => ({
+        // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
+        requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,
           title: typeof t === 'string' && t ? t : null,
-        }))(requesterSnapshot?.directoryDepartment, requesterSnapshot?.directoryTitle),
+          roles: Array.isArray(r) ? r.filter((role): role is string => typeof role === 'string') : null,
+        }))(requesterSnapshot?.directoryDepartment, requesterSnapshot?.directoryTitle, requesterSnapshot?.directoryRoles),
       })
       const storedCurrentNodeKey = instance.current_node_key
       const actorRoles = actor.roles || []
