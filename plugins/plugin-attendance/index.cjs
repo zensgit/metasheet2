@@ -14364,6 +14364,186 @@ async function loadAttendanceScopeContextForUser(db, orgId, userId) {
   }
 }
 
+const ATTENDANCE_RULES_ME_FORBIDDEN_QUERY_KEYS = new Set([
+  'userId',
+  'user_id',
+  'orgId',
+  'org_id',
+  'tenantId',
+  'tenant_id',
+  'workspaceId',
+  'workspace_id',
+  'groupId',
+  'group_id',
+])
+const ATTENDANCE_RULES_ME_FORBIDDEN_HEADER_KEYS = new Set([
+  'x-user-id',
+  'x-org-id',
+  'x-tenant-id',
+  'x-workspace-id',
+  'x-group-id',
+  'x-attendance-group-id',
+  'x-schedule-group-id',
+])
+
+function hasOwnRequestKey(input, forbiddenKeys) {
+  if (!input || typeof input !== 'object') return false
+  return [...forbiddenKeys].some(key => Object.prototype.hasOwnProperty.call(input, key))
+}
+
+function hasAttendanceRulesMeSubjectOverride(req) {
+  if (hasOwnRequestKey(req.query, ATTENDANCE_RULES_ME_FORBIDDEN_QUERY_KEYS)) return true
+  if (hasOwnRequestKey(req.body, ATTENDANCE_RULES_ME_FORBIDDEN_QUERY_KEYS)) return true
+  const headers = req.headers || {}
+  return [...ATTENDANCE_RULES_ME_FORBIDDEN_HEADER_KEYS].some(key => headers[key] !== undefined)
+}
+
+function getAttendanceRulesMeOrgId(req) {
+  const user = req.user || {}
+  for (const value of [user.orgId, user.workspaceId, user.tenantId]) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  // Existing dev-token attendance tests do not mint org/workspace claims. Keep
+  // that local/default compatibility without accepting request-level org overrides.
+  return DEFAULT_ORG_ID
+}
+
+function mapAttendanceRulesMeRuntimeRule(context) {
+  const rule = context?.rule || DEFAULT_RULE
+  return {
+    source: context?.source || 'rule',
+    id: rule.id ?? null,
+    name: rule.name ?? DEFAULT_RULE.name,
+    timezone: rule.timezone ?? DEFAULT_RULE.timezone,
+    workStartTime: rule.workStartTime ?? rule.work_start_time ?? DEFAULT_RULE.workStartTime,
+    workEndTime: rule.workEndTime ?? rule.work_end_time ?? DEFAULT_RULE.workEndTime,
+    lateGraceMinutes: Number(rule.lateGraceMinutes ?? rule.late_grace_minutes ?? DEFAULT_RULE.lateGraceMinutes),
+    earlyGraceMinutes: Number(rule.earlyGraceMinutes ?? rule.early_grace_minutes ?? DEFAULT_RULE.earlyGraceMinutes),
+    severeLateThresholdMinutes: Number(rule.severeLateThresholdMinutes ?? rule.severe_late_threshold_minutes ?? DEFAULT_RULE.severeLateThresholdMinutes),
+    absenceLateThresholdMinutes: Number(rule.absenceLateThresholdMinutes ?? rule.absence_late_threshold_minutes ?? DEFAULT_RULE.absenceLateThresholdMinutes),
+    roundingMinutes: Number(rule.roundingMinutes ?? rule.rounding_minutes ?? DEFAULT_RULE.roundingMinutes),
+    workingDays: normalizeWorkingDays(rule.workingDays ?? rule.working_days),
+    isWorkingDay: context?.isWorkingDay === true,
+  }
+}
+
+function mapAttendanceRulesMeAttendanceGroup(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    code: row.code ?? '',
+    attendanceType: normalizeAttendanceGroupType(row.attendance_type),
+    timezone: row.timezone ?? DEFAULT_RULE.timezone,
+    ruleSetId: row.rule_set_id ?? null,
+  }
+}
+
+function mapAttendanceRulesMeScheduleGroup(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    code: row.code ?? '',
+    departmentRef: row.department_ref ?? null,
+    role: row.role ?? null,
+    source: row.source ?? 'manual',
+    effectiveFrom: normalizeDateOnly(row.effective_from),
+    effectiveTo: normalizeDateOnly(row.effective_to),
+  }
+}
+
+function mapAttendanceRulesMePunchPolicy(settings) {
+  const punchPolicy = normalizePunchPolicySetting(settings?.punchPolicy)
+  return {
+    source: 'org_settings',
+    unscheduledMode: punchPolicy.unscheduled.mode,
+    outdoorApprovalRequired: punchPolicy.outdoor.requireApproval === true,
+    outdoorNoteRequired: punchPolicy.outdoor.requireNote === true,
+    merge: {
+      internalWinsOnIn: punchPolicy.merge.internalWinsOnIn === true,
+      externalWinsOnOut: punchPolicy.merge.externalWinsOnOut === true,
+    },
+  }
+}
+
+async function loadAttendanceRulesMeSummary(db, { orgId, userId, workDate }) {
+  const warnings = []
+  const membershipRows = await db.query(
+    `SELECT 1
+       FROM user_orgs uo
+       JOIN users u ON u.id = uo.user_id
+      WHERE uo.user_id = $1
+        AND uo.org_id = $2
+        AND uo.is_active = true
+        AND u.is_active = true
+      LIMIT 1`,
+    [userId, orgId],
+  )
+  if (!membershipRows.length) {
+    throw new HttpError(404, 'USER_NOT_IN_ORG', 'User is not an active member of this org')
+  }
+
+  const attendanceGroupRows = await db.query(
+    `SELECT g.id, g.name, g.code, g.attendance_type, g.timezone, g.rule_set_id
+       FROM attendance_group_members m
+       JOIN attendance_groups g ON g.id = m.group_id AND g.org_id = m.org_id
+      WHERE m.org_id = $1
+        AND m.user_id = $2
+      ORDER BY g.name ASC, g.id ASC`,
+    [orgId, userId],
+  )
+  if (attendanceGroupRows.length === 0) warnings.push({ code: 'NO_ATTENDANCE_GROUP', severity: 'warning' })
+  if (attendanceGroupRows.length > 1) warnings.push({ code: 'MULTIPLE_ATTENDANCE_GROUPS', severity: 'warning' })
+
+  const scheduleGroupRows = await db.query(
+    `SELECT g.id, g.name, g.code, g.department_ref, m.role, m.source, m.effective_from, m.effective_to
+       FROM attendance_schedule_group_members m
+       JOIN attendance_schedule_groups g
+         ON g.id = m.schedule_group_id
+        AND g.org_id = m.org_id
+        AND COALESCE(g.is_active, true) = true
+      WHERE m.org_id = $1
+        AND m.user_id = $2
+        AND COALESCE(m.effective_from, DATE '0001-01-01') <= $3::date
+        AND COALESCE(m.effective_to, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+      ORDER BY g.name ASC, g.id ASC, m.effective_from ASC NULLS FIRST`,
+    [orgId, userId, workDate],
+  )
+  if (scheduleGroupRows.length > 1) {
+    warnings.push({ code: 'MULTIPLE_SCHEDULE_GROUPS', severity: 'warning' })
+    warnings.push({ code: 'SCHEDULE_GROUP_WINDOW_OVERLAP', severity: 'warning' })
+  }
+
+  const context = await resolveWorkContext({ db, orgId, userId, workDate })
+  if (context.source === 'rule') warnings.push({ code: 'DEFAULT_RULE_FALLBACK', severity: 'info' })
+
+  const configuredGroupRuleRows = attendanceGroupRows.filter(row => row.rule_set_id)
+  const configuredGroupRule = configuredGroupRuleRows.length
+    ? {
+        groupId: configuredGroupRuleRows[0].id,
+        ruleSetId: configuredGroupRuleRows[0].rule_set_id,
+        enforcement: 'not_user_calc_chain',
+      }
+    : null
+  if (configuredGroupRule) warnings.push({ code: 'GROUP_RULE_SET_PREVIEW_DIVERGENCE', severity: 'info' })
+  if (configuredGroupRuleRows.length > 1) warnings.push({ code: 'MULTIPLE_CONFIGURED_GROUP_RULES', severity: 'warning' })
+
+  const settings = await getSettings(db)
+  return {
+    userId,
+    orgId,
+    resolvedAt: new Date().toISOString(),
+    resolvedForDate: workDate,
+    assignment: {
+      attendanceGroups: attendanceGroupRows.map(mapAttendanceRulesMeAttendanceGroup),
+      scheduleGroups: scheduleGroupRows.map(mapAttendanceRulesMeScheduleGroup),
+    },
+    runtimeRule: mapAttendanceRulesMeRuntimeRule(context),
+    ...(configuredGroupRule ? { configuredGroupRule } : {}),
+    punchPolicy: mapAttendanceRulesMePunchPolicy(settings),
+    warnings,
+  }
+}
+
 // Step 5: batch range version mirroring loadShiftAssignmentMapForUsersRange.
 // Used by buildWorkContextPrefetch to populate scopeContextByUser so the
 // calc-chain prefetch path can resolve calendarPolicy.overrides without a
@@ -39354,6 +39534,57 @@ module.exports = {
             return
           }
           logger.error('Annual leave self balance read failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: error instanceof Error ? error.message : String(error) } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rules/me',
+      withPermission('attendance:read', async (req, res) => {
+        // Employee self-service rules read (SR-1): subject and org are pinned to
+        // authenticated context. Unlike admin reads, this route rejects request-level
+        // user/org/group overrides instead of silently ignoring them, so callers cannot
+        // accidentally depend on spoofable query/header fields.
+        if (hasAttendanceRulesMeSubjectOverride(req)) {
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'ATTENDANCE_RULES_ME_SUBJECT_OVERRIDE',
+              message: 'rules/me does not accept userId, orgId, or groupId overrides',
+            },
+          })
+          return
+        }
+
+        const userId = getUserId(req)
+        if (!userId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+
+        const asOfRaw = typeof req.query.asOf === 'string' ? req.query.asOf.trim() : ''
+        const resolvedForDate = asOfRaw ? normalizeDateOnlyStrict(asOfRaw) : new Date().toISOString().slice(0, 10)
+        if (!resolvedForDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must use YYYY-MM-DD' } })
+          return
+        }
+
+        const orgId = getAttendanceRulesMeOrgId(req)
+        try {
+          const data = await loadAttendanceRulesMeSummary(db, { orgId, userId, workDate: resolvedForDate })
+          res.json({ ok: true, data })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance self rules read failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: error instanceof Error ? error.message : String(error) } })
         }
       })
