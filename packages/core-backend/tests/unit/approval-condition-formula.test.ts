@@ -100,10 +100,9 @@ describe('requester namespace (RA-1a — department only)', () => {
     expect(evaluateApprovalConditionFormula('requester.department == "财务" AND {amount} >= 5000', { amount: 6000 }, { department: '技术' })).toBe(false)
   })
 
-  it('PARSE-rejects every attr outside {department} — fail-closed, never runtime-absent', () => {
+  it('PARSE-rejects every attr outside {department, title} — fail-closed, never runtime-absent', () => {
     expect(() => parseApprovalConditionFormula('requester.level >= 5')).toThrow(/unsupported requester attribute/)
     expect(() => parseApprovalConditionFormula('requester.role == "x"')).toThrow(/unsupported requester attribute/)
-    expect(() => parseApprovalConditionFormula('requester.title == "经理"')).toThrow(/unsupported requester attribute/)
     expect(() => parseApprovalConditionFormula('requester.foo == "x"')).toThrow(/unsupported requester attribute/)
   })
 
@@ -139,5 +138,49 @@ describe('requester namespace (RA-1a — department only)', () => {
     expect(() => assertApprovalConditionFormulaValidForSchema('requester.department > "财务"', schema)).toThrow(/numeric operands/)
     expect(() => assertApprovalConditionFormulaValidForSchema('requester.department < "财务"', schema)).toThrow(/numeric operands/)
     expect(() => assertApprovalConditionFormulaValidForSchema('requester.department <= "财务"', schema)).toThrow(/numeric operands/)
+  })
+})
+
+describe('requester namespace (requester.title — string ==/!= only)', () => {
+  it('evaluates requester.title ==/!= from the frozen context', () => {
+    expect(evaluateApprovalConditionFormula('requester.title == "经理"', {}, { title: '经理' })).toBe(true)
+    expect(evaluateApprovalConditionFormula('requester.title == "经理"', {}, { title: '专员' })).toBe(false)
+    expect(evaluateApprovalConditionFormula('requester.title != "经理"', {}, { title: '专员' })).toBe(true)
+  })
+
+  it('combines with form fields (AND)', () => {
+    expect(evaluateApprovalConditionFormula('requester.title == "经理" AND {amount} >= 5000', { amount: 6000 }, { title: '经理' })).toBe(true)
+    expect(evaluateApprovalConditionFormula('requester.title == "经理" AND {amount} >= 5000', { amount: 6000 }, { title: '专员' })).toBe(false)
+  })
+
+  it('PARSE-allowlist now PERMITS title but still rejects level/role/unknown', () => {
+    expect(() => parseApprovalConditionFormula('requester.title == "经理"')).not.toThrow()
+    expect(() => parseApprovalConditionFormula('requester.level >= 5')).toThrow(/unsupported requester attribute/)
+    expect(() => parseApprovalConditionFormula('requester.role == "x"')).toThrow(/unsupported requester attribute/)
+    expect(() => parseApprovalConditionFormula('requester.grade == "x"')).toThrow(/unsupported requester attribute/)
+  })
+
+  it('RUNTIME fail-closed: absent context / missing title rejects (no phantom routing)', () => {
+    expect(() => evaluateApprovalConditionFormula('requester.title == "经理"', {}, null)).toThrow(/context unavailable/)
+    expect(() => evaluateApprovalConditionFormula('requester.title == "经理"', {}, {})).toThrow(/title is missing/)
+    expect(() => evaluateApprovalConditionFormula('requester.title == "经理"', {}, { title: '' })).toThrow(/title is missing/)
+    expect(() => evaluateApprovalConditionFormula('requester.title == "经理"', {}, { title: null })).toThrow(/title is missing/)
+  })
+
+  it('token-aware: a string literal "requester.title" reads neither context nor formData', () => {
+    // The token reads the frozen context; a quoted literal is just a string, and a form field named
+    // `requester` cannot spoof it.
+    expect(evaluateApprovalConditionFormula('requester.title == "经理"', { requester: { title: '经理' } }, { title: '专员' })).toBe(false)
+    expect(evaluateApprovalConditionFormula('"requester.title" == "requester.title"', {}, { title: '专员' })).toBe(true)
+  })
+
+  it('pins the operator restriction: title is ==/!= only (ordering ops fail publish type-check)', () => {
+    // title is string-typed, so ordering operators fail the numeric-operand check at publish.
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.title == "经理"', schema)).not.toThrow()
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.title', schema)).toThrow(/must return boolean/)
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.title >= "经理"', schema)).toThrow(/numeric operands/)
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.title > "经理"', schema)).toThrow(/numeric operands/)
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.title < "经理"', schema)).toThrow(/numeric operands/)
+    expect(() => assertApprovalConditionFormulaValidForSchema('requester.title <= "经理"', schema)).toThrow(/numeric operands/)
   })
 })

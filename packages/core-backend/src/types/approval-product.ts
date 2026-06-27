@@ -260,6 +260,9 @@ export interface ApprovalRequesterSnapshot {
    *  `department` above) — the tamper-resistant source `requester.department` reads; frozen at create,
    *  reloaded at dispatch. */
   directoryDepartment?: string | null
+  /** Directory-resolved job title (via ApprovalDirectoryOrg, NOT the JWT/session `title` below) — the
+   *  tamper-resistant source `requester.title` reads; frozen at create, reloaded at dispatch. */
+  directoryTitle?: string | null
   title?: string
   /**
    * Lane G (P1-A) org-relation plumbing — local user id of the requester's

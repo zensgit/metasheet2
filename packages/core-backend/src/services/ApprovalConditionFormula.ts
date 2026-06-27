@@ -44,13 +44,15 @@ type FormulaAst =
 type FormulaValue = number | string | boolean | null
 type FormulaType = 'number' | 'string' | 'boolean' | 'null'
 
-/** RA-1a: the frozen, server-resolved requester attributes the evaluator may read. DEPARTMENT-ONLY in
- *  RA-1a; every other attribute (level/role/title/unknown) is rejected at PARSE (see parsePrimary), so it
- *  never reaches runtime. Values come from ApprovalDirectoryOrg's directory snapshot, NOT actor/JWT. */
+/** The frozen, server-resolved requester attributes the evaluator may read: `department` (RA-1a) and
+ *  `title` (next slice — string `==`/`!=` only). Every other attribute (level/role/unknown) is rejected at
+ *  PARSE (see parsePrimary), so it never reaches runtime. Values come from ApprovalDirectoryOrg's directory
+ *  snapshot, NOT actor/JWT. */
 export interface RequesterFormulaContext {
   department?: string | null
+  title?: string | null
 }
-const RA1A_REQUESTER_ATTRS: Record<string, FormulaType> = { department: 'string' }
+const RA1A_REQUESTER_ATTRS: Record<string, FormulaType> = { department: 'string', title: 'string' }
 
 function fail(message: string): never {
   throw new ApprovalConditionFormulaError(message)
@@ -362,10 +364,10 @@ class FormulaParser {
       case 'field':
         return this.node({ kind: 'field', path: token.path, raw: token.raw })
       case 'requester':
-        // RA-1a allowlist IS the parse/publish fail-closed gate: anything outside {department}
-        // (level/role/title/unknown) is rejected here, so it never reaches runtime as absent-in-context.
+        // The allowlist IS the parse/publish fail-closed gate: anything outside {department, title}
+        // (level/role/unknown) is rejected here, so it never reaches runtime as absent-in-context.
         if (!(token.attr in RA1A_REQUESTER_ATTRS)) {
-          fail(`unsupported requester attribute: ${token.raw} (RA-1a supports requester.department only)`)
+          fail(`unsupported requester attribute: ${token.raw} (supports requester.department / requester.title only)`)
         }
         return this.node({ kind: 'requester', attr: token.attr, raw: token.raw })
       case 'identifier':
@@ -615,15 +617,21 @@ function evaluateAggregate(ast: Extract<FormulaAst, { kind: 'aggregate' }>, form
   return ast.fn === 'MIN' ? Math.min(...numbers) : Math.max(...numbers)
 }
 
-/** Resolve a `requester.<attr>` value from the frozen, server-resolved requester context. RA-1a:
- *  `department` only (the parser already rejected every other attr). Fail-closed on ROW-LEVEL absence: a
- *  null/undefined context, or a missing/blank department, rejects rather than routing on a phantom. */
+/** Resolve a `requester.<attr>` value from the frozen, server-resolved requester context: `department`
+ *  and `title` (the parser already rejected every other attr). Fail-closed on ROW-LEVEL absence: a
+ *  null/undefined context, or a missing/blank value, rejects rather than routing on a phantom. */
 function evaluateRequester(attr: string, raw: string, requester: RequesterFormulaContext | null): FormulaValue {
   if (!requester) fail(`requester context unavailable for ${raw}`)
   if (attr === 'department') {
     const value = requester.department
     if (value === null || value === undefined || value === '') fail(`requester department is missing for ${raw}`)
     if (typeof value !== 'string') fail(`requester department has an unsupported value for ${raw}`)
+    return value
+  }
+  if (attr === 'title') {
+    const value = requester.title
+    if (value === null || value === undefined || value === '') fail(`requester title is missing for ${raw}`)
+    if (typeof value !== 'string') fail(`requester title has an unsupported value for ${raw}`)
     return value
   }
   fail(`unsupported requester attribute: ${raw}`)

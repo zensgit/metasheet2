@@ -399,10 +399,14 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
 
       try {
         assertApprovalConditionFormulaValidForSchema(expression, formSchema)
-        // RA-1a: optional sample requester context so `requester.*` conditions are previewable here.
-        // Non-authoritative (RA-3) — the real value is server-resolved + frozen at create, never client-supplied.
+        // RA-1a/title: optional sample requester context so `requester.department` / `requester.title`
+        // conditions are previewable here. Non-authoritative (RA-3) — the real value is server-resolved
+        // + frozen at create, never client-supplied.
         const requesterContext = isPlainRecord(body.requester)
-          ? { department: typeof body.requester.department === 'string' ? body.requester.department : null }
+          ? {
+              department: typeof body.requester.department === 'string' ? body.requester.department : null,
+              title: typeof body.requester.title === 'string' ? body.requester.title : null,
+            }
           : null
         const result = evaluateApprovalConditionFormula(expression, formData, requesterContext)
         return res.json({ data: { success: true, result } })
