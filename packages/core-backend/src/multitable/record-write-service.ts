@@ -633,6 +633,15 @@ export class RecordWriteService {
     const mirrorInvalidationBySheet = new Map<string, { recordIds: Set<string>; mirrorFieldIds: Set<string> }>()
     const collectMirrorInvalidation = (cfg: LinkFieldConfig, foreignRecordIds: string[]): void => {
       if (cfg.twoWay !== true || !cfg.mirrorFieldId || foreignRecordIds.length === 0) return
+      // ②b read-only cross-base mirror v1 (2026-06-27) — DEFER the realtime mirror-invalidation fan-out for a
+      // CROSS-BASE pairing. `foreignBaseId` is persisted ONLY as the cross-base opt-in claim (field-codecs:
+      // emitted iff a foreign-base claim is present; same-base mirrors omit it), so `!= null` ⟺ cross-base
+      // here. This is a deliberate v1 behavior, NOT a missed-push bug: the reverse mirror is a read-time
+      // projection recomputed + base-masked on every fetch (loadLinkValuesByRecord + maskDerivedMirrorFieldIds
+      // / buildLinkSummaries), so a cross-base mirror still reads CORRECTLY on the next read — it only forgoes
+      // a live realtime nudge. Same-base fan-out (cfg.foreignBaseId == null) is UNCHANGED. (Editable cross-base
+      // mirror + cross-base realtime push are a separately-governed follow-up, out of this slice.)
+      if (cfg.foreignBaseId != null) return
       const mirrorSheetId = cfg.foreignSheetId // the mirror field lives on the forward link's foreign sheet
       const group = mirrorInvalidationBySheet.get(mirrorSheetId) ?? { recordIds: new Set<string>(), mirrorFieldIds: new Set<string>() }
       for (const id of foreignRecordIds) group.recordIds.add(id)
