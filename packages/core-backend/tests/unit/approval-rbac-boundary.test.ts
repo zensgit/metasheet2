@@ -257,6 +257,36 @@ describe('Approval RBAC boundary verification', () => {
       expect(res.body.data.error.code).toBe('APPROVAL_FORMULA_CONDITION_DRY_RUN_FAILED')
       expect(res.body.data.error.message).toContain('must be a finite number')
     })
+
+    it('POST .../dry-run previews a requester.department condition when a sample requester is supplied (RA-1a)', async () => {
+      authState.user = templateManager()
+      const res = await request(app)
+        .post('/api/approval-templates/formula-condition/dry-run')
+        .send({
+          expression: 'requester.department == "财务"',
+          formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+          formData: {},
+          requester: { department: '财务' },
+        })
+
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ data: { success: true, result: true } })
+    })
+
+    it('POST .../dry-run: a requester.* condition without a sample requester is unpreviewable (success:false, not a phantom true)', async () => {
+      authState.user = templateManager()
+      const res = await request(app)
+        .post('/api/approval-templates/formula-condition/dry-run')
+        .send({
+          expression: 'requester.department == "财务"',
+          formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+          formData: {},
+        })
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.success).toBe(false)
+      expect(res.body.data.error.message).toMatch(/context unavailable/)
+    })
   })
 
   // =========================================================================
