@@ -1,6 +1,6 @@
-# 考勤统计通知订阅 — 设计锁（PROPOSED）
+# 考勤统计通知订阅 — 设计锁（RATIFIED）
 
-> **Status**: 🟡 **PROPOSED（待 owner 拍板）**。本设计锁把“按日/周/月主动发送考勤统计摘要”收敛成 MetaSheet 自己的契约：订阅配置、周期 producer、C5 outbox、可解释 payload、以及 delivery observability。本文只锁设计，不写运行时代码；实现仍按 RD-1 → RD-5 一刀一 PR。
+> **Status**: ✅ **RATIFIED（§11 owner 拍板 2026-06-27；RD-3 producer/outbox 仍单独 gated，等下一次确认再开外发路径）**。本设计锁把“按日/周/月主动发送考勤统计摘要”收敛成 MetaSheet 自己的契约：订阅配置、周期 producer、C5 outbox、可解释 payload、以及 delivery observability。本文只锁设计，不写运行时代码；实现仍按 RD-1 → RD-5 一刀一 PR。
 
 ---
 
@@ -39,9 +39,9 @@ v1 提供一个小而稳的 report digest 能力：
     "timezone": "Asia/Shanghai",
     "channel": "work_notification",
     "cadences": {
-      "daily": { "enabled": true, "sendAt": "18:30", "recipients": ["self"] },
-      "weekly": { "enabled": false, "weekday": 1, "sendAt": "09:00", "recipients": ["self", "owner"] },
-      "monthly": { "enabled": false, "dayOfMonth": 1, "sendAt": "09:00", "recipients": ["self", "owner"] }
+      "daily": { "enabled": false, "sendAt": "18:30", "recipients": ["self"] },
+      "weekly": { "enabled": false, "weekday": 1, "sendAt": "09:00", "recipients": ["self"] },
+      "monthly": { "enabled": false, "dayOfMonth": 1, "sendAt": "09:00", "recipients": ["self"] }
     }
   }
 }
@@ -91,8 +91,8 @@ ATTENDANCE_REPORT_DIGEST_ENABLED=true
 
 Period:
 
-- daily: 前一自然日，或 owner 决定是否当天日终。
-- weekly: 上一个完整周，默认 Monday-Sunday。
+- daily: 前一自然日（上一个完整日）。
+- weekly: 上一个完整 Monday-Sunday 周。
 - monthly: 上一个完整自然月。
 
 v1 推荐“完整已结束 period”，避免当天未收盘数据反复变化。
@@ -242,13 +242,15 @@ RD-4:
 
 ---
 
-## 11. Owner 拍板问题
+## 11. Owner 拍板结论（Ratified 2026-06-27）
 
-1. Period 口径：daily/weekly/monthly 是否都发送**上一个完整 period**？还是 daily 发当天日终？
-2. 默认 cadence：daily 是否默认开启（在 policy enabled 后）？weekly/monthly 是否默认关闭？
-3. 默认收件人：v1 是否只发 self，owner/sub_owner 必须显式勾选？
-4. Channel：v1 是否允许 `email_smtp`，还是先只允许 `work_notification`？
-5. UI 是否放在现有 notification delivery 区域旁边，还是放在 report settings 区域？
+> 以下 5 条已由 owner 拍板，RD-1..RD-5 以此为准。RD-3 producer/outbox 仍单独 gated，等下一次确认再开外发路径。
+
+1. **Period 口径**：只发「完整已结束 period」。daily = 前一自然日（上一个完整日）；weekly = 上一个完整 Monday-Sunday 周；monthly = 上一个完整自然月。不发当天未收盘数据。
+2. **默认频率**：默认全关。`enabled=false`，且 daily / weekly / monthly 三个 cadence 都不自动开启；管理员显式打开后，producer 才写 outbox。
+3. **默认收件人**：默认只 `self`。`owner` / `sub_owner` 保留为可配置 opt-in（词表仍支持，但不进默认）。负责人由 RD-3 producer 解析后写入具体 `recipient_user_id`，delivery worker 不做 fan-out。
+4. **Channel**：允许 `work_notification` + `email_smtp`，配置层用品牌无关枚举。`email_smtp` 允许，但真实发送仍由已有 worker / env gate 控制；RD-3 producer 只写 C5 outbox，不直发。
+5. **UI 放置**：放在 Attendance admin 的 notification / delivery 区域附近，新增「统计通知订阅 / Report digest subscription」配置卡；不做手动群发按钮。
 
 ---
 
