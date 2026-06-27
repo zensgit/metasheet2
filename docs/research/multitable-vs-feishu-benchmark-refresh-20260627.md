@@ -3,6 +3,20 @@
 > Status: **RESEARCH / 决策输入**(内部对标，可引用飞书)。总目标 `multitable-benchmark-surpass-goal`(对标并超越飞书多维表格)。
 > 方法:子代理对 `origin/main` 全能力面取证(file/route 级)→ 对照 2026-06-11 ladder v3 先验 → 对标飞书 Base(飞书近况以 ~2026-01 知识为准,标注"待核")→ 重排候选弧。
 > 取证根:`origin/main`(本地 checkout 落后,所有结论读自 origin/main)。
+> **WEB-VERIFIED 2026-06-27**:飞书侧已用官方文档核验(见 §A),不再仅凭 ~2026-01 知识。benchmark 是**决策输入,非 runtime 证明**。
+
+## A. Web 核验更新(2026-06-27,飞书官方文档)
+
+对 §1 ladder 的飞书侧判断做了一轮官方核验,修正/坐实如下:
+
+- **坐实主弧**:飞书「跨多维表格」是**只读同步**模型(把数据同步汇总到另一张表,同步后的数据表仅支持阅读、不可编辑)——**不是实时关联**。我们治理化的实时 cross-base link + 关系聚合是飞书没有的纵深 → cross-base 做深的「超越」定位被飞书自家文档反向印证。
+- **修正① dashboard/图表 → 飞书略领先**(原写「≈持平」偏乐观):飞书约 20 种仪表盘组件(柱/折线/饼/条/散点/组合/统计数字/漏斗/词云/文本/按钮 + 倒计时/雷达/地图/网页嵌入/里程碑/排行榜/电池/目标/滚动文本)+ 单组件可加多数据源表;我们 9 图表 + 4 widget,缺词云/雷达/地图/电池/排行榜/多数据源等。**真落后项**。
+- **修正② AI → 飞书领先(可用性)**:飞书 AI 字段捷径(提取/分类/总结/翻译)+ 智能汇总**已 GA**;我们能力建好但 DARK(flag+key+双确认默认关)。差距在**可用性**非能力。
+- **坐实(我方领先 / 持平)**:视图我方领先(飞书 6 种、无层级;我们 8 含 hierarchy+timeline)· 字段 ≈ 持平(飞书 ~28 + 流程字段 ≈ 我们 progress 缺口)· 权限 ≈ 持平(飞书高级权限管数据表/记录/字段/视图/仪表盘;我们字段+行级但行级 DARK)· 自动化 ≈ 持平。
+- **坐实(飞书领先,确认)**:移动端(飞书有,我们 ABSENT)· 模板平台(飞书模板中心 + 自定义模板,我们 8 内置)· API 写回(飞书服务端 API 读写全、批量新增 ≤1000;我们只读)。
+- **仍待考**:dashboard 之外若要把某具体对标项作为产品排序硬依据,建议就该项单独再做一轮 web 核验。
+
+来源(飞书官方):[仪表盘](https://www.feishu.cn/hc/zh-CN/articles/161059314076) · [多数据源](https://www.feishu.cn/hc/zh-CN/articles/858919003989) · [视图](https://www.feishu.cn/hc/zh-CN/articles/360049067931) · [字段](https://www.feishu.cn/hc/zh-CN/articles/541575577400) · [跨多维表格同步](https://www.feishu.cn/hc/zh-CN/articles/128401098783) · [AI 字段捷径](https://www.feishu.cn/hc/zh-CN/articles/464880997049) · [高级权限](https://www.feishu.cn/hc/zh-CN/articles/962169212093) · [服务端 API](https://open.feishu.cn/document/server-docs/docs/bitable-v1/bitable-overview)
 
 ## 0. 三个改变结论的刷新发现
 
@@ -24,11 +38,11 @@
 | **cross-base** | 单向跨 base link + 治理墙 + 外读脱敏 + 跨 base 自动化写 **ON(已 GA)** | **领先(超越轴)** | 深度缺口=两向 mirror 同步 / 跨 base 条件关系聚合(`#PERM!` bug)/ 引用完整性级联(无 FK)/ 跨 base 视图筛排 |
 | 权限 | 角色 grant + 字段级 visible/read_only ON;**行级读 deny + 条件读规则 DARK** | ≈ 持平(但 DARK) | 条件可见性是展示层非安全边界 |
 | 自动化 | 8 触发 / 14 动作 / 条件分支 / 审批即任务 ON | ≈ 持平 | `webhook.received` INERT(无入站);`delete_record`/`start_approval` BACKEND-ONLY;cron 仅 ~5 粗模式 |
-| 仪表盘/图表 | 9 图表 + 6 聚合 + 跨面板联动 ON | ≈ 持平 | 第二条 `/dashboard/query` 无前端=死路 |
+| 仪表盘/图表 | 9 图表 + 6 聚合 + 跨面板联动 ON | **飞书略领先**(图表更丰富,§A web-verified) | 飞书 ~20 组件(+词云/雷达/地图/电池/排行榜/倒计时/里程碑)+ 多数据源;我们缺这些 + 第二条 `/dashboard/query` 无前端=死路 |
 | 实时协同 | presence + 逐格光标 ON;**Yjs CRDT 共编 DARK(POC)** | **落后** | 飞书强项;且 schema/config 变更不广播=协作者看到过期 schema |
 | 导入/导出 | CSV/TSV/XLSX 导入 + 导出(权限脱敏)ON | ≈ 持平 | — |
 | API/Webhook | token 全生命周期、**但只读路由可达(写 scope INERT)**;webhook 仅出站 | **落后** | 飞书开放 API 读写全;入站 webhook 缺 |
-| AI | 真 provider(Anthropic/OpenAI)、字段 shortcut/bulk-fill/NL→公式 **DARK** | ≈ 持平(已建) | flag+key+双确认才开 |
+| AI | 真 provider(Anthropic/OpenAI)、字段 shortcut/bulk-fill/NL→公式 **DARK** | **飞书领先(可用性,§A)** | 飞书 AI 字段捷径+智能汇总已 GA;我们能力建好但 flag+key+双确认默认关 |
 | 模板 | 8 内置模板 + 安装/dry-run ON | **落后** | 无"存为模板"/市场/分享 |
 | 移动端 | **ABSENT**(web 多维表无移动/响应式代码) | **明显落后** | 飞书移动强;独立大工程 |
 
