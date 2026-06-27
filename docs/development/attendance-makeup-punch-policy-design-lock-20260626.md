@@ -1,6 +1,6 @@
-# 考勤补卡自助与规则强约束 — 设计锁（PROPOSED）
+# 考勤补卡自助与规则强约束 — 设计锁（RATIFIED）
 
-> **Status**: PROPOSED（2026-06-26）。本设计锁只锁定 MetaSheet 自身的补卡规则模型：现有 `missed_check_in` / `missed_check_out` / `time_correction` 申请已经能走审批并在最终通过后写 `attendance_records` + `attendance_events`；缺的是企业可配置的**次数 / 时限 / 类型 / 周期**强约束。本文不写运行时代码，后续仍按 MP-1 → MP-6 一刀一 PR。
+> **Status**: RATIFIED（§9 owner 拍板 2026-06-27；MP-2/MP-3 runtime 在此之后开）。本设计锁只锁定 MetaSheet 自身的补卡规则模型：现有 `missed_check_in` / `missed_check_out` / `time_correction` 申请已经能走审批并在最终通过后写 `attendance_records` + `attendance_events`；缺的是企业可配置的**次数 / 时限 / 类型 / 周期**强约束。本文不写运行时代码，后续仍按 MP-1 → MP-6 一刀一 PR。
 
 ---
 
@@ -260,12 +260,14 @@ MP-1/MP-2 可以独立设计；MP-5 先接现有 `/api/attendance/anomalies` + R
 
 ---
 
-## 9. 待 owner 拍板
+## 9. Owner 拍板结论（Ratified 2026-06-27）
 
-1. **默认 quota**：推荐 `3 / cycle`，范围 1..99。是否接受？
-2. **默认 window**：推荐 `30 calendar days`，范围 0..180。是否接受？
-3. **cycleStartDay**：推荐支持 1..31，并在短月 clamp 到月末。是否接受？
-4. **quota status**：推荐只计 `pending` + `approved`，rejected/cancelled 释放额度。是否接受？
-5. **normal 修正**：推荐默认关闭。是否接受？
-6. **delegated/admin 代提交**：推荐 v1 OUT，因现表无法审计实际提交人。是否接受？
-7. **workday window / 弹性晚到晚走**：推荐 MP-v2，不混入 v1。是否接受？
+> 以下 7 条已由 owner 拍板（推荐值全部接受），MP-1..MP-6 以此为准；MP-2/MP-3 写路径 runtime 在此之后开。
+
+1. **默认 quota**：`3 / cycle`，范围 1..99。✅
+2. **默认 window**：`30 calendar days`，范围 0..180（`0` = 只能当天）。✅
+3. **cycleStartDay**：1..31，短月 clamp 到该月最后一天。✅
+4. **quota status**：只计 `pending` + `approved`；`rejected` / `cancelled` 释放额度。✅
+5. **normal 修正**：默认关闭（admin 可显式开启）。✅
+6. **delegated/admin 代提交**：v1 OUT（现表无法审计实际提交人）；策略 enabled 时三类补卡的 cross-user `PUT /api/attendance/requests/:id` fail-closed，直到新增 submitter/audit 事实列。✅
+7. **workday window / 弹性晚到晚走**：MP-v2，不混入 v1（v1 仅 `calendar_day`）。✅
