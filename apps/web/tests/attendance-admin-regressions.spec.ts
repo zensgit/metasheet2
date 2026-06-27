@@ -831,6 +831,8 @@ describe('Attendance admin regressions', () => {
         && forbiddenAdminLoads.some(prefix => url.startsWith(prefix))
       ),
     ).toEqual([])
+    expect(container!.querySelector('[data-missed-punch-reminder-admin]')).toBeNull()
+    expect(container!.querySelector('[data-missed-punch-reminder-toolbar]')).toBeNull()
   })
 
   it('overview self-service — the annual leave card reads the token-locked /me balance (no userId param)', async () => {
@@ -851,6 +853,126 @@ describe('Attendance admin regressions', () => {
     const meCall = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).find(u => u.includes('/leave-balances/me'))
     expect(meCall).toBeTruthy()
     expect(meCall).not.toContain('userId=')
+  })
+
+  it('admin notification deliveries — reminds selected owed-punch candidates with an authoritative confirm snapshot', async () => {
+    const candidateCalls: string[] = []
+    const enqueueCalls: Array<{ url: string; body: Record<string, unknown> }> = []
+    let enqueueStatus = 202
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/manual-missed-punch-reminders/candidates')) {
+        candidateCalls.push(url)
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                recordId: '00000000-0000-4000-8000-000000000abc',
+                userId: 'worker-1',
+                workDate: '2026-06-10',
+                status: 'absent',
+                missingSide: 'both',
+                selectedByDefault: true,
+                pendingRequest: null,
+                latestRequest: null,
+              },
+              {
+                recordId: '00000000-0000-4000-8000-000000000def',
+                userId: 'worker-2',
+                workDate: '2026-06-11',
+                status: 'partial',
+                missingSide: 'check_in',
+                selectedByDefault: false,
+                pendingRequest: { id: 'request-pending', status: 'pending', requestType: 'missed_check_in' },
+                latestRequest: { id: 'request-pending', status: 'pending', requestType: 'missed_check_in' },
+              },
+            ],
+            total: 2,
+            page: 1,
+            pageSize: 50,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/manual-missed-punch-reminders/enqueue')) {
+        const body = JSON.parse(String((init as RequestInit | undefined)?.body ?? '{}')) as Record<string, unknown>
+        enqueueCalls.push({ url, body })
+        if (enqueueStatus >= 400) {
+          return jsonResponse(enqueueStatus, { ok: false, error: { code: 'MISSED_PUNCH_REMINDER_CANDIDATE_STALE', message: 'candidate stale' } })
+        }
+        return jsonResponse(202, {
+          ok: true,
+          data: {
+            channel: 'dingtalk_work_notification',
+            created: 1,
+            existing: 0,
+            deliveries: [{ id: 'delivery-1', status: 'pending' }],
+          },
+        })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const nav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-notification-deliveries"]')
+    expect(nav).toBeTruthy()
+    nav!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-notification-deliveries')
+    expect(section).toBeTruthy()
+
+    section!.querySelector<HTMLButtonElement>('[data-missed-punch-reminder-load]')!.click()
+    await flushUi(8)
+
+    expect(candidateCalls).toHaveLength(1)
+    expect(candidateCalls[0]).toContain('pageSize=50')
+    expect(section!.textContent).toContain('2026-06-10')
+    expect(section!.textContent).toContain('2026-06-11')
+
+    const rowCheckboxes = section!.querySelectorAll<HTMLInputElement>('[data-missed-punch-reminder-row]')
+    expect(rowCheckboxes).toHaveLength(2)
+    expect(rowCheckboxes[0]!.checked).toBe(true)
+    expect(rowCheckboxes[1]!.checked).toBe(false)
+
+    setInput(section!, '[data-missed-punch-reminder-message]', 'snapshot message')
+    const openConfirm = section!.querySelector<HTMLButtonElement>('[data-missed-punch-reminder-open-confirm]')
+    expect(openConfirm).toBeTruthy()
+    openConfirm!.click()
+    await flushUi(2)
+    expect(section!.querySelector('[data-missed-punch-reminder-confirm]')).toBeTruthy()
+
+    setInput(section!, '[data-missed-punch-reminder-message]', 'edited after confirm')
+    section!.querySelector<HTMLButtonElement>('[data-missed-punch-reminder-submit]')!.click()
+    await flushUi(8)
+
+    expect(enqueueCalls).toHaveLength(1)
+    expect(enqueueCalls[0]!.url).toContain('/api/attendance/manual-missed-punch-reminders/enqueue')
+    expect(enqueueCalls[0]!.body).toEqual({
+      recordIds: ['00000000-0000-4000-8000-000000000abc'],
+      message: 'snapshot message',
+      idempotencyKey: expect.any(String),
+    })
+    expect(enqueueCalls[0]!.body).not.toHaveProperty('orgId')
+    expect(section!.querySelector('[data-missed-punch-reminder-result]')?.textContent).toContain('Created')
+
+    enqueueStatus = 409
+    const retryRow = section!.querySelector<HTMLInputElement>('[data-missed-punch-reminder-row]')
+    expect(retryRow).toBeTruthy()
+    retryRow!.checked = true
+    retryRow!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    setInput(section!, '[data-missed-punch-reminder-message]', 'second snapshot')
+    openConfirm!.click()
+    await flushUi(2)
+    section!.querySelector<HTMLButtonElement>('[data-missed-punch-reminder-submit]')!.click()
+    await flushUi(8)
+
+    expect(enqueueCalls).toHaveLength(2)
+    expect(section!.querySelector('[data-missed-punch-reminder-result]')).toBeNull()
+    expect(section!.querySelector('[data-missed-punch-reminder-error]')?.textContent).toContain('candidate stale')
   })
 
   it('exposes shift_swap as an approval-flow type and saves it through the admin form', async () => {

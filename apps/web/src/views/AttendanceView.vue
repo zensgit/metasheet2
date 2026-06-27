@@ -1757,6 +1757,123 @@
               <p class="attendance__field-hint" data-attendance-notification-deliveries-readonly>
                 {{ tr('Read-only delivery truth for C5 outbox rows. Manual retry and bulk replay are separate follow-ups.', '这里仅读取 C5 outbox 的投递真实状态；手动重试和批量重放属于后续独立能力。') }}
               </p>
+              <div class="attendance__admin-subsection" data-missed-punch-reminder-admin>
+                <div class="attendance__admin-section-header">
+                  <h5>{{ tr('Manual missed-punch reminders', '手动欠卡提醒') }}</h5>
+                  <div class="attendance__admin-actions">
+                    <button class="attendance__btn" :disabled="missedPunchReminderLoading" data-missed-punch-reminder-load @click="loadMissedPunchReminderCandidates">
+                      {{ missedPunchReminderLoading ? tr('Loading...', '加载中...') : tr('Load owed-punch candidates', '加载欠卡候选') }}
+                    </button>
+                  </div>
+                </div>
+                <div class="attendance__missed-reminder-toolbar" data-missed-punch-reminder-toolbar>
+                  <label class="attendance__field" for="attendance-missed-reminder-from">
+                    <span>{{ tr('From', '开始日期') }}</span>
+                    <input id="attendance-missed-reminder-from" v-model="missedPunchReminderForm.from" type="date" data-missed-punch-reminder-from />
+                  </label>
+                  <label class="attendance__field" for="attendance-missed-reminder-to">
+                    <span>{{ tr('To', '结束日期') }}</span>
+                    <input id="attendance-missed-reminder-to" v-model="missedPunchReminderForm.to" type="date" data-missed-punch-reminder-to />
+                  </label>
+                  <label class="attendance__field" for="attendance-missed-reminder-user">
+                    <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
+                    <input id="attendance-missed-reminder-user" v-model="missedPunchReminderForm.userId" type="text" data-missed-punch-reminder-user />
+                  </label>
+                  <label class="attendance__field attendance__field--full" for="attendance-missed-reminder-message">
+                    <span>{{ tr('Reminder message', '提醒内容') }}</span>
+                    <textarea
+                      id="attendance-missed-reminder-message"
+                      v-model="missedPunchReminderMessage"
+                      rows="2"
+                      maxlength="500"
+                      data-missed-punch-reminder-message
+                    ></textarea>
+                  </label>
+                </div>
+                <p class="attendance__field-hint">
+                  {{ tr('Candidates are loaded through the scheduler-scope remind endpoint; the producer only enqueues delivery rows and never mutates attendance facts.', '候选通过排班范围 remind 权限接口加载；生产者只写投递队列，不修改考勤事实。') }}
+                </p>
+                <p v-if="missedPunchReminderError" class="attendance__field-hint attendance__field-hint--error" data-missed-punch-reminder-error>
+                  {{ missedPunchReminderError }}
+                </p>
+                <div v-if="missedPunchReminderResult" class="attendance__import-result" data-missed-punch-reminder-result>
+                  <strong>{{ tr('Reminder enqueued', '提醒已入队') }}</strong>
+                  <div class="attendance__request-meta">
+                    <span>{{ tr('Created', '新增') }}: {{ missedPunchReminderResult.created }}</span>
+                    <span>{{ tr('Existing', '已存在') }}: {{ missedPunchReminderResult.existing }}</span>
+                    <span>{{ tr('Channel', '渠道') }}: {{ missedPunchReminderResult.channel }}</span>
+                  </div>
+                </div>
+                <div v-if="missedPunchReminderConfirm.open" class="attendance__modal" role="dialog" aria-modal="true" data-missed-punch-reminder-confirm>
+                  <div class="attendance__modal-body">
+                    <h5>{{ tr('Confirm missed-punch reminder', '确认欠卡提醒') }}</h5>
+                    <table class="attendance__detail-table">
+                      <tbody>
+                        <tr><th>{{ tr('Employees', '员工数') }}</th><td>{{ missedPunchReminderConfirm.employeeCount }}</td></tr>
+                        <tr><th>{{ tr('Records', '记录数') }}</th><td>{{ missedPunchReminderConfirm.recordIds.length }}</td></tr>
+                        <tr><th>{{ tr('Pending requests', '待审批申请') }}</th><td>{{ missedPunchReminderConfirm.pendingCount }}</td></tr>
+                        <tr><th>{{ tr('Message', '提醒内容') }}</th><td>{{ missedPunchReminderConfirm.message }}</td></tr>
+                      </tbody>
+                    </table>
+                    <div class="attendance__modal-actions">
+                      <button class="attendance__btn" @click="cancelMissedPunchReminderConfirm" data-missed-punch-reminder-cancel>{{ tr('Cancel', '取消') }}</button>
+                      <button class="attendance__btn attendance__btn--primary" :disabled="missedPunchReminderSubmitting" @click="confirmMissedPunchReminder" data-missed-punch-reminder-submit>
+                        {{ missedPunchReminderSubmitting ? tr('Enqueuing...', '正在入队...') : tr('Confirm', '确认') }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="!missedPunchReminderLoading && missedPunchReminderCandidates.length === 0" class="attendance__empty" data-missed-punch-reminder-empty>
+                  {{ tr('No owed-punch candidates loaded.', '暂无已加载欠卡候选。') }}
+                </div>
+                <div v-else class="attendance__table-wrapper">
+                  <table class="attendance__table" data-missed-punch-reminder-table>
+                    <thead>
+                      <tr>
+                        <th>
+                          <input
+                            type="checkbox"
+                            :checked="missedPunchReminderAllVisibleSelected"
+                            :disabled="missedPunchReminderCandidates.length === 0"
+                            data-missed-punch-reminder-select-all
+                            @change="setMissedPunchReminderVisibleSelection(($event.target as HTMLInputElement).checked)"
+                          />
+                        </th>
+                        <th>{{ tr('Date', '日期') }}</th>
+                        <th>{{ tr('User', '用户') }}</th>
+                        <th>{{ tr('Missing', '缺卡') }}</th>
+                        <th>{{ tr('Request', '申请') }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="item in missedPunchReminderCandidates" :key="item.recordId">
+                        <td>
+                          <input
+                            type="checkbox"
+                            :checked="missedPunchReminderSelectedIds.includes(item.recordId)"
+                            data-missed-punch-reminder-row
+                            @change="toggleMissedPunchReminderSelection(item.recordId, ($event.target as HTMLInputElement).checked)"
+                          />
+                        </td>
+                        <td>{{ item.workDate }}</td>
+                        <td>{{ item.userId }}</td>
+                        <td>{{ missedPunchReminderMissingSideLabel(item.missingSide) }}</td>
+                        <td>{{ item.pendingRequest ? tr('Pending request', '申请处理中') : '--' }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="attendance__admin-actions">
+                  <button
+                    class="attendance__btn attendance__btn--primary"
+                    :disabled="missedPunchReminderSubmitting || missedPunchReminderSelectedItems.length === 0"
+                    data-missed-punch-reminder-open-confirm
+                    @click="requestMissedPunchReminderConfirm"
+                  >
+                    {{ missedPunchReminderSubmitting ? tr('Enqueuing...', '正在入队...') : tr(`Remind selected (${missedPunchReminderSelectedItems.length})`, `提醒所选（${missedPunchReminderSelectedItems.length}）`) }}
+                  </button>
+                </div>
+              </div>
               <div class="attendance__group-summary-grid" data-attendance-notification-deliveries-counters>
                 <section
                   v-for="item in notificationDeliveryCounterItems"
@@ -8746,6 +8863,31 @@ interface AttendanceAnomaly {
   suggestedRequestType: string | null
 }
 
+interface MissedPunchReminderResult {
+  channel: string
+  created: number
+  existing: number
+}
+
+interface MissedPunchReminderCandidate {
+  recordId: string
+  userId: string
+  workDate: string
+  status: string
+  missingSide: 'check_in' | 'check_out' | 'both'
+  selectedByDefault?: boolean
+  pendingRequest?: {
+    id: string
+    status: string
+    requestType: string
+  } | null
+  latestRequest?: {
+    id: string
+    status: string
+    requestType: string
+  } | null
+}
+
 interface AttendanceRequest {
   id: string
   work_date: string
@@ -9926,6 +10068,28 @@ const scheduleDispatchSaving = ref(false)
 const focusedAttendanceRequestId = computed(() => props.initialRequestId.trim())
 const anomalies = ref<AttendanceAnomaly[]>([])
 const anomaliesLoading = ref(false)
+const missedPunchReminderCandidates = ref<MissedPunchReminderCandidate[]>([])
+const missedPunchReminderLoading = ref(false)
+const missedPunchReminderDefaultTo = new Date()
+const missedPunchReminderDefaultFrom = new Date(Date.now() - 1000 * 60 * 60 * 24 * 30)
+const missedPunchReminderForm = reactive({
+  from: missedPunchReminderDefaultFrom.toISOString().slice(0, 10),
+  to: missedPunchReminderDefaultTo.toISOString().slice(0, 10),
+  userId: '',
+})
+const missedPunchReminderSelectedIds = ref<string[]>([])
+const missedPunchReminderMessage = ref('Please submit a missed-punch request for the selected attendance record(s).')
+const missedPunchReminderSubmitting = ref(false)
+const missedPunchReminderError = ref('')
+const missedPunchReminderResult = ref<MissedPunchReminderResult | null>(null)
+const missedPunchReminderConfirm = reactive({
+  open: false,
+  recordIds: [] as string[],
+  message: '',
+  employeeCount: 0,
+  pendingCount: 0,
+  idempotencyKey: '',
+})
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'error'>('info')
 const statusMeta = ref<AttendanceStatusMeta | null>(null)
@@ -10116,6 +10280,16 @@ const summaryTimezoneContextHint = computed(() =>
 const anomaliesTimezoneContextHint = computed(() =>
   `${tr('Anomalies timezone context', '异常时区上下文')}: ${overviewTimezoneLabel.value}`
 )
+const missedPunchReminderSelectedItems = computed(() => {
+  const selected = new Set(missedPunchReminderSelectedIds.value)
+  return missedPunchReminderCandidates.value.filter(item => selected.has(item.recordId))
+})
+const missedPunchReminderAllVisibleSelected = computed(() => {
+  const visible = missedPunchReminderCandidates.value
+  if (visible.length === 0) return false
+  const selected = new Set(missedPunchReminderSelectedIds.value)
+  return visible.every(item => selected.has(item.recordId))
+})
 const requestReportTimezoneContextHint = computed(() =>
   `${tr('Request report timezone context', '申请报表时区上下文')}: ${overviewTimezoneLabel.value}`
 )
@@ -18231,6 +18405,137 @@ async function loadFocusedAttendanceRequest(): Promise<AttendanceRequest | null>
   return data.data?.request ?? null
 }
 
+function missedPunchReminderMissingSideLabel(side: MissedPunchReminderCandidate['missingSide']): string {
+  if (side === 'check_in') return tr('Check-in', '上班卡')
+  if (side === 'check_out') return tr('Check-out', '下班卡')
+  return tr('Check-in and check-out', '上下班卡')
+}
+
+watch(missedPunchReminderCandidates, () => {
+  const valid = new Set(missedPunchReminderCandidates.value.map(item => item.recordId))
+  missedPunchReminderSelectedIds.value = missedPunchReminderSelectedIds.value.filter(id => valid.has(id))
+})
+
+async function loadMissedPunchReminderCandidates(): Promise<void> {
+  missedPunchReminderLoading.value = true
+  missedPunchReminderError.value = ''
+  missedPunchReminderResult.value = null
+  missedPunchReminderConfirm.open = false
+  missedPunchReminderSelectedIds.value = []
+  try {
+    const query = buildQuery({
+      orgId: normalizedOrgId(),
+      from: missedPunchReminderForm.from,
+      to: missedPunchReminderForm.to,
+      userId: missedPunchReminderForm.userId.trim() || undefined,
+      page: '1',
+      pageSize: '50',
+    })
+    const queryString = query.toString()
+    const response = await apiFetch(`/api/attendance/manual-missed-punch-reminders/candidates${queryString ? `?${queryString}` : ''}`)
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to load missed-punch candidates', '加载欠卡候选失败')))
+    }
+    const items = Array.isArray(data.data?.items)
+      ? data.data.items as MissedPunchReminderCandidate[]
+      : []
+    missedPunchReminderCandidates.value = items
+    missedPunchReminderSelectedIds.value = items
+      .filter(item => item.selectedByDefault !== false)
+      .map(item => item.recordId)
+  } catch (error: any) {
+    missedPunchReminderCandidates.value = []
+    missedPunchReminderError.value = readErrorMessage(error, tr('Failed to load missed-punch candidates', '加载欠卡候选失败'))
+  } finally {
+    missedPunchReminderLoading.value = false
+  }
+}
+
+function toggleMissedPunchReminderSelection(recordId: string, checked: boolean): void {
+  const next = new Set(missedPunchReminderSelectedIds.value)
+  if (checked) next.add(recordId)
+  else next.delete(recordId)
+  missedPunchReminderSelectedIds.value = Array.from(next)
+  missedPunchReminderError.value = ''
+}
+
+function setMissedPunchReminderVisibleSelection(checked: boolean): void {
+  const next = new Set(missedPunchReminderSelectedIds.value)
+  for (const item of missedPunchReminderCandidates.value) {
+    if (checked) next.add(item.recordId)
+    else next.delete(item.recordId)
+  }
+  missedPunchReminderSelectedIds.value = Array.from(next)
+  missedPunchReminderError.value = ''
+}
+
+function missedPunchReminderIdempotencyKey(): string {
+  return `manual-missed-punch-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function requestMissedPunchReminderConfirm(): void {
+  const items = missedPunchReminderSelectedItems.value
+  const message = missedPunchReminderMessage.value.trim()
+  missedPunchReminderError.value = ''
+  missedPunchReminderResult.value = null
+  if (items.length === 0) {
+    missedPunchReminderError.value = tr('Select at least one owed-punch anomaly.', '请至少选择一条欠卡异常。')
+    return
+  }
+  if (!message) {
+    missedPunchReminderError.value = tr('Reminder message is required.', '请填写提醒内容。')
+    return
+  }
+  missedPunchReminderConfirm.open = true
+  missedPunchReminderConfirm.recordIds = items.map(item => item.recordId)
+  missedPunchReminderConfirm.message = message
+  missedPunchReminderConfirm.employeeCount = new Set(items.map(item => item.userId || item.recordId)).size
+  missedPunchReminderConfirm.pendingCount = items.filter(item => item.pendingRequest?.status === 'pending').length
+  missedPunchReminderConfirm.idempotencyKey = missedPunchReminderIdempotencyKey()
+}
+
+function cancelMissedPunchReminderConfirm(): void {
+  missedPunchReminderConfirm.open = false
+}
+
+async function confirmMissedPunchReminder(): Promise<void> {
+  if (!missedPunchReminderConfirm.open || missedPunchReminderSubmitting.value) return
+  const snapshot = {
+    recordIds: [...missedPunchReminderConfirm.recordIds],
+    message: missedPunchReminderConfirm.message,
+    idempotencyKey: missedPunchReminderConfirm.idempotencyKey,
+  }
+  missedPunchReminderSubmitting.value = true
+  missedPunchReminderError.value = ''
+  missedPunchReminderResult.value = null
+  try {
+    const query = buildQuery({ orgId: normalizedOrgId() })
+    const queryString = query.toString()
+    const response = await apiFetch(`/api/attendance/manual-missed-punch-reminders/enqueue${queryString ? `?${queryString}` : ''}`, {
+      method: 'POST',
+      body: JSON.stringify(snapshot),
+    })
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to enqueue reminder', '提醒入队失败')))
+    }
+    missedPunchReminderResult.value = {
+      channel: String(data.data?.channel ?? ''),
+      created: Number(data.data?.created ?? 0),
+      existing: Number(data.data?.existing ?? 0),
+    }
+    missedPunchReminderConfirm.open = false
+    missedPunchReminderSelectedIds.value = []
+    setStatus(tr('Missed-punch reminder enqueued.', '欠卡提醒已入队。'))
+    void loadAttendanceNotificationDeliveries()
+  } catch (error: any) {
+    missedPunchReminderError.value = readErrorMessage(error, tr('Failed to enqueue reminder', '提醒入队失败'))
+  } finally {
+    missedPunchReminderSubmitting.value = false
+  }
+}
+
 async function loadAnomalies() {
   anomaliesLoading.value = true
   try {
@@ -24395,6 +24700,27 @@ const holidaySectionBindings = {
   min-width: auto;
 }
 
+.attendance__checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #555;
+}
+
+.attendance__missed-reminder-toolbar {
+  display: grid;
+  grid-template-columns: max-content minmax(220px, 1fr) max-content;
+  align-items: end;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.attendance__missed-reminder-toolbar textarea {
+  min-height: 44px;
+  resize: vertical;
+}
+
 .attendance__field-hint {
   color: #777;
   font-size: 11px;
@@ -26700,6 +27026,11 @@ const holidaySectionBindings = {
   .attendance__admin-current-section-jump,
   .attendance__admin-current-section-select {
     min-width: 100%;
+  }
+
+  .attendance__missed-reminder-toolbar {
+    grid-template-columns: 1fr;
+    align-items: stretch;
   }
 
   .attendance__admin-shortcuts-items {
