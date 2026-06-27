@@ -87,6 +87,7 @@ import {
 import {
   type ConfigRevisionRow,
   classifyRevert,
+  isSupportedSheetConfigRevert,
   computeRevertPreview,
   loadEntityConfigSnapshot,
   applyConfigRevert,
@@ -7742,7 +7743,10 @@ export function univerMetaRouter(): Router {
       // T9-W Tier 1: classifyRevert stays PURE (sheet_config = intrinsically gated), but the flag is ON here (flag-off
       // already 403'd above), so the ROUTE supports this revert — surface it as confirmable so the FE shows the confirm
       // path (the FE hides confirm unless opKind === 'safe'). EXECUTE applies the same flag+guard gate, not opKind.
-      if (rev.entity_type === 'sheet_config') {
+      // Narrowed: ONLY an update-to-mapped-read-rule-columns is Tier 1. A create/delete (Tier 3, held) or unknown
+      // changed_keys stays gated → FE hides confirm, and execute returns 422 below (same predicate, can't diverge).
+      // The redaction above still runs for EVERY sheet_config preview (gated or not) so a gated preview can't leak.
+      if (isSupportedSheetConfigRevert(rev)) {
         preview.opKind = 'safe'
         delete preview.gatedReason
       }
@@ -7792,9 +7796,11 @@ export function univerMetaRouter(): Router {
         }
       }
       const classify = classifyRevert(rev)
-      // classifyRevert stays PURE; the route SUPPORTS flag-on sheet_config (already flag/guard-gated above), so it must
-      // NOT 422 it. Every other gated kind (permission, lossy field, create/delete) is still refused here.
-      if (classify.kind === 'gated' && rev.entity_type !== 'sheet_config') return res.status(422).json({ ok: false, error: { code: 'RESTORE_NOT_SUPPORTED', message: classify.reason ?? 'This config restore is not supported in this slice.' } })
+      // classifyRevert stays PURE; the route SUPPORTS flag-on sheet_config ONLY in the narrowed Tier-1 shape (update +
+      // mapped read-rule keys), already flag/guard-gated above. Everything else still gated — including a sheet_config
+      // create/delete (Tier 3, held) or unknown changed_keys, which now returns a clean 422 here instead of falling
+      // through to applyConfigRevert (which would otherwise throw → 500, or worse, write an update-shaped revert).
+      if (classify.kind === 'gated' && !isSupportedSheetConfigRevert(rev)) return res.status(422).json({ ok: false, error: { code: 'RESTORE_NOT_SUPPORTED', message: classify.reason ?? 'This config restore is not supported in this slice.' } })
 
       // null = applied; a failure object = a guard tripped (the txn made no write either way).
       const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {

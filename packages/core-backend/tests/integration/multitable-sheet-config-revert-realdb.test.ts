@@ -3,11 +3,13 @@
  * MULTITABLE_ENABLE_SHEET_CONFIG_REVERT (default off). classifyRevert stays PURE (sheet_config = intrinsically
  * gated); the ROUTE supports it when the flag is on and surfaces the preview as confirmable (opKind:'safe').
  *
- * Goldens: (a) flag-OFF → preview AND execute 403 RESET... no: SHEET_CONFIG_REVERT_DISABLED · (b) gate: a
- * write-but-not-share actor → 403 · (c) fail-closed: a revision whose entity_id != sheet_id → 400 INVALID_REVISION ·
- * (d) flag-ON happy path: preview is confirmable (opKind:'safe', no drift) and execute SUCCEEDS (rules reverted,
- * forward source=restore revision) · (e) drift: rules edited after preview → execute 409 · (f) U-L6 redaction: a
- * field-denied canManageSheetAccess reader does NOT see the secret rule literal in the preview; fully-allowed does.
+ * Goldens: (a) flag-OFF → preview AND execute 403 SHEET_CONFIG_REVERT_DISABLED · (b) gate: a write-but-not-share
+ * actor → 403 · (c) fail-closed: a revision whose entity_id != sheet_id → 400 INVALID_REVISION · (d) flag-ON happy
+ * path: preview is confirmable (opKind:'safe', no drift) and execute SUCCEEDS (rules reverted, forward source=restore
+ * revision) · (e) drift: rules edited after preview → execute 409 · (f) U-L6 redaction: a field-denied
+ * canManageSheetAccess reader does NOT see the secret rule literal in the preview; fully-allowed does · (g) U-L4
+ * atomicity: a forced revision-insert failure rolls back the config UPDATE · (h) narrowing: create/delete/unknown-key
+ * sheet_config stays gated (preview not-safe + execute 422, no write, no restore revision).
  * Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
@@ -197,5 +199,42 @@ describeIfDatabase('multitable sheet_config revert — T9-W Tier 1 (real DB)', (
       await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_config_revisions`, []).catch(() => {})
       await q(`DROP FUNCTION IF EXISTS ${FN}()`, []).catch(() => {})
     }
+  })
+
+  // (h) Narrowing (isSupportedSheetConfigRevert): flag-on, entity_id===sheet_id, canManageSheetAccess — but a
+  // sheet_config revision that is NOT an update-to-mapped-read-rule-columns must stay GATED. classifyRevert is pure
+  // (sheet_config always gated); the route's opKind override + execute 422-skip are narrowed by the predicate, so a
+  // create/delete (Tier 3 un-create, held by #3254) or unknown changed_keys can't masquerade as a confirmable/
+  // executable Tier-1 revert. Each forged shape → preview gated (opKind NOT 'safe') AND execute 422 RESTORE_NOT_SUPPORTED,
+  // with ZERO config write + NO forward restore revision. entity_id is set to SHEET so this isolates the action/key
+  // gate, not the (c) entity_id guard.
+  test('(h) narrowing: flag-on sheet_config create/delete/unknown-key stays gated → preview not-safe + execute 422, no write, no restore revision', async () => {
+    process.env[FLAG] = 'true'
+    const forge = async (action: string, changedKeys: string[], payload: Record<string, unknown>): Promise<string> =>
+      ((await q(
+        `INSERT INTO meta_config_revisions (id, sheet_id, entity_type, entity_id, action, before, after, changed_keys, batch_id, actor_id, created_at)
+         VALUES (gen_random_uuid(), $1, 'sheet_config', $1, $2, $3::jsonb, $4::jsonb, $5::text[], gen_random_uuid(), $6, now()) RETURNING id`,
+        [SHEET, action, JSON.stringify(payload), JSON.stringify(payload), changedKeys, U_FULL],
+      )).rows[0] as { id: string }).id
+    const forged = [
+      await forge('create', ['conditionalReadRules'], { conditionalReadRules: [] }), // create = Tier 3 (held)
+      await forge('delete', ['conditionalReadRules'], { conditionalReadRules: [] }), // delete = Tier 3 (held)
+      await forge('update', ['someUnknownKey'], { someUnknownKey: 'x' }),            // unknown key (not mapped)
+    ]
+    const liveBefore = JSON.stringify(await liveRules())
+    const restoreCountBefore = ((await q(`SELECT count(*)::int AS n FROM meta_config_revisions WHERE sheet_id=$1 AND source='restore'`, [SHEET])).rows[0] as { n: number }).n
+    for (const revId of forged) {
+      const p = await preview(revId, FULL)
+      expect(p.status).toBe(200)
+      expect(p.body?.data?.preview?.opKind).not.toBe('safe') // stays gated → FE hides confirm
+      expect(p.body?.data?.preview?.gatedReason).toBeTruthy()
+      const x = await execute(revId, p.body?.data?.previewToken ?? 'any-token', FULL)
+      expect(x.status).toBe(422)
+      expect(x.body?.error?.code).toBe('RESTORE_NOT_SUPPORTED')
+    }
+    // zero side effects: live rules byte-for-byte unchanged + no forward restore revision appended
+    expect(JSON.stringify(await liveRules())).toBe(liveBefore)
+    const restoreCountAfter = ((await q(`SELECT count(*)::int AS n FROM meta_config_revisions WHERE sheet_id=$1 AND source='restore'`, [SHEET])).rows[0] as { n: number }).n
+    expect(restoreCountAfter).toBe(restoreCountBefore)
   })
 })

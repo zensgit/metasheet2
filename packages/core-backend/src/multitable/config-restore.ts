@@ -147,6 +147,23 @@ const SHEET_CONFIG_COLUMN: Record<string, ColumnMap> = {
   conditionalReadRules: { col: 'conditional_read_rules', jsonb: true },
   rowLevelReadPermissionsEnabled: { col: 'row_level_read_permissions_enabled' },
 }
+// The ONLY sheet_config revert shape this slice supports. A Set (not `key in obj`) so a forged `changed_keys`
+// entry like 'toString'/'constructor' can't match via the prototype chain.
+const SHEET_CONFIG_REVERT_KEYS = new Set(Object.keys(SHEET_CONFIG_COLUMN))
+
+/**
+ * T9-W Tier 1 narrowing: `classifyRevert` stays PURE (sheet_config is intrinsically gated), so the route must NOT
+ * treat *every* sheet_config revision as the supported Tier-1 path. Only an `update` to the mapped read-rule columns
+ * is in scope; create/delete (= Tier 3 un-create, held) and unknown `changed_keys` stay gated/422. The route uses
+ * this for BOTH the preview `opKind='safe'` override AND the execute 422-skip, so the two can never diverge.
+ */
+export function isSupportedSheetConfigRevert(rev: Pick<ConfigRevisionRow, 'entity_type' | 'action' | 'changed_keys'>): boolean {
+  return rev.entity_type === 'sheet_config'
+    && rev.action === 'update'
+    && Array.isArray(rev.changed_keys)
+    && rev.changed_keys.length > 0
+    && rev.changed_keys.every((k) => SHEET_CONFIG_REVERT_KEYS.has(k))
+}
 
 /** Apply the revert: UPDATE the entity's changed columns to the revision's `before` values. Safe-op only (caller gates). */
 export async function applyConfigRevert(query: QueryFn, rev: ConfigRevisionRow): Promise<void> {
