@@ -192,6 +192,62 @@
           </ul>
         </div>
 
+        <div class="attendance__card attendance__card--selfservice" data-selfservice-card="rules">
+          <div class="attendance__requests-header">
+            <div>
+              <h3>{{ tr('My attendance rules', '我的考勤规则') }}</h3>
+              <small class="attendance__field-hint">{{ tr('Read-only summary of the rules currently used for you.', '当前适用于您的考勤规则只读摘要。') }}</small>
+            </div>
+          </div>
+          <p v-if="selfRulesLoading" class="attendance__field-hint">{{ tr('Loading...', '加载中...') }}</p>
+          <p v-else-if="selfRulesError" class="attendance__error" data-selfservice-rules-error>{{ selfRulesError }}</p>
+          <div v-else-if="selfRulesData" class="attendance__selfrules" data-selfservice-rules>
+            <div class="attendance__summary attendance__summary--workbench">
+              <div class="attendance__summary-item">
+                <span>{{ tr('Attendance group', '考勤组') }}</span>
+                <strong>{{ selfRulesAttendanceGroupSummary }}</strong>
+              </div>
+              <div class="attendance__summary-item">
+                <span>{{ tr('Schedule group', '排班组') }}</span>
+                <strong>{{ selfRulesScheduleGroupSummary }}</strong>
+              </div>
+              <div class="attendance__summary-item">
+                <span>{{ tr('Work window', '工作时间') }}</span>
+                <strong>{{ selfRulesWorkWindowSummary }}</strong>
+              </div>
+              <div class="attendance__summary-item">
+                <span>{{ tr('Punch policy', '打卡策略') }}</span>
+                <strong>{{ selfRulesPunchPolicySummary }}</strong>
+              </div>
+              <div class="attendance__summary-item">
+                <span>{{ tr('Working days', '工作日') }}</span>
+                <strong>{{ selfRulesWorkingDaysSummary }}</strong>
+              </div>
+              <div class="attendance__summary-item">
+                <span>{{ tr('Late / early grace', '迟到 / 早退宽限') }}</span>
+                <strong>{{ selfRulesGraceSummary }}</strong>
+              </div>
+              <div class="attendance__summary-item">
+                <span>{{ tr('Severe / absence late', '严重 / 旷工迟到') }}</span>
+                <strong>{{ selfRulesLateThresholdSummary }}</strong>
+              </div>
+            </div>
+            <p v-if="selfRulesConfiguredRuleSummary" class="attendance__field-hint attendance__field-hint--strong">
+              {{ selfRulesConfiguredRuleSummary }}
+            </p>
+            <div v-if="selfRulesWarningCodes.length > 0" class="attendance__chip-list" data-selfservice-rules-warnings>
+              <span
+                v-for="code in selfRulesWarningCodes"
+                :key="code"
+                class="attendance__status-chip attendance__status-chip--pending"
+              >
+                {{ formatSelfRulesWarning(code) }}
+              </span>
+            </div>
+          </div>
+          <p v-else class="attendance__field-hint">{{ tr('No attendance rules loaded yet.', '暂无考勤规则摘要。') }}</p>
+        </div>
+
         <div class="attendance__card attendance__card--selfservice" data-selfservice-card="requests">
           <div class="attendance__requests-header">
             <div>
@@ -18595,6 +18651,7 @@ async function refreshAll(): Promise<boolean> {
     const tasks = [loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()]
     if (showOverview.value) {
       tasks.push(
+        loadSelfAttendanceRules(),
         loadLeaveTypes({ activeOnly: true }),
         loadOvertimeRules({ activeOnly: true }),
         loadShiftSwapRequests(),
@@ -20502,9 +20559,166 @@ interface AnnualLeaveBalanceData {
   recentEvents: AnnualLeaveBalanceEvent[]
   eventLimit: number
 }
+
+interface AttendanceSelfRulesGroupSummary {
+  id?: string | null
+  name?: string | null
+  code?: string | null
+  type?: string | null
+  attendanceType?: string | null
+  effectiveFrom?: string | null
+  effectiveTo?: string | null
+}
+
+interface AttendanceSelfRulesData {
+  userId?: string
+  orgId?: string
+  resolvedForDate?: string
+  assignment?: {
+    attendanceGroups?: AttendanceSelfRulesGroupSummary[]
+    scheduleGroups?: AttendanceSelfRulesGroupSummary[]
+  }
+  runtimeRule?: {
+    name?: string | null
+    timezone?: string | null
+    workStartTime?: string | null
+    workEndTime?: string | null
+    workingDays?: number[] | null
+    lateGraceMinutes?: number | null
+    earlyGraceMinutes?: number | null
+    earlyLeaveGraceMinutes?: number | null
+    severeLateThresholdMinutes?: number | null
+    absenceLateThresholdMinutes?: number | null
+  }
+  configuredGroupRule?: {
+    ruleSetId?: string | null
+    groupId?: string | null
+    enforcement?: string | null
+  } | null
+  punchPolicy?: {
+    unscheduledMode?: string | null
+    outdoorApprovalRequired?: boolean | null
+    outdoorNoteRequired?: boolean | null
+    merge?: {
+      internalWinsOnIn?: boolean | null
+      externalWinsOnOut?: boolean | null
+    } | null
+  } | null
+  warnings?: Array<{ code?: string | null } | string>
+}
+
 const annualBalanceUserId = ref('')
 const annualBalanceLoading = ref(false)
 const annualBalanceData = ref<AnnualLeaveBalanceData | null>(null)
+
+const selfRulesData = ref<AttendanceSelfRulesData | null>(null)
+const selfRulesLoading = ref(false)
+const selfRulesError = ref<string | null>(null)
+
+function summarizeSelfRulesGroups(groups: AttendanceSelfRulesGroupSummary[] | undefined, emptyLabel: string): string {
+  if (!Array.isArray(groups) || groups.length === 0) return emptyLabel
+  return groups
+    .map((group) => String(group.name || group.code || group.id || '').trim())
+    .filter(Boolean)
+    .join(', ') || emptyLabel
+}
+
+const selfRulesAttendanceGroupSummary = computed(() =>
+  summarizeSelfRulesGroups(selfRulesData.value?.assignment?.attendanceGroups, tr('No attendance group', '未加入考勤组'))
+)
+
+const selfRulesScheduleGroupSummary = computed(() =>
+  summarizeSelfRulesGroups(selfRulesData.value?.assignment?.scheduleGroups, tr('No schedule group', '未加入排班组'))
+)
+
+const selfRulesWorkWindowSummary = computed(() => {
+  const rule = selfRulesData.value?.runtimeRule
+  const start = String(rule?.workStartTime || '').trim()
+  const end = String(rule?.workEndTime || '').trim()
+  const timezone = String(rule?.timezone || '').trim()
+  const window = start && end ? `${start}-${end}` : tr('Default rule', '默认规则')
+  return timezone ? `${window} · ${timezone}` : window
+})
+
+const selfRulesPunchPolicySummary = computed(() => {
+  const policy = selfRulesData.value?.punchPolicy
+  if (!policy) return tr('Not configured', '未配置')
+  const mode = String(policy.unscheduledMode || '').trim() || tr('default', '默认')
+  const outdoor = policy.outdoorApprovalRequired
+    ? tr('outdoor approval', '外勤需审批')
+    : tr('outdoor direct', '外勤直接记录')
+  const merge = policy.merge?.internalWinsOnIn || policy.merge?.externalWinsOnOut
+    ? tr('merge on', '合并开启')
+    : tr('merge off', '合并关闭')
+  return `${mode} · ${outdoor} · ${merge}`
+})
+
+const SELF_RULES_WEEKDAY_LABELS = [
+  tr('Sun', '周日'),
+  tr('Mon', '周一'),
+  tr('Tue', '周二'),
+  tr('Wed', '周三'),
+  tr('Thu', '周四'),
+  tr('Fri', '周五'),
+  tr('Sat', '周六'),
+]
+
+function formatSelfRulesMinutes(value: unknown): string {
+  const minutes = Number(value)
+  return Number.isFinite(minutes) ? `${Math.max(0, Math.trunc(minutes))}m` : tr('Not configured', '未配置')
+}
+
+const selfRulesWorkingDaysSummary = computed(() => {
+  const days = selfRulesData.value?.runtimeRule?.workingDays
+  if (!Array.isArray(days) || days.length === 0) return tr('Not configured', '未配置')
+  const uniqueDays = Array.from(new Set(days.map(day => Number(day)).filter(day => Number.isInteger(day) && day >= 0 && day <= 6))).sort((a, b) => a - b)
+  if (uniqueDays.length === 7) return tr('Every day', '每天')
+  return uniqueDays.map(day => SELF_RULES_WEEKDAY_LABELS[day]).join(', ') || tr('Not configured', '未配置')
+})
+
+const selfRulesGraceSummary = computed(() => {
+  const rule = selfRulesData.value?.runtimeRule
+  const earlyGrace = rule?.earlyLeaveGraceMinutes ?? rule?.earlyGraceMinutes
+  return tr(
+    `Late ${formatSelfRulesMinutes(rule?.lateGraceMinutes)} / Early ${formatSelfRulesMinutes(earlyGrace)}`,
+    `迟到 ${formatSelfRulesMinutes(rule?.lateGraceMinutes)} / 早退 ${formatSelfRulesMinutes(earlyGrace)}`,
+  )
+})
+
+const selfRulesLateThresholdSummary = computed(() => {
+  const rule = selfRulesData.value?.runtimeRule
+  return tr(
+    `Severe ${formatSelfRulesMinutes(rule?.severeLateThresholdMinutes)} / Absence ${formatSelfRulesMinutes(rule?.absenceLateThresholdMinutes)}`,
+    `严重 ${formatSelfRulesMinutes(rule?.severeLateThresholdMinutes)} / 旷工 ${formatSelfRulesMinutes(rule?.absenceLateThresholdMinutes)}`,
+  )
+})
+
+const selfRulesConfiguredRuleSummary = computed(() => {
+  const configured = selfRulesData.value?.configuredGroupRule
+  if (!configured?.ruleSetId) return ''
+  return tr(
+    `Configured group rule ${configured.ruleSetId} is visible but not the user calc chain.`,
+    `考勤组规则 ${configured.ruleSetId} 仅作可见提示，暂未进入个人计算链。`,
+  )
+})
+
+const selfRulesWarningCodes = computed(() =>
+  (Array.isArray(selfRulesData.value?.warnings) ? selfRulesData.value?.warnings ?? [] : [])
+    .map(item => typeof item === 'string' ? item : String(item?.code || '').trim())
+    .filter(Boolean)
+)
+
+function formatSelfRulesWarning(code: string): string {
+  const labels: Record<string, string> = {
+    MULTIPLE_ATTENDANCE_GROUPS: tr('Multiple attendance groups', '多个考勤组'),
+    MULTIPLE_SCHEDULE_GROUPS: tr('Multiple schedule groups', '多个排班组'),
+    SCHEDULE_GROUP_WINDOW_OVERLAP: tr('Schedule window overlap', '排班组窗口重叠'),
+    GROUP_RULE_SET_PREVIEW_DIVERGENCE: tr('Group rule is preview-only', '考勤组规则仅作预览'),
+    NO_ATTENDANCE_GROUP: tr('No attendance group', '未加入考勤组'),
+    DEFAULT_RULE_FALLBACK: tr('Default rule fallback', '使用默认规则'),
+  }
+  return labels[code] ?? code
+}
 
 // 年假/法定假 employee self-service: the overview card reads the caller's OWN balance via the token-locked /me
 // endpoint (no userId — the server forces the subject to the authenticated token). Read-only.
@@ -20531,6 +20745,26 @@ async function loadAnnualSelfBalance(): Promise<void> {
     annualSelfBalanceError.value = readErrorMessage(error, tr('Failed to load your leave balance', '加载您的休假余额失败'))
   } finally {
     annualSelfBalanceLoading.value = false
+  }
+}
+
+async function loadSelfAttendanceRules(): Promise<void> {
+  selfRulesData.value = null
+  selfRulesLoading.value = true
+  selfRulesError.value = null
+  try {
+    const response = await apiFetch('/api/attendance/rules/me')
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw createApiError(response, data, tr('Failed to load your attendance rules', '加载您的考勤规则失败'))
+    }
+    selfRulesData.value = data.data && typeof data.data === 'object'
+      ? data.data as AttendanceSelfRulesData
+      : null
+  } catch (error: any) {
+    selfRulesError.value = readErrorMessage(error, tr('Failed to load your attendance rules', '加载您的考勤规则失败'))
+  } finally {
+    selfRulesLoading.value = false
   }
 }
 
