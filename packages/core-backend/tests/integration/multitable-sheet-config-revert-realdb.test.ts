@@ -1,13 +1,17 @@
 /**
  * T9-W Tier 1 — sheet_config revert (real DB). The first UNSAFE config-restore slice, behind the per-tier flag
  * MULTITABLE_ENABLE_SHEET_CONFIG_REVERT (default off). classifyRevert stays PURE (sheet_config = intrinsically
- * gated); the ROUTE supports it when the flag is on and surfaces the preview as confirmable (opKind:'safe').
+ * gated); with the flag on the ROUTE opens ONLY the Tier-1 subset (isSupportedSheetConfigRevert: an `update` whose
+ * changed keys ⊆ {conditionalReadRules, rowLevelReadPermissionsEnabled}) and surfaces THAT as confirmable
+ * (opKind:'safe') — a create/delete or unknown-key sheet_config stays gated.
  *
  * Goldens: (a) flag-OFF → preview AND execute 403 RESET... no: SHEET_CONFIG_REVERT_DISABLED · (b) gate: a
  * write-but-not-share actor → 403 · (c) fail-closed: a revision whose entity_id != sheet_id → 400 INVALID_REVISION ·
  * (d) flag-ON happy path: preview is confirmable (opKind:'safe', no drift) and execute SUCCEEDS (rules reverted,
  * forward source=restore revision) · (e) drift: rules edited after preview → execute 409 · (f) U-L6 redaction: a
- * field-denied canManageSheetAccess reader does NOT see the secret rule literal in the preview; fully-allowed does.
+ * field-denied canManageSheetAccess reader does NOT see the secret rule literal in the preview; fully-allowed does ·
+ * (g) U-L4 atomicity: a forced revision-insert failure rolls back the config UPDATE (nothing written) · (h) scope:
+ * flag-ON sheet_config create/delete/unknown-key stays gated (preview not confirmable, execute 422, no write).
  * Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
@@ -44,6 +48,9 @@ const execute = (revisionId: string, previewToken: string, as: typeof FULL) => {
 const rule = (id: string, fieldId: string, value: string) => ({ id, fieldId, operator: 'eq', value, effect: 'deny_read' })
 const latestRevId = async (): Promise<string> => ((await q(`SELECT id FROM meta_config_revisions WHERE sheet_id=$1 AND entity_type='sheet_config' ORDER BY created_at DESC, id DESC LIMIT 1`, [SHEET])).rows[0] as { id: string }).id
 const liveRules = async (): Promise<any[]> => (((await q('SELECT conditional_read_rules AS r FROM meta_sheets WHERE id=$1', [SHEET])).rows[0] as { r: any }).r) ?? []
+const restoreRevCount = async (): Promise<number> => ((await q(`SELECT count(*)::int AS n FROM meta_config_revisions WHERE sheet_id=$1 AND source='restore'`, [SHEET])).rows[0] as { n: number }).n
+// craft a raw sheet_config revision (entity_id===sheet to pass the entity_id guard; source defaults to 'mutation')
+const craftSheetConfigRev = async (action: string, changedKeys: string[], before: unknown, after: unknown): Promise<string> => ((await q(`INSERT INTO meta_config_revisions (sheet_id, entity_type, entity_id, action, before, after, changed_keys, actor_id) VALUES ($1,'sheet_config',$1,$2,$3::jsonb,$4::jsonb,$5,$6) RETURNING id`, [SHEET, action, JSON.stringify(before), JSON.stringify(after), changedKeys, U_FULL])).rows[0] as { id: string }).id
 
 describeIfDatabase('multitable sheet_config revert — T9-W Tier 1 (real DB)', () => {
   let revToRevert = '' // R2: before=[visible,secret], after=[visible] → revert restores the secret rule
@@ -198,4 +205,32 @@ describeIfDatabase('multitable sheet_config revert — T9-W Tier 1 (real DB)', (
       await q(`DROP FUNCTION IF EXISTS ${FN}()`, []).catch(() => {})
     }
   })
+
+  // (h) U-L1/scope ([P1] fix): the flag opens ONLY Tier 1 — an `update` whose changed keys ⊆ {conditionalReadRules,
+  // rowLevelReadPermissionsEnabled}. A flag-ON sheet_config create / delete (un-create / undelete = Tier 3/4, #3254
+  // HOLD) or an `update` with an unknown changed_key must STAY gated: preview is NOT confirmable (opKind !== 'safe')
+  // and execute 422s RESTORE_NOT_SUPPORTED with NO config write and NO forward restore revision. Guards the earlier
+  // blanket `entity_type === 'sheet_config'` bypass that wrongly treated these Tier-3/4 ops as confirmable/executable.
+  const outOfTier1: Array<{ name: string; action: string; keys: string[]; before: unknown; after: unknown }> = [
+    { name: 'create (un-create / Tier 3)', action: 'create', keys: ['conditionalReadRules'], before: null, after: { conditionalReadRules: [rule('rc', FLD_VISIBLE, 'created-lit')] } },
+    { name: 'delete (undelete / Tier 4)', action: 'delete', keys: ['conditionalReadRules'], before: { conditionalReadRules: [rule('rd', FLD_VISIBLE, 'deleted-lit')] }, after: null },
+    { name: 'update with an unknown changed_key', action: 'update', keys: ['rowLevelReadPermissionsEnabledX'], before: { rowLevelReadPermissionsEnabledX: false }, after: { rowLevelReadPermissionsEnabledX: true } },
+  ]
+  for (const c of outOfTier1) {
+    test(`(h) flag-ON sheet_config OUTSIDE Tier 1 — ${c.name} → gated preview + 422 execute, nothing written`, async () => {
+      process.env[FLAG] = 'true'
+      const revId = await craftSheetConfigRev(c.action, c.keys, c.before, c.after)
+      const p = await preview(revId, FULL)
+      expect(p.status).toBe(200)
+      expect(p.body?.data?.preview?.opKind).not.toBe('safe') // NOT confirmable — Tier 3/4 HOLD honored
+      const token = p.body?.data?.previewToken
+      const liveBefore = JSON.stringify(await liveRules())
+      const restoreBefore = await restoreRevCount()
+      const x = await execute(revId, token, FULL)
+      expect(x.status).toBe(422)
+      expect(x.body?.error?.code).toBe('RESTORE_NOT_SUPPORTED')
+      expect(JSON.stringify(await liveRules())).toBe(liveBefore) // no config write
+      expect(await restoreRevCount()).toBe(restoreBefore)        // no forward restore revision
+    })
+  }
 })

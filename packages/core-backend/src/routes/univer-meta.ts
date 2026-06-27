@@ -87,6 +87,9 @@ import {
 import {
   type ConfigRevisionRow,
   classifyRevert,
+  isSupportedSheetConfigRevert,
+  isFieldRetypeRevert,
+  isSupportedFieldRetypeRevert,
   computeRevertPreview,
   loadEntityConfigSnapshot,
   applyConfigRevert,
@@ -7709,6 +7712,12 @@ export function univerMetaRouter(): Router {
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
         : (capabilities.canManageFields || capabilities.canManageViews || capabilities.canManageSheetAccess)
       if (!cap) return sendForbidden(res)
+      // T9-W Tier 2 (U-2): field type/property revert is behind its OWN per-tier flag (default off). Schema-only +
+      // scalar-safe (isSupportedFieldRetypeRevert); mirrors the forward PATCH (no value migration). A non-retype
+      // field revert (name/order only) is unaffected and stays on the existing safe path.
+      if (isFieldRetypeRevert(rev) && process.env.MULTITABLE_ENABLE_FIELD_RETYPE_REVERT !== 'true') {
+        return res.status(403).json({ ok: false, error: { code: 'FIELD_RETYPE_REVERT_DISABLED', message: 'field type/property revert is disabled (MULTITABLE_ENABLE_FIELD_RETYPE_REVERT off).' } })
+      }
       // T9-W Tier 1 (U-L1): sheet_config revert is behind a per-tier flag (default off) — refuse preview AND execute.
       if (rev.entity_type === 'sheet_config') {
         if (process.env.MULTITABLE_ENABLE_SHEET_CONFIG_REVERT !== 'true') {
@@ -7739,10 +7748,13 @@ export function univerMetaRouter(): Router {
         preview.current = redactConditionalReadRuleLiterals(preview.current as { conditionalReadRules?: unknown }, allowedFieldIds) as Record<string, unknown>
         preview.target = redactConditionalReadRuleLiterals(preview.target as { conditionalReadRules?: unknown }, allowedFieldIds) as Record<string, unknown>
       }
-      // T9-W Tier 1: classifyRevert stays PURE (sheet_config = intrinsically gated), but the flag is ON here (flag-off
-      // already 403'd above), so the ROUTE supports this revert — surface it as confirmable so the FE shows the confirm
-      // path (the FE hides confirm unless opKind === 'safe'). EXECUTE applies the same flag+guard gate, not opKind.
-      if (rev.entity_type === 'sheet_config') {
+      // T9-W: classifyRevert stays PURE (sheet_config + field type/property are intrinsically gated). The relevant
+      // per-tier flag is ON here (flag-off already 403'd above), but each flag opens ONLY its supported subset —
+      // isSupportedSheetConfigRevert (Tier-1 sheet_config: update over Tier-1 keys) or isSupportedFieldRetypeRevert
+      // (Tier-2 field: a scalar-safe type-changing retype). Everything else (sheet_config create/delete/unknown-key,
+      // non-scalar/property-only field retype = held/deferred) stays gated — leave opKind as classifyRevert set it
+      // (the FE hides confirm) and EXECUTE 422s it below. Only the supported subsets are surfaced confirmable.
+      if (isSupportedSheetConfigRevert(rev) || isSupportedFieldRetypeRevert(rev)) {
         preview.opKind = 'safe'
         delete preview.gatedReason
       }
@@ -7782,6 +7794,10 @@ export function univerMetaRouter(): Router {
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
         : (capabilities.canManageFields || capabilities.canManageViews || capabilities.canManageSheetAccess)
       if (!cap) return sendForbidden(res)
+      // T9-W Tier 2 (U-2): field type/property revert behind its OWN per-tier flag (default off); see preview route.
+      if (isFieldRetypeRevert(rev) && process.env.MULTITABLE_ENABLE_FIELD_RETYPE_REVERT !== 'true') {
+        return res.status(403).json({ ok: false, error: { code: 'FIELD_RETYPE_REVERT_DISABLED', message: 'field type/property revert is disabled (MULTITABLE_ENABLE_FIELD_RETYPE_REVERT off).' } })
+      }
       // T9-W Tier 1 (U-L1): sheet_config revert behind the per-tier flag (default off) + fail-closed entity_id guard.
       if (rev.entity_type === 'sheet_config') {
         if (process.env.MULTITABLE_ENABLE_SHEET_CONFIG_REVERT !== 'true') {
@@ -7792,9 +7808,11 @@ export function univerMetaRouter(): Router {
         }
       }
       const classify = classifyRevert(rev)
-      // classifyRevert stays PURE; the route SUPPORTS flag-on sheet_config (already flag/guard-gated above), so it must
-      // NOT 422 it. Every other gated kind (permission, lossy field, create/delete) is still refused here.
-      if (classify.kind === 'gated' && rev.entity_type !== 'sheet_config') return res.status(422).json({ ok: false, error: { code: 'RESTORE_NOT_SUPPORTED', message: classify.reason ?? 'This config restore is not supported in this slice.' } })
+      // classifyRevert stays PURE; the route SUPPORTS only the flag-opened supported subsets — Tier-1 sheet_config
+      // (isSupportedSheetConfigRevert) and Tier-2 scalar field retype (isSupportedFieldRetypeRevert) — so it must NOT
+      // 422 those. Every other gated kind — permission, non-scalar/property-only field retype, create/delete, AND any
+      // non-Tier-1 sheet_config (create/delete/unknown changed_key = Tier 3/4 HOLD, #3254) — is still refused here.
+      if (classify.kind === 'gated' && !isSupportedSheetConfigRevert(rev) && !isSupportedFieldRetypeRevert(rev)) return res.status(422).json({ ok: false, error: { code: 'RESTORE_NOT_SUPPORTED', message: classify.reason ?? 'This config restore is not supported in this slice.' } })
 
       // null = applied; a failure object = a guard tripped (the txn made no write either way).
       const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
