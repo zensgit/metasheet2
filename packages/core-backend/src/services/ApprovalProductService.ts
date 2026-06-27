@@ -2908,17 +2908,27 @@ export class ApprovalProductService {
       )
     }
 
-    // RA-1a wedge guard (error-vs-empty split): a directory read that THREW leaves the department
-    // unknown. If the template routes on `requester.department`, freezing an absent department would
-    // wedge every later approval at the condition (the snapshot is frozen — admin-cancel only). Fail the
-    // create fast (retryable) instead. A read that SUCCEEDED with no department is genuine row-level
-    // absence — proceed, and runtime fail-closes per the ratified lock (never block a requester who
-    // genuinely has no department). Only fires when the graph actually routes on requester.department.
-    if (orgReadFailed && !orgRelations.primaryDepartmentName && runtimeGraphUsesRequesterDepartment(runtimeGraph)) {
+    // RA-1a wedge guard: if the template routes on `requester.department` but it could NOT be resolved,
+    // fail-closed AT CREATE — the ratified lock says absence "reject this createApproval rather than route
+    // on a phantom value". Without this, a condition downstream of an approval node only rejects at
+    // dispatch (after the snapshot is frozen), so every later approval throws -> rolls back -> wedges the
+    // instance forever (admin-cancel only). Reject both causes at create; distinguish them for the caller:
+    //   - read THREW (transient/infra) -> 503, retryable.
+    //   - read SUCCEEDED but empty (genuine row-level absence) -> 422, the requester's department is unset.
+    // Only fires when the graph actually routes on requester.department (manager-chain / dept-head and
+    // non-department templates are unaffected; genuine absence on those follows their emptyAssigneePolicy).
+    if (!orgRelations.primaryDepartmentName && runtimeGraphUsesRequesterDepartment(runtimeGraph)) {
+      if (orgReadFailed) {
+        throw new ServiceError(
+          'Could not resolve the requester department required by this approval template. Please retry.',
+          503,
+          'APPROVAL_REQUESTER_DEPARTMENT_UNRESOLVED',
+        )
+      }
       throw new ServiceError(
-        'Could not resolve the requester department required by this approval template. Please retry.',
-        503,
-        'APPROVAL_REQUESTER_DEPARTMENT_UNRESOLVED',
+        'This approval template routes on the requester department, which is not set for you. Contact an administrator.',
+        422,
+        'APPROVAL_REQUESTER_DEPARTMENT_REQUIRED',
       )
     }
 

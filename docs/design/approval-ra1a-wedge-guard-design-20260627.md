@@ -1,26 +1,25 @@
-# RA-1a transient-resolution wedge guard — Design
+# RA-1a requester.department wedge guard — Design
 
-> Status: **PROPOSED — owner ratification needed** (touches the `createApproval` contract). Implemented on `claude/approval-ra1a-wedge-fix-20260627`; PR open, do-not-merge until ratified. Source of the finding: the RA-1a deep review (2026-06-27), P2.
+> Status: **PROPOSED — owner ratification needed** (touches the `createApproval` contract). Implemented on `claude/approval-ra1a-wedge-fix-20260627`; PR open as **draft**, do-not-merge until ratified. Source of the finding: the RA-1a deep review (2026-06-27), P2.
 
 ## Problem
-`createApproval` resolves the requester's directory department best-effort and **swallows failures** into `orgRelations = {}` (`ApprovalProductService.ts` ~:2876-2886). If the directory read fails **transiently at create** AND the template routes on `requester.department` **downstream of an approval node**, the create succeeds with the department absent, the `requester_snapshot` is frozen, and the first approval that reaches the condition throws → rolls back → re-throws on every retry **forever** (admin-cancel only). Fail-closed (safe, no mis-route) but a permanent in-flight wedge — production-triggerable and invisible to tests.
+`createApproval` resolves the requester's directory department best-effort and **swallows failures** into `orgRelations = {}` (`ApprovalProductService.ts` ~:2876-2886). If the template routes on `requester.department` **downstream of an approval node** and the department is absent — whether because the read **failed transiently** OR because the requester **genuinely has none** — the create succeeds, the `requester_snapshot` is frozen, and the first approval that reaches the condition throws → rolls back → re-throws on **every retry forever** (admin-cancel only). Fail-closed (no mis-route) but a permanent in-flight wedge — production-triggerable and invisible to tests.
 
-## Root cause — error-vs-empty conflation
-The `catch` swallows BOTH a *thrown* read error (transient/infra) AND a *genuinely empty* result into `{}`. "department absent" is then ambiguous, and freezing it is wrong only for the transient case.
+The lock §2 intends absence to be **"reject this createApproval rather than route on a phantom value"** — but the runtime realizes that only when the condition is reachable *at create*. A **downstream** condition rejects at dispatch (post-freeze) instead, which is the wedge. This holds for both the transient AND the genuine-absence trigger; an earlier scoping that fixed only the transient case left the (deterministic) genuine-absence wedge open.
 
-## Fix (error-vs-empty split)
-Track whether the org-read threw (`orgReadFailed`). Then, **only when the published graph actually routes on `requester.department`** (new exported helper `runtimeGraphUsesRequesterDepartment`):
-- read **THREW** (transient) and no department resolved → **fail the create fast**: `ServiceError(503, 'APPROVAL_REQUESTER_DEPARTMENT_UNRESOLVED')`, retryable. A visible, retryable create error beats a silent permanent wedge.
-- read **SUCCEEDED but empty** (genuine row-level absence) → **proceed unchanged**; runtime fail-closes per the ratified lock. A requester who genuinely has no department is never blocked at create — ratified semantics preserved.
+## Fix
+When the published graph routes on `requester.department` (new exported helper `runtimeGraphUsesRequesterDepartment`) and the department did not resolve, **reject at create** — realizing the lock's reject-at-create regardless of graph topology. The cause is distinguished for the caller:
+- read **THREW** (transient/infra) → `ServiceError(503, 'APPROVAL_REQUESTER_DEPARTMENT_UNRESOLVED')` — retryable.
+- read **SUCCEEDED but empty** (genuine row-level absence) → `ServiceError(422, 'APPROVAL_REQUESTER_DEPARTMENT_REQUIRED')` — the requester's department is unset for a template that routes on it.
 
-Non-`requester.department` templates and the manager-chain / dept-head paths are unaffected (the guard never fires for them).
+Non-`requester.department` templates and the manager-chain / dept-head paths are unaffected (the guard never fires; genuine absence on those still follows their `emptyAssigneePolicy`).
 
-## Why this preserves ratified semantics
-The lock's "missing department → runtime fail-closed" is unchanged for genuine absence. The guard only changes the **transient-failure** case, converting a permanent mid-flight wedge into an immediate retryable create error. No change to publish validation, routing, or genuine-absence runtime behavior.
+## Alignment with the ratified lock
+The lock §2: row-level absence → "reject this createApproval rather than route on a phantom value." This guard makes that hold regardless of topology, for both causes. No change to publish validation, to routing, or to the never-phantom-route rule. Conservative trade-off: the guard fires whenever the graph *references* `requester.department` (coarse), so it can reject a create whose actual path would not have reached the condition — accepted under the lock's "never route on a phantom value" priority; precise per-path reachability is not knowable at create (branches depend on future approver decisions).
 
 ## Tests
-- `approval-product-service.test.ts` (unit): transient read throw + `requester.department` graph → rejects 503; successful empty read + same graph → still creates (genuine absence proceeds).
-- Happy path already covered by the round-trip integration test (#3294); the guard does not fire there (department resolves).
+- `approval-product-service.test.ts` (unit): transient throw + `requester.department` graph → rejects **503**; successful empty read + same graph → rejects **422** (genuine absence fail-closed at create, NOT a downstream wedge); existing non-department createApproval paths unaffected (64/64 green; tsc clean).
+- Happy path covered by the round-trip integration test (#3294, now wired into the CI integration lane); the guard does not fire there (department resolves).
 
 ## Out of scope / future
-- Optional: persist a `resolutionFailed` reason so `dispatch` can re-resolve ONLY the transient case (heal without re-reading on the happy path). Deferred — fail-fast-at-create needs no snapshot-schema change and is simpler.
+- Optional: instead of reject-at-create, persist a `resolutionFailed` reason and re-resolve ONLY the transient case at dispatch (heal without re-reading on the happy path). Deferred — reject-at-create needs no snapshot-schema change and is the lock's stated behavior.

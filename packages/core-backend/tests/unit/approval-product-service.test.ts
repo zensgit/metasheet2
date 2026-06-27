@@ -2213,13 +2213,14 @@ describe('ApprovalProductService', () => {
       .rejects.toMatchObject({ statusCode: 503, code: 'APPROVAL_REQUESTER_DEPARTMENT_UNRESOLVED' })
   })
 
-  it('RA-1a wedge guard: a SUCCESSFUL read with no department still creates (genuine absence proceeds; runtime fail-closes later)', async () => {
-    orgRelationsState.resolveApprovalRequesterOrgRelations.mockResolvedValue({})
+  it('RA-1a wedge guard: a SUCCESSFUL read with no department also rejects AT CREATE (422) — genuine absence is fail-closed at create per the lock, never a downstream wedge', async () => {
+    orgRelationsState.resolveApprovalRequesterOrgRelations.mockResolvedValue({}) // success, but no primaryDepartmentName
     mountWedgeSql()
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
     const service = new ApprovalProductService(buildNoopMetrics() as never)
     vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-2', publishedDefinitionId: 'pub-2' }))
-    await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' })).resolves.toBeTruthy()
+    await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+      .rejects.toMatchObject({ statusCode: 422, code: 'APPROVAL_REQUESTER_DEPARTMENT_REQUIRED' })
   })
 
   it('bakes the manager chain into the persisted requester snapshot for a manager_at_level graph', async () => {
