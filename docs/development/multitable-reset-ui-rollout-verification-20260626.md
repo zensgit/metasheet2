@@ -11,7 +11,7 @@ records the **Reset UI rollout** (#1 acceptance harness → #2 UI foundation) an
 | record-history `hasMore` keyset | **merged** (#3217) |
 | Reset acceptance harness + runbook (#1) | **merged** (#3232) + (d)-fix (#3248) |
 | Reset UI design + model correction | **merged** (#3239, #3251) |
-| Reset UI **foundation** (signal + client + inert dialog) (#2) | **#3250** — [P1]/[P2] green, in merge |
+| Reset UI **foundation** (signal + client + inert dialog) (#2) | **merged** (#3250 bf91099) |
 | Reset UI **entry wiring** | **blocked on a T-source product decision** (§3) |
 | undelete-execute · T9-W data-loss | **gated** on item-specific sign-off |
 
