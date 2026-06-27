@@ -61,7 +61,6 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   let baseUrl = ''
   let pool: Pool
   let adminToken = ''
-  let tableReady = false
 
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
@@ -148,16 +147,17 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     pool = new Pool({ connectionString: dbUrl })
     adminToken = await mintToken(`ae1-admin-${RUN}`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
 
-    // Visible skip (not false green) if the AE-1 migration is not applied in this env.
+    // This is a LIVE feature, not a dormant table: when a DB is present the AE-1 migration MUST have run.
+    // A missing table here means the migration regressed — fail LOUD (RED), never a silent skip / false green.
     const cols = (await pool.query(
       `SELECT column_name FROM information_schema.columns WHERE table_name = 'attendance_record_result_edits'`,
     )).rows as { column_name: string }[]
-    tableReady = cols.length > 0
-    if (tableReady) {
-      const names = new Set(cols.map((c) => c.column_name))
-      for (const c of ['org_id', 'record_id', 'before_status', 'after_status', 'before_snapshot', 'after_snapshot', 'reason', 'evidence', 'idempotency_key', 'notification_delivery_id', 'notification_skipped_reason']) {
-        expect(names.has(c)).toBe(true)
-      }
+    if (cols.length === 0) {
+      throw new Error('attendance_record_result_edits is missing — the AE-1 migration was not applied (regression)')
+    }
+    const names = new Set(cols.map((c) => c.column_name))
+    for (const c of ['org_id', 'record_id', 'before_status', 'after_status', 'before_snapshot', 'after_snapshot', 'reason', 'evidence', 'idempotency_key', 'notification_delivery_id', 'notification_skipped_reason']) {
+      expect(names.has(c)).toBe(true)
     }
   })
 
@@ -171,10 +171,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     await pool?.end().catch(() => undefined)
   })
 
-  const skipIfNoTable = () => { if (!tableReady) return true; return false }
-
   it('§3.5a late→normal: zeroes late/early, preserves work_minutes, recomputes meta tiers; writes audit before/after', async () => {
-    if (skipIfNoTable()) return
     const userId = `u-late-${RUN}`
     const workDate = ymd(2)
     const recordId = await seedRecord({
@@ -212,7 +209,6 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('§3.5a absent→normal: keeps work_minutes=0 + null punches by default; overrideMetrics.workMinutes takes precedence', async () => {
-    if (skipIfNoTable()) return
     // default: no override → work stays 0, no fabricated punches
     const u1 = `u-abs-${RUN}`
     const wd1 = ymd(3)
@@ -237,7 +233,6 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('idempotency: missing key → 400 nothing written; same key+payload → alreadyApplied (one row); different payload → 409', async () => {
-    if (skipIfNoTable()) return
     const userId = `u-idem-${RUN}`
     const workDate = ymd(2)
     const recordId = await seedRecord({ userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 20, firstInAt: `${workDate}T01:20:00Z`, lastOutAt: `${workDate}T10:00:00Z` })
@@ -267,7 +262,6 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('editable-source: off/adjusted → 422 SOURCE_NOT_EDITABLE; normal→abnormal → 422 NORMAL_TO_ABNORMAL_UNSUPPORTED; normal→normal → 422 SOURCE_NOT_EDITABLE', async () => {
-    if (skipIfNoTable()) return
     const wd = ymd(2)
     const off = await seedRecord({ userId: `u-off-${RUN}`, workDate: wd, status: 'off', isWorkday: false })
     const ro = await postEdit({ orgId: ORG, recordId: off, targetStatus: 'normal', reason: 'x', idempotencyKey: `k-off-${RUN}` })
@@ -295,7 +289,6 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('closed/archived cycle covering work_date → 409 CYCLE_CLOSED even with no settlement row; closed wins over an overlapping open cycle', async () => {
-    if (skipIfNoTable()) return
     const wd = ymd(2)
     const cycleClosed = await seedClosedCycle(wd, 'closed')
     try {
@@ -335,7 +328,6 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('edit-window: work_date older than editWindowDays (default 180) → 422 WINDOW_EXPIRED, nothing written', async () => {
-    if (skipIfNoTable()) return
     const wd = ymd(400)
     const recordId = await seedRecord({ userId: `u-win-${RUN}`, workDate: wd, status: 'late', lateMinutes: 30, workMinutes: 480, firstInAt: `${wd}T01:30:00Z`, lastOutAt: `${wd}T10:00:00Z` })
     const res = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: 'too old', idempotencyKey: `k-win-${RUN}` })
@@ -345,7 +337,6 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('cross-org: a record from another org → 404, no audit row, no cross-org leak', async () => {
-    if (skipIfNoTable()) return
     const wd = ymd(2)
     const otherRecord = await seedRecord({ userId: `u-x-${RUN}`, workDate: wd, status: 'late', lateMinutes: 30, workMinutes: 480, org: ORG_OTHER, firstInAt: `${wd}T01:30:00Z`, lastOutAt: `${wd}T10:00:00Z` })
     const key = `k-xorg-${RUN}`
@@ -358,7 +349,6 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('reason: blank reason → 400 when policy.requireReason (default true), nothing written', async () => {
-    if (skipIfNoTable()) return
     const wd = ymd(2)
     const recordId = await seedRecord({ userId: `u-reason-${RUN}`, workDate: wd, status: 'late', lateMinutes: 30, workMinutes: 480, firstInAt: `${wd}T01:30:00Z`, lastOutAt: `${wd}T10:00:00Z` })
     const res = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: '   ', idempotencyKey: `k-reason-${RUN}` })
@@ -368,7 +358,6 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   })
 
   it('evidence: raw http URL rejected; https + attachmentId accepted and persisted', async () => {
-    if (skipIfNoTable()) return
     const wd = ymd(2)
     const recordId = await seedRecord({ userId: `u-ev-${RUN}`, workDate: wd, status: 'late', lateMinutes: 30, workMinutes: 480, firstInAt: `${wd}T01:30:00Z`, lastOutAt: `${wd}T10:00:00Z` })
 
