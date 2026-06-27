@@ -2598,9 +2598,13 @@ async function loadLinkValuesByRecord(
   if (forwardFields.length > 0) {
     const fieldIds = forwardFields.map((l) => l.fieldId)
     const linkRes = await query(
+      // repair-on-read: foreign_record_id has NO FK, so an inbound edge to a since-deleted record dangles
+      // (sheet-delete / direct-SQL / legacy). Filter dangling edges so a deleted foreign record never surfaces
+      // as a ghost link id. (deleteRecord already drops both directions in-txn; this defends the slip-throughs.)
       `SELECT field_id, record_id, foreign_record_id
        FROM meta_links
-       WHERE field_id = ANY($1::text[]) AND record_id = ANY($2::text[])`,
+       WHERE field_id = ANY($1::text[]) AND record_id = ANY($2::text[])
+         AND EXISTS (SELECT 1 FROM meta_records r WHERE r.id = foreign_record_id)`,
       [fieldIds, recordIds],
     )
     for (const raw of linkRes.rows as any[]) {
@@ -2622,9 +2626,13 @@ async function loadLinkValuesByRecord(
     }
     const forwardIds = Array.from(mirrorFieldsByForwardId.keys())
     const reverseRes = await query(
+      // repair-on-read (symmetry / defense-in-depth): the mirror value is the SOURCE record_id, which is
+      // FK-cascade-protected (record_id REFERENCES meta_records ON DELETE CASCADE) so a ghost source is not
+      // expected today — but filter it too so NO read path can ever surface a deleted record id.
       `SELECT field_id, record_id, foreign_record_id
        FROM meta_links
-       WHERE field_id = ANY($1::text[]) AND foreign_record_id = ANY($2::text[])`,
+       WHERE field_id = ANY($1::text[]) AND foreign_record_id = ANY($2::text[])
+         AND EXISTS (SELECT 1 FROM meta_records r WHERE r.id = record_id)`,
       [forwardIds, recordIds],
     )
     for (const raw of reverseRes.rows as any[]) {
@@ -10970,7 +10978,15 @@ export function univerMetaRouter(): Router {
       } else if (!capabilities.canManageViews) {
         return sendForbidden(res)
       }
-      const del = await pool.query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
+      // Referential integrity (cross-base dangling-link repair, companion to repair-on-read): the sheet's
+      // records are about to be deleted (FK cascade on meta_sheets→meta_records). meta_links.record_id has
+      // ON DELETE CASCADE so their OUTBOUND edges go — but foreign_record_id has NO FK, so INBOUND edges from
+      // OTHER sheets pointing to these records would DANGLE. Clean those inbound edges FIRST, in the SAME
+      // transaction, before the records vanish (else the subquery can't find them) — atomic delete-edges+sheet.
+      const del = await pool.transaction(async ({ query }) => {
+        await query('DELETE FROM meta_links WHERE foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId])
+        return query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
+      })
       invalidateSheetSummaryCache(sheetId)
       invalidateFieldCache(sheetId)
       invalidateViewConfigCache()
