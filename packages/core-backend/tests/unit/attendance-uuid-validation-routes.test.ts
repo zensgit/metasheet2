@@ -262,6 +262,21 @@ function schedulerScopeImportRow(overrides: Record<string, unknown> = {}) {
   })
 }
 
+function schedulerScopeRemindRow(overrides: Record<string, unknown> = {}) {
+  return schedulerScopeRow({
+    actions: ['remind'],
+    scope: {
+      scheduleGroupIds: [],
+      attendanceGroupIds: [],
+      userIds: ['worker-1'],
+      departments: [],
+      roles: [],
+      roleTags: [],
+    },
+    ...overrides,
+  })
+}
+
 function scheduleGroupMemberRow(overrides: Record<string, unknown> = {}) {
   return {
     id: scheduleGroupMemberId,
@@ -1958,6 +1973,135 @@ describe('attendance UUID route validation', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.body).toMatchObject({ ok: true, data: { total: 1, items: [{ id: scheduleGroupId }] } })
+  })
+
+  it('lets attendance admins read missed-punch reminder candidates without writing deliveries', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, true)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('FROM attendance_records r')) {
+        return [
+          attendanceRecordRow({
+            id: 'record-1',
+            status: 'partial',
+            first_in_at: null,
+            last_out_at: '2026-06-10T18:00:00.000Z',
+          }),
+        ]
+      }
+      if (sql.includes('FROM attendance_requests')) {
+        return [attendanceRequestRow({ id: 'request-1', status: 'pending', request_type: 'missed_check_in' })]
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/manual-missed-punch-reminders/candidates', {
+      query: { from: '2026-06-10', to: '2026-06-10' },
+      user: { id: 'admin-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: {
+        total: 1,
+        items: [
+          {
+            recordId: 'record-1',
+            userId: 'worker-1',
+            workDate: '2026-06-10',
+            missingSide: 'check_in',
+            selectedByDefault: false,
+            pendingRequest: { id: 'request-1', status: 'pending', requestType: 'missed_check_in' },
+          },
+        ],
+      },
+    })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('attendance_notification_deliveries'))).toBe(false)
+  })
+
+  it('filters missed-punch reminder candidates by scoped remind authority before pagination', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeRemindRow()]
+      if (sql.includes('FROM attendance_records r')) {
+        return [
+          attendanceRecordRow({
+            id: 'record-out-of-scope',
+            user_id: 'worker-2',
+            status: 'partial',
+            first_in_at: null,
+            last_out_at: '2026-06-10T18:00:00.000Z',
+          }),
+          attendanceRecordRow({
+            id: 'record-in-scope',
+            user_id: 'worker-1',
+            status: 'partial',
+            first_in_at: '2026-06-10T09:00:00.000Z',
+            last_out_at: null,
+          }),
+        ]
+      }
+      if (sql.includes('SELECT DISTINCT group_id') && sql.includes('FROM attendance_group_members')) return []
+      if (sql.includes('SELECT DISTINCT m.schedule_group_id')) return []
+      if (sql.includes('FROM attendance_requests')) {
+        expect(params).toEqual(['default', ['worker-1'], '2026-06-10', '2026-06-10'])
+        return []
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/manual-missed-punch-reminders/candidates', {
+      query: { from: '2026-06-10', to: '2026-06-10', pageSize: '1' },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({
+      ok: true,
+      data: {
+        total: 1,
+        pageSize: 1,
+        items: [
+          {
+            recordId: 'record-in-scope',
+            userId: 'worker-1',
+            missingSide: 'check_out',
+            selectedByDefault: true,
+          },
+        ],
+      },
+    })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('attendance_notification_deliveries'))).toBe(false)
+  })
+
+  it('rejects attendance-read-only actors from the missed-punch reminder candidate pool', async () => {
+    const { db, routes } = await createHarness('false')
+
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = attendanceReadOnlyRbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return []
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/manual-missed-punch-reminders/candidates', {
+      query: { from: '2026-06-10', to: '2026-06-10' },
+      user: { id: 'reader-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_records r'))).toBe(false)
   })
 
   it('does not disclose schedule group lookup outside scoped view targets', async () => {

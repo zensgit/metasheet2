@@ -22890,6 +22890,169 @@ module.exports = {
 
 	    context.api.http.addRoute(
 	      'GET',
+	      '/api/attendance/manual-missed-punch-reminders/candidates',
+	      async (req, res) => {
+	        const schema = z.object({
+	          userId: z.string().optional(),
+	          orgId: z.string().optional(),
+	          from: z.string().min(1),
+	          to: z.string().min(1),
+	        })
+
+	        const parsed = schema.safeParse({
+	          userId: typeof req.query.userId === 'string' ? req.query.userId : undefined,
+	          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+	          from: typeof req.query.from === 'string' ? req.query.from : undefined,
+	          to: typeof req.query.to === 'string' ? req.query.to : undefined,
+	        })
+
+	        if (!parsed.success) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+	          return
+	        }
+
+	        const orgId = getOrgId(req)
+	        const { page, pageSize, offset } = parsePagination(req.query)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
+	        const access = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'remind' })
+	        if (!access) return
+	        if (!access.access.fullAdmin && access.scopes.length === 0) {
+	          respondAttendanceSchedulerScopeForbidden(res)
+	          return
+	        }
+
+	        const resolveMissingSide = (row) => {
+	          const status = String(row?.status ?? '')
+	          if (status === 'absent') return 'both'
+	          if (status !== 'partial') return null
+	          const missingIn = !row.first_in_at
+	          const missingOut = !row.last_out_at
+	          if (missingIn && missingOut) return 'both'
+	          if (missingIn) return 'check_in'
+	          if (missingOut) return 'check_out'
+	          return null
+	        }
+
+	        const summarizeRequest = (row) => row ? {
+	          id: row.id,
+	          status: row.status,
+	          requestType: row.request_type,
+	        } : null
+
+	        try {
+	          const params = [orgId, from, to]
+	          const userClause = parsed.data.userId ? `AND r.user_id = $${params.push(parsed.data.userId)}` : ''
+	          const candidateRows = await db.query(
+	            `SELECT r.*
+	             FROM attendance_records r
+	             WHERE r.org_id = $1
+	               AND r.work_date BETWEEN $2::date AND $3::date
+	               AND COALESCE(r.is_workday, true) = true
+	               AND (
+	                 (r.status = 'partial' AND (r.first_in_at IS NULL OR r.last_out_at IS NULL))
+	                 OR r.status = 'absent'
+	               )
+	               ${userClause}
+	             ORDER BY r.work_date DESC, r.user_id ASC, r.id ASC`,
+	            params
+	          )
+
+	          const actorContext = access.access.fullAdmin
+	            ? null
+	            : await loadAttendanceScopeContextForUser(db, orgId, access.access.userId)
+	          const scopedRows = []
+	          for (const row of candidateRows) {
+	            const missingSide = resolveMissingSide(row)
+	            if (!missingSide) continue
+	            if (access.access.fullAdmin) {
+	              scopedRows.push({ row, missingSide })
+	              continue
+	            }
+	            const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
+	            const facts = await resolveAttendanceUserSchedulerScopeFacts(db, orgId, row.user_id, { workDate })
+	            const allowed = access.scopes.some(scope =>
+	              attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'remind', facts)
+	            )
+	            if (allowed) scopedRows.push({ row, missingSide })
+	          }
+
+	          const total = scopedRows.length
+	          const pageRows = scopedRows.slice(offset, offset + pageSize)
+	          const pageUserIds = sortedUnique(pageRows.map(({ row }) => row.user_id))
+	          const requestByUserDate = new Map()
+	          if (pageUserIds.length) {
+	            const requestRows = await db.query(
+	              `SELECT id, user_id, work_date, request_type, status
+	               FROM attendance_requests
+	               WHERE org_id = $1
+	                 AND user_id = ANY($2::text[])
+	                 AND work_date BETWEEN $3::date AND $4::date
+	               ORDER BY user_id ASC, work_date DESC, created_at DESC`,
+	              [orgId, pageUserIds, from, to]
+	            )
+	            for (const requestRow of requestRows) {
+	              const workDate = normalizeDateOnly(requestRow.work_date) ?? String(requestRow.work_date ?? '').slice(0, 10)
+	              const key = `${requestRow.user_id}:${workDate}`
+	              const entry = requestByUserDate.get(key) ?? { hasPending: false, pending: null, latest: null }
+	              if (!entry.latest) entry.latest = summarizeRequest(requestRow)
+	              if (requestRow.status === 'pending') {
+	                entry.hasPending = true
+	                if (!entry.pending) entry.pending = summarizeRequest(requestRow)
+	              }
+	              requestByUserDate.set(key, entry)
+	            }
+	          }
+
+	          const items = pageRows.map(({ row, missingSide }) => {
+	            const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
+	            const requestSummary = requestByUserDate.get(`${row.user_id}:${workDate}`) ?? { hasPending: false, pending: null, latest: null }
+	            return {
+	              recordId: row.id,
+	              userId: row.user_id,
+	              workDate,
+	              status: row.status,
+	              missingSide,
+	              firstInAt: row.first_in_at,
+	              lastOutAt: row.last_out_at,
+	              pendingRequest: requestSummary.pending,
+	              latestRequest: requestSummary.latest,
+	              selectedByDefault: !requestSummary.hasPending,
+	            }
+	          })
+
+	          res.json({
+	            ok: true,
+	            data: {
+	              items,
+	              total,
+	              page,
+	              pageSize,
+	              from,
+	              to,
+	            },
+	          })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          logger.error('Attendance manual missed-punch reminder candidates query failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load manual missed-punch reminder candidates' } })
+	        }
+	      }
+	    )
+
+	    context.api.http.addRoute(
+	      'GET',
 	      '/api/attendance/anomalies',
 	      withPermission('attendance:read', async (req, res) => {
 	        const schema = z.object({
