@@ -94,7 +94,8 @@ const ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS = ['attendance:approve', 'attendance
 const ATTENDANCE_SCHEDULE_GROUP_SOURCES = new Set(['manual', 'import', 'integration'])
 const ATTENDANCE_SCHEDULE_GROUP_MEMBER_ROLES = new Set(['member', 'lead', 'backup'])
 const ATTENDANCE_SCHEDULER_SCOPE_SUBJECT_TYPES = new Set(['user', 'role', 'role_tag'])
-const ATTENDANCE_SCHEDULER_SCOPE_ACTIONS = new Set(['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'])
+const ATTENDANCE_SCHEDULER_SCOPE_ACTION_VALUES = ['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch', 'remind']
+const ATTENDANCE_SCHEDULER_SCOPE_ACTIONS = new Set(ATTENDANCE_SCHEDULER_SCOPE_ACTION_VALUES)
 const AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG = 'system:attendance-auto-shift'
 const AUTO_SHIFT_AUTO_WRITE_SOURCE = 'scheduler'
 const ATTENDANCE_GROUP_TYPES = new Set(['fixed_shift', 'scheduled_shift', 'free_time'])
@@ -34682,7 +34683,7 @@ module.exports = {
     const schedulerScopeSchema = z.object({
       subjectType: z.enum(['user', 'role', 'role_tag']).optional(),
       subjectRef: z.string().min(1).optional(),
-      actions: z.array(z.enum(['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'])).optional(),
+      actions: z.array(z.enum(ATTENDANCE_SCHEDULER_SCOPE_ACTION_VALUES)).optional(),
       scope: z.record(z.unknown()).optional(),
       isActive: z.boolean().optional(),
     }).strict()
@@ -34690,7 +34691,7 @@ module.exports = {
     const schedulerScopeCreateSchema = schedulerScopeSchema.extend({
       subjectType: z.enum(['user', 'role', 'role_tag']),
       subjectRef: z.string().min(1),
-      actions: z.array(z.enum(['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'])).min(1),
+      actions: z.array(z.enum(ATTENDANCE_SCHEDULER_SCOPE_ACTION_VALUES)).min(1),
       scope: z.record(z.unknown()),
     })
 
