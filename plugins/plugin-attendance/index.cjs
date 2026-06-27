@@ -120,6 +120,11 @@ const ATTENDANCE_SCHEDULER_SCOPE_ACTIONS = new Set(ATTENDANCE_SCHEDULER_SCOPE_AC
 const ATTENDANCE_DINGTALK_WORK_NOTIFICATION_CHANNEL = 'dingtalk_work_notification'
 const ATTENDANCE_ROUTABLE_DEFAULT_DELIVERY_CHANNELS = new Set([ATTENDANCE_DINGTALK_WORK_NOTIFICATION_CHANNEL, 'email_smtp'])
 const MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE = 'manual_missed_punch_reminder'
+// RD-3 attendance report-digest producer (design-lock attendance-report-digest-subscription-design-lock-20260626 §4).
+// source_type stamped on every C5 outbox row this producer writes.
+const ATTENDANCE_REPORT_DIGEST_SOURCE_TYPE = 'attendance_report_digest'
+// Request types counted toward digest requestTotals.makeupPunchCount (补卡). Approved-only is applied at query time.
+const ATTENDANCE_REPORT_DIGEST_MAKEUP_PUNCH_TYPES = new Set(['missed_check_in', 'missed_check_out', 'time_correction'])
 const AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG = 'system:attendance-auto-shift'
 const AUTO_SHIFT_AUTO_WRITE_SOURCE = 'scheduler'
 const ATTENDANCE_GROUP_TYPES = new Set(['fixed_shift', 'scheduled_shift', 'free_time'])
@@ -298,6 +303,7 @@ let autoHolidaySyncTimeout = null
 let autoHolidaySyncInterval = null
 let importUploadCleanupInterval = null
 let autoShiftAutoWriteSchedulerUnregister = null
+let attendanceReportDigestSchedulerUnregister = null
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
@@ -12485,6 +12491,58 @@ function buildAttendanceReportDigestPayload(input = {}) {
   }
 }
 
+// RD-3 due-gating: weekday in the policy timezone, 1=Monday..7=Sunday (doc §3: weekly.weekday ∈ 1..7, 1=Monday).
+// getWeekdayFromDateKey returns 0=Sunday..6=Saturday, so remap.
+function attendanceReportDigestLocalWeekdayMonday1(localDateKey) {
+  return ((getWeekdayFromDateKey(localDateKey) + 6) % 7) + 1
+}
+
+// RD-3 due-gating: local wall-clock HH:mm in the policy timezone, for the `>= sendAt` window comparison.
+function attendanceReportDigestLocalTimeOfDay(now, timezone) {
+  const date = now instanceof Date ? now : new Date(now)
+  const zone = typeof timezone === 'string' && timezone.trim() ? timezone.trim() : 'UTC'
+  const parts = getZonedParts(date, zone)
+  return `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`
+}
+
+// RD-3: which enabled cadences are DUE this tick. The scheduler is HOURLY, so this is NOT minute-equality —
+// it is anchor-matches-today AND localTimeOfDay(policy tz) >= cadence.sendAt. Per-period source_key gives
+// exactly-once across the repeated hourly ticks inside the window. Returns an ordered array of cadence names.
+function dueDigestCadences(policy, { now = new Date(), todayKey } = {}) {
+  const cadences = policy && typeof policy === 'object' && policy.cadences && typeof policy.cadences === 'object'
+    ? policy.cadences
+    : {}
+  const timezone = typeof policy?.timezone === 'string' && policy.timezone.trim() ? policy.timezone.trim() : 'UTC'
+  const localDateKey = todayKey
+    ? normalizeDateOnlyStrict(todayKey)
+    : attendanceReportDigestLocalDateKey(now, timezone)
+  if (!localDateKey) return []
+  const timeOfDay = attendanceReportDigestLocalTimeOfDay(now, timezone)
+  const parts = attendanceReportDigestDateParts(localDateKey)
+  const weekdayMonday1 = attendanceReportDigestLocalWeekdayMonday1(localDateKey)
+  const due = []
+
+  const daily = cadences.daily
+  if (daily?.enabled === true && timeOfDay >= daily.sendAt) {
+    due.push('daily')
+  }
+
+  const weekly = cadences.weekly
+  if (weekly?.enabled === true && weekdayMonday1 === weekly.weekday && timeOfDay >= weekly.sendAt) {
+    due.push('weekly')
+  }
+
+  const monthly = cadences.monthly
+  if (monthly?.enabled === true && parts) {
+    const clampedKey = clampAttendanceReportDigestDayOfMonth(parts.year, parts.month, monthly.dayOfMonth)
+    if (localDateKey === clampedKey && timeOfDay >= monthly.sendAt) {
+      due.push('monthly')
+    }
+  }
+
+  return due
+}
+
 function normalizeOvertimeBankPolicySetting(raw) {
   const value = raw && typeof raw === 'object' ? raw : {}
   const seen = new Set()
@@ -13782,6 +13840,13 @@ function isAutoShiftAutoWriteRuntimeEnabled() {
   return parseBoolean(process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED, false)
 }
 
+// RD-3: dedicated env gate for the report-digest producer. Distinct from ATTENDANCE_SCHEDULER_ENABLED (process
+// gate) and ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED (send gate). Default OFF — producer writes nothing
+// until an admin explicitly opts in AND the policy/cadence are enabled.
+function isAttendanceReportDigestRuntimeEnabled() {
+  return parseBoolean(process.env.ATTENDANCE_REPORT_DIGEST_ENABLED, false)
+}
+
 function confidenceRank(value) {
   if (value === 'high') return 3
   if (value === 'medium') return 2
@@ -14541,6 +14606,166 @@ async function runAttendanceAutoShiftAutoWriteOnce(db, { orgId = DEFAULT_ORG_ID,
     }).catch(() => undefined)
     throw error
   }
+}
+
+// RD-3 target population: active org members only (user_orgs.is_active=true JOIN users.is_active=true). Mirrors the
+// annual-accrual loader — NOT the auto-shift target loader, which filters attendance_type='scheduled_shift'.
+async function loadActiveReportDigestUserIds(db, orgId) {
+  const rows = await db.query(
+    `SELECT u.id
+       FROM user_orgs uo
+       JOIN users u ON u.id = uo.user_id
+      WHERE uo.org_id = $1 AND uo.is_active = true AND u.is_active = true
+      ORDER BY u.id ASC`,
+    [orgId],
+  )
+  return rows.map((row) => row.id).filter(Boolean)
+}
+
+// RD-3 owner/sub_owner resolution (the producer fans out; the delivery worker never does). attendance_group_*
+// have NO is_active column → 'active group' = the membership/manager row exists; 'active manager' = users.is_active.
+// SELECT DISTINCT dedups a manager shared across multiple of the subject's groups (multi-group dedup §6).
+async function resolveDigestManagerUserIds(db, orgId, subjectUserId, role) {
+  const rows = await db.query(
+    `SELECT DISTINCT mgr.user_id
+       FROM attendance_group_members mem
+       JOIN attendance_group_managers mgr
+         ON mgr.org_id = mem.org_id AND mgr.group_id = mem.group_id
+       JOIN users u ON u.id = mgr.user_id
+      WHERE mem.org_id = $1
+        AND mem.user_id = $2
+        AND mgr.role = $3
+        AND u.is_active = true
+      ORDER BY mgr.user_id ASC`,
+    [orgId, subjectUserId, role],
+  )
+  return rows.map((row) => row.user_id).filter(Boolean)
+}
+
+// RD-3: request totals for the digest payload. Extracted from the inline GET /reports/requests group-by because
+// loadAttendanceSummary returns only approved leave/overtime MINUTES, not request COUNTS — feeding the summary
+// alone would ship all-zero requestTotals. leave/overtime minutes + makeup-punch count are approved-only.
+async function loadAttendanceReportDigestRequestTotals(db, orgId, userId, from, to) {
+  const rows = await db.query(
+    `SELECT request_type, status,
+            COUNT(*)::int AS total,
+            COALESCE(SUM(CASE WHEN (metadata->>'minutes') ~ '^[0-9]+' THEN (metadata->>'minutes')::int ELSE 0 END), 0)::int AS total_minutes
+       FROM attendance_requests
+      WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4
+      GROUP BY request_type, status`,
+    [userId, orgId, from, to],
+  )
+  const totals = { pending: 0, approved: 0, rejected: 0, leaveMinutes: 0, overtimeMinutes: 0, makeupPunchCount: 0 }
+  for (const row of rows) {
+    const total = Number(row.total ?? 0)
+    const minutes = Number(row.total_minutes ?? 0)
+    const status = row.status
+    const type = row.request_type
+    if (status === 'pending') totals.pending += total
+    else if (status === 'approved') totals.approved += total
+    else if (status === 'rejected') totals.rejected += total
+    if (status === 'approved') {
+      if (type === 'leave') totals.leaveMinutes += minutes
+      else if (type === 'overtime') totals.overtimeMinutes += minutes
+      if (ATTENDANCE_REPORT_DIGEST_MAKEUP_PUNCH_TYPES.has(type)) totals.makeupPunchCount += total
+    }
+  }
+  return totals
+}
+
+// RD-3 producer: each tick, for every enabled+DUE cadence, write status='pending' C5 outbox rows for the org's
+// active members and their configured recipients. It NEVER sends — the AttendanceNotificationDeliveryWorker stays
+// the sole sender. Idempotency: per-(subject,role,recipient,channel,period) source_key + ON CONFLICT DO NOTHING,
+// serialized per (org,cadence,period) by an advisory xact lock. Gated: env + policy.enabled + cadence.enabled + due.
+async function runAttendanceReportDigestOnce(db, { orgId = DEFAULT_ORG_ID, now = new Date(), todayKey, logger = console, emitEvent = () => {} } = {}) {
+  const settings = await getSettings(db)
+  const policy = normalizeAttendanceReportDigestPolicySetting(settings.attendanceReportDigestPolicy)
+  if (!isAttendanceReportDigestRuntimeEnabled() || policy.enabled !== true) {
+    return { ran: false, reason: 'disabled', cadences: [] }
+  }
+
+  const timezone = policy.timezone
+  const resolvedTodayKey = todayKey ? normalizeDateOnlyStrict(todayKey) : attendanceReportDigestLocalDateKey(now, timezone)
+  const dueCadences = dueDigestCadences(policy, { now, todayKey: resolvedTodayKey })
+  if (dueCadences.length === 0) {
+    return { ran: true, cadences: [] }
+  }
+
+  // work_notification → the worker's registered default work-notification channel constant; email_smtp passes
+  // through. The RESOLVED value is stamped into BOTH row.channel and the source_key — never the raw config word.
+  const deliveryChannel = policy.channel === 'work_notification'
+    ? resolveAttendanceDefaultDeliveryChannelForProducer()
+    : 'email_smtp'
+
+  const cadenceSummaries = []
+  for (const cadence of dueCadences) {
+    const period = resolveAttendanceReportDigestPeriod(cadence, { now, todayKey: resolvedTodayKey, timezone })
+    const recipients = policy.cadences[cadence]?.recipients ?? ['self']
+    const sourceId = `${orgId}:${cadence}:${period.periodKey}`
+    const cadenceSummary = { cadence, rowsCreated: 0, rowsExisting: 0, ownerSkipped: 0, subOwnerSkipped: 0 }
+
+    try {
+      await db.transaction(async (trx) => {
+        // Serialize concurrent ticks / scheduler leaders racing the same (org, period); ON CONFLICT is the
+        // durable idempotency backstop even if two transactions interleave.
+        await trx.query(
+          'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+          [orgId, sourceId],
+        )
+        const userIds = await loadActiveReportDigestUserIds(trx, orgId)
+        for (const subjectUserId of userIds) {
+          const attendanceSummary = await loadAttendanceSummary(trx, orgId, subjectUserId, period.from, period.to)
+          const requestTotals = await loadAttendanceReportDigestRequestTotals(trx, orgId, subjectUserId, period.from, period.to)
+          const payload = buildAttendanceReportDigestPayload({
+            cadence,
+            period,
+            summary: attendanceSummary,
+            requestTotals,
+          })
+          const payloadJson = JSON.stringify(payload)
+
+          for (const recipientRole of recipients) {
+            let recipientUserIds
+            if (recipientRole === 'self') {
+              recipientUserIds = [subjectUserId]
+            } else {
+              recipientUserIds = await resolveDigestManagerUserIds(trx, orgId, subjectUserId, recipientRole)
+              if (recipientUserIds.length === 0) {
+                // Fail-soft: a role that resolves to no active manager is skipped + counted; self still ships.
+                if (recipientRole === 'owner') cadenceSummary.ownerSkipped += 1
+                else if (recipientRole === 'sub_owner') cadenceSummary.subOwnerSkipped += 1
+                continue
+              }
+            }
+            // self → recipient_role column 'subject'; owner/sub_owner keep their literal role. The source_key
+            // uses the config-vocab word (self/owner/sub_owner) to keep the dedup grain stable.
+            const recipientRoleColumn = recipientRole === 'self' ? 'subject' : recipientRole
+            for (const recipientUserId of recipientUserIds) {
+              const sourceKey = `${ATTENDANCE_REPORT_DIGEST_SOURCE_TYPE}:${orgId}:${cadence}:${period.periodKey}:subject:${subjectUserId}:${recipientRole}:${recipientUserId}:channel:${deliveryChannel}`
+              const inserted = await trx.query(
+                `INSERT INTO attendance_notification_deliveries
+                   (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, status, payload)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8::jsonb)
+                 ON CONFLICT (org_id, source_key) DO NOTHING
+                 RETURNING id`,
+                [orgId, ATTENDANCE_REPORT_DIGEST_SOURCE_TYPE, sourceId, sourceKey, recipientUserId, recipientRoleColumn, deliveryChannel, payloadJson],
+              )
+              if (inserted.length > 0) cadenceSummary.rowsCreated += 1
+              else cadenceSummary.rowsExisting += 1
+            }
+          }
+        }
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (logger?.warn) logger.warn(`Attendance report digest cadence ${cadence} failed: ${message}`)
+      throw error
+    }
+
+    cadenceSummaries.push(cadenceSummary)
+  }
+
+  return { ran: true, cadences: cadenceSummaries }
 }
 
 async function loadAttendanceScopeContextForUser(db, orgId, userId) {
@@ -19081,9 +19306,15 @@ module.exports = {
   },
   __attendanceReportDigestForTests: {
     ATTENDANCE_REPORT_DIGEST_CADENCES,
+    ATTENDANCE_REPORT_DIGEST_SOURCE_TYPE,
     buildAttendanceReportDigestPayload,
     clampAttendanceReportDigestDayOfMonth,
     resolveAttendanceReportDigestPeriod,
+    dueDigestCadences,
+    loadActiveReportDigestUserIds,
+    resolveDigestManagerUserIds,
+    loadAttendanceReportDigestRequestTotals,
+    runAttendanceReportDigestOnce,
   },
   __attendanceReportFieldCatalogForTests: {
     ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS,
@@ -40202,6 +40433,16 @@ module.exports = {
 	        name: 'attendance-auto-shift-auto-write',
 	        run: () => runAttendanceAutoShiftAutoWriteOnce(db, { logger, emitEvent }),
 	      }) ?? null
+	      // RD-3 report-digest producer. Registration is harmless — the producer is dormant until
+	      // ATTENDANCE_REPORT_DIGEST_ENABLED=true AND the org policy/cadence are enabled AND a cadence is due.
+	      if (attendanceReportDigestSchedulerUnregister) {
+	        attendanceReportDigestSchedulerUnregister()
+	        attendanceReportDigestSchedulerUnregister = null
+	      }
+	      attendanceReportDigestSchedulerUnregister = context.services?.attendanceScheduler?.registerJob?.({
+	        name: 'attendance-report-digest',
+	        run: () => runAttendanceReportDigestOnce(db, { logger, emitEvent }),
+	      }) ?? null
 	    } catch (error) {
 	      logger.warn('Attendance settings preload failed', error)
 	    }
@@ -40223,6 +40464,10 @@ module.exports = {
 	    if (autoShiftAutoWriteSchedulerUnregister) {
 	      autoShiftAutoWriteSchedulerUnregister()
 	      autoShiftAutoWriteSchedulerUnregister = null
+	    }
+	    if (attendanceReportDigestSchedulerUnregister) {
+	      attendanceReportDigestSchedulerUnregister()
+	      attendanceReportDigestSchedulerUnregister = null
 	    }
 	  }
 }

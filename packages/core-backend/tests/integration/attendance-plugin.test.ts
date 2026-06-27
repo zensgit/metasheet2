@@ -15891,6 +15891,609 @@ attendanceIntegrationDescribe(
     }
   })
 
+  describe('attendance report digest producer (RD-3)', () => {
+    // RD-3 producer seam (design-lock attendance-report-digest-subscription-design-lock-20260626).
+    // The producer ONLY writes status='pending' C5 outbox rows; the delivery worker stays the sole sender.
+    const reportDigestSeam = () => (getAttendancePluginForTest() as any).__attendanceReportDigestForTests
+
+    async function digestAdminToken(uid: string): Promise<string | undefined> {
+      const res = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`,
+      )
+      return (res.body as { token?: string } | undefined)?.token
+    }
+
+    async function putDigestPolicy(token: string, policy: Record<string, unknown>): Promise<number> {
+      const res = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ attendanceReportDigestPolicy: policy }),
+      })
+      return res.status
+    }
+
+    function digestPolicy(opts: {
+      enabled?: boolean
+      timezone?: string
+      channel?: 'work_notification' | 'email_smtp'
+      daily?: { enabled: boolean; sendAt?: string; recipients?: string[] }
+      weekly?: { enabled: boolean; weekday?: number; sendAt?: string; recipients?: string[] }
+      monthly?: { enabled: boolean; dayOfMonth?: number; sendAt?: string; recipients?: string[] }
+    }): Record<string, unknown> {
+      return {
+        enabled: opts.enabled ?? true,
+        timezone: opts.timezone ?? 'UTC',
+        channel: opts.channel ?? 'work_notification',
+        cadences: {
+          daily: { enabled: opts.daily?.enabled ?? false, sendAt: opts.daily?.sendAt ?? '00:00', recipients: opts.daily?.recipients ?? ['self'] },
+          weekly: { enabled: opts.weekly?.enabled ?? false, weekday: opts.weekly?.weekday ?? 1, sendAt: opts.weekly?.sendAt ?? '00:00', recipients: opts.weekly?.recipients ?? ['self'] },
+          monthly: { enabled: opts.monthly?.enabled ?? false, dayOfMonth: opts.monthly?.dayOfMonth ?? 1, sendAt: opts.monthly?.sendAt ?? '00:00', recipients: opts.monthly?.recipients ?? ['self'] },
+        },
+      }
+    }
+
+    // 1=Monday..7=Sunday from a UTC date key — the SAME mapping the producer uses, so the test can't disagree.
+    function weekdayMonday1(dateKey: string): number {
+      const day = new Date(`${dateKey}T00:00:00Z`).getUTCDay()
+      return ((day + 6) % 7) + 1
+    }
+
+    async function seedUser(pool: Pool, id: string, org: string, opts: { userActive?: boolean; orgActive?: boolean } = {}): Promise<string> {
+      const userActive = opts.userActive ?? true
+      const orgActive = opts.orgActive ?? true
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, is_active) VALUES ($1, $2, 'no-login', $3)
+         ON CONFLICT (id) DO UPDATE SET is_active = $3`,
+        [id, `${id}@example.com`, userActive],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = $3`,
+        [id, org, orgActive],
+      )
+      return id
+    }
+
+    async function seedGroup(pool: Pool, org: string, name: string): Promise<string> {
+      const id = randomUUID()
+      await pool.query(`INSERT INTO attendance_groups (id, org_id, name) VALUES ($1, $2, $3)`, [id, org, name])
+      return id
+    }
+
+    async function seedMember(pool: Pool, org: string, groupId: string, userId: string): Promise<void> {
+      await pool.query(
+        `INSERT INTO attendance_group_members (org_id, group_id, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+        [org, groupId, userId],
+      )
+    }
+
+    async function seedManager(pool: Pool, org: string, groupId: string, userId: string, role: 'owner' | 'sub_owner'): Promise<void> {
+      await pool.query(
+        `INSERT INTO attendance_group_managers (org_id, group_id, user_id, role) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+        [org, groupId, userId, role],
+      )
+    }
+
+    async function runDigest(pool: Pool, org: string, now: Date, todayKey?: string): Promise<any> {
+      const seam = reportDigestSeam()
+      expect(seam?.runAttendanceReportDigestOnce).toBeTruthy()
+      return seam.runAttendanceReportDigestOnce(createPluginDbForTest(pool), {
+        orgId: org,
+        now,
+        todayKey,
+        logger: { warn: () => undefined, error: () => undefined, info: () => undefined },
+        emitEvent: () => undefined,
+      })
+    }
+
+    async function fetchDeliveries(pool: Pool, org: string): Promise<any[]> {
+      return (await pool.query(
+        `SELECT org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, status,
+                attempt_count, delivered_at, payload
+           FROM attendance_notification_deliveries
+          WHERE org_id = $1
+          ORDER BY recipient_role, recipient_user_id, source_key`,
+        [org],
+      )).rows
+    }
+
+    async function cleanupDigestOrg(pool: Pool, org: string, userIds: string[]): Promise<void> {
+      await pool.query('DELETE FROM attendance_notification_deliveries WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_group_managers WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_group_members WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_groups WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_requests WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_records WHERE org_id = $1', [org]).catch(() => undefined)
+      if (userIds.length) {
+        await pool.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [userIds]).catch(() => undefined)
+        await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [userIds]).catch(() => undefined)
+      }
+    }
+
+    function withEnv<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+      const prev = process.env.ATTENDANCE_REPORT_DIGEST_ENABLED
+      if (value === undefined) delete process.env.ATTENDANCE_REPORT_DIGEST_ENABLED
+      else process.env.ATTENDANCE_REPORT_DIGEST_ENABLED = value
+      return fn().finally(() => {
+        if (prev === undefined) delete process.env.ATTENDANCE_REPORT_DIGEST_ENABLED
+        else process.env.ATTENDANCE_REPORT_DIGEST_ENABLED = prev
+      })
+    }
+
+    it('writes zero rows when env flag unset, when policy disabled, and when the cadence is disabled', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `rd3-disabled-${runSuffix}`
+      const adminToken = await digestAdminToken(`rd3-disabled-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-06-26T12:00:00.000Z')
+      const userIds: string[] = []
+      try {
+        await requireAttendanceTable(pool, 'attendance_notification_deliveries')
+        userIds.push(await seedUser(pool, `rd3-dis-u-${runSuffix}`, org))
+
+        // (a) env flag unset → producer short-circuits, zero rows, ran=false.
+        const enabledDaily = digestPolicy({ enabled: true, daily: { enabled: true } })
+        expect(await putDigestPolicy(adminToken, enabledDaily)).toBe(200)
+        const resEnvOff = await withEnv(undefined, () => runDigest(pool, org, now))
+        expect(resEnvOff.ran).toBe(false)
+        expect((await fetchDeliveries(pool, org)).length).toBe(0)
+
+        // (b) env on but policy.enabled=false → ran=false, zero rows.
+        expect(await putDigestPolicy(adminToken, digestPolicy({ enabled: false, daily: { enabled: true } }))).toBe(200)
+        const resPolicyOff = await withEnv('true', () => runDigest(pool, org, now))
+        expect(resPolicyOff.ran).toBe(false)
+        expect((await fetchDeliveries(pool, org)).length).toBe(0)
+
+        // (c) env on + policy.enabled=true but the only cadence is disabled → ran=true, no due cadence, zero rows.
+        expect(await putDigestPolicy(adminToken, digestPolicy({ enabled: true, daily: { enabled: false } }))).toBe(200)
+        const resCadenceOff = await withEnv('true', () => runDigest(pool, org, now))
+        expect(resCadenceOff.ran).toBe(true)
+        expect(resCadenceOff.cadences).toEqual([])
+        expect((await fetchDeliveries(pool, org)).length).toBe(0)
+      } finally {
+        await putDigestPolicy(adminToken, digestPolicy({ enabled: false })).catch(() => undefined)
+        await cleanupDigestOrg(pool, org, userIds)
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('enabled daily writes one subject row per active member, period=previous day, and a repeat tick writes zero duplicates', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `rd3-daily-${runSuffix}`
+      const adminToken = await digestAdminToken(`rd3-daily-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-06-26T12:00:00.000Z')
+      const u1 = `rd3-daily-u1-${runSuffix}`
+      const u2 = `rd3-daily-u2-${runSuffix}`
+      const userIds = [u1, u2]
+      try {
+        await requireAttendanceTable(pool, 'attendance_notification_deliveries')
+        await seedUser(pool, u1, org)
+        await seedUser(pool, u2, org)
+        expect(await putDigestPolicy(adminToken, digestPolicy({ enabled: true, daily: { enabled: true, recipients: ['self'] } }))).toBe(200)
+
+        const res = await withEnv('true', () => runDigest(pool, org, now))
+        expect(res.ran).toBe(true)
+        expect(res.cadences).toHaveLength(1)
+        expect(res.cadences[0]).toMatchObject({ cadence: 'daily', rowsCreated: 2, rowsExisting: 0, ownerSkipped: 0, subOwnerSkipped: 0 })
+
+        const rows = await fetchDeliveries(pool, org)
+        expect(rows).toHaveLength(2)
+        for (const row of rows) {
+          expect(row.source_type).toBe('attendance_report_digest')
+          expect(row.recipient_role).toBe('subject')
+          expect(row.status).toBe('pending')
+          expect(row.delivered_at).toBeNull()
+          expect(row.attempt_count).toBe(0)
+          expect(row.channel).toBe('dingtalk_work_notification')
+          expect(userIds).toContain(row.recipient_user_id)
+          // period is the previous complete day.
+          expect(row.payload.period).toMatchObject({ from: '2026-06-25', to: '2026-06-25' })
+          // self → recipient_user_id == subject in the key, role token is the config word 'self'.
+          expect(row.source_key).toBe(
+            `attendance_report_digest:${org}:daily:daily:2026-06-25:subject:${row.recipient_user_id}:self:${row.recipient_user_id}:channel:dingtalk_work_notification`,
+          )
+          expect(row.source_id).toBe(`${org}:daily:daily:2026-06-25`)
+        }
+
+        // Repeat tick within the same period writes zero duplicates (ON CONFLICT backstop).
+        const res2 = await withEnv('true', () => runDigest(pool, org, now))
+        expect(res2.cadences[0]).toMatchObject({ rowsCreated: 0, rowsExisting: 2 })
+        expect((await fetchDeliveries(pool, org)).length).toBe(2)
+      } finally {
+        await putDigestPolicy(adminToken, digestPolicy({ enabled: false })).catch(() => undefined)
+        await cleanupDigestOrg(pool, org, userIds)
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('the delivery channel is part of the source_key grain and is stamped from policy only', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `rd3-channel-${runSuffix}`
+      const adminToken = await digestAdminToken(`rd3-channel-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-06-26T12:00:00.000Z') // held constant so only the channel token varies.
+      const u1 = `rd3-channel-u1-${runSuffix}`
+      const userIds = [u1]
+      try {
+        await requireAttendanceTable(pool, 'attendance_notification_deliveries')
+        await seedUser(pool, u1, org)
+
+        // work_notification → resolved to the worker's registered default work-notification channel, never raw.
+        expect(await putDigestPolicy(adminToken, digestPolicy({ enabled: true, channel: 'work_notification', daily: { enabled: true } }))).toBe(200)
+        const resWork = await withEnv('true', () => runDigest(pool, org, now))
+        expect(resWork.cadences[0]).toMatchObject({ rowsCreated: 1 })
+        let rows = await fetchDeliveries(pool, org)
+        expect(rows).toHaveLength(1)
+        expect(rows[0].channel).toBe('dingtalk_work_notification')
+        expect(rows[0].channel).not.toBe('work_notification')
+        expect(rows[0].source_key).toContain(':channel:dingtalk_work_notification')
+
+        // Switch to email_smtp on the SAME period → a NEW row (channel is in the dedup grain), not a dup.
+        expect(await putDigestPolicy(adminToken, digestPolicy({ enabled: true, channel: 'email_smtp', daily: { enabled: true } }))).toBe(200)
+        const resEmail = await withEnv('true', () => runDigest(pool, org, now))
+        expect(resEmail.cadences[0]).toMatchObject({ rowsCreated: 1, rowsExisting: 0 })
+        rows = await fetchDeliveries(pool, org)
+        expect(rows).toHaveLength(2)
+        const emailRow = rows.find((r) => r.channel === 'email_smtp')
+        expect(emailRow).toBeTruthy()
+        expect(emailRow.source_key).toContain(':channel:email_smtp')
+
+        // Re-run on the SAME channel → zero duplicates.
+        const resEmail2 = await withEnv('true', () => runDigest(pool, org, now))
+        expect(resEmail2.cadences[0]).toMatchObject({ rowsCreated: 0, rowsExisting: 1 })
+        expect((await fetchDeliveries(pool, org)).length).toBe(2)
+      } finally {
+        await putDigestPolicy(adminToken, digestPolicy({ enabled: false })).catch(() => undefined)
+        await cleanupDigestOrg(pool, org, userIds)
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('one manager managing two subjects gets TWO distinct rows (subject-id collision guard)', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `rd3-collide-${runSuffix}`
+      const adminToken = await digestAdminToken(`rd3-collide-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-06-26T12:00:00.000Z')
+      const subjectA = `rd3-collide-a-${runSuffix}`
+      const subjectB = `rd3-collide-b-${runSuffix}`
+      const manager = `rd3-collide-mgr-${runSuffix}`
+      const userIds = [subjectA, subjectB, manager]
+      try {
+        await requireAttendanceTable(pool, 'attendance_notification_deliveries')
+        await seedUser(pool, subjectA, org)
+        await seedUser(pool, subjectB, org)
+        await seedUser(pool, manager, org)
+        const group = await seedGroup(pool, org, 'collide-group')
+        await seedMember(pool, org, group, subjectA)
+        await seedMember(pool, org, group, subjectB)
+        await seedManager(pool, org, group, manager, 'owner')
+        expect(await putDigestPolicy(adminToken, digestPolicy({ enabled: true, daily: { enabled: true, recipients: ['self', 'owner'] } }))).toBe(200)
+
+        const res = await withEnv('true', () => runDigest(pool, org, now))
+        // 2 self rows (A,B) + 2 owner rows (manager for subject A and for subject B) = 4.
+        expect(res.cadences[0]).toMatchObject({ rowsCreated: 4, ownerSkipped: 0 })
+
+        const ownerRows = (await fetchDeliveries(pool, org)).filter((r) => r.recipient_role === 'owner')
+        expect(ownerRows).toHaveLength(2)
+        // Both owner rows go to the SAME manager but carry DISTINCT subject ids in the key.
+        for (const row of ownerRows) {
+          expect(row.recipient_user_id).toBe(manager)
+        }
+        const ownerKeys = ownerRows.map((r) => r.source_key).sort()
+        expect(ownerKeys[0]).not.toBe(ownerKeys[1])
+        expect(ownerKeys).toEqual([
+          `attendance_report_digest:${org}:daily:daily:2026-06-25:subject:${subjectA}:owner:${manager}:channel:dingtalk_work_notification`,
+          `attendance_report_digest:${org}:daily:daily:2026-06-25:subject:${subjectB}:owner:${manager}:channel:dingtalk_work_notification`,
+        ].sort())
+      } finally {
+        await putDigestPolicy(adminToken, digestPolicy({ enabled: false })).catch(() => undefined)
+        await cleanupDigestOrg(pool, org, userIds)
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('fail-soft: missing owner / zero active group still writes the self row and counts the skip', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `rd3-failsoft-${runSuffix}`
+      const adminToken = await digestAdminToken(`rd3-failsoft-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-06-26T12:00:00.000Z')
+      // subjectGroup: in a group that has a sub_owner but NO owner. subjectNoGroup: in no group at all.
+      const subjectGroup = `rd3-fs-grp-${runSuffix}`
+      const subjectNoGroup = `rd3-fs-nogrp-${runSuffix}`
+      const subOwner = `rd3-fs-subowner-${runSuffix}`
+      const userIds = [subjectGroup, subjectNoGroup, subOwner]
+      try {
+        await requireAttendanceTable(pool, 'attendance_notification_deliveries')
+        await seedUser(pool, subjectGroup, org)
+        await seedUser(pool, subjectNoGroup, org)
+        await seedUser(pool, subOwner, org)
+        const group = await seedGroup(pool, org, 'failsoft-group')
+        await seedMember(pool, org, group, subjectGroup)
+        await seedManager(pool, org, group, subOwner, 'sub_owner') // sub_owner present, owner absent
+        expect(await putDigestPolicy(adminToken, digestPolicy({ enabled: true, daily: { enabled: true, recipients: ['self', 'owner', 'sub_owner'] } }))).toBe(200)
+
+        const res = await withEnv('true', () => runDigest(pool, org, now))
+        // self rows: 2 (both subjects). sub_owner row: 1 (subjectGroup → subOwner). owner: 0 (skipped twice).
+        expect(res.cadences[0]).toMatchObject({ rowsCreated: 3, ownerSkipped: 2, subOwnerSkipped: 1 })
+
+        const rows = await fetchDeliveries(pool, org)
+        const byRole = (role: string) => rows.filter((r) => r.recipient_role === role)
+        expect(byRole('subject').map((r) => r.recipient_user_id).sort()).toEqual([subjectGroup, subjectNoGroup].sort())
+        expect(byRole('owner')).toHaveLength(0)
+        expect(byRole('sub_owner')).toHaveLength(1)
+        expect(byRole('sub_owner')[0].recipient_user_id).toBe(subOwner)
+        // No worker involvement — every row is still pending, never delivered.
+        for (const row of rows) {
+          expect(row.status).toBe('pending')
+          expect(row.delivered_at).toBeNull()
+        }
+      } finally {
+        await putDigestPolicy(adminToken, digestPolicy({ enabled: false })).catch(() => undefined)
+        await cleanupDigestOrg(pool, org, userIds)
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('multi-group: a shared manager is written once; distinct managers across groups are written separately', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `rd3-multigrp-${runSuffix}`
+      const adminToken = await digestAdminToken(`rd3-multigrp-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-06-26T12:00:00.000Z')
+      // subjectShared in two groups that share manager M. subjectDistinct in two groups with managers M and N.
+      const subjectShared = `rd3-mg-shared-${runSuffix}`
+      const subjectDistinct = `rd3-mg-distinct-${runSuffix}`
+      const mgrM = `rd3-mg-m-${runSuffix}`
+      const mgrN = `rd3-mg-n-${runSuffix}`
+      const userIds = [subjectShared, subjectDistinct, mgrM, mgrN]
+      try {
+        await requireAttendanceTable(pool, 'attendance_notification_deliveries')
+        await seedUser(pool, subjectShared, org)
+        await seedUser(pool, subjectDistinct, org)
+        await seedUser(pool, mgrM, org)
+        await seedUser(pool, mgrN, org)
+        const g1 = await seedGroup(pool, org, 'mg-g1')
+        const g2 = await seedGroup(pool, org, 'mg-g2')
+        // subjectShared ∈ g1,g2; both owned by M → dedup to ONE owner row.
+        await seedMember(pool, org, g1, subjectShared)
+        await seedMember(pool, org, g2, subjectShared)
+        await seedManager(pool, org, g1, mgrM, 'owner')
+        await seedManager(pool, org, g2, mgrM, 'owner')
+        // subjectDistinct ∈ g1 (owner M), g2 (owner N) → TWO distinct owner rows.
+        await seedMember(pool, org, g1, subjectDistinct)
+        await seedMember(pool, org, g2, subjectDistinct)
+        await seedManager(pool, org, g2, mgrN, 'owner')
+        expect(await putDigestPolicy(adminToken, digestPolicy({ enabled: true, daily: { enabled: true, recipients: ['self', 'owner'] } }))).toBe(200)
+
+        const res = await withEnv('true', () => runDigest(pool, org, now))
+        expect(res.cadences[0].ownerSkipped).toBe(0)
+
+        const rows = await fetchDeliveries(pool, org)
+        const ownerRowsShared = rows.filter((r) => r.recipient_role === 'owner' && r.source_key.includes(`:subject:${subjectShared}:`))
+        const ownerRowsDistinct = rows.filter((r) => r.recipient_role === 'owner' && r.source_key.includes(`:subject:${subjectDistinct}:`))
+        expect(ownerRowsShared).toHaveLength(1) // shared manager deduped across groups
+        expect(ownerRowsShared[0].recipient_user_id).toBe(mgrM)
+        expect(ownerRowsDistinct.map((r) => r.recipient_user_id).sort()).toEqual([mgrM, mgrN].sort()) // distinct managers
+      } finally {
+        await putDigestPolicy(adminToken, digestPolicy({ enabled: false })).catch(() => undefined)
+        await cleanupDigestOrg(pool, org, userIds)
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('inactive user and inactive (offboarded) manager are excluded', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `rd3-inactive-${runSuffix}`
+      const adminToken = await digestAdminToken(`rd3-inactive-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-06-26T12:00:00.000Z')
+      const activeSubject = `rd3-ia-active-${runSuffix}`
+      const inactiveUser = `rd3-ia-useroff-${runSuffix}`
+      const inactiveMembership = `rd3-ia-orgoff-${runSuffix}`
+      const offboardedManager = `rd3-ia-mgroff-${runSuffix}`
+      const userIds = [activeSubject, inactiveUser, inactiveMembership, offboardedManager]
+      try {
+        await requireAttendanceTable(pool, 'attendance_notification_deliveries')
+        await seedUser(pool, activeSubject, org)
+        await seedUser(pool, inactiveUser, org, { userActive: false })       // users.is_active=false → excluded
+        await seedUser(pool, inactiveMembership, org, { orgActive: false })  // user_orgs.is_active=false → excluded
+        await seedUser(pool, offboardedManager, org, { userActive: false })  // offboarded manager → not written
+        const group = await seedGroup(pool, org, 'inactive-group')
+        await seedMember(pool, org, group, activeSubject)
+        await seedManager(pool, org, group, offboardedManager, 'owner')
+        expect(await putDigestPolicy(adminToken, digestPolicy({ enabled: true, daily: { enabled: true, recipients: ['self', 'owner'] } }))).toBe(200)
+
+        const res = await withEnv('true', () => runDigest(pool, org, now))
+        // Only the one active member gets a self row; the offboarded owner is not written (owner skipped).
+        expect(res.cadences[0]).toMatchObject({ rowsCreated: 1, ownerSkipped: 1 })
+
+        const rows = await fetchDeliveries(pool, org)
+        expect(rows).toHaveLength(1)
+        expect(rows[0].recipient_user_id).toBe(activeSubject)
+        expect(rows[0].recipient_role).toBe('subject')
+      } finally {
+        await putDigestPolicy(adminToken, digestPolicy({ enabled: false })).catch(() => undefined)
+        await cleanupDigestOrg(pool, org, userIds)
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('stored payload matches buildAttendanceReportDigestPayload with non-zero requestTotals from the group-by helper', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `rd3-payload-${runSuffix}`
+      const adminToken = await digestAdminToken(`rd3-payload-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-06-26T12:00:00.000Z')
+      const periodDay = '2026-06-25' // daily previous-day period
+      const subject = `rd3-payload-u-${runSuffix}`
+      const userIds = [subject]
+      try {
+        await requireAttendanceTable(pool, 'attendance_notification_deliveries')
+        await requireAttendanceTable(pool, 'attendance_requests')
+        await seedUser(pool, subject, org)
+        // Seed requests inside the period: 1 approved leave (240 min) + 1 pending leave. loadAttendanceSummary
+        // would report 0 request counts → the group-by helper is what makes requestTotals non-zero.
+        await pool.query(
+          `INSERT INTO attendance_requests (id, org_id, user_id, work_date, request_type, status, metadata)
+           VALUES ($1, $2, $3, $4, 'leave', 'approved', '{"minutes":"240"}'::jsonb),
+                  ($5, $2, $3, $4, 'leave', 'pending', '{"minutes":"60"}'::jsonb)`,
+          [randomUUID(), org, subject, periodDay, randomUUID()],
+        )
+        expect(await putDigestPolicy(adminToken, digestPolicy({ enabled: true, daily: { enabled: true, recipients: ['self'] } }))).toBe(200)
+
+        const res = await withEnv('true', () => runDigest(pool, org, now))
+        expect(res.cadences[0]).toMatchObject({ rowsCreated: 1 })
+
+        const rows = await fetchDeliveries(pool, org)
+        expect(rows).toHaveLength(1)
+        const payload = rows[0].payload
+        const seam = reportDigestSeam()
+
+        // Reconstruct the expected requestTotals via the SAME exported helper the producer uses, then run it
+        // through buildAttendanceReportDigestPayload — the stored requestTotals must match byte-for-byte.
+        const expectedTotals = await seam.loadAttendanceReportDigestRequestTotals(createPluginDbForTest(pool), org, subject, periodDay, periodDay)
+        expect(expectedTotals).toMatchObject({ pending: 1, approved: 1, rejected: 0, leaveMinutes: 240, overtimeMinutes: 0, makeupPunchCount: 0 })
+        const expectedPeriod = seam.resolveAttendanceReportDigestPeriod('daily', { now, timezone: 'UTC' })
+        const expectedPayload = seam.buildAttendanceReportDigestPayload({
+          cadence: 'daily',
+          period: expectedPeriod,
+          summary: {}, // summary asserted structurally below; requestTotals/period/kind asserted exactly
+          requestTotals: expectedTotals,
+        })
+        expect(payload.kind).toBe('attendance_report_digest')
+        expect(payload.cadence).toBe('daily')
+        expect(payload.period).toEqual(expectedPayload.period)
+        expect(payload.period).toMatchObject({ from: periodDay, to: periodDay, periodKey: 'daily:2026-06-25' })
+        expect(payload.requestTotals).toEqual(expectedPayload.requestTotals)
+        expect(payload.requestTotals).toEqual({ pending: 1, approved: 1, rejected: 0, leaveMinutes: 240, overtimeMinutes: 0, makeupPunchCount: 0 })
+        // Small payload: summary present (numeric keys) and NO records array — only summary + requestTotals.
+        expect(typeof payload.summary).toBe('object')
+        expect(typeof payload.summary.totalMinutes).toBe('number')
+        expect('records' in payload).toBe(false)
+      } finally {
+        await putDigestPolicy(adminToken, digestPolicy({ enabled: false })).catch(() => undefined)
+        await cleanupDigestOrg(pool, org, userIds)
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('weekly and monthly cadences are due-gated by anchor + sendAt and digest the previous complete period', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `rd3-cadence-${runSuffix}`
+      const adminToken = await digestAdminToken(`rd3-cadence-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      // now (UTC) = 2026-06-15, which is a Monday. weekday(Mon=1) and dayOfMonth(15) are derived, not eyeballed.
+      const now = new Date('2026-06-15T09:30:00.000Z')
+      const todayKey = '2026-06-15'
+      const matchingWeekday = weekdayMonday1(todayKey)
+      const subject = `rd3-cadence-u-${runSuffix}`
+      const userIds = [subject]
+      try {
+        await requireAttendanceTable(pool, 'attendance_notification_deliveries')
+        await seedUser(pool, subject, org)
+
+        // (a) NOT due: weekday/dayOfMonth do not match → zero rows even though both cadences are enabled.
+        const nonMatchingWeekday = matchingWeekday === 7 ? 1 : matchingWeekday + 1
+        expect(await putDigestPolicy(adminToken, digestPolicy({
+          enabled: true,
+          weekly: { enabled: true, weekday: nonMatchingWeekday, sendAt: '00:00' },
+          monthly: { enabled: true, dayOfMonth: 20, sendAt: '00:00' },
+        }))).toBe(200)
+        const resNotDue = await withEnv('true', () => runDigest(pool, org, now))
+        expect(resNotDue.ran).toBe(true)
+        expect(resNotDue.cadences).toEqual([])
+        expect((await fetchDeliveries(pool, org)).length).toBe(0)
+
+        // (b) Before sendAt: anchors match but local time (09:30) is before sendAt 23:00 → not due.
+        expect(await putDigestPolicy(adminToken, digestPolicy({
+          enabled: true,
+          weekly: { enabled: true, weekday: matchingWeekday, sendAt: '23:00' },
+        }))).toBe(200)
+        const resBeforeSendAt = await withEnv('true', () => runDigest(pool, org, now))
+        expect(resBeforeSendAt.cadences).toEqual([])
+        expect((await fetchDeliveries(pool, org)).length).toBe(0)
+
+        // (c) Due: anchors match and local time >= sendAt → weekly digests the previous full Mon-Sun week,
+        //     monthly digests the previous full calendar month; each writes one self row.
+        expect(await putDigestPolicy(adminToken, digestPolicy({
+          enabled: true,
+          weekly: { enabled: true, weekday: matchingWeekday, sendAt: '09:00', recipients: ['self'] },
+          monthly: { enabled: true, dayOfMonth: 15, sendAt: '09:00', recipients: ['self'] },
+        }))).toBe(200)
+        const resDue = await withEnv('true', () => runDigest(pool, org, now, todayKey))
+        const dueNames = resDue.cadences.map((c: any) => c.cadence).sort()
+        expect(dueNames).toEqual(['monthly', 'weekly'])
+        for (const c of resDue.cadences) expect(c.rowsCreated).toBe(1)
+
+        const rows = await fetchDeliveries(pool, org)
+        expect(rows).toHaveLength(2)
+        const weeklyRow = rows.find((r) => r.payload.cadence === 'weekly')
+        const monthlyRow = rows.find((r) => r.payload.cadence === 'monthly')
+        // Previous complete Mon-Sun week before the Monday 2026-06-15 = 2026-06-08 .. 2026-06-14.
+        expect(weeklyRow.payload.period).toMatchObject({ from: '2026-06-08', to: '2026-06-14' })
+        // Previous complete calendar month before June 2026 = May 1 .. May 31.
+        expect(monthlyRow.payload.period).toMatchObject({ from: '2026-05-01', to: '2026-05-31' })
+
+        // Repeat tick → both cadences write zero duplicates.
+        const resRepeat = await withEnv('true', () => runDigest(pool, org, now, todayKey))
+        for (const c of resRepeat.cadences) expect(c.rowsCreated).toBe(0)
+        expect((await fetchDeliveries(pool, org)).length).toBe(2)
+      } finally {
+        await putDigestPolicy(adminToken, digestPolicy({ enabled: false })).catch(() => undefined)
+        await cleanupDigestOrg(pool, org, userIds)
+        await pool.end().catch(() => undefined)
+      }
+    })
+  })
+
   it('C5-4: lists notification deliveries with counters, pagination, filtering, and admin-only access', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
