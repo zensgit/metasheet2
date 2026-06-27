@@ -30,6 +30,6 @@ This is **item #1** of the owner's reordered list. **Not** included (each is des
 
 ## Follow-ups (non-blocking)
 - Flag-on smoke (the ⬜ above).
-- **Post-destructive page offset:** `onResetDone` calls `grid.reloadCurrentPage()`; after a Reset moves post-T records to trash the total shrinks, so the current offset can land on a now-empty page. The config-revert path reloaded more deliberately — consider resetting the offset to 0 (or clamping) on reset-done.
+- **Post-destructive page offset:** `onResetDone` calls `grid.reloadCurrentPage()` → `loadViewData()`, which already falls back/clamps when the current offset becomes empty (owner-confirmed in the #3301 review). So no extra offset handling is needed — the earlier "reset offset to 0" caution was unnecessary.
 - Swap the T-source seam to history-timestamp options if the owner prefers the richer picker.
 - Visual placement polish (currently a gated strip under the toolbar) + i18n (matches `ResetConfirmDialog`'s current raw-string state; a later i18n sweep covers both).
