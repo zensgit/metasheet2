@@ -8,7 +8,7 @@
  */
 import { describe, expect, test } from 'vitest'
 
-import { isSupportedSheetConfigRevert } from '../src/multitable/config-restore'
+import { isSupportedSheetConfigRevert, SHEET_CONFIG_REVERT_KEYS } from '../src/multitable/config-restore'
 
 const rev = (over: Partial<{ entity_type: string; action: string; changed_keys: unknown }>) => ({
   entity_type: 'sheet_config',
@@ -51,5 +51,13 @@ describe('isSupportedSheetConfigRevert — T9-W Tier 1 narrowing', () => {
     expect(isSupportedSheetConfigRevert(rev({ changed_keys: undefined }))).toBe(false)
     expect(isSupportedSheetConfigRevert(rev({ changed_keys: null }))).toBe(false)
     expect(isSupportedSheetConfigRevert(rev({ changed_keys: 'conditionalReadRules' }))).toBe(false)
+  })
+
+  // TRIPWIRE: the Tier-1 revert surface is design-locked to exactly these two read-rule keys, and is an EXPLICIT
+  // literal (not derived from SHEET_CONFIG_COLUMN) so growing that map can't silently widen it. If you add a key to
+  // SHEET_CONFIG_REVERT_KEYS this assertion fails ON PURPOSE — widening Tier 1 is a T9-W design-lock change that needs
+  // its own goldens + sign-off (e.g. Tier 2 lossy retype is a SEPARATE slice), not a quiet edit. Update the lock first.
+  test('TRIPWIRE: supported revert surface is exactly the design-locked read-rule keys', () => {
+    expect([...SHEET_CONFIG_REVERT_KEYS].sort()).toEqual(['conditionalReadRules', 'rowLevelReadPermissionsEnabled'])
   })
 })

@@ -147,9 +147,13 @@ const SHEET_CONFIG_COLUMN: Record<string, ColumnMap> = {
   conditionalReadRules: { col: 'conditional_read_rules', jsonb: true },
   rowLevelReadPermissionsEnabled: { col: 'row_level_read_permissions_enabled' },
 }
-// The ONLY sheet_config revert shape this slice supports. A Set (not `key in obj`) so a forged `changed_keys`
-// entry like 'toString'/'constructor' can't match via the prototype chain.
-const SHEET_CONFIG_REVERT_KEYS = new Set(Object.keys(SHEET_CONFIG_COLUMN))
+// The Tier-1 revert surface — the ONLY sheet_config keys this slice will revert. Deliberately an EXPLICIT literal,
+// NOT derived from Object.keys(SHEET_CONFIG_COLUMN): growing that column map (for any reason) must NOT silently widen
+// what's revertible. Adding a key here is a Tier-1 SCOPE change — update the T9-W design-lock + add goldens FIRST;
+// the unit test pins this exact set as a tripwire. A Set (not `key in obj`) so a forged 'toString'/'constructor'
+// changed_key can't match via the prototype chain. Every key here must also exist in SHEET_CONFIG_COLUMN (else
+// applyConfigRevert throws) — the happy-path real-DB golden exercises that direction.
+export const SHEET_CONFIG_REVERT_KEYS = new Set(['conditionalReadRules', 'rowLevelReadPermissionsEnabled'])
 
 /**
  * T9-W Tier 1 narrowing: `classifyRevert` stays PURE (sheet_config is intrinsically gated), so the route must NOT
