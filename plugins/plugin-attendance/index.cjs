@@ -25984,6 +25984,17 @@ module.exports = {
           throw error
         }
 
+        // 补卡规则 MP-2/MP-3: only the three makeup request types read this policy. Gating the settings
+        // read behind the cheap request-type check keeps leave/overtime/etc byte-identical (zero new
+        // queries) when makeupPunchPolicy is disabled. Enforcement itself runs inside the txn below.
+        let makeupPunchPolicy = null
+        if (MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
+          const settings = await getSettings(db)
+          if (settings?.makeupPunchPolicy?.enabled === true) {
+            makeupPunchPolicy = settings.makeupPunchPolicy
+          }
+        }
+
         const requestId = randomUUID()
         const approvalId = `apv_${randomUUID()}`
         const approvalPayload = buildAttendanceApprovalInstancePayload({
@@ -26007,6 +26018,21 @@ module.exports = {
             })
             if (duplicateRequest) {
               throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+            }
+            // 补卡规则 MP-2/MP-3: enforce inside the txn, after the lock + duplicate guard, so the quota
+            // count and the insert below are consistent with the per-(org,user,workDate,requestType) lock.
+            // On success, persist a FRESH per-write policy snapshot onto the request metadata that the
+            // final approval will audit (never re-reading the live policy).
+            if (makeupPunchPolicy) {
+              const enforcement = await enforceMakeupPunchPolicy(trx, {
+                policy: makeupPunchPolicy,
+                orgId,
+                subjectUserId: userId,
+                requesterId: userId,
+                requestId: null,
+                draft,
+              })
+              draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
             }
             await upsertAttendanceApprovalInstance(trx, approvalPayload)
             await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
@@ -27159,6 +27185,29 @@ module.exports = {
             }
 
             const draft = await resolveAttendanceRequestDraft(parsed.data, existingRequest)
+
+            // 补卡规则 MP-2/MP-3: only read the policy when a makeup type is involved (existing OR edited
+            // type), so non-makeup edits stay byte-identical. When enabled, cross-user editing of a makeup
+            // request is fail-closed (Q6: cannot yet audit the real submitter). Enabled-gated so disabled
+            // customers keep the current canAccessOtherUsers cross-user edit behavior.
+            const makeupTypeInvolved =
+              MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType) ||
+              MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(existingRequest.request_type)
+            let makeupPunchPolicy = null
+            if (makeupTypeInvolved) {
+              const settings = await getSettings(db)
+              if (settings?.makeupPunchPolicy?.enabled === true) {
+                makeupPunchPolicy = settings.makeupPunchPolicy
+                if (existingRequest.user_id !== requesterId) {
+                  throw new HttpError(
+                    422,
+                    'MAKEUP_PUNCH_CROSS_USER_FORBIDDEN',
+                    'Cross-user editing of makeup punch requests is not allowed while the makeup policy is enabled'
+                  )
+                }
+              }
+            }
+
             await acquireAttendanceRequestLock(trx, existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType)
             const duplicateRows = await trx.query(
               `SELECT id
@@ -27174,6 +27223,23 @@ module.exports = {
             )
             if (duplicateRows.length > 0) {
               throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+            }
+
+            // 补卡规则 MP-2/MP-3: enforce on the EDITED makeup type, inside the txn after the lock +
+            // duplicate guard, excluding the current request id from the quota count. Recompute a FRESH
+            // snapshot every successful update — resolveAttendanceRequestDraft rebuilds metadata from
+            // scratch (it never copies makeupPunchPolicySnapshot), so the stale snapshot is dropped and
+            // the metadata siblings (attachmentUrl/approvalFlow) are preserved.
+            if (makeupPunchPolicy && MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
+              const enforcement = await enforceMakeupPunchPolicy(trx, {
+                policy: makeupPunchPolicy,
+                orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+                subjectUserId: existingRequest.user_id,
+                requesterId,
+                requestId,
+                draft,
+              })
+              draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
             }
 
             const approvalId = existingRequest.approval_instance_id || `apv_${randomUUID()}`
@@ -27740,6 +27806,32 @@ module.exports = {
                 overtimeRule: requestMetadata.overtimeRule ?? null,
                 requested_in_at: requestRow.requested_in_at,
                 requested_out_at: requestRow.requested_out_at,
+              }
+              // 补卡规则 MP-3 §5: for the three makeup types, append a SUMMARY of the PERSISTED policy
+              // snapshot (incl matchedAnomalyTypes) to the adjustment audit event. Gated on snapshot
+              // PRESENCE, never the live policy — so legacy/disabled-created pending rows carry no snapshot
+              // and grandfather through this exact same path with byte-identical event meta, and a later
+              // policy change cannot retro-rewrite an already-pending request's audit evidence.
+              const persistedMakeupSnapshot =
+                MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(requestType) &&
+                requestMetadata.makeupPunchPolicySnapshot &&
+                typeof requestMetadata.makeupPunchPolicySnapshot === 'object'
+                  ? requestMetadata.makeupPunchPolicySnapshot
+                  : null
+              if (persistedMakeupSnapshot) {
+                eventMeta.makeupPolicySnapshot = {
+                  version: persistedMakeupSnapshot.version ?? null,
+                  enabled: persistedMakeupSnapshot.enabled ?? null,
+                  cycle: persistedMakeupSnapshot.cycle ?? null,
+                  quota: persistedMakeupSnapshot.quota
+                    ? { maxRequestsPerCycle: persistedMakeupSnapshot.quota.maxRequestsPerCycle ?? null }
+                    : null,
+                  submitWindow: persistedMakeupSnapshot.submitWindow ?? null,
+                  matchedAnomalyTypes: Array.isArray(persistedMakeupSnapshot.matchedAnomalyTypes)
+                    ? [...persistedMakeupSnapshot.matchedAnomalyTypes]
+                    : [],
+                  requestEvaluatedAt: persistedMakeupSnapshot.requestEvaluatedAt ?? null,
+                }
               }
 
               await trx.query(
