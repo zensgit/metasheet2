@@ -259,6 +259,19 @@ const DEFAULT_SETTINGS = {
     anyLeaveBreaksFullAttendance: true,
     lateBeyondThresholdBreaksFullAttendance: true,
   },
+  // 考勤统计通知订阅 (report digest subscription) — RD-1 LATENT config (design-lock
+  // attendance-report-digest-subscription-design-lock-20260626). Default OFF; no scheduler producer
+  // reads this until RD-3. Cadence defaults describe the opt-in preset only.
+  attendanceReportDigestPolicy: {
+    enabled: false,
+    timezone: 'Asia/Shanghai',
+    channel: 'work_notification',
+    cadences: {
+      daily: { enabled: true, sendAt: '18:30', recipients: ['self'] },
+      weekly: { enabled: false, weekday: 1, sendAt: '09:00', recipients: ['self', 'owner'] },
+      monthly: { enabled: false, dayOfMonth: 1, sendAt: '09:00', recipients: ['self', 'owner'] },
+    },
+  },
   // 自动对班 (auto shift matching) — A1 preview/manual apply plus A2 scheduler auto-write.
   // Runtime still requires env flags in addition to these org settings.
   autoShiftMatching: {
@@ -12103,6 +12116,7 @@ function normalizeSettings(raw) {
     overtimeBankPolicy: normalizeOvertimeBankPolicySetting(raw.overtimeBankPolicy),
     leaveBalanceDeductionPolicy: normalizeLeaveBalanceDeductionPolicySetting(raw.leaveBalanceDeductionPolicy),
     attendanceBonusPolicy: normalizeAttendanceBonusPolicySetting(raw.attendanceBonusPolicy),
+    attendanceReportDigestPolicy: normalizeAttendanceReportDigestPolicySetting(raw.attendanceReportDigestPolicy),
     autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
   }
 }
@@ -12256,6 +12270,65 @@ function normalizeAttendanceBonusPolicySetting(raw) {
     enabled: parseBoolean(value.enabled, false),
     anyLeaveBreaksFullAttendance: parseBoolean(value.anyLeaveBreaksFullAttendance, true),
     lateBeyondThresholdBreaksFullAttendance: parseBoolean(value.lateBeyondThresholdBreaksFullAttendance, true),
+  }
+}
+
+const ATTENDANCE_REPORT_DIGEST_CHANNELS = Object.freeze(['work_notification', 'email_smtp'])
+const ATTENDANCE_REPORT_DIGEST_RECIPIENTS = Object.freeze(['self', 'owner', 'sub_owner'])
+const ATTENDANCE_REPORT_DIGEST_SEND_AT_RE = /^([01]\d|2[0-3]):[0-5]\d$/
+
+function normalizeAttendanceReportDigestRecipients(raw, fallback = ['self']) {
+  const seen = new Set()
+  const recipients = []
+  for (const item of Array.isArray(raw) ? raw : []) {
+    if (typeof item === 'string' && ATTENDANCE_REPORT_DIGEST_RECIPIENTS.includes(item) && !seen.has(item)) {
+      seen.add(item)
+      recipients.push(item)
+    }
+  }
+  return recipients.length ? recipients : [...fallback]
+}
+
+function normalizeAttendanceReportDigestCadence(raw, fallback, extra = {}) {
+  const value = raw && typeof raw === 'object' ? raw : {}
+  const sendAt = typeof value.sendAt === 'string' && ATTENDANCE_REPORT_DIGEST_SEND_AT_RE.test(value.sendAt.trim())
+    ? value.sendAt.trim()
+    : fallback.sendAt
+  const normalized = {
+    enabled: parseBoolean(value.enabled, fallback.enabled),
+    sendAt,
+    recipients: normalizeAttendanceReportDigestRecipients(value.recipients, fallback.recipients),
+  }
+  if (extra.weekday) {
+    const weekday = Number(value.weekday)
+    normalized.weekday = Number.isInteger(weekday) && weekday >= 1 && weekday <= 7
+      ? weekday
+      : fallback.weekday
+  }
+  if (extra.dayOfMonth) {
+    const dayOfMonth = Number(value.dayOfMonth)
+    normalized.dayOfMonth = Number.isInteger(dayOfMonth) && dayOfMonth >= 1 && dayOfMonth <= 31
+      ? dayOfMonth
+      : fallback.dayOfMonth
+  }
+  return normalized
+}
+
+function normalizeAttendanceReportDigestPolicySetting(raw) {
+  const value = raw && typeof raw === 'object' ? raw : {}
+  const fallback = DEFAULT_SETTINGS.attendanceReportDigestPolicy
+  const channelRaw = typeof value.channel === 'string' ? value.channel.trim() : ''
+  const timezoneRaw = typeof value.timezone === 'string' ? value.timezone.trim() : ''
+  const cadences = value.cadences && typeof value.cadences === 'object' ? value.cadences : {}
+  return {
+    enabled: parseBoolean(value.enabled, fallback.enabled),
+    timezone: isValidTimeZoneIdentifier(timezoneRaw) ? timezoneRaw : fallback.timezone,
+    channel: ATTENDANCE_REPORT_DIGEST_CHANNELS.includes(channelRaw) ? channelRaw : fallback.channel,
+    cadences: {
+      daily: normalizeAttendanceReportDigestCadence(cadences.daily, fallback.cadences.daily),
+      weekly: normalizeAttendanceReportDigestCadence(cadences.weekly, fallback.cadences.weekly, { weekday: true }),
+      monthly: normalizeAttendanceReportDigestCadence(cadences.monthly, fallback.cadences.monthly, { dayOfMonth: true }),
+    },
   }
 }
 
@@ -12485,6 +12558,24 @@ function mergeSettings(base, update) {
     attendanceBonusPolicy: {
       ...(base?.attendanceBonusPolicy || {}),
       ...(update?.attendanceBonusPolicy || {}),
+    },
+    attendanceReportDigestPolicy: {
+      ...(base?.attendanceReportDigestPolicy || {}),
+      ...(update?.attendanceReportDigestPolicy || {}),
+      cadences: {
+        daily: {
+          ...(base?.attendanceReportDigestPolicy?.cadences?.daily || {}),
+          ...(update?.attendanceReportDigestPolicy?.cadences?.daily || {}),
+        },
+        weekly: {
+          ...(base?.attendanceReportDigestPolicy?.cadences?.weekly || {}),
+          ...(update?.attendanceReportDigestPolicy?.cadences?.weekly || {}),
+        },
+        monthly: {
+          ...(base?.attendanceReportDigestPolicy?.cadences?.monthly || {}),
+          ...(update?.attendanceReportDigestPolicy?.cadences?.monthly || {}),
+        },
+      },
     },
     autoShiftMatching: {
       ...(base?.autoShiftMatching || {}),
@@ -19804,6 +19895,13 @@ module.exports = {
       }).optional(),
     })
 
+    const reportDigestSendAtSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+    const reportDigestRecipientsSchema = z.array(z.enum(['self', 'owner', 'sub_owner'])).min(1)
+    const reportDigestCadenceSchema = z.object({
+      enabled: z.boolean().optional(),
+      sendAt: reportDigestSendAtSchema.optional(),
+      recipients: reportDigestRecipientsSchema.optional(),
+    }).optional()
     const settingsSchema = z.object({
       autoAbsence: z.object({
         enabled: z.boolean().optional(),
@@ -19952,6 +20050,27 @@ module.exports = {
         enabled: z.boolean().optional(),
         anyLeaveBreaksFullAttendance: z.boolean().optional(),
         lateBeyondThresholdBreaksFullAttendance: z.boolean().optional(),
+      }).optional(),
+      // 考勤统计通知订阅 RD-1 latent config. Default OFF; no producer reads it until RD-3.
+      attendanceReportDigestPolicy: z.object({
+        enabled: z.boolean().optional(),
+        timezone: z.string().refine(isValidTimeZoneIdentifier, { message: 'Invalid timezone' }).optional(),
+        channel: z.enum(['work_notification', 'email_smtp']).optional(),
+        cadences: z.object({
+          daily: reportDigestCadenceSchema,
+          weekly: z.object({
+            enabled: z.boolean().optional(),
+            weekday: z.number().int().min(1).max(7).optional(),
+            sendAt: reportDigestSendAtSchema.optional(),
+            recipients: reportDigestRecipientsSchema.optional(),
+          }).optional(),
+          monthly: z.object({
+            enabled: z.boolean().optional(),
+            dayOfMonth: z.number().int().min(1).max(31).optional(),
+            sendAt: reportDigestSendAtSchema.optional(),
+            recipients: reportDigestRecipientsSchema.optional(),
+          }).optional(),
+        }).optional(),
       }).optional(),
       // 年假/法定假余额引擎 — L0 latent config (design-lock #2622). Round-trips through PUT/GET; no
       // runtime reads it until L2 (accrual). tiers = org-configurable statutory bands.
