@@ -386,8 +386,10 @@ class FormulaParser {
     while (true) {
       const token = this.advance()
       if (token.kind !== 'string') {
+        if (token.kind === 'eof') fail('the `in` array literal is missing its closing `]`')
         fail('the `in` array literal accepts string literals only (no nested arrays, numbers, or expressions)')
       }
+      if (!token.value.trim()) fail('the `in` array literal must not contain blank string elements')
       elements.push(token.value)
       if (elements.length > APPROVAL_CONDITION_FORMULA_LIMITS.maxInArrayElements) {
         fail(`the \`in\` array literal exceeds ${APPROVAL_CONDITION_FORMULA_LIMITS.maxInArrayElements} elements`)
