@@ -302,6 +302,19 @@ const DEFAULT_SETTINGS = {
     requireReason: true,
     requireAttachment: false,
   },
+  // 异常结果编辑护栏 (anomaly result-edit guard) — AE-1 config (design-lock
+  // attendance-anomaly-result-edit-guard-design-lock-20260626 §3.3 / §9, RATIFIED 2026-06-27). Governs the
+  // attendance:admin POST /api/attendance/anomaly-result-edits write action. enabled = master switch (default
+  // ON; the route 403s when explicitly false). editWindowDays bounds how far back a work_date may be corrected
+  // (org-tz today − work_date), default 180, range 1..366. requireReason default true (a blank reason 400s).
+  // notifyAffectedEmployee default true (AE-2 honours it; a disabled value is still recorded as a skipped
+  // reason on the audit row).
+  attendanceResultEditPolicy: {
+    enabled: true,
+    editWindowDays: 180,
+    requireReason: true,
+    notifyAffectedEmployee: true,
+  },
   // 自动对班 (auto shift matching) — A1 preview/manual apply plus A2 scheduler auto-write.
   // Runtime still requires env flags in addition to these org settings.
   autoShiftMatching: {
@@ -12149,6 +12162,7 @@ function normalizeSettings(raw) {
     attendanceBonusPolicy: normalizeAttendanceBonusPolicySetting(raw.attendanceBonusPolicy),
     attendanceReportDigestPolicy: normalizeAttendanceReportDigestPolicySetting(raw.attendanceReportDigestPolicy),
     makeupPunchPolicy: normalizeMakeupPunchPolicySetting(raw.makeupPunchPolicy),
+    attendanceResultEditPolicy: normalizeAttendanceResultEditPolicySetting(raw.attendanceResultEditPolicy),
     autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
   }
 }
@@ -12890,6 +12904,23 @@ async function enforceMakeupPunchPolicy(trx, { policy, orgId, subjectUserId, req
   return { matchedAnomalyTypes, requestEvaluatedAt }
 }
 
+// 异常结果编辑护栏 AE-1 (design-lock §3.3 / §9). Pure normalize of the bounded org policy: master switch +
+// edit window (1..366) + reason/notify flags. An unset / partial / malformed value can never silently widen
+// the window or flip a flag — every field falls back to DEFAULT_SETTINGS.
+function normalizeAttendanceResultEditPolicySetting(raw) {
+  const value = raw && typeof raw === 'object' ? raw : {}
+  const fallback = DEFAULT_SETTINGS.attendanceResultEditPolicy
+  const editWindowDaysRaw = Number(value.editWindowDays)
+  return {
+    enabled: parseBoolean(value.enabled, fallback.enabled),
+    editWindowDays: Number.isInteger(editWindowDaysRaw) && editWindowDaysRaw >= 1 && editWindowDaysRaw <= 366
+      ? editWindowDaysRaw
+      : fallback.editWindowDays,
+    requireReason: parseBoolean(value.requireReason, fallback.requireReason),
+    notifyAffectedEmployee: parseBoolean(value.notifyAffectedEmployee, fallback.notifyAffectedEmployee),
+  }
+}
+
 function normalizeOvertimeSegmentationSetting(raw) {
   const config = raw && typeof raw === 'object' ? raw : {}
   return {
@@ -13096,6 +13127,11 @@ function mergeSettings(base, update) {
         ...(base?.makeupPunchPolicy?.submitWindow || {}),
         ...(update?.makeupPunchPolicy?.submitWindow || {}),
       },
+    },
+    // Flat policy object → shallow merge preserves the other fields on a partial update (e.g. only { enabled }).
+    attendanceResultEditPolicy: {
+      ...(base?.attendanceResultEditPolicy || {}),
+      ...(update?.attendanceResultEditPolicy || {}),
     },
     autoShiftMatching: {
       ...(base?.autoShiftMatching || {}),
@@ -20801,6 +20837,14 @@ module.exports = {
         allowedRequestTypes: z.array(z.enum(['missed_check_in', 'missed_check_out', 'time_correction'])).min(1).optional(),
         requireReason: z.boolean().optional(),
         requireAttachment: z.boolean().optional(),
+      }).optional(),
+      // 异常结果编辑护栏 AE-1 (design-lock §3.3 / §9). Bounded org policy for the anomaly result-edit route.
+      // editWindowDays is enum-strict 1..366; an invalid value fails the PUT with 400.
+      attendanceResultEditPolicy: z.object({
+        enabled: z.boolean().optional(),
+        editWindowDays: z.number().int().min(1).max(366).optional(),
+        requireReason: z.boolean().optional(),
+        notifyAffectedEmployee: z.boolean().optional(),
       }).optional(),
       // 年假/法定假余额引擎 — L0 latent config (design-lock #2622). Round-trips through PUT/GET; no
       // runtime reads it until L2 (accrual). tiers = org-configurable statutory bands.
