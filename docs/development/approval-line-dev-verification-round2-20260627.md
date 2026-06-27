@@ -16,7 +16,7 @@ The merge stack landed through a fast-moving `main` (attendance burst) via a bou
 ## 2. Next-layer DESIGN — two design locks, now durable in `docs/design/`
 Schema verified on `origin/main`: `directory_accounts` has `title` + `job_number` + `raw`; **no role/level column**.
 - **`requester.title` / `requester.level`** — `docs/design/approval-requester-title-level-design-lock-20260627.md`. **RATIFIED**: `title` buildable now (directory-sync-sourced `title` column, server-resolved; fill-rate varies → unset title fails-closed at create). `level` DEFERRED (no numeric source).
-- **RA-1b `requester.role`** — `docs/design/approval-requester-role-ra1b-design-lock-20260627.md`. **PROPOSED**: source = system RBAC (not directory). Decisions: provenance = **fresh `user_roles` query**; vocabulary = **approval-curated subset**; v1 boundary excludes directory `raw` role/position. Needs the `in`/array grammar.
+- **RA-1b `requester.role`** — `docs/design/approval-requester-role-ra1b-design-lock-20260627.md`. **RATIFIED — RUNTIME NOT BUILT** (build after title): source = system RBAC (not directory). Decisions: provenance = **fresh `user_roles` query**; vocabulary = **approval-curated subset**; v1 boundary excludes directory `raw` role/position. Needs the `in`/array grammar.
 
 ## 3. Owner decisions (locked 2026-06-27)
 D-title = **YES** · D-level = **DEFER** · D-role-provenance = **fresh `user_roles`** · D-role-vocabulary = **approval-curated subset**.

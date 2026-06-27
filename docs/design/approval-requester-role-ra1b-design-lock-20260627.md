@@ -1,6 +1,6 @@
 # RA-1b requester.role membership — Design Lock
 
-> Status: **PROPOSED.** Provenance + vocabulary decided (owner 2026-06-27); runtime is a separate gated slice (do `requester.title` first). Schema verified on `origin/main`.
+> Status: **RATIFIED — RUNTIME NOT BUILT** (build after `requester.title`). Provenance + vocabulary decided (owner 2026-06-27); the runtime is the next gated slice. Schema verified on `origin/main`.
 
 ## Facts
 - `directory_accounts` has **NO** first-class role/position column. A DingTalk `role_list` may sit unextracted in `directory_accounts.raw` — **NOT a v1 source**.
