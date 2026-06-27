@@ -62,7 +62,7 @@ WORK_DATE="$(date -u +%Y-%m-%d)"
 
 5. Real-channel run only: make sure the default C5 channel is intentionally
    routable in staging. If the default channel is `dingtalk_work_notification`,
-   use a staging DingTalk test recipient. If it is `email_smtp`, use a staging
+   use a staging work-notification test recipient. If it is `email_smtp`, use a staging
    SMTP sink. Fake/in-app routing may prove enqueue state flow, but it is not a
    real external-delivery PASS unless product accepts that channel for the run.
 
