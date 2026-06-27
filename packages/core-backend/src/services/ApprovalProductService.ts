@@ -47,6 +47,7 @@ import { validateAmountTotalConsistency } from './amount-total-check'
 import {
   ApprovalConditionFormulaError,
   assertApprovalConditionFormulaValidForSchema,
+  formulaReferencesRequesterAttribute,
   parseApprovalConditionFormula,
 } from './ApprovalConditionFormula'
 import { resolveApprovalRequesterOrgRelations, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
@@ -1767,6 +1768,28 @@ export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolea
   })
 }
 
+/**
+ * RA-1a: does the published runtime graph route on `requester.department`? Used by the create-time
+ * wedge guard — a transient directory-read failure must fail the create fast (retryable) when a
+ * `requester.department` condition exists, rather than freezing an absent department that would
+ * wedge every later approval at the condition (the snapshot is frozen; admin-cancel only).
+ */
+export function runtimeGraphUsesRequesterDepartment(runtimeGraph: RuntimeGraph): boolean {
+  return runtimeGraph.nodes.some((node) => {
+    if (node.type !== 'condition') return false
+    const config: unknown = node.config
+    const branches = isRecord(config) ? config.branches : undefined
+    if (!Array.isArray(branches)) return false
+    return branches.some((branch) => {
+      if (!isRecord(branch)) return false
+      const formula = isRecord(branch.formula) ? branch.formula : undefined
+      const expression = formula && typeof formula.expression === 'string' ? formula.expression : ''
+      // Token-aware (NOT a regex): a string literal like "requester.department" must never trip the guard.
+      return expression !== '' && formulaReferencesRequesterAttribute(expression, 'department')
+    })
+  })
+}
+
 function getEffectiveAutoApprovalPolicy(
   runtimeGraph: RuntimeGraph,
   nodeKey: string,
@@ -2873,15 +2896,41 @@ export class ApprovalProductService {
     const runtimeGraph = asRuntimeGraph(bundle.publishedDefinition.runtime_graph)
     const needsManagerChain = runtimeGraphUsesManagerChain(runtimeGraph)
     let orgRelations: ApprovalRequesterOrgRelations = {}
+    let orgReadFailed = false
     try {
       orgRelations = await resolveApprovalRequesterOrgRelations(actor.userId, pool.query.bind(pool), {
         includeManagerChain: needsManagerChain,
       })
     } catch (error) {
+      orgReadFailed = true
       metricsLogger.warn(
         `Failed to resolve requester org relations for ${actor.userId}: ${
           error instanceof Error ? error.message : 'unknown error'
         }`,
+      )
+    }
+
+    // RA-1a wedge guard: if the template routes on `requester.department` but it could NOT be resolved,
+    // fail-closed AT CREATE — the ratified lock says absence "reject this createApproval rather than route
+    // on a phantom value". Without this, a condition downstream of an approval node only rejects at
+    // dispatch (after the snapshot is frozen), so every later approval throws -> rolls back -> wedges the
+    // instance forever (admin-cancel only). Reject both causes at create; distinguish them for the caller:
+    //   - read THREW (transient/infra) -> 503, retryable.
+    //   - read SUCCEEDED but empty (genuine row-level absence) -> 422, the requester's department is unset.
+    // Only fires when the graph actually routes on requester.department (manager-chain / dept-head and
+    // non-department templates are unaffected; genuine absence on those follows their emptyAssigneePolicy).
+    if (!orgRelations.primaryDepartmentName && runtimeGraphUsesRequesterDepartment(runtimeGraph)) {
+      if (orgReadFailed) {
+        throw new ServiceError(
+          'Could not resolve the requester department required by this approval template. Please retry.',
+          503,
+          'APPROVAL_REQUESTER_DEPARTMENT_UNRESOLVED',
+        )
+      }
+      throw new ServiceError(
+        'This approval template routes on the requester department, which is not set for you. Contact an administrator.',
+        422,
+        'APPROVAL_REQUESTER_DEPARTMENT_REQUIRED',
       )
     }
 
