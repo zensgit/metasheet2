@@ -23,6 +23,11 @@ const orgRelationsState = vi.hoisted(() => ({
   resolveApprovalRequesterOrgRelations: vi.fn(async () => ({})),
 }))
 
+const roleResolverState = vi.hoisted(() => ({
+  // Default returns [] — only role-routed graphs invoke it, so existing tests are unaffected.
+  resolveApprovalRequesterRoleIds: vi.fn(async () => [] as string[]),
+}))
+
 vi.mock('../../src/db/pg', () => ({
   pool: pgState.pool,
 }))
@@ -46,6 +51,17 @@ vi.mock('../../src/services/ApprovalDirectoryOrg', async () => {
   return {
     ...actual,
     resolveApprovalRequesterOrgRelations: orgRelationsState.resolveApprovalRequesterOrgRelations,
+  }
+})
+
+vi.mock('../../src/services/ApprovalRequesterRoles', async () => {
+  const actual = await vi.importActual<typeof import('../../src/services/ApprovalRequesterRoles')>(
+    '../../src/services/ApprovalRequesterRoles',
+  )
+
+  return {
+    ...actual,
+    resolveApprovalRequesterRoleIds: roleResolverState.resolveApprovalRequesterRoleIds,
   }
 })
 
@@ -233,6 +249,8 @@ describe('ApprovalProductService', () => {
     completionEventState.emitApprovalCompletionEvent.mockReset()
     orgRelationsState.resolveApprovalRequesterOrgRelations.mockReset()
     orgRelationsState.resolveApprovalRequesterOrgRelations.mockResolvedValue({})
+    roleResolverState.resolveApprovalRequesterRoleIds.mockReset()
+    roleResolverState.resolveApprovalRequesterRoleIds.mockResolvedValue([])
   })
 
   it('blocks revoke when the published runtime policy disables it', async () => {
@@ -2260,6 +2278,152 @@ describe('ApprovalProductService', () => {
     const service = new ApprovalProductService(buildNoopMetrics() as never)
     vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-2', publishedDefinitionId: 'pub-2' }))
     await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' })).resolves.toBeTruthy()
+  })
+
+  // requester.title wedge guard — same error-vs-empty split as department. A title-routed condition
+  // downstream of an approval node would otherwise freeze an absent title into the snapshot and wedge every
+  // later approval (admin-cancel only); reject at create instead, distinguishing transient-read (503) from
+  // genuine row-level absence (422).
+  const titleWedgeGraph = {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      { key: 'approval_1', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['mgr-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'condition_1', type: 'condition', config: { branches: [{ edgeKey: 'mgr', rules: [], formula: { expression: "requester.title == '经理'" } }], defaultEdgeKey: 'other' } },
+      { key: 'approval_mgr', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['m-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'approval_other', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['oth-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    edges: [
+      { key: 'e1', source: 'start', target: 'approval_1' },
+      { key: 'e2', source: 'approval_1', target: 'condition_1' },
+      { key: 'mgr', source: 'condition_1', target: 'approval_mgr' },
+      { key: 'other', source: 'condition_1', target: 'approval_other' },
+      { key: 'e3', source: 'approval_mgr', target: 'end' },
+      { key: 'e4', source: 'approval_other', target: 'end' },
+    ],
+    policy: { allowRevoke: true },
+  }
+  const titleLiteralGraph = {
+    ...titleWedgeGraph,
+    nodes: titleWedgeGraph.nodes.map((node) =>
+      node.key === 'condition_1'
+        ? { ...node, config: { branches: [{ edgeKey: 'mgr', rules: [], formula: { expression: '"requester.title" == "x"' } }], defaultEdgeKey: 'other' } }
+        : node),
+  }
+
+  it('title wedge guard: fails create fast (503) when the directory read THROWS and the graph routes on requester.title', async () => {
+    orgRelationsState.resolveApprovalRequesterOrgRelations.mockRejectedValue(new Error('transient directory read failure'))
+    mountWedgeSql(titleWedgeGraph)
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-2', publishedDefinitionId: 'pub-2' }))
+    await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+      .rejects.toMatchObject({ statusCode: 503, code: 'APPROVAL_REQUESTER_TITLE_UNRESOLVED' })
+  })
+
+  it('title wedge guard: a SUCCESSFUL read with no title also rejects AT CREATE (422) — genuine absence is fail-closed at create', async () => {
+    orgRelationsState.resolveApprovalRequesterOrgRelations.mockResolvedValue({}) // success, but no primaryTitle
+    mountWedgeSql(titleWedgeGraph)
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-2', publishedDefinitionId: 'pub-2' }))
+    await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+      .rejects.toMatchObject({ statusCode: 422, code: 'APPROVAL_REQUESTER_TITLE_REQUIRED' })
+  })
+
+  it('title guard detection is token-aware — a quoted "requester.title" is not a requester reference', () => {
+    expect(formulaReferencesRequesterAttribute("requester.title == '经理'", 'title')).toBe(true)
+    expect(formulaReferencesRequesterAttribute('NOT (requester.title == "经理")', 'title')).toBe(true)
+    expect(formulaReferencesRequesterAttribute('"requester.title" == "x"', 'title')).toBe(false)
+    expect(formulaReferencesRequesterAttribute('{reason} == "requester.title"', 'title')).toBe(false)
+  })
+
+  it('title wedge guard does NOT fire for a string-literal "requester.title" — create succeeds with no title', async () => {
+    orgRelationsState.resolveApprovalRequesterOrgRelations.mockResolvedValue({}) // no title
+    mountWedgeSql(titleLiteralGraph)
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-2', publishedDefinitionId: 'pub-2' }))
+    await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' })).resolves.toBeTruthy()
+  })
+
+  // requester.role wedge guard — same error-vs-empty split as department/title. A role-routed condition
+  // downstream of an approval node would otherwise freeze an empty role set into the snapshot and wedge
+  // every later approval; reject at create instead, distinguishing transient-read (503) from genuine
+  // row-level absence (422). The role-id set is resolved by the SEPARATE user_roles resolver (mocked here).
+  const roleWedgeGraph = {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      { key: 'approval_1', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['mgr-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'condition_1', type: 'condition', config: { branches: [{ edgeKey: 'fin', rules: [], formula: { expression: 'requester.role in ["finance_approver","admin"]' } }], defaultEdgeKey: 'other' } },
+      { key: 'approval_fin', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['f-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'approval_other', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['oth-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    edges: [
+      { key: 'e1', source: 'start', target: 'approval_1' },
+      { key: 'e2', source: 'approval_1', target: 'condition_1' },
+      { key: 'fin', source: 'condition_1', target: 'approval_fin' },
+      { key: 'other', source: 'condition_1', target: 'approval_other' },
+      { key: 'e3', source: 'approval_fin', target: 'end' },
+      { key: 'e4', source: 'approval_other', target: 'end' },
+    ],
+    policy: { allowRevoke: true },
+  }
+  const roleLiteralGraph = {
+    ...roleWedgeGraph,
+    nodes: roleWedgeGraph.nodes.map((node) =>
+      node.key === 'condition_1'
+        ? { ...node, config: { branches: [{ edgeKey: 'fin', rules: [], formula: { expression: '"requester.role" == "x"' } }], defaultEdgeKey: 'other' } }
+        : node),
+  }
+
+  it('role wedge guard: fails create fast (503) when the user_roles read THROWS and the graph routes on requester.role', async () => {
+    roleResolverState.resolveApprovalRequesterRoleIds.mockRejectedValue(new Error('transient user_roles read failure'))
+    mountWedgeSql(roleWedgeGraph)
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-2', publishedDefinitionId: 'pub-2' }))
+    await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+      .rejects.toMatchObject({ statusCode: 503, code: 'APPROVAL_REQUESTER_ROLE_UNRESOLVED' })
+  })
+
+  it('role wedge guard: a SUCCESSFUL read with NO roles also rejects AT CREATE (422) — genuine absence is fail-closed at create', async () => {
+    roleResolverState.resolveApprovalRequesterRoleIds.mockResolvedValue([]) // success, but no roles
+    mountWedgeSql(roleWedgeGraph)
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-2', publishedDefinitionId: 'pub-2' }))
+    await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+      .rejects.toMatchObject({ statusCode: 422, code: 'APPROVAL_REQUESTER_ROLE_REQUIRED' })
+  })
+
+  it('role guard detection is token-aware — a quoted "requester.role" is not a requester reference', () => {
+    expect(formulaReferencesRequesterAttribute('requester.role in ["a","b"]', 'role')).toBe(true)
+    expect(formulaReferencesRequesterAttribute('NOT (requester.role in ["a"])', 'role')).toBe(true)
+    expect(formulaReferencesRequesterAttribute('"requester.role" == "x"', 'role')).toBe(false)
+    expect(formulaReferencesRequesterAttribute('{reason} == "requester.role"', 'role')).toBe(false)
+  })
+
+  it('role wedge guard does NOT fire for a string-literal "requester.role" — create succeeds and the resolver is never called', async () => {
+    roleResolverState.resolveApprovalRequesterRoleIds.mockResolvedValue([]) // would 422 if invoked
+    mountWedgeSql(roleLiteralGraph)
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-2', publishedDefinitionId: 'pub-2' }))
+    await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' })).resolves.toBeTruthy()
+    // gated query: a non-role graph must not even read user_roles.
+    expect(roleResolverState.resolveApprovalRequesterRoleIds).not.toHaveBeenCalled()
+  })
+
+  it('role wedge guard does NOT fire when the resolver returns a non-empty role set — create succeeds', async () => {
+    roleResolverState.resolveApprovalRequesterRoleIds.mockResolvedValue(['admin'])
+    mountWedgeSql(roleWedgeGraph)
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    const service = new ApprovalProductService(buildNoopMetrics() as never)
+    vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-2', publishedDefinitionId: 'pub-2' }))
+    await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' })).resolves.toBeTruthy()
+    expect(roleResolverState.resolveApprovalRequesterRoleIds).toHaveBeenCalledTimes(1)
   })
 
   it('bakes the manager chain into the persisted requester snapshot for a manager_at_level graph', async () => {

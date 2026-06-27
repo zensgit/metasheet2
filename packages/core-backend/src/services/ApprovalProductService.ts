@@ -51,6 +51,7 @@ import {
   parseApprovalConditionFormula,
 } from './ApprovalConditionFormula'
 import { resolveApprovalRequesterOrgRelations, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
+import { resolveApprovalRequesterRoleIds } from './ApprovalRequesterRoles'
 import { resolveActiveDelegationMap } from './ApprovalDelegations'
 import type {
   ApprovalAssignmentDTO,
@@ -1769,12 +1770,12 @@ export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolea
 }
 
 /**
- * RA-1a: does the published runtime graph route on `requester.department`? Used by the create-time
- * wedge guard — a transient directory-read failure must fail the create fast (retryable) when a
- * `requester.department` condition exists, rather than freezing an absent department that would
- * wedge every later approval at the condition (the snapshot is frozen; admin-cancel only).
+ * Does the published runtime graph route on `requester.<attr>` (e.g. `department` / `title`)? Used by the
+ * create-time wedge guard — a transient directory-read failure must fail the create fast (retryable) when
+ * such a condition exists, rather than freezing an absent attribute that would wedge every later approval
+ * at the condition (the snapshot is frozen; admin-cancel only).
  */
-export function runtimeGraphUsesRequesterDepartment(runtimeGraph: RuntimeGraph): boolean {
+export function runtimeGraphUsesRequesterAttribute(runtimeGraph: RuntimeGraph, attr: string): boolean {
   return runtimeGraph.nodes.some((node) => {
     if (node.type !== 'condition') return false
     const config: unknown = node.config
@@ -1785,7 +1786,7 @@ export function runtimeGraphUsesRequesterDepartment(runtimeGraph: RuntimeGraph):
       const formula = isRecord(branch.formula) ? branch.formula : undefined
       const expression = formula && typeof formula.expression === 'string' ? formula.expression : ''
       // Token-aware (NOT a regex): a string literal like "requester.department" must never trip the guard.
-      return expression !== '' && formulaReferencesRequesterAttribute(expression, 'department')
+      return expression !== '' && formulaReferencesRequesterAttribute(expression, attr)
     })
   })
 }
@@ -2910,6 +2911,27 @@ export class ApprovalProductService {
       )
     }
 
+    // RA-1b: `requester.role in [...]` routes on the requester's CURRENT role membership. Resolve it with a
+    // FRESH `user_roles` SELECT (NOT the token-claim actor.roles) and freeze it into the snapshot — but only
+    // when the published graph actually routes on requester.role, so the extra read stays off every approval
+    // (same gating precedent as includeManagerChain). Best-effort read; the wedge guard below turns an
+    // unresolved set into a fail-closed create rejection (transient-read 503 vs genuine-empty 422).
+    const needsRequesterRoles = runtimeGraphUsesRequesterAttribute(runtimeGraph, 'role')
+    let requesterRoleIds: string[] = []
+    let roleReadFailed = false
+    if (needsRequesterRoles) {
+      try {
+        requesterRoleIds = await resolveApprovalRequesterRoleIds(actor.userId, pool.query.bind(pool))
+      } catch (error) {
+        roleReadFailed = true
+        metricsLogger.warn(
+          `Failed to resolve requester roles for ${actor.userId}: ${
+            error instanceof Error ? error.message : 'unknown error'
+          }`,
+        )
+      }
+    }
+
     // RA-1a wedge guard: if the template routes on `requester.department` but it could NOT be resolved,
     // fail-closed AT CREATE — the ratified lock says absence "reject this createApproval rather than route
     // on a phantom value". Without this, a condition downstream of an approval node only rejects at
@@ -2919,7 +2941,7 @@ export class ApprovalProductService {
     //   - read SUCCEEDED but empty (genuine row-level absence) -> 422, the requester's department is unset.
     // Only fires when the graph actually routes on requester.department (manager-chain / dept-head and
     // non-department templates are unaffected; genuine absence on those follows their emptyAssigneePolicy).
-    if (!orgRelations.primaryDepartmentName && runtimeGraphUsesRequesterDepartment(runtimeGraph)) {
+    if (!orgRelations.primaryDepartmentName && runtimeGraphUsesRequesterAttribute(runtimeGraph, 'department')) {
       if (orgReadFailed) {
         throw new ServiceError(
           'Could not resolve the requester department required by this approval template. Please retry.',
@@ -2931,6 +2953,45 @@ export class ApprovalProductService {
         'This approval template routes on the requester department, which is not set for you. Contact an administrator.',
         422,
         'APPROVAL_REQUESTER_DEPARTMENT_REQUIRED',
+      )
+    }
+
+    // Same wedge guard for `requester.title` (string == / != routing) — title is an always-present
+    // structural column but not guaranteed FILLED for every requester, so the same error-vs-empty split
+    // applies: a directory read that THREW -> 503 (retryable); a read that SUCCEEDED but left title unset
+    // -> 422 (genuine row-level absence). Only fires when the graph actually routes on requester.title.
+    if (!orgRelations.primaryTitle && runtimeGraphUsesRequesterAttribute(runtimeGraph, 'title')) {
+      if (orgReadFailed) {
+        throw new ServiceError(
+          'Could not resolve the requester title required by this approval template. Please retry.',
+          503,
+          'APPROVAL_REQUESTER_TITLE_UNRESOLVED',
+        )
+      }
+      throw new ServiceError(
+        'This approval template routes on the requester title, which is not set for you. Contact an administrator.',
+        422,
+        'APPROVAL_REQUESTER_TITLE_REQUIRED',
+      )
+    }
+
+    // Same wedge guard for `requester.role` (membership routing). An unresolved role set on a role-routed
+    // condition downstream of an approval node would otherwise freeze an empty set into the snapshot and
+    // wedge every later approval at the condition; reject at create instead. Distinguish a thrown read
+    // (transient/infra -> 503, retryable) from a successful empty read (genuine row-level absence — the
+    // requester holds no roles -> 422). Only fires when the graph actually routes on requester.role.
+    if (needsRequesterRoles && requesterRoleIds.length === 0) {
+      if (roleReadFailed) {
+        throw new ServiceError(
+          'Could not resolve the requester roles required by this approval template. Please retry.',
+          503,
+          'APPROVAL_REQUESTER_ROLE_UNRESOLVED',
+        )
+      }
+      throw new ServiceError(
+        'This approval template routes on the requester roles, which are not set for you. Contact an administrator.',
+        422,
+        'APPROVAL_REQUESTER_ROLE_REQUIRED',
       )
     }
 
@@ -2959,6 +3020,8 @@ export class ApprovalProductService {
       email: actor.email,
       department: actor.department,
       ...(orgRelations.primaryDepartmentName ? { directoryDepartment: orgRelations.primaryDepartmentName } : {}),
+      ...(orgRelations.primaryTitle ? { directoryTitle: orgRelations.primaryTitle } : {}),
+      ...(requesterRoleIds.length > 0 ? { directoryRoles: requesterRoleIds } : {}),
       roles: actor.roles || [],
       permissions: actor.permissions || [],
       ...(orgRelations.managerId ? { managerId: orgRelations.managerId } : {}),
@@ -2972,7 +3035,11 @@ export class ApprovalProductService {
         formSnapshot: normalizedFormData,
         requesterSnapshot,
       }),
-      requesterContext: { department: requesterSnapshot.directoryDepartment ?? null },
+      requesterContext: {
+        department: requesterSnapshot.directoryDepartment ?? null,
+        title: requesterSnapshot.directoryTitle ?? null,
+        roles: requesterSnapshot.directoryRoles ?? null,
+      },
     })
     const instanceId = crypto.randomUUID()
     const initialResolution = executor.resolveInitialState()
@@ -3210,8 +3277,12 @@ export class ApprovalProductService {
           formSnapshot,
           requesterSnapshot,
         }),
-        // RA-1a: re-thread the frozen directory department at dispatch (loaded requester_snapshot record).
-        requesterContext: ((d) => ({ department: typeof d === 'string' && d ? d : null }))(requesterSnapshot?.directoryDepartment),
+        // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
+        requesterContext: ((d, t, r) => ({
+          department: typeof d === 'string' && d ? d : null,
+          title: typeof t === 'string' && t ? t : null,
+          roles: Array.isArray(r) ? r.filter((role): role is string => typeof role === 'string') : null,
+        }))(requesterSnapshot?.directoryDepartment, requesterSnapshot?.directoryTitle, requesterSnapshot?.directoryRoles),
       })
       const jumpResolution = executor.resolveReturnToNode(targetNodeKey)
       const requesterId = requesterSnapshot?.id
@@ -3376,8 +3447,12 @@ export class ApprovalProductService {
           formSnapshot,
           requesterSnapshot,
         }),
-        // RA-1a: re-thread the frozen directory department at dispatch (loaded requester_snapshot record).
-        requesterContext: ((d) => ({ department: typeof d === 'string' && d ? d : null }))(requesterSnapshot?.directoryDepartment),
+        // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
+        requesterContext: ((d, t, r) => ({
+          department: typeof d === 'string' && d ? d : null,
+          title: typeof t === 'string' && t ? t : null,
+          roles: Array.isArray(r) ? r.filter((role): role is string => typeof role === 'string') : null,
+        }))(requesterSnapshot?.directoryDepartment, requesterSnapshot?.directoryTitle, requesterSnapshot?.directoryRoles),
       })
       const storedCurrentNodeKey = instance.current_node_key
       const actorRoles = actor.roles || []

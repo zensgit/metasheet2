@@ -6,6 +6,8 @@ export const APPROVAL_CONDITION_FORMULA_LIMITS = {
   maxDepth: 16,
   maxFieldReferences: 64,
   maxFunctionCalls: 32,
+  /** RA-1b: cap on string elements in an `in [...]` array literal (DoS bound). */
+  maxInArrayElements: 32,
 } as const
 
 export class ApprovalConditionFormulaError extends Error {
@@ -25,6 +27,8 @@ type Token =
   | { kind: 'identifier'; value: string }
   | { kind: 'operator'; value: '+' | '-' | '*' | '/' | '==' | '!=' | '>' | '>=' | '<' | '<=' }
   | { kind: 'paren'; value: '(' | ')' }
+  | { kind: 'bracket'; value: '[' | ']' }
+  | { kind: 'comma' }
   | { kind: 'eof' }
 
 type OperatorTokenValue = Extract<Token, { kind: 'operator' }>['value']
@@ -40,17 +44,29 @@ type FormulaAst =
   | { kind: 'unary'; op: 'NEG' | 'NOT'; expr: FormulaAst }
   | { kind: 'binary'; op: '+' | '-' | '*' | '/' | 'AND' | 'OR'; left: FormulaAst; right: FormulaAst }
   | { kind: 'compare'; op: '==' | '!=' | '>' | '>=' | '<' | '<='; left: FormulaAst; right: FormulaAst }
+  // RA-1b: `requester.<role-attr> in [ "a", "b" ]` — role-set membership, comparison-precedence, boolean.
+  // The ONLY valid shape of `in`; `attr` is the role attr, `elements` the string literals (1..32).
+  | { kind: 'membership'; attr: string; raw: string; elements: string[] }
 
 type FormulaValue = number | string | boolean | null
 type FormulaType = 'number' | 'string' | 'boolean' | 'null'
 
-/** RA-1a: the frozen, server-resolved requester attributes the evaluator may read. DEPARTMENT-ONLY in
- *  RA-1a; every other attribute (level/role/title/unknown) is rejected at PARSE (see parsePrimary), so it
- *  never reaches runtime. Values come from ApprovalDirectoryOrg's directory snapshot, NOT actor/JWT. */
+/** The frozen, server-resolved requester attributes the evaluator may read: `department` (RA-1a) and
+ *  `title` (next slice — string `==`/`!=` only). Every other attribute (level/role/unknown) is rejected at
+ *  PARSE (see parsePrimary), so it never reaches runtime. Values come from ApprovalDirectoryOrg's directory
+ *  snapshot, NOT actor/JWT. */
 export interface RequesterFormulaContext {
   department?: string | null
+  title?: string | null
+  /** RA-1b: the requester's frozen, server-resolved ROLE-ID SET (from `user_roles`, NOT token claims).
+   *  Read ONLY by `requester.role in [...]` membership; null/absent fails closed at eval. */
+  roles?: string[] | null
 }
-const RA1A_REQUESTER_ATTRS: Record<string, FormulaType> = { department: 'string' }
+/** Scalar requester attributes (string `==`/`!=`). `role` is NOT here — it is a LIST attr handled by
+ *  membership (`ROLE_REQUESTER_ATTRS`), so a scalar `requester.role == "x"` type-rejects. */
+const RA1A_REQUESTER_ATTRS: Record<string, FormulaType> = { department: 'string', title: 'string' }
+/** RA-1b: LIST-valued requester attributes — usable ONLY as the LHS of `in [...]` membership. */
+const ROLE_REQUESTER_ATTRS: Record<string, true> = { role: true }
 
 function fail(message: string): never {
   throw new ApprovalConditionFormulaError(message)
@@ -185,6 +201,19 @@ function tokenize(expression: string): Token[] {
       i += 1
       continue
     }
+    // RA-1b: array-literal delimiters + separator for `requester.role in [ "a", "b" ]`.
+    // `in` itself needs no dedicated token — it tokenizes as the identifier 'IN' (case-insensitive,
+    // uppercased above), matched in the parser exactly like the AND/OR/NOT keywords.
+    if (char === '[' || char === ']') {
+      tokens.push({ kind: 'bracket', value: char })
+      i += 1
+      continue
+    }
+    if (char === ',') {
+      tokens.push({ kind: 'comma' })
+      i += 1
+      continue
+    }
     fail(`unexpected token: ${char}`)
   }
 
@@ -270,6 +299,23 @@ class FormulaParser {
     return false
   }
 
+  private matchBracket(value: '[' | ']'): boolean {
+    const token = this.peek()
+    if (token.kind === 'bracket' && token.value === value) {
+      this.index += 1
+      return true
+    }
+    return false
+  }
+
+  private matchComma(): boolean {
+    if (this.peek().kind === 'comma') {
+      this.index += 1
+      return true
+    }
+    return false
+  }
+
   private parseOr(): FormulaAst {
     let left = this.parseAnd()
     while (this.matchIdentifier('OR')) {
@@ -295,6 +341,11 @@ class FormulaParser {
 
   private parseComparison(): FormulaAst {
     const left = this.parseAdditive()
+    // RA-1b: `in` membership (comparison-precedence, yields boolean) — matched as the keyword identifier
+    // 'IN' (like AND/OR/NOT). Scoped to `requester.role in [...]` ONLY; everything else fails closed.
+    if (this.matchIdentifier('IN')) {
+      return this.parseMembership(left)
+    }
     const token = this.peek()
     if (token.kind !== 'operator' || !['==', '!=', '>', '>=', '<', '<='].includes(token.value)) {
       return left
@@ -306,6 +357,47 @@ class FormulaParser {
       left,
       right: this.parseAdditive(),
     })
+  }
+
+  /**
+   * RA-1b membership: the LHS of `in` MUST be `requester.<role-attr>` (v1 scopes `in` to role membership
+   * only) and the RHS MUST be a non-empty bracketed array of string literals. Every other shape — `in` on
+   * a scalar/field/literal LHS, a non-array RHS — fails closed here at parse.
+   */
+  private parseMembership(left: FormulaAst): FormulaAst {
+    if (left.kind !== 'requester' || !(left.attr in ROLE_REQUESTER_ATTRS)) {
+      fail('the `in` operator is only supported for requester.role membership (e.g. requester.role in ["a"])')
+    }
+    const elements = this.parseStringArrayLiteral()
+    return this.node({ kind: 'membership', attr: left.attr, raw: left.raw, elements })
+  }
+
+  /**
+   * Parse `[ "a", "b", ... ]` — comma-separated STRING literals only. Rejects (fail-closed) a non-array
+   * RHS, an empty array, a trailing/missing comma, any non-string element (number / nested array / token),
+   * and more than `maxInArrayElements` (32) elements.
+   */
+  private parseStringArrayLiteral(): string[] {
+    if (!this.matchBracket('[')) {
+      fail('the `in` operator requires a bracketed array literal of string values (e.g. ["a", "b"])')
+    }
+    if (this.matchBracket(']')) fail('the `in` array literal must not be empty')
+    const elements: string[] = []
+    while (true) {
+      const token = this.advance()
+      if (token.kind !== 'string') {
+        if (token.kind === 'eof') fail('the `in` array literal is missing its closing `]`')
+        fail('the `in` array literal accepts string literals only (no nested arrays, numbers, or expressions)')
+      }
+      if (!token.value.trim()) fail('the `in` array literal must not contain blank string elements')
+      elements.push(token.value)
+      if (elements.length > APPROVAL_CONDITION_FORMULA_LIMITS.maxInArrayElements) {
+        fail(`the \`in\` array literal exceeds ${APPROVAL_CONDITION_FORMULA_LIMITS.maxInArrayElements} elements`)
+      }
+      if (this.matchBracket(']')) break
+      if (!this.matchComma()) fail('the `in` array literal elements must be comma-separated')
+    }
+    return elements
   }
 
   private parseAdditive(): FormulaAst {
@@ -362,10 +454,13 @@ class FormulaParser {
       case 'field':
         return this.node({ kind: 'field', path: token.path, raw: token.raw })
       case 'requester':
-        // RA-1a allowlist IS the parse/publish fail-closed gate: anything outside {department}
-        // (level/role/title/unknown) is rejected here, so it never reaches runtime as absent-in-context.
-        if (!(token.attr in RA1A_REQUESTER_ATTRS)) {
-          fail(`unsupported requester attribute: ${token.raw} (RA-1a supports requester.department only)`)
+        // The allowlist IS the parse/publish fail-closed gate: anything outside the scalar set
+        // {department, title} OR the list set {role} (level/unknown) is rejected here, so it never reaches
+        // runtime as absent-in-context. A `role` token is accepted as a requester node so the parser can
+        // see it as the LHS of `in`; a scalar use of `requester.role` is then TYPE-rejected in
+        // inferFormulaType (so `requester.role == "x"` fails publish, while `requester.role in [...]` lives).
+        if (!(token.attr in RA1A_REQUESTER_ATTRS) && !(token.attr in ROLE_REQUESTER_ATTRS)) {
+          fail(`unsupported requester attribute: ${token.raw} (supports requester.department / requester.title / requester.role only)`)
         }
         return this.node({ kind: 'requester', attr: token.attr, raw: token.raw })
       case 'identifier':
@@ -426,6 +521,11 @@ function parseFormula(expression: string): FormulaAst {
 function astReferencesRequesterAttribute(ast: FormulaAst, attr: string): boolean {
   switch (ast.kind) {
     case 'requester':
+      return ast.attr === attr
+    // RA-1b: a `requester.role in [...]` node carries its role attr directly (no child requester node), so
+    // role usage is invisible to the wedge guard unless detected here. KEYSTONE: omitting this case silently
+    // disables the role create-time fail-closed guard.
+    case 'membership':
       return ast.attr === attr
     case 'unary':
       return astReferencesRequesterAttribute(ast.expr, attr)
@@ -503,10 +603,17 @@ function inferFormulaType(ast: FormulaAst, schema: FormSchema): FormulaType {
       return type
     }
     case 'requester': {
+      // RA-1b: a list attr (`role`) reaching scalar type-inference means it was used WITHOUT `in`
+      // (e.g. `requester.role == "x"`) — TYPE-reject at publish; `in` produces a `membership` node instead.
+      if (ast.attr in ROLE_REQUESTER_ATTRS) {
+        fail(`requester.${ast.attr} can only be used with the \`in\` operator (e.g. requester.role in ["a"])`)
+      }
       const requesterType = RA1A_REQUESTER_ATTRS[ast.attr]
       if (!requesterType) fail(`unsupported requester attribute: ${ast.raw}`)
       return requesterType
     }
+    case 'membership':
+      return 'boolean'
     case 'aggregate':
       validateAggregateReference(ast, schema)
       return 'number'
@@ -615,9 +722,9 @@ function evaluateAggregate(ast: Extract<FormulaAst, { kind: 'aggregate' }>, form
   return ast.fn === 'MIN' ? Math.min(...numbers) : Math.max(...numbers)
 }
 
-/** Resolve a `requester.<attr>` value from the frozen, server-resolved requester context. RA-1a:
- *  `department` only (the parser already rejected every other attr). Fail-closed on ROW-LEVEL absence: a
- *  null/undefined context, or a missing/blank department, rejects rather than routing on a phantom. */
+/** Resolve a `requester.<attr>` value from the frozen, server-resolved requester context: `department`
+ *  and `title` (the parser already rejected every other attr). Fail-closed on ROW-LEVEL absence: a
+ *  null/undefined context, or a missing/blank value, rejects rather than routing on a phantom. */
 function evaluateRequester(attr: string, raw: string, requester: RequesterFormulaContext | null): FormulaValue {
   if (!requester) fail(`requester context unavailable for ${raw}`)
   if (attr === 'department') {
@@ -626,7 +733,35 @@ function evaluateRequester(attr: string, raw: string, requester: RequesterFormul
     if (typeof value !== 'string') fail(`requester department has an unsupported value for ${raw}`)
     return value
   }
+  if (attr === 'title') {
+    const value = requester.title
+    if (value === null || value === undefined || value === '') fail(`requester title is missing for ${raw}`)
+    if (typeof value !== 'string') fail(`requester title has an unsupported value for ${raw}`)
+    return value
+  }
+  // RA-1b: `role` is a list attr — never resolved as a scalar value. Reaching here means a scalar use of
+  // `requester.role` slipped past type-check (defensive; inferFormulaType already rejects it at publish).
+  if (attr in ROLE_REQUESTER_ATTRS) {
+    fail(`requester.${attr} can only be used with the \`in\` operator`)
+  }
   fail(`unsupported requester attribute: ${raw}`)
+}
+
+/** RA-1b: `requester.role in [...]` — TRUE iff the requester's frozen role set INTERSECTS the literal
+ *  array. Fail-closed on ROW-LEVEL absence: a null/undefined context or a null/absent role set rejects
+ *  rather than routing on a phantom. A genuinely-empty role set simply intersects nothing (false) — but
+ *  the create-time wedge guard already rejects an empty set on a role-routed template, so this is
+ *  defensive only at eval. */
+function evaluateRequesterMembership(
+  ast: Extract<FormulaAst, { kind: 'membership' }>,
+  requester: RequesterFormulaContext | null,
+): boolean {
+  if (!requester) fail(`requester context unavailable for ${ast.raw}`)
+  const roles = requester.roles
+  if (roles === null || roles === undefined) fail(`requester roles are missing for ${ast.raw}`)
+  if (!Array.isArray(roles)) fail(`requester roles have an unsupported value for ${ast.raw}`)
+  const held = new Set(roles.filter((role): role is string => typeof role === 'string'))
+  return ast.elements.some((element) => held.has(element))
 }
 
 function evaluateAst(ast: FormulaAst, formData: Record<string, unknown>, requester: RequesterFormulaContext | null): FormulaValue {
@@ -643,6 +778,8 @@ function evaluateAst(ast: FormulaAst, formData: Record<string, unknown>, request
       return evaluateAggregate(ast, formData)
     case 'requester':
       return evaluateRequester(ast.attr, ast.raw, requester)
+    case 'membership':
+      return evaluateRequesterMembership(ast, requester)
     case 'unary': {
       const value = evaluateAst(ast.expr, formData, requester)
       if (ast.op === 'NOT') return !assertBoolean(value, 'NOT operand')
