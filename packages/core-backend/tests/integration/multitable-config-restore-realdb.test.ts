@@ -36,7 +36,8 @@ const insertRev = async (entityType: string, entityId: string, before: unknown, 
 
 let REV_FIELD = '' // a recorded field rename Old→New
 let REV_VIEW = '' // a recorded view filter change
-let REV_GATED = '' // a recorded field RETYPE (gated in this slice)
+let REV_GATED = '' // a recorded permission change — a still-intrinsically-gated op (422 RESTORE_NOT_SUPPORTED).
+// (field type-retype is no longer a blanket 422: it is now Tier-2 flag-gated — covered by multitable-field-retype-revert-realdb.)
 
 describeIfDatabase('multitable config-restore — T9-W (real DB)', () => {
   beforeAll(async () => {
@@ -53,7 +54,7 @@ describeIfDatabase('multitable config-restore — T9-W (real DB)', () => {
     await q(`INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
              VALUES ($1,$2,'V','grid','{"q":"new"}'::jsonb,'{}'::jsonb,'{}'::jsonb,'[]'::jsonb,'{}'::jsonb)`, [VIEW, SHEET])
     REV_VIEW = await insertRev('view', VIEW, { filterInfo: { q: 'old' } }, { filterInfo: { q: 'new' } }, ['filterInfo'])
-    REV_GATED = await insertRev('field', FIELD, { type: 'string' }, { type: 'number' }, ['type'])
+    REV_GATED = await insertRev('permission', 'field:' + FIELD, { visible: false }, { visible: true }, ['visible'])
   })
   afterAll(async () => {
     await q('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [SHEET]).catch(() => {})
@@ -95,7 +96,7 @@ describeIfDatabase('multitable config-restore — T9-W (real DB)', () => {
     expect((await execute(READER, { revisionId: REV_FIELD, previewToken: 'x' })).status).toBe(403)
   })
 
-  test('a gated op (field RETYPE) is refused 422, not partially attempted (L6)', async () => {
+  test('a gated op (permission revert) is refused 422, not partially attempted (L6)', async () => {
     const before = await fieldName()
     const res = await execute(ADMIN, { revisionId: REV_GATED, previewToken: 'whatever' })
     expect(res.status).toBe(422)
