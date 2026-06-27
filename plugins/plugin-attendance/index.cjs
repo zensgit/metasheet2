@@ -18037,6 +18037,356 @@ function computeAttendanceRecordUpsertValues(options) {
   }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// AE-1 — audited admin correction of a confirmed attendance anomaly result
+// (design-lock attendance-anomaly-result-edit-guard-design-lock-20260626, RATIFIED 2026-06-27).
+// ──────────────────────────────────────────────────────────────────────────────
+
+// §3.2 target vocabulary + §3.2/§9.7 editability. A source NOT in the editable set is immutable: normal→abnormal
+// is the explicit NORMAL_TO_ABNORMAL guard, every other non-editable source (off/adjusted, and normal→normal/
+// normal→adjusted no-ops) is SOURCE_NOT_EDITABLE.
+const RESULT_EDIT_TARGET_STATUSES = ['normal', 'late', 'early_leave', 'late_early', 'partial', 'absent', 'adjusted']
+const RESULT_EDIT_EDITABLE_SOURCES = new Set(['late', 'early_leave', 'late_early', 'partial', 'absent'])
+const RESULT_EDIT_ABNORMAL_TARGETS = new Set(['late', 'early_leave', 'late_early', 'partial', 'absent'])
+
+const RESULT_EDIT_EVIDENCE_MAX_ITEMS = 20
+const RESULT_EDIT_EVIDENCE_TEXT_MAX = 200
+const RESULT_EDIT_EVIDENCE_URL_MAX = 2048
+const RESULT_EDIT_EVIDENCE_ATTACHMENT_ID_MAX = 200
+
+function resultEditEvidenceHasMarkup(text) {
+  return /[<>]/.test(text)
+}
+
+// §3.4 + §9.3 evidence validator: metadata-only references — attachmentId / safe-text label / HTTPS-only URL
+// (length-capped, no script/HTML, non-empty host). A raw http:// or any unvalidated URL string is REJECTED so
+// nothing hostile is ever written into the immutable audit row. Returns the normalized array or a message.
+function validateAttendanceResultEditEvidence(evidence) {
+  if (evidence == null) return { ok: true, value: [] }
+  if (!Array.isArray(evidence)) return { ok: false, message: 'evidence must be an array of reference objects' }
+  if (evidence.length > RESULT_EDIT_EVIDENCE_MAX_ITEMS) {
+    return { ok: false, message: `evidence accepts at most ${RESULT_EDIT_EVIDENCE_MAX_ITEMS} references` }
+  }
+  const out = []
+  for (let i = 0; i < evidence.length; i++) {
+    const item = evidence[i]
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return { ok: false, message: `evidence[${i}] must be an object` }
+    }
+    const ref = {}
+    if (item.label != null) {
+      if (typeof item.label !== 'string') return { ok: false, message: `evidence[${i}].label must be a string` }
+      const label = item.label.trim()
+      if (label.length > RESULT_EDIT_EVIDENCE_TEXT_MAX) return { ok: false, message: `evidence[${i}].label exceeds ${RESULT_EDIT_EVIDENCE_TEXT_MAX} chars` }
+      if (resultEditEvidenceHasMarkup(label)) return { ok: false, message: `evidence[${i}].label must not contain HTML/script markup` }
+      if (label) ref.label = label
+    }
+    if (item.url != null) {
+      if (typeof item.url !== 'string') return { ok: false, message: `evidence[${i}].url must be a string` }
+      const url = item.url.trim()
+      if (!url) return { ok: false, message: `evidence[${i}].url is empty` }
+      if (url.length > RESULT_EDIT_EVIDENCE_URL_MAX) return { ok: false, message: `evidence[${i}].url is too long` }
+      if (/\s/.test(url) || resultEditEvidenceHasMarkup(url)) return { ok: false, message: `evidence[${i}].url must not contain whitespace or markup` }
+      let parsed
+      try { parsed = new URL(url) } catch { return { ok: false, message: `evidence[${i}].url is not a valid URL` } }
+      if (parsed.protocol !== 'https:') return { ok: false, message: `evidence[${i}].url must use https://` }
+      if (!parsed.hostname) return { ok: false, message: `evidence[${i}].url must have a non-empty host` }
+      ref.type = 'url'
+      ref.url = url
+    } else if (item.attachmentId != null) {
+      if (typeof item.attachmentId !== 'string') return { ok: false, message: `evidence[${i}].attachmentId must be a string` }
+      const attachmentId = item.attachmentId.trim()
+      if (!attachmentId) return { ok: false, message: `evidence[${i}].attachmentId is empty` }
+      if (attachmentId.length > RESULT_EDIT_EVIDENCE_ATTACHMENT_ID_MAX) return { ok: false, message: `evidence[${i}].attachmentId is too long` }
+      if (resultEditEvidenceHasMarkup(attachmentId)) return { ok: false, message: `evidence[${i}].attachmentId must not contain markup` }
+      ref.type = 'attachment'
+      ref.attachmentId = attachmentId
+    } else if (item.text != null) {
+      if (typeof item.text !== 'string') return { ok: false, message: `evidence[${i}].text must be a string` }
+      const text = item.text.trim()
+      if (!text) return { ok: false, message: `evidence[${i}].text is empty` }
+      if (text.length > RESULT_EDIT_EVIDENCE_TEXT_MAX) return { ok: false, message: `evidence[${i}].text is too long` }
+      if (resultEditEvidenceHasMarkup(text)) return { ok: false, message: `evidence[${i}].text must not contain markup` }
+      ref.type = 'text'
+      ref.text = text
+    } else if (ref.label) {
+      // A safe-text label with no url/attachment/text is itself an acceptable metadata-only reference.
+      ref.type = 'text'
+    } else {
+      return { ok: false, message: `evidence[${i}] must carry one of url / attachmentId / text / label` }
+    }
+    out.push(ref)
+  }
+  return { ok: true, value: out }
+}
+
+// §3.5a normalization table (RATIFIED). Anomaly metrics are normalized per target status; work_minutes defaults
+// to the ORIGINAL stored value (an edit re-classifies, it does not fabricate work time); admin overrideMetrics
+// take precedence per-field. The returned object is fed to upsertAttendanceRecord as overrideMetrics, so it
+// FULLY shadows computeMetrics' punch-derived values (which would otherwise re-derive the original anomaly —
+// e.g. absent has no punches → computeMetrics returns 'absent' again).
+function applyResultEditMetricNormalization(targetStatus, beforeRecord, overrideMetrics) {
+  let work = Math.max(0, Math.floor(Number(beforeRecord?.work_minutes) || 0))
+  let late = Math.max(0, Math.floor(Number(beforeRecord?.late_minutes) || 0))
+  let early = Math.max(0, Math.floor(Number(beforeRecord?.early_leave_minutes) || 0))
+  switch (targetStatus) {
+    case 'normal': late = 0; early = 0; break          // on-time, full day → no lateness/early-leave
+    case 'late': early = 0; break                      // late preserved/override; early cleared
+    case 'early_leave': late = 0; break                // early preserved/override; late cleared
+    case 'late_early': break                           // preserve both
+    case 'partial': break                              // preserve
+    case 'absent': work = 0; late = 0; early = 0; break // no worked time on an absent day
+    case 'adjusted': break                             // preserve (admin may override)
+    default: break
+  }
+  if (overrideMetrics && typeof overrideMetrics === 'object') {
+    if (Number.isFinite(overrideMetrics.workMinutes)) work = Math.max(0, Math.floor(overrideMetrics.workMinutes))
+    if (Number.isFinite(overrideMetrics.lateMinutes)) late = Math.max(0, Math.floor(overrideMetrics.lateMinutes))
+    if (Number.isFinite(overrideMetrics.earlyLeaveMinutes)) early = Math.max(0, Math.floor(overrideMetrics.earlyLeaveMinutes))
+  }
+  return { workMinutes: work, lateMinutes: late, earlyLeaveMinutes: early }
+}
+
+function coerceResultEditJson(value) {
+  if (typeof value === 'string') {
+    try { return JSON.parse(value) } catch { return value }
+  }
+  return value
+}
+
+// §4.1 before/after snapshot — the full record fact persisted on the audit row, independent of policy.
+function buildResultEditSnapshot(record) {
+  if (!record || typeof record !== 'object') return {}
+  const iso = (value) => {
+    if (value == null) return null
+    const date = value instanceof Date ? value : new Date(value)
+    const time = date.getTime()
+    return Number.isFinite(time) ? date.toISOString() : null
+  }
+  return {
+    id: record.id ?? null,
+    userId: record.user_id ?? null,
+    orgId: record.org_id ?? null,
+    workDate: normalizeDateOnly(record.work_date) ?? (record.work_date != null ? String(record.work_date).slice(0, 10) : null),
+    status: record.status ?? null,
+    isWorkday: record.is_workday !== false,
+    timezone: record.timezone ?? null,
+    firstInAt: iso(record.first_in_at),
+    lastOutAt: iso(record.last_out_at),
+    workMinutes: Number(record.work_minutes ?? 0),
+    lateMinutes: Number(record.late_minutes ?? 0),
+    earlyLeaveMinutes: Number(record.early_leave_minutes ?? 0),
+    meta: normalizeMetadata(record.meta),
+  }
+}
+
+// §4.1 idempotency compare: a replayed (org_id, idempotency_key) is "already applied" only when its key
+// PAYLOAD fields match the prior audit row — compared in STORED form (trimmed reason, normalized evidence)
+// so a byte-identical replay never spuriously conflicts on whitespace/key-ordering. Any divergence → 409.
+function resultEditPayloadMatches(priorRow, payload) {
+  if (!priorRow) return false
+  if (String(priorRow.record_id) !== String(payload.recordId)) return false
+  if (String(priorRow.after_status) !== String(payload.targetStatus)) return false
+  if (String(priorRow.reason ?? '') !== String(payload.reason ?? '')) return false
+  const priorEvidence = coerceResultEditJson(priorRow.evidence) ?? []
+  if (stableJsonString(priorEvidence) !== stableJsonString(payload.evidence ?? [])) return false
+  return true
+}
+
+function mapResultEditRow(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    orgId: row.org_id,
+    recordId: row.record_id,
+    userId: row.user_id,
+    workDate: normalizeDateOnly(row.work_date) ?? (row.work_date != null ? String(row.work_date).slice(0, 10) : null),
+    beforeStatus: row.before_status,
+    afterStatus: row.after_status,
+    beforeSnapshot: coerceResultEditJson(row.before_snapshot),
+    afterSnapshot: coerceResultEditJson(row.after_snapshot),
+    reason: row.reason,
+    evidence: coerceResultEditJson(row.evidence) ?? [],
+    actorUserId: row.actor_user_id,
+    idempotencyKey: row.idempotency_key,
+    notificationDeliveryId: row.notification_delivery_id ?? null,
+    notificationSkippedReason: row.notification_skipped_reason ?? null,
+    createdAt: row.created_at,
+  }
+}
+
+// AE-1 transactional write helper. Locks the target record (id+org, cross-org miss → 404 with no leak), runs
+// the editable-source / closed-cycle / edit-window guards, applies the §3.5a normalization via
+// upsertAttendanceRecord (statusOverride + overrideMetrics, NOT a naked status UPDATE so meta tiers stay
+// consistent), and writes ONE immutable audit row. Idempotency is compare-then-{alreadyApplied|409}: a prior
+// same-key row with an identical payload returns alreadyApplied with NO second write; a divergent payload → 409.
+// MUST be called inside db.transaction so a guard failure mid-flight rolls back the record update too.
+async function applyAttendanceResultEdit(trx, options) {
+  const {
+    orgId,
+    recordId,
+    targetStatus,
+    overrideMetrics,
+    reason,
+    evidence,
+    actorUserId,
+    idempotencyKey,
+    editWindowDays,
+  } = options
+
+  const normalizedEvidence = Array.isArray(evidence) ? evidence : []
+
+  // (0) Idempotency pre-check — a replay never re-mutates the record (and AE-2 will never re-enqueue).
+  const priorRows = await trx.query(
+    'SELECT * FROM attendance_record_result_edits WHERE org_id = $1 AND idempotency_key = $2 LIMIT 1',
+    [orgId, idempotencyKey]
+  )
+  if (priorRows.length > 0) {
+    const prior = priorRows[0]
+    if (resultEditPayloadMatches(prior, { recordId, targetStatus, reason, evidence: normalizedEvidence })) {
+      return { alreadyApplied: true, edit: mapResultEditRow(prior), record: null }
+    }
+    throw new HttpError(409, 'ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT', 'idempotencyKey was already used with a different payload')
+  }
+
+  // (1) Lock the target record by id + org. Cross-org / missing → 404 with no cross-org detail.
+  const lockedRows = await trx.query(
+    'SELECT * FROM attendance_records WHERE id = $1 AND org_id = $2 FOR UPDATE',
+    [recordId, orgId]
+  )
+  const record = lockedRows[0] ?? null
+  if (!record) {
+    throw new HttpError(404, 'ATTENDANCE_RECORD_NOT_FOUND', 'attendance record not found')
+  }
+  const beforeStatus = String(record.status ?? '')
+  const workDate = normalizeDateOnly(record.work_date) ?? String(record.work_date ?? '').slice(0, 10)
+
+  // (2) Editable-source guard (§3.2 / §9.7).
+  if (!RESULT_EDIT_EDITABLE_SOURCES.has(beforeStatus)) {
+    if (beforeStatus === 'normal' && RESULT_EDIT_ABNORMAL_TARGETS.has(targetStatus)) {
+      throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_NORMAL_TO_ABNORMAL_UNSUPPORTED', 'a normal result cannot be edited into an abnormal status in v1')
+    }
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_SOURCE_NOT_EDITABLE', `source status "${beforeStatus}" is not an editable anomaly result`)
+  }
+
+  // (3) Closed-cycle guard (§6 / §9.4) — fail-closed. Any same-org closed/archived cycle covering work_date
+  // rejects with 409, even when no settlement row exists; an unavailable cycle table → 503 (never bypass).
+  let cycleRows
+  try {
+    cycleRows = await trx.query(
+      `SELECT 1 FROM attendance_payroll_cycles
+        WHERE org_id = $1 AND status IN ('closed', 'archived') AND $2::date BETWEEN start_date AND end_date
+        LIMIT 1`,
+      [orgId, workDate]
+    )
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) {
+      throw new HttpError(503, 'DB_NOT_READY', 'payroll cycle table unavailable; result edit refused (fail-closed)')
+    }
+    throw error
+  }
+  if (cycleRows.length > 0) {
+    throw new HttpError(409, 'ATTENDANCE_RESULT_EDIT_CYCLE_CLOSED', 'work_date falls inside a closed or archived payroll cycle')
+  }
+
+  // (4) Resolve the record's effective rule + timezone (drives §3.5a tier recompute + the edit window).
+  const context = await resolveWorkContext({ db: trx, orgId, userId: record.user_id, workDate })
+  const timezone = context?.rule?.timezone
+  if (!timezone || !isValidTimeZoneIdentifier(timezone)) {
+    // Fail-closed: without a resolvable zone the edit window cannot be verified safely.
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve a valid timezone for the edit window (fail-closed)')
+  }
+
+  // (5) Edit window (§3.3 / §9.1) — work_date within editWindowDays of org-tz today.
+  const todayKey = toWorkDate(new Date(), timezone)
+  const todayMs = Date.parse(`${todayKey}T00:00:00Z`)
+  const workMs = Date.parse(`${workDate}T00:00:00Z`)
+  if (!Number.isFinite(todayMs) || !Number.isFinite(workMs)) {
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve the edit window (fail-closed)')
+  }
+  const diffDays = Math.floor((todayMs - workMs) / 86400000)
+  if (diffDays > editWindowDays) {
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', `work_date is older than the ${editWindowDays}-day edit window`)
+  }
+
+  // (6) Apply §3.5a normalization and re-write the record through the consistency helper (statusOverride +
+  // overrideMetrics fully shadow computeMetrics; meta tiers are recomputed from the FINAL lateMinutes).
+  const metrics = applyResultEditMetricNormalization(targetStatus, record, overrideMetrics)
+  const updated = await upsertAttendanceRecord({
+    userId: record.user_id,
+    orgId,
+    workDate,
+    timezone,
+    rule: { ...context.rule, timezone },
+    updateFirstInAt: null,
+    updateLastOutAt: null,
+    mode: 'merge',
+    statusOverride: targetStatus,
+    overrideMetrics: {
+      workMinutes: metrics.workMinutes,
+      lateMinutes: metrics.lateMinutes,
+      earlyLeaveMinutes: metrics.earlyLeaveMinutes,
+    },
+    isWorkday: record.is_workday !== false,
+    leaveMinutes: 0,
+    overtimeMinutes: 0,
+    existingRow: record,
+    client: trx,
+  })
+
+  const beforeSnapshot = buildResultEditSnapshot(record)
+  const afterSnapshot = buildResultEditSnapshot(updated)
+
+  // (7) Write the immutable audit row. The UNIQUE(org_id, idempotency_key) is the concurrency backstop: a
+  // racing same-key insert from another txn surfaces as 23505 → re-run the same compare-then-{ok|409}.
+  let auditRow
+  try {
+    const inserted = await trx.query(
+      `INSERT INTO attendance_record_result_edits
+        (org_id, record_id, user_id, work_date, before_status, after_status, before_snapshot, after_snapshot,
+         reason, evidence, actor_user_id, idempotency_key)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10::jsonb, $11, $12)
+       RETURNING *`,
+      [
+        orgId,
+        recordId,
+        record.user_id,
+        workDate,
+        beforeStatus,
+        targetStatus,
+        JSON.stringify(beforeSnapshot),
+        JSON.stringify(afterSnapshot),
+        reason,
+        JSON.stringify(normalizedEvidence),
+        actorUserId,
+        idempotencyKey,
+      ]
+    )
+    auditRow = inserted[0]
+  } catch (error) {
+    if (error?.code === '23505') {
+      const raceRows = await trx.query(
+        'SELECT * FROM attendance_record_result_edits WHERE org_id = $1 AND idempotency_key = $2 LIMIT 1',
+        [orgId, idempotencyKey]
+      )
+      const prior = raceRows[0]
+      if (prior && resultEditPayloadMatches(prior, { recordId, targetStatus, reason, evidence: normalizedEvidence })) {
+        return { alreadyApplied: true, edit: mapResultEditRow(prior), record: updated }
+      }
+      throw new HttpError(409, 'ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT', 'idempotencyKey was already used with a different payload')
+    }
+    throw error
+  }
+
+  return {
+    alreadyApplied: false,
+    edit: mapResultEditRow(auditRow),
+    record: updated,
+    beforeSnapshot,
+    afterSnapshot,
+  }
+}
+
 async function batchUpsertAttendanceRecordsValues(client, rows) {
   if (!Array.isArray(rows) || rows.length === 0) return new Map()
 
@@ -19781,6 +20131,12 @@ module.exports = {
     ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_VALUE_COLUMNS,
     resetAttendanceSettingsCacheForTests,
     mergeSettings,
+    normalizeAttendanceResultEditPolicySetting,
+    applyAttendanceResultEdit,
+    applyResultEditMetricNormalization,
+    validateAttendanceResultEditEvidence,
+    buildResultEditSnapshot,
+    resultEditPayloadMatches,
     calculateAttendanceComprehensiveShiftPlannedMinutes,
     buildAttendanceComprehensivePlannedMinutesFromDays,
     buildAttendanceComprehensiveActualMinutesFromSummary,
@@ -24596,6 +24952,112 @@ module.exports = {
 	          }
 	          logger.error('Attendance anomalies query failed', error)
 	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load anomalies' } })
+	        }
+	      })
+	    )
+
+	    context.api.http.addRoute(
+	      'POST',
+	      '/api/attendance/anomaly-result-edits',
+	      withPermission('attendance:admin', async (req, res) => {
+	        const schema = z.object({
+	          orgId: z.string().optional(),
+	          recordId: z.string().uuid(),
+	          targetStatus: z.enum(['normal', 'late', 'early_leave', 'late_early', 'partial', 'absent', 'adjusted']),
+	          reason: z.string().max(500).optional(),
+	          evidence: z.array(z.unknown()).optional(),
+	          overrideMetrics: z.object({
+	            workMinutes: z.number().int().min(0).optional(),
+	            lateMinutes: z.number().int().min(0).optional(),
+	            earlyLeaveMinutes: z.number().int().min(0).optional(),
+	          }).optional(),
+	          idempotencyKey: z.string().min(1).max(200),
+	        })
+
+	        const parsed = schema.safeParse(req.body ?? {})
+	        if (!parsed.success) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+	          return
+	        }
+
+	        const actorUserId = getUserId(req)
+	        if (!actorUserId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+	          return
+	        }
+	        const orgId = getOrgId(req)
+
+	        // idempotencyKey REQUIRED, trim 1..200; the server NEVER generates one. Missing/blank/oversized → 400,
+	        // writes nothing.
+	        const idempotencyKey = String(parsed.data.idempotencyKey ?? '').trim()
+	        if (!idempotencyKey || idempotencyKey.length > 200) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'idempotencyKey is required (1..200 chars)' } })
+	          return
+	        }
+
+	        let policy
+	        try {
+	          policy = (await getSettings(db)).attendanceResultEditPolicy ?? DEFAULT_SETTINGS.attendanceResultEditPolicy
+	        } catch (error) {
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          policy = DEFAULT_SETTINGS.attendanceResultEditPolicy
+	        }
+
+	        // enabled = master switch (default ON). The design enumerated every other guard/error code but did NOT
+	        // spec a disabled-path code; gating here (default-true so the main path is unaffected) — owner review.
+	        if (policy.enabled === false) {
+	          res.status(403).json({ ok: false, error: { code: 'ATTENDANCE_RESULT_EDIT_DISABLED', message: 'attendance result editing is disabled by policy' } })
+	          return
+	        }
+
+	        // reason: always persisted to the audit row; required (non-blank) when policy.requireReason.
+	        const reason = typeof parsed.data.reason === 'string' ? parsed.data.reason.trim() : ''
+	        if (policy.requireReason && !reason) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'reason is required' } })
+	          return
+	        }
+
+	        // evidence: metadata-only; the validator rejects raw/unsafe URLs so nothing hostile reaches the audit row.
+	        const evidenceResult = validateAttendanceResultEditEvidence(parsed.data.evidence)
+	        if (!evidenceResult.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: evidenceResult.message } })
+	          return
+	        }
+
+	        try {
+	          const result = await db.transaction(async (trx) => applyAttendanceResultEdit(trx, {
+	            orgId,
+	            recordId: parsed.data.recordId,
+	            targetStatus: parsed.data.targetStatus,
+	            overrideMetrics: parsed.data.overrideMetrics ?? null,
+	            reason,
+	            evidence: evidenceResult.value,
+	            actorUserId,
+	            idempotencyKey,
+	            editWindowDays: policy.editWindowDays,
+	          }))
+	          res.json({
+	            ok: true,
+	            data: {
+	              alreadyApplied: result.alreadyApplied === true,
+	              edit: result.edit,
+	              record: result.record ? buildResultEditSnapshot(result.record) : null,
+	            },
+	          })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          logger.error('Attendance result edit failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to edit attendance result' } })
 	        }
 	      })
 	    )
