@@ -423,6 +423,37 @@ function parseFormula(expression: string): FormulaAst {
   return new FormulaParser(tokenize(trimmed)).parse()
 }
 
+function astReferencesRequesterAttribute(ast: FormulaAst, attr: string): boolean {
+  switch (ast.kind) {
+    case 'requester':
+      return ast.attr === attr
+    case 'unary':
+      return astReferencesRequesterAttribute(ast.expr, attr)
+    case 'binary':
+    case 'compare':
+      return astReferencesRequesterAttribute(ast.left, attr) || astReferencesRequesterAttribute(ast.right, attr)
+    default:
+      return false
+  }
+}
+
+/**
+ * Token-aware: does the formula reference `requester.<attr>` as an actual reserved requester TOKEN —
+ * not a string literal like "requester.department" or a field name that merely contains the text?
+ * Parses to the AST and walks for a `{ kind: 'requester', attr }` node, so quoting can never trip it.
+ * Returns false on a parse error (callers scan already-published, parseable formulas, so this is
+ * defensive only — and false-on-error avoids over-firing the RA-1a create-time wedge guard).
+ */
+export function formulaReferencesRequesterAttribute(expression: string, attr: string): boolean {
+  let ast: FormulaAst
+  try {
+    ast = parseFormula(expression)
+  } catch {
+    return false
+  }
+  return astReferencesRequesterAttribute(ast, attr)
+}
+
 function formFieldTypeToFormulaType(field: FormField): FormulaType | 'unsupported' {
   switch (field.type) {
     case 'number':

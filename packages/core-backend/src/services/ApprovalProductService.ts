@@ -47,6 +47,7 @@ import { validateAmountTotalConsistency } from './amount-total-check'
 import {
   ApprovalConditionFormulaError,
   assertApprovalConditionFormulaValidForSchema,
+  formulaReferencesRequesterAttribute,
   parseApprovalConditionFormula,
 } from './ApprovalConditionFormula'
 import { resolveApprovalRequesterOrgRelations, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
@@ -1783,7 +1784,8 @@ export function runtimeGraphUsesRequesterDepartment(runtimeGraph: RuntimeGraph):
       if (!isRecord(branch)) return false
       const formula = isRecord(branch.formula) ? branch.formula : undefined
       const expression = formula && typeof formula.expression === 'string' ? formula.expression : ''
-      return /\brequester\s*\.\s*department\b/.test(expression)
+      // Token-aware (NOT a regex): a string literal like "requester.department" must never trip the guard.
+      return expression !== '' && formulaReferencesRequesterAttribute(expression, 'department')
     })
   })
 }
