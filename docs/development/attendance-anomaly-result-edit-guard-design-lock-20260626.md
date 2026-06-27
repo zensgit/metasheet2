@@ -1,6 +1,6 @@
-# 考勤异常结果编辑护栏 — 设计锁（PROPOSED）
+# 考勤异常结果编辑护栏 — 设计锁（RATIFIED）
 
-> **Status**: 🟡 **PROPOSED（待 owner 拍板）**。本设计锁把“异常考勤结果可人工更正”收敛成 MetaSheet 自己的契约：专用动作、原因/证据、可配置编辑窗口、审计、只通知被影响员工、以及“正常结果不可被改成异常”的 v1 护栏。本文只锁设计，不写运行时代码；实现仍按 AE-1 → AE-4 一刀一 PR。
+> **Status**: ✅ **RATIFIED（§9 owner 拍板 2026-06-27；§3.5a metric 表锁定；AE-1..AE-4 runtime 在此之后逐刀开，每刀单独 review）**。本设计锁把“异常考勤结果可人工更正”收敛成 MetaSheet 自己的契约：专用动作、原因/证据、可配置编辑窗口、审计、只通知被影响员工、以及“正常结果不可被改成异常”的 v1 护栏。本文只锁设计，不写运行时代码；实现仍按 AE-1 → AE-4 一刀一 PR。
 
 ---
 
@@ -138,8 +138,12 @@ helper 必须：
 
 - `SELECT ... FOR UPDATE` 锁定 record；
 - 读取原始 row 的 before snapshot；
-- 按目标状态应用一套显式 normalization 表；
-- 如涉及 late/early/work minutes，复用现有 metric/tier 计算能力，或明确写入 overrideMetrics 并重算 meta；
+- 按目标状态应用 **§3.5a 显式 normalization 表（Ratified 2026-06-27）**：
+  - **异常 metrics 按目标状态归一**：`normal`→ late=0、early=0；`late`→ early=0（late 保留/override）；`early_leave`→ late=0（early 保留/override）；`late_early`→ 保留 late+early；`partial`→ 保留；`absent`→ work=0、late=0、early=0；`adjusted`→ 保留/可 override。
+  - **`work_minutes` 默认保留原 record 值**（编辑是更正分类，不凭空造工时）；admin 可选传 `overrideMetrics.{workMinutes,lateMinutes,earlyLeaveMinutes}`，提供时优先。
+  - **`meta` 分级（severe_late / absence_late tiers）一律按最终 metrics 用既有 tier 计算重算**，绝不裸改 status、绝不留陈旧 meta。
+  - **边界 `absent → normal`**：默认保留 `work_minutes=0`（状态已更正用于异常报表；payroll 工时留 0，由 admin 经 `overrideMetrics.workMinutes` 设定）——v1 **不**自动补一个完整排班工作日。
+- 复用既有 `computeAttendanceRecordUpsertValues` 的 metric/tier 计算，不绕过这条一致性能力；
 - 写 audit row 后再返回 after snapshot。
 
 ---
@@ -280,13 +284,15 @@ AE-3 必测：
 
 ---
 
-## 9. Owner 拍板问题
+## 9. Owner 拍板结论（Ratified 2026-06-27）
 
-1. v1 `editWindowDays` 默认是否锁 180 天？是否允许企业改到最多 366 天？
-2. v1 目标状态是否允许 `adjusted`？还是只允许改成 `normal`？
-3. v1 evidence 是否只接受 attachmentId/文本引用，还是 AE-1 同步落 HTTPS-only URL allowlist？
-4. 关闭 payroll cycle 后的历史记录修改：v1 是否一律 409，还是允许但只写 audit、不改 payroll facts？
-5. 通知是否可被企业关闭？如果可关闭，是否仍必须在 audit row 记录 skipped reason？
+1. **editWindowDays**：默认 180 天，允许企业配 `1..366`。✅
+2. **目标状态**：允许 §3.2 全词表 `{normal, late, early_leave, late_early, partial, absent, adjusted}`（含 `adjusted`）。✅
+3. **evidence**：接受 attachmentId / 文本引用，**且** AE-1 同步落 HTTPS-only URL allowlist（长度上限、禁 script/HTML、禁空 host）；任何情况都不写未校验的裸 URL。✅
+4. **关闭/归档 payroll cycle**：一律 **409 fail-closed**（任何 status ∈ {`closed`,`archived`} 且覆盖 `work_date` 的同 org cycle；即使无 settlement row 也 409）；payroll 表不可用时亦 fail-closed。✅
+5. **通知**：`notifyAffectedEmployee` 默认 `true`，可被企业关闭；关闭时仍必须在 audit row 记 `notificationSkippedReason='policy_disabled'`。✅
+6. **§3.5 metric normalization 表**：按上文 §3.5a 锁定。✅
+7. **不可编辑来源 / `normal→normal` 空编辑的拒绝码**：`422 ATTENDANCE_RESULT_EDIT_SOURCE_NOT_EDITABLE`。✅
 
 ---
 
