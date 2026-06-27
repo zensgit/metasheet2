@@ -131,6 +131,20 @@ export function hashScope(perRecord: Array<{ recordId: string; changesHash: stri
   return createHash('sha256').update(JSON.stringify(canon)).digest('hex')
 }
 
+/**
+ * T8-1 undelete: order-invariant hash over the RESURRECT set (records that existed at T but are deleted now → to be
+ * re-inserted at their full T-snapshot). A deleted record has NO live version, so the per-record anchor is a hash of
+ * its FULL server-side T-target snapshot (`snapshotHash`), NOT a version. Binding this into the PIT-revert identity
+ * means a change to WHICH records are resurrected OR to any target snapshot between preview and execute re-hashes and
+ * is rejected (409) — the resurrect set can never be widened/narrowed/altered past what the actor previewed.
+ */
+export function hashResurrectSet(perRecord: Array<{ recordId: string; snapshotHash: string }>): string {
+  const canon = [...perRecord]
+    .sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0))
+    .map((r) => JSON.stringify([r.recordId, r.snapshotHash]))
+  return createHash('sha256').update(JSON.stringify(canon)).digest('hex')
+}
+
 export function mintScopedRestorePreviewIdentity(claims: ScopedRestorePreviewIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
   return jwt.sign({ type: 'restore-preview-scoped', ...claims }, getSecret(), { algorithm: 'HS256', expiresIn } as SignOptions)
 }
@@ -176,6 +190,10 @@ export interface PitRevertPreviewIdentityClaims {
   strategy: 'revert'
   /** sha256 over the sorted revert set (recordId + per-record masked changesHash + version), via hashScope. */
   scopeHash: string
+  /** T8-1: sha256 over the sorted RESURRECT set (recordId + T-snapshot hash), via hashResurrectSet. Always present
+   *  (empty-set hash when there are no undeletes) so the (possibly-empty) resurrect set is bound the same way the
+   *  Reset identity binds its delete-set — an execute can never inject/alter undeletes the actor did not preview. */
+  resurrectScopeHash: string
   actorId: string
 }
 
@@ -185,7 +203,7 @@ export function mintPitRevertPreviewIdentity(claims: PitRevertPreviewIdentityCla
 
 export interface PitRevertVerifyResult {
   valid: boolean
-  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_asOf' | 'mismatch_strategy' | 'mismatch_scopeHash' | 'mismatch_actorId'
+  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_asOf' | 'mismatch_strategy' | 'mismatch_scopeHash' | 'mismatch_resurrectScopeHash' | 'mismatch_actorId'
 }
 
 export function verifyPitRevertPreviewIdentity(token: string, expected: PitRevertPreviewIdentityClaims): PitRevertVerifyResult {
@@ -200,6 +218,7 @@ export function verifyPitRevertPreviewIdentity(token: string, expected: PitRever
   if (payload.asOf !== expected.asOf) return { valid: false, reason: 'mismatch_asOf' }
   if (payload.strategy !== expected.strategy) return { valid: false, reason: 'mismatch_strategy' }
   if (payload.scopeHash !== expected.scopeHash) return { valid: false, reason: 'mismatch_scopeHash' }
+  if (payload.resurrectScopeHash !== expected.resurrectScopeHash) return { valid: false, reason: 'mismatch_resurrectScopeHash' }
   if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
   return { valid: true }
 }
