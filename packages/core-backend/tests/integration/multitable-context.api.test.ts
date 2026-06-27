@@ -952,6 +952,11 @@ describe('Multitable context API', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ id: 'sheet_ops' }], rowCount: 1 }
         }
+        if (sql.includes('DELETE FROM meta_links WHERE foreign_record_id IN')) {
+          // sheet-delete cascade: clean inbound dangling edges before the sheet's records vanish (same txn).
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [], rowCount: 0 }
+        }
         if (sql.includes('DELETE FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [], rowCount: 1 }
