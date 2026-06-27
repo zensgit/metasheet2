@@ -1,6 +1,6 @@
 # RA-1a requester.department wedge guard — Design
 
-> Status: **PROPOSED — owner ratification needed** (touches the `createApproval` contract). Implemented on `claude/approval-ra1a-wedge-fix-20260627`; PR open as **draft**, do-not-merge until ratified. Source of the finding: the RA-1a deep review (2026-06-27), P2.
+> Status: **RATIFIED — SHIPPED #3296 (`4d5a388b5`, 2026-06-27).** Owner-ratified; the create-time wedge guard (reject-at-create 503/422, token-aware AST detection) is on `main`. Source of the finding: the RA-1a deep review (2026-06-27), P2.
 
 ## Problem
 `createApproval` resolves the requester's directory department best-effort and **swallows failures** into `orgRelations = {}` (`ApprovalProductService.ts` ~:2876-2886). If the template routes on `requester.department` **downstream of an approval node** and the department is absent — whether because the read **failed transiently** OR because the requester **genuinely has none** — the create succeeds, the `requester_snapshot` is frozen, and the first approval that reaches the condition throws → rolls back → re-throws on **every retry forever** (admin-cancel only). Fail-closed (no mis-route) but a permanent in-flight wedge — production-triggerable and invisible to tests.
