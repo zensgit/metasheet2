@@ -245,6 +245,45 @@ function installOverviewMock(): void {
     if (url.includes('/api/attendance/settings')) {
       return jsonResponse(200, { ok: true, data: {} })
     }
+    if (url.includes('/api/attendance/rules/me')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          userId: 'swap-user-a',
+          orgId: 'default',
+          resolvedForDate: '2026-04-15',
+          assignment: {
+            attendanceGroups: [{ id: 'group-a', name: 'Shanghai Store A', attendanceType: 'scheduled_shift' }],
+            scheduleGroups: [{ id: 'schedule-a', name: 'Morning rotation', effectiveFrom: '2026-04-01', effectiveTo: null }],
+          },
+          runtimeRule: {
+            name: 'Morning rule',
+            timezone: 'Asia/Shanghai',
+            workStartTime: '09:00',
+            workEndTime: '18:00',
+            workingDays: [1, 2, 3, 4, 5],
+            lateGraceMinutes: 5,
+            earlyLeaveGraceMinutes: 5,
+            severeLateThresholdMinutes: 30,
+            absenceLateThresholdMinutes: 60,
+            geofence: 'raw-geofence-secret',
+          },
+          configuredGroupRule: { groupId: 'group-a', ruleSetId: 'rule-set-a', enforcement: 'not_user_calc_chain' },
+          punchPolicy: {
+            source: 'org_settings',
+            unscheduledMode: 'block',
+            outdoorApprovalRequired: true,
+            outdoorNoteRequired: true,
+            approvalFlowId: 'approval-flow-secret',
+            geofence: { latitude: 31.2304, longitude: 121.4737 },
+            wifiAllowlist: ['wifi-secret'],
+            integrationConfig: { webhookToken: 'integration-secret' },
+            merge: { internalWinsOnIn: true, externalWinsOnOut: true },
+          },
+          warnings: [{ code: 'GROUP_RULE_SET_PREVIEW_DIVERGENCE' }],
+        },
+      })
+    }
     if (url.includes('/api/attendance/rules/default')) {
       return jsonResponse(200, { ok: true, data: {} })
     }
@@ -338,6 +377,20 @@ function installZeroStateMock(): void {
     }
     if (url.includes('/api/attendance/settings')) {
       return jsonResponse(200, { ok: true, data: {} })
+    }
+    if (url.includes('/api/attendance/rules/me')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          userId: 'swap-user-a',
+          orgId: 'default',
+          resolvedForDate: '2026-04-15',
+          assignment: { attendanceGroups: [], scheduleGroups: [] },
+          runtimeRule: { timezone: 'Asia/Shanghai' },
+          punchPolicy: { unscheduledMode: 'allow', outdoorApprovalRequired: false, merge: {} },
+          warnings: [{ code: 'NO_ATTENDANCE_GROUP' }, { code: 'DEFAULT_RULE_FALLBACK' }],
+        },
+      })
     }
     if (url.includes('/api/attendance/rules/default')) {
       return jsonResponse(200, { ok: true, data: {} })
@@ -537,10 +590,129 @@ describe('Attendance self-service dashboard', () => {
     expect(container?.querySelector('[data-selfservice-card="requests"]')?.textContent).toContain('Approved · 1')
     expect(container?.querySelector('[data-selfservice-card="requests"]')?.textContent).toContain('Rejected · 1')
     expect(container?.querySelector('[data-selfservice-request-followup]')?.textContent).toContain('Pending follow-up')
+    expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Shanghai Store A')
+    expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Morning rotation')
+    expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('09:00-18:00 · Asia/Shanghai')
+    expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Mon, Tue, Wed, Thu, Fri')
+    expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Late 5m / Early 5m')
+    expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Severe 30m / Absence 60m')
+    expect(container?.querySelector('[data-selfservice-rules-warnings]')?.textContent).toContain('Group rule is preview-only')
+    const rulesCard = container?.querySelector('[data-selfservice-card="rules"]')?.textContent ?? ''
+    expect(rulesCard).not.toContain('raw-geofence-secret')
+    expect(rulesCard).not.toContain('approvalFlowId')
+    expect(rulesCard).not.toContain('approval-flow-secret')
+    expect(rulesCard).not.toContain('wifi-secret')
+    expect(rulesCard).not.toContain('integration-secret')
     expect(container?.querySelector('[data-selfservice-card="actions"]')?.textContent).toContain('Fix missing punch')
     expect(container?.querySelector('[data-selfservice-primary-action]')?.textContent).toContain('Resolve anomaly reminders')
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('Adjusted')
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('manual correction')
+  })
+
+  it('clears stale self-service rules while a reload is in flight', async () => {
+    installOverviewMock()
+    const baseImpl = vi.mocked(apiFetch).getMockImplementation()
+    let rulesCallCount = 0
+    let resolveSecondRules: ((response: Response) => void) | null = null
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/rules/me')) {
+        rulesCallCount += 1
+        if (rulesCallCount === 1) {
+          return jsonResponse(200, {
+            ok: true,
+            data: {
+              userId: 'swap-user-a',
+              orgId: 'default',
+              assignment: { attendanceGroups: [{ id: 'group-a', name: 'Store A' }], scheduleGroups: [] },
+              runtimeRule: { timezone: 'Asia/Shanghai', workStartTime: '09:00', workEndTime: '18:00', workingDays: [1, 2, 3, 4, 5] },
+              punchPolicy: { unscheduledMode: 'block', outdoorApprovalRequired: false, merge: {} },
+              warnings: [],
+            },
+          })
+        }
+        return new Promise<Response>((resolve) => {
+          resolveSecondRules = resolve
+        })
+      }
+      if (baseImpl) return baseImpl(input, init)
+      return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(12)
+    expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Store A')
+
+    findButton(container!, 'Refresh').click()
+    await flushUi(2)
+    const rulesCardDuringLoad = container?.querySelector('[data-selfservice-card="rules"]')?.textContent ?? ''
+    expect(rulesCardDuringLoad).not.toContain('Store A')
+    expect(rulesCardDuringLoad).toContain('Loading...')
+
+    expect(resolveSecondRules).toBeTruthy()
+    resolveSecondRules!(jsonResponse(200, {
+      ok: true,
+      data: {
+        userId: 'swap-user-a',
+        orgId: 'default',
+        assignment: { attendanceGroups: [{ id: 'group-b', name: 'Store B' }], scheduleGroups: [] },
+        runtimeRule: { timezone: 'Asia/Shanghai', workStartTime: '10:00', workEndTime: '19:00', workingDays: [2, 3, 4] },
+        punchPolicy: { unscheduledMode: 'allow', outdoorApprovalRequired: false, merge: {} },
+        warnings: [],
+      },
+    }))
+    await flushUi(12)
+    expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Store B')
+  })
+
+  it('clears stale self-service rules when a reload fails', async () => {
+    installOverviewMock()
+    const baseImpl = vi.mocked(apiFetch).getMockImplementation()
+    let rulesCallCount = 0
+    let resolveSecondRules: ((response: Response) => void) | null = null
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/rules/me')) {
+        rulesCallCount += 1
+        if (rulesCallCount === 1) {
+          return jsonResponse(200, {
+            ok: true,
+            data: {
+              userId: 'swap-user-a',
+              orgId: 'default',
+              assignment: { attendanceGroups: [{ id: 'group-a', name: 'Store A' }], scheduleGroups: [] },
+              runtimeRule: { timezone: 'Asia/Shanghai', workStartTime: '09:00', workEndTime: '18:00', workingDays: [1, 2, 3, 4, 5] },
+              punchPolicy: { unscheduledMode: 'block', outdoorApprovalRequired: false, merge: {} },
+              warnings: [],
+            },
+          })
+        }
+        return new Promise<Response>((resolve) => {
+          resolveSecondRules = resolve
+        })
+      }
+      if (baseImpl) return baseImpl(input, init)
+      return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(12)
+    expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Store A')
+
+    findButton(container!, 'Refresh').click()
+    await flushUi(2)
+    const rulesCardDuringLoad = container?.querySelector('[data-selfservice-card="rules"]')?.textContent ?? ''
+    expect(rulesCardDuringLoad).not.toContain('Store A')
+    expect(rulesCardDuringLoad).toContain('Loading...')
+
+    expect(resolveSecondRules).toBeTruthy()
+    resolveSecondRules!(jsonResponse(500, { ok: false, error: { message: 'rules failed' } }))
+    await flushUi(12)
+    const rulesCardAfterFailure = container?.querySelector('[data-selfservice-card="rules"]')?.textContent ?? ''
+    expect(rulesCardAfterFailure).toContain('rules failed')
+    expect(rulesCardAfterFailure).not.toContain('Store A')
   })
 
   it('renders effective-calendar holiday anchors and approved overlays in the personal calendar', async () => {

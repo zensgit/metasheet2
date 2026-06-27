@@ -150,6 +150,21 @@
 
 ---
 
+## 0.6 下一候选目标（PROPOSED, 2026-06-26）— 人工提醒应到未打卡
+
+> post-H2 小切片目标提案：在已闭环的 attendance records/anomalies 事实基础 + C5 delivery outbox 上，补一个管理员主动提醒 selected owed-punch users 的 humane operation。正式设计锁：`attendance-manual-missed-punch-reminder-design-lock-20260626.md`。本节记录 HMR stack；**HMR-5 staging PASS 前不标整线完成**。
+
+| Slice | 内容 | 当前状态 | 完成口径 |
+|---|---|---|---|
+| HMR-0 | 设计锁 + tracker proposal | 🟡 #3268 | 锁 v1：records-backed owed-punch candidates；只写 C5 outbox、不直发；新增 scheduler-scope `remind` action；affected employee only；idempotency key 防双发 |
+| HMR-1 | scheduler-scope `remind` action | ✅ #3269 | allowlist + UI labels + regression，证明 existing actions 不回归 |
+| HMR-2 | owed-punch candidate read/filter | ✅ #3270 | records-backed `absent`/`partial` 候选 + pending request hint + scoped/central authority tests |
+| HMR-3 | manual reminder enqueue route | ✅ #3271 | `manual_missed_punch_reminder` delivery rows；replay no-op；payload conflict 409；out-of-scope 403；stale candidate 409；producer 不直接 send |
+| HMR-4 | admin UI | ✅ #3272 | admin notification-deliveries operation；candidate load + selected remind confirm/result；confirm snapshot authoritative；web regressions |
+| HMR-5 | staging smoke | 🟡 runbook prepared | scoped actor enqueue → worker delivery → repeat no duplicate → stale/out-of-scope guards → residue=0；runbook `attendance-manual-missed-punch-reminder-hmr5-staging-runbook-20260626.md` |
+
+---
+
 ## 1. H2 目标档位（产品负责人 2026-06-01 最终版）
 
 > 验收口径：MUST 项 = **后端运行时强制 + 前端可配 + 反向（权限/校验）测试 + 1 条 staging 联调** 才算 ✅；不是"能展示"算完。

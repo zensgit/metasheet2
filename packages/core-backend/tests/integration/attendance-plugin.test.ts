@@ -5482,6 +5482,168 @@ attendanceIntegrationDescribe(
     }
   })
 
+  it('attendance rules /me — returns a token-subject rule summary, rejects overrides, and does not leak admin settings', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const meId = `rules-me-${runSuffix}`
+    const otherId = `rules-me-other-${runSuffix}`
+    const adminId = `rules-me-admin-${runSuffix}`
+    const ruleSetId = randomUuidV4()
+    const attendanceGroupId = randomUuidV4()
+    const scheduleGroupAId = randomUuidV4()
+    const scheduleGroupBId = randomUuidV4()
+    const asOf = '2026-06-15'
+    const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+    const employeeTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(meId)}&tenantId=default&roles=employee&perms=attendance:read`)
+    const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+    const employeeToken = (employeeTokenRes.body as { token?: string } | undefined)?.token
+    expect(adminToken).toBeTruthy()
+    expect(employeeToken).toBeTruthy()
+    if (!adminToken || !employeeToken) { await pool.end().catch(() => undefined); return }
+    const adminHeaders = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+    const headers = { Authorization: `Bearer ${employeeToken}` }
+    const originalSettingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+    const originalSettings = (originalSettingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
+    try {
+      await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: adminHeaders,
+        body: JSON.stringify({
+          punchPolicy: {
+            unscheduled: { mode: 'block' },
+            merge: { internalWinsOnIn: true, externalWinsOnOut: true },
+            outdoor: { requireApproval: true, requireNote: true, approvalFlowId: `secret-flow-${runSuffix}` },
+          },
+          geoFence: { lat: 31.23, lng: 121.47, radiusMeters: 300 },
+        }),
+      })
+      await pool.query(
+        `INSERT INTO users (id, email, name, password_hash, is_active)
+         VALUES ($1, $2, $3, 'no-login', true), ($4, $5, $6, 'no-login', true)
+         ON CONFLICT (id) DO UPDATE SET is_active = true`,
+        [meId, `${meId}@example.com`, meId, otherId, `${otherId}@example.com`, otherId],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active)
+         VALUES ($1, 'default', true), ($2, 'default', true)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [meId, otherId],
+      )
+      await pool.query(
+        `INSERT INTO attendance_rule_sets (id, org_id, name, version, scope, config, is_default)
+         VALUES ($1, 'default', $2, 1, 'org', $3::jsonb, false)`,
+        [ruleSetId, `Rules Me Rule Set ${runSuffix}`, JSON.stringify({ source: 'manual', sensitive: `rule-set-secret-${runSuffix}` })],
+      )
+      await pool.query(
+        `INSERT INTO attendance_groups (id, org_id, name, code, timezone, rule_set_id, attendance_type, created_at, updated_at)
+         VALUES ($1, 'default', $2, $3, 'Asia/Shanghai', $4, 'scheduled_shift', now(), now())`,
+        [attendanceGroupId, `Rules Me Group ${runSuffix}`, `rules-me-${runSuffix}`, ruleSetId],
+      )
+      await pool.query(
+        `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
+         VALUES ('default', $1, $2, now(), now())`,
+        [attendanceGroupId, meId],
+      )
+      await pool.query(
+        `INSERT INTO attendance_schedule_groups
+           (id, org_id, name, code, attendance_group_id, department_ref, source, is_active, created_by, updated_by, created_at, updated_at)
+         VALUES
+           ($1, 'default', $2, $3, $7, 'dept-a', 'manual', true, $8, $8, now(), now()),
+           ($4, 'default', $5, $6, $7, 'dept-b', 'manual', true, $8, $8, now(), now())`,
+        [
+          scheduleGroupAId,
+          `Rules Me Schedule A ${runSuffix}`,
+          `rules-me-sga-${runSuffix}`,
+          scheduleGroupBId,
+          `Rules Me Schedule B ${runSuffix}`,
+          `rules-me-sgb-${runSuffix}`,
+          attendanceGroupId,
+          adminId,
+        ],
+      )
+      await pool.query(
+        `INSERT INTO attendance_schedule_group_members
+           (org_id, schedule_group_id, user_id, effective_from, effective_to, role, source, created_by, updated_by, created_at, updated_at)
+         VALUES
+           ('default', $1, $3, '2026-01-01', '2026-12-31', 'member', 'manual', $4, $4, now(), now()),
+           ('default', $2, $3, '2026-06-01', '2026-06-30', 'backup', 'manual', $4, $4, now(), now())`,
+        [scheduleGroupAId, scheduleGroupBId, meId, adminId],
+      )
+
+      const res = await requestJson(`${baseUrl}/api/attendance/rules/me?asOf=${asOf}`, { headers })
+      expect(res.status, res.raw).toBe(200)
+      const data = (res.body as { data?: Record<string, unknown> } | undefined)?.data as {
+        userId?: string
+        orgId?: string
+        resolvedForDate?: string
+        assignment?: {
+          attendanceGroups?: Array<Record<string, unknown>>
+          scheduleGroups?: Array<Record<string, unknown>>
+        }
+        runtimeRule?: Record<string, unknown>
+        configuredGroupRule?: Record<string, unknown>
+        punchPolicy?: Record<string, unknown>
+        warnings?: Array<{ code?: string }>
+      } | undefined
+      expect(data?.userId).toBe(meId)
+      expect(data?.orgId).toBe('default')
+      expect(data?.resolvedForDate).toBe(asOf)
+      expect(data?.assignment?.attendanceGroups).toHaveLength(1)
+      expect(data?.assignment?.attendanceGroups?.[0]).toMatchObject({
+        id: attendanceGroupId,
+        attendanceType: 'scheduled_shift',
+        ruleSetId,
+      })
+      expect(data?.assignment?.scheduleGroups).toHaveLength(2)
+      expect(data?.runtimeRule).toMatchObject({ source: 'rule', timezone: expect.any(String) })
+      expect(data?.configuredGroupRule).toMatchObject({ groupId: attendanceGroupId, ruleSetId, enforcement: 'not_user_calc_chain' })
+      expect(data?.punchPolicy).toMatchObject({
+        source: 'org_settings',
+        unscheduledMode: 'block',
+        outdoorApprovalRequired: true,
+        outdoorNoteRequired: true,
+        merge: { internalWinsOnIn: true, externalWinsOnOut: true },
+      })
+      const warningCodes = new Set((data?.warnings ?? []).map((warning: { code?: string }) => warning.code))
+      expect(warningCodes.has('MULTIPLE_SCHEDULE_GROUPS')).toBe(true)
+      expect(warningCodes.has('SCHEDULE_GROUP_WINDOW_OVERLAP')).toBe(true)
+      expect(warningCodes.has('GROUP_RULE_SET_PREVIEW_DIVERGENCE')).toBe(true)
+      expect(res.raw).not.toContain(`secret-flow-${runSuffix}`)
+      expect(res.raw).not.toContain(`rule-set-secret-${runSuffix}`)
+      expect(res.raw).not.toContain('geoFence')
+
+      const spoofQuery = await requestJson(`${baseUrl}/api/attendance/rules/me?asOf=${asOf}&userId=${encodeURIComponent(otherId)}`, { headers })
+      expect(spoofQuery.status).toBe(400)
+      expect((spoofQuery.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ATTENDANCE_RULES_ME_SUBJECT_OVERRIDE')
+      const spoofHeader = await requestJson(`${baseUrl}/api/attendance/rules/me?asOf=${asOf}`, { headers: { ...headers, 'x-user-id': otherId } })
+      expect(spoofHeader.status).toBe(400)
+      const spoofOrgHeader = await requestJson(`${baseUrl}/api/attendance/rules/me?asOf=${asOf}`, { headers: { ...headers, 'x-org-id': 'other-org' } })
+      expect(spoofOrgHeader.status).toBe(400)
+      const spoofTenantHeader = await requestJson(`${baseUrl}/api/attendance/rules/me?asOf=${asOf}`, { headers: { ...headers, 'x-tenant-id': 'other-org' } })
+      expect(spoofTenantHeader.status).toBe(400)
+    } finally {
+      await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: adminHeaders,
+        body: JSON.stringify({
+          punchPolicy: originalSettings.punchPolicy,
+          geoFence: originalSettings.geoFence ?? null,
+        }),
+      }).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_schedule_group_members WHERE user_id = ANY($1::text[])`, [[meId, otherId]]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_schedule_groups WHERE id = ANY($1::uuid[])`, [[scheduleGroupAId, scheduleGroupBId]]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_group_members WHERE user_id = ANY($1::text[])`, [[meId, otherId]]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_groups WHERE id = $1`, [attendanceGroupId]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_rule_sets WHERE id = $1`, [ruleSetId]).catch(() => undefined)
+      await pool.query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [[meId, otherId]]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[meId, otherId]]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   it('A2 auto-shift auto-write ledger — active-run claim and item invariants are DB-enforced (latent schema)', async () => {
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
     if (!dbUrl) return
@@ -15801,6 +15963,136 @@ attendanceIntegrationDescribe(
       await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[adminId, readOnlyId]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_notification_deliveries WHERE org_id = $1`, [orgId]).catch(() => undefined)
       await pool.end()
+    }
+  })
+
+  it('HMR-3: enqueues manual missed-punch reminders into the notification outbox idempotently', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const orgId = `hmr3-${runSuffix}`
+    const adminId = `hmr3-admin-${runSuffix}`
+    const workerId = `hmr3-worker-${runSuffix}`
+    const recordId = randomUUID()
+    const sourceBatchId = randomUUID()
+    const workDate = '2037-04-15'
+    const idempotencyKey = `hmr3-${runSuffix}`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const previousDefaultChannel = process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL
+    const pool = new Pool({ connectionString: dbUrl })
+
+    try {
+      process.env.RBAC_BYPASS = 'true'
+      delete process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL
+      await requireAttendanceTable(pool, 'attendance_notification_deliveries')
+      await pool.query(
+        `INSERT INTO attendance_records
+         (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'Asia/Shanghai', NULL, $5::timestamptz, 480, 0, 0, 'partial', true, $6::jsonb, $7, now(), now())`,
+        [
+          recordId,
+          workerId,
+          orgId,
+          workDate,
+          `${workDate}T10:00:00.000Z`,
+          JSON.stringify({ source: 'hmr3-integration' }),
+          sourceBatchId,
+        ],
+      )
+
+      const tokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&roles=admin&perms=attendance:read,attendance:admin`,
+      )
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+      const payload = {
+        recordIds: [recordId],
+        message: 'Please submit a missed-punch request.',
+        idempotencyKey,
+      }
+
+      const first = await requestJson(`${baseUrl}/api/attendance/manual-missed-punch-reminders/enqueue?orgId=${encodeURIComponent(orgId)}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      })
+      expect(first.status, first.raw).toBe(202)
+      expect(first.body).toMatchObject({
+        ok: true,
+        data: {
+          channel: 'dingtalk_work_notification',
+          created: 1,
+          existing: 0,
+          candidates: [
+            {
+              recordId,
+              userId: workerId,
+              workDate,
+              missingSide: 'check_in',
+              selectedByDefault: true,
+            },
+          ],
+        },
+      })
+
+      await pool.query(
+        `UPDATE attendance_records
+         SET status = 'normal', first_in_at = $2::timestamptz, updated_at = now()
+         WHERE id = $1`,
+        [recordId, `${workDate}T01:00:00.000Z`],
+      )
+
+      const replay = await requestJson(`${baseUrl}/api/attendance/manual-missed-punch-reminders/enqueue?orgId=${encodeURIComponent(orgId)}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      })
+      expect(replay.status, replay.raw).toBe(202)
+      expect(replay.body).toMatchObject({ ok: true, data: { created: 0, existing: 1 } })
+
+      const rows = await pool.query(
+        `SELECT source_type, source_id, source_key, recipient_user_id, channel, status, payload
+         FROM attendance_notification_deliveries
+         WHERE org_id = $1
+         ORDER BY created_at ASC`,
+        [orgId],
+      )
+      expect(rows.rows).toHaveLength(1)
+      expect(rows.rows[0]).toMatchObject({
+        source_type: 'manual_missed_punch_reminder',
+        source_id: `manual_missed_punch_reminder:${idempotencyKey}`,
+        recipient_user_id: workerId,
+        channel: 'dingtalk_work_notification',
+        status: 'pending',
+      })
+      expect(rows.rows[0].source_key).toBe(`manual_missed_punch_reminder:${idempotencyKey}:recipient:${workerId}:channel:dingtalk_work_notification`)
+      expect(rows.rows[0].payload).toMatchObject({
+        kind: 'manual_missed_punch_reminder',
+        body: 'Please submit a missed-punch request.',
+        actorUserId: adminId,
+        recipientUserId: workerId,
+        recordIds: [recordId],
+        candidates: [
+          {
+            recordId,
+            userId: workerId,
+            workDate,
+            missingSide: 'check_in',
+          },
+        ],
+      })
+    } finally {
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      if (previousDefaultChannel === undefined) delete process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL
+      else process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL = previousDefaultChannel
+      await pool.query(`DELETE FROM attendance_notification_deliveries WHERE org_id = $1`, [orgId]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_records WHERE id = $1`, [recordId]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
     }
   })
 

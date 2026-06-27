@@ -87,6 +87,7 @@ describeIfDatabase('continuous_managers chain walk (real DB)', () => {
     const rel = await resolveApprovalRequesterOrgRelations(U_R, queryFn, { includeManagerChain: true })
     expect(rel.managerChainIds).toEqual([U_M]) // exactly one level; level-2 finds no leader → stops
     expect(rel.managerId).toBe(U_M) // chain[0] agrees with the shipped direct-manager resolution
+    expect(rel.primaryDepartmentName).toBe('Eng') // RA-1a: requester.department source SQL-lift proven on real DB
   })
 
   it('B1 end-to-end: a manager_at_level template bakes the chain (scanner gate) and resolves the level-1 manager', async () => {

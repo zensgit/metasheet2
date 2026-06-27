@@ -1,6 +1,6 @@
 # Requester / org-attribute formula conditions — Design Lock
 
-Status: RATIFIED — RUNTIME NOT BUILT. Owner decisions RESOLVED 2026-06-26 + a SCOPE CORRECTION 2026-06-26
+Status: RATIFIED — **RA-1a (`requester.department`) SHIPPED #3265 (`369417694`)**; RA-1b/`title`/`level`/RA-2/RA-3 NOT BUILT. Owner decisions RESOLVED 2026-06-26 + a SCOPE CORRECTION 2026-06-26
 (see bottom): RA-1a ships **`requester.department` ONLY** — `requester.level` is DEFERRED because the
 directory has no seniority-level source (Decision 2). `level`/`role`/`title`/`in`/array literals/unknown
 attr all parse/publish fail-closed in RA-1a; seniority (`title` vs `level`) and `role` follow in their own
@@ -42,13 +42,15 @@ amount total-check already ships (validate-at-publish vs reject-at-runtime):
   schema / provider capability before the template can publish. The author fixes it where they authored
   it. A template referencing an attribute the org cannot supply MUST fail publish — NOT brick every
   requester's create.
-  - **RA-1a deviation (recorded 2026-06-26):** RA-1a does the ATTRIBUTE half at publish (the `{department}`
-    allowlist parse/publish-rejects `level`/`role`/`title`/unknown) but DEFERS the org-DATA half (does this
-    org's directory actually carry department names) to RA-2 — that check needs the org's directory context
-    at publish, which the form-schema validator lacks. Safe for `department`: an org with no department
-    names has `requester.department` formulas fail-closed at RUNTIME (reject the create, never
-    phantom-route), just caught later than this paragraph's general promise. RA-2 adds the publish-time
-    org-capability check.
+  - **RA-1a as-built (corrected 2026-06-27):** for `requester.department` there is **no org-DATA publish-gap**.
+    `directory_departments.name` is an always-present structural column, so the *attribute* is always
+    structurally supported; whether a given requester resolves a department is purely **row-level runtime**
+    fact, handled by the runtime fail-closed below. RA-1a's publish is therefore **complete**: the
+    `{department}` allowlist (parse/publish-rejects `level`/`role`/`title`/unknown), the operator restricted
+    to `==`/`!=` (enforced via `department` being `string`-typed — ordering operators require numeric
+    operands and so fail type-check), and a boolean result-type. The general "MUST fail publish" promise
+    above applies only to *future* attributes whose backing directory column can be **genuinely absent for a
+    provider** — `department` is not one, so there is no deferred RA-2 publish-check for it.
 - **Row-level absence — attribute supported, but absent for THIS requester.** That is the **runtime
   fail-closed**: reject this `createApproval` rather than route on a phantom value (never default-to-0,
   never silently take `defaultEdgeKey` — error vs no-match, same as the FC-1 evaluator).
@@ -87,9 +89,12 @@ or the form — they live only in the frozen snapshot the evaluator reads.)
 - **RA-1 — snapshot + evaluator namespace.** Extend `ApprovalDirectoryOrg` to lift the chosen attributes
   into the frozen snapshot; extend the FC-1 evaluator to resolve `requester.*` from the snapshot (never
   formData); reuse the FC-1 narrow-evaluator discipline (no eval, bounded, fail-closed).
-- **RA-2 — the publish/runtime split.** Publish-time: reject a template whose `requester.*` refs the org
-  can't supply. Runtime: reject a create whose required attribute is absent for that requester. Tests for
-  BOTH branches + the membership semantics + ordinal direction.
+- **RA-2 — the publish/runtime split (for structurally-absent-capable attributes only).** Publish-time:
+  reject a template whose `requester.*` refs an attribute whose backing directory column can be **genuinely
+  absent for a provider**. Runtime: reject a create whose required attribute is absent for that requester.
+  Tests for BOTH branches + the membership semantics + ordinal direction. **`requester.department` needs no
+  publish-time org check** — its column (`directory_departments.name`) always exists, so only the runtime
+  branch applies; RA-2 is a no-op for any attribute already backed by an always-present column.
 - **RA-3 — no trust regression.** A `requester.*` formula reads only the frozen server snapshot; a form
   field named `requester` cannot spoof it; the FE preview is non-authoritative.
 

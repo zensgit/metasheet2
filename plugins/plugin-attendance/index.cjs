@@ -56,6 +56,27 @@ function computeLateTierCounts(lateMinutes, rule) {
     absenceLateCount,
   }
 }
+
+function resolveAttendanceDefaultDeliveryChannelForProducer(env = process.env) {
+  const configured = String(env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL ?? '').trim()
+  return ATTENDANCE_ROUTABLE_DEFAULT_DELIVERY_CHANNELS.has(configured)
+    ? configured
+    : ATTENDANCE_DINGTALK_WORK_NOTIFICATION_CHANNEL
+}
+
+function stableJsonValue(value) {
+  if (Array.isArray(value)) return value.map(stableJsonValue)
+  if (value instanceof Date) return value.toISOString()
+  if (!value || typeof value !== 'object') return value
+  const out = {}
+  for (const key of Object.keys(value).sort()) out[key] = stableJsonValue(value[key])
+  return out
+}
+
+function stableJsonString(value) {
+  return JSON.stringify(stableJsonValue(value))
+}
+
 const DEFAULT_SHIFT = {
   orgId: DEFAULT_ORG_ID,
   name: 'Standard Shift',
@@ -94,7 +115,11 @@ const ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS = ['attendance:approve', 'attendance
 const ATTENDANCE_SCHEDULE_GROUP_SOURCES = new Set(['manual', 'import', 'integration'])
 const ATTENDANCE_SCHEDULE_GROUP_MEMBER_ROLES = new Set(['member', 'lead', 'backup'])
 const ATTENDANCE_SCHEDULER_SCOPE_SUBJECT_TYPES = new Set(['user', 'role', 'role_tag'])
-const ATTENDANCE_SCHEDULER_SCOPE_ACTIONS = new Set(['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'])
+const ATTENDANCE_SCHEDULER_SCOPE_ACTION_VALUES = ['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch', 'remind']
+const ATTENDANCE_SCHEDULER_SCOPE_ACTIONS = new Set(ATTENDANCE_SCHEDULER_SCOPE_ACTION_VALUES)
+const ATTENDANCE_DINGTALK_WORK_NOTIFICATION_CHANNEL = 'dingtalk_work_notification'
+const ATTENDANCE_ROUTABLE_DEFAULT_DELIVERY_CHANNELS = new Set([ATTENDANCE_DINGTALK_WORK_NOTIFICATION_CHANNEL, 'email_smtp'])
+const MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE = 'manual_missed_punch_reminder'
 const AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG = 'system:attendance-auto-shift'
 const AUTO_SHIFT_AUTO_WRITE_SOURCE = 'scheduler'
 const ATTENDANCE_GROUP_TYPES = new Set(['fixed_shift', 'scheduled_shift', 'free_time'])
@@ -14339,6 +14364,186 @@ async function loadAttendanceScopeContextForUser(db, orgId, userId) {
   }
 }
 
+const ATTENDANCE_RULES_ME_FORBIDDEN_QUERY_KEYS = new Set([
+  'userId',
+  'user_id',
+  'orgId',
+  'org_id',
+  'tenantId',
+  'tenant_id',
+  'workspaceId',
+  'workspace_id',
+  'groupId',
+  'group_id',
+])
+const ATTENDANCE_RULES_ME_FORBIDDEN_HEADER_KEYS = new Set([
+  'x-user-id',
+  'x-org-id',
+  'x-tenant-id',
+  'x-workspace-id',
+  'x-group-id',
+  'x-attendance-group-id',
+  'x-schedule-group-id',
+])
+
+function hasOwnRequestKey(input, forbiddenKeys) {
+  if (!input || typeof input !== 'object') return false
+  return [...forbiddenKeys].some(key => Object.prototype.hasOwnProperty.call(input, key))
+}
+
+function hasAttendanceRulesMeSubjectOverride(req) {
+  if (hasOwnRequestKey(req.query, ATTENDANCE_RULES_ME_FORBIDDEN_QUERY_KEYS)) return true
+  if (hasOwnRequestKey(req.body, ATTENDANCE_RULES_ME_FORBIDDEN_QUERY_KEYS)) return true
+  const headers = req.headers || {}
+  return [...ATTENDANCE_RULES_ME_FORBIDDEN_HEADER_KEYS].some(key => headers[key] !== undefined)
+}
+
+function getAttendanceRulesMeOrgId(req) {
+  const user = req.user || {}
+  for (const value of [user.orgId, user.workspaceId, user.tenantId]) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  // Existing dev-token attendance tests do not mint org/workspace claims. Keep
+  // that local/default compatibility without accepting request-level org overrides.
+  return DEFAULT_ORG_ID
+}
+
+function mapAttendanceRulesMeRuntimeRule(context) {
+  const rule = context?.rule || DEFAULT_RULE
+  return {
+    source: context?.source || 'rule',
+    id: rule.id ?? null,
+    name: rule.name ?? DEFAULT_RULE.name,
+    timezone: rule.timezone ?? DEFAULT_RULE.timezone,
+    workStartTime: rule.workStartTime ?? rule.work_start_time ?? DEFAULT_RULE.workStartTime,
+    workEndTime: rule.workEndTime ?? rule.work_end_time ?? DEFAULT_RULE.workEndTime,
+    lateGraceMinutes: Number(rule.lateGraceMinutes ?? rule.late_grace_minutes ?? DEFAULT_RULE.lateGraceMinutes),
+    earlyGraceMinutes: Number(rule.earlyGraceMinutes ?? rule.early_grace_minutes ?? DEFAULT_RULE.earlyGraceMinutes),
+    severeLateThresholdMinutes: Number(rule.severeLateThresholdMinutes ?? rule.severe_late_threshold_minutes ?? DEFAULT_RULE.severeLateThresholdMinutes),
+    absenceLateThresholdMinutes: Number(rule.absenceLateThresholdMinutes ?? rule.absence_late_threshold_minutes ?? DEFAULT_RULE.absenceLateThresholdMinutes),
+    roundingMinutes: Number(rule.roundingMinutes ?? rule.rounding_minutes ?? DEFAULT_RULE.roundingMinutes),
+    workingDays: normalizeWorkingDays(rule.workingDays ?? rule.working_days),
+    isWorkingDay: context?.isWorkingDay === true,
+  }
+}
+
+function mapAttendanceRulesMeAttendanceGroup(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    code: row.code ?? '',
+    attendanceType: normalizeAttendanceGroupType(row.attendance_type),
+    timezone: row.timezone ?? DEFAULT_RULE.timezone,
+    ruleSetId: row.rule_set_id ?? null,
+  }
+}
+
+function mapAttendanceRulesMeScheduleGroup(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    code: row.code ?? '',
+    departmentRef: row.department_ref ?? null,
+    role: row.role ?? null,
+    source: row.source ?? 'manual',
+    effectiveFrom: normalizeDateOnly(row.effective_from),
+    effectiveTo: normalizeDateOnly(row.effective_to),
+  }
+}
+
+function mapAttendanceRulesMePunchPolicy(settings) {
+  const punchPolicy = normalizePunchPolicySetting(settings?.punchPolicy)
+  return {
+    source: 'org_settings',
+    unscheduledMode: punchPolicy.unscheduled.mode,
+    outdoorApprovalRequired: punchPolicy.outdoor.requireApproval === true,
+    outdoorNoteRequired: punchPolicy.outdoor.requireNote === true,
+    merge: {
+      internalWinsOnIn: punchPolicy.merge.internalWinsOnIn === true,
+      externalWinsOnOut: punchPolicy.merge.externalWinsOnOut === true,
+    },
+  }
+}
+
+async function loadAttendanceRulesMeSummary(db, { orgId, userId, workDate }) {
+  const warnings = []
+  const membershipRows = await db.query(
+    `SELECT 1
+       FROM user_orgs uo
+       JOIN users u ON u.id = uo.user_id
+      WHERE uo.user_id = $1
+        AND uo.org_id = $2
+        AND uo.is_active = true
+        AND u.is_active = true
+      LIMIT 1`,
+    [userId, orgId],
+  )
+  if (!membershipRows.length) {
+    throw new HttpError(404, 'USER_NOT_IN_ORG', 'User is not an active member of this org')
+  }
+
+  const attendanceGroupRows = await db.query(
+    `SELECT g.id, g.name, g.code, g.attendance_type, g.timezone, g.rule_set_id
+       FROM attendance_group_members m
+       JOIN attendance_groups g ON g.id = m.group_id AND g.org_id = m.org_id
+      WHERE m.org_id = $1
+        AND m.user_id = $2
+      ORDER BY g.name ASC, g.id ASC`,
+    [orgId, userId],
+  )
+  if (attendanceGroupRows.length === 0) warnings.push({ code: 'NO_ATTENDANCE_GROUP', severity: 'warning' })
+  if (attendanceGroupRows.length > 1) warnings.push({ code: 'MULTIPLE_ATTENDANCE_GROUPS', severity: 'warning' })
+
+  const scheduleGroupRows = await db.query(
+    `SELECT g.id, g.name, g.code, g.department_ref, m.role, m.source, m.effective_from, m.effective_to
+       FROM attendance_schedule_group_members m
+       JOIN attendance_schedule_groups g
+         ON g.id = m.schedule_group_id
+        AND g.org_id = m.org_id
+        AND COALESCE(g.is_active, true) = true
+      WHERE m.org_id = $1
+        AND m.user_id = $2
+        AND COALESCE(m.effective_from, DATE '0001-01-01') <= $3::date
+        AND COALESCE(m.effective_to, DATE '${ATTENDANCE_SCHEDULE_OPEN_END_DATE}') >= $3::date
+      ORDER BY g.name ASC, g.id ASC, m.effective_from ASC NULLS FIRST`,
+    [orgId, userId, workDate],
+  )
+  if (scheduleGroupRows.length > 1) {
+    warnings.push({ code: 'MULTIPLE_SCHEDULE_GROUPS', severity: 'warning' })
+    warnings.push({ code: 'SCHEDULE_GROUP_WINDOW_OVERLAP', severity: 'warning' })
+  }
+
+  const context = await resolveWorkContext({ db, orgId, userId, workDate })
+  if (context.source === 'rule') warnings.push({ code: 'DEFAULT_RULE_FALLBACK', severity: 'info' })
+
+  const configuredGroupRuleRows = attendanceGroupRows.filter(row => row.rule_set_id)
+  const configuredGroupRule = configuredGroupRuleRows.length
+    ? {
+        groupId: configuredGroupRuleRows[0].id,
+        ruleSetId: configuredGroupRuleRows[0].rule_set_id,
+        enforcement: 'not_user_calc_chain',
+      }
+    : null
+  if (configuredGroupRule) warnings.push({ code: 'GROUP_RULE_SET_PREVIEW_DIVERGENCE', severity: 'info' })
+  if (configuredGroupRuleRows.length > 1) warnings.push({ code: 'MULTIPLE_CONFIGURED_GROUP_RULES', severity: 'warning' })
+
+  const settings = await getSettings(db)
+  return {
+    userId,
+    orgId,
+    resolvedAt: new Date().toISOString(),
+    resolvedForDate: workDate,
+    assignment: {
+      attendanceGroups: attendanceGroupRows.map(mapAttendanceRulesMeAttendanceGroup),
+      scheduleGroups: scheduleGroupRows.map(mapAttendanceRulesMeScheduleGroup),
+    },
+    runtimeRule: mapAttendanceRulesMeRuntimeRule(context),
+    ...(configuredGroupRule ? { configuredGroupRule } : {}),
+    punchPolicy: mapAttendanceRulesMePunchPolicy(settings),
+    warnings,
+  }
+}
+
 // Step 5: batch range version mirroring loadShiftAssignmentMapForUsersRange.
 // Used by buildWorkContextPrefetch to populate scopeContextByUser so the
 // calc-chain prefetch path can resolve calendarPolicy.overrides without a
@@ -22885,6 +23090,421 @@ module.exports = {
 	      'GET',
 	      '/api/attendance/calendar',
 	      handleAttendanceRecordsGet
+	    )
+
+	    const resolveManualMissedPunchReminderMissingSide = (row) => {
+	      const status = String(row?.status ?? '')
+	      if (status === 'absent') return 'both'
+	      if (status !== 'partial') return null
+	      const missingIn = !row.first_in_at
+	      const missingOut = !row.last_out_at
+	      if (missingIn && missingOut) return 'both'
+	      if (missingIn) return 'check_in'
+	      if (missingOut) return 'check_out'
+	      return null
+	    }
+
+	    const summarizeManualMissedPunchReminderRequest = (row) => row ? {
+	      id: row.id,
+	      status: row.status,
+	      requestType: row.request_type,
+	    } : null
+
+	    const normalizeReminderTimestamp = (value) => {
+	      if (value instanceof Date) return value.toISOString()
+	      return value ?? null
+	    }
+
+	    const buildManualMissedPunchReminderCandidateItem = ({ row, missingSide, requestSummary }) => {
+	      const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
+	      const summary = requestSummary ?? { hasPending: false, pending: null, latest: null }
+	      return {
+	        recordId: row.id,
+	        userId: row.user_id,
+	        workDate,
+	        status: row.status,
+	        missingSide,
+	        firstInAt: normalizeReminderTimestamp(row.first_in_at),
+	        lastOutAt: normalizeReminderTimestamp(row.last_out_at),
+	        pendingRequest: summary.pending,
+	        latestRequest: summary.latest,
+	        selectedByDefault: !summary.hasPending,
+	      }
+	    }
+
+	    async function filterManualMissedPunchReminderCandidatesByScope(client, orgId, access, candidateRows) {
+	      const actorContext = access.access.fullAdmin
+	        ? null
+	        : await loadAttendanceScopeContextForUser(client, orgId, access.access.userId)
+	      const scopedRows = []
+	      for (const row of candidateRows) {
+	        const missingSide = resolveManualMissedPunchReminderMissingSide(row)
+	        if (!missingSide) continue
+	        if (access.access.fullAdmin) {
+	          scopedRows.push({ row, missingSide })
+	          continue
+	        }
+	        const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
+	        const facts = await resolveAttendanceUserSchedulerScopeFacts(client, orgId, row.user_id, { workDate })
+	        const allowed = access.scopes.some(scope =>
+	          attendanceSchedulerScopeAllowsActorActionFacts(scope, actorContext, 'remind', facts)
+	        )
+	        if (allowed) scopedRows.push({ row, missingSide })
+	      }
+	      return scopedRows
+	    }
+
+	    async function loadManualMissedPunchReminderRequestSummary(client, orgId, userIds, from, to) {
+	      const requestByUserDate = new Map()
+	      if (!userIds.length) return requestByUserDate
+	      const requestRows = await client.query(
+	        `SELECT id, user_id, work_date, request_type, status
+	         FROM attendance_requests
+	         WHERE org_id = $1
+	           AND user_id = ANY($2::text[])
+	           AND work_date BETWEEN $3::date AND $4::date
+	         ORDER BY user_id ASC, work_date DESC, created_at DESC`,
+	        [orgId, userIds, from, to]
+	      )
+	      for (const requestRow of requestRows) {
+	        const workDate = normalizeDateOnly(requestRow.work_date) ?? String(requestRow.work_date ?? '').slice(0, 10)
+	        const key = `${requestRow.user_id}:${workDate}`
+	        const entry = requestByUserDate.get(key) ?? { hasPending: false, pending: null, latest: null }
+	        if (!entry.latest) entry.latest = summarizeManualMissedPunchReminderRequest(requestRow)
+	        if (requestRow.status === 'pending') {
+	          entry.hasPending = true
+	          if (!entry.pending) entry.pending = summarizeManualMissedPunchReminderRequest(requestRow)
+	        }
+	        requestByUserDate.set(key, entry)
+	      }
+	      return requestByUserDate
+	    }
+
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/manual-missed-punch-reminders/candidates',
+	      async (req, res) => {
+	        const schema = z.object({
+	          userId: z.string().optional(),
+	          orgId: z.string().optional(),
+	          from: z.string().min(1),
+	          to: z.string().min(1),
+	        })
+
+	        const parsed = schema.safeParse({
+	          userId: typeof req.query.userId === 'string' ? req.query.userId : undefined,
+	          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+	          from: typeof req.query.from === 'string' ? req.query.from : undefined,
+	          to: typeof req.query.to === 'string' ? req.query.to : undefined,
+	        })
+
+	        if (!parsed.success) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+	          return
+	        }
+
+	        const orgId = getOrgId(req)
+	        const { page, pageSize, offset } = parsePagination(req.query)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
+	        const access = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'remind' })
+	        if (!access) return
+	        if (!access.access.fullAdmin && access.scopes.length === 0) {
+	          respondAttendanceSchedulerScopeForbidden(res)
+	          return
+	        }
+
+	        try {
+	          const params = [orgId, from, to]
+	          const userClause = parsed.data.userId ? `AND r.user_id = $${params.push(parsed.data.userId)}` : ''
+	          const candidateRows = await db.query(
+	            `SELECT r.*
+	             FROM attendance_records r
+	             WHERE r.org_id = $1
+	               AND r.work_date BETWEEN $2::date AND $3::date
+	               AND COALESCE(r.is_workday, true) = true
+	               AND (
+	                 (r.status = 'partial' AND (r.first_in_at IS NULL OR r.last_out_at IS NULL))
+	                 OR r.status = 'absent'
+	               )
+	               ${userClause}
+	             ORDER BY r.work_date DESC, r.user_id ASC, r.id ASC`,
+	            params
+	          )
+
+	          const scopedRows = await filterManualMissedPunchReminderCandidatesByScope(db, orgId, access, candidateRows)
+
+	          const total = scopedRows.length
+	          const pageRows = scopedRows.slice(offset, offset + pageSize)
+	          const pageUserIds = sortedUnique(pageRows.map(({ row }) => row.user_id))
+	          const requestByUserDate = await loadManualMissedPunchReminderRequestSummary(db, orgId, pageUserIds, from, to)
+
+	          const items = pageRows.map(({ row, missingSide }) => {
+	            const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
+	            const requestSummary = requestByUserDate.get(`${row.user_id}:${workDate}`) ?? { hasPending: false, pending: null, latest: null }
+	            return buildManualMissedPunchReminderCandidateItem({ row, missingSide, requestSummary })
+	          })
+
+	          res.json({
+	            ok: true,
+	            data: {
+	              items,
+	              total,
+	              page,
+	              pageSize,
+	              from,
+	              to,
+	            },
+	          })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          logger.error('Attendance manual missed-punch reminder candidates query failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load manual missed-punch reminder candidates' } })
+	        }
+	      }
+	    )
+
+	    context.api.http.addRoute(
+	      'POST',
+	      '/api/attendance/manual-missed-punch-reminders/enqueue',
+	      async (req, res) => {
+	        const schema = z.object({
+	          recordIds: z.array(z.string().min(1)).min(1).max(50),
+	          message: z.string().min(1).max(500),
+	          idempotencyKey: z.string().min(1).max(200),
+	        }).strict()
+
+	        const parsed = schema.safeParse(req.body ?? {})
+	        if (!parsed.success) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+	          return
+	        }
+
+	        const normalizedRecordIds = parsed.data.recordIds.map(value => {
+	          const normalized = normalizeUuidString(value)
+	          return normalized ? normalized.toLowerCase() : null
+	        })
+	        if (normalizedRecordIds.some(value => !value)) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordIds must contain valid UUIDs' } })
+	          return
+	        }
+	        const recordIds = sortedUnique(normalizedRecordIds)
+
+	        const orgId = getOrgId(req)
+	        const actorId = getUserId(req)
+	        if (!actorId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+	          return
+	        }
+	        const access = await loadAttendanceSchedulerScopesForAction(req, res, { action: 'remind' })
+	        if (!access) return
+	        if (!access.access.fullAdmin && access.scopes.length === 0) {
+	          respondAttendanceSchedulerScopeForbidden(res)
+	          return
+	        }
+
+	        const message = parsed.data.message.trim()
+	        if (!message) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'message is required' } })
+	          return
+	        }
+	        const idempotencyKey = parsed.data.idempotencyKey.trim()
+	        if (!idempotencyKey) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'idempotencyKey is required' } })
+	          return
+	        }
+	        const channel = resolveAttendanceDefaultDeliveryChannelForProducer()
+	        const sourceId = `${MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE}:${idempotencyKey}`
+	        const buildExistingReminderReplay = (deliveryRows) => {
+	          const existingCandidates = []
+	          const existingRecordIds = []
+	          let existingChannel = null
+	          for (const row of deliveryRows) {
+	            const payload = normalizeMetadata(row.payload)
+	            if (
+	              payload?.kind !== MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE
+	              || payload?.sourceType !== MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE
+	              || payload?.idempotencyKey !== idempotencyKey
+	              || payload?.actorUserId !== actorId
+	              || payload?.body !== message
+	            ) {
+	              throw new HttpError(409, 'MISSED_PUNCH_REMINDER_IDEMPOTENCY_CONFLICT', 'idempotencyKey was already used for a different missed-punch reminder payload')
+	            }
+	            if (!existingChannel) existingChannel = row.channel
+	            if (Array.isArray(payload.candidates)) existingCandidates.push(...payload.candidates)
+	            if (Array.isArray(payload.recordIds)) existingRecordIds.push(...payload.recordIds)
+	          }
+	          const normalizedExistingRecordIds = sortedUnique(existingRecordIds.map(value => String(value).toLowerCase()))
+	          if (stableJsonString(normalizedExistingRecordIds) !== stableJsonString(recordIds)) {
+	            throw new HttpError(409, 'MISSED_PUNCH_REMINDER_IDEMPOTENCY_CONFLICT', 'idempotencyKey was already used for a different missed-punch reminder payload')
+	          }
+	          return {
+	            channel: existingChannel ?? channel,
+	            candidates: existingCandidates.sort((left, right) => `${left.userId}:${left.workDate}:${left.recordId}`.localeCompare(`${right.userId}:${right.workDate}:${right.recordId}`)),
+	            deliveries: deliveryRows.map(mapAttendanceNotificationDeliveryRow),
+	            created: 0,
+	            existing: deliveryRows.length,
+	          }
+	        }
+
+	        try {
+	          const result = await db.transaction(async (trx) => {
+	            // Serialize the whole idempotency group before looking for source_id rows.
+	            await trx.query(
+	              'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+	              [orgId, sourceId]
+	            )
+	            const existingSourceRows = await trx.query(
+	              `SELECT *
+	               FROM attendance_notification_deliveries
+	               WHERE org_id = $1
+	                 AND source_type = $2
+	                 AND source_id = $3
+	               ORDER BY recipient_user_id ASC`,
+	              [orgId, MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE, sourceId]
+	            )
+	            if (existingSourceRows.length) {
+	              return buildExistingReminderReplay(existingSourceRows)
+	            }
+
+	            const candidateRows = await trx.query(
+	              `SELECT r.*
+	               FROM attendance_records r
+	               WHERE r.org_id = $1
+	                 AND r.id = ANY($2::uuid[])
+	                 AND COALESCE(r.is_workday, true) = true
+	                 AND (
+	                   (r.status = 'partial' AND (r.first_in_at IS NULL OR r.last_out_at IS NULL))
+	                   OR r.status = 'absent'
+	                 )
+	               ORDER BY r.work_date DESC, r.user_id ASC, r.id ASC
+	               FOR UPDATE OF r`,
+	              [orgId, recordIds]
+	            )
+	            if (candidateRows.length !== recordIds.length) {
+	              throw new HttpError(409, 'MISSED_PUNCH_REMINDER_CANDIDATE_STALE', 'One or more missed-punch candidates are no longer remindable')
+	            }
+
+	            const scopedRows = await filterManualMissedPunchReminderCandidatesByScope(trx, orgId, access, candidateRows)
+	            if (scopedRows.length !== candidateRows.length) {
+	              throw new HttpError(403, 'SCHEDULER_SCOPE_FORBIDDEN', 'Scheduler scope does not allow this missed-punch reminder target')
+	            }
+
+	            const workDates = scopedRows
+	              .map(({ row }) => normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10))
+	              .filter(Boolean)
+	              .sort()
+	            const from = workDates[0]
+	            const to = workDates[workDates.length - 1]
+	            const pageUserIds = sortedUnique(scopedRows.map(({ row }) => row.user_id))
+	            const requestByUserDate = await loadManualMissedPunchReminderRequestSummary(trx, orgId, pageUserIds, from, to)
+	            const items = scopedRows
+	              .map(({ row, missingSide }) => {
+	                const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
+	                const requestSummary = requestByUserDate.get(`${row.user_id}:${workDate}`) ?? { hasPending: false, pending: null, latest: null }
+	                return buildManualMissedPunchReminderCandidateItem({ row, missingSide, requestSummary })
+	              })
+	              .sort((left, right) => `${left.userId}:${left.workDate}:${left.recordId}`.localeCompare(`${right.userId}:${right.workDate}:${right.recordId}`))
+
+	            const itemsByUser = new Map()
+	            for (const item of items) {
+	              if (!itemsByUser.has(item.userId)) itemsByUser.set(item.userId, [])
+	              itemsByUser.get(item.userId).push(item)
+	            }
+
+	            const desiredRows = [...itemsByUser.entries()].map(([recipientUserId, candidates]) => {
+	              const payload = {
+	                kind: MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE,
+	                title: 'Missed punch reminder',
+	                body: message,
+	                sourceType: MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE,
+	                idempotencyKey,
+	                actorUserId: actorId,
+	                recipientUserId,
+	                recipientRole: 'subject',
+	                channel,
+	                recordIds: candidates.map(item => item.recordId),
+	                candidates,
+	              }
+	              return {
+	                sourceKey: `${MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE}:${idempotencyKey}:recipient:${recipientUserId}:channel:${channel}`,
+	                recipientUserId,
+	                payload,
+	              }
+	            })
+
+	            const insertedIds = new Set()
+	            for (const desired of desiredRows) {
+	              const insertedRows = await trx.query(
+	                `INSERT INTO attendance_notification_deliveries
+	                 (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, status, payload)
+	                 VALUES ($1, $2, $3, $4, $5, 'subject', $6, 'pending', $7::jsonb)
+	                 ON CONFLICT (org_id, source_key) DO NOTHING
+	                 RETURNING id`,
+	                [
+	                  orgId,
+	                  MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE,
+	                  sourceId,
+	                  desired.sourceKey,
+	                  desired.recipientUserId,
+	                  channel,
+	                  JSON.stringify(desired.payload),
+	                ]
+	              )
+	              for (const row of insertedRows) insertedIds.add(row.id)
+	            }
+
+	            const deliveryRows = await trx.query(
+	              `SELECT *
+	               FROM attendance_notification_deliveries
+	               WHERE org_id = $1
+	                 AND source_key = ANY($2::text[])
+	               ORDER BY recipient_user_id ASC`,
+	              [orgId, desiredRows.map(row => row.sourceKey)]
+	            )
+	            const bySourceKey = new Map(deliveryRows.map(row => [row.source_key, row]))
+	            for (const desired of desiredRows) {
+	              const existing = bySourceKey.get(desired.sourceKey)
+	              if (!existing) {
+	                throw new HttpError(500, 'INTERNAL_ERROR', 'Failed to record missed-punch reminder delivery')
+	              }
+	            }
+	            const replay = buildExistingReminderReplay(deliveryRows)
+
+	            return {
+	              channel: replay.channel,
+	              candidates: replay.candidates,
+	              deliveries: replay.deliveries,
+	              created: deliveryRows.filter(row => insertedIds.has(row.id)).length,
+	              existing: deliveryRows.filter(row => !insertedIds.has(row.id)).length,
+	            }
+	          })
+
+	          res.status(202).json({ ok: true, data: result })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance notification delivery table missing' } })
+	            return
+	          }
+	          logger.error('Attendance manual missed-punch reminder enqueue failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to enqueue manual missed-punch reminders' } })
+	        }
+	      }
 	    )
 
 	    context.api.http.addRoute(
@@ -34682,7 +35302,7 @@ module.exports = {
     const schedulerScopeSchema = z.object({
       subjectType: z.enum(['user', 'role', 'role_tag']).optional(),
       subjectRef: z.string().min(1).optional(),
-      actions: z.array(z.enum(['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'])).optional(),
+      actions: z.array(z.enum(ATTENDANCE_SCHEDULER_SCOPE_ACTION_VALUES)).optional(),
       scope: z.record(z.unknown()).optional(),
       isActive: z.boolean().optional(),
     }).strict()
@@ -34690,7 +35310,7 @@ module.exports = {
     const schedulerScopeCreateSchema = schedulerScopeSchema.extend({
       subjectType: z.enum(['user', 'role', 'role_tag']),
       subjectRef: z.string().min(1),
-      actions: z.array(z.enum(['view', 'edit', 'import', 'export', 'clear', 'approve', 'dispatch'])).min(1),
+      actions: z.array(z.enum(ATTENDANCE_SCHEDULER_SCOPE_ACTION_VALUES)).min(1),
       scope: z.record(z.unknown()),
     })
 
@@ -38914,6 +39534,57 @@ module.exports = {
             return
           }
           logger.error('Annual leave self balance read failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: error instanceof Error ? error.message : String(error) } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rules/me',
+      withPermission('attendance:read', async (req, res) => {
+        // Employee self-service rules read (SR-1): subject and org are pinned to
+        // authenticated context. Unlike admin reads, this route rejects request-level
+        // user/org/group overrides instead of silently ignoring them, so callers cannot
+        // accidentally depend on spoofable query/header fields.
+        if (hasAttendanceRulesMeSubjectOverride(req)) {
+          res.status(400).json({
+            ok: false,
+            error: {
+              code: 'ATTENDANCE_RULES_ME_SUBJECT_OVERRIDE',
+              message: 'rules/me does not accept userId, orgId, or groupId overrides',
+            },
+          })
+          return
+        }
+
+        const userId = getUserId(req)
+        if (!userId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+
+        const asOfRaw = typeof req.query.asOf === 'string' ? req.query.asOf.trim() : ''
+        const resolvedForDate = asOfRaw ? normalizeDateOnlyStrict(asOfRaw) : new Date().toISOString().slice(0, 10)
+        if (!resolvedForDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must use YYYY-MM-DD' } })
+          return
+        }
+
+        const orgId = getAttendanceRulesMeOrgId(req)
+        try {
+          const data = await loadAttendanceRulesMeSummary(db, { orgId, userId, workDate: resolvedForDate })
+          res.json({ ok: true, data })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance self rules read failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: error instanceof Error ? error.message : String(error) } })
         }
       })

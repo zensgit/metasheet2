@@ -136,6 +136,48 @@ describe('ApprovalGraphExecutor', () => {
     expect(() => new ApprovalGraphExecutor(runtimeGraph, { amount: 0 }).resolveInitialState()).toThrow(/division by zero/)
   })
 
+  it('routes a requester.department branch from threaded requesterContext, fail-closed on absent (RA-1a)', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [{ edgeKey: 'edge-fin', rules: [], formula: { expression: 'requester.department == "财务"' } }],
+            defaultEdgeKey: 'edge-other',
+          },
+        },
+        { key: 'fin-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['finance'] } },
+        { key: 'other-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-fin', source: 'route', target: 'fin-review' },
+        { key: 'edge-other', source: 'route', target: 'other-review' },
+        { key: 'edge-fin-end', source: 'fin-review', target: 'end' },
+        { key: 'edge-other-end', source: 'other-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    // match → finance branch, resolved from the frozen requester department (not formData)
+    expect(new ApprovalGraphExecutor(runtimeGraph, {}, { requesterContext: { department: '财务' } })
+      .resolveInitialState().currentNodeKey).toBe('fin-review')
+    // present-but-different → default edge (genuine no-match, not fail-closed)
+    expect(new ApprovalGraphExecutor(runtimeGraph, {}, { requesterContext: { department: '技术' } })
+      .resolveInitialState().currentNodeKey).toBe('other-review')
+    // absent context → FAIL-CLOSED throw, never silently take defaultEdgeKey (no phantom route)
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, {}, { requesterContext: null })
+      .resolveInitialState()).toThrow(/context unavailable/)
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, {}, { requesterContext: {} })
+      .resolveInitialState()).toThrow(/department is missing/)
+    // 3rd arg omitted → requesterContext defaults null → fail-closed (covers paths that must thread it)
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, {})
+      .resolveInitialState()).toThrow(/context unavailable/)
+  })
+
   it('advances to approved when the next node is end', () => {
     const runtimeGraph: RuntimeGraph = {
       nodes: [

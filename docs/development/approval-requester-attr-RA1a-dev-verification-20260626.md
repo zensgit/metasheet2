@@ -56,10 +56,12 @@ server-resolved and frozen — tamper-resistant by provenance, unlike applicant-
 - **`requester.level`** — DEFERRED (no directory source). Parse-rejects.
 - **`requester.role`** — RA-1b (membership + `in` + array literals). Parse-rejects.
 - **`requester.title`** — the seniority candidate, its own title-vs-level design-lock. Parse-rejects.
-- **Org-level structural publish-check** (template publishes only if the org's directory can supply a
-  department) — RA-2 refinement. RA-1a relies on the parse-time attribute allowlist + the runtime
-  row-level fail-closed; an org with no department names today simply has every such create fail-closed
-  rather than failing at publish. Noted as the one RA-2 follow-up.
+- **Org-level structural publish-check** — **N/A for `requester.department` (corrected 2026-06-27).**
+  `directory_departments.name` is an always-present column, so the attribute is always structurally
+  supported and RA-1a's publish is complete (allowlist + `==`/`!=` via string-typing + boolean type).
+  Whether a given requester resolves a department is purely row-level runtime, handled by the runtime
+  fail-closed. There is **no RA-2 publish-gap to defer** for department; an RA-2 publish-time org-capability
+  check is only relevant to *future* attributes whose backing column can be genuinely absent for a provider.
 
 ## Next
 RA-1b (`requester.role` membership) and the `title`-vs-`level` seniority design-lock, each separate and
