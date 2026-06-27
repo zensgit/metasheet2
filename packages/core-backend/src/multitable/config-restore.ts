@@ -59,6 +59,47 @@ export function isSupportedSheetConfigRevert(rev: Pick<ConfigRevisionRow, 'entit
   )
 }
 
+/**
+ * T9-W Tier 2 (U-2) — field retype revert. The forward PATCH /fields route changes type/property with NO cell-value
+ * migration (stored values are kept raw, and the read path tolerates type-mismatched values), so a SCHEMA-ONLY revert
+ * of type/property is symmetric with the forward op and LOSSLESS — it does NOT coerce or drop stored values. (A
+ * value-transforming/dropping retype would be a separate, destructive decision — explicitly NOT this slice.)
+ *
+ * classifyRevert returns `gated` for a field revert touching type/property, so the route opens the supported subset
+ * behind MULTITABLE_ENABLE_FIELD_RETYPE_REVERT via these predicates (mirrors the Tier-1 sheet_config pattern).
+ *
+ * SCALAR-SAFE ONLY: applyConfigRevert does a raw meta_fields UPDATE, but the forward route ALSO runs type-transition
+ * side effects (autoNumber sequence, formula deps, link join-table) that a raw UPDATE skips. So BOTH the reverted-from
+ * (`after`) and reverted-to (`before`) types MUST be plain scalars (not in FIELD_RETYPE_EXCLUDED_TYPES); a retype
+ * touching computed/link/attachment/autoNumber/system types stays gated (it needs those handlers — a separate slice).
+ * v1 also requires a `type` change so the predicate stays pure on `rev` (property-only reverts are deferred).
+ */
+const FIELD_RETYPE_KEYS: ReadonlySet<string> = new Set(['name', 'order', 'type', 'property'])
+const FIELD_RETYPE_EXCLUDED_TYPES: ReadonlySet<string> = new Set([
+  'formula', 'lookup', 'rollup', 'link', 'attachment', 'button',
+  'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy',
+])
+/** Structural gate (drives the per-tier flag): a field `update` revert that touches type and/or property. */
+export function isFieldRetypeRevert(rev: Pick<ConfigRevisionRow, 'entity_type' | 'action' | 'changed_keys'>): boolean {
+  return (
+    rev.entity_type === 'field' &&
+    rev.action === 'update' &&
+    Array.isArray(rev.changed_keys) &&
+    rev.changed_keys.length > 0 &&
+    rev.changed_keys.every((k) => FIELD_RETYPE_KEYS.has(k)) &&
+    rev.changed_keys.some((k) => k === 'type' || k === 'property')
+  )
+}
+/** Confirmable/executable subset: a type-changing field retype where BOTH endpoints are plain scalars (raw UPDATE safe). */
+export function isSupportedFieldRetypeRevert(rev: ConfigRevisionRow): boolean {
+  if (!isFieldRetypeRevert(rev)) return false
+  if (!rev.changed_keys.includes('type')) return false // v1: type-changing reverts only (property-only deferred)
+  const beforeType = rev.before?.type
+  const afterType = rev.after?.type
+  if (typeof beforeType !== 'string' || typeof afterType !== 'string') return false // need both to verify scalar-safety
+  return !FIELD_RETYPE_EXCLUDED_TYPES.has(beforeType) && !FIELD_RETYPE_EXCLUDED_TYPES.has(afterType)
+}
+
 const stable = (v: unknown): string => JSON.stringify(v ?? null)
 function pick(snapshot: Record<string, unknown>, keys: string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {}
@@ -157,7 +198,8 @@ export async function loadEntityConfigSnapshot(query: QueryFn, rev: ConfigRevisi
 // --- the revert WRITE (forward-only): set the changed keys back to `before` ---
 
 interface ColumnMap { col: string; jsonb?: boolean }
-const FIELD_COLUMN: Record<string, ColumnMap> = { name: { col: 'name' }, order: { col: '"order"' } }
+// T9-W Tier 2 adds type/property (schema-only revert; gated to scalar-safe retypes by isSupportedFieldRetypeRevert).
+const FIELD_COLUMN: Record<string, ColumnMap> = { name: { col: 'name' }, order: { col: '"order"' }, type: { col: 'type' }, property: { col: 'property', jsonb: true } }
 const VIEW_COLUMN: Record<string, ColumnMap> = {
   name: { col: 'name' }, type: { col: 'type' },
   filterInfo: { col: 'filter_info', jsonb: true }, sortInfo: { col: 'sort_info', jsonb: true },
