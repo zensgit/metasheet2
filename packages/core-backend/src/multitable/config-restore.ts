@@ -3,8 +3,11 @@
  * FORWARD (re-applies its `before` state as a new change), drift-guarded (T9-W-L5) and forward-only (T9-W-L1).
  *
  * v1 SAFE subset (T9-W-L6): field `name`/`order` reverts + all view config reverts (display-only, non-lossy).
- * Everything else — field `type`/`property` (potentially lossy), create/delete (undelete), permission, sheet_config —
- * is GATED in this slice and refused fail-closed. No record-data is ever touched (T9-W-L2).
+ * Everything else — field `type`/`property` (potentially lossy), create/delete (undelete), permission — is GATED in
+ * this slice and refused fail-closed. sheet_config is also `gated` at the classify layer (classifyRevert); the ROUTE
+ * opens only a narrow Tier-1 subset (an `update` whose changed keys ⊆ {conditionalReadRules,
+ * rowLevelReadPermissionsEnabled}, per isSupportedSheetConfigRevert) behind MULTITABLE_ENABLE_SHEET_CONFIG_REVERT —
+ * a sheet_config create/delete/unknown-key stays gated. No record-data is ever touched (T9-W-L2).
  */
 import { createHash } from 'node:crypto'
 

@@ -1,13 +1,17 @@
 /**
  * T9-W Tier 1 — sheet_config revert (real DB). The first UNSAFE config-restore slice, behind the per-tier flag
  * MULTITABLE_ENABLE_SHEET_CONFIG_REVERT (default off). classifyRevert stays PURE (sheet_config = intrinsically
- * gated); the ROUTE supports it when the flag is on and surfaces the preview as confirmable (opKind:'safe').
+ * gated); with the flag on the ROUTE opens ONLY the Tier-1 subset (isSupportedSheetConfigRevert: an `update` whose
+ * changed keys ⊆ {conditionalReadRules, rowLevelReadPermissionsEnabled}) and surfaces THAT as confirmable
+ * (opKind:'safe') — a create/delete or unknown-key sheet_config stays gated.
  *
  * Goldens: (a) flag-OFF → preview AND execute 403 RESET... no: SHEET_CONFIG_REVERT_DISABLED · (b) gate: a
  * write-but-not-share actor → 403 · (c) fail-closed: a revision whose entity_id != sheet_id → 400 INVALID_REVISION ·
  * (d) flag-ON happy path: preview is confirmable (opKind:'safe', no drift) and execute SUCCEEDS (rules reverted,
  * forward source=restore revision) · (e) drift: rules edited after preview → execute 409 · (f) U-L6 redaction: a
- * field-denied canManageSheetAccess reader does NOT see the secret rule literal in the preview; fully-allowed does.
+ * field-denied canManageSheetAccess reader does NOT see the secret rule literal in the preview; fully-allowed does ·
+ * (g) U-L4 atomicity: a forced revision-insert failure rolls back the config UPDATE (nothing written) · (h) scope:
+ * flag-ON sheet_config create/delete/unknown-key stays gated (preview not confirmable, execute 422, no write).
  * Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
