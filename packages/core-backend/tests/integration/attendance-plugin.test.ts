@@ -6313,9 +6313,12 @@ attendanceIntegrationDescribe(
       // never convertible.
       expect(Number(settle.statutory_holiday?.must_pay_minutes)).toBe(480)
       expect(Number(settle.statutory_holiday?.convertible_minutes)).toBe(0)
-      expect(settle.statutory_holiday?.must_pay_minutes).not.toBe(9999)
     } finally {
-      if (token && Object.keys(originalSettings).length > 0) await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
+      // Unconditional settings restore: overtimeBankPolicy is a GLOBAL/org setting and PUT /settings deep-merges
+      // (mergeSettings), so PUT-ing an EMPTY originalSettings is a no-op that would leak this test's
+      // overtimeBankPolicy onto sibling attendance cases. Always re-assert the original, and explicitly reset
+      // overtimeBankPolicy (defaulting to disabled+empty when there were no prior settings).
+      if (token) await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...originalSettings, overtimeBankPolicy: { enabled: false, pooledSources: [], ...(originalSettings.overtimeBankPolicy as Record<string, unknown> | undefined) } }) }).catch(() => undefined)
       if (cycleId) await pool.query('DELETE FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1', [cycleId]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_requests WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_leave_balances WHERE user_id = $1', [userId]).catch(() => undefined)
