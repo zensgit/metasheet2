@@ -71,6 +71,31 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
 
   const postEdit = (body: Record<string, unknown>, token = adminToken) =>
     requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify(body) })
+  const getSettings = () =>
+    requestJson(`${baseUrl}/api/attendance/settings`, { headers: authHeaders(adminToken) })
+  const putSettings = (body: Record<string, unknown>) =>
+    requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: authHeaders(adminToken), body: JSON.stringify(body) })
+
+  type ResultEditPolicySetting = {
+    enabled?: boolean
+    editWindowDays?: unknown
+    requireReason?: boolean
+    notifyAffectedEmployee?: boolean
+  }
+
+  function isResultEditPolicySetting(policy: unknown): policy is ResultEditPolicySetting {
+    return policy !== null && typeof policy === 'object'
+  }
+
+  function resultEditPolicyWithEnabled(policy: unknown, enabled: boolean) {
+    const base = isResultEditPolicySetting(policy) ? policy : {}
+    return {
+      enabled,
+      editWindowDays: Number.isInteger(Number(base.editWindowDays)) ? Number(base.editWindowDays) : 180,
+      requireReason: typeof base.requireReason === 'boolean' ? base.requireReason : true,
+      notifyAffectedEmployee: typeof base.notifyAffectedEmployee === 'boolean' ? base.notifyAffectedEmployee : true,
+    }
+  }
 
   async function seedRecord(input: {
     userId: string
@@ -206,6 +231,39 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(audit[0].actor_user_id).toBe(`ae1-admin-${RUN}`)
     expect(audit[0].notification_delivery_id).toBeNull()
     expect(audit[0].notification_skipped_reason).toBeNull()
+  })
+
+  it('disabled policy: returns 403 ATTENDANCE_RESULT_EDIT_DISABLED before writing audit or record changes', async () => {
+    const settings = await getSettings()
+    expect(settings.status).toBe(200)
+    const originalPolicy = dataOf(settings)?.attendanceResultEditPolicy
+    const disabled = await putSettings({ attendanceResultEditPolicy: resultEditPolicyWithEnabled(originalPolicy, false) })
+    expect(disabled.status).toBe(200)
+
+    try {
+      const userId = `u-disabled-${RUN}`
+      const workDate = ymd(2)
+      const recordId = await seedRecord({
+        userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 30, earlyLeaveMinutes: 0,
+        firstInAt: `${workDate}T01:30:00Z`, lastOutAt: `${workDate}T10:00:00Z`,
+      })
+
+      const res = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: 'policy disabled', idempotencyKey: `k-disabled-${RUN}` })
+      expect(res.status).toBe(403)
+      expect(codeOf(res)).toBe('ATTENDANCE_RESULT_EDIT_DISABLED')
+      expect(await auditRowsForRecord(recordId)).toHaveLength(0)
+
+      const rec = await recordById(recordId)
+      expect(rec.status).toBe('late')
+      expect(Number(rec.late_minutes)).toBe(30)
+    } finally {
+      await putSettings({
+        attendanceResultEditPolicy: resultEditPolicyWithEnabled(
+          originalPolicy,
+          isResultEditPolicySetting(originalPolicy) ? originalPolicy.enabled !== false : true,
+        ),
+      }).catch(() => undefined)
+    }
   })
 
   it('§3.5a absent→normal: keeps work_minutes=0 + null punches by default; overrideMetrics.workMinutes takes precedence', async () => {
