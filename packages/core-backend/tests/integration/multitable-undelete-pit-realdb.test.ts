@@ -51,6 +51,7 @@ describeIfDatabase('multitable T8-1 PIT undelete-execute (real DB)', () => {
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['member'], perms: curPerms }; next() })
+    process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '2' // captured at router creation; (k) exceeds it via the resurrect set
     app.use('/api/multitable', univerMetaRouter())
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'UN Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'UN Sheet'])
@@ -186,17 +187,13 @@ describeIfDatabase('multitable T8-1 PIT undelete-execute (real DB)', () => {
 
   test('(k) fix#1 unified cap: live count passes the early ceiling but reverts+resurrects exceeds it → 413', async () => {
     process.env[FLAG] = 'true'
-    const prev = process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
-    process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '1' // live = 1 (L) passes early; U + U3 = 2 resurrects exceed
-    try {
-      await rev(`rec_un_cap_${TS}`, 1, 'create', { [NAME]: 'c' }, T0) // a 2nd undelete candidate
-      const res = await preview(T1)
-      expect(res.status).toBe(413)
-      expect(res.body?.error?.code).toBe('SHEET_TOO_LARGE')
-    } finally {
-      if (prev === undefined) delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
-      else process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = prev
-    }
+    // Ceiling = 2 (set at router creation in beforeAll). Live count = 1 (L) passes the EARLY ceiling check; the seed's
+    // U + these 2 extra undelete candidates = 3 resurrects exceed it → the post-scan UNIFIED check fires (the fix).
+    await rev(`rec_un_cap1_${TS}`, 1, 'create', { [NAME]: 'c1' }, T0)
+    await rev(`rec_un_cap2_${TS}`, 1, 'create', { [NAME]: 'c2' }, T0)
+    const res = await preview(T1)
+    expect(res.status).toBe(413)
+    expect(res.body?.error?.code).toBe('SHEET_TOO_LARGE')
   })
 
   test('(l) fix#4 no partial: an undelete failure aborts BEFORE the field-reverts (reorder) — a revert candidate stays unreverted', async () => {
