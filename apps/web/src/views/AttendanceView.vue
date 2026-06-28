@@ -20951,7 +20951,7 @@ const selfRulesPunchPolicySummary = computed(() => {
   return `${mode} · ${outdoor} · ${merge}`
 })
 
-const SELF_RULES_WEEKDAY_LABELS = [
+const selfRulesWeekdayLabels = computed(() => [
   tr('Sun', '周日'),
   tr('Mon', '周一'),
   tr('Tue', '周二'),
@@ -20959,7 +20959,7 @@ const SELF_RULES_WEEKDAY_LABELS = [
   tr('Thu', '周四'),
   tr('Fri', '周五'),
   tr('Sat', '周六'),
-]
+])
 
 function formatSelfRulesMinutes(value: unknown): string {
   const minutes = Number(value)
@@ -20971,7 +20971,8 @@ const selfRulesWorkingDaysSummary = computed(() => {
   if (!Array.isArray(days) || days.length === 0) return tr('Not configured', '未配置')
   const uniqueDays = Array.from(new Set(days.map(day => Number(day)).filter(day => Number.isInteger(day) && day >= 0 && day <= 6))).sort((a, b) => a - b)
   if (uniqueDays.length === 7) return tr('Every day', '每天')
-  return uniqueDays.map(day => SELF_RULES_WEEKDAY_LABELS[day]).join(', ') || tr('Not configured', '未配置')
+  const labels = selfRulesWeekdayLabels.value
+  return uniqueDays.map(day => labels[day]).join(', ') || tr('Not configured', '未配置')
 })
 
 const selfRulesGraceSummary = computed(() => {
