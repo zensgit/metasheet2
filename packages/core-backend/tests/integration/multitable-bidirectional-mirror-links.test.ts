@@ -486,7 +486,8 @@ describeIfDatabase('multitable bidirectional / mirror links — derived reverse 
 
   test('C-XB-NOFANOUT: a CROSS-BASE forward write does NOT fan a mirror invalidation to the foreign-base sheet (site 3 v1 defer; parity with C3)', async () => {
     // Full-perms writer so the cross-base forward write can never be perm-blocked — the defer under test is
-    // purely cfg-based (cfg.foreignBaseId != null), independent of the actor's permissions.
+    // based on the actual source/foreign sheet base comparison (crossBaseMirrorForeignSheetIds), independent
+    // of the actor's permissions.
     currentUser = { id: `u_xb_writer_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:base:admin'] }
     publishSpy.mockClear()
     const newX = `rec_bdl_xnew_${TS}`
