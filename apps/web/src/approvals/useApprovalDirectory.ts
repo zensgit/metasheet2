@@ -39,6 +39,7 @@ export interface UseApprovalDirectoryOptions {
 const FORBIDDEN_MESSAGE = '需要 approval-templates:manage 权限'
 const USERS_FAILED_MESSAGE = '加载用户目录失败'
 const ROLES_FAILED_MESSAGE = '加载角色目录失败'
+const FORMULA_ROLES_FAILED_MESSAGE = '加载审批可用角色失败'
 
 async function readJson(response: Response): Promise<Record<string, unknown> | null> {
   try {
@@ -81,8 +82,13 @@ function asRoleOptions(value: unknown): DirectoryRoleOption[] {
 export function useApprovalDirectory({ apiFetch = defaultApiFetch }: UseApprovalDirectoryOptions = {}) {
   const users = ref<DirectoryUserOption[]>([])
   const roles = ref<DirectoryRoleOption[]>([])
+  // CURATED-VOCABULARY (RA-1b): the roles an author may route on in a formula `requester.role in [...]`
+  // condition — i.e. `approval_usable = true`. SEPARATE from `roles` (the static_role approver picker,
+  // which intentionally lists ALL roles). Never merge the two — that boundary is the ratified scope.
+  const formulaRoles = ref<DirectoryRoleOption[]>([])
   const usersLoading = ref(false)
   const rolesLoading = ref(false)
+  const formulaRolesLoading = ref(false)
   const statusMessage = ref('')
 
   async function searchUsers(q: string): Promise<void> {
@@ -113,10 +119,8 @@ export function useApprovalDirectory({ apiFetch = defaultApiFetch }: UseApproval
     }
   }
 
-  // TODO(RA-1b FE): this loads ALL roles for the SHARED static_role approver picker (correct — static_role is
-  // NOT curated). When a DEDICATED formula `requester.role` picker is added, point it at the curated endpoint
-  // `GET /api/approval-templates/directory/formula-roles` (approval_usable=true only). The BE publish + dry-run
-  // HARD GATE already enforces curation regardless, so this is convenience, not the security boundary.
+  // Loads ALL roles for the SHARED static_role approver picker (correct — static_role assignee selection is
+  // NOT curated). The DEDICATED formula `requester.role` picker uses `loadFormulaRoles()` below instead.
   async function loadRoles(): Promise<void> {
     rolesLoading.value = true
     statusMessage.value = ''
@@ -136,6 +140,33 @@ export function useApprovalDirectory({ apiFetch = defaultApiFetch }: UseApproval
       statusMessage.value = error instanceof Error && error.message ? error.message : ROLES_FAILED_MESSAGE
     } finally {
       rolesLoading.value = false
+    }
+  }
+
+  // CURATED-VOCABULARY (RA-1b): the DEDICATED formula `requester.role` picker. Hits the curated endpoint
+  // `GET /api/approval-templates/directory/formula-roles` (approval_usable=true only), so an author is GUIDED
+  // to insert only curated roles into `requester.role in [...]` — matching the publish + dry-run HARD GATE
+  // (which is the actual security boundary; this picker is authoring convenience). Mirrors `loadRoles` exactly
+  // but MUST stay separate from it / `roles` (static_role): never merge the curated and full role sets.
+  async function loadFormulaRoles(): Promise<void> {
+    formulaRolesLoading.value = true
+    statusMessage.value = ''
+    try {
+      const response = await apiFetch('/api/approval-templates/directory/formula-roles')
+      if (response.status === 403) {
+        formulaRoles.value = []
+        statusMessage.value = FORBIDDEN_MESSAGE
+        return
+      }
+      const data = await readJson(response)
+      if (!response.ok || !data) {
+        throw new Error(FORMULA_ROLES_FAILED_MESSAGE)
+      }
+      formulaRoles.value = asRoleOptions(data.roles)
+    } catch (error: unknown) {
+      statusMessage.value = error instanceof Error && error.message ? error.message : FORMULA_ROLES_FAILED_MESSAGE
+    } finally {
+      formulaRolesLoading.value = false
     }
   }
 
@@ -168,11 +199,14 @@ export function useApprovalDirectory({ apiFetch = defaultApiFetch }: UseApproval
   return {
     users,
     roles,
+    formulaRoles,
     usersLoading,
     rolesLoading,
+    formulaRolesLoading,
     statusMessage,
     searchUsers,
     loadRoles,
+    loadFormulaRoles,
     ensureUserOptionVisible,
     ensureRoleOptionVisible,
     formatUserLabel,
