@@ -180,7 +180,8 @@ function readSmokeSuccessEvidence(preset, result, contract = {}) {
 function readSmokeErrorEvidence(preset, error, contract = {}) {
   // Use the error's own enum-like code + name only (both values-free). Never fall back to constructor.name
   // (a plain thrown object would surface 'Object', which is noise) and never read the message.
-  const code = error && typeof error.code === 'string' && error.code ? error.code : null
+  const code = readSmokeSafeErrorCode(error && error.code) ||
+    readSmokeSafeErrorCode(error && error.details && error.details.code)
   const name = error && typeof error.name === 'string' && error.name ? error.name : null
   const object = typeof contract.object === 'string' && contract.object ? contract.object : preset.object
   const mode = typeof contract.mode === 'string' && contract.mode ? contract.mode : preset.defaultMode
@@ -192,6 +193,13 @@ function readSmokeErrorEvidence(preset, error, contract = {}) {
     errorCode: code || 'READ_SMOKE_READ_FAILED',
     errorType: name || 'Error',
   }
+}
+
+function readSmokeSafeErrorCode(value) {
+  if (typeof value !== 'string') return null
+  const code = value.trim()
+  if (!code || code.length > 80) return null
+  return /^[A-Z0-9_:-]+$/.test(code) ? code : null
 }
 
 // C1 contract normalizer (#1709 / C0 #3242). Reconciles the forward-looking

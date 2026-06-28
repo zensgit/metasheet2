@@ -5718,7 +5718,7 @@ async function testReadSmokeRoute() {
   const failSvc = createMockServices({
     externalSystemRegistry: { async getExternalSystemForAdapter(input) { return { id: input.id, kind: 'erp:k3-wise-webapi', credentials: {} } } },
     adapterRegistry: { createAdapter() { return {
-      async read() { const e = new Error('material M-001 secret 42'); e.name = 'K3WiseWebApiAdapterError'; e.code = 'K3_WISE_READ_BUSINESS_ERROR'; throw e },
+      async read() { const e = new Error('material M-001 secret 42'); e.name = 'K3WiseWebApiAdapterError'; e.details = { code: 'K3_WISE_READ_BUSINESS_ERROR' }; throw e },
       async upsert(b) { failWrite.push(b); return {} },
     } } },
   })
