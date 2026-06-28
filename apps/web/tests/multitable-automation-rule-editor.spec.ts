@@ -525,6 +525,64 @@ describe('MetaAutomationRuleEditor', () => {
     expect(triggerSelect.value).toBe('form.submitted')
   })
 
+  it('exposes start_approval as a selectable action with template + form-data mapping, and saves it', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'start approval'; nameInput.dispatchEvent(new Event('input'))
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    expect(Array.from(actionSelect.options).map((o) => o.value)).toContain('start_approval')
+    actionSelect.value = 'start_approval'; actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    // No client injected → the template picker degrades to a free-text input (the rbac/empty fallback).
+    const tmpl = container.querySelector('[data-field="approvalTemplateId"]') as HTMLInputElement
+    expect(tmpl).not.toBeNull()
+    tmpl.value = 'tmpl_1'; tmpl.dispatchEvent(new Event('input'))
+
+    const cfg = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-config') as HTMLElement
+    const addBtn = Array.from(cfg.querySelectorAll('button')).find((b) => !b.classList.contains('meta-rule-editor__btn--icon')) as HTMLButtonElement
+    addBtn.click()
+    await flushPromises()
+    const keyInput = cfg.querySelector('[data-field="approvalMappingKey"]') as HTMLInputElement
+    const valSelect = cfg.querySelector('[data-field="approvalMappingValue"]') as HTMLSelectElement
+    keyInput.value = 'amount'; keyInput.dispatchEvent(new Event('input'))
+    valSelect.value = 'fld_2'; valSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].actions).toEqual([
+      { type: 'start_approval', config: { templateId: 'tmpl_1', formDataMapping: { amount: 'fld_2' } } },
+    ])
+  })
+
+  it('backfills + round-trips a form.submitted → start_approval rule (the combo, both directions)', async () => {
+    const saved = vi.fn()
+    const rule: AutomationRule = {
+      id: 'atr_sa', sheetId: 'sheet_1', name: 'sa', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: { templateId: 'tmpl_9', formDataMapping: { amount: 'fld_2' } }, enabled: true,
+    } as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+    // form.submitted trigger + start_approval action coexist; the mapping disassembled into an editable row.
+    expect((container.querySelector('[data-field="triggerType"]') as HTMLSelectElement).value).toBe('form.submitted')
+    expect((container.querySelector('[data-field="approvalTemplateId"]') as HTMLInputElement).value).toBe('tmpl_9')
+    expect((container.querySelector('[data-field="approvalMappingKey"]') as HTMLInputElement).value).toBe('amount')
+    expect((container.querySelector('[data-field="approvalMappingValue"]') as HTMLSelectElement).value).toBe('fld_2')
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].triggerType).toBe('form.submitted')
+    expect(saved.mock.calls[0][0].actions).toEqual([
+      { type: 'start_approval', config: { templateId: 'tmpl_9', formDataMapping: { amount: 'fld_2' } } },
+    ])
+  })
+
   it('can add and remove conditions', async () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()

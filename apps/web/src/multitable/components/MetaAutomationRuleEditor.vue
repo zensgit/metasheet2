@@ -317,6 +317,26 @@
               <textarea v-model="action.config.message" class="meta-rule-editor__textarea" :placeholder="automationLabel('actionConfig.notificationMessagePlaceholder', isZh)" rows="3"></textarea>
             </div>
 
+            <!-- start_approval config -->
+            <div v-if="action.type === 'start_approval'" class="meta-rule-editor__action-config">
+              <label class="meta-rule-editor__label">{{ isZh ? '审批模板' : 'Approval template' }}</label>
+              <select v-if="approvalTemplates.length > 0" v-model="action.config.templateId" class="meta-rule-editor__select" data-field="approvalTemplateId">
+                <option value="">{{ isZh ? '请选择审批模板' : 'Select an approval template' }}</option>
+                <option v-for="t in approvalTemplates" :key="t.id" :value="t.id">{{ t.name || t.id }}</option>
+              </select>
+              <input v-else v-model="action.config.templateId" class="meta-rule-editor__input" type="text" :placeholder="isZh ? '审批模板 ID' : 'Approval template ID'" data-field="approvalTemplateId" />
+              <label class="meta-rule-editor__label">{{ isZh ? '表单字段映射（审批字段 → 记录字段）' : 'Form-data mapping (approval field → record field)' }}</label>
+              <div v-for="(pair, pidx) in (action.config.formDataMappingPairs as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
+                <input v-model="pair.fieldId" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" :placeholder="isZh ? '审批字段' : 'Approval field'" data-field="approvalMappingKey" />
+                <select v-model="pair.value" class="meta-rule-editor__select meta-rule-editor__select--sm" data-field="approvalMappingValue">
+                  <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
+                  <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
+                </select>
+                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeApprovalMapping(action, pidx)">&times;</button>
+              </div>
+              <button class="meta-rule-editor__btn" type="button" @click="addApprovalMapping(action)">{{ automationLabel('editor.addField', isZh) }}</button>
+            </div>
+
             <!-- send_email config -->
             <div v-if="action.type === 'send_email'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.recipients', isZh) }}</label>
@@ -1264,6 +1284,9 @@ const saving = ref(false)
 const cronPreset = ref('0 * * * *')
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingTalkDestinationsError = ref('')
+// start_approval template picker. Empty (incl. on a 401/403 for an author lacking `approvals:read`) →
+// the config block degrades to a free-text template-id input; the select is never a hard dependency.
+const approvalTemplates = ref<Array<{ id: string; name?: string }>>([])
 const personRecipientSuggestions = ref<Record<number, MetaSheetPermissionCandidate[]>>({})
 const personRecipientLoading = ref<Record<number, boolean>>({})
 const personRecipientErrors = ref<Record<number, string>>({})
@@ -1287,6 +1310,7 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   'create_record',
   'send_webhook',
   'send_notification',
+  'start_approval',
   'send_email',
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
@@ -1784,6 +1808,19 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
       message: typeof config.message === 'string' ? config.message : '',
     }
   }
+  if (type === 'start_approval') {
+    // Backfill: disassemble the persisted formDataMapping object into editable {fieldId, value} rows
+    // (inverse of buildActionPayload's fieldPairsToRecord). templateId loads as-is.
+    const mapping = isPlainRecord(config.formDataMapping) ? config.formDataMapping : {}
+    const formDataMappingPairs = Array.isArray(config.formDataMappingPairs)
+      ? config.formDataMappingPairs
+      : Object.entries(mapping).map(([fieldId, value]) => ({ fieldId, value: String(value ?? '') }))
+    return {
+      ...config,
+      templateId: typeof config.templateId === 'string' ? config.templateId : '',
+      formDataMappingPairs,
+    }
+  }
   if (type === 'send_dingtalk_group_message') {
     return {
       ...config,
@@ -2075,8 +2112,16 @@ watch(
           dingTalkDestinations.value = []
           dingTalkDestinationsError.value = err instanceof Error ? err.message : 'Failed to load DingTalk groups'
         }
+        try {
+          // Best-effort: a 401/403 (author lacks approvals:read) or any error → empty → text-input fallback.
+          const res = await props.client.listApprovalTemplates()
+          approvalTemplates.value = Array.isArray(res?.data) ? res.data : []
+        } catch {
+          approvalTemplates.value = []
+        }
       } else {
         dingTalkDestinations.value = []
+        approvalTemplates.value = []
       }
     }
   },
@@ -2762,6 +2807,18 @@ function removeFieldUpdate(action: DraftAction, idx: number) {
   ;(action.config.fieldUpdates as FieldPair[]).splice(idx, 1)
 }
 
+// start_approval: formDataMapping rows reuse the FieldPair shape (fieldId = the approval-form field key,
+// value = the source record field id). buildActionPayload assembles them into the {key: value} object the
+// backend's validateStartApprovalConfig requires.
+function addApprovalMapping(action: DraftAction) {
+  if (!Array.isArray(action.config.formDataMappingPairs)) action.config.formDataMappingPairs = []
+  ;(action.config.formDataMappingPairs as FieldPair[]).push({ fieldId: '', value: '' })
+}
+
+function removeApprovalMapping(action: DraftAction, idx: number) {
+  ;(action.config.formDataMappingPairs as FieldPair[]).splice(idx, 1)
+}
+
 function addCreateFieldValue(action: DraftAction) {
   if (!Array.isArray(action.config.fieldValues)) action.config.fieldValues = []
   ;(action.config.fieldValues as FieldPair[]).push({ fieldId: '', value: '' })
@@ -2802,6 +2859,18 @@ function buildPayload(): Partial<AutomationRule> {
         type: action.type,
         config: {
           fields: fieldPairsToRecord(action.config.fieldUpdates),
+        },
+      }
+    }
+    if (action.type === 'start_approval') {
+      // Assemble the {key: value} formDataMapping the backend requires from the editable rows. templateId +
+      // mapping non-emptiness are enforced server-side (validateStartApprovalConfig) — the UI is authoring,
+      // not the validation gate.
+      return {
+        type: action.type,
+        config: {
+          templateId: typeof action.config.templateId === 'string' ? action.config.templateId.trim() : '',
+          formDataMapping: fieldPairsToRecord(action.config.formDataMappingPairs),
         },
       }
     }

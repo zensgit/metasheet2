@@ -1008,6 +1008,7 @@ export type AutomationActionType =
   | 'create_record'
   | 'send_webhook'
   | 'send_notification'
+  | 'start_approval'
   | 'send_email'
   | 'send_dingtalk_group_message'
   | 'send_dingtalk_person_message'
