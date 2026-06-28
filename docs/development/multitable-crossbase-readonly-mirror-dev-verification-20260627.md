@@ -46,13 +46,26 @@ Sink B-1, which already base-gates **every** link field in `idsBySheet`, mirror 
 goldens cover each separately and the fail-first proves they are genuinely independent (see §4).
 
 ### Site 3 — `collectMirrorInvalidation` (`multitable/record-write-service.ts`): defer cross-base realtime push
-Added `if (cfg.foreignBaseId != null) return` so a **cross-base** forward write does not fan a mirror-
-invalidation broadcast to the foreign-base sheet. `foreignBaseId` is persisted only as the cross-base opt-in
-claim (codec emits it iff present; same-base mirrors omit it), so `!= null ⟺ cross-base` here. This is a
-**deliberate v1 behavior, not a missed-push bug**: the reverse mirror is recomputed + base-masked on every
-fetch (`loadLinkValuesByRecord` + `maskDerivedMirrorFieldIds` / `buildLinkSummaries`), so a cross-base mirror
-still reads **correctly** on the next read — it only forgoes a live realtime nudge. Same-base fan-out
-(`foreignBaseId == null`) is **unchanged**.
+A **cross-base** forward write does not fan a mirror-invalidation broadcast to the foreign-base sheet. The
+cross-base determination compares the **actual** sheet bases — pre-transaction we resolve `this sheet` vs each
+twoWay-mirror forward field's `foreignSheetId` base (one `SELECT id, base_id FROM meta_sheets WHERE id = ANY(…)`,
+skipped entirely when the sheet has no twoWay-mirror field) into a `crossBaseMirrorForeignSheetIds` set, and the
+closure defers iff `crossBaseMirrorForeignSheetIds.has(cfg.foreignSheetId)`.
+
+> **[P2 review correction]** The first cut used `if (cfg.foreignBaseId != null) return` as the discriminator —
+> **wrong**: claim presence is *not* cross-base. `validateLinkFieldConfig` only rejects a *false* claim
+> (`claimed !== actualForeignBaseId`), so a **same-base** link may legally carry a **truthful own-base**
+> `foreignBaseId` (semantic lock: `multitable-cross-base-link-optin` **XB-3b**). Under the old predicate such a
+> same-base twoWay link would wrongly skip its mirror push — a same-base realtime-push regression not covered by
+> C1–C9. The fix resolves real bases instead of inferring from the claim. Regression-locked by
+> `C-SB-TRUTHFUL-CLAIM` (RED under the old predicate: `expected 0 to be greater than 0`).
+
+This is a **deliberate v1 behavior, not a missed-push bug**: the reverse mirror is recomputed + base-masked on
+every fetch (`loadLinkValuesByRecord` + `maskDerivedMirrorFieldIds` / `buildLinkSummaries`), so a cross-base
+mirror still reads **correctly** on the next read — it only forgoes a live realtime nudge. Same-base fan-out
+(including a same-base link with a truthful own-base claim) is **unchanged**. Site-3 truth table:
+same-base/no-claim → fan-out (`C3`); same-base/truthful-claim → fan-out (`C-SB-TRUTHFUL-CLAIM`); cross-base →
+defer (`C-XB-NOFANOUT`).
 
 ## 3. Acceptance criteria → evidence (all met)
 
@@ -61,6 +74,7 @@ still reads **correctly** on the next read — it only forgoes a live realtime n
 | Old C5 "cross-base pairing rejected" **changed** to the new allow semantics (not added beside) | `C5` rewritten in place → asserts 2xx |
 | Golden proves base-read have / not-have × mirror read-only (three states) | `C-XB-MASK` (denied→`[]`, permitted→`[REC_A1]`) + `C-XB-RO` (mirror PATCH rejected, no edge) |
 | Regression: same-base twoWay/mirror unchanged | `C1`–`C9` all green |
+| Regression: same-base twoWay realtime push unchanged incl. **truthful own-base claim** (P2) | `C-SB-TRUTHFUL-CLAIM` (same-base + truthful `foreignBaseId` still fans the mirror event) |
 | Regression: one-way cross-base still goes through the foreignBaseId gate | `C5d` (one-way, no claim → 400) |
 | Regression: no-claim / wrong-claim still fail closed | `C5b` (no claim → 400), `C5c` (wrong claim → 400) |
 | Create path exercised end-to-end (not only SQL-seeded) | `C5-CREATE` (forward SA→SX **and** mirror SX→SA both create; mirror returns read-only) |
@@ -80,15 +94,20 @@ The raw wires go RED (the leak site 2 closes); the linkSummaries wire stays gree
 **separate** wire already covered by `buildLinkSummaries`, exactly as the two-wire analysis predicted. Gate (2)
 restored; all green (§5).
 
+**P2 site-3 fail-first.** Temporarily reverted site 3 to the old `if (cfg.foreignBaseId != null) return` and ran
+`C-SB-TRUTHFUL-CLAIM` → RED (`expected 0 to be greater than 0` — the same-base mirror event was dropped because
+the truthful own-base claim tripped the imprecise predicate). Restored the actual-base resolution → green.
+
 ## 5. Verification results
 
-- **Target file (real DB):** `multitable-bidirectional-mirror-links.test.ts` → **21/21 passed** (C1–C9 +
-  C5/C5b/C5c/C5d/C5-CREATE + C-XB-MASK ×3 + C-XB-RO + C-XB-NOFANOUT).
-- **Adjacent cross-base suites + #3306 mock canary (real DB):** `multitable-crossbase-relation-aggregation`,
-  `multitable-cross-base-write-quota`, `multitable-cross-base-automation-delete-lock`,
-  `multitable-dangling-link-sweep`, `multitable-context.api` → **54/54 passed** (no regression; the canary
-  confirms site 2's new `loadSheetRowShared` calls don't break a strict query mock — `maskDerivedMirrorFieldIds`
-  early-returns when no mirror field is present, and the mirror test is the only suite with `mirrorOf` data).
+- **Target file (real DB):** `multitable-bidirectional-mirror-links.test.ts` → **22/22 passed** (C1–C9 +
+  C5/C5b/C5c/C5d/C5-CREATE + C-XB-MASK ×3 + C-XB-RO + C-XB-NOFANOUT + **C-SB-TRUTHFUL-CLAIM**).
+- **Adjacent cross-base suites + XB-3b lock + #3306 mock canary (real DB):**
+  `multitable-crossbase-relation-aggregation`, `multitable-cross-base-write-quota`,
+  `multitable-cross-base-automation-delete-lock`, `multitable-dangling-link-sweep`,
+  `multitable-cross-base-link-optin` (contains the **XB-3b** same-base-truthful-claim lock), `multitable-context.api`
+  → **72/72 passed**. No regression; the canary + the new pre-transaction base-resolution query (skipped when the
+  sheet has no twoWay-mirror field) don't break any strict mock.
 - **Typecheck:** `tsc --noEmit` on `@metasheet/core-backend` → exit 0, clean.
 
 ## 6. Boundaries honored

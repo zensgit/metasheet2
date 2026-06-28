@@ -34,6 +34,9 @@
  *   C-XB-RO                   — a PATCH on the cross-base mirror field is rejected (read-only, no edge).
  *   C-XB-NOFANOUT             — a cross-base forward write does NOT fan a mirror invalidation to the foreign
  *                               base sheet (site 3 v1 defer; read recomputes + masks on next fetch).
+ *   C-SB-TRUTHFUL-CLAIM       — a SAME-base twoWay write whose forward field carries a TRUTHFUL own-base
+ *                               foreignBaseId STILL fans the mirror invalidation (claim presence != cross-base;
+ *                               site 3 compares real sheet bases, not claim presence). [P2 regression guard]
  *
  * Runs only with DATABASE_URL (describeIfDatabase) via the plugin-tests.yml real-DB runner list.
  */
@@ -65,6 +68,12 @@ const FLD_B_PLAIN = `fld_bdl_b_plain_${TS}` // ordinary (non-twoWay) link B → 
 // record (REC_A1) → base-read gated. SA/SX already exist (SA=BASE, SX=XBASE) from the C5 layout above.
 const FLD_A_XLINK = `fld_bdl_a_xlink_${TS}` // forward twoWay link SA → SX, foreignBaseId=XBASE_ID
 const FLD_X_MIRROR = `fld_bdl_x_mirror_${TS}` // mirror twoWay link SX → SA, mirrorOf=FLD_A_XLINK, foreignBaseId=BASE_ID
+
+// P2 regression guard (2026-06-27): a SAME-base twoWay link carrying a TRUTHFUL own-base foreignBaseId — a
+// legal config (cross-base-link-optin XB-3b) whose mirror push must NOT be deferred (claim presence is NOT
+// cross-base). SA and SB are both in BASE_ID, so this pairing is same-base despite the explicit claim.
+const FLD_A_LINK2 = `fld_bdl_a_link2_${TS}` // same-base twoWay link SA → SB, foreignBaseId=BASE_ID (truthful own-base)
+const FLD_B_MIRROR2 = `fld_bdl_b_mirror2_${TS}` // its mirror on SB → SA, mirrorOf=FLD_A_LINK2
 
 const REC_A1 = `rec_bdl_a1_${TS}`
 const REC_A2 = `rec_bdl_a2_${TS}` // a SECOND A linking B1 → mirror is multi-value
@@ -194,6 +203,14 @@ describeIfDatabase('multitable bidirectional / mirror links — derived reverse 
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
       [REC_X1, SX, JSON.stringify({})])
     await seedEdge(FLD_A_XLINK, REC_A1, REC_X1)
+
+    // P2 guard fixtures: a SAME-base twoWay pairing (SA↔SB, both BASE_ID) where the forward field carries a
+    // truthful own-base foreignBaseId. No edge seeded — the golden writes the forward edge and asserts the
+    // mirror invalidation still fans (it must NOT be deferred just because foreignBaseId is present).
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_A_LINK2, SA, 'ALink2', 'link', JSON.stringify({ foreignSheetId: SB, foreignBaseId: BASE_ID, twoWay: true, mirrorFieldId: FLD_B_MIRROR2 }), 4])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_B_MIRROR2, SB, 'BMirror2', 'link', JSON.stringify({ foreignSheetId: SA, foreignBaseId: BASE_ID, twoWay: true, mirrorFieldId: FLD_A_LINK2, mirrorOf: FLD_A_LINK2 }), 4])
   })
 
   beforeEach(() => {
@@ -203,7 +220,7 @@ describeIfDatabase('multitable bidirectional / mirror links — derived reverse 
 
   afterAll(async () => {
     publishSpy.mockRestore()
-    await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[FLD_A_LINK, FLD_B_MIRROR, FLD_B_PLAIN, FLD_A_XLINK, FLD_X_MIRROR]]).catch(() => {})
+    await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[FLD_A_LINK, FLD_B_MIRROR, FLD_B_PLAIN, FLD_A_XLINK, FLD_X_MIRROR, FLD_A_LINK2, FLD_B_MIRROR2]]).catch(() => {})
     await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = ANY($1::text[])', [[SA, SB, SX]]).catch(() => {})
     await q('DELETE FROM field_permissions WHERE sheet_id = ANY($1::text[])', [[SA, SB, SX]]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [[SA, SB, SX]]).catch(() => {})
@@ -487,5 +504,24 @@ describeIfDatabase('multitable bidirectional / mirror links — derived reverse 
     await q('DELETE FROM meta_links WHERE field_id = $1 AND foreign_record_id = $2', [FLD_A_XLINK, newX]).catch(() => {})
     await q('DELETE FROM meta_records WHERE id = $1', [newX]).catch(() => {})
     await q('UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2', [JSON.stringify({ [FLD_A_XLINK]: [REC_X1] }), REC_A1]).catch(() => {})
+  })
+
+  // [P2 regression] claim presence is NOT cross-base. FLD_A_LINK2 is SAME-base (SA & SB both BASE_ID) but
+  // carries a truthful own-base foreignBaseId — a legal config (XB-3b). The old `cfg.foreignBaseId != null`
+  // discriminator would wrongly DEFER its mirror push; the fix resolves the real bases, sees same-base, and
+  // keeps the fan-out. Writing the forward edge must still emit the SB mirror invalidation event. (RED under
+  // the old predicate, GREEN under the actual-base resolution.)
+  test('C-SB-TRUTHFUL-CLAIM: a SAME-base twoWay write with a truthful own-base foreignBaseId STILL fans the mirror invalidation', async () => {
+    currentUser = { id: `u_sb_writer_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+    publishSpy.mockClear()
+    const res = await patch(SA, REC_A1, FLD_A_LINK2, [REC_B1])
+    expect(res.status).toBe(200)
+    const mirrorEvents = sheetEvents(SB).filter(
+      (e) => (e.fieldIds ?? []).includes(FLD_B_MIRROR2) && (e.recordIds ?? []).includes(REC_B1),
+    )
+    expect(mirrorEvents.length).toBeGreaterThan(0)
+    // restore: drop the throwaway edge + remove the key from REC_A1 (it never carried FLD_A_LINK2)
+    await q('DELETE FROM meta_links WHERE field_id = $1', [FLD_A_LINK2]).catch(() => {})
+    await q('UPDATE meta_records SET data = data - $1::text WHERE id = $2', [FLD_A_LINK2, REC_A1]).catch(() => {})
   })
 })
