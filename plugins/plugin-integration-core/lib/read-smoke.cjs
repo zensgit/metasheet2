@@ -1,11 +1,14 @@
 'use strict'
 
+const { READ_SMOKE_LIST_REQUEST_MARKER } = require('./read-smoke-marker.cjs')
+
 // #1709 follow-up: generic read-smoke preset catalog + values-free evidence helpers.
-// v1 registers ONLY built-in presets — there is no user/request-supplied preset path. The route reads only
-// { presetId, key } from the request; the preset (kind/object/read shape) comes from THIS frozen catalog,
-// never the request. Read-only: builds a forced single-record read; no list / pagination / cursor /
-// watermark / BOM; no Save / Submit / Audit. Evidence is values-free (booleans / counts / coarse enums only)
-// — never the key, raw payload, material values, host, token, credentials, or connection string.
+// Registers ONLY built-in presets — there is no user/request-supplied preset path. The preset
+// (kind/object/read shape) comes from THIS frozen catalog, never the request. Read-only: supports the
+// original forced single-record Material/GetDetail smoke plus the C3 customer-gated bounded Material/GetList
+// probe. No BOM, resolver, Save, Submit, Audit, external write, raw endpoint/path/method/payload, or
+// request-supplied pagination/filtering. Evidence is values-free (booleans / counts / coarse enums only) —
+// never the key, raw payload, material values, host, token, credentials, or connection string.
 
 const READ_SMOKE_PRESETS = Object.freeze({
   'k3wise.material-detail.v1': Object.freeze({
@@ -25,6 +28,42 @@ const READ_SMOKE_PRESETS = Object.freeze({
           operations: Object.freeze(['read']),
           readPath: '/K3API/Material/GetDetail',
           readMethod: 'POST',
+        }),
+      }),
+    }),
+  }),
+  'k3wise.material-list.v1': Object.freeze({
+    presetId: 'k3wise.material-list.v1',
+    requiredKind: 'erp:k3-wise-webapi',
+    object: 'material',
+    // C3 LIST-only (#1709): explicit preset + explicit intent shape only. The bounded pagination
+    // parameters are preset-owned and never request-sourced.
+    allowedObjects: Object.freeze(['material']),
+    allowedModes: Object.freeze(['list']),
+    defaultObject: 'material',
+    defaultMode: 'list',
+    listLimit: 10,
+    readConfigOverlay: Object.freeze({
+      objects: Object.freeze({
+        material: Object.freeze({
+          operations: Object.freeze(['read']),
+          readPath: '/K3API/Material/GetList',
+          readMethod: 'POST',
+          readMode: 'list',
+          readListBodyTemplate: Object.freeze({
+            Data: Object.freeze({
+              Top: 10,
+              PageIndex: 1,
+            }),
+          }),
+          readListBodyKey: 'Data',
+          readListFields: Object.freeze(['FNumber', 'FName', 'FModel', 'FUnitID']),
+          readListOrderBy: 'FNumber',
+          readListFilterField: 'FNumber',
+          topField: 'Top',
+          pageIndexField: 'PageIndex',
+          pageSizeField: 'PageSize',
+          maxListLimit: 10,
         }),
       }),
     }),
@@ -55,9 +94,31 @@ function getReadSmokePreset(presetId) {
   return Object.prototype.hasOwnProperty.call(READ_SMOKE_PRESETS, presetId) ? READ_SMOKE_PRESETS[presetId] : undefined
 }
 
-// Forced single-record read request. Single explicit key only — no list/pagination/cursor/watermark/BOM.
-function buildReadSmokeRequest(preset, key) {
-  return { object: preset.object, filters: { FNumber: key } }
+// Built-in request builder. Detail reads require a single explicit key. LIST reads are bounded by the
+// preset and never accept request-supplied filters, cursor, watermark, path, method, or limit.
+function buildReadSmokeRequest(preset, contractOrKey) {
+  const contract = typeof contractOrKey === 'string'
+    ? { object: preset.object, mode: preset.defaultMode || 'single_record_detail', key: contractOrKey }
+    : contractOrKey
+  const object = contract && typeof contract.object === 'string' ? contract.object : preset.object
+  const mode = contract && typeof contract.mode === 'string' ? contract.mode : preset.defaultMode
+  if (mode === 'single_record_detail') {
+    return { object, filters: { FNumber: contract.key } }
+  }
+  if (mode === 'list') {
+    const request = {
+      object,
+      limit: preset.listLimit,
+      options: { k3ReadMode: 'list' },
+    }
+    Object.defineProperty(request.options, READ_SMOKE_LIST_REQUEST_MARKER, {
+      value: true,
+      enumerable: true,
+    })
+    if (contract.key !== undefined) request.options.listKey = contract.key
+    return request
+  }
+  throw new ReadSmokeContractError('mode_not_allowed', 'mode is not allowlisted for this preset')
 }
 
 // Non-persisted preset overlay for the credentialed read-smoke route. Entity-machine validation
@@ -93,9 +154,11 @@ function applyReadSmokePresetOverlay(system, preset) {
 // Values-free evidence from a successful read. Extracts ONLY recordPresent (boolean) + referenceObjectCount
 // (count) from the result's records — never the record values, metadata (which carries the key as
 // requestedNumber + a readPath), or raw payload.
-function readSmokeSuccessEvidence(preset, result) {
+function readSmokeSuccessEvidence(preset, result, contract = {}) {
   const records = result && Array.isArray(result.records) ? result.records : []
   const recordPresent = records.length > 0
+  const object = typeof contract.object === 'string' && contract.object ? contract.object : preset.object
+  const mode = typeof contract.mode === 'string' && contract.mode ? contract.mode : preset.defaultMode
   let referenceObjectCount = 0
   if (recordPresent) {
     const refs = records[0] && records[0]._k3ReferenceObjects
@@ -104,23 +167,28 @@ function readSmokeSuccessEvidence(preset, result) {
   return {
     ok: true,
     presetId: preset.presetId,
-    object: preset.object,
+    object,
+    mode,
     recordPresent,
+    recordCount: records.length,
     referenceObjectCount,
   }
 }
 
 // Values-free error evidence. Returns ONLY a coarse code + type — never the error message, which may carry
 // the key or material values.
-function readSmokeErrorEvidence(preset, error) {
+function readSmokeErrorEvidence(preset, error, contract = {}) {
   // Use the error's own enum-like code + name only (both values-free). Never fall back to constructor.name
   // (a plain thrown object would surface 'Object', which is noise) and never read the message.
   const code = error && typeof error.code === 'string' && error.code ? error.code : null
   const name = error && typeof error.name === 'string' && error.name ? error.name : null
+  const object = typeof contract.object === 'string' && contract.object ? contract.object : preset.object
+  const mode = typeof contract.mode === 'string' && contract.mode ? contract.mode : preset.defaultMode
   return {
     ok: false,
     presetId: preset.presetId,
-    object: preset.object,
+    object,
+    mode,
     errorCode: code || 'READ_SMOKE_READ_FAILED',
     errorType: name || 'Error',
   }
@@ -128,8 +196,10 @@ function readSmokeErrorEvidence(preset, error) {
 
 // C1 contract normalizer (#1709 / C0 #3242). Reconciles the forward-looking
 // { presetId, intent:{ object, mode, key } } shape with the shipped read-smoke { presetId, key } subset by
-// normalizing BOTH to one output { presetId, object, mode, key }. Pure contract: it does NOT call K3, does
-// NOT touch the route, and opens no LIST/BOM/runtime. Fail-closed + values-free: a raw path/method/headers/
+// normalizing BOTH detail shapes to one output { presetId, object, mode, key }. C3 LIST uses the explicit
+// intent shape and returns { presetId, object, mode } or an optional key that maps only to the preset-owned
+// internal FNumber prefix filter. Fail-closed + values-free: a raw
+// path/method/headers/
 // body/response/credential/config can never ride in (strict key allowlist); unknown preset/object/mode → a
 // coarse reason; the key is never echoed in an error.
 const READ_SMOKE_CONTRACT_TOP_KEYS = Object.freeze(['presetId', 'key', 'intent'])
@@ -185,7 +255,19 @@ function normalizeReadSmokeContract(input) {
   if (!Array.isArray(preset.allowedModes) || !preset.allowedModes.includes(mode)) {
     throw new ReadSmokeContractError('mode_not_allowed', 'mode is not allowlisted for this preset')
   }
-  // Key is runtime-only and never echoed; require a non-empty string.
+  if (mode === 'list') {
+    if (!hasIntent) {
+      throw new ReadSmokeContractError('intent_required', 'list mode requires the intent shape')
+    }
+    if (rawKey === undefined) {
+      return { presetId: preset.presetId, object, mode }
+    }
+    const key = typeof rawKey === 'string' ? rawKey.trim() : ''
+    if (!key) throw new ReadSmokeContractError('key_required', 'a non-empty key is required when supplied')
+    return { presetId: preset.presetId, object, mode, key }
+  }
+
+  // Key is runtime-only and never echoed; require a non-empty string for single-record detail reads.
   const key = typeof rawKey === 'string' ? rawKey.trim() : ''
   if (!key) throw new ReadSmokeContractError('key_required', 'a non-empty key is required')
 

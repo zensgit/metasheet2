@@ -26,6 +26,7 @@ const {
   normalizeTemplate,
 } = require('./k3-wise-document-templates.cjs')
 const crypto = require('node:crypto')
+const { READ_SMOKE_LIST_REQUEST_MARKER } = require('../read-smoke-marker.cjs')
 const { scrubSecretStringValue } = require('../payload-redaction.cjs')
 // DF-T1-0: single source of truth for Save-body composition, shared with the no-write
 // preview (http-routes.cjs). Placeholder detection (findUnfilledPlaceholders) is shared; the
@@ -42,6 +43,7 @@ class K3WiseWebApiAdapterError extends Error {
 }
 
 const DEFAULT_OBJECTS = getK3WiseDocumentObjectDefaults()
+const DEFAULT_MATERIAL_LIST_MAX_LIMIT = 10
 
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
@@ -598,6 +600,87 @@ function assertMaterialDetailReadOnlyScope(request) {
   }
 }
 
+function resolveMaterialReadMode(request, objectConfig) {
+  const optionMode = typeof request.options.k3ReadMode === 'string' ? request.options.k3ReadMode.trim() : ''
+  const configMode = typeof objectConfig.readMode === 'string' ? objectConfig.readMode.trim() : ''
+  if (optionMode && configMode && optionMode !== configMode) {
+    throw new AdapterValidationError('K3 WISE Material read mode does not match the object config', {
+      code: 'K3_WISE_READ_MODE_MISMATCH',
+      object: request.object,
+    })
+  }
+  const mode = optionMode || configMode || 'single_record_detail'
+  if (mode === 'single_record_detail') return mode
+  if (mode === 'list') {
+    if (request.options[READ_SMOKE_LIST_REQUEST_MARKER] !== true) {
+      throw new AdapterValidationError('K3 WISE Material LIST is only available through the read-smoke route', {
+        code: 'K3_WISE_READ_LIST_ROUTE_UNSUPPORTED',
+        object: request.object,
+      })
+    }
+    if (configMode !== 'list') {
+      throw new AdapterValidationError('K3 WISE Material list read requires a list-mode object config', {
+        code: 'K3_WISE_READ_LIST_NOT_CONFIGURED',
+        object: request.object,
+      })
+    }
+    return mode
+  }
+  throw new AdapterValidationError('K3 WISE Material read mode is not supported', {
+    code: 'K3_WISE_READ_MODE_UNSUPPORTED',
+    object: request.object,
+  })
+}
+
+function assertMaterialListReadOnlyScope(request, objectConfig) {
+  if (request.object !== 'material') {
+    throw new UnsupportedAdapterOperationError('K3 WISE WebAPI read-only LIST supports only material list reads', {
+      kind: 'erp:k3-wise-webapi',
+      object: request.object,
+      operation: 'read',
+    })
+  }
+  if (request.cursor) {
+    throw new AdapterValidationError('K3 WISE Material LIST smoke does not support cursor pagination', {
+      code: 'K3_WISE_READ_LIST_CURSOR_UNSUPPORTED',
+      object: request.object,
+      field: 'cursor',
+    })
+  }
+  if (Object.keys(request.watermark || {}).length > 0) {
+    throw new AdapterValidationError('K3 WISE Material LIST smoke does not support watermark reads', {
+      code: 'K3_WISE_READ_LIST_WATERMARK_UNSUPPORTED',
+      object: request.object,
+      field: 'watermark',
+    })
+  }
+  if (Object.keys(request.filters || {}).length > 0) {
+    throw new AdapterValidationError('K3 WISE Material LIST smoke does not accept request-supplied filters', {
+      code: 'K3_WISE_READ_LIST_FILTER_UNSUPPORTED',
+      object: request.object,
+      fields: Object.keys(request.filters),
+    })
+  }
+  const allowedOptionKeys = new Set(['k3ReadMode', 'listKey'])
+  const unknownOptions = Object.keys(request.options || {}).filter((key) => !allowedOptionKeys.has(key))
+  if (unknownOptions.length > 0) {
+    throw new AdapterValidationError('K3 WISE Material LIST smoke does not accept request-supplied options', {
+      code: 'K3_WISE_READ_LIST_OPTION_UNSUPPORTED',
+      object: request.object,
+      fields: unknownOptions,
+    })
+  }
+  const maxLimit = toPositiveNumber(objectConfig.maxListLimit) || DEFAULT_MATERIAL_LIST_MAX_LIMIT
+  if (request.limit > maxLimit) {
+    throw new AdapterValidationError('K3 WISE Material LIST smoke limit exceeds the preset bound', {
+      code: 'K3_WISE_READ_LIST_LIMIT_EXCEEDED',
+      object: request.object,
+      limit: request.limit,
+      maxLimit,
+    })
+  }
+}
+
 function defaultMaterialReferenceFields(objectConfig) {
   return Array.isArray(objectConfig.schema)
     ? objectConfig.schema
@@ -640,6 +723,73 @@ function buildReadBody(materialNumber, objectConfig) {
     : { FNumber: materialNumber }
   if (template.GetProperty === undefined) template.GetProperty = false
   return template
+}
+
+function buildListReadBody(request, objectConfig) {
+  const template = isPlainObject(objectConfig.readListBodyTemplate)
+    ? cloneJson(objectConfig.readListBodyTemplate)
+    : {}
+  const bodyKey = typeof objectConfig.readListBodyKey === 'string' && objectConfig.readListBodyKey.trim()
+    ? objectConfig.readListBodyKey.trim()
+    : 'Data'
+  const pageIndexField = typeof objectConfig.pageIndexField === 'string' && objectConfig.pageIndexField.trim()
+    ? objectConfig.pageIndexField.trim()
+    : 'PageIndex'
+  const pageSizeField = typeof objectConfig.pageSizeField === 'string' && objectConfig.pageSizeField.trim()
+    ? objectConfig.pageSizeField.trim()
+    : 'PageSize'
+  const topField = typeof objectConfig.topField === 'string' && objectConfig.topField.trim()
+    ? objectConfig.topField.trim()
+    : 'Top'
+  const container = isPlainObject(template[bodyKey]) ? template[bodyKey] : {}
+  template[bodyKey] = {
+    ...container,
+    [topField]: request.limit,
+    [pageIndexField]: 1,
+    [pageSizeField]: request.limit,
+  }
+  const listFields = Array.isArray(objectConfig.readListFields)
+    ? objectConfig.readListFields.filter((field) => typeof field === 'string' && field.trim()).map((field) => field.trim())
+    : []
+  if (listFields.length > 0 && template[bodyKey].Fields === undefined) {
+    template[bodyKey].Fields = listFields.join(',')
+  }
+  if (typeof objectConfig.readListOrderBy === 'string' && objectConfig.readListOrderBy.trim() && template[bodyKey].OrderBy === undefined) {
+    template[bodyKey].OrderBy = objectConfig.readListOrderBy.trim()
+  }
+  const listKey = typeof request.options.listKey === 'string' ? request.options.listKey.trim() : ''
+  if (listKey) {
+    const filterField = typeof objectConfig.readListFilterField === 'string' && objectConfig.readListFilterField.trim()
+      ? objectConfig.readListFilterField.trim()
+      : 'FNumber'
+    const escaped = escapeK3LikePrefix(listKey)
+    template[bodyKey].Filter = `${filterField} LIKE '${escaped}%'`
+  }
+  return template
+}
+
+function escapeK3LikePrefix(value) {
+  return String(value)
+    .replace(/'/g, "''")
+    .replace(/\[/g, '[[]')
+    .replace(/%/g, '[%]')
+    .replace(/_/g, '[_]')
+}
+
+function materialListRowsCandidate(data) {
+  const candidates = [
+    getPath(data, 'Data.DATA'),
+    getPath(data, 'Data.data'),
+  ]
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate.filter(isPlainObject).map((row) => cloneJson(row))
+  }
+  return null
+}
+
+function materialListBusinessSuccess(data, config) {
+  if (hasExplicitBusinessFailure(data)) return false
+  return businessSuccess(data, config) && materialListRowsCandidate(data) !== null
 }
 
 function buildMaterialReadRecord(detail, request, objectConfig) {
@@ -1117,6 +1267,60 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       throw new AdapterValidationError(`K3 WISE object is not configured: ${request.object}`, { object: request.object })
     }
     ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'read')
+    const readMode = resolveMaterialReadMode(request, objectConfig)
+    if (readMode === 'list') {
+      assertMaterialListReadOnlyScope(request, objectConfig)
+      const readPath = objectConfig.readPath
+        ? assertRelativePath(objectConfig.readPath, 'object.readPath')
+        : null
+      if (!readPath) {
+        throw new K3WiseWebApiAdapterError('K3 WISE list endpoint is not configured for material', {
+          code: 'K3_WISE_READ_NOT_CONFIGURED',
+          object: request.object,
+        })
+      }
+
+      const authContext = await login()
+      let readResponse
+      try {
+        readResponse = await requestJson(readPath, {
+          method: objectConfig.readMethod || 'POST',
+          query: authContext.query,
+          headers: authContext.headers,
+          body: buildListReadBody(request, objectConfig),
+        })
+      } catch (error) {
+        throw new K3WiseWebApiAdapterError(`K3 WISE WebAPI list read failed: ${error && error.message ? error.message : String(error)}`, {
+          code: 'K3_WISE_READ_FAILED',
+          object: request.object,
+          status: error && error.status,
+          path: readPath,
+        })
+      }
+
+      if (!materialListBusinessSuccess(readResponse.data, config)) {
+        throw new K3WiseWebApiAdapterError(String(responseMessage(readResponse.data, config, 'K3 WISE list read business response failed')), {
+          code: 'K3_WISE_READ_BUSINESS_ERROR',
+          object: request.object,
+          responseCode: responseFailureCode(readResponse.data, config, 'K3_WISE_READ_BUSINESS_ERROR'),
+        })
+      }
+
+      const records = (materialListRowsCandidate(readResponse.data) || []).slice(0, request.limit)
+      return createReadResult({
+        records,
+        raw: readResponse.data,
+        metadata: {
+          object: request.object,
+          mode: 'material-list-smoke',
+          requestedLimit: request.limit,
+          returnedRecordCount: records.length,
+          readPath,
+          readOnly: true,
+        },
+      })
+    }
+
     assertMaterialDetailReadOnlyScope(request)
 
     const readPath = objectConfig.readPath
