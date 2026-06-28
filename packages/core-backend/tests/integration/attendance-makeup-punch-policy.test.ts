@@ -109,6 +109,7 @@ describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', 
     d.setUTCDate(d.getUTCDate() + offset)
     return d.toISOString().slice(0, 10)
   }
+  const weekdayOf = (workDate: string): number => new Date(`${workDate}T00:00:00.000Z`).getUTCDay()
   const at = (workDate: string, hhmm: string) => `${workDate}T${hhmm}:00.000Z`
 
   // Full policy shape on every PUT so a previous test's array never leaks through mergeSettings; nested
@@ -158,8 +159,54 @@ describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', 
   // A 'partial' record missing the check-IN side → fact missing_check_in (the typical 补卡 case).
   const seedMissingCheckIn = (userId: string, workDate: string) =>
     seedRecord(userId, workDate, { status: 'partial', firstIn: null, lastOut: at(workDate, '18:00'), lateMinutes: 0 })
+  const seedMissingCheckOut = (userId: string, workDate: string) =>
+    seedRecord(userId, workDate, { status: 'partial', firstIn: at(workDate, '09:00'), lastOut: null, lateMinutes: 0 })
   const seedLate = (userId: string, workDate: string) =>
     seedRecord(userId, workDate, { status: 'late', firstIn: at(workDate, '09:30'), lastOut: at(workDate, '18:00'), lateMinutes: 30 })
+
+  async function withDefaultWorkdayFor(workDate: string, run: () => Promise<void>): Promise<void> {
+    const ruleId = randomUUID()
+    const previousDefaultIds = (await pool.query(
+      `SELECT id FROM attendance_rules WHERE org_id = $1 AND is_default = true`,
+      [ORG],
+    )).rows.map((row) => String(row.id))
+    const previousHolidays = (await pool.query(
+      `SELECT id, name, is_working_day, origin FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2`,
+      [ORG, workDate],
+    )).rows
+    try {
+      await pool.query(`UPDATE attendance_rules SET is_default = false, updated_at = now() WHERE org_id = $1 AND is_default = true`, [ORG])
+      await pool.query(
+        `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes,
+          severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default)
+         VALUES ($1, $2, $3, 'UTC', '09:00', '18:00', 5, 5, 30, 60, 5, $4::jsonb, true)`,
+        [ruleId, ORG, `mp-no-record-${ruleId}`, JSON.stringify([weekdayOf(workDate)])],
+      )
+      await pool.query(`DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2`, [ORG, workDate])
+      await pool.query(
+        `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
+         VALUES ($1, $2, $3, $4, true, 'manual')`,
+        [randomUUID(), ORG, workDate, 'MP no-record workday'],
+      )
+      await run()
+    } finally {
+      await pool.query(`DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2`, [ORG, workDate]).catch(() => undefined)
+      for (const row of previousHolidays) {
+        await pool.query(
+          `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (org_id, holiday_date) DO UPDATE
+           SET name = EXCLUDED.name, is_working_day = EXCLUDED.is_working_day, origin = EXCLUDED.origin, updated_at = now()`,
+          [row.id, ORG, workDate, row.name ?? null, row.is_working_day === true, row.origin ?? 'manual'],
+        ).catch(() => undefined)
+      }
+      await pool.query(`DELETE FROM attendance_rules WHERE id = $1`, [ruleId]).catch(() => undefined)
+      if (previousDefaultIds.length > 0) {
+        await pool.query(`UPDATE attendance_rules SET is_default = true, updated_at = now() WHERE id = ANY($1::uuid[])`, [previousDefaultIds]).catch(() => undefined)
+      }
+    }
+  }
 
   async function reqRow(id: string): Promise<{ status: string; metadata: Record<string, unknown> } | null> {
     const row = (await pool.query(`SELECT status, metadata FROM attendance_requests WHERE id = $1`, [id])).rows[0]
@@ -357,6 +404,120 @@ describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', 
     } finally {
       await cleanupUser(uLate)
       await cleanupUser(uMiss)
+    }
+  })
+
+  it('missing_check_out fact: genuine missed_check_out passes and snapshots matchedAnomalyTypes', async () => {
+    await setMakeup({ enabled: true, allowedAnomalyTypes: ['missing_check_out'] })
+    const u = uid('typeO')
+    const tU = await mintToken(u, 'attendance:read,attendance:write')
+    const wd = dayKey(0)
+    try {
+      await seedMissingCheckOut(u, wd)
+      const created = await createReq(tU, { requestType: 'missed_check_out', workDate: wd, requestedOutAt: at(wd, '18:00'), reason: 'forgot out' })
+      expect(created.status).toBe(201)
+      const snap = (await reqRow(requestIdOf(created)))?.metadata?.makeupPunchPolicySnapshot as Record<string, unknown> | undefined
+      expect(snap?.matchedAnomalyTypes).toEqual(['missing_check_out'])
+    } finally {
+      await cleanupUser(u)
+    }
+  })
+
+  it('no-record workday fact: missing-side requests pass from resolved default rule context', async () => {
+    await setMakeup({ enabled: true, allowedAnomalyTypes: ['missing_check_in', 'missing_check_out'] })
+    const uIn = uid('typeNoRecIn')
+    const uOut = uid('typeNoRecOut')
+    const tIn = await mintToken(uIn, 'attendance:read,attendance:write')
+    const tOut = await mintToken(uOut, 'attendance:read,attendance:write')
+    const wd = dayKey(0)
+    try {
+      await withDefaultWorkdayFor(wd, async () => {
+        expect(await recordStatus(uIn, wd)).toBeNull()
+        expect(await recordStatus(uOut, wd)).toBeNull()
+
+        const checkIn = await createReq(tIn, { requestType: 'missed_check_in', workDate: wd, requestedInAt: at(wd, '09:00'), reason: 'forgot in entirely' })
+        expect(checkIn.status).toBe(201)
+        const checkInSnap = (await reqRow(requestIdOf(checkIn)))?.metadata?.makeupPunchPolicySnapshot as Record<string, unknown> | undefined
+        expect(checkInSnap?.matchedAnomalyTypes).toEqual(['missing_check_in'])
+
+        const checkOut = await createReq(tOut, { requestType: 'missed_check_out', workDate: wd, requestedOutAt: at(wd, '18:00'), reason: 'forgot out entirely' })
+        expect(checkOut.status).toBe(201)
+        const checkOutSnap = (await reqRow(requestIdOf(checkOut)))?.metadata?.makeupPunchPolicySnapshot as Record<string, unknown> | undefined
+        expect(checkOutSnap?.matchedAnomalyTypes).toEqual(['missing_check_out'])
+      })
+    } finally {
+      await cleanupUser(uIn)
+      await cleanupUser(uOut)
+    }
+  })
+
+  it('time_correction facts: late_early double-match and meta-derived severe/absence late tiers are enforced', async () => {
+    const wd = dayKey(0)
+    const uBoth = uid('typeBoth')
+    const uSevere = uid('typeSev')
+    const uAbsence = uid('typeAbs')
+    const tBoth = await mintToken(uBoth, 'attendance:read,attendance:write')
+    const tSevere = await mintToken(uSevere, 'attendance:read,attendance:write')
+    const tAbsence = await mintToken(uAbsence, 'attendance:read,attendance:write')
+    try {
+      await setMakeup({ enabled: true })
+      await seedRecord(uBoth, wd, {
+        status: 'late_early',
+        firstIn: at(wd, '09:30'),
+        lastOut: at(wd, '17:30'),
+        lateMinutes: 30,
+        earlyLeaveMinutes: 30,
+      })
+      const both = await createReq(tBoth, {
+        requestType: 'time_correction',
+        workDate: wd,
+        requestedInAt: at(wd, '09:00'),
+        requestedOutAt: at(wd, '18:00'),
+        reason: 'fix both sides',
+      })
+      expect(both.status).toBe(201)
+      const bothSnap = (await reqRow(requestIdOf(both)))?.metadata?.makeupPunchPolicySnapshot as Record<string, unknown> | undefined
+      expect(bothSnap?.matchedAnomalyTypes).toEqual(['late', 'early_leave'])
+
+      await setMakeup({ enabled: true, allowedAnomalyTypes: ['severe_late'] })
+      await seedRecord(uSevere, wd, {
+        status: 'late',
+        firstIn: at(wd, '11:00'),
+        lastOut: at(wd, '18:00'),
+        lateMinutes: 120,
+        meta: { severe_late_count: 1, severe_late_minutes: 120 },
+      })
+      const severe = await createReq(tSevere, {
+        requestType: 'time_correction',
+        workDate: wd,
+        requestedInAt: at(wd, '09:00'),
+        reason: 'fix severe late',
+      })
+      expect(severe.status).toBe(201)
+      const severeSnap = (await reqRow(requestIdOf(severe)))?.metadata?.makeupPunchPolicySnapshot as Record<string, unknown> | undefined
+      expect(severeSnap?.matchedAnomalyTypes).toEqual(['severe_late'])
+
+      await setMakeup({ enabled: true, allowedAnomalyTypes: ['absence_late'] })
+      await seedRecord(uAbsence, wd, {
+        status: 'late',
+        firstIn: at(wd, '13:00'),
+        lastOut: at(wd, '18:00'),
+        lateMinutes: 240,
+        meta: { absence_late_count: 1 },
+      })
+      const absence = await createReq(tAbsence, {
+        requestType: 'time_correction',
+        workDate: wd,
+        requestedInAt: at(wd, '09:00'),
+        reason: 'fix absence late',
+      })
+      expect(absence.status).toBe(201)
+      const absenceSnap = (await reqRow(requestIdOf(absence)))?.metadata?.makeupPunchPolicySnapshot as Record<string, unknown> | undefined
+      expect(absenceSnap?.matchedAnomalyTypes).toEqual(['absence_late'])
+    } finally {
+      await cleanupUser(uBoth)
+      await cleanupUser(uSevere)
+      await cleanupUser(uAbsence)
     }
   })
 
