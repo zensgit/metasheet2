@@ -878,6 +878,8 @@ export function automationTriggerTypeLabel(type: AutomationTriggerType | Unknown
       return isZh ? '定时计划（cron）' : 'Schedule (cron)'
     case 'schedule.interval':
       return isZh ? '定时计划（间隔）' : 'Schedule (interval)'
+    case 'schedule.date_field':
+      return isZh ? '日期提醒（按日期字段）' : 'Date reminder (by date field)'
     case 'webhook.received':
       return isZh ? '收到 Webhook 时' : 'Webhook received'
     case 'form.submitted':

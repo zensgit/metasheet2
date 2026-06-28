@@ -36,6 +36,7 @@
             <option value="field.value_changed">{{ automationTriggerTypeLabel('field.value_changed', isZh) }}</option>
             <option value="schedule.cron">{{ automationTriggerTypeLabel('schedule.cron', isZh) }}</option>
             <option value="schedule.interval">{{ automationTriggerTypeLabel('schedule.interval', isZh) }}</option>
+            <option value="schedule.date_field">{{ automationTriggerTypeLabel('schedule.date_field', isZh) }}</option>
             <option value="webhook.received">{{ automationTriggerTypeLabel('webhook.received', isZh) }}</option>
           </select>
 
@@ -78,6 +79,24 @@
           <template v-if="draft.triggerType === 'schedule.interval'">
             <label class="meta-rule-editor__label">{{ automationLabel('trigger.intervalMinutes', isZh) }}</label>
             <input v-model.number="draft.triggerConfig.intervalMinutes" class="meta-rule-editor__input" type="number" min="1" placeholder="5" data-field="intervalMinutes" />
+          </template>
+
+          <!-- schedule.date_field (date reminder) config -->
+          <template v-if="draft.triggerType === 'schedule.date_field'">
+            <label class="meta-rule-editor__label">{{ isZh ? '日期字段' : 'Date field' }}</label>
+            <select v-model="draft.triggerConfig.dateFieldId" class="meta-rule-editor__select" data-field="dateFieldId">
+              <option value="">{{ isZh ? '请选择日期字段' : 'Select a date field' }}</option>
+              <option v-for="field in dateReminderCandidateFields" :key="field.id" :value="field.id">{{ field.name }}</option>
+            </select>
+            <label class="meta-rule-editor__label">{{ isZh ? '提前 / 延后天数' : 'Days offset' }}</label>
+            <input v-model.number="draft.triggerConfig.offsetDays" class="meta-rule-editor__input" type="number" min="0" placeholder="3" data-field="offsetDays" />
+            <label class="meta-rule-editor__label">{{ isZh ? '方向' : 'Direction' }}</label>
+            <select v-model="draft.triggerConfig.direction" class="meta-rule-editor__select" data-field="direction">
+              <option value="before">{{ isZh ? '日期之前' : 'Before the date' }}</option>
+              <option value="after">{{ isZh ? '日期之后' : 'After the date' }}</option>
+            </select>
+            <label class="meta-rule-editor__label">{{ isZh ? '触发时间（UTC，可选）' : 'Time of day (UTC, optional)' }}</label>
+            <input v-model="draft.triggerConfig.timeOfDay" class="meta-rule-editor__input" type="time" placeholder="09:00" data-field="timeOfDay" />
           </template>
         </section>
 
@@ -1304,6 +1323,7 @@ const internalViews = computed(() => (props.views ?? []).filter((view) => !view.
 const groupDestinationCandidateFields = computed(() => props.fields)
 const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
 const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
+const dateReminderCandidateFields = computed(() => props.fields.filter((field) => field.type === 'date' || field.type === 'dateTime'))
 const savedRuleHasDingTalkActions = computed(() => ruleHasDingTalkActions(props.rule))
 function dingTalkTestRunConfirmMessage(): string {
   const separator = isZh.value ? '' : ' '
@@ -2755,6 +2775,11 @@ function buildPayload(): Partial<AutomationRule> {
   const triggerConfig = { ...d.triggerConfig }
   if (d.triggerType === 'schedule.cron' && cronPreset.value !== 'custom') {
     triggerConfig.cron = cronPreset.value
+  }
+  if (d.triggerType === 'schedule.date_field') {
+    // Normalize the date-reminder config so an unset/garbage direction or offset can't persist a no-op rule.
+    triggerConfig.direction = triggerConfig.direction === 'after' ? 'after' : 'before'
+    triggerConfig.offsetDays = Number(triggerConfig.offsetDays) || 0
   }
   const actions = d.actions.map((action) => {
     if (action.type === 'condition_branch') {

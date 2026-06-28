@@ -217,7 +217,8 @@ describe('MetaAutomationRuleEditor', () => {
 
     const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
     expect(triggerSelect).toBeTruthy()
-    expect(triggerSelect.options.length).toBe(7)
+    // record.created/updated/deleted + field.value_changed + schedule.cron/interval/date_field + webhook.received
+    expect(triggerSelect.options.length).toBe(8)
   })
 
   it('localizes core rule editor chrome in zh-CN while keeping raw select values', async () => {
@@ -471,6 +472,20 @@ describe('MetaAutomationRuleEditor', () => {
 
     const cronSelect = container.querySelector('[data-field="cronPreset"]')
     expect(cronSelect).toBeTruthy()
+  })
+
+  it('shows date-field config (field/offset/direction) for schedule.date_field trigger', async () => {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
+    triggerSelect.value = 'schedule.date_field'
+    triggerSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.querySelector('[data-field="dateFieldId"]')).toBeTruthy()
+    expect(container.querySelector('[data-field="offsetDays"]')).toBeTruthy()
+    expect(container.querySelector('[data-field="direction"]')).toBeTruthy()
   })
 
   it('can add and remove conditions', async () => {

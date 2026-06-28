@@ -1,8 +1,16 @@
 import { randomUUID } from 'crypto'
-import type { Kysely } from 'kysely'
+import { sql, type Kysely } from 'kysely'
 import type { EventBus } from '../integration/events/event-bus'
 import { Logger } from '../core/logger'
 import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, type AutomationTriggerType } from './automation-triggers'
+import {
+  computeDateReminderOccurrence,
+  isDateReminderDue,
+  dateReminderScanIntervalMs,
+  dateReminderScanWindowMs,
+  dateReminderCandidateDateRange,
+  type ScheduleDateFieldConfig,
+} from './automation-date-reminder'
 import { ensureRecordNotLocked } from './record-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { extractSelectOptions } from './field-codecs'
@@ -57,6 +65,7 @@ const VALID_TRIGGER_TYPES = new Set([
   'field.value_changed',
   'schedule.cron',
   'schedule.interval',
+  'schedule.date_field',
   'webhook.received',
   'form.submitted',
 ])
@@ -673,7 +682,12 @@ export class AutomationService {
     this.approvalBridgeService = new AutomationApprovalBridgeService(this.jobService)
     this.scheduler = new AutomationScheduler(
       async (rule) => {
-        await this.executeRule(rule, { _triggeredBy: 'schedule' })
+        // Date-reminder rules scan → claim → fire per due record; other schedule rules execute once.
+        if (rule.trigger.type === 'schedule.date_field') {
+          await this.evaluateDateReminders(rule)
+        } else {
+          await this.executeRule(rule, { _triggeredBy: 'schedule' })
+        }
       },
       schedulerLeaderOptions,
       schedulerRuntime,
@@ -1013,7 +1027,11 @@ export class AutomationService {
   async registerScheduledRules(sheetId: string): Promise<void> {
     const rules = await this.loadEnabledRules(sheetId)
     for (const rule of rules) {
-      if (rule.trigger_type === 'schedule.cron' || rule.trigger_type === 'schedule.interval') {
+      if (
+        rule.trigger_type === 'schedule.cron' ||
+        rule.trigger_type === 'schedule.interval' ||
+        rule.trigger_type === 'schedule.date_field'
+      ) {
         this.scheduler.register(toExecutorRule(rule))
       }
     }
@@ -1034,7 +1052,7 @@ export class AutomationService {
       .selectFrom('automation_rules')
       .selectAll()
       .where('enabled', '=', true)
-      .where('trigger_type', 'in', ['schedule.cron', 'schedule.interval'])
+      .where('trigger_type', 'in', ['schedule.cron', 'schedule.interval', 'schedule.date_field'])
       .execute()
 
     for (const row of rows) {
@@ -1052,9 +1070,99 @@ export class AutomationService {
    */
   registerSchedule(rule: AutomationRule): void {
     const execRule = toExecutorRule(rule)
-    if (execRule.trigger.type === 'schedule.cron' || execRule.trigger.type === 'schedule.interval') {
+    if (
+      execRule.trigger.type === 'schedule.cron' ||
+      execRule.trigger.type === 'schedule.interval' ||
+      execRule.trigger.type === 'schedule.date_field'
+    ) {
       this.scheduler.register(execRule)
     }
+  }
+
+  /**
+   * Date-reminder scan (`schedule.date_field`). For each record in the rule's sheet whose date field yields a
+   * DUE occurrence, claim it in the idempotency ledger and fire the rule once with the record as context.
+   *
+   * Idempotency = claim-then-fire (AT-MOST-ONCE): INSERT the (rule, record, occurrence) row ON CONFLICT DO
+   * NOTHING and fire ONLY when the insert won. A crash between claim and fire drops that one reminder — the
+   * documented at-most-once semantic, preferable to at-least-once double-reminders. `isDateReminderDue`
+   * bounds the lower edge so a fresh rule over historical records never backfill-blasts, and `occurrence` is a
+   * pure, day-bucketed function of the record's date value + config (never NOW) → the dedup key is stable
+   * across ticks. The coarse date-value range pushes the scan into SQL (ISO date strings sort
+   * chronologically, so a string BETWEEN works without a cast that could throw on legacy data).
+   *
+   * The fire payload mirrors the record.* shape (`{ recordId, data }`) the executor maps to
+   * `context.recordData`, so downstream actions (e.g. send_notification) resolve record fields normally.
+   */
+  private async evaluateDateReminders(rule: ExecutorRule): Promise<void> {
+    const config = rule.trigger.config as Partial<ScheduleDateFieldConfig>
+    const dateFieldId = typeof config.dateFieldId === 'string' ? config.dateFieldId : ''
+    if (
+      !dateFieldId ||
+      typeof config.offsetDays !== 'number' ||
+      (config.direction !== 'before' && config.direction !== 'after')
+    ) {
+      logger.warn(`Rule ${rule.id}: invalid schedule.date_field config — skipping scan`)
+      return
+    }
+
+    const nowMs = Date.now()
+    const scanWindowMs = dateReminderScanWindowMs(dateReminderScanIntervalMs(config))
+    const createdAtMs = new Date(rule.createdAt).getTime()
+    const ruleCreatedAtMs = Number.isNaN(createdAtMs) ? 0 : createdAtMs
+    const { loIso, hiIso } = dateReminderCandidateDateRange(nowMs, config, scanWindowMs)
+
+    // Coarse SQL pre-filter: only records whose date field falls in the window can produce a due occurrence.
+    const candidates = await sql<{ id: string; data: Record<string, unknown> | string | null }>`
+      SELECT id, data
+        FROM meta_records
+       WHERE sheet_id = ${rule.sheetId}
+         AND data ->> ${dateFieldId} IS NOT NULL
+         AND data ->> ${dateFieldId} BETWEEN ${loIso} AND ${hiIso}
+    `.execute(this.db)
+
+    let fired = 0
+    for (const rec of candidates.rows) {
+      const data: Record<string, unknown> =
+        typeof rec.data === 'string' ? (JSON.parse(rec.data) as Record<string, unknown>) : (rec.data ?? {})
+      const occurrence = computeDateReminderOccurrence(data[dateFieldId], config)
+      if (!occurrence) continue
+      if (!isDateReminderDue(occurrence, nowMs, scanWindowMs, ruleCreatedAtMs)) continue
+
+      // Claim-then-fire: insert the dedup row; fire ONLY if WE won the insert (at-most-once).
+      const claim = await sql<{ record_id: string }>`
+        INSERT INTO meta_automation_date_reminder_fires (rule_id, record_id, occurrence_ts)
+        VALUES (${rule.id}, ${rec.id}, ${occurrence})
+        ON CONFLICT DO NOTHING
+        RETURNING record_id
+      `.execute(this.db)
+      if (claim.rows.length === 0) continue // a prior tick / replica already fired this occurrence
+
+      await this.executeRule(rule, {
+        recordId: rec.id,
+        data,
+        sheetId: rule.sheetId,
+        occurrenceTs: occurrence,
+        _triggeredBy: 'date_reminder',
+      })
+      fired += 1
+    }
+    if (fired > 0) {
+      logger.info(`Date-reminder rule ${rule.id}: fired ${fired} reminder(s)`)
+    }
+  }
+
+  /**
+   * Run ONE date-reminder scan for a single rule immediately — an ops "run now" / diagnostics hook (and the
+   * deterministic test seam, since the scheduler's setInterval cadence is not test-friendly). Loads the rule
+   * and, only if it is a `schedule.date_field` rule, runs the scan → claim → fire pass once. No-op otherwise.
+   */
+  async runDateReminderScanNow(ruleId: string): Promise<void> {
+    const rule = await this.getRule(ruleId)
+    if (!rule) return
+    const execRule = toExecutorRule(rule)
+    if (execRule.trigger.type !== 'schedule.date_field') return
+    await this.evaluateDateReminders(execRule)
   }
 
   /**
