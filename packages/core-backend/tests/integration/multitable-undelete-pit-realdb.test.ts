@@ -164,4 +164,62 @@ describeIfDatabase('multitable T8-1 PIT undelete-execute (real DB)', () => {
     const again = await execute(T1, pv.body?.data?.previewIdentity, 'undelete') // resurrect-set now empty → hash mismatch
     expect([409, 410]).toContain(again.status)
   })
+
+  // ── pre-rollout review fixes ──────────────────────────────────────────────────────────────────────────────
+  test('(i) fix#3 source: the resurrect revision is source=restore (Time Machine), not a plain rest create', async () => {
+    process.env[FLAG] = 'true'
+    const pv = await preview(T1)
+    expect((await execute(T1, pv.body?.data?.previewIdentity, 'undelete')).status).toBe(200)
+    const row = (await q('SELECT source FROM meta_record_revisions WHERE record_id=$1 AND action=$2 ORDER BY created_at DESC LIMIT 1', [U, 'create'])).rows[0] as { source: string } | undefined
+    expect(row?.source).toBe('restore')
+  })
+
+  test('(j) fix#2 schema-drift: a resurrect target whose T-snapshot has a removed field is NOT resurrected', async () => {
+    process.env[FLAG] = 'true'
+    const U2 = `rec_un_drift_${TS}`
+    await rev(U2, 1, 'create', { [`fld_gone_${TS}`]: 'x', [NAME]: 'd' }, T0) // a field id that is not in the sheet schema
+    const pv = await preview(T1)
+    expect(pv.body?.data?.undeleteRecordIds).toEqual([U]) // U2 excluded as schema-drift; only U is resurrectable
+    expect((await execute(T1, pv.body?.data?.previewIdentity, 'undelete')).status).toBe(200)
+    expect(await liveRow(U2)).toBeUndefined() // never resurrected (would have written the stale field key)
+  })
+
+  test('(k) fix#1 unified cap: live count passes the early ceiling but reverts+resurrects exceeds it → 413', async () => {
+    process.env[FLAG] = 'true'
+    const prev = process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
+    process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '1' // live = 1 (L) passes early; U + U3 = 2 resurrects exceed
+    try {
+      await rev(`rec_un_cap_${TS}`, 1, 'create', { [NAME]: 'c' }, T0) // a 2nd undelete candidate
+      const res = await preview(T1)
+      expect(res.status).toBe(413)
+      expect(res.body?.error?.code).toBe('SHEET_TOO_LARGE')
+    } finally {
+      if (prev === undefined) delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
+      else process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = prev
+    }
+  })
+
+  test('(l) fix#4 no partial: an undelete failure aborts BEFORE the field-reverts (reorder) — a revert candidate stays unreverted', async () => {
+    process.env[FLAG] = 'true'
+    const R = `rec_un_revert_${TS}`
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,2)', [R, SHEET, JSON.stringify({ [NAME]: 'B' })]) // live revert candidate: T1=A, now=B
+    await rev(R, 1, 'create', { [NAME]: 'A' }, T0)
+    await rev(R, 2, 'update', { [NAME]: 'B' }, T2)
+    const pv = await preview(T1)
+    const FN = `un_fail_${TS}`, TRG = `un_fail_trg_${TS}`
+    await q(`CREATE OR REPLACE FUNCTION ${FN}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'forced undelete insert failure'; END; $fn$`, [])
+    await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_records`, [])
+    await q(`CREATE TRIGGER ${TRG} BEFORE INSERT ON meta_records FOR EACH ROW WHEN (NEW.id = '${U}') EXECUTE FUNCTION ${FN}()`, [])
+    try {
+      const x = await execute(T1, pv.body?.data?.previewIdentity, 'undelete')
+      expect(x.status).toBeGreaterThanOrEqual(409) // undelete failed (409 conflict or 500) — request fails
+      expect(await liveRow(U)).toBeUndefined() // U not resurrected (txn rolled back)
+      const r = await liveRow(R)
+      expect(r?.data?.[NAME]).toBe('B') // R NOT reverted — the field-reverts run AFTER the (failed) undelete, so never executed
+      expect(r?.version).toBe(2)
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_records`, []).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${FN}()`, []).catch(() => {})
+    }
+  })
 })

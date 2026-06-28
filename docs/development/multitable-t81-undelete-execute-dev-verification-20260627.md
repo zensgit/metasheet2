@@ -7,14 +7,23 @@ PIT **Revert**-to-T now resurrects records that existed at T but are deleted now
 
 - **`computeSheetRevert`**: collects a **resurrect-set** `{recordId, snapshot, snapshotHash}` from `reconstructRecordsAtT`'s **full unmasked T-snapshot** (not the masked revert diff — undelete re-creates the whole record; read-masking still applies on later reads). Denied records are skipped (no oracle).
 - **Identity (L2)**: `mintPitRevertPreviewIdentity` now also binds **`resurrectScopeHash`** (`hashResurrectSet` = recordId + T-snapshot hash; a deleted record has **no live version**, so the snapshot hash is the per-record anchor). Execute re-enumerates → **409** on any drift to the resurrect set.
-- **`revert-execute`**: when resurrects present → default-off flag (403 `UNDELETE_DISABLED`) + **`canDeleteRecord`** floor (403 `FORBIDDEN`; never `canEditRecord` — `canDeleteRecord===canWrite`, tested via a share-only actor) + typed **`confirm:'undelete'`** (400 `CONFIRM_REQUIRED`). Then resurrect each in **one `pool.transaction`** (L6 all-or-nothing): `FOR UPDATE` id-collision reject + `INSERT` full T-snapshot under the **original id** (unique-violation → 409 `UNDELETE_CONFLICT`, no overwrite) + **outbound** `meta_links` rebuild from the snapshot (L3) + a `'rest'` create-revision; realtime create events post-commit (L7). **No inbound** rebuild (L4 A).
+- **`revert-execute`**: when resurrects present → default-off flag (403 `UNDELETE_DISABLED`) + **`canDeleteRecord`** floor (403 `FORBIDDEN`; never `canEditRecord` — `canDeleteRecord===canWrite`, tested via a share-only actor) + typed **`confirm:'undelete'`** (400 `CONFIRM_REQUIRED`). Then resurrect each in **one `pool.transaction`** (L6 all-or-nothing): `FOR UPDATE` id-collision reject + `INSERT` full T-snapshot under the **original id** (unique-violation → 409 `UNDELETE_CONFLICT`, no overwrite) + **outbound** `meta_links` rebuild from the snapshot (L3) + a `'restore'` create-revision; realtime create events post-commit (L7). **No inbound** rebuild (L4 A). *(Resurrect runs FIRST — see the pre-rollout fixes below.)*
 
 ## Two design-lock corrections the implementation grounding surfaced
 1. **Inbound (already corrected in #3307/#3310):** #3306's repair-on-read *filters* dangling edges; it does **not** re-create the inbound edges delete removed. Inbound re-appears when the **linking record is next saved** — golden (f) pins this (undelete writes zero inbound edges; the linking record's data still references the resurrected id).
 2. **Resurrect from T-snapshot, NOT `restoreRecord` (trash):** `restoreRecord` resurrects the *delete-time* trash state (≠ T-state for a modified-then-deleted record) and opens its own txn. So the resurrect inserts `reconstructRecordsAtT`'s **T-snapshot** directly, reusing `restoreRecord`'s collision/outbound/revision *pattern* inside the execute txn. (Avoids a latent data-loss + trash-retention dependency.)
 
+## Pre-rollout review fixes (follow-up PR — required before enabling the flag)
+Post-merge adversarial review of #3311 found 4 issues (flag-off on main was safe; these gate enablement). All fixed:
+1. **Unified cap** — the ceiling counted live rows only; few-live + large-deleted-history could resurrect past `SHEET_REVERT_MAX_RECORDS`. Now `reverts+resurrects` is re-checked post-scan → 413.
+2. **Resurrect schema-drift guard** — the resurrect branch lacked the revert path's drift check, so a T-snapshot with a removed field could write a stale key into `meta_records.data`. Now drift-rejected (excluded → re-preview), parity with reverts.
+3. **`source:'restore'`** (was `'rest'`) — Time-Machine undeletes no longer show as plain REST creates in history/audit (`RecordRevisionSource` allows it via `| string`).
+4. **No partial / reorder** — the resurrect transaction now runs **FIRST**; a resurrect failure aborts the request (409/500) with **zero writes**, *before* any field-revert is applied. Eliminates the "reverts applied + undelete failed" partial.
+
+New goldens (i)–(l): source=restore · drift-not-resurrected · unified-cap 413 · undelete-fails→revert-not-applied.
+
 ## Mixed semantics (real behavioral note)
-The handler is now **mixed**: field-**reverts** stay best-effort per-record (skip-on-conflict, as before); **resurrects** are atomic all-or-nothing. A resurrect-set failure rolls back only the resurrects (reverts already applied stand). Documented here, not buried.
+After the reorder: **resurrects run first, atomically** (all-or-nothing; a failure aborts the whole request with zero writes). Field-**reverts** then run best-effort per-record (skip-on-conflict). The only residual is the *forward* direction — if resurrects succeed and a later revert skips on conflict, the request returns 200 with that record marked `skipped` (never a silent partial of the destructive-adjacent resurrect).
 
 ## Verification
 | What | How | Status |
