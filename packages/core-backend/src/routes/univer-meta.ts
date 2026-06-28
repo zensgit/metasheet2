@@ -1714,19 +1714,19 @@ async function validateLinkFieldConfig(
     return `链接字段 foreignBaseId 需与外表实际 base 一致：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} 实际 base=${actualForeignBaseId ?? 'null'}，声明=${claimed ?? 'null'}`
   }
   if (baseIdsAreCrossBase(sourceBaseId, actualForeignBaseId)) {
-    // Bidirectional / mirror links MVP (design 2026-06-14 §7.2) — cross-base bidirectional is DEFERRED.
-    // A two-way link must be same-base, even if it carries a valid cross-base `foreignBaseId` opt-in
-    // (this fires BEFORE the ②b opt-in short-circuit so the opt-in cannot rescue a cross-base pairing).
-    // Uses only this field's own config, so create-order / paired-field existence is irrelevant.
-    if (linkCfg.twoWay === true) {
-      return `二维（双向）链接 MVP 不支持跨 base 配对：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} base=${actualForeignBaseId ?? 'null'}`
-    }
-    // ②b opt-in short-circuit — a cross-base link is allowed IFF it carries an EXPLICIT foreignBaseId
-    // EQUAL to the foreign sheet's real base (claim == truth; you can't declare a wrong base). A
-    // degenerate null/legacy-base foreign sheet has no concrete base to claim, so it can never opt in
-    // (claimed===null falls through to reject; a non-null claim !== null actual also rejects). This is a
-    // pure consistency gate — the foreign READ-permission check is §3 (base-read) + §2a.3 (field mask),
-    // NOT here (adding a perm check in this structural wall would over-reach).
+    // ②b read-only cross-base mirror v1 (2026-06-27) — cross-base bidirectional (twoWay) is now ALLOWED on
+    // the SAME terms as a one-way cross-base link (the earlier §7.2 blanket deferral of twoWay is lifted).
+    // The derived (mirror) side stays read-only by codec (field-codecs.ts: mirrorOf ⇒ readOnly), so this
+    // opens only a reverse READ-projection, never a cross-base write path. The realtime mirror-invalidation
+    // fan-out is deferred for cross-base (record-write-service.ts collectMirrorInvalidation) — harmless: the
+    // reverse read recomputes + base-masks on every fetch.
+    // ②b opt-in short-circuit — a cross-base link (one-way OR twoWay) is allowed IFF it carries an EXPLICIT
+    // foreignBaseId EQUAL to the foreign sheet's real base (claim == truth; you can't declare a wrong base —
+    // a wrong claim is already rejected above). A degenerate null/legacy-base foreign sheet has no concrete
+    // base to claim, so it can never opt in (claimed===null falls through to reject). This is a pure
+    // consistency gate — the foreign READ-permission check is §3 (base-read) + §2a.3 (field mask), NOT here
+    // (a perm check in this structural wall would over-reach). Uses only this field's own config, so
+    // create-order / paired-field existence is irrelevant.
     if (claimed !== null) {
       return null
     }
@@ -2661,26 +2661,55 @@ async function loadLinkValuesByRecord(
  *
  * FORWARD link fields are deliberately left UNTOUCHED: their raw-id posture is pre-existing and shared
  * repo-wide (an outbound edge this record authored), and the task scopes this fix to mirror fields only.
- * Same-base only by construction (cross-base twoWay/mirror is rejected at field-create), so the cross-base
- * coarse gate `buildLinkSummaries` adds on top of `resolveReadableSheetIds` is a no-op here — sheet-level
- * read IS the exact gate. Idempotent / order-independent: mutates `row.data` in place for denied mirrors only.
+ * TWO gates, both REDUCE-only (never widen): (1) the same-base / sheet-level gate `resolveReadableSheetIds`
+ * keyed on `cfg.foreignSheetId`; (2) ②b read-only cross-base mirror v1 (2026-06-27) — when a mirror's
+ * foreign sheet lives in a DIFFERENT base, a base-read COARSE gate (`resolveBaseReadable`, parity with
+ * `resolveForeignFieldReadability` §3.2 Sink A and `buildLinkSummaries` Sink B-1) empties the reverse
+ * projection for a sheet-readable-but-base-unreadable actor (no foreign-record id/count leak). Same-base
+ * mirrors never reach gate (2). Idempotent / order-independent: mutates `row.data` in place for denied
+ * mirrors only. NOTE: the inline `linkSummaries` projection of the SAME reverse edge is gated independently
+ * in `buildLinkSummaries` (Sink B-1) — both wires must hold; the goldens cover each separately.
  */
 async function maskDerivedMirrorFieldIds(
   req: Request,
   query: QueryFn,
+  // The sheet the `rows` belong to — the SOURCE base is resolved from it (parity with applyLookupRollup) to
+  // decide cross-base per mirror foreign sheet. Not derivable from `rows` (records carry no sheet/base id).
+  sourceSheetId: string,
   rows: UniverMetaRecord[],
   relationalLinkFields: RelationalLinkField[],
 ): Promise<void> {
   const mirrorFields = relationalLinkFields.filter((l) => l.cfg.mirrorOf)
   if (mirrorFields.length === 0 || rows.length === 0) return
+  // Gate (1): same-base / sheet-level read — UNCHANGED (never loosened).
   const readableSheetIds = await resolveReadableSheetIds(
     req,
     query,
     mirrorFields.map((l) => l.cfg.foreignSheetId),
   )
+  // Gate (2): ②b cross-base base-read. Resolve the source base once, then for each DISTINCT cross-base
+  // mirror foreign sheet require base-read; deny → mask. Memoized per base; a null foreign base is
+  // unreadable by definition (also crash-safe vs resolveBaseReadable, which rejects an empty id).
+  const sourceBaseId = (await loadSheetRowShared(query, sourceSheetId))?.baseId ?? null
+  const crossBaseDeniedForeignSheetIds = new Set<string>()
+  const baseReadableCache = new Map<string, boolean>()
+  for (const foreignSheetId of new Set(mirrorFields.map((l) => l.cfg.foreignSheetId))) {
+    const foreignBaseId = (await loadSheetRowShared(query, foreignSheetId))?.baseId ?? null
+    if (foreignBaseId === sourceBaseId) continue // same-base → gate (1) is the exact gate
+    if (foreignBaseId == null) {
+      crossBaseDeniedForeignSheetIds.add(foreignSheetId)
+      continue
+    }
+    let readable = baseReadableCache.get(foreignBaseId)
+    if (readable === undefined) {
+      readable = await resolveBaseReadable(req, query, foreignBaseId)
+      baseReadableCache.set(foreignBaseId, readable)
+    }
+    if (!readable) crossBaseDeniedForeignSheetIds.add(foreignSheetId)
+  }
   for (const row of rows) {
     for (const { fieldId, cfg } of mirrorFields) {
-      if (!readableSheetIds.has(cfg.foreignSheetId)) {
+      if (!readableSheetIds.has(cfg.foreignSheetId) || crossBaseDeniedForeignSheetIds.has(cfg.foreignSheetId)) {
         row.data[fieldId] = []
       }
     }
@@ -12344,7 +12373,7 @@ export function univerMetaRouter(): Router {
 
         // B3 review nit: blank a DERIVED (mirror) field's raw reverse ids for an actor who can't read the
         // mirror's foreign sheet — parity with the buildLinkSummaries gate below. Forward links untouched.
-        await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), rows, relationalLinkFields)
+        await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), sheetId, rows, relationalLinkFields)
       }
 
       await applyLookupRollup(
@@ -13087,7 +13116,7 @@ export function univerMetaRouter(): Router {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
       // B3 review nit: blank a mirror field's raw reverse ids for a foreign-sheet-denied actor (write-echo).
-      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), view.sheetId, [record], relationalLinkFields)
       record.data = filterRecordDataByFieldIds(record.data, readableEchoFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
@@ -13321,7 +13350,7 @@ export function univerMetaRouter(): Router {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
       // B3 review nit: blank a mirror field's raw reverse ids for a foreign-sheet-denied actor (write-echo).
-      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), sheetId, [record], relationalLinkFields)
       record.data = filterRecordDataByFieldIds(record.data, readableEchoFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
@@ -13598,7 +13627,7 @@ export function univerMetaRouter(): Router {
       }
       // B3 review nit: blank a mirror field's raw reverse ids for an actor who can't read the mirror's
       // foreign sheet (parity with the buildLinkSummaries gate below). Forward links untouched.
-      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), sheetId, [record], relationalLinkFields)
       await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, [record], relationalLinkFields, linkValuesByRecord)
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
       // #2015 read-path field mask: D3c security composite (layer-2 property.hidden ∧ layer-3
