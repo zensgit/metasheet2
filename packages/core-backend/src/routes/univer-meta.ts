@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express'
-import { randomUUID } from 'crypto'
+import { randomUUID, createHash } from 'crypto'
 import * as path from 'path'
 import { Router } from 'express'
 import { z } from 'zod'
@@ -73,7 +73,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -91,6 +91,7 @@ import {
   isFieldRetypeRevert,
   isSupportedFieldRetypeRevert,
   isSupportedUncreate,
+  isSupportedUndelete,
   computeRevertPreview,
   loadEntityConfigSnapshot,
   applyConfigRevert,
@@ -6021,6 +6022,79 @@ async function computeUncreatePlan(query: TxnQuery, rev: ConfigRevisionRow): Pro
   return { entityAlive: true, cascadeViewIds, orderShiftIds, columnDataPresent: dataRows.rows.length > 0 }
 }
 
+// ── T9-W Tier 4 (U-4) config-undelete: recreate-from-`before` + plan digest (design-lock U4-L2/L4) ─────────────
+const stableConfigString = (obj: Record<string, unknown>): string => {
+  const sorted: Record<string, unknown> = {}
+  for (const k of Object.keys(obj).sort()) sorted[k] = obj[k]
+  return JSON.stringify(sorted)
+}
+
+/** U4-L5: the SERVER-SIDE recreate plan — feeds hashUndeletePlan ONLY (NEVER the response). */
+async function computeUndeletePlan(query: TxnQuery, rev: ConfigRevisionRow): Promise<UndeletePlan> {
+  const before = (rev.before ?? {}) as Record<string, unknown>
+  const targetConfigHash = createHash('sha256').update(stableConfigString(before)).digest('hex')
+  if (rev.entity_type === 'view') {
+    const occupied = ((await query('SELECT 1 FROM meta_views WHERE id = $1', [rev.entity_id])) as any).rows.length > 0
+    return { idFree: !occupied, insertOrder: 0, trailingShiftIds: [], targetConfigHash }
+  }
+  const occupied = ((await query('SELECT 1 FROM meta_fields WHERE id = $1', [rev.entity_id])) as any).rows.length > 0
+  const insertOrder = Number(before.order ?? 0)
+  const shiftRows = (await query('SELECT id FROM meta_fields WHERE sheet_id = $1 AND "order" >= $2', [String(rev.sheet_id), insertOrder])) as any
+  const trailingShiftIds = (shiftRows.rows as any[]).map((r) => String(r.id))
+  return { idFree: !occupied, insertOrder, trailingShiftIds, targetConfigHash }
+}
+
+/** U4-L2/L3: recreate a deleted FIELD from its `before` (DEFINITION-ONLY) at its original order (trailing shift +1). */
+async function recreateFieldFromConfig(query: TxnQuery, opts: {
+  sheetId: string; fieldId: string; before: Record<string, unknown>; actorId: string | null; source?: 'mutation' | 'restore'; restoredFromId?: string | null
+}): Promise<void> {
+  const { sheetId, fieldId, before, actorId } = opts
+  const name = String(before.name ?? '')
+  const type = String(before.type ?? 'string')
+  const property = before.property ?? {}
+  const order = Number(before.order ?? 0)
+  const configBatchId = randomUUID()
+  // U4-L2: re-insert at the original order — shift trailing fields +1 (the inverse of the delete's -1), record each.
+  const shifted = ((await query('UPDATE meta_fields SET "order" = "order" + 1 WHERE sheet_id = $1 AND "order" >= $2 RETURNING id, "order"', [sheetId, order])) as any).rows as Array<{ id: string; order: number }>
+  await recordFieldOrderShifts(query, sheetId, shifted.map((r) => ({ id: String(r.id), newOrder: Number(r.order) })), 1, configBatchId, actorId)
+  try {
+    await query('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1, $2, $3, $4, $5::jsonb, $6)', [fieldId, sheetId, name, type, JSON.stringify(property), order])
+  } catch (e) {
+    if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Config entity id is occupied, cannot undelete: ${fieldId}`)
+    throw e
+  }
+  // DEFINITION-ONLY (U4-L3): column values / meta_links / auto-number are NOT recovered; the field is NOT re-added to
+  // any view config (lazy view re-integration). Record the recreate as a `create` revision (source='restore').
+  await recordConfigRevision(query, {
+    sheetId, entityType: 'field', entityId: fieldId, action: 'create',
+    ...fieldCreateDiff({ name, type, property, order }),
+    batchId: configBatchId, actorId,
+    source: opts.source ?? 'mutation', restoredFromId: opts.restoredFromId ?? null,
+  })
+}
+
+/** U4-L2: recreate a deleted VIEW from its `before` (clean, non-lossy). */
+async function recreateViewFromConfig(query: TxnQuery, opts: {
+  sheetId: string; viewId: string; before: Record<string, unknown>; actorId: string | null; source?: 'mutation' | 'restore'; restoredFromId?: string | null
+}): Promise<void> {
+  const { sheetId, viewId, before, actorId } = opts
+  try {
+    await query(
+      'INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)',
+      [viewId, sheetId, String(before.name ?? ''), String(before.type ?? 'grid'), JSON.stringify(before.filterInfo ?? {}), JSON.stringify(before.sortInfo ?? {}), JSON.stringify(before.groupInfo ?? {}), JSON.stringify(before.hiddenFieldIds ?? []), JSON.stringify(before.config ?? {})],
+    )
+  } catch (e) {
+    if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Config entity id is occupied, cannot undelete: ${viewId}`)
+    throw e
+  }
+  await recordConfigRevision(query, {
+    sheetId, entityType: 'view', entityId: viewId, action: 'create',
+    ...configCreateDiff(before, VIEW_CONFIG_HISTORY_KEYS as unknown as ReadonlyArray<string>),
+    batchId: randomUUID(), actorId,
+    source: opts.source ?? 'mutation', restoredFromId: opts.restoredFromId ?? null,
+  })
+}
+
 export function univerMetaRouter(): Router {
   const router = Router()
 
@@ -7917,6 +7991,24 @@ export function univerMetaRouter(): Router {
           : 'Un-creating this view permanently removes its saved configuration. This cannot be undone.'
         return res.json({ ok: true, data: { uncreate: { entityType: rev.entity_type, entityId: rev.entity_id, entityName, note }, previewToken } })
       }
+      // T9-W Tier 4 (U-4): undelete — reverting a field/view DELETE = RECREATE the entity from its `before`. Behind
+      // its own default-off flag; disjoint plan-hash identity; definition-only (values/links/auto-number gone).
+      if (isSupportedUndelete(rev)) {
+        if (process.env.MULTITABLE_ENABLE_CONFIG_UNDELETE !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'CONFIG_UNDELETE_DISABLED', message: 'config undelete is disabled (MULTITABLE_ENABLE_CONFIG_UNDELETE off).' } })
+        }
+        const plan = await computeUndeletePlan(pool.query.bind(pool), rev)
+        const previewToken = mintConfigUndeletePreviewIdentity({
+          sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+          undeleteHash: hashUndeletePlan(plan), actorId: access.userId,
+        })
+        const entityName = typeof (rev.before as { name?: unknown })?.name === 'string' ? ((rev.before as { name?: string }).name as string) : undefined
+        const note = rev.entity_type === 'field'
+          ? 'Undeleting recreates this field definition (name/type/config) at its original position. Its previous cell values, link references, and auto-number counter are gone and are NOT restored.'
+          : 'Undeleting recreates this view with its saved configuration.'
+        // U4-L5 no-oracle: name + losses note + an id-collision flag; NO counts, NO raw plan fields.
+        return res.json({ ok: true, data: { undelete: { entityType: rev.entity_type, entityId: rev.entity_id, entityName, note, idCollision: !plan.idFree }, previewToken } })
+      }
       // T9-W Tier 2 (U-2): field type/property revert is behind its OWN per-tier flag (default off). Schema-only +
       // scalar-safe (isSupportedFieldRetypeRevert); mirrors the forward PATCH (no value migration). A non-retype
       // field revert (name/order only) is unaffected and stays on the existing safe path.
@@ -8068,6 +8160,49 @@ export function univerMetaRouter(): Router {
         if (rev.entity_type === 'field') invalidateFieldCache(sheetId)
         invalidateViewConfigCache()
         return res.json({ ok: true, data: { uncreated: { entityType: rev.entity_type, entityId: rev.entity_id } } })
+      }
+      // T9-W Tier 4 (U-4): undelete — RECREATE the field/view from the delete revision's `before`. Default-off flag;
+      // id-collision (also the idempotency guard) + plan-drift; definition-only recreate in ONE transaction.
+      if (isSupportedUndelete(rev)) {
+        if (process.env.MULTITABLE_ENABLE_CONFIG_UNDELETE !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'CONFIG_UNDELETE_DISABLED', message: 'config undelete is disabled (MULTITABLE_ENABLE_CONFIG_UNDELETE off).' } })
+        }
+        const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
+        if (confirm.trim() !== 'undelete') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "undelete" to confirm recreating the deleted entity.' } })
+        const before = (rev.before ?? {}) as Record<string, unknown>
+        const undeleteSheetId = String(rev.sheet_id)
+        const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+          // U4-L5 id-occupied check (FOR UPDATE) — also the idempotency guard: undelete when the entity already exists → reject.
+          const table = rev.entity_type === 'field' ? 'meta_fields' : 'meta_views'
+          const occ = (await query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE`, [rev.entity_id])) as any
+          if (occ.rows.length > 0) return { status: 409, code: 'ID_COLLISION', message: 'An entity with this id already exists; cannot undelete.' }
+          // recompute the recreate plan + verify the opaque undeleteHash → ONE generic PLAN_DRIFT on divergence.
+          const plan = await computeUndeletePlan(query, rev)
+          const verdict = verifyConfigUndeletePreviewIdentity(previewToken, {
+            sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+            undeleteHash: hashUndeletePlan(plan), actorId: access.userId,
+          })
+          if (!verdict.valid) {
+            if (verdict.reason === 'plan_drift') return { status: 409, code: 'PLAN_DRIFT', message: 'The undelete plan changed since preview; re-preview before undeleting.' }
+            if (verdict.reason === 'expired') return { status: 410, code: 'PREVIEW_EXPIRED', message: 'The preview identity expired; re-preview before undeleting.' }
+            return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before undeleting.' }
+          }
+          try {
+            if (rev.entity_type === 'field') {
+              await recreateFieldFromConfig(query, { sheetId: undeleteSheetId, fieldId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
+            } else {
+              await recreateViewFromConfig(query, { sheetId: undeleteSheetId, viewId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
+            }
+          } catch (e) {
+            if (e instanceof RecordServiceRestoreConflictError) return { status: 409, code: 'ID_COLLISION', message: 'An entity with this id already exists; cannot undelete.' }
+            throw e
+          }
+          return null
+        })
+        if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+        if (rev.entity_type === 'field') invalidateFieldCache(undeleteSheetId)
+        invalidateViewConfigCache()
+        return res.json({ ok: true, data: { undeleted: { entityType: rev.entity_type, entityId: rev.entity_id } } })
       }
       const classify = classifyRevert(rev)
       // classifyRevert stays PURE; the route SUPPORTS only the flag-opened supported subsets — Tier-1 sheet_config

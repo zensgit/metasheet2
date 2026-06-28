@@ -117,6 +117,21 @@ export function isSupportedUncreate(rev: Pick<ConfigRevisionRow, 'entity_type' |
   return rev.action === 'create' && UNCREATE_ENTITY_TYPES.has(rev.entity_type)
 }
 
+/**
+ * T9-W Tier 4 (U-4) — undelete. Reverting a `delete` revision forward-only = RECREATING the entity it removed (a
+ * delete's `before` is the full config, `after` is null). v1 (design-lock U4-L1) opens ONLY field/view delete-reverts.
+ * DEFINITION-ONLY: a field's dropped column values, meta_links, and auto-number counter are gone (no soft-delete), so
+ * undelete restores the field DEFINITION (recreated at its original order) but NOT its data — the route states this.
+ * sheet_config and permission (= permission-revert, held) stay gated. classifyRevert returns `gated` for every delete
+ * (action !== 'update'), so the route opens THIS subset behind MULTITABLE_ENABLE_CONFIG_UNDELETE via this predicate.
+ *
+ * Pure & structural ONLY: the recreate, the id-collision/plan-drift guards (U4-L5), and the no-oracle preview live at
+ * the route (config-restore-execute), NOT here.
+ */
+export function isSupportedUndelete(rev: Pick<ConfigRevisionRow, 'entity_type' | 'action'>): boolean {
+  return rev.action === 'delete' && UNCREATE_ENTITY_TYPES.has(rev.entity_type)
+}
+
 const stable = (v: unknown): string => JSON.stringify(v ?? null)
 function pick(snapshot: Record<string, unknown>, keys: string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {}

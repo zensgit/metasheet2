@@ -335,6 +335,71 @@ export function verifyConfigUncreatePreviewIdentity(token: string, expected: Con
   return { valid: true }
 }
 
+// ── T9-W Tier 4 (U-4) config-undelete preview-identity (design-lock U4-L5) ────────────────────────────────────
+// Undelete (revert a config `delete` = RECREATE the entity from its `before`) binds an opaque HMAC `undeleteHash`
+// over the SERVER-SIDE recreate plan — { idFree (the original id is unoccupied), insertOrder, trailingShiftIds,
+// targetConfigHash } — never a claim/response field (no-oracle, same discipline as un-create). `type:
+// 'config-undelete-preview'` keeps it DISJOINT from un-create / Tier-1/2 (an undelete token can never drive a drop
+// or a Tier-1/2 restore, and vice versa). Execute re-checks the id-free guard separately (→ ID_COLLISION) and the
+// single hash (→ ONE generic PLAN_DRIFT — the opaque hash cannot reveal WHICH input moved).
+export interface UndeletePlan {
+  /** the original entity id is currently unoccupied (free to recreate). */
+  idFree: boolean
+  /** (field) the order the field is re-inserted at (from the delete revision's `before.order`). 0 for view. */
+  insertOrder: number
+  /** (field) trailing field ids whose `order` shifts +1 on re-insert. [] for view. */
+  trailingShiftIds: string[]
+  /** sha256 over the immutable `before` config the recreate restores (binds the recreate target). */
+  targetConfigHash: string
+}
+export function hashUndeletePlan(plan: UndeletePlan): string {
+  const canon = {
+    idFree: plan.idFree === true,
+    insertOrder: Number.isFinite(plan.insertOrder) ? Math.trunc(plan.insertOrder) : 0,
+    trailingShiftIds: [...plan.trailingShiftIds].sort(),
+    targetConfigHash: String(plan.targetConfigHash),
+  }
+  return createHmac('sha256', getSecret()).update(JSON.stringify(canon)).digest('hex')
+}
+
+export interface ConfigUndeletePreviewIdentityClaims {
+  sheetId: string
+  revisionId: string
+  entityType: string
+  entityId: string
+  /** opaque HMAC over the recreate plan (hashUndeletePlan); raw plan fields are NEVER claims or response fields. */
+  undeleteHash: string
+  actorId: string
+}
+
+export function mintConfigUndeletePreviewIdentity(claims: ConfigUndeletePreviewIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
+  return jwt.sign({ type: 'config-undelete-preview', ...claims }, getSecret(), { algorithm: 'HS256', expiresIn } as SignOptions)
+}
+
+export interface ConfigUndeleteVerifyResult {
+  valid: boolean
+  // `plan_drift` = the undeleteHash diverged (id taken / insert-order or trailing set changed) — the route maps it to
+  // ONE generic 409 PLAN_DRIFT (the explicit id-occupied check at execute yields the distinct ID_COLLISION).
+  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_revisionId' | 'mismatch_entityType' | 'mismatch_entityId' | 'plan_drift' | 'mismatch_actorId'
+}
+
+export function verifyConfigUndeletePreviewIdentity(token: string, expected: ConfigUndeletePreviewIdentityClaims): ConfigUndeleteVerifyResult {
+  let payload: Partial<ConfigUndeletePreviewIdentityClaims> & { type?: string }
+  try {
+    payload = jwt.verify(token, getSecret()) as Partial<ConfigUndeletePreviewIdentityClaims> & { type?: string }
+  } catch (e) {
+    return { valid: false, reason: (e as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid' }
+  }
+  if (payload.type !== 'config-undelete-preview') return { valid: false, reason: 'wrong_type' }
+  if (payload.sheetId !== expected.sheetId) return { valid: false, reason: 'mismatch_sheetId' }
+  if (payload.revisionId !== expected.revisionId) return { valid: false, reason: 'mismatch_revisionId' }
+  if (payload.entityType !== expected.entityType) return { valid: false, reason: 'mismatch_entityType' }
+  if (payload.entityId !== expected.entityId) return { valid: false, reason: 'mismatch_entityId' }
+  if (payload.undeleteHash !== expected.undeleteHash) return { valid: false, reason: 'plan_drift' }
+  if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
+  return { valid: true }
+}
+
 // ── T8-2 Reset-to-T (DESTRUCTIVE) preview-identity ────────────────────────────────────────────────────────────
 // Reset = Revert (surviving records to their T-state) + SOFT-DELETE the records CREATED AFTER T. Its identity is
 // DISJOINT from revert (`type: 'restore-preview-pit-reset'`), so a revert token can never trigger a destructive
