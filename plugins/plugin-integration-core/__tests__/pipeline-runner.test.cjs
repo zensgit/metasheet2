@@ -2049,10 +2049,21 @@ async function main() {
     const errThrown = tryAssert({ id: 'sys_err', status: 'error' })
     assert.ok(errThrown, 'error-status system throws')
     assert.match(errThrown.message, /external system is not active/, 'keeps the base reason')
+    assert.match(errThrown.message, /source connection last failed its test/, 'sourceSystem hint names the source side')
     assert.match(errThrown.message, /retest\/reactivate/i, 'error status points at the retest/reactivate action')
     assert.equal(errThrown.details.field, 'sourceSystem', 'details preserve field')
     assert.equal(errThrown.details.systemId, 'sys_err', 'details preserve systemId (#2205 evidence)')
     assert.equal(errThrown.details.status, 'error', 'details preserve status')
+
+    const targetErrThrown = (() => {
+      try { assertActiveSystem({ id: 'target_err', status: 'error' }, 'targetSystem'); return null } catch (e) { return e }
+    })()
+    assert.ok(targetErrThrown, 'target error-status system throws')
+    assert.match(targetErrThrown.message, /target connection last failed its test/, 'targetSystem hint names the target side (#2438)')
+    assert.doesNotMatch(targetErrThrown.message, /source connection last failed its test/, 'targetSystem hint does not blame the source side')
+    assert.equal(targetErrThrown.details.field, 'targetSystem', 'target details preserve field')
+    assert.equal(targetErrThrown.details.systemId, 'target_err', 'target details preserve systemId')
+    assert.equal(targetErrThrown.details.status, 'error', 'target details preserve status')
 
     const inactiveThrown = tryAssert({ id: 'sys_inact', status: 'inactive' })
     assert.ok(inactiveThrown, 'inactive-status system throws')
