@@ -1,7 +1,9 @@
 # Design-Lock — PLM-COLLAB P3 BOM Multitable Line Write-Back Consumer Pact (方案1)
 
+> **SUPERSEDED (2026-06-28).** The frozen consumer pact entry locked here was an **aspirational** interaction — it froze `PLMAdapter.updateBomMultitableLine`, a method no production path calls, against a provider endpoint that does not exist, which reddened the Yuantus pact-broker gate. #3337 depublished the interaction; this change completes the cleanup by removing the dead client method, its types/unit tests, and the `endpointsToFind` assertion. Per **#896 Slice 0** (no aspiration in the frozen pact), the write-back lands as a **real** pact in the consumer-relay slice, *after* the provider write slice ships as one complete cut (endpoint + replay guard + domain AuditLog/idempotency + ECO create-intent semantics). This doc is retained as the 方案1 design record; it is **not** the current execution path.
+
 Date: 2026-06-27
-Status: LOCKED (consumer contract) — provider endpoint NOT yet built (downstream obligation, see below)
+Status: SUPERSEDED by #896 Slice 0 (pact depublished #3337; client method removed 2026-06-28) — provider-first complete cut is the path forward
 Consumer: `Metasheet2`  ·  Provider: `YuantusPLM`
 Branch: `claude/plm-bom-multitable-line-write-pact-20260627`
 
