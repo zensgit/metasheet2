@@ -259,6 +259,17 @@ export interface BOMSubstituteMutationResponse {
   substitute_item_id?: string
 }
 
+/**
+ * PLM-COLLAB Phase 7 (pact-first slice, consumer-only): the governed BOM multitable write-back
+ * response shape the consumer expects from the (future, separately-authorized) provider seam.
+ * Thin by design — provider-side detail (e.g. the governed ECO id) is the deferred provider-endpoint
+ * slice's to define. This slice ships the CONTRACT only; no provider mutation exists yet.
+ */
+export interface BomMultitableWriteBackResponse {
+  ok: boolean
+  bom_line_id: string
+}
+
 export interface PLMDocument {
   id: string
   name: string
@@ -2171,6 +2182,36 @@ export class PLMAdapter extends HTTPAdapter {
     }
     // legacy / non-yuantus PLM has no multitable review surface
     return { feature_key: 'bom_multitable', entitled: false, upgrade: { available: true }, context: null }
+  }
+
+  /**
+   * PLM-COLLAB Phase 7 (pact-first slice, consumer-only): relay a governed BOM multitable
+   * line-field write-back INTENT to the provider's governed write seam, addressed by the stable
+   * `bomLineId`. The write is a SEPARATELY-AUTHORIZED, write-scoped operation — never the read
+   * embed token; the provider enforces is_entitled(bom_multitable_writeback) + permission +
+   * lifecycle guard and routes it through ECO change control. This consumer slice defines the
+   * CONTRACT only (see tests/contract/pacts) — the provider write endpoint is a deferred,
+   * separately-authorized slice and does NOT exist yet.
+   */
+  async writeBackBomMultitableLine(
+    partId: string,
+    bomLineId: string,
+    changes: { quantity?: number; uom?: string; find_num?: string; refdes?: string }
+  ): Promise<QueryResult<BomMultitableWriteBackResponse>> {
+    if (this.mockMode) {
+      return {
+        data: [{ ok: true, bom_line_id: bomLineId }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('BOM multitable write-back is not supported for this PLM API mode') }
+    }
+
+    return this.select<BomMultitableWriteBackResponse>(`/api/v1/bom/multitable/${partId}/lines/${bomLineId}`, {
+      method: 'PATCH',
+      data: changes,
+    })
   }
 
   async getApprovals(options?: ApprovalQueryOptions): Promise<QueryResult<ApprovalRequest>> {

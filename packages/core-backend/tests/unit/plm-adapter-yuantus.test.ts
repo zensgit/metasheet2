@@ -1146,3 +1146,37 @@ describe('PLMAdapter Yuantus documents single-side failure + sources metadata', 
     expect(sources[1]).toMatchObject({ name: 'related_documents', ok: true, count: 1 })
   })
 })
+
+describe('PLMAdapter Yuantus BOM multitable write-back (Phase 7 pact-first slice)', () => {
+  it('relays as PATCH /bom/multitable/{partId}/lines/{bomLineId} with the change body and no read embed-token header', async () => {
+    const adapter = createAdapter()
+    const selectMock = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R1' }], metadata: { totalCount: 1 } })
+    ;(adapter as any).select = selectMock
+
+    const changes = { quantity: 2, uom: 'EA' }
+    const result = await adapter.writeBackBomMultitableLine('P1', 'R1', changes)
+
+    // write-back API shape: a PATCH to the line resource carrying ONLY the BOM line change intent
+    expect(selectMock).toHaveBeenCalledTimes(1)
+    expect(selectMock).toHaveBeenCalledWith('/api/v1/bom/multitable/P1/lines/R1', {
+      method: 'PATCH',
+      data: changes,
+    })
+    // the write must NOT ride the read embed token: this method injects no headers / embed-token at all
+    const [, opts] = selectMock.mock.calls[0]
+    expect(opts).not.toHaveProperty('headers')
+    expect(JSON.stringify(opts)).not.toContain('embed')
+    expect(result.data?.[0]).toMatchObject({ ok: true, bom_line_id: 'R1' })
+  })
+
+  it('refuses on a non-yuantus PLM without attempting the write', async () => {
+    const adapter = createAdapter()
+    ;(adapter as any).apiMode = 'legacy'
+    const selectMock = vi.fn()
+    ;(adapter as any).select = selectMock
+
+    const result = await adapter.writeBackBomMultitableLine('P1', 'R1', { quantity: 2 })
+    expect(selectMock).not.toHaveBeenCalled()
+    expect(result.error).toBeInstanceOf(Error)
+  })
+})

@@ -3803,6 +3803,83 @@
       }
     },
     {
+      "description": "write back BOM multitable line field changes for an entitled part with a write-scoped token",
+      "providerStates": [
+        {
+          "name": "tenant-1 holds an active plm.bom_multitable_writeback authorization and BOM line 01H000000000000000000000R1 on part 01H000000000000000000000P1 accepts a write-scoped field update"
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "path": "/api/v1/bom/multitable/01H000000000000000000000P1/lines/01H000000000000000000000R1",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.write-scoped.example",
+          "x-tenant-id": "tenant-1",
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          },
+          "body": {
+            "$.quantity": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.uom": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "body": {
+          "quantity": 2,
+          "uom": "EA"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "ok": true,
+          "bom_line_id": "01H000000000000000000000R1"
+        },
+        "matchingRules": {
+          "body": {
+            "$.ok": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.bom_line_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
       "description": "mint a MetaSheet BOM review embed token for the Yuantus parent host",
       "providerStates": [
         {

@@ -116,6 +116,8 @@ const PLM_ADAPTER_PACT_PATHS = [
   // PLM-COLLAB V1.1: the two modern Path-A surfaces (advisory manifest + governed BOM context).
   { method: 'GET', path: '/api/v1/integrations/capabilities' },
   { method: 'GET', path: '/api/v1/bom/multitable/01H000000000000000000000P1/context' },
+  // PLM-COLLAB Phase 7 (pact-first, consumer-only): governed BOM line-field write-back intent.
+  { method: 'PATCH', path: '/api/v1/bom/multitable/01H000000000000000000000P1/lines/01H000000000000000000000R1' },
 ] as const
 
 const PARENT_HOST_PACT_PATHS = [
@@ -199,6 +201,7 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       'fetchYuantusFileMetadata',
       '/api/v1/integrations/capabilities',
       '/api/v1/bom/multitable/${partId}/context',
+      '/api/v1/bom/multitable/${partId}/lines/${bomLineId}',
     ]
     for (const ep of endpointsToFind) {
       expect(
