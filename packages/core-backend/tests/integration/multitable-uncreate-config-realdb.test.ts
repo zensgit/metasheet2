@@ -347,7 +347,7 @@ describeIfDatabase('multitable config un-create — T9-W Tier 3 / U-3 (real DB)'
     expect(await rowCount('SELECT 1 FROM meta_fields WHERE id=$1', [F])).toBe(0)
   })
 
-  test('(k) single-txn atomicity: a forced mid-cascade failure rolls everything back — F still present, zero writes', async () => {
+  test('(k) early-drop atomicity: failure at the delete-revision insert (right after DELETE meta_fields) rolls the drop back', async () => {
     process.env[FLAG] = 'true'
     const s = await freshSheet('k')
     const F = mkFieldId(); await insertField(s, F, 'KField', 'string', 1)
@@ -356,8 +356,9 @@ describeIfDatabase('multitable config un-create — T9-W Tier 3 / U-3 (real DB)'
     await insertRecord(s, { [F]: 'v1' })
     const p = await preview(s, rev); expect(p.status).toBe(200)
     const token: string = p.body.data.previewToken
-    // Trigger scoped to THIS sheet's restore-delete revision (the un-create's own delete row) — fires DURING the drop,
-    // never on setup inserts or any parallel suite. The RAISE aborts the txn → the meta_fields DELETE rolls back.
+    // Fails at the EARLY step — the restore delete-revision insert, right after DELETE meta_fields and BEFORE the
+    // later cascade writes (links delete / column strip / order shift / view cleanup). Golden (n) forces a LATER step
+    // to prove the full cascade is atomic. Trigger scoped to THIS sheet's restore-delete row (never setup/parallel).
     const FN = `uc_atomic_fail_${TS}`
     const TRG = `uc_atomic_fail_trg_${TS}`
     await q(`CREATE OR REPLACE FUNCTION ${FN}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'forced un-create cascade failure (atomicity golden)'; END; $fn$`, [])
@@ -388,5 +389,51 @@ describeIfDatabase('multitable config un-create — T9-W Tier 3 / U-3 (real DB)'
       [s, F, createRev],
     )).rows[0] as { n: number }
     expect(audit.n).toBe(1)
+  })
+
+  test('(m) sheet-consistency guard: a revision whose entity lives on ANOTHER sheet → 400 INVALID_REVISION, zero drops', async () => {
+    process.env[FLAG] = 'true'
+    const sOther = await freshSheet('m-other')
+    const sUrl = await freshSheet('m-url')
+    const F = mkFieldId(); await insertField(sOther, F, 'MField', 'string', 1) // the field actually lives on sOther
+    await insertRecord(sOther, { [F]: 'keep' })
+    // a malformed create revision recorded under sUrl but pointing at F (which belongs to sOther). The revision is
+    // findable on sUrl (sheet_id matches the URL), but the entity's own sheet_id diverges → the execute guard fires.
+    const rev = await insertFieldCreateRev(sUrl, F, 'MField', 'string', 1)
+    const x = await execute(sUrl, { revisionId: rev, previewToken: 'any-token', confirm: 'uncreate' })
+    expect(x.status).toBe(400)
+    expect(x.body?.error?.code).toBe('INVALID_REVISION') // guard runs BEFORE the planHash verify, so the token is moot
+    expect(await rowCount('SELECT 1 FROM meta_fields WHERE id=$1', [F])).toBe(1) // F NOT dropped
+    expect(await countColumnData(sOther, F)).toBe(1) // sOther's column data untouched
+  })
+
+  test('(n) late-cascade atomicity: a failure at the column-strip (AFTER field+links delete) rolls the WHOLE cascade back', async () => {
+    process.env[FLAG] = 'true'
+    const s = await freshSheet('n')
+    const F = mkFieldId(); await insertField(s, F, 'NField', 'string', 1)
+    await insertField(s, mkFieldId(), 'NTrailing', 'string', 2) // order-shift target
+    const rev = await insertFieldCreateRev(s, F, 'NField', 'string', 1)
+    const r1 = await insertRecord(s, { [F]: 'v1' })
+    await insertLink(F, r1, 'foreign-n')
+    const p = await preview(s, rev); expect(p.status).toBe(200)
+    const token: string = p.body.data.previewToken
+    // Fail at the column-strip (UPDATE meta_records) — which runs AFTER DELETE meta_fields, DELETE auto-number, the
+    // delete-revision insert, AND DELETE meta_links. A clean rollback past (k)'s early point must restore ALL of those.
+    const FN = `uc_late_fail_${TS}`
+    const TRG = `uc_late_fail_trg_${TS}`
+    await q(`CREATE OR REPLACE FUNCTION ${FN}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'forced late-cascade failure (atomicity golden n)'; END; $fn$`, [])
+    await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_records`, [])
+    await q(`CREATE TRIGGER ${TRG} BEFORE UPDATE ON meta_records FOR EACH ROW WHEN (OLD.sheet_id = '${s}') EXECUTE FUNCTION ${FN}()`, [])
+    try {
+      const x = await execute(s, { revisionId: rev, previewToken: token, confirm: 'uncreate' })
+      expect(x.status).toBeGreaterThanOrEqual(500) // forced failure aborts the txn → INTERNAL
+      expect(await rowCount('SELECT 1 FROM meta_fields WHERE id=$1', [F])).toBe(1) // field restored (DELETE rolled back)
+      expect(await rowCount('SELECT 1 FROM meta_links WHERE field_id=$1', [F])).toBe(1) // links restored (the later DELETE rolled back)
+      expect(await countColumnData(s, F)).toBe(1) // column data intact
+      expect(await rowCount(`SELECT 1 FROM meta_config_revisions WHERE sheet_id=$1 AND action='delete' AND source='restore'`, [s])).toBe(0) // no delete revision committed
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_records`, []).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${FN}()`, []).catch(() => {})
+    }
   })
 })
