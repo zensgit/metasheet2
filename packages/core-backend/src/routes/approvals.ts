@@ -24,13 +24,19 @@ import {
   ApprovalConditionFormulaError,
   assertApprovalConditionFormulaValidForSchema,
   evaluateApprovalConditionFormula,
+  extractRequesterRoleLiterals,
 } from '../services/ApprovalConditionFormula'
 import {
   APPROVAL_ERROR_CODES,
   type ApprovalBridgePlmAdapter,
 } from '../services/approval-bridge-types'
 import { publishApprovalCountsUpdate } from '../services/approval-realtime'
-import { searchDirectoryUsers, listDirectoryRoles } from '../services/approval-directory'
+import {
+  searchDirectoryUsers,
+  listDirectoryRoles,
+  listFormulaConditionRoles,
+  fetchCuratedApprovalRoleIds,
+} from '../services/approval-directory'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation } from '../services/ApprovalDelegationConfig'
 import type { FormSchema } from '../types/approval-product'
@@ -371,6 +377,19 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // RA-1b CURATED-VOCABULARY — DEDICATED formula-condition role picker. Returns ONLY roles with
+  // approval_usable=true (the curated set the publish/dry-run HARD GATE enforces). Distinct from
+  // /directory/roles, which is the shared author picker that ALSO serves static_role approver selection and
+  // intentionally returns ALL roles. Curating only requester.role (NOT static_role) is the ratified scope.
+  r.get('/api/approval-templates/directory/formula-roles', authenticate, rbacGuard('approval-templates:manage'), async (_req: Request, res: Response) => {
+    try {
+      const roles = await listFormulaConditionRoles()
+      res.json({ roles })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DIRECTORY_FORMULA_ROLES_FAILED', 'Failed to list formula-condition roles')
+    }
+  })
+
   // FC-4 — approval-specific formula-condition dry-run. This intentionally uses the
   // exact approval evaluator from publish/execution and stays separate from the
   // sheet-scoped multitable formula dry-run API.
@@ -395,6 +414,27 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         return res.status(400).json(
           approvalErrorResponse('APPROVAL_FORMULA_DRY_RUN_INVALID_REQUEST', 'formData object is required'),
         )
+      }
+
+      // RA-1b CURATED-VOCABULARY — run the SAME curated gate as publish so preview and publish never
+      // diverge: any `requester.role in [...]` literal not in the curated set (roles.approval_usable=true)
+      // is rejected as success:false / APPROVAL_REQUESTER_ROLE_NOT_CURATED. Skip the DB read entirely when
+      // the formula has no role literals. A curated-set read failure surfaces via the outer catch (500).
+      const roleLiterals = extractRequesterRoleLiterals(expression)
+      if (roleLiterals.length > 0) {
+        const curated = await fetchCuratedApprovalRoleIds()
+        const uncurated = roleLiterals.filter((roleId) => !curated.has(roleId))
+        if (uncurated.length > 0) {
+          return res.json({
+            data: {
+              success: false,
+              error: {
+                code: 'APPROVAL_REQUESTER_ROLE_NOT_CURATED',
+                message: `requester.role routes on role(s) not approved for approval routing: ${uncurated.join(', ')}`,
+              },
+            },
+          })
+        }
       }
 
       try {

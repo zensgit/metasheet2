@@ -3,6 +3,7 @@ import {
   APPROVAL_CONDITION_FORMULA_LIMITS,
   assertApprovalConditionFormulaValidForSchema,
   evaluateApprovalConditionFormula,
+  extractRequesterRoleLiterals,
   parseApprovalConditionFormula,
 } from '../../src/services/ApprovalConditionFormula'
 import type { FormSchema } from '../../src/types/approval-product'
@@ -197,8 +198,9 @@ describe('requester namespace (requester.role — membership via `in [...]`)', (
     expect(evaluateApprovalConditionFormula('requester.role in ["a","b"]', {}, { roles: ['x', 'y'] })).toBe(false)
     // genuinely-empty held set -> false (no match; create-time guard prevents this on a role-routed graph)
     expect(evaluateApprovalConditionFormula('requester.role in ["a","b"]', {}, { roles: [] })).toBe(false)
-    // single-element literal
-    expect(evaluateApprovalConditionFormula('requester.role in ["admin"]', {}, { roles: ['admin'] })).toBe(true)
+    // single-element literal (use a NON-system curated-style id — `admin` would be uncurated and is a
+    // misleading sample now that requester.role is a curated vocabulary, RA-1b)
+    expect(evaluateApprovalConditionFormula('requester.role in ["finance_approver"]', {}, { roles: ['finance_approver'] })).toBe(true)
   })
 
   it('combines with form fields + AND/OR/NOT (membership yields boolean)', () => {
@@ -257,5 +259,28 @@ describe('requester namespace (requester.role — membership via `in [...]`)', (
     expect(() => parseApprovalConditionFormula('"requester.role" in ["a"]')).toThrow(/only supported for requester.role/)
     // and a bare quoted literal evaluates as a plain string (no context read, no formData spoof).
     expect(evaluateApprovalConditionFormula('"requester.role" == "requester.role"', {}, { roles: ['a'] })).toBe(true)
+  })
+})
+
+describe('extractRequesterRoleLiterals (RA-1b CURATED-VOCABULARY — publish/dry-run hard gate input)', () => {
+  it('returns the unique union of role literals, including membership nested in AND/OR/NOT', () => {
+    expect(extractRequesterRoleLiterals('requester.role in ["a","b"]')).toEqual(['a', 'b'])
+    // nested inside AND/OR/NOT — KEYSTONE: a curated gate that only checked top-level would miss these
+    expect(extractRequesterRoleLiterals('requester.role in ["a"] AND {amount} >= 5')).toEqual(['a'])
+    expect(extractRequesterRoleLiterals('NOT (requester.role in ["a"])')).toEqual(['a'])
+    expect(
+      extractRequesterRoleLiterals('(requester.role in ["a","b"]) OR (requester.role in ["b","c"])'),
+    ).toEqual(['a', 'b', 'c']) // deduped union across two membership nodes
+  })
+
+  it('returns [] for a non-role formula and for a parse error', () => {
+    expect(extractRequesterRoleLiterals('{amount} >= 5')).toEqual([])
+    expect(extractRequesterRoleLiterals('requester.department == "财务"')).toEqual([])
+    // a quoted "admin" used as a plain comparison operand is NOT a role literal
+    expect(extractRequesterRoleLiterals('requester.title == "admin"')).toEqual([])
+    // parse error -> [] (never throws)
+    expect(extractRequesterRoleLiterals('requester.role in [')).toEqual([])
+    expect(extractRequesterRoleLiterals('this is (not valid')).toEqual([])
+    expect(extractRequesterRoleLiterals('')).toEqual([])
   })
 })
