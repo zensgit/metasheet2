@@ -34,6 +34,7 @@
             <option value="record.updated">{{ automationTriggerTypeLabel('record.updated', isZh) }}</option>
             <option value="record.deleted">{{ automationTriggerTypeLabel('record.deleted', isZh) }}</option>
             <option value="field.value_changed">{{ automationTriggerTypeLabel('field.value_changed', isZh) }}</option>
+            <option value="form.submitted">{{ automationTriggerTypeLabel('form.submitted', isZh) }}</option>
             <option value="schedule.cron">{{ automationTriggerTypeLabel('schedule.cron', isZh) }}</option>
             <option value="schedule.interval">{{ automationTriggerTypeLabel('schedule.interval', isZh) }}</option>
             <option value="schedule.date_field">{{ automationTriggerTypeLabel('schedule.date_field', isZh) }}</option>
