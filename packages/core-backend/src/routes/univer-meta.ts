@@ -8954,16 +8954,21 @@ export function univerMetaRouter(): Router {
   // synchronously, never truncated). Async-above-threshold is a follow-up; v1 hard-refuses. Env-overridable.
   const SHEET_REVERT_MAX_RECORDS = Number(process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS) > 0
     ? Math.floor(Number(process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS)) : 5000
+  type SheetRevertTooLarge = { tooLarge: true; recordCount: number; scope: 'live_sheet' | 'effective_write_set' }
+  const sheetRevertTooLargeMessage = (computed: SheetRevertTooLarge) => {
+    if (computed.scope === 'effective_write_set') return `This revert would touch ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.`
+    return `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.`
+  }
   const computeSheetRevert = async (
     pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
     access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
-  ): Promise<null | { tooLarge: true; recordCount: number } | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
+  ): Promise<null | SheetRevertTooLarge | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
     const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
     if (!patchContext) return null
     const { fieldById } = patchContext
     const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
-    if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount } // D3/PIT-6 fail-closed before the full scan
+    if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount, scope: 'live_sheet' } // D3/PIT-6 fail-closed before the full scan
     const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
     const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
     const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed) // PIT-3 mask; NO reveal (PIT-7)
@@ -9011,7 +9016,7 @@ export function univerMetaRouter(): Router {
     // Unified ceiling (T8-1): the early `recordCount` guard counts LIVE rows only — a sheet with few live records but a
     // large deleted history could resurrect far more than the ceiling. Re-check the EFFECTIVE write set (reverts +
     // resurrects) so undelete can't bypass SHEET_REVERT_MAX_RECORDS.
-    if (reverts.length + resurrects.length > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount: reverts.length + resurrects.length }
+    if (reverts.length + resurrects.length > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount: reverts.length + resurrects.length, scope: 'effective_write_set' }
     return { reverts, resurrects, undeleteCount, keptCreatedAfterT, createdAfterTIds, driftCount, patchContext }
   }
 
@@ -9104,7 +9109,7 @@ export function univerMetaRouter(): Router {
       if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: a sheet-wide revert needs a sheet-admin cap, ABOVE plain record-write (interim for a dedicated history-restore cap)
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.` } })
+      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: sheetRevertTooLargeMessage(computed) } })
       const { reverts, resurrects, undeleteCount, keptCreatedAfterT, driftCount } = computed
       const previewIdentity = (reverts.length > 0 || resurrects.length > 0)
         ? mintPitRevertPreviewIdentity({
@@ -9143,7 +9148,7 @@ export function univerMetaRouter(): Router {
       if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: sheet-wide revert needs a sheet-admin cap, ABOVE plain record-write
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.` } })
+      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: sheetRevertTooLargeMessage(computed) } })
       const { reverts, resurrects, patchContext } = computed
       // T8-1 undelete gate: a revert that would resurrect deleted records needs the default-off flag, the
       // canDeleteRecord floor (NEVER canEditRecord — record resurrection, not edit), and a typed confirm:'undelete'.

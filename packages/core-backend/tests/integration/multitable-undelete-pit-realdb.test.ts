@@ -194,6 +194,8 @@ describeIfDatabase('multitable T8-1 PIT undelete-execute (real DB)', () => {
     const res = await preview(T1)
     expect(res.status).toBe(413)
     expect(res.body?.error?.code).toBe('SHEET_TOO_LARGE')
+    expect(res.body?.error?.message).toContain('This revert would touch 3 records')
+    expect(res.body?.error?.message).not.toContain('This sheet has 3 records')
   })
 
   test('(l) fix#4 no partial: an undelete failure aborts BEFORE the field-reverts (reorder) — a revert candidate stays unreverted', async () => {
