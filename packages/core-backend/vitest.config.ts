@@ -28,6 +28,8 @@ export default defineConfig({
       'tests/integration/dept-head-sync-plumbing.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
+      'tests/integration/approval-requester-title.db.test.ts',
+      'tests/integration/approval-requester-role.db.test.ts',
       'tests/integration/approval-delegation-seam.db.test.ts',
       'tests/integration/approval-delegation-api.db.test.ts',
       'tests/integration/approval-detail-subform.db.test.ts',
@@ -67,6 +69,15 @@ export default defineConfig({
       // job (plugin-tests.yml), where it is green — so it is CI-covered, not invisible debt.
       'tests/integration/multitable-context.api.test.ts',
       'tests/integration/multitable-record-form.api.test.ts',
+      // multitable-sheet-permissions.api.test.ts: 41 per-test SQL-string-matching MOCK handlers that have
+      // DRIFTED — the record-context/view/delete-record routes now SELECT meta_records column-sets the mocks
+      // don't match, so the handlers `throw new Error('Unhandled SQL')` → 500. Excluded HERE and NOT in the
+      // real-DB job (unlike multitable-context.api above) — i.e. currently CI-invisible debt, made explicit here.
+      // Robust restore = a real-DB conversion (drop the SQL mocks, like the other multitable real-DB goldens),
+      // NOT re-patching 41 brittle mocks that re-drift on the next record-query change. Sheet-scoped permission
+      // behavior is partly covered by multitable-permission-golden-d3d2 (real-DB, in CI); the write-own
+      // owner-scoped row overrides + effective-access-from-direct/role/member-group specifics here are a
+      // tracked coverage gap pending that conversion.
       'tests/integration/multitable-sheet-permissions.api.test.ts',
       'tests/integration/multitable-sheet-realtime.api.test.ts',
       // multitable-view-config.api.test.ts uses an in-file MOCK pool (no live DB) and

@@ -90,6 +90,50 @@ describe('useApprovalDirectory', () => {
     expect(dir.statusMessage.value).toContain('approval-templates:manage')
   })
 
+  // RA-1b CURATED-VOCABULARY: the dedicated formula-role picker hits the CURATED endpoint and is kept
+  // strictly separate from loadRoles / `roles` (the static_role approver picker, which lists ALL roles).
+  it('loadFormulaRoles hits the CURATED /formula-roles endpoint and parses the bare {roles} shape', async () => {
+    const apiFetch = vi.fn().mockResolvedValue(
+      jsonResponse({ roles: [{ id: 'finance_approver', name: '财务审批' }, { id: 'r2', name: '' }] }),
+    )
+    const dir = useApprovalDirectory({ apiFetch })
+
+    await dir.loadFormulaRoles()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/approval-templates/directory/formula-roles')
+    expect(dir.formulaRoles.value).toEqual([{ id: 'finance_approver', name: '财务审批' }, { id: 'r2', name: '' }])
+    expect(dir.formulaRolesLoading.value).toBe(false)
+  })
+
+  it('loadFormulaRoles and loadRoles hit DIFFERENT endpoints and fill SEPARATE refs (curated vs static_role)', async () => {
+    const apiFetch = vi.fn().mockImplementation((path: string) =>
+      Promise.resolve(
+        path.endsWith('/formula-roles')
+          ? jsonResponse({ roles: [{ id: 'finance_approver', name: '财务审批' }] })
+          : jsonResponse({ roles: [{ id: 'finance_approver', name: '财务审批' }, { id: 'admin', name: '系统管理员' }] }),
+      ),
+    )
+    const dir = useApprovalDirectory({ apiFetch })
+
+    await dir.loadRoles()
+    await dir.loadFormulaRoles()
+
+    // static_role picker keeps ALL roles (incl. admin); the curated formula picker excludes it.
+    expect(dir.roles.value.map((r) => r.id)).toEqual(['finance_approver', 'admin'])
+    expect(dir.formulaRoles.value.map((r) => r.id)).toEqual(['finance_approver'])
+  })
+
+  it('403 on loadFormulaRoles sets a permission status message and clears the curated array', async () => {
+    const apiFetch = vi.fn().mockResolvedValue(jsonResponse({}, { status: 403, ok: false }))
+    const dir = useApprovalDirectory({ apiFetch })
+    dir.formulaRoles.value = [{ id: 'stale', name: 'x' }]
+
+    await dir.loadFormulaRoles()
+
+    expect(dir.formulaRoles.value).toEqual([])
+    expect(dir.statusMessage.value).toContain('approval-templates:manage')
+  })
+
   it('ensureUserOptionVisible prepends a synthetic option for an id missing from the page, no-op when present', () => {
     const apiFetch = vi.fn()
     const dir = useApprovalDirectory({ apiFetch })

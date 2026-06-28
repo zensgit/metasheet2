@@ -681,6 +681,21 @@
                       data-testid="approval-condition-formula-insert-max"
                       @click="insertConditionFormulaFunction(branch, 'MAX')"
                     >MAX()</el-button>
+                    <template v-if="directory.formulaRoles.value.length > 0">
+                      <span
+                        class="template-authoring__condition-formula-role-hint"
+                        data-testid="approval-condition-formula-role-hint"
+                      >requester.role（审批可用角色）：</span>
+                      <el-button
+                        v-for="role in directory.formulaRoles.value"
+                        :key="role.id"
+                        size="small"
+                        :disabled="readOnly"
+                        :title="`插入 requester.role in [&quot;${role.id}&quot;]`"
+                        :data-testid="`approval-condition-formula-insert-role-${role.id}`"
+                        @click="insertConditionFormulaRoleMembership(branch, role.id)"
+                      >{{ directory.formatRoleLabel(role) }}</el-button>
+                    </template>
                   </div>
                   <div class="template-authoring__condition-formula-dryrun">
                     <el-input
@@ -1286,6 +1301,12 @@ function insertConditionFormulaToken(branch: ConditionBranchEdit, token: string)
 function insertConditionFormulaFunction(branch: ConditionBranchEdit, fn: 'SUM' | 'COUNT' | 'MIN' | 'MAX'): void {
   appendFormulaText(branch, `${fn}()`)
 }
+// CURATED-VOCABULARY (RA-1b): insert a ready `requester.role in ["<id>"]` membership for a CURATED role
+// (from the formula-roles picker). JSON.stringify quotes/escapes the id so the inserted snippet always
+// parses. Single-role is the common case; for multiple roles the author edits the array by hand.
+function insertConditionFormulaRoleMembership(branch: ConditionBranchEdit, roleId: string): void {
+  appendFormulaText(branch, `requester.role in [${JSON.stringify(roleId)}]`)
+}
 
 function conditionFormulaDryRunKey(nodeKey: string, edgeKey: string): string {
   return `${nodeKey}:${edgeKey}`
@@ -1809,6 +1830,7 @@ async function handlePublish() {
 onMounted(() => {
   if (!canManageTemplates.value) return
   void directory.loadRoles()
+  void directory.loadFormulaRoles()
   void loadTemplateForEdit()
 })
 </script>
@@ -2008,6 +2030,13 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  align-items: center;
+}
+
+.template-authoring__condition-formula-role-hint {
+  margin-left: 4px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 .template-authoring__condition-formula-dryrun {

@@ -3,7 +3,7 @@
  * FORWARD (re-applies its `before` state as a new change), drift-guarded (T9-W-L5) and forward-only (T9-W-L1).
  *
  * v1 SAFE subset (T9-W-L6): field `name`/`order` reverts + all view config reverts (display-only, non-lossy).
- * Everything else — field `type`/`property` (potentially lossy), create/delete (undelete), permission — is GATED in
+ * Everything else — field `type`/`property` (schema-only revert; gated at classify, route opens a scalar-safe Tier-2 subset), create/delete (undelete), permission — is GATED in
  * this slice and refused fail-closed. sheet_config is also `gated` at the classify layer (classifyRevert); the ROUTE
  * opens only a narrow Tier-1 subset (an `update` whose changed keys ⊆ {conditionalReadRules,
  * rowLevelReadPermissionsEnabled}, per isSupportedSheetConfigRevert) behind MULTITABLE_ENABLE_SHEET_CONFIG_REVERT —
@@ -34,7 +34,7 @@ export function classifyRevert(rev: Pick<ConfigRevisionRow, 'entity_type' | 'act
   if (rev.entity_type === 'view') return { kind: 'safe' } // view config is display-only, non-lossy
   if (rev.entity_type === 'field') {
     const unsafe = rev.changed_keys.filter((k) => !SAFE_FIELD_KEYS.has(k))
-    if (unsafe.length > 0) return { kind: 'gated', reason: `field ${unsafe.join('/')} reverts are not supported in this slice (potentially lossy)` }
+    if (unsafe.length > 0) return { kind: 'gated', reason: `field ${unsafe.join('/')} reverts are gated at the classify layer (type/property is route-gated to a scalar schema-only subset; see isSupportedFieldRetypeRevert)` }
     return { kind: 'safe' }
   }
   return { kind: 'gated', reason: `${rev.entity_type} reverts are not supported in this slice` }
@@ -98,6 +98,23 @@ export function isSupportedFieldRetypeRevert(rev: ConfigRevisionRow): boolean {
   const afterType = rev.after?.type
   if (typeof beforeType !== 'string' || typeof afterType !== 'string') return false // need both to verify scalar-safety
   return !FIELD_RETYPE_EXCLUDED_TYPES.has(beforeType) && !FIELD_RETYPE_EXCLUDED_TYPES.has(afterType)
+}
+
+/**
+ * T9-W Tier 3 (U-3) — un-create. Reverting a `create` revision forward-only = DROPPING the entity that revision
+ * created (a create's `before` is null, so the reverted-to state is non-existence). v1 (design-lock U3-L1) opens ONLY
+ * field/view create-reverts — the two entity types a forward create-route records. sheet_config create (1-row,
+ * nonsensical to un-create), permission (permission-revert, held), and `delete`-reverts (undelete = Tier 4) stay
+ * gated. classifyRevert returns `gated` for every create (action !== 'update'), so the route opens THIS subset behind
+ * MULTITABLE_ENABLE_CONFIG_UNCREATE via this predicate (mirrors the Tier-1/2 predicate pattern).
+ *
+ * Pure & structural ONLY: the destructive cascade (drop + column-data loss), the no-oracle preview (U3-L5), and the
+ * opaque HMAC plan-hash drift control (U3-L4) live at the route (config-restore-execute), NOT here. This decides only
+ * "is this revision an un-create the flag may open".
+ */
+export const UNCREATE_ENTITY_TYPES: ReadonlySet<string> = new Set(['field', 'view'])
+export function isSupportedUncreate(rev: Pick<ConfigRevisionRow, 'entity_type' | 'action'>): boolean {
+  return rev.action === 'create' && UNCREATE_ENTITY_TYPES.has(rev.entity_type)
 }
 
 const stable = (v: unknown): string => JSON.stringify(v ?? null)

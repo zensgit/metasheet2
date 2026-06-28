@@ -969,6 +969,7 @@ export type AutomationTriggerType =
   | 'field.value_changed'
   | 'schedule.cron'
   | 'schedule.interval'
+  | 'schedule.date_field'
   | 'webhook.received'
   | 'form.submitted'
   // Legacy aliases

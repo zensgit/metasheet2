@@ -722,6 +722,26 @@ export interface BomMultitableContextResult {
   context: BomMultitableContext | null;
 }
 
+// The consumer-side write-back patch for a single governed BOM multi-table line. Only the four
+// editable business cells of BomMultitableLine are whitelisted; all are optional (a PATCH carries
+// only the cells the user actually changed). `quantity` is numeric in the read model but the editor
+// may hand us a string before coercion, so the consumer type accepts number|string|null. Anything
+// outside this whitelist is stripped before the request is issued (see updateBomMultitableLine).
+export interface BomMultitableLinePatch {
+  quantity?: number | string | null;
+  uom?: string | null;
+  find_num?: string | null;
+  refdes?: string | null;
+}
+
+// The thinnest success envelope the provider write-back must return. Deliberately minimal:
+// eco_id / source_version / applied are DEFERRED to the real provider endpoint design and are
+// NOT part of this consumer contract.
+export interface BomMultitableLineUpdateResult {
+  ok: boolean;
+  bom_line_id: string;
+}
+
 // Field guard for the governed BOM multi-table context. Validates EVERY field declared on
 // BomMultitableLine / BomMultitablePart / BomMultitableContext — both the structural keys
 // (bom_line_id, part_id, level, path, ...) AND the displayed cells (item_number, name, state,
@@ -2171,6 +2191,52 @@ export class PLMAdapter extends HTTPAdapter {
     }
     // legacy / non-yuantus PLM has no multitable review surface
     return { feature_key: 'bom_multitable', entitled: false, upgrade: { available: true }, context: null }
+  }
+
+  /**
+   * Write back a single governed BOM multi-table line (方案1 — line-addressed PATCH; `partId` is the
+   * context boundary, `bomLineId` selects the row). THIN consumer contract: the payload is restricted
+   * to the four editable business cells (quantity / uom / find_num / refdes), an empty patch (nothing
+   * changed) is REJECTED before any mock/network branch, any non-whitelisted key is stripped, and the
+   * success envelope is the minimal { ok, bom_line_id }. Permission/unauthorized (403) and the
+   * provider's line∈part validation are intentionally OUT of this consumer contract; success-only.
+   */
+  async updateBomMultitableLine(
+    partId: string,
+    bomLineId: string,
+    patch: BomMultitableLinePatch,
+  ): Promise<QueryResult<BomMultitableLineUpdateResult>> {
+    // Build the request payload from ONLY the four whitelisted, defined keys. `null` is a real value
+    // (a "clear this cell" edit) and is preserved; `undefined` (untouched) and any unknown key are
+    // dropped. Copying the four keys individually makes the unknown-key strip structural.
+    const payload: BomMultitableLinePatch = {}
+    if (patch.quantity !== undefined) payload.quantity = patch.quantity
+    if (patch.uom !== undefined) payload.uom = patch.uom
+    if (patch.find_num !== undefined) payload.find_num = patch.find_num
+    if (patch.refdes !== undefined) payload.refdes = patch.refdes
+
+    // Reject an empty body (a PATCH that changes nothing) BEFORE any mock/network branch.
+    if (Object.keys(payload).length === 0) {
+      return {
+        data: [],
+        error: new Error('updateBomMultitableLine requires at least one of quantity, uom, find_num, refdes'),
+      }
+    }
+
+    if (this.mockMode) {
+      return {
+        data: [{ ok: true, bom_line_id: bomLineId }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('BOM multitable line write-back is not supported for this PLM API mode') }
+    }
+
+    return this.select<BomMultitableLineUpdateResult>(`/api/v1/bom/multitable/${partId}/lines/${bomLineId}`, {
+      method: 'PATCH',
+      data: payload,
+    })
   }
 
   async getApprovals(options?: ApprovalQueryOptions): Promise<QueryResult<ApprovalRequest>> {

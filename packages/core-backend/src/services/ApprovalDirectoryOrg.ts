@@ -47,6 +47,9 @@ export interface ApprovalRequesterOrgRelations {
   /** RA-1a: the requester's directory-resolved primary department NAME (directory_departments.name) —
    *  the tamper-resistant source for `requester.department`. Omitted when unresolvable. */
   primaryDepartmentName?: string
+  /** The requester's directory-resolved job TITLE (directory_accounts.title) — the tamper-resistant
+   *  source for `requester.title`. Omitted when unresolvable (unset/blank for this requester). */
+  primaryTitle?: string
   /** Local user id of the requester's direct manager, if resolvable. */
   managerId?: string
   /** Local user id of the head of the requester's primary department, if resolvable. */
@@ -148,6 +151,7 @@ interface RequesterDirectoryRow {
   account_id: string
   external_user_id: string
   raw: unknown
+  title: string | null
   primary_external_department_id: string | null
   primary_department_raw: unknown
   primary_department_name: string | null
@@ -175,6 +179,7 @@ export async function resolveApprovalRequesterOrgRelations(
             a.id::text                   AS account_id,
             a.external_user_id           AS external_user_id,
             a.raw                        AS raw,
+            a.title                      AS title,
             d.external_department_id     AS primary_external_department_id,
             d.raw                        AS primary_department_raw,
             d.name                       AS primary_department_name
@@ -241,6 +246,8 @@ export async function resolveApprovalRequesterOrgRelations(
   if (deptHeadId) relations.deptHeadId = deptHeadId
   const primaryDepartmentName = requester.primary_department_name?.trim()
   if (primaryDepartmentName) relations.primaryDepartmentName = primaryDepartmentName
+  const primaryTitle = requester.title?.trim()
+  if (primaryTitle) relations.primaryTitle = primaryTitle
 
   // 4) Manager chain (opt-in): walk leader_in_dept hop-by-hop up the org tree,
   //    starting from the requester. Only runs when the caller opts in — i.e. a

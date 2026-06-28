@@ -73,7 +73,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { hashPreviewChanges, hashScope, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -90,6 +90,7 @@ import {
   isSupportedSheetConfigRevert,
   isFieldRetypeRevert,
   isSupportedFieldRetypeRevert,
+  isSupportedUncreate,
   computeRevertPreview,
   loadEntityConfigSnapshot,
   applyConfigRevert,
@@ -1714,19 +1715,19 @@ async function validateLinkFieldConfig(
     return `链接字段 foreignBaseId 需与外表实际 base 一致：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} 实际 base=${actualForeignBaseId ?? 'null'}，声明=${claimed ?? 'null'}`
   }
   if (baseIdsAreCrossBase(sourceBaseId, actualForeignBaseId)) {
-    // Bidirectional / mirror links MVP (design 2026-06-14 §7.2) — cross-base bidirectional is DEFERRED.
-    // A two-way link must be same-base, even if it carries a valid cross-base `foreignBaseId` opt-in
-    // (this fires BEFORE the ②b opt-in short-circuit so the opt-in cannot rescue a cross-base pairing).
-    // Uses only this field's own config, so create-order / paired-field existence is irrelevant.
-    if (linkCfg.twoWay === true) {
-      return `二维（双向）链接 MVP 不支持跨 base 配对：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} base=${actualForeignBaseId ?? 'null'}`
-    }
-    // ②b opt-in short-circuit — a cross-base link is allowed IFF it carries an EXPLICIT foreignBaseId
-    // EQUAL to the foreign sheet's real base (claim == truth; you can't declare a wrong base). A
-    // degenerate null/legacy-base foreign sheet has no concrete base to claim, so it can never opt in
-    // (claimed===null falls through to reject; a non-null claim !== null actual also rejects). This is a
-    // pure consistency gate — the foreign READ-permission check is §3 (base-read) + §2a.3 (field mask),
-    // NOT here (adding a perm check in this structural wall would over-reach).
+    // ②b read-only cross-base mirror v1 (2026-06-27) — cross-base bidirectional (twoWay) is now ALLOWED on
+    // the SAME terms as a one-way cross-base link (the earlier §7.2 blanket deferral of twoWay is lifted).
+    // The derived (mirror) side stays read-only by codec (field-codecs.ts: mirrorOf ⇒ readOnly), so this
+    // opens only a reverse READ-projection, never a cross-base write path. The realtime mirror-invalidation
+    // fan-out is deferred for cross-base (record-write-service.ts collectMirrorInvalidation) — harmless: the
+    // reverse read recomputes + base-masks on every fetch.
+    // ②b opt-in short-circuit — a cross-base link (one-way OR twoWay) is allowed IFF it carries an EXPLICIT
+    // foreignBaseId EQUAL to the foreign sheet's real base (claim == truth; you can't declare a wrong base —
+    // a wrong claim is already rejected above). A degenerate null/legacy-base foreign sheet has no concrete
+    // base to claim, so it can never opt in (claimed===null falls through to reject). This is a pure
+    // consistency gate — the foreign READ-permission check is §3 (base-read) + §2a.3 (field mask), NOT here
+    // (a perm check in this structural wall would over-reach). Uses only this field's own config, so
+    // create-order / paired-field existence is irrelevant.
     if (claimed !== null) {
       return null
     }
@@ -2598,9 +2599,13 @@ async function loadLinkValuesByRecord(
   if (forwardFields.length > 0) {
     const fieldIds = forwardFields.map((l) => l.fieldId)
     const linkRes = await query(
+      // repair-on-read: foreign_record_id has NO FK, so an inbound edge to a since-deleted record dangles
+      // (sheet-delete / direct-SQL / legacy). Filter dangling edges so a deleted foreign record never surfaces
+      // as a ghost link id. (deleteRecord already drops both directions in-txn; this defends the slip-throughs.)
       `SELECT field_id, record_id, foreign_record_id
        FROM meta_links
-       WHERE field_id = ANY($1::text[]) AND record_id = ANY($2::text[])`,
+       WHERE field_id = ANY($1::text[]) AND record_id = ANY($2::text[])
+         AND EXISTS (SELECT 1 FROM meta_records r WHERE r.id = foreign_record_id)`,
       [fieldIds, recordIds],
     )
     for (const raw of linkRes.rows as any[]) {
@@ -2622,9 +2627,13 @@ async function loadLinkValuesByRecord(
     }
     const forwardIds = Array.from(mirrorFieldsByForwardId.keys())
     const reverseRes = await query(
+      // repair-on-read (symmetry / defense-in-depth): the mirror value is the SOURCE record_id, which is
+      // FK-cascade-protected (record_id REFERENCES meta_records ON DELETE CASCADE) so a ghost source is not
+      // expected today — but filter it too so NO read path can ever surface a deleted record id.
       `SELECT field_id, record_id, foreign_record_id
        FROM meta_links
-       WHERE field_id = ANY($1::text[]) AND foreign_record_id = ANY($2::text[])`,
+       WHERE field_id = ANY($1::text[]) AND foreign_record_id = ANY($2::text[])
+         AND EXISTS (SELECT 1 FROM meta_records r WHERE r.id = record_id)`,
       [forwardIds, recordIds],
     )
     for (const raw of reverseRes.rows as any[]) {
@@ -2653,26 +2662,55 @@ async function loadLinkValuesByRecord(
  *
  * FORWARD link fields are deliberately left UNTOUCHED: their raw-id posture is pre-existing and shared
  * repo-wide (an outbound edge this record authored), and the task scopes this fix to mirror fields only.
- * Same-base only by construction (cross-base twoWay/mirror is rejected at field-create), so the cross-base
- * coarse gate `buildLinkSummaries` adds on top of `resolveReadableSheetIds` is a no-op here — sheet-level
- * read IS the exact gate. Idempotent / order-independent: mutates `row.data` in place for denied mirrors only.
+ * TWO gates, both REDUCE-only (never widen): (1) the same-base / sheet-level gate `resolveReadableSheetIds`
+ * keyed on `cfg.foreignSheetId`; (2) ②b read-only cross-base mirror v1 (2026-06-27) — when a mirror's
+ * foreign sheet lives in a DIFFERENT base, a base-read COARSE gate (`resolveBaseReadable`, parity with
+ * `resolveForeignFieldReadability` §3.2 Sink A and `buildLinkSummaries` Sink B-1) empties the reverse
+ * projection for a sheet-readable-but-base-unreadable actor (no foreign-record id/count leak). Same-base
+ * mirrors never reach gate (2). Idempotent / order-independent: mutates `row.data` in place for denied
+ * mirrors only. NOTE: the inline `linkSummaries` projection of the SAME reverse edge is gated independently
+ * in `buildLinkSummaries` (Sink B-1) — both wires must hold; the goldens cover each separately.
  */
 async function maskDerivedMirrorFieldIds(
   req: Request,
   query: QueryFn,
+  // The sheet the `rows` belong to — the SOURCE base is resolved from it (parity with applyLookupRollup) to
+  // decide cross-base per mirror foreign sheet. Not derivable from `rows` (records carry no sheet/base id).
+  sourceSheetId: string,
   rows: UniverMetaRecord[],
   relationalLinkFields: RelationalLinkField[],
 ): Promise<void> {
   const mirrorFields = relationalLinkFields.filter((l) => l.cfg.mirrorOf)
   if (mirrorFields.length === 0 || rows.length === 0) return
+  // Gate (1): same-base / sheet-level read — UNCHANGED (never loosened).
   const readableSheetIds = await resolveReadableSheetIds(
     req,
     query,
     mirrorFields.map((l) => l.cfg.foreignSheetId),
   )
+  // Gate (2): ②b cross-base base-read. Resolve the source base once, then for each DISTINCT cross-base
+  // mirror foreign sheet require base-read; deny → mask. Memoized per base; a null foreign base is
+  // unreadable by definition (also crash-safe vs resolveBaseReadable, which rejects an empty id).
+  const sourceBaseId = (await loadSheetRowShared(query, sourceSheetId))?.baseId ?? null
+  const crossBaseDeniedForeignSheetIds = new Set<string>()
+  const baseReadableCache = new Map<string, boolean>()
+  for (const foreignSheetId of new Set(mirrorFields.map((l) => l.cfg.foreignSheetId))) {
+    const foreignBaseId = (await loadSheetRowShared(query, foreignSheetId))?.baseId ?? null
+    if (foreignBaseId === sourceBaseId) continue // same-base → gate (1) is the exact gate
+    if (foreignBaseId == null) {
+      crossBaseDeniedForeignSheetIds.add(foreignSheetId)
+      continue
+    }
+    let readable = baseReadableCache.get(foreignBaseId)
+    if (readable === undefined) {
+      readable = await resolveBaseReadable(req, query, foreignBaseId)
+      baseReadableCache.set(foreignBaseId, readable)
+    }
+    if (!readable) crossBaseDeniedForeignSheetIds.add(foreignSheetId)
+  }
   for (const row of rows) {
     for (const { fieldId, cfg } of mirrorFields) {
-      if (!readableSheetIds.has(cfg.foreignSheetId)) {
+      if (!readableSheetIds.has(cfg.foreignSheetId) || crossBaseDeniedForeignSheetIds.has(cfg.foreignSheetId)) {
         row.data[fieldId] = []
       }
     }
@@ -5842,6 +5880,147 @@ class PermissionError extends Error {
   }
 }
 
+// ── T9-W Tier 3 (U-3) un-create: shared destructive drop cascades + plan digest ───────────────────────────────
+// (U3-L2) The forward DELETE /fields|/views cascades, extracted txn-parameterized so the un-create execute reuses
+// the IDENTICAL effect (no orphans/residue). `query` is a transaction handle → runs inside EITHER the forward
+// route's txn OR the un-create execute's txn. `source`/`restoredFromId` thread into the ENTITY's OWN delete
+// revision only (cascade order-shift/view-cleanup revisions stay 'mutation'); the forward route passes the default.
+type TxnQuery = (text: string, params: any[]) => Promise<any>
+
+/** The view-config cleanup a field-drop applies (drop the field from a view's filter/sort/group/hidden). Pure. */
+function cleanupViewConfigForField(fieldId: string, args: {
+  filterInfo: Record<string, unknown>
+  sortInfo: Record<string, unknown>
+  groupInfo: Record<string, unknown>
+  hiddenFieldIds: string[]
+}) {
+  const nextHidden = args.hiddenFieldIds.filter((id) => id !== fieldId)
+  const rawSortRules = Array.isArray(args.sortInfo.rules) ? args.sortInfo.rules : []
+  const nextSortRules = rawSortRules.filter((r) => isPlainObject(r) && r.fieldId !== fieldId)
+  const nextSortInfo = nextSortRules.length > 0 ? { ...args.sortInfo, rules: nextSortRules } : {}
+  const nextGroupInfo = args.groupInfo.fieldId === fieldId ? {} : args.groupInfo
+  const rawConditions = Array.isArray(args.filterInfo.conditions) ? args.filterInfo.conditions : []
+  const nextConditions = rawConditions.filter((c) => isPlainObject(c) && c.fieldId !== fieldId)
+  const nextFilterInfo = nextConditions.length > 0 ? { ...args.filterInfo, conditions: nextConditions } : {}
+  return { nextHidden, nextSortInfo, nextGroupInfo, nextFilterInfo }
+}
+
+/** Whether dropping `fieldId` would CHANGE this view's config — drives BOTH the real cascade and the plan digest. */
+function viewConfigChangedByFieldDrop(fieldId: string, v: any): boolean {
+  const filterInfo = normalizeJson(v.filter_info)
+  const sortInfo = normalizeJson(v.sort_info)
+  const groupInfo = normalizeJson(v.group_info)
+  const hiddenFieldIds = normalizeJsonArray(v.hidden_field_ids)
+  const { nextHidden, nextSortInfo, nextGroupInfo, nextFilterInfo } = cleanupViewConfigForField(fieldId, { filterInfo, sortInfo, groupInfo, hiddenFieldIds })
+  return (
+    nextHidden.length !== hiddenFieldIds.length ||
+    JSON.stringify(nextSortInfo) !== JSON.stringify(sortInfo) ||
+    JSON.stringify(nextGroupInfo) !== JSON.stringify(groupInfo) ||
+    JSON.stringify(nextFilterInfo) !== JSON.stringify(filterInfo)
+  )
+}
+
+/** U3-L2: forward field-delete cascade, txn-parameterized. Shared by DELETE /fields AND un-create execute. */
+async function dropFieldCascade(query: TxnQuery, opts: {
+  sheetId: string
+  fieldId: string
+  fieldRow: { name: string; type: string; property: unknown; order: number }
+  actorId: string | null
+  source?: 'mutation' | 'restore'
+  restoredFromId?: string | null
+}): Promise<void> {
+  const { sheetId, fieldId, fieldRow, actorId } = opts
+  const order = Number(fieldRow.order ?? 0)
+  const configBatchId = randomUUID() // one batchId — the deleted field + the order-shift of later fields share it
+  await query('DELETE FROM meta_fields WHERE id = $1', [fieldId])
+  await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
+  await recordConfigRevision(query, {
+    sheetId, entityType: 'field', entityId: fieldId, action: 'delete',
+    ...fieldDeleteDiff({ name: String(fieldRow.name), type: String(fieldRow.type), property: fieldRow.property, order }),
+    batchId: configBatchId, actorId,
+    source: opts.source ?? 'mutation', restoredFromId: opts.restoredFromId ?? null,
+  })
+  try {
+    await query('DELETE FROM meta_links WHERE field_id = $1', [fieldId])
+  } catch (err) {
+    if (!isUndefinedTableError(err, 'meta_links')) throw err
+  }
+  // lock-exempt: field-delete schema op — drops the deleted field's key sheet-wide; not a per-record user edit.
+  await query('UPDATE meta_records SET data = data - $1 WHERE sheet_id = $2', [fieldId, sheetId])
+  const shiftedDel = ((await query('UPDATE meta_fields SET "order" = "order" - 1 WHERE sheet_id = $1 AND "order" > $2 RETURNING id, "order"', [sheetId, order])) as any).rows as Array<{ id: string; order: number }>
+  await recordFieldOrderShifts(query, sheetId, shiftedDel.map((r) => ({ id: String(r.id), newOrder: Number(r.order) })), -1, configBatchId, actorId)
+  const views = await query(
+    'SELECT id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1',
+    [sheetId],
+  )
+  for (const v of (views as any).rows as any[]) {
+    const beforeView = viewConfigSnapshotFromRow(v)
+    const filterInfo = normalizeJson(v.filter_info)
+    const sortInfo = normalizeJson(v.sort_info)
+    const groupInfo = normalizeJson(v.group_info)
+    const hiddenFieldIds = normalizeJsonArray(v.hidden_field_ids)
+    const { nextHidden, nextSortInfo, nextGroupInfo, nextFilterInfo } = cleanupViewConfigForField(fieldId, { filterInfo, sortInfo, groupInfo, hiddenFieldIds })
+    const changed =
+      nextHidden.length !== hiddenFieldIds.length ||
+      JSON.stringify(nextSortInfo) !== JSON.stringify(sortInfo) ||
+      JSON.stringify(nextGroupInfo) !== JSON.stringify(groupInfo) ||
+      JSON.stringify(nextFilterInfo) !== JSON.stringify(filterInfo)
+    if (!changed) continue
+    await query(
+      'UPDATE meta_views SET filter_info = $2::jsonb, sort_info = $3::jsonb, group_info = $4::jsonb, hidden_field_ids = $5::jsonb WHERE id = $1',
+      [String(v.id), JSON.stringify(nextFilterInfo), JSON.stringify(nextSortInfo), JSON.stringify(nextGroupInfo), JSON.stringify(nextHidden)],
+    )
+    const afterView = { ...beforeView, filterInfo: nextFilterInfo, sortInfo: nextSortInfo, groupInfo: nextGroupInfo, hiddenFieldIds: nextHidden }
+    const cascadeDiff = configUpdateDiff(beforeView, afterView, VIEW_CONFIG_HISTORY_KEYS)
+    if (cascadeDiff) {
+      await recordConfigRevision(query, {
+        sheetId, entityType: 'view', entityId: String(v.id), action: 'update',
+        before: cascadeDiff.before, after: cascadeDiff.after, changedKeys: cascadeDiff.changedKeys,
+        batchId: configBatchId, actorId,
+      })
+    }
+  }
+}
+
+/** U3-L2: forward view-delete cascade, txn-parameterized. Shared by DELETE /views AND un-create execute. */
+async function dropViewCascade(query: TxnQuery, opts: {
+  sheetId: string
+  viewId: string
+  viewRow: any
+  actorId: string | null
+  source?: 'mutation' | 'restore'
+  restoredFromId?: string | null
+}): Promise<void> {
+  const { sheetId, viewId, viewRow, actorId } = opts
+  await query('DELETE FROM meta_views WHERE id = $1', [viewId])
+  await recordConfigRevision(query, {
+    sheetId, entityType: 'view', entityId: viewId, action: 'delete',
+    ...configDeleteDiff(viewConfigSnapshotFromRow(viewRow), VIEW_CONFIG_HISTORY_KEYS),
+    batchId: randomUUID(), actorId,
+    source: opts.source ?? 'mutation', restoredFromId: opts.restoredFromId ?? null,
+  })
+}
+
+/** U3-L4: the SERVER-SIDE blast-radius plan for an un-create — feeds hashUncreatePlan ONLY (NEVER the response). */
+async function computeUncreatePlan(query: TxnQuery, rev: ConfigRevisionRow): Promise<UncreatePlan> {
+  if (rev.entity_type === 'view') {
+    const exists = ((await query('SELECT 1 FROM meta_views WHERE id = $1', [rev.entity_id])) as any).rows.length > 0
+    return { entityAlive: exists, cascadeViewIds: [], orderShiftIds: [], columnDataPresent: false }
+  }
+  const fres = (await query('SELECT id, sheet_id, "order" FROM meta_fields WHERE id = $1', [rev.entity_id])) as any
+  if (fres.rows.length === 0) return { entityAlive: false, cascadeViewIds: [], orderShiftIds: [], columnDataPresent: false }
+  const frow = fres.rows[0]
+  const sheetId = String(frow.sheet_id)
+  const order = Number(frow.order ?? 0)
+  const views = (await query('SELECT id, filter_info, sort_info, group_info, hidden_field_ids FROM meta_views WHERE sheet_id = $1', [sheetId])) as any
+  const cascadeViewIds = (views.rows as any[]).filter((v) => viewConfigChangedByFieldDrop(rev.entity_id, v)).map((v) => String(v.id))
+  const shiftRows = (await query('SELECT id FROM meta_fields WHERE sheet_id = $1 AND "order" > $2', [sheetId, order])) as any
+  const orderShiftIds = (shiftRows.rows as any[]).map((r) => String(r.id))
+  // EXISTS via data->>key IS NOT NULL (the key present with a non-null value) — NOT the `?` operator. Coarse bit only.
+  const dataRows = (await query('SELECT 1 FROM meta_records WHERE sheet_id = $1 AND data->>$2 IS NOT NULL LIMIT 1', [sheetId, rev.entity_id])) as any
+  return { entityAlive: true, cascadeViewIds, orderShiftIds, columnDataPresent: dataRows.rows.length > 0 }
+}
+
 export function univerMetaRouter(): Router {
   const router = Router()
 
@@ -7717,6 +7896,27 @@ export function univerMetaRouter(): Router {
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
         : (capabilities.canManageFields || capabilities.canManageViews || capabilities.canManageSheetAccess)
       if (!cap) return sendForbidden(res)
+      // T9-W Tier 3 (U-3): un-create = revert a field/view `create` = DROP the created entity. Behind its own
+      // default-off flag. Preview is read-only: compute the SERVER-SIDE blast-radius plan, bind it as an OPAQUE
+      // planHash (U3-L4), and return an UNDISCLOSED summary (U3-L5: name the entity + the destructive consequence,
+      // NO counts, NO raw plan fields). classifyRevert stays gated for every create, so this isSupportedUncreate
+      // branch is the ONLY confirmable create-revert path — sheet_config/permission creates fall through to gated.
+      if (isSupportedUncreate(rev)) {
+        if (process.env.MULTITABLE_ENABLE_CONFIG_UNCREATE !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'CONFIG_UNCREATE_DISABLED', message: 'config un-create is disabled (MULTITABLE_ENABLE_CONFIG_UNCREATE off).' } })
+        }
+        const plan = await computeUncreatePlan(pool.query.bind(pool), rev)
+        if (!plan.entityAlive) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot preview an un-create.' } })
+        const previewToken = mintConfigUncreatePreviewIdentity({
+          sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+          planHash: hashUncreatePlan(plan), actorId: access.userId,
+        })
+        const entityName = typeof rev.after?.name === 'string' ? (rev.after.name as string) : undefined
+        const note = rev.entity_type === 'field'
+          ? 'Un-creating this field permanently drops its column and every value in it (all created after this point) from every record. This cannot be undone.'
+          : 'Un-creating this view permanently removes its saved configuration. This cannot be undone.'
+        return res.json({ ok: true, data: { uncreate: { entityType: rev.entity_type, entityId: rev.entity_id, entityName, note }, previewToken } })
+      }
       // T9-W Tier 2 (U-2): field type/property revert is behind its OWN per-tier flag (default off). Schema-only +
       // scalar-safe (isSupportedFieldRetypeRevert); mirrors the forward PATCH (no value migration). A non-retype
       // field revert (name/order only) is unaffected and stays on the existing safe path.
@@ -7811,6 +8011,63 @@ export function univerMetaRouter(): Router {
         if (rev.entity_id !== rev.sheet_id) {
           return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'sheet_config revision entity_id does not match its sheet.' } })
         }
+      }
+      // T9-W Tier 3 (U-3) un-create EXECUTE — DROP the field/view this `create` revision created. Behind the flag +
+      // typed confirm. ONE txn: re-fetch FOR UPDATE → recompute the plan → verify the OPAQUE planHash (U3-L4): any
+      // blast-radius drift (entity gone / new view ref / new column data / order-set changed) → ONE generic 409
+      // PLAN_DRIFT (no sub-reason). Then drop via the SHARED forward-delete cascade (U3-L2) with source='restore'
+      // (U3-L3). Atomic via the failure-object pattern — a guard returns the failure object with zero writes.
+      if (isSupportedUncreate(rev)) {
+        if (process.env.MULTITABLE_ENABLE_CONFIG_UNCREATE !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'CONFIG_UNCREATE_DISABLED', message: 'config un-create is disabled (MULTITABLE_ENABLE_CONFIG_UNCREATE off).' } })
+        }
+        const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
+        if (confirm.trim() !== 'uncreate') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "uncreate" to confirm dropping the created entity.' } })
+        const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+          let fieldRow: any = null
+          let viewRow: any = null
+          if (rev.entity_type === 'field') {
+            const f = (await query('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1 FOR UPDATE', [rev.entity_id])) as any
+            if (f.rows.length === 0) return { status: 409, code: 'ENTITY_GONE', message: 'The field no longer exists; cannot un-create.' }
+            fieldRow = f.rows[0]
+          } else {
+            const vq = (await query('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1 FOR UPDATE', [rev.entity_id])) as any
+            if (vq.rows.length === 0) return { status: 409, code: 'ENTITY_GONE', message: 'The view no longer exists; cannot un-create.' }
+            viewRow = vq.rows[0]
+          }
+          // Fail-closed sheet-consistency guard (mirrors the sheet_config entity_id≡sheet_id guard): the cascade's
+          // column-strip / order-shift / view-cleanup all scope by sheet_id, and computeUncreatePlan builds the plan
+          // on the ENTITY's own sheet_id — so the drop MUST run on that same basis. If the entity's sheet_id diverges
+          // from the revision's, refuse rather than clean the wrong sheet (inert in normal operation; this is defense).
+          const entitySheetId = String((rev.entity_type === 'field' ? fieldRow : viewRow).sheet_id ?? '')
+          if (entitySheetId !== sheetId) return { status: 400, code: 'INVALID_REVISION', message: 'The config entity belongs to a different sheet than its revision; refusing to un-create.' }
+          // U3-L4: recompute the plan from the locked current state + verify the opaque planHash → ONE generic
+          // PLAN_DRIFT on any divergence (the hash cannot reveal WHICH input moved — that would itself be an oracle).
+          const plan = await computeUncreatePlan(query, rev)
+          const verdict = verifyConfigUncreatePreviewIdentity(previewToken, {
+            sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+            planHash: hashUncreatePlan(plan), actorId: access.userId,
+          })
+          if (!verdict.valid) {
+            if (verdict.reason === 'plan_drift') return { status: 409, code: 'PLAN_DRIFT', message: 'The un-create plan changed since preview; re-preview before un-creating.' }
+            if (verdict.reason === 'expired') return { status: 410, code: 'PREVIEW_EXPIRED', message: 'The preview identity expired; re-preview before un-creating.' }
+            return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before un-creating.' }
+          }
+          if (rev.entity_type === 'field') {
+            await dropFieldCascade(query, {
+              sheetId: entitySheetId, fieldId: rev.entity_id,
+              fieldRow: { name: String(fieldRow.name), type: String(fieldRow.type), property: fieldRow.property, order: Number(fieldRow.order ?? 0) },
+              actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id,
+            })
+          } else {
+            await dropViewCascade(query, { sheetId: entitySheetId, viewId: rev.entity_id, viewRow, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
+          }
+          return null
+        })
+        if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+        if (rev.entity_type === 'field') invalidateFieldCache(sheetId)
+        invalidateViewConfigCache()
+        return res.json({ ok: true, data: { uncreated: { entityType: rev.entity_type, entityId: rev.entity_id } } })
       }
       const classify = classifyRevert(rev)
       // classifyRevert stays PURE; the route SUPPORTS only the flag-opened supported subsets — Tier-1 sheet_config
@@ -8700,7 +8957,7 @@ export function univerMetaRouter(): Router {
   const computeSheetRevert = async (
     pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
     access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
-  ): Promise<null | { tooLarge: true; recordCount: number } | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
+  ): Promise<null | { tooLarge: true; recordCount: number } | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
     const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
     if (!patchContext) return null
@@ -8718,12 +8975,26 @@ export function univerMetaRouter(): Router {
     }
     const stateMap = await reconstructRecordsAtT(pool.query.bind(pool), sheetId, asOfIso) // delete-aware, deterministic (PIT-4)
     const reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }> = []
+    const resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }> = []
     let undeleteCount = 0, keptCreatedAfterT = 0, driftCount = 0
     for (const [recordId, target] of stateMap) {
-      if (deniedIds.has(recordId)) continue // PIT-3/LOCK-3 — denied records are invisible (uncounted, never reverted)
+      if (deniedIds.has(recordId)) continue // PIT-3/LOCK-3 — denied records are invisible (uncounted, never reverted/resurrected — no denied-record oracle)
       const live = liveById.get(recordId)
       if (target.exists) {
-        if (!live) { undeleteCount++; continue } // existed at T, gone now (deleted after T) → undelete (execute-deferred)
+        if (!live) {
+          // existed at T, gone now (deleted after T) → T8-1 undelete. Collect the FULL server-side T-snapshot (NOT a
+          // masked diff — undelete re-creates the whole record; read-masking still applies on later reads). The
+          // snapshotHash binds the exact target into the resurrect identity (a deleted record has no live version).
+          const snap = asRec(target.data)
+          // Schema-drift guard (parity with the live-revert branch below): if the T-snapshot carries a field that no
+          // longer exists in the current schema, do NOT resurrect — re-inserting would write a stale field key into
+          // meta_records.data. Exclude it (counted as drift → re-preview), never resurrect a schema-drifted snapshot.
+          let resurrectDrift = false
+          for (const fid of Object.keys(snap)) if (!fieldById.has(fid)) { resurrectDrift = true; break }
+          if (resurrectDrift) { driftCount++; continue }
+          resurrects.push({ recordId, snapshot: snap, snapshotHash: hashPreviewChanges(Object.entries(snap).map(([fieldId, value]) => ({ fieldId, op: 'set', value }))) })
+          undeleteCount++; continue
+        }
         const targetSnapshot = asRec(target.data)
         let drift = false
         for (const fid of Object.keys(targetSnapshot)) if (!fieldById.has(fid)) { drift = true; break }
@@ -8737,7 +9008,11 @@ export function univerMetaRouter(): Router {
     }
     const createdAfterTIds: string[] = []
     for (const id of liveById.keys()) if (!stateMap.has(id) && !deniedIds.has(id)) { keptCreatedAfterT++; createdAfterTIds.push(id) } // created after T (visible) → KEPT by revert; the DELETE-SET for reset (T8-2)
-    return { reverts, undeleteCount, keptCreatedAfterT, createdAfterTIds, driftCount, patchContext }
+    // Unified ceiling (T8-1): the early `recordCount` guard counts LIVE rows only — a sheet with few live records but a
+    // large deleted history could resurrect far more than the ceiling. Re-check the EFFECTIVE write set (reverts +
+    // resurrects) so undelete can't bypass SHEET_REVERT_MAX_RECORDS.
+    if (reverts.length + resurrects.length > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount: reverts.length + resurrects.length }
+    return { reverts, resurrects, undeleteCount, keptCreatedAfterT, createdAfterTIds, driftCount, patchContext }
   }
 
   type PitResetRevert = { recordId: string; diff: RecordChange[]; changesHash: string; version: number }
@@ -8809,6 +9084,13 @@ export function univerMetaRouter(): Router {
     return res.status(409).json({ ok: false, error: { code: 'RESET_BLOCKED', message: 'Reset is all-or-nothing: a target is denied or forbidden, so nothing was written.' } })
   }
 
+  // T8-1 undelete: PIT Revert resurrects records that existed at T but are deleted now. Default-OFF flag (ON TOP of
+  // canManageSheetAccess), and at execute the undelete-specific floor is canDeleteRecord (NEVER canEditRecord) + a
+  // typed confirm:'undelete'. The resurrect set is bound into the SAME pit-revert identity (resurrectScopeHash); the
+  // resurrects run in ONE transaction (all-or-nothing) while field-reverts stay best-effort per-record. Inbound links
+  // are NOT rebuilt (design-lock L4 A) — they re-appear when the linking record is next saved.
+  const PIT_UNDELETE_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_UNDELETE ?? '').trim().toLowerCase() === 'true'
+
   router.post('/sheets/:sheetId/revert-preview', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const parsed = z.object({ asOf: z.string().min(1) }).safeParse(req.body)
@@ -8823,15 +9105,21 @@ export function univerMetaRouter(): Router {
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.` } })
-      const { reverts, undeleteCount, keptCreatedAfterT, driftCount } = computed
-      const previewIdentity = reverts.length > 0
-        ? mintPitRevertPreviewIdentity({ sheetId, asOf: asOfIso, strategy: 'revert', scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))), actorId: access.userId })
-        : null // empty revert set → no executable token (no hashScope([]) replay)
+      const { reverts, resurrects, undeleteCount, keptCreatedAfterT, driftCount } = computed
+      const previewIdentity = (reverts.length > 0 || resurrects.length > 0)
+        ? mintPitRevertPreviewIdentity({
+            sheetId, asOf: asOfIso, strategy: 'revert',
+            scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
+            resurrectScopeHash: hashResurrectSet(resurrects.map((r) => ({ recordId: r.recordId, snapshotHash: r.snapshotHash }))),
+            actorId: access.userId,
+          })
+        : null // nothing to revert AND nothing to resurrect → no-op, no executable token
       return res.json({ ok: true, data: {
         asOf: asOfIso, strategy: 'revert',
         summary: { visibleRevertCount: reverts.length, visibleUndeleteCount: undeleteCount, keptCreatedAfterTCount: keptCreatedAfterT, conflictCount: driftCount },
         records: reverts.map((r) => ({ recordId: r.recordId, fieldIds: r.diff.map((dd) => dd.fieldId) })),
-        undeleteSupported: false, previewIdentity,
+        undeleteRecordIds: resurrects.map((r) => r.recordId),
+        undeleteSupported: PIT_UNDELETE_ENABLED(), previewIdentity,
       } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
@@ -8844,7 +9132,7 @@ export function univerMetaRouter(): Router {
 
   router.post('/sheets/:sheetId/revert-execute', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
-    const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1) }).safeParse(req.body)
+    const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1), confirm: z.string().optional() }).safeParse(req.body)
     if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, asOf, previewIdentity required' } })
     const d = new Date(parsed.data.asOf); const asOfIso = Number.isNaN(d.getTime()) ? '' : d.toISOString()
     if (!asOfIso) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must be a valid timestamp' } })
@@ -8856,10 +9144,19 @@ export function univerMetaRouter(): Router {
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.` } })
-      const { reverts, patchContext } = computed
+      const { reverts, resurrects, patchContext } = computed
+      // T8-1 undelete gate: a revert that would resurrect deleted records needs the default-off flag, the
+      // canDeleteRecord floor (NEVER canEditRecord — record resurrection, not edit), and a typed confirm:'undelete'.
+      if (resurrects.length > 0) {
+        if (!PIT_UNDELETE_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'UNDELETE_DISABLED', message: 'PIT undelete is disabled (MULTITABLE_ENABLE_PIT_UNDELETE is off).' } })
+        if (!capabilities.canDeleteRecord) return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Undelete requires delete permission (canDeleteRecord).' } })
+        if ((parsed.data.confirm ?? '').trim() !== 'undelete') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "undelete" to confirm resurrecting deleted records.' } })
+      }
       const verdict = verifyPitRevertPreviewIdentity(parsed.data.previewIdentity, {
         sheetId, asOf: asOfIso, strategy: 'revert',
-        scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))), actorId: access.userId,
+        scopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
+        resurrectScopeHash: hashResurrectSet(resurrects.map((r) => ({ recordId: r.recordId, snapshotHash: r.snapshotHash }))),
+        actorId: access.userId,
       })
       if (!verdict.valid) {
         const status = verdict.reason === 'expired' ? 410 : 409
@@ -8868,6 +9165,46 @@ export function univerMetaRouter(): Router {
       const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions } = patchContext
       const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
         ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
+      // T8-1 undelete — run FIRST (atomic, all-or-nothing) so a resurrect conflict aborts the request with ZERO writes
+      // BEFORE any best-effort field-revert is applied (no mixed partial). Each resurrect re-inserts the FULL T-snapshot
+      // (schema-drift-rejected in computeSheetRevert) under its ORIGINAL id with a FOR UPDATE id-collision reject (L1),
+      // rebuilds OUTBOUND meta_links (L3; NO inbound — L4 A: inbound re-appears on the linking record's next save), and
+      // appends a 'restore' create-revision (the Time Machine source, NOT a plain 'rest' create). Realtime post-commit.
+      const resurrectedIds: string[] = []
+      if (resurrects.length > 0) {
+        const linkFieldIds = fields.filter((f) => f.type === 'link').map((f) => f.id)
+        const undeleteActorId = getRequestActorId(req)
+        try {
+          await pool.transaction(async ({ query }) => {
+            const sheetAlive = await query('SELECT 1 FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
+            if ((sheetAlive.rows as unknown[]).length === 0) throw new RecordServiceRestoreConflictError(`Cannot undelete: sheet no longer exists: ${sheetId}`)
+            for (const r of resurrects) {
+              const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [r.recordId])
+              if ((occupied.rows as unknown[]).length > 0) throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
+              try {
+                await query('INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, created_at, updated_at) VALUES ($1, $2, $3::jsonb, 1, $4, $4, now(), now())', [r.recordId, sheetId, JSON.stringify(r.snapshot), undeleteActorId])
+              } catch (e) {
+                if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
+                throw e
+              }
+              for (const fieldId of linkFieldIds) {
+                for (const foreignId of normalizeLinkIds(r.snapshot[fieldId])) {
+                  await query('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING', [`lnk_${randomUUID()}`.slice(0, 50), fieldId, r.recordId, foreignId])
+                }
+              }
+              await recordRecordRevision(query, { sheetId, recordId: r.recordId, version: 1, action: 'create', source: 'restore', changedFieldIds: Object.keys(r.snapshot), patch: r.snapshot, snapshot: r.snapshot, actorId: undeleteActorId })
+              resurrectedIds.push(r.recordId)
+            }
+          })
+        } catch (err) {
+          if (err instanceof RecordServiceRestoreConflictError) return res.status(409).json({ ok: false, error: { code: 'UNDELETE_CONFLICT', message: `${err.message}; the sheet changed since preview — re-preview` } })
+          throw err
+        }
+        for (const recordId of resurrectedIds) { // post-commit realtime, mirrors restoreRecord
+          publishMultitableSheetRealtime({ spreadsheetId: sheetId, actorId: undeleteActorId, source: 'multitable', kind: 'record-created', recordId, recordIds: [recordId] })
+          eventBus.emit('multitable.record.created', { sheetId, recordId, actorId: undeleteActorId })
+        }
+      }
       const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
       const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
       if (yjsInvalidator) recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
@@ -8891,7 +9228,7 @@ export function univerMetaRouter(): Router {
         }
       }
       const revertedCount = outcomes.filter((o) => o.status === 'reverted').length
-      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount } })
+      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount, resurrectedCount: resurrectedIds.length, undeleteRecordIds: resurrectedIds } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
       const hint = getDbNotReadyMessage(err)
@@ -10057,27 +10394,6 @@ export function univerMetaRouter(): Router {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'fieldId is required' } })
     }
 
-    const cleanupViewConfig = (args: {
-      filterInfo: Record<string, unknown>
-      sortInfo: Record<string, unknown>
-      groupInfo: Record<string, unknown>
-      hiddenFieldIds: string[]
-    }) => {
-      const nextHidden = args.hiddenFieldIds.filter((id) => id !== fieldId)
-
-      const rawSortRules = Array.isArray(args.sortInfo.rules) ? args.sortInfo.rules : []
-      const nextSortRules = rawSortRules.filter((r) => isPlainObject(r) && r.fieldId !== fieldId)
-      const nextSortInfo = nextSortRules.length > 0 ? { ...args.sortInfo, rules: nextSortRules } : {}
-
-      const nextGroupInfo = args.groupInfo.fieldId === fieldId ? {} : args.groupInfo
-
-      const rawConditions = Array.isArray(args.filterInfo.conditions) ? args.filterInfo.conditions : []
-      const nextConditions = rawConditions.filter((c) => isPlainObject(c) && c.fieldId !== fieldId)
-      const nextFilterInfo = nextConditions.length > 0 ? { ...args.filterInfo, conditions: nextConditions } : {}
-
-      return { nextHidden, nextSortInfo, nextGroupInfo, nextFilterInfo }
-    }
-
     try {
       const pool = poolManager.get()
       const existing = await pool.query('SELECT id, sheet_id FROM meta_fields WHERE id = $1', [fieldId])
@@ -10090,84 +10406,12 @@ export function univerMetaRouter(): Router {
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
         const row = (existing as any).rows[0]
         const sheetId = String(row.sheet_id)
-        const order = Number(row.order ?? 0)
-        const configBatchId = randomUUID() // T9-R1: one batchId — the deleted field + the order-shift of later fields share it
-
-        await query('DELETE FROM meta_fields WHERE id = $1', [fieldId])
-        await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
-
-        // T9: record the field deletion (before = the deleted field's config). Any cascade view-config cleanup below
-        // is recorded under the SAME batchId so the operation remains one logical config-change batch (T9-L7).
-        await recordConfigRevision(query, {
-          sheetId, entityType: 'field', entityId: fieldId, action: 'delete',
-          ...fieldDeleteDiff({ name: String(row.name), type: String(row.type), property: row.property, order }),
-          batchId: configBatchId, actorId: getRequestActorId(req),
+        // U3-L2: the field-delete cascade is the shared dropFieldCascade (also used by the un-create execute).
+        await dropFieldCascade(query, {
+          sheetId, fieldId,
+          fieldRow: { name: String(row.name), type: String(row.type), property: row.property, order: Number(row.order ?? 0) },
+          actorId: getRequestActorId(req),
         })
-
-        try {
-          await query('DELETE FROM meta_links WHERE field_id = $1', [fieldId])
-        } catch (err) {
-          if (!isUndefinedTableError(err, 'meta_links')) throw err
-        }
-
-        // lock-exempt: field-delete schema op — drops the deleted field's key sheet-wide; not a per-record user edit.
-        await query('UPDATE meta_records SET data = data - $1 WHERE sheet_id = $2', [fieldId, sheetId])
-        // T9-R1: deleting a field shifts later fields' order -1 — record each shifted field under the same batchId.
-        const shiftedDel = ((await query('UPDATE meta_fields SET "order" = "order" - 1 WHERE sheet_id = $1 AND "order" > $2 RETURNING id, "order"', [sheetId, order])) as any).rows as Array<{ id: string; order: number }>
-        await recordFieldOrderShifts(query, sheetId, shiftedDel.map((r) => ({ id: String(r.id), newOrder: Number(r.order) })), -1, configBatchId, getRequestActorId(req))
-
-        const views = await query(
-          'SELECT id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1',
-          [sheetId],
-        )
-        for (const v of (views as any).rows as any[]) {
-          const beforeView = viewConfigSnapshotFromRow(v)
-          const filterInfo = normalizeJson(v.filter_info)
-          const sortInfo = normalizeJson(v.sort_info)
-          const groupInfo = normalizeJson(v.group_info)
-          const hiddenFieldIds = normalizeJsonArray(v.hidden_field_ids)
-
-          const { nextHidden, nextSortInfo, nextGroupInfo, nextFilterInfo } = cleanupViewConfig({
-            filterInfo,
-            sortInfo,
-            groupInfo,
-            hiddenFieldIds,
-          })
-
-          const changed =
-            nextHidden.length !== hiddenFieldIds.length ||
-            JSON.stringify(nextSortInfo) !== JSON.stringify(sortInfo) ||
-            JSON.stringify(nextGroupInfo) !== JSON.stringify(groupInfo) ||
-            JSON.stringify(nextFilterInfo) !== JSON.stringify(filterInfo)
-          if (!changed) continue
-
-          await query(
-            'UPDATE meta_views SET filter_info = $2::jsonb, sort_info = $3::jsonb, group_info = $4::jsonb, hidden_field_ids = $5::jsonb WHERE id = $1',
-            [String(v.id), JSON.stringify(nextFilterInfo), JSON.stringify(nextSortInfo), JSON.stringify(nextGroupInfo), JSON.stringify(nextHidden)],
-          )
-          const afterView = {
-            ...beforeView,
-            filterInfo: nextFilterInfo,
-            sortInfo: nextSortInfo,
-            groupInfo: nextGroupInfo,
-            hiddenFieldIds: nextHidden,
-          }
-          const cascadeDiff = configUpdateDiff(beforeView, afterView, VIEW_CONFIG_HISTORY_KEYS)
-          if (cascadeDiff) {
-            await recordConfigRevision(query, {
-              sheetId,
-              entityType: 'view',
-              entityId: String(v.id),
-              action: 'update',
-              before: cascadeDiff.before,
-              after: cascadeDiff.after,
-              changedKeys: cascadeDiff.changedKeys,
-              batchId: configBatchId,
-              actorId: getRequestActorId(req),
-            })
-          }
-        }
-
         return { deleted: fieldId, sheetId }
       })
 
@@ -10931,16 +11175,8 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
       await pool.transaction(async ({ query }) => {
-        await query('DELETE FROM meta_views WHERE id = $1', [viewId])
-        await recordConfigRevision(query, {
-          sheetId,
-          entityType: 'view',
-          entityId: viewId,
-          action: 'delete',
-          ...configDeleteDiff(viewConfigSnapshotFromRow(row), VIEW_CONFIG_HISTORY_KEYS),
-          batchId: randomUUID(),
-          actorId: getRequestActorId(req),
-        })
+        // U3-L2: the view-delete cascade is the shared dropViewCascade (also used by the un-create execute).
+        await dropViewCascade(query, { sheetId, viewId, viewRow: row, actorId: getRequestActorId(req) })
       })
       invalidateViewConfigCache(viewId)
       return res.json({ ok: true, data: { deleted: viewId } })
@@ -10970,7 +11206,15 @@ export function univerMetaRouter(): Router {
       } else if (!capabilities.canManageViews) {
         return sendForbidden(res)
       }
-      const del = await pool.query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
+      // Referential integrity (cross-base dangling-link repair, companion to repair-on-read): the sheet's
+      // records are about to be deleted (FK cascade on meta_sheets→meta_records). meta_links.record_id has
+      // ON DELETE CASCADE so their OUTBOUND edges go — but foreign_record_id has NO FK, so INBOUND edges from
+      // OTHER sheets pointing to these records would DANGLE. Clean those inbound edges FIRST, in the SAME
+      // transaction, before the records vanish (else the subquery can't find them) — atomic delete-edges+sheet.
+      const del = await pool.transaction(async ({ query }) => {
+        await query('DELETE FROM meta_links WHERE foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId])
+        return query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
+      })
       invalidateSheetSummaryCache(sheetId)
       invalidateFieldCache(sheetId)
       invalidateViewConfigCache()
@@ -12248,7 +12492,7 @@ export function univerMetaRouter(): Router {
 
         // B3 review nit: blank a DERIVED (mirror) field's raw reverse ids for an actor who can't read the
         // mirror's foreign sheet — parity with the buildLinkSummaries gate below. Forward links untouched.
-        await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), rows, relationalLinkFields)
+        await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), sheetId, rows, relationalLinkFields)
       }
 
       await applyLookupRollup(
@@ -12991,7 +13235,7 @@ export function univerMetaRouter(): Router {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
       // B3 review nit: blank a mirror field's raw reverse ids for a foreign-sheet-denied actor (write-echo).
-      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), view.sheetId, [record], relationalLinkFields)
       record.data = filterRecordDataByFieldIds(record.data, readableEchoFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
@@ -13225,7 +13469,7 @@ export function univerMetaRouter(): Router {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
       // B3 review nit: blank a mirror field's raw reverse ids for a foreign-sheet-denied actor (write-echo).
-      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), sheetId, [record], relationalLinkFields)
       record.data = filterRecordDataByFieldIds(record.data, readableEchoFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
@@ -13502,7 +13746,7 @@ export function univerMetaRouter(): Router {
       }
       // B3 review nit: blank a mirror field's raw reverse ids for an actor who can't read the mirror's
       // foreign sheet (parity with the buildLinkSummaries gate below). Forward links untouched.
-      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), sheetId, [record], relationalLinkFields)
       await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, [record], relationalLinkFields, linkValuesByRecord)
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
       // #2015 read-path field mask: D3c security composite (layer-2 property.hidden ∧ layer-3

@@ -16,13 +16,27 @@
  *                               affected foreign record (mirror sheet event present; no forward write back).
  *   C4 wire round-trip        — twoWay/mirrorFieldId survive on F_A; twoWay/mirrorFieldId/mirrorOf +
  *                               readOnly survive on F_B (create→read, not a hand-built fixture).
- *   C5 cross-base rejected    — pairing two link fields whose sheets are cross-base ⇒ 400.
+ *   C5 cross-base allow (v1)  — ②b read-only cross-base mirror (2026-06-27): a cross-base twoWay pairing is
+ *                               now ALLOWED with a valid foreignBaseId claim (claim == truth). C5b/C5c/C5d
+ *                               lock the still-fail-closed cases (no-claim / wrong-claim / one-way-no-claim);
+ *                               C5-CREATE proves BOTH sides create end-to-end (the mirror side comes back
+ *                               codec read-only — a reverse READ projection, never a cross-base write path).
  *   C6 delete clears the edge — delete B1 ⇒ A1's forward F_A no longer lists B1 (existing cascade) and the
  *                               symmetric reverse is gone.
  *   C7 masked mirror          — an actor without read on sheet A reading B1 ⇒ mirror masked (no A-record
  *                               id/display leak), via the swapped buildLinkSummaries perm chain.
  *   C8 non-twoWay regression  — an ordinary (non-twoWay) link on B does NOT reverse-resolve.
  *   C9 mirror read-only       — a PATCH on the mirror field F_B is rejected (no second materialized edge).
+ *   C-XB-MASK (security)      — cross-base mirror (SX→SA): both readers hold global multitable:read so the
+ *                               SHEET gate passes; base-read is the sole decider — denied ⇒ [] (raw /view,
+ *                               raw single-GET, AND linkSummaries), permitted ⇒ [REC_A1]. (raw wire = site 2
+ *                               maskDerivedMirrorFieldIds; summary wire = buildLinkSummaries Sink B-1.)
+ *   C-XB-RO                   — a PATCH on the cross-base mirror field is rejected (read-only, no edge).
+ *   C-XB-NOFANOUT             — a cross-base forward write does NOT fan a mirror invalidation to the foreign
+ *                               base sheet (site 3 v1 defer; read recomputes + masks on next fetch).
+ *   C-SB-TRUTHFUL-CLAIM       — a SAME-base twoWay write whose forward field carries a TRUTHFUL own-base
+ *                               foreignBaseId STILL fans the mirror invalidation (claim presence != cross-base;
+ *                               site 3 compares real sheet bases, not claim presence). [P2 regression guard]
  *
  * Runs only with DATABASE_URL (describeIfDatabase) via the plugin-tests.yml real-DB runner list.
  */
@@ -49,9 +63,22 @@ const FLD_B_NAME = `fld_bdl_b_name_${TS}` // B's display (string)
 const FLD_B_MIRROR = `fld_bdl_b_mirror_${TS}` // mirror twoWay link B → A, mirrorOf = FLD_A_LINK
 const FLD_B_PLAIN = `fld_bdl_b_plain_${TS}` // ordinary (non-twoWay) link B → A (C8 regression)
 
+// ②b read-only cross-base mirror v1 (2026-06-27): forward SA(BASE) → SX(XBASE) twoWay + cross-base claim;
+// mirror on SX → SA (mirrorOf, codec-forced read-only). Reading SX/REC_X1's mirror reverse-projects a BASE
+// record (REC_A1) → base-read gated. SA/SX already exist (SA=BASE, SX=XBASE) from the C5 layout above.
+const FLD_A_XLINK = `fld_bdl_a_xlink_${TS}` // forward twoWay link SA → SX, foreignBaseId=XBASE_ID
+const FLD_X_MIRROR = `fld_bdl_x_mirror_${TS}` // mirror twoWay link SX → SA, mirrorOf=FLD_A_XLINK, foreignBaseId=BASE_ID
+
+// P2 regression guard (2026-06-27): a SAME-base twoWay link carrying a TRUTHFUL own-base foreignBaseId — a
+// legal config (cross-base-link-optin XB-3b) whose mirror push must NOT be deferred (claim presence is NOT
+// cross-base). SA and SB are both in BASE_ID, so this pairing is same-base despite the explicit claim.
+const FLD_A_LINK2 = `fld_bdl_a_link2_${TS}` // same-base twoWay link SA → SB, foreignBaseId=BASE_ID (truthful own-base)
+const FLD_B_MIRROR2 = `fld_bdl_b_mirror2_${TS}` // its mirror on SB → SA, mirrorOf=FLD_A_LINK2
+
 const REC_A1 = `rec_bdl_a1_${TS}`
 const REC_A2 = `rec_bdl_a2_${TS}` // a SECOND A linking B1 → mirror is multi-value
 const REC_B1 = `rec_bdl_b1_${TS}`
+const REC_X1 = `rec_bdl_x1_${TS}` // a record in SX (XBASE_ID) — its mirror reverse-projects REC_A1 (cross-base)
 
 const USER_FULL = `u_bdl_full_${TS}` // global multitable read+write
 const USER_NOA = `u_bdl_noa_${TS}` // sheet-scoped: B only; sheet A unreadable (C7 mask)
@@ -165,6 +192,25 @@ describeIfDatabase('multitable bidirectional / mirror links — derived reverse 
     // USER_NOA: read on B only (sheet A unreadable, no global perms) → C7 mask.
     await q('INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code) VALUES ($1,$2,$3,$4,$5)',
       [SB, USER_NOA, 'user', USER_NOA, 'spreadsheet:read'])
+
+    // ②b cross-base fixtures: forward FLD_A_XLINK on SA (BASE) → SX (XBASE) twoWay + cross-base claim; mirror
+    // FLD_X_MIRROR on SX → SA, mirrorOf=forward (codec forces readOnly). One edge (FLD_A_XLINK, REC_A1, REC_X1)
+    // ⇒ reading SX/REC_X1's mirror reverse-projects REC_A1 (a BASE record) — the base-read gate decides.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_A_XLINK, SA, 'AXLink', 'link', JSON.stringify({ foreignSheetId: SX, foreignBaseId: XBASE_ID, twoWay: true, mirrorFieldId: FLD_X_MIRROR }), 3])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_X_MIRROR, SX, 'XMirror', 'link', JSON.stringify({ foreignSheetId: SA, foreignBaseId: BASE_ID, twoWay: true, mirrorFieldId: FLD_A_XLINK, mirrorOf: FLD_A_XLINK }), 1])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
+      [REC_X1, SX, JSON.stringify({})])
+    await seedEdge(FLD_A_XLINK, REC_A1, REC_X1)
+
+    // P2 guard fixtures: a SAME-base twoWay pairing (SA↔SB, both BASE_ID) where the forward field carries a
+    // truthful own-base foreignBaseId. No edge seeded — the golden writes the forward edge and asserts the
+    // mirror invalidation still fans (it must NOT be deferred just because foreignBaseId is present).
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_A_LINK2, SA, 'ALink2', 'link', JSON.stringify({ foreignSheetId: SB, foreignBaseId: BASE_ID, twoWay: true, mirrorFieldId: FLD_B_MIRROR2 }), 4])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_B_MIRROR2, SB, 'BMirror2', 'link', JSON.stringify({ foreignSheetId: SA, foreignBaseId: BASE_ID, twoWay: true, mirrorFieldId: FLD_A_LINK2, mirrorOf: FLD_A_LINK2 }), 4])
   })
 
   beforeEach(() => {
@@ -174,7 +220,7 @@ describeIfDatabase('multitable bidirectional / mirror links — derived reverse 
 
   afterAll(async () => {
     publishSpy.mockRestore()
-    await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[FLD_A_LINK, FLD_B_MIRROR, FLD_B_PLAIN]]).catch(() => {})
+    await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[FLD_A_LINK, FLD_B_MIRROR, FLD_B_PLAIN, FLD_A_XLINK, FLD_X_MIRROR, FLD_A_LINK2, FLD_B_MIRROR2]]).catch(() => {})
     await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = ANY($1::text[])', [[SA, SB, SX]]).catch(() => {})
     await q('DELETE FROM field_permissions WHERE sheet_id = ANY($1::text[])', [[SA, SB, SX]]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [[SA, SB, SX]]).catch(() => {})
@@ -296,15 +342,84 @@ describeIfDatabase('multitable bidirectional / mirror links — derived reverse 
     await q('UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2', [JSON.stringify({ [FLD_A_LINK]: [REC_B1] }), REC_A1]).catch(() => {})
   })
 
-  test('C5: cross-base pairing rejected — a twoWay link across bases is 400', async () => {
+  // C5 — ②b read-only cross-base mirror v1 (2026-06-27): the OLD blanket reject is REPLACED by allow-on-claim.
+  // A cross-base twoWay link is now ALLOWED iff it carries an EXPLICIT foreignBaseId == the foreign sheet's
+  // real base (claim == truth); no-claim / wrong-claim / one-way-no-claim all still fail closed.
+  test('C5: cross-base twoWay pairing is now ALLOWED with a valid foreignBaseId claim (lift of the §7.2 reject)', async () => {
     const res = await request(app).post('/api/multitable/fields').send({
       sheetId: SA,
-      name: 'XLink',
+      name: `XLinkOk_${TS}`,
       type: 'link',
-      property: { foreignSheetId: SX, foreignBaseId: XBASE_ID, twoWay: true, mirrorFieldId: 'whatever' },
+      property: { foreignSheetId: SX, foreignBaseId: XBASE_ID, twoWay: true, mirrorFieldId: `mfxok_${TS}` },
+    })
+    expect(res.status).toBeGreaterThanOrEqual(200)
+    expect(res.status).toBeLessThan(300)
+  })
+
+  test('C5b: cross-base twoWay with NO foreignBaseId claim still fails closed (400)', async () => {
+    const res = await request(app).post('/api/multitable/fields').send({
+      sheetId: SA,
+      name: `XLinkNoClaim_${TS}`,
+      type: 'link',
+      property: { foreignSheetId: SX, twoWay: true, mirrorFieldId: `mfxnc_${TS}` }, // no foreignBaseId
     })
     expect(res.status).toBeGreaterThanOrEqual(400)
     expect(res.status).toBeLessThan(500)
+  })
+
+  test('C5c: cross-base twoWay with a WRONG foreignBaseId claim still fails closed (claim != truth → 400)', async () => {
+    const res = await request(app).post('/api/multitable/fields').send({
+      sheetId: SA,
+      name: `XLinkWrong_${TS}`,
+      type: 'link',
+      property: { foreignSheetId: SX, foreignBaseId: BASE_ID, twoWay: true, mirrorFieldId: `mfxwr_${TS}` }, // claims SA's own base, not SX's
+    })
+    expect(res.status).toBeGreaterThanOrEqual(400)
+    expect(res.status).toBeLessThan(500)
+  })
+
+  test('C5d: a ONE-WAY cross-base link STILL requires the foreignBaseId claim (no-claim → 400, original ②b gate intact)', async () => {
+    const res = await request(app).post('/api/multitable/fields').send({
+      sheetId: SA,
+      name: `XLinkOnewayNoClaim_${TS}`,
+      type: 'link',
+      property: { foreignSheetId: SX }, // one-way, no claim → original cross-base gate still rejects
+    })
+    expect(res.status).toBeGreaterThanOrEqual(400)
+    expect(res.status).toBeLessThan(500)
+  })
+
+  // Advisor item 2 — the read goldens SQL-seed the cross-base mirror, so this is the ONLY proof the CREATE
+  // PATH (validateLinkFieldConfig at field-create) accepts BOTH sides end-to-end. The MIRROR side (a
+  // cross-base link carrying mirrorOf + a back-claim to BASE) hits the SAME lifted branch and is the side
+  // most likely to break; assert it creates AND returns codec-forced read-only (no cross-base WRITE path).
+  test('C5-CREATE: forward (SA→SX) AND mirror (SX→SA) cross-base twoWay fields both create end-to-end; mirror is read-only', async () => {
+    const fwdId = `fld_bdl_a_xcr_${TS}`
+    const mirId = `fld_bdl_x_xcr_${TS}`
+    const fwd = await request(app).post('/api/multitable/fields').send({
+      sheetId: SA,
+      id: fwdId,
+      name: `XCreateFwd_${TS}`,
+      type: 'link',
+      property: { foreignSheetId: SX, foreignBaseId: XBASE_ID, twoWay: true, mirrorFieldId: mirId },
+    })
+    expect(fwd.status).toBeGreaterThanOrEqual(200)
+    expect(fwd.status).toBeLessThan(300)
+    const mir = await request(app).post('/api/multitable/fields').send({
+      sheetId: SX,
+      id: mirId,
+      name: `XCreateMir_${TS}`,
+      type: 'link',
+      property: { foreignSheetId: SA, foreignBaseId: BASE_ID, twoWay: true, mirrorFieldId: fwdId, mirrorOf: fwdId },
+    })
+    expect(mir.status).toBeGreaterThanOrEqual(200)
+    expect(mir.status).toBeLessThan(300)
+    // the derived side comes back read-only (codec mirrorOf ⇒ readOnly) — a reverse READ projection only.
+    const mirror = (await viewFields(SX)).find((f) => f.id === mirId)
+    expect(mirror?.property?.mirrorOf).toBe(fwdId)
+    expect(mirror?.property?.readOnly).toBe(true)
+    // tidy the throwaway created fields (afterAll also cleans by sheet, but keep later reads byte-clean).
+    await q('DELETE FROM meta_fields WHERE id = ANY($1::text[])', [[fwdId, mirId]]).catch(() => {})
   })
 
   test('C6: delete clears the edge — deleting B1 removes it from A1 forward + the symmetric reverse', async () => {
@@ -328,5 +443,86 @@ describeIfDatabase('multitable bidirectional / mirror links — derived reverse 
     expect((await viewLinkSummaries(SA))[REC_A1]?.[FLD_A_LINK]?.map((s) => s.id) ?? []).not.toContain(tmpB)
 
     await q('UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2', [JSON.stringify({ [FLD_A_LINK]: [REC_B1] }), REC_A1]).catch(() => {})
+  })
+
+  // ②b cross-base mirror — SECURITY GOLDEN. Reading SX/REC_X1's mirror reverse-projects REC_A1 (a BASE
+  // record). BOTH readers carry global multitable:read (so the SHEET gate on SA passes for both) — the ONLY
+  // difference is multitable:base:read, so the cross-base BASE-READ gate is the sole decider:
+  //   denied (no base:read) → mirror emptied (no foreign-record id/count leak); permitted (+base:read) →
+  //   mirror shows [REC_A1]. The RAW data[mirror] wire is gated by maskDerivedMirrorFieldIds (site 2, the
+  //   change under test); the linkSummaries wire is gated independently by buildLinkSummaries (Sink B-1).
+  const XB_DENIED = { id: `u_xb_no_${TS}`, roles: ['member'], perms: ['multitable:read'] }
+  const XB_OK = { id: `u_xb_ok_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:base:read'] }
+
+  test('C-XB-MASK (/view raw): cross-base mirror data is [] for a base-denied reader, [REC_A1] for a base-permitted reader', async () => {
+    currentUser = XB_DENIED
+    expect(((await viewRawRecordData(SX, REC_X1))[FLD_X_MIRROR] as string[]) ?? []).toEqual([])
+    currentUser = XB_OK
+    expect(((await viewRawRecordData(SX, REC_X1))[FLD_X_MIRROR] as string[]) ?? []).toEqual([REC_A1])
+  })
+
+  test('C-XB-MASK (single-GET raw): cross-base mirror data is [] for a base-denied reader, [REC_A1] for a base-permitted reader', async () => {
+    currentUser = XB_DENIED
+    expect(((await getRecordRawData(SX, REC_X1))[FLD_X_MIRROR] as string[]) ?? []).toEqual([])
+    currentUser = XB_OK
+    expect(((await getRecordRawData(SX, REC_X1))[FLD_X_MIRROR] as string[]) ?? []).toEqual([REC_A1])
+  })
+
+  test('C-XB-MASK (linkSummaries): the inline summary wire is base-read gated too ([] for denied, [REC_A1] for permitted)', async () => {
+    currentUser = XB_DENIED
+    expect(((await viewLinkSummaries(SX))[REC_X1]?.[FLD_X_MIRROR] ?? []).map((s) => s.id)).toEqual([])
+    currentUser = XB_OK
+    expect(((await viewLinkSummaries(SX))[REC_X1]?.[FLD_X_MIRROR] ?? []).map((s) => s.id)).toEqual([REC_A1])
+  })
+
+  test('C-XB-RO: a PATCH on the cross-base mirror field is rejected (read-only; no edge written under the mirror id)', async () => {
+    const before = await q('SELECT count(*)::int AS n FROM meta_links WHERE field_id = $1', [FLD_X_MIRROR])
+    const res = await patch(SX, REC_X1, FLD_X_MIRROR, [REC_A1])
+    expect(res.status).toBeGreaterThanOrEqual(400)
+    const after = await q('SELECT count(*)::int AS n FROM meta_links WHERE field_id = $1', [FLD_X_MIRROR])
+    expect((after.rows as Array<{ n: number }>)[0].n).toBe((before.rows as Array<{ n: number }>)[0].n)
+    expect((after.rows as Array<{ n: number }>)[0].n).toBe(0)
+  })
+
+  test('C-XB-NOFANOUT: a CROSS-BASE forward write does NOT fan a mirror invalidation to the foreign-base sheet (site 3 v1 defer; parity with C3)', async () => {
+    // Full-perms writer so the cross-base forward write can never be perm-blocked — the defer under test is
+    // based on the actual source/foreign sheet base comparison (crossBaseMirrorForeignSheetIds), independent
+    // of the actor's permissions.
+    currentUser = { id: `u_xb_writer_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:base:admin'] }
+    publishSpy.mockClear()
+    const newX = `rec_bdl_xnew_${TS}`
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
+      [newX, SX, JSON.stringify({})])
+    // the forward cross-base write SUCCEEDS (the write path RAN — so an absent fan-out is a real defer, not a failed write)
+    const res = await patch(SA, REC_A1, FLD_A_XLINK, [REC_X1, newX])
+    expect(res.status).toBe(200)
+    const fwd = await q('SELECT count(*)::int AS n FROM meta_links WHERE field_id = $1 AND foreign_record_id = $2', [FLD_A_XLINK, newX])
+    expect((fwd.rows as Array<{ n: number }>)[0].n).toBe(1)
+    // … but NO mirror-invalidation event was fanned to SX (cross-base realtime push is deferred in v1).
+    const xMirrorEvents = sheetEvents(SX).filter((e) => (e.fieldIds ?? []).includes(FLD_X_MIRROR))
+    expect(xMirrorEvents).toEqual([])
+    // restore the shared fixture (drop the throwaway edge + record; reset REC_A1's forward to just REC_X1)
+    await q('DELETE FROM meta_links WHERE field_id = $1 AND foreign_record_id = $2', [FLD_A_XLINK, newX]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE id = $1', [newX]).catch(() => {})
+    await q('UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2', [JSON.stringify({ [FLD_A_XLINK]: [REC_X1] }), REC_A1]).catch(() => {})
+  })
+
+  // [P2 regression] claim presence is NOT cross-base. FLD_A_LINK2 is SAME-base (SA & SB both BASE_ID) but
+  // carries a truthful own-base foreignBaseId — a legal config (XB-3b). The old `cfg.foreignBaseId != null`
+  // discriminator would wrongly DEFER its mirror push; the fix resolves the real bases, sees same-base, and
+  // keeps the fan-out. Writing the forward edge must still emit the SB mirror invalidation event. (RED under
+  // the old predicate, GREEN under the actual-base resolution.)
+  test('C-SB-TRUTHFUL-CLAIM: a SAME-base twoWay write with a truthful own-base foreignBaseId STILL fans the mirror invalidation', async () => {
+    currentUser = { id: `u_sb_writer_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+    publishSpy.mockClear()
+    const res = await patch(SA, REC_A1, FLD_A_LINK2, [REC_B1])
+    expect(res.status).toBe(200)
+    const mirrorEvents = sheetEvents(SB).filter(
+      (e) => (e.fieldIds ?? []).includes(FLD_B_MIRROR2) && (e.recordIds ?? []).includes(REC_B1),
+    )
+    expect(mirrorEvents.length).toBeGreaterThan(0)
+    // restore: drop the throwaway edge + remove the key from REC_A1 (it never carried FLD_A_LINK2)
+    await q('DELETE FROM meta_links WHERE field_id = $1', [FLD_A_LINK2]).catch(() => {})
+    await q('UPDATE meta_records SET data = data - $1::text WHERE id = $2', [FLD_A_LINK2, REC_A1]).catch(() => {})
   })
 })

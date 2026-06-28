@@ -32,7 +32,8 @@ const NON = `${PREFIX}-non`
 const ALICE = `${PREFIX}-alice`
 const BOB = `${PREFIX}-bob`
 const CAROL = `${PREFIX}-carol`
-const ROLE = `${PREFIX}-role`
+const ROLE = `${PREFIX}-role` // UNCURATED (approval_usable defaults false)
+const ROLE_CURATED = `${PREFIX}-role-curated` // RA-1b: approval_usable=true
 
 async function canListenOnEphemeralPort(): Promise<boolean> {
   return await new Promise((resolve) => {
@@ -78,7 +79,15 @@ describeIfDatabase('approval directory endpoints (P1-static-picker backend, real
     await seedUser(BOB, 'ZmarkerQ Bob')
     await seedUser(CAROL, 'Zzz Other Person')
     try {
+      // RA-1b: defensively ensure the curated column exists (whether or not the migration ran in this lane),
+      // then seed an UNCURATED role (ROLE, default approval_usable=false) and a CURATED role (approval_usable=true).
+      await pool.query(`ALTER TABLE roles ADD COLUMN IF NOT EXISTS approval_usable boolean NOT NULL DEFAULT false`)
       await pool.query(`INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [ROLE, 'Dirpick Role'])
+      await pool.query(
+        `INSERT INTO roles (id, name, approval_usable) VALUES ($1, $2, true)
+         ON CONFLICT (id) DO UPDATE SET approval_usable = true`,
+        [ROLE_CURATED, 'Dirpick Curated Role'],
+      )
       roleSeeded = true
     } catch {
       roleSeeded = false
@@ -99,7 +108,7 @@ describeIfDatabase('approval directory endpoints (P1-static-picker backend, real
     const pool = poolManager.get()
     try {
       await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[ADMIN, NON, ALICE, BOB, CAROL]])
-      if (roleSeeded) await pool.query(`DELETE FROM roles WHERE id = $1`, [ROLE])
+      if (roleSeeded) await pool.query(`DELETE FROM roles WHERE id = ANY($1::text[])`, [[ROLE, ROLE_CURATED]])
     } catch {
       // ignore cleanup failures
     }
@@ -166,16 +175,50 @@ describeIfDatabase('approval directory endpoints (P1-static-picker backend, real
     }
   })
 
+  it('RA-1b: /directory/formula-roles returns ONLY approval_usable roles (curated vocabulary)', async () => {
+    const res = await get(baseUrl, '/api/approval-templates/directory/formula-roles', adminToken)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { roles: Array<{ id: string; name: string }> }
+    expect(Array.isArray(body.roles)).toBe(true)
+    if (roleSeeded) {
+      const ids = body.roles.map((r) => r.id)
+      expect(ids).toContain(ROLE_CURATED) // approval_usable=true → curated
+      expect(ids).not.toContain(ROLE) // approval_usable=false → excluded (secure-by-default)
+    }
+  })
+
+  it('RA-1b: /directory/roles is UNCHANGED — the shared author/static_role picker still returns ALL roles', async () => {
+    // The curated lock scopes ONLY formula requester.role; static_role approver selection (which shares this
+    // endpoint) must still see uncurated roles, otherwise the owner boundary would over-reach.
+    const res = await get(baseUrl, '/api/approval-templates/directory/roles', adminToken)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { roles: Array<{ id: string }> }
+    if (roleSeeded) {
+      const ids = body.roles.map((r) => r.id)
+      expect(ids).toContain(ROLE) // uncurated role STILL visible to the shared picker
+      expect(ids).toContain(ROLE_CURATED)
+    }
+  })
+
+  it('rejects a non-manager on /directory/formula-roles (403)', async () => {
+    const res = await get(baseUrl, '/api/approval-templates/directory/formula-roles', nonMgrToken)
+    expect(res.status).toBe(403)
+  })
+
   it('routes are gated by least-privilege approval-templates:manage, NOT ensurePlatformAdmin', () => {
     const src = readFileSync(path.resolve(__dirname, '../../src/routes/approvals.ts'), 'utf8')
     const lines = src.split('\n')
     const usersLine = lines.find((l) => l.includes("'/api/approval-templates/directory/users'"))
     const rolesLine = lines.find((l) => l.includes("'/api/approval-templates/directory/roles'"))
+    const formulaRolesLine = lines.find((l) => l.includes("'/api/approval-templates/directory/formula-roles'"))
     expect(usersLine).toBeTruthy()
     expect(rolesLine).toBeTruthy()
+    expect(formulaRolesLine).toBeTruthy()
     expect(usersLine).toContain("rbacGuard('approval-templates:manage')")
     expect(rolesLine).toContain("rbacGuard('approval-templates:manage')")
+    expect(formulaRolesLine).toContain("rbacGuard('approval-templates:manage')")
     expect(usersLine).not.toContain('ensurePlatformAdmin')
     expect(rolesLine).not.toContain('ensurePlatformAdmin')
+    expect(formulaRolesLine).not.toContain('ensurePlatformAdmin')
   })
 })

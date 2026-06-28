@@ -1,5 +1,5 @@
 import jwt, { type SignOptions } from 'jsonwebtoken'
-import { createHash } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { secretManager } from '../security/SecretManager'
 import { resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 
@@ -131,6 +131,20 @@ export function hashScope(perRecord: Array<{ recordId: string; changesHash: stri
   return createHash('sha256').update(JSON.stringify(canon)).digest('hex')
 }
 
+/**
+ * T8-1 undelete: order-invariant hash over the RESURRECT set (records that existed at T but are deleted now → to be
+ * re-inserted at their full T-snapshot). A deleted record has NO live version, so the per-record anchor is a hash of
+ * its FULL server-side T-target snapshot (`snapshotHash`), NOT a version. Binding this into the PIT-revert identity
+ * means a change to WHICH records are resurrected OR to any target snapshot between preview and execute re-hashes and
+ * is rejected (409) — the resurrect set can never be widened/narrowed/altered past what the actor previewed.
+ */
+export function hashResurrectSet(perRecord: Array<{ recordId: string; snapshotHash: string }>): string {
+  const canon = [...perRecord]
+    .sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0))
+    .map((r) => JSON.stringify([r.recordId, r.snapshotHash]))
+  return createHash('sha256').update(JSON.stringify(canon)).digest('hex')
+}
+
 export function mintScopedRestorePreviewIdentity(claims: ScopedRestorePreviewIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
   return jwt.sign({ type: 'restore-preview-scoped', ...claims }, getSecret(), { algorithm: 'HS256', expiresIn } as SignOptions)
 }
@@ -176,6 +190,10 @@ export interface PitRevertPreviewIdentityClaims {
   strategy: 'revert'
   /** sha256 over the sorted revert set (recordId + per-record masked changesHash + version), via hashScope. */
   scopeHash: string
+  /** T8-1: sha256 over the sorted RESURRECT set (recordId + T-snapshot hash), via hashResurrectSet. Always present
+   *  (empty-set hash when there are no undeletes) so the (possibly-empty) resurrect set is bound the same way the
+   *  Reset identity binds its delete-set — an execute can never inject/alter undeletes the actor did not preview. */
+  resurrectScopeHash: string
   actorId: string
 }
 
@@ -185,7 +203,7 @@ export function mintPitRevertPreviewIdentity(claims: PitRevertPreviewIdentityCla
 
 export interface PitRevertVerifyResult {
   valid: boolean
-  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_asOf' | 'mismatch_strategy' | 'mismatch_scopeHash' | 'mismatch_actorId'
+  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_asOf' | 'mismatch_strategy' | 'mismatch_scopeHash' | 'mismatch_resurrectScopeHash' | 'mismatch_actorId'
 }
 
 export function verifyPitRevertPreviewIdentity(token: string, expected: PitRevertPreviewIdentityClaims): PitRevertVerifyResult {
@@ -200,6 +218,7 @@ export function verifyPitRevertPreviewIdentity(token: string, expected: PitRever
   if (payload.asOf !== expected.asOf) return { valid: false, reason: 'mismatch_asOf' }
   if (payload.strategy !== expected.strategy) return { valid: false, reason: 'mismatch_strategy' }
   if (payload.scopeHash !== expected.scopeHash) return { valid: false, reason: 'mismatch_scopeHash' }
+  if (payload.resurrectScopeHash !== expected.resurrectScopeHash) return { valid: false, reason: 'mismatch_resurrectScopeHash' }
   if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
   return { valid: true }
 }
@@ -244,6 +263,74 @@ export function verifyConfigRestorePreviewIdentity(token: string, expected: Conf
   if (payload.entityType !== expected.entityType) return { valid: false, reason: 'mismatch_entityType' }
   if (payload.entityId !== expected.entityId) return { valid: false, reason: 'mismatch_entityId' }
   if (payload.baselineHash !== expected.baselineHash) return { valid: false, reason: 'mismatch_baselineHash' }
+  if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
+  return { valid: true }
+}
+
+// ── T9-W Tier 3 (U-3) un-create preview-identity (design-lock U3-L4) ──────────────────────────────────────────
+// Un-create (revert a config `create` = DROP the entity) binds an OPAQUE `planHash` INSTEAD OF baselineHash: a
+// create's changed_keys is the full config set, so the Tier-1/2 baselineHash/driftConflict (`current != after`)
+// would FALSE-trip on a benign post-create rename when we are dropping the entity anyway. planHash =
+// HMAC(secret, canonical(BLAST-RADIUS plan)) — entity-alive + cascade view-id set + order-shift set + (field)
+// column-data-presence — computed SERVER-SIDE only; the raw plan is NEVER a claim or a response field (U3-L5
+// no-oracle). HMAC-keyed (not the plain sha256 that baselineHash uses) because the column-data-presence input is
+// ~1 bit: a plain hash in the client-decodable JWT would be brute-forceable to confirm hidden-column data presence;
+// the server key makes it a PRF. `type: 'config-uncreate-preview'` keeps it DISJOINT from the Tier-1/2 config
+// identity (an un-create token can never drive a Tier-1/2 restore, and vice versa). Cosmetic config (e.g. name) is
+// NOT a plan input → a benign rename does not drift; execute compares the single planHash → ONE generic PLAN_DRIFT.
+export interface UncreatePlan {
+  entityAlive: boolean
+  /** view ids whose config currently references the dropped field (cleaned on drop). [] for view un-create. */
+  cascadeViewIds: string[]
+  /** trailing field ids whose `order` shifts on drop. [] for view un-create. */
+  orderShiftIds: string[]
+  /** (field) whether any record currently has a non-null value for the column. false for view un-create. */
+  columnDataPresent: boolean
+}
+export function hashUncreatePlan(plan: UncreatePlan): string {
+  const canon = {
+    entityAlive: plan.entityAlive === true,
+    cascadeViewIds: [...plan.cascadeViewIds].sort(),
+    orderShiftIds: [...plan.orderShiftIds].sort(),
+    columnDataPresent: plan.columnDataPresent === true,
+  }
+  return createHmac('sha256', getSecret()).update(JSON.stringify(canon)).digest('hex')
+}
+
+export interface ConfigUncreatePreviewIdentityClaims {
+  sheetId: string
+  revisionId: string
+  entityType: string
+  entityId: string
+  /** opaque HMAC over the blast-radius plan (hashUncreatePlan); raw plan fields are NEVER claims or response fields. */
+  planHash: string
+  actorId: string
+}
+
+export function mintConfigUncreatePreviewIdentity(claims: ConfigUncreatePreviewIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
+  return jwt.sign({ type: 'config-uncreate-preview', ...claims }, getSecret(), { algorithm: 'HS256', expiresIn } as SignOptions)
+}
+
+export interface ConfigUncreateVerifyResult {
+  valid: boolean
+  // `plan_drift` = the planHash diverged (entity gone / new view ref / new column data / order-set changed) — the
+  // route maps it to ONE generic 409 PLAN_DRIFT (no sub-reason; the opaque hash cannot reveal which input moved).
+  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_revisionId' | 'mismatch_entityType' | 'mismatch_entityId' | 'plan_drift' | 'mismatch_actorId'
+}
+
+export function verifyConfigUncreatePreviewIdentity(token: string, expected: ConfigUncreatePreviewIdentityClaims): ConfigUncreateVerifyResult {
+  let payload: Partial<ConfigUncreatePreviewIdentityClaims> & { type?: string }
+  try {
+    payload = jwt.verify(token, getSecret()) as Partial<ConfigUncreatePreviewIdentityClaims> & { type?: string }
+  } catch (e) {
+    return { valid: false, reason: (e as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid' }
+  }
+  if (payload.type !== 'config-uncreate-preview') return { valid: false, reason: 'wrong_type' }
+  if (payload.sheetId !== expected.sheetId) return { valid: false, reason: 'mismatch_sheetId' }
+  if (payload.revisionId !== expected.revisionId) return { valid: false, reason: 'mismatch_revisionId' }
+  if (payload.entityType !== expected.entityType) return { valid: false, reason: 'mismatch_entityType' }
+  if (payload.entityId !== expected.entityId) return { valid: false, reason: 'mismatch_entityId' }
+  if (payload.planHash !== expected.planHash) return { valid: false, reason: 'plan_drift' }
   if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
   return { valid: true }
 }

@@ -217,7 +217,9 @@ describe('MetaAutomationRuleEditor', () => {
 
     const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
     expect(triggerSelect).toBeTruthy()
-    expect(triggerSelect.options.length).toBe(7)
+    // record.created/updated/deleted + field.value_changed + form.submitted + schedule.cron/interval/date_field
+    // + webhook.received
+    expect(triggerSelect.options.length).toBe(9)
   })
 
   it('localizes core rule editor chrome in zh-CN while keeping raw select values', async () => {
@@ -471,6 +473,56 @@ describe('MetaAutomationRuleEditor', () => {
 
     const cronSelect = container.querySelector('[data-field="cronPreset"]')
     expect(cronSelect).toBeTruthy()
+  })
+
+  it('shows date-field config (field/offset/direction) for schedule.date_field trigger', async () => {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
+    triggerSelect.value = 'schedule.date_field'
+    triggerSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.querySelector('[data-field="dateFieldId"]')).toBeTruthy()
+    expect(container.querySelector('[data-field="offsetDays"]')).toBeTruthy()
+    expect(container.querySelector('[data-field="direction"]')).toBeTruthy()
+  })
+
+  it('exposes form.submitted as a config-less trigger and saves it (light up the BACKEND-ONLY trigger)', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'On form submit'
+    nameInput.dispatchEvent(new Event('input'))
+
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
+    triggerSelect.value = 'form.submitted'
+    triggerSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    // form.submitted is config-less — none of the type-specific config sub-forms render for it.
+    expect(container.querySelector('[data-field="dateFieldId"]')).toBeNull()
+    expect(container.querySelector('[data-field="cronPreset"]')).toBeNull()
+    expect(container.querySelector('[data-field="intervalMinutes"]')).toBeNull()
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].triggerType).toBe('form.submitted')
+  })
+
+  it('backfills an existing form.submitted rule into the trigger selector (round-trip)', async () => {
+    const rule: AutomationRule = {
+      id: 'atr_fs', sheetId: 'sheet_1', name: 'fs', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'notify', actionConfig: {}, enabled: true,
+    } as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule })
+    await flushPromises()
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
+    expect(triggerSelect.value).toBe('form.submitted')
   })
 
   it('can add and remove conditions', async () => {

@@ -5,6 +5,7 @@
  */
 
 import { Logger } from '../core/logger'
+import { dateReminderScanIntervalMs, type ScheduleDateFieldConfig } from './automation-date-reminder'
 import type { AutomationRule } from './automation-executor'
 import type { RedisLeaderLock } from './redis-leader-lock'
 
@@ -285,6 +286,11 @@ export class AutomationScheduler {
         logger.warn(`Rule ${rule.id}: unsupported cron expression: ${expression}`)
         return
       }
+    } else if (trigger.type === 'schedule.date_field') {
+      // Date-reminder: a fixed SCAN cadence (default daily). The timer fires the same callback as cron, but
+      // the service callback branches on the type and runs evaluateDateReminders (scan → claim → fire) rather
+      // than executing the rule once. Correctness lives in the firing-window predicate, not the cadence.
+      intervalMs = dateReminderScanIntervalMs(trigger.config as Partial<ScheduleDateFieldConfig>)
     } else {
       // Not a schedule trigger — skip
       return

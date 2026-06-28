@@ -120,6 +120,11 @@ const ATTENDANCE_SCHEDULER_SCOPE_ACTIONS = new Set(ATTENDANCE_SCHEDULER_SCOPE_AC
 const ATTENDANCE_DINGTALK_WORK_NOTIFICATION_CHANNEL = 'dingtalk_work_notification'
 const ATTENDANCE_ROUTABLE_DEFAULT_DELIVERY_CHANNELS = new Set([ATTENDANCE_DINGTALK_WORK_NOTIFICATION_CHANNEL, 'email_smtp'])
 const MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE = 'manual_missed_punch_reminder'
+// RD-3 attendance report-digest producer (design-lock attendance-report-digest-subscription-design-lock-20260626 §4).
+// source_type stamped on every C5 outbox row this producer writes.
+const ATTENDANCE_REPORT_DIGEST_SOURCE_TYPE = 'attendance_report_digest'
+// Request types counted toward digest requestTotals.makeupPunchCount (补卡). Approved-only is applied at query time.
+const ATTENDANCE_REPORT_DIGEST_MAKEUP_PUNCH_TYPES = new Set(['missed_check_in', 'missed_check_out', 'time_correction'])
 const AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG = 'system:attendance-auto-shift'
 const AUTO_SHIFT_AUTO_WRITE_SOURCE = 'scheduler'
 const ATTENDANCE_GROUP_TYPES = new Set(['fixed_shift', 'scheduled_shift', 'free_time'])
@@ -259,6 +264,57 @@ const DEFAULT_SETTINGS = {
     anyLeaveBreaksFullAttendance: true,
     lateBeyondThresholdBreaksFullAttendance: true,
   },
+  // 考勤统计通知订阅 (report digest subscription) — RD-1 LATENT config (design-lock
+  // attendance-report-digest-subscription-design-lock-20260626). Default OFF; no scheduler producer
+  // reads this until RD-3. Cadence defaults describe the opt-in preset only.
+  attendanceReportDigestPolicy: {
+    enabled: false,
+    timezone: 'Asia/Shanghai',
+    channel: 'work_notification',
+    cadences: {
+      daily: { enabled: false, sendAt: '18:30', recipients: ['self'] },
+      weekly: { enabled: false, weekday: 1, sendAt: '09:00', recipients: ['self'] },
+      monthly: { enabled: false, dayOfMonth: 1, sendAt: '09:00', recipients: ['self'] },
+    },
+  },
+  // 补卡规则 (makeup punch policy) — MP-1 LATENT config
+  // (design-lock attendance-makeup-punch-policy-design-lock-20260626). Default OFF; no request
+  // path reads it until MP-2. This only round-trips the bounded org policy shape.
+  makeupPunchPolicy: {
+    enabled: false,
+    timezone: 'Asia/Shanghai',
+    cycle: { type: 'calendar_month', startDay: 1 },
+    quota: {
+      maxRequestsPerCycle: 3,
+      countStatuses: ['pending', 'approved'],
+      principal: 'self_service_user',
+    },
+    submitWindow: { unit: 'calendar_day', days: 30 },
+    allowedAnomalyTypes: [
+      'missing_check_in',
+      'missing_check_out',
+      'late',
+      'severe_late',
+      'absence_late',
+      'early_leave',
+    ],
+    allowedRequestTypes: ['missed_check_in', 'missed_check_out', 'time_correction'],
+    requireReason: true,
+    requireAttachment: false,
+  },
+  // 异常结果编辑护栏 (anomaly result-edit guard) — AE-1 config (design-lock
+  // attendance-anomaly-result-edit-guard-design-lock-20260626 §3.3 / §9, RATIFIED 2026-06-27). Governs the
+  // attendance:admin POST /api/attendance/anomaly-result-edits write action. enabled = master switch (default
+  // ON; the route 403s when explicitly false). editWindowDays bounds how far back a work_date may be corrected
+  // (org-tz today − work_date), default 180, range 1..366. requireReason default true (a blank reason 400s).
+  // notifyAffectedEmployee default true (AE-2 honours it; a disabled value is still recorded as a skipped
+  // reason on the audit row).
+  attendanceResultEditPolicy: {
+    enabled: true,
+    editWindowDays: 180,
+    requireReason: true,
+    notifyAffectedEmployee: true,
+  },
   // 自动对班 (auto shift matching) — A1 preview/manual apply plus A2 scheduler auto-write.
   // Runtime still requires env flags in addition to these org settings.
   autoShiftMatching: {
@@ -285,6 +341,7 @@ let autoHolidaySyncTimeout = null
 let autoHolidaySyncInterval = null
 let importUploadCleanupInterval = null
 let autoShiftAutoWriteSchedulerUnregister = null
+let attendanceReportDigestSchedulerUnregister = null
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
@@ -12103,6 +12160,9 @@ function normalizeSettings(raw) {
     overtimeBankPolicy: normalizeOvertimeBankPolicySetting(raw.overtimeBankPolicy),
     leaveBalanceDeductionPolicy: normalizeLeaveBalanceDeductionPolicySetting(raw.leaveBalanceDeductionPolicy),
     attendanceBonusPolicy: normalizeAttendanceBonusPolicySetting(raw.attendanceBonusPolicy),
+    attendanceReportDigestPolicy: normalizeAttendanceReportDigestPolicySetting(raw.attendanceReportDigestPolicy),
+    makeupPunchPolicy: normalizeMakeupPunchPolicySetting(raw.makeupPunchPolicy),
+    attendanceResultEditPolicy: normalizeAttendanceResultEditPolicySetting(raw.attendanceResultEditPolicy),
     autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
   }
 }
@@ -12259,6 +12319,270 @@ function normalizeAttendanceBonusPolicySetting(raw) {
   }
 }
 
+const ATTENDANCE_REPORT_DIGEST_CHANNELS = Object.freeze(['work_notification', 'email_smtp'])
+const ATTENDANCE_REPORT_DIGEST_RECIPIENTS = Object.freeze(['self', 'owner', 'sub_owner'])
+const ATTENDANCE_REPORT_DIGEST_SEND_AT_RE = /^([01]\d|2[0-3]):[0-5]\d$/
+const ATTENDANCE_REPORT_DIGEST_CADENCES = Object.freeze(['daily', 'weekly', 'monthly'])
+
+function normalizeAttendanceReportDigestRecipients(raw, fallback = ['self']) {
+  const seen = new Set()
+  const recipients = []
+  for (const item of Array.isArray(raw) ? raw : []) {
+    if (typeof item === 'string' && ATTENDANCE_REPORT_DIGEST_RECIPIENTS.includes(item) && !seen.has(item)) {
+      seen.add(item)
+      recipients.push(item)
+    }
+  }
+  return recipients.length ? recipients : [...fallback]
+}
+
+function normalizeAttendanceReportDigestCadence(raw, fallback, extra = {}) {
+  const value = raw && typeof raw === 'object' ? raw : {}
+  const sendAt = typeof value.sendAt === 'string' && ATTENDANCE_REPORT_DIGEST_SEND_AT_RE.test(value.sendAt.trim())
+    ? value.sendAt.trim()
+    : fallback.sendAt
+  const normalized = {
+    enabled: parseBoolean(value.enabled, fallback.enabled),
+    sendAt,
+    recipients: normalizeAttendanceReportDigestRecipients(value.recipients, fallback.recipients),
+  }
+  if (extra.weekday) {
+    const weekday = Number(value.weekday)
+    normalized.weekday = Number.isInteger(weekday) && weekday >= 1 && weekday <= 7
+      ? weekday
+      : fallback.weekday
+  }
+  if (extra.dayOfMonth) {
+    const dayOfMonth = Number(value.dayOfMonth)
+    normalized.dayOfMonth = Number.isInteger(dayOfMonth) && dayOfMonth >= 1 && dayOfMonth <= 31
+      ? dayOfMonth
+      : fallback.dayOfMonth
+  }
+  return normalized
+}
+
+function normalizeAttendanceReportDigestPolicySetting(raw) {
+  const value = raw && typeof raw === 'object' ? raw : {}
+  const fallback = DEFAULT_SETTINGS.attendanceReportDigestPolicy
+  const channelRaw = typeof value.channel === 'string' ? value.channel.trim() : ''
+  const timezoneRaw = typeof value.timezone === 'string' ? value.timezone.trim() : ''
+  const cadences = value.cadences && typeof value.cadences === 'object' ? value.cadences : {}
+  return {
+    enabled: parseBoolean(value.enabled, fallback.enabled),
+    timezone: isValidTimeZoneIdentifier(timezoneRaw) ? timezoneRaw : fallback.timezone,
+    channel: ATTENDANCE_REPORT_DIGEST_CHANNELS.includes(channelRaw) ? channelRaw : fallback.channel,
+    cadences: {
+      daily: normalizeAttendanceReportDigestCadence(cadences.daily, fallback.cadences.daily),
+      weekly: normalizeAttendanceReportDigestCadence(cadences.weekly, fallback.cadences.weekly, { weekday: true }),
+      monthly: normalizeAttendanceReportDigestCadence(cadences.monthly, fallback.cadences.monthly, { dayOfMonth: true }),
+    },
+  }
+}
+
+function attendanceReportDigestDateKey(year, month, day) {
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+function attendanceReportDigestDateParts(dateKey) {
+  const normalized = normalizeDateOnlyStrict(dateKey)
+  if (!normalized) return null
+  const [year, month, day] = normalized.split('-').map((part) => Number(part))
+  return { year, month, day }
+}
+
+function attendanceReportDigestDaysInMonth(year, month) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate()
+}
+
+function attendanceReportDigestLocalDateKey(now, timezone) {
+  const date = now instanceof Date ? now : new Date(now)
+  if (Number.isNaN(date.getTime())) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'now must be a valid timestamp')
+  }
+  const zone = typeof timezone === 'string' && timezone.trim() ? timezone.trim() : 'UTC'
+  const parts = getZonedParts(date, zone)
+  return attendanceReportDigestDateKey(parts.year, parts.month, parts.day)
+}
+
+function attendanceReportDigestIsoWeekMonday(dateKey) {
+  const normalized = normalizeDateOnlyStrict(dateKey)
+  if (!normalized) throw new HttpError(400, 'VALIDATION_ERROR', 'dateKey must be YYYY-MM-DD')
+  const weekday = getWeekdayFromDateKey(normalized)
+  const offsetToMonday = (weekday + 6) % 7
+  return addDaysToDateKey(normalized, -offsetToMonday)
+}
+
+function clampAttendanceReportDigestDayOfMonth(year, month, dayOfMonth) {
+  const y = Number(year)
+  const m = Number(month)
+  const d = Number(dayOfMonth)
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d) || m < 1 || m > 12 || d < 1 || d > 31) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid attendance report digest month/day')
+  }
+  return attendanceReportDigestDateKey(y, m, Math.min(d, attendanceReportDigestDaysInMonth(y, m)))
+}
+
+function resolveAttendanceReportDigestPeriod(cadence, options = {}) {
+  const normalizedCadence = typeof cadence === 'string' ? cadence.trim().toLowerCase() : ''
+  if (!ATTENDANCE_REPORT_DIGEST_CADENCES.includes(normalizedCadence)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'Unsupported attendance report digest cadence')
+  }
+  const timezone = typeof options.timezone === 'string' && options.timezone.trim() ? options.timezone.trim() : 'UTC'
+  if (!isValidTimeZoneIdentifier(timezone)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'attendance report digest timezone must be a valid IANA time zone')
+  }
+  const todayKey = options.todayKey
+    ? normalizeDateOnlyStrict(options.todayKey)
+    : attendanceReportDigestLocalDateKey(options.now ?? new Date(), timezone)
+  if (!todayKey) throw new HttpError(400, 'VALIDATION_ERROR', 'todayKey must be YYYY-MM-DD')
+
+  if (normalizedCadence === 'daily') {
+    const day = addDaysToDateKey(todayKey, -1)
+    return {
+      cadence: normalizedCadence,
+      timezone,
+      from: day,
+      to: day,
+      periodKey: `daily:${day}`,
+      label: day,
+    }
+  }
+
+  if (normalizedCadence === 'weekly') {
+    const currentMonday = attendanceReportDigestIsoWeekMonday(todayKey)
+    const from = addDaysToDateKey(currentMonday, -7)
+    const to = addDaysToDateKey(currentMonday, -1)
+    return {
+      cadence: normalizedCadence,
+      timezone,
+      from,
+      to,
+      periodKey: `weekly:${from}:${to}`,
+      label: `${from}..${to}`,
+    }
+  }
+
+  const parts = attendanceReportDigestDateParts(todayKey)
+  let year = parts.year
+  let month = parts.month - 1
+  if (month < 1) {
+    year -= 1
+    month = 12
+  }
+  const from = attendanceReportDigestDateKey(year, month, 1)
+  const to = attendanceReportDigestDateKey(year, month, attendanceReportDigestDaysInMonth(year, month))
+  return {
+    cadence: normalizedCadence,
+    timezone,
+    from,
+    to,
+    periodKey: `monthly:${from}:${to}`,
+    label: `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`,
+  }
+}
+
+function attendanceReportDigestNumber(summary, ...keys) {
+  for (const key of keys) {
+    if (summary && Object.prototype.hasOwnProperty.call(summary, key)) {
+      return attendanceSummaryNumber(summary, key)
+    }
+  }
+  return 0
+}
+
+function buildAttendanceReportDigestPayload(input = {}) {
+  const summary = input.summary && typeof input.summary === 'object' ? input.summary : {}
+  const period = input.period && typeof input.period === 'object' ? input.period : {}
+  const requestTotals = input.requestTotals && typeof input.requestTotals === 'object' ? input.requestTotals : {}
+  const fullAttendanceEligible = summary.fullAttendanceEligible ?? summary.full_attendance_eligible
+  const payloadSummary = {
+    totalMinutes: attendanceReportDigestNumber(summary, 'total_minutes', 'totalMinutes'),
+    lateDays: attendanceReportDigestNumber(summary, 'late_days', 'lateDays'),
+    lateEarlyDays: attendanceReportDigestNumber(summary, 'late_early_days', 'lateEarlyDays'),
+    earlyLeaveDays: attendanceReportDigestNumber(summary, 'early_leave_days', 'earlyLeaveDays'),
+    absentDays: attendanceReportDigestNumber(summary, 'absent_days', 'absentDays'),
+    leaveMinutes: attendanceReportDigestNumber(summary, 'leave_minutes', 'leaveMinutes'),
+    overtimeMinutes: attendanceReportDigestNumber(summary, 'overtime_minutes', 'overtimeMinutes'),
+    workdayOvertimeMinutes: attendanceReportDigestNumber(summary, 'workday_overtime_minutes', 'workdayOvertimeMinutes'),
+    restdayOvertimeMinutes: attendanceReportDigestNumber(summary, 'restday_overtime_minutes', 'restdayOvertimeMinutes'),
+    holidayOvertimeMinutes: attendanceReportDigestNumber(summary, 'holiday_overtime_minutes', 'holidayOvertimeMinutes'),
+  }
+  if (typeof fullAttendanceEligible === 'boolean') {
+    payloadSummary.fullAttendanceEligible = fullAttendanceEligible
+  }
+  return {
+    kind: 'attendance_report_digest',
+    cadence: input.cadence,
+    period: {
+      from: period.from,
+      to: period.to,
+      label: period.label,
+      periodKey: period.periodKey,
+    },
+    summary: payloadSummary,
+    requestTotals: {
+      pending: attendanceReportDigestNumber(requestTotals, 'pending', 'pendingCount'),
+      approved: attendanceReportDigestNumber(requestTotals, 'approved', 'approvedCount'),
+      rejected: attendanceReportDigestNumber(requestTotals, 'rejected', 'rejectedCount'),
+      leaveMinutes: attendanceReportDigestNumber(requestTotals, 'leave_minutes', 'leaveMinutes'),
+      overtimeMinutes: attendanceReportDigestNumber(requestTotals, 'overtime_minutes', 'overtimeMinutes'),
+      makeupPunchCount: attendanceReportDigestNumber(requestTotals, 'makeup_punch_count', 'makeupPunchCount'),
+    },
+  }
+}
+
+// RD-3 due-gating: weekday in the policy timezone, 1=Monday..7=Sunday (doc §3: weekly.weekday ∈ 1..7, 1=Monday).
+// getWeekdayFromDateKey returns 0=Sunday..6=Saturday, so remap.
+function attendanceReportDigestLocalWeekdayMonday1(localDateKey) {
+  return ((getWeekdayFromDateKey(localDateKey) + 6) % 7) + 1
+}
+
+// RD-3 due-gating: local wall-clock HH:mm in the policy timezone, for the `>= sendAt` window comparison.
+function attendanceReportDigestLocalTimeOfDay(now, timezone) {
+  const date = now instanceof Date ? now : new Date(now)
+  const zone = typeof timezone === 'string' && timezone.trim() ? timezone.trim() : 'UTC'
+  const parts = getZonedParts(date, zone)
+  return `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`
+}
+
+// RD-3: which enabled cadences are DUE this tick. The scheduler is HOURLY, so this is NOT minute-equality —
+// it is anchor-matches-today AND localTimeOfDay(policy tz) >= cadence.sendAt. Per-period source_key gives
+// exactly-once across the repeated hourly ticks inside the window. Returns an ordered array of cadence names.
+function dueDigestCadences(policy, { now = new Date(), todayKey } = {}) {
+  const cadences = policy && typeof policy === 'object' && policy.cadences && typeof policy.cadences === 'object'
+    ? policy.cadences
+    : {}
+  const timezone = typeof policy?.timezone === 'string' && policy.timezone.trim() ? policy.timezone.trim() : 'UTC'
+  const localDateKey = todayKey
+    ? normalizeDateOnlyStrict(todayKey)
+    : attendanceReportDigestLocalDateKey(now, timezone)
+  if (!localDateKey) return []
+  const timeOfDay = attendanceReportDigestLocalTimeOfDay(now, timezone)
+  const parts = attendanceReportDigestDateParts(localDateKey)
+  const weekdayMonday1 = attendanceReportDigestLocalWeekdayMonday1(localDateKey)
+  const due = []
+
+  const daily = cadences.daily
+  if (daily?.enabled === true && timeOfDay >= daily.sendAt) {
+    due.push('daily')
+  }
+
+  const weekly = cadences.weekly
+  if (weekly?.enabled === true && weekdayMonday1 === weekly.weekday && timeOfDay >= weekly.sendAt) {
+    due.push('weekly')
+  }
+
+  const monthly = cadences.monthly
+  if (monthly?.enabled === true && parts) {
+    const clampedKey = clampAttendanceReportDigestDayOfMonth(parts.year, parts.month, monthly.dayOfMonth)
+    if (localDateKey === clampedKey && timeOfDay >= monthly.sendAt) {
+      due.push('monthly')
+    }
+  }
+
+  return due
+}
+
 function normalizeOvertimeBankPolicySetting(raw) {
   const value = raw && typeof raw === 'object' ? raw : {}
   const seen = new Set()
@@ -12311,6 +12635,290 @@ function normalizeLeaveBalanceDeductionPolicySetting(raw) {
     rules.push({ requestLeaveType, deductFrom, insufficient })
   }
   return { enabled: parseBoolean(value.enabled, false), rules }
+}
+
+const MAKEUP_PUNCH_ALLOWED_ANOMALY_TYPES = Object.freeze([
+  'missing_check_in',
+  'missing_check_out',
+  'late',
+  'severe_late',
+  'absence_late',
+  'early_leave',
+  'normal',
+])
+const MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES = Object.freeze(['missed_check_in', 'missed_check_out', 'time_correction'])
+const MAKEUP_PUNCH_COUNT_STATUSES = Object.freeze(['pending', 'approved'])
+
+function normalizeMakeupPunchStringArray(raw, allowed, fallback) {
+  if (!Array.isArray(raw)) return [...fallback]
+  const seen = new Set()
+  const values = []
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const value = item.trim()
+    if (allowed.includes(value) && !seen.has(value)) {
+      seen.add(value)
+      values.push(value)
+    }
+  }
+  return values.length ? values : [...fallback]
+}
+
+// 补卡规则 MP-1: dormant bounded config only. Supplied invalid values are rejected by the PUT zod
+// schema; this normalizer is the persisted/default fallback so a malformed stored value cannot alter
+// request behavior. MP-2 is the first slice that reads this policy on request create/update.
+function normalizeMakeupPunchPolicySetting(raw) {
+  const value = raw && typeof raw === 'object' ? raw : {}
+  const fallback = DEFAULT_SETTINGS.makeupPunchPolicy
+  const cycle = value.cycle && typeof value.cycle === 'object' ? value.cycle : {}
+  const quota = value.quota && typeof value.quota === 'object' ? value.quota : {}
+  const submitWindow = value.submitWindow && typeof value.submitWindow === 'object' ? value.submitWindow : {}
+  const startDayRaw = Number(cycle.startDay)
+  const maxRequestsRaw = Number(quota.maxRequestsPerCycle)
+  const submitWindowDaysRaw = Number(submitWindow.days)
+  const timezoneRaw = typeof value.timezone === 'string' && value.timezone.trim()
+    ? value.timezone.trim()
+    : fallback.timezone
+  return {
+    enabled: parseBoolean(value.enabled, fallback.enabled),
+    timezone: isValidTimeZoneIdentifier(timezoneRaw) ? timezoneRaw : fallback.timezone,
+    cycle: {
+      type: cycle.type === 'calendar_month' ? cycle.type : fallback.cycle.type,
+      startDay: Number.isInteger(startDayRaw) && startDayRaw >= 1 && startDayRaw <= 31
+        ? startDayRaw
+        : fallback.cycle.startDay,
+    },
+    quota: {
+      maxRequestsPerCycle: Number.isInteger(maxRequestsRaw) && maxRequestsRaw >= 1 && maxRequestsRaw <= 99
+        ? maxRequestsRaw
+        : fallback.quota.maxRequestsPerCycle,
+      countStatuses: normalizeMakeupPunchStringArray(
+        quota.countStatuses,
+        MAKEUP_PUNCH_COUNT_STATUSES,
+        fallback.quota.countStatuses,
+      ),
+      principal: quota.principal === 'self_service_user' ? quota.principal : fallback.quota.principal,
+    },
+    submitWindow: {
+      unit: submitWindow.unit === 'calendar_day' ? submitWindow.unit : fallback.submitWindow.unit,
+      days: Number.isInteger(submitWindowDaysRaw) && submitWindowDaysRaw >= 0 && submitWindowDaysRaw <= 180
+        ? submitWindowDaysRaw
+        : fallback.submitWindow.days,
+    },
+    allowedAnomalyTypes: normalizeMakeupPunchStringArray(
+      value.allowedAnomalyTypes,
+      MAKEUP_PUNCH_ALLOWED_ANOMALY_TYPES,
+      fallback.allowedAnomalyTypes,
+    ),
+    allowedRequestTypes: normalizeMakeupPunchStringArray(
+      value.allowedRequestTypes,
+      MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES,
+      fallback.allowedRequestTypes,
+    ),
+    requireReason: parseBoolean(value.requireReason, fallback.requireReason),
+    requireAttachment: parseBoolean(value.requireAttachment, fallback.requireAttachment),
+  }
+}
+
+// 补卡规则 MP-2 §4.4: static request-type → allowed anomaly-fact table. This is the FIRST of three
+// intersected allow-lists (static table ∩ org policy.allowedAnomalyTypes ∩ server-derived facts). A
+// `late_early` record matches both `late` and `early_leave`; `severe_late`/`absence_late` are RT-1a tiers.
+const MAKEUP_REQUEST_TYPE_ANOMALY_TABLE = Object.freeze({
+  missed_check_in: Object.freeze(['missing_check_in']),
+  missed_check_out: Object.freeze(['missing_check_out']),
+  time_correction: Object.freeze(['late', 'severe_late', 'absence_late', 'early_leave', 'normal']),
+})
+
+// 补卡规则 MP-2 §4.4: derive the anomaly facts for a (org,user,workDate) from SERVER-SIDE TRUTH —
+// attendance_records.status / missing-side / late+early minutes / RT-1a tier meta — never from client
+// anomaly prefill. Returns an ARRAY of fact tokens (a record can match several, e.g. late_early). This
+// is intentionally a plain read (no FOR UPDATE): it observes truth, it does not mutate the record, so it
+// must not contend with the concurrent punch/approval write paths. Shared by the MP-2 type gate and the
+// MP-3 snapshot.matchedAnomalyTypes. Fail-closed: an unresolvable / fact-less day yields [].
+async function deriveMakeupAnomalyFacts(trx, { orgId, userId, workDate }) {
+  const facts = new Set()
+  const rows = await trx.query(
+    `SELECT status, first_in_at, last_out_at, late_minutes, early_leave_minutes, is_workday, meta
+     FROM attendance_records
+     WHERE org_id = $1 AND user_id = $2 AND work_date = $3
+     LIMIT 1`,
+    [orgId, userId, workDate]
+  )
+  const record = rows[0] ?? null
+  if (record) {
+    const status = record.status ? String(record.status) : ''
+    const lateMinutes = Number(record.late_minutes ?? 0)
+    const earlyLeaveMinutes = Number(record.early_leave_minutes ?? 0)
+    const severeLateCount = Number(readAttendanceRecordMeta(record, ['severe_late_count', 'severeLateCount']) ?? 0)
+    const absenceLateCount = Number(readAttendanceRecordMeta(record, ['absence_late_count', 'absenceLateCount']) ?? 0)
+    // 'partial' = exactly one side punched → the absent side is a genuine missing-punch makeup candidate.
+    // 'absent' (a materialized zero-punch row) is NOT makeup-able here: §4.4 routes whole-day absence to
+    // leave, so it must fail-closed rather than be auto-corrected by a missed-check request.
+    if (status === 'partial') {
+      if (!record.first_in_at) facts.add('missing_check_in')
+      if (!record.last_out_at) facts.add('missing_check_out')
+    }
+    if (status === 'late' || status === 'late_early' || lateMinutes > 0) facts.add('late')
+    if (status === 'early_leave' || status === 'late_early' || earlyLeaveMinutes > 0) facts.add('early_leave')
+    if (severeLateCount > 0) facts.add('severe_late')
+    if (absenceLateCount > 0) facts.add('absence_late')
+    if (status === 'normal') facts.add('normal')
+  } else {
+    // No record at all but the day should be attended → both sides missing (§4.4 "记录不存在但当日应出勤
+    // 且缺某侧打卡，可判为 missing"). Resolve the workday truth; if it cannot be resolved, fail-closed (no
+    // facts) so an undeterminable day is never auto-correctable.
+    try {
+      const context = await resolveWorkContext({ db: trx, orgId, userId, workDate })
+      if (context && context.isWorkingDay) {
+        facts.add('missing_check_in')
+        facts.add('missing_check_out')
+      }
+    } catch (_error) {
+      // fail-closed: leave facts empty
+    }
+  }
+  return [...facts]
+}
+
+// 补卡规则 MP-2 §4.2: compute the calendar_month quota cycle [cycleStart, cycleEnd] (inclusive, local
+// YYYY-MM-DD) that the WORK DATE falls into — anchored on workDate in policy timezone, NOT submit time.
+// startDay 1..31 is clamped to the month's last day on short months (Q3 ratified), so a startDay=31 policy
+// yields Jan 31..Feb 27, Feb 28..Mar 30, etc. Each date maps to exactly one cycle.
+function computeMakeupCycleWindow(policy, workDateLocal) {
+  const normalized = normalizeDateOnly(workDateLocal) ?? String(workDateLocal ?? '').slice(0, 10)
+  const startDay = Number(policy?.cycle?.startDay) || 1
+  const [yStr, mStr, dStr] = String(normalized).split('-')
+  const year = Number(yStr)
+  const month0 = Number(mStr) - 1
+  const day = Number(dStr)
+  const startThisMonth = Math.min(startDay, daysInMonthUtc(year, month0))
+  let startYear = year
+  let startMonth0 = month0
+  if (day < startThisMonth) {
+    if (month0 === 0) { startYear = year - 1; startMonth0 = 11 } else { startYear = year; startMonth0 = month0 - 1 }
+  }
+  const cycleStart = formatDateOnly(buildUtcDate(startYear, startMonth0, startDay))
+  let nextYear = startYear
+  let nextMonth0 = startMonth0 + 1
+  if (nextMonth0 > 11) { nextMonth0 = 0; nextYear += 1 }
+  const nextStart = buildUtcDate(nextYear, nextMonth0, startDay)
+  const cycleEnd = formatDateOnly(new Date(nextStart.getTime() - 86400000))
+  return { cycleStart, cycleEnd }
+}
+
+// 补卡规则 MP-3 §5: build the per-write policy snapshot persisted on the request metadata. Recomputed
+// fresh on every successful create/update; final approval audits THIS snapshot, never the current policy.
+function buildMakeupPunchPolicySnapshot(policy, { matchedAnomalyTypes, requestEvaluatedAt }) {
+  return {
+    version: 1,
+    enabled: policy.enabled === true,
+    timezone: policy.timezone,
+    cycle: { type: policy.cycle.type, startDay: policy.cycle.startDay },
+    quota: {
+      maxRequestsPerCycle: policy.quota.maxRequestsPerCycle,
+      countStatuses: [...policy.quota.countStatuses],
+      principal: policy.quota.principal,
+    },
+    submitWindow: { unit: policy.submitWindow.unit, days: policy.submitWindow.days },
+    allowedAnomalyTypes: [...policy.allowedAnomalyTypes],
+    requestEvaluatedAt: requestEvaluatedAt.toISOString(),
+    matchedAnomalyTypes: [...matchedAnomalyTypes],
+  }
+}
+
+// 补卡规则 MP-2: the single create/update enforcement gate. Throws HttpError(422, MAKEUP_PUNCH_*) on the
+// first violation, else returns { matchedAnomalyTypes, requestEvaluatedAt } for the MP-3 snapshot (so the
+// type facts are derived exactly once). MUST run INSIDE the request transaction, after
+// acquireAttendanceRequestLock, alongside the duplicate guard — quota counting + the eventual insert must
+// be consistent with the per-(org,user,workDate,requestType) lock. Only ever called when policy.enabled
+// and draft.requestType is one of the three makeup types.
+// Order is load-bearing: future-date FIRST (a future workDate is not `< earliestAllowed`, so the window
+// check cannot catch it), then window, then type (fail-closed), then reason/attachment, then quota.
+// Quota TOCTOU (accepted slack, documented — NOT mitigated with a cycle lock): the advisory lock is keyed
+// on (org,user,workDate,requestType); the quota counts across the whole cycle. Two concurrent creates for
+// DIFFERENT workDates in the same cycle take different locks and can both pass the count, so the cycle cap
+// can be exceeded by the number of racing distinct-workDate submissions. This is bounded and acceptable
+// for v1; the duplicate guard (same workDate) is still strictly serialized by the lock.
+async function enforceMakeupPunchPolicy(trx, { policy, orgId, subjectUserId, requesterId, requestId, draft }) {
+  void requesterId
+  const requestEvaluatedAt = new Date()
+  const timezone = policy.timezone
+  const workDate = draft.workDate
+  const todayLocal = toWorkDate(requestEvaluatedAt, timezone)
+
+  // §4.3 future date: workDate must not be after today (policy-tz local).
+  if (workDate > todayLocal) {
+    throw new HttpError(422, 'MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED', 'Makeup punch cannot target a future work date')
+  }
+
+  // §4.3 submit window: todayLocal - workDate <= submitWindow.days (calendar_day). days=0 → today only.
+  const earliestAllowed = addDaysToDateKey(todayLocal, -Number(policy.submitWindow.days || 0))
+  if (earliestAllowed && workDate < earliestAllowed) {
+    throw new HttpError(422, 'MAKEUP_PUNCH_WINDOW_EXPIRED', 'Makeup punch submit window has expired for this work date')
+  }
+
+  // §4.4 type gate (fail-closed): static table ∩ org allowedAnomalyTypes ∩ server-derived facts.
+  const facts = await deriveMakeupAnomalyFacts(trx, { orgId, userId: subjectUserId, workDate })
+  const staticAllowed = MAKEUP_REQUEST_TYPE_ANOMALY_TABLE[draft.requestType] || []
+  const orgAllowed = new Set(Array.isArray(policy.allowedAnomalyTypes) ? policy.allowedAnomalyTypes : [])
+  const factSet = new Set(facts)
+  const matchedAnomalyTypes = staticAllowed.filter((type) => orgAllowed.has(type) && factSet.has(type))
+  if (matchedAnomalyTypes.length === 0) {
+    throw new HttpError(422, 'MAKEUP_PUNCH_TYPE_NOT_ALLOWED', 'This work date has no makeup-eligible anomaly for the requested type')
+  }
+
+  // §4.5 reason / attachment.
+  if (policy.requireReason === true && !draft.reason) {
+    throw new HttpError(422, 'MAKEUP_PUNCH_REASON_REQUIRED', 'A reason is required for this makeup punch request')
+  }
+  if (policy.requireAttachment === true && !(draft.metadata && draft.metadata.attachmentUrl)) {
+    throw new HttpError(422, 'MAKEUP_PUNCH_ATTACHMENT_REQUIRED', 'An attachment is required for this makeup punch request')
+  }
+
+  // §4.2 quota: count subject's pending+approved makeup requests whose workDate falls in the cycle. On
+  // update, exclude the current request id. Subject = attendance_requests.user_id, never the actor.
+  const { cycleStart, cycleEnd } = computeMakeupCycleWindow(policy, workDate)
+  const params = [orgId, subjectUserId, MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES, policy.quota.countStatuses, cycleStart, cycleEnd]
+  let excludeClause = ''
+  if (requestId) {
+    params.push(requestId)
+    excludeClause = `AND id <> $${params.length}`
+  }
+  const quotaRows = await trx.query(
+    `SELECT COUNT(*)::int AS total
+     FROM attendance_requests
+     WHERE org_id = $1
+       AND user_id = $2
+       AND request_type = ANY($3)
+       AND status = ANY($4)
+       AND work_date >= $5
+       AND work_date <= $6
+       ${excludeClause}`,
+    params
+  )
+  const used = Number(quotaRows[0]?.total ?? 0)
+  if (used >= Number(policy.quota.maxRequestsPerCycle)) {
+    throw new HttpError(422, 'MAKEUP_PUNCH_QUOTA_EXCEEDED', 'Makeup punch quota for this cycle has been reached')
+  }
+
+  return { matchedAnomalyTypes, requestEvaluatedAt }
+}
+
+// 异常结果编辑护栏 AE-1 (design-lock §3.3 / §9). Pure normalize of the bounded org policy: master switch +
+// edit window (1..366) + reason/notify flags. An unset / partial / malformed value can never silently widen
+// the window or flip a flag — every field falls back to DEFAULT_SETTINGS.
+function normalizeAttendanceResultEditPolicySetting(raw) {
+  const value = raw && typeof raw === 'object' ? raw : {}
+  const fallback = DEFAULT_SETTINGS.attendanceResultEditPolicy
+  const editWindowDaysRaw = Number(value.editWindowDays)
+  return {
+    enabled: parseBoolean(value.enabled, fallback.enabled),
+    editWindowDays: Number.isInteger(editWindowDaysRaw) && editWindowDaysRaw >= 1 && editWindowDaysRaw <= 366
+      ? editWindowDaysRaw
+      : fallback.editWindowDays,
+    requireReason: parseBoolean(value.requireReason, fallback.requireReason),
+    notifyAffectedEmployee: parseBoolean(value.notifyAffectedEmployee, fallback.notifyAffectedEmployee),
+  }
 }
 
 function normalizeOvertimeSegmentationSetting(raw) {
@@ -12485,6 +13093,45 @@ function mergeSettings(base, update) {
     attendanceBonusPolicy: {
       ...(base?.attendanceBonusPolicy || {}),
       ...(update?.attendanceBonusPolicy || {}),
+    },
+    attendanceReportDigestPolicy: {
+      ...(base?.attendanceReportDigestPolicy || {}),
+      ...(update?.attendanceReportDigestPolicy || {}),
+      cadences: {
+        daily: {
+          ...(base?.attendanceReportDigestPolicy?.cadences?.daily || {}),
+          ...(update?.attendanceReportDigestPolicy?.cadences?.daily || {}),
+        },
+        weekly: {
+          ...(base?.attendanceReportDigestPolicy?.cadences?.weekly || {}),
+          ...(update?.attendanceReportDigestPolicy?.cadences?.weekly || {}),
+        },
+        monthly: {
+          ...(base?.attendanceReportDigestPolicy?.cadences?.monthly || {}),
+          ...(update?.attendanceReportDigestPolicy?.cadences?.monthly || {}),
+        },
+      },
+    },
+    makeupPunchPolicy: {
+      ...(base?.makeupPunchPolicy || {}),
+      ...(update?.makeupPunchPolicy || {}),
+      cycle: {
+        ...(base?.makeupPunchPolicy?.cycle || {}),
+        ...(update?.makeupPunchPolicy?.cycle || {}),
+      },
+      quota: {
+        ...(base?.makeupPunchPolicy?.quota || {}),
+        ...(update?.makeupPunchPolicy?.quota || {}),
+      },
+      submitWindow: {
+        ...(base?.makeupPunchPolicy?.submitWindow || {}),
+        ...(update?.makeupPunchPolicy?.submitWindow || {}),
+      },
+    },
+    // Flat policy object → shallow merge preserves the other fields on a partial update (e.g. only { enabled }).
+    attendanceResultEditPolicy: {
+      ...(base?.attendanceResultEditPolicy || {}),
+      ...(update?.attendanceResultEditPolicy || {}),
     },
     autoShiftMatching: {
       ...(base?.autoShiftMatching || {}),
@@ -13538,6 +14185,13 @@ function isAutoShiftAutoWriteRuntimeEnabled() {
   return parseBoolean(process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED, false)
 }
 
+// RD-3: dedicated env gate for the report-digest producer. Distinct from ATTENDANCE_SCHEDULER_ENABLED (process
+// gate) and ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED (send gate). Default OFF — producer writes nothing
+// until an admin explicitly opts in AND the policy/cadence are enabled.
+function isAttendanceReportDigestRuntimeEnabled() {
+  return parseBoolean(process.env.ATTENDANCE_REPORT_DIGEST_ENABLED, false)
+}
+
 function confidenceRank(value) {
   if (value === 'high') return 3
   if (value === 'medium') return 2
@@ -14297,6 +14951,166 @@ async function runAttendanceAutoShiftAutoWriteOnce(db, { orgId = DEFAULT_ORG_ID,
     }).catch(() => undefined)
     throw error
   }
+}
+
+// RD-3 target population: active org members only (user_orgs.is_active=true JOIN users.is_active=true). Mirrors the
+// annual-accrual loader — NOT the auto-shift target loader, which filters attendance_type='scheduled_shift'.
+async function loadActiveReportDigestUserIds(db, orgId) {
+  const rows = await db.query(
+    `SELECT u.id
+       FROM user_orgs uo
+       JOIN users u ON u.id = uo.user_id
+      WHERE uo.org_id = $1 AND uo.is_active = true AND u.is_active = true
+      ORDER BY u.id ASC`,
+    [orgId],
+  )
+  return rows.map((row) => row.id).filter(Boolean)
+}
+
+// RD-3 owner/sub_owner resolution (the producer fans out; the delivery worker never does). attendance_group_*
+// have NO is_active column → 'active group' = the membership/manager row exists; 'active manager' = users.is_active.
+// SELECT DISTINCT dedups a manager shared across multiple of the subject's groups (multi-group dedup §6).
+async function resolveDigestManagerUserIds(db, orgId, subjectUserId, role) {
+  const rows = await db.query(
+    `SELECT DISTINCT mgr.user_id
+       FROM attendance_group_members mem
+       JOIN attendance_group_managers mgr
+         ON mgr.org_id = mem.org_id AND mgr.group_id = mem.group_id
+       JOIN users u ON u.id = mgr.user_id
+      WHERE mem.org_id = $1
+        AND mem.user_id = $2
+        AND mgr.role = $3
+        AND u.is_active = true
+      ORDER BY mgr.user_id ASC`,
+    [orgId, subjectUserId, role],
+  )
+  return rows.map((row) => row.user_id).filter(Boolean)
+}
+
+// RD-3: request totals for the digest payload. Extracted from the inline GET /reports/requests group-by because
+// loadAttendanceSummary returns only approved leave/overtime MINUTES, not request COUNTS — feeding the summary
+// alone would ship all-zero requestTotals. leave/overtime minutes + makeup-punch count are approved-only.
+async function loadAttendanceReportDigestRequestTotals(db, orgId, userId, from, to) {
+  const rows = await db.query(
+    `SELECT request_type, status,
+            COUNT(*)::int AS total,
+            COALESCE(SUM(CASE WHEN (metadata->>'minutes') ~ '^[0-9]+' THEN (metadata->>'minutes')::int ELSE 0 END), 0)::int AS total_minutes
+       FROM attendance_requests
+      WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4
+      GROUP BY request_type, status`,
+    [userId, orgId, from, to],
+  )
+  const totals = { pending: 0, approved: 0, rejected: 0, leaveMinutes: 0, overtimeMinutes: 0, makeupPunchCount: 0 }
+  for (const row of rows) {
+    const total = Number(row.total ?? 0)
+    const minutes = Number(row.total_minutes ?? 0)
+    const status = row.status
+    const type = row.request_type
+    if (status === 'pending') totals.pending += total
+    else if (status === 'approved') totals.approved += total
+    else if (status === 'rejected') totals.rejected += total
+    if (status === 'approved') {
+      if (type === 'leave') totals.leaveMinutes += minutes
+      else if (type === 'overtime') totals.overtimeMinutes += minutes
+      if (ATTENDANCE_REPORT_DIGEST_MAKEUP_PUNCH_TYPES.has(type)) totals.makeupPunchCount += total
+    }
+  }
+  return totals
+}
+
+// RD-3 producer: each tick, for every enabled+DUE cadence, write status='pending' C5 outbox rows for the org's
+// active members and their configured recipients. It NEVER sends — the AttendanceNotificationDeliveryWorker stays
+// the sole sender. Idempotency: per-(subject,role,recipient,channel,period) source_key + ON CONFLICT DO NOTHING,
+// serialized per (org,cadence,period) by an advisory xact lock. Gated: env + policy.enabled + cadence.enabled + due.
+async function runAttendanceReportDigestOnce(db, { orgId = DEFAULT_ORG_ID, now = new Date(), todayKey, logger = console, emitEvent = () => {} } = {}) {
+  const settings = await getSettings(db)
+  const policy = normalizeAttendanceReportDigestPolicySetting(settings.attendanceReportDigestPolicy)
+  if (!isAttendanceReportDigestRuntimeEnabled() || policy.enabled !== true) {
+    return { ran: false, reason: 'disabled', cadences: [] }
+  }
+
+  const timezone = policy.timezone
+  const resolvedTodayKey = todayKey ? normalizeDateOnlyStrict(todayKey) : attendanceReportDigestLocalDateKey(now, timezone)
+  const dueCadences = dueDigestCadences(policy, { now, todayKey: resolvedTodayKey })
+  if (dueCadences.length === 0) {
+    return { ran: true, cadences: [] }
+  }
+
+  // work_notification → the worker's registered default work-notification channel constant; email_smtp passes
+  // through. The RESOLVED value is stamped into BOTH row.channel and the source_key — never the raw config word.
+  const deliveryChannel = policy.channel === 'work_notification'
+    ? resolveAttendanceDefaultDeliveryChannelForProducer()
+    : 'email_smtp'
+
+  const cadenceSummaries = []
+  for (const cadence of dueCadences) {
+    const period = resolveAttendanceReportDigestPeriod(cadence, { now, todayKey: resolvedTodayKey, timezone })
+    const recipients = policy.cadences[cadence]?.recipients ?? ['self']
+    const sourceId = `${orgId}:${cadence}:${period.periodKey}`
+    const cadenceSummary = { cadence, rowsCreated: 0, rowsExisting: 0, ownerSkipped: 0, subOwnerSkipped: 0 }
+
+    try {
+      await db.transaction(async (trx) => {
+        // Serialize concurrent ticks / scheduler leaders racing the same (org, period); ON CONFLICT is the
+        // durable idempotency backstop even if two transactions interleave.
+        await trx.query(
+          'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+          [orgId, sourceId],
+        )
+        const userIds = await loadActiveReportDigestUserIds(trx, orgId)
+        for (const subjectUserId of userIds) {
+          const attendanceSummary = await loadAttendanceSummary(trx, orgId, subjectUserId, period.from, period.to)
+          const requestTotals = await loadAttendanceReportDigestRequestTotals(trx, orgId, subjectUserId, period.from, period.to)
+          const payload = buildAttendanceReportDigestPayload({
+            cadence,
+            period,
+            summary: attendanceSummary,
+            requestTotals,
+          })
+          const payloadJson = JSON.stringify(payload)
+
+          for (const recipientRole of recipients) {
+            let recipientUserIds
+            if (recipientRole === 'self') {
+              recipientUserIds = [subjectUserId]
+            } else {
+              recipientUserIds = await resolveDigestManagerUserIds(trx, orgId, subjectUserId, recipientRole)
+              if (recipientUserIds.length === 0) {
+                // Fail-soft: a role that resolves to no active manager is skipped + counted; self still ships.
+                if (recipientRole === 'owner') cadenceSummary.ownerSkipped += 1
+                else if (recipientRole === 'sub_owner') cadenceSummary.subOwnerSkipped += 1
+                continue
+              }
+            }
+            // self → recipient_role column 'subject'; owner/sub_owner keep their literal role. The source_key
+            // uses the config-vocab word (self/owner/sub_owner) to keep the dedup grain stable.
+            const recipientRoleColumn = recipientRole === 'self' ? 'subject' : recipientRole
+            for (const recipientUserId of recipientUserIds) {
+              const sourceKey = `${ATTENDANCE_REPORT_DIGEST_SOURCE_TYPE}:${orgId}:${cadence}:${period.periodKey}:subject:${subjectUserId}:${recipientRole}:${recipientUserId}:channel:${deliveryChannel}`
+              const inserted = await trx.query(
+                `INSERT INTO attendance_notification_deliveries
+                   (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, status, payload)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8::jsonb)
+                 ON CONFLICT (org_id, source_key) DO NOTHING
+                 RETURNING id`,
+                [orgId, ATTENDANCE_REPORT_DIGEST_SOURCE_TYPE, sourceId, sourceKey, recipientUserId, recipientRoleColumn, deliveryChannel, payloadJson],
+              )
+              if (inserted.length > 0) cadenceSummary.rowsCreated += 1
+              else cadenceSummary.rowsExisting += 1
+            }
+          }
+        }
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (logger?.warn) logger.warn(`Attendance report digest cadence ${cadence} failed: ${message}`)
+      throw error
+    }
+
+    cadenceSummaries.push(cadenceSummary)
+  }
+
+  return { ran: true, cadences: cadenceSummaries }
 }
 
 async function loadAttendanceScopeContextForUser(db, orgId, userId) {
@@ -17223,6 +18037,356 @@ function computeAttendanceRecordUpsertValues(options) {
   }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// AE-1 — audited admin correction of a confirmed attendance anomaly result
+// (design-lock attendance-anomaly-result-edit-guard-design-lock-20260626, RATIFIED 2026-06-27).
+// ──────────────────────────────────────────────────────────────────────────────
+
+// §3.2 target vocabulary + §3.2/§9.7 editability. A source NOT in the editable set is immutable: normal→abnormal
+// is the explicit NORMAL_TO_ABNORMAL guard, every other non-editable source (off/adjusted, and normal→normal/
+// normal→adjusted no-ops) is SOURCE_NOT_EDITABLE.
+const RESULT_EDIT_TARGET_STATUSES = ['normal', 'late', 'early_leave', 'late_early', 'partial', 'absent', 'adjusted']
+const RESULT_EDIT_EDITABLE_SOURCES = new Set(['late', 'early_leave', 'late_early', 'partial', 'absent'])
+const RESULT_EDIT_ABNORMAL_TARGETS = new Set(['late', 'early_leave', 'late_early', 'partial', 'absent'])
+
+const RESULT_EDIT_EVIDENCE_MAX_ITEMS = 20
+const RESULT_EDIT_EVIDENCE_TEXT_MAX = 200
+const RESULT_EDIT_EVIDENCE_URL_MAX = 2048
+const RESULT_EDIT_EVIDENCE_ATTACHMENT_ID_MAX = 200
+
+function resultEditEvidenceHasMarkup(text) {
+  return /[<>]/.test(text)
+}
+
+// §3.4 + §9.3 evidence validator: metadata-only references — attachmentId / safe-text label / HTTPS-only URL
+// (length-capped, no script/HTML, non-empty host). A raw http:// or any unvalidated URL string is REJECTED so
+// nothing hostile is ever written into the immutable audit row. Returns the normalized array or a message.
+function validateAttendanceResultEditEvidence(evidence) {
+  if (evidence == null) return { ok: true, value: [] }
+  if (!Array.isArray(evidence)) return { ok: false, message: 'evidence must be an array of reference objects' }
+  if (evidence.length > RESULT_EDIT_EVIDENCE_MAX_ITEMS) {
+    return { ok: false, message: `evidence accepts at most ${RESULT_EDIT_EVIDENCE_MAX_ITEMS} references` }
+  }
+  const out = []
+  for (let i = 0; i < evidence.length; i++) {
+    const item = evidence[i]
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return { ok: false, message: `evidence[${i}] must be an object` }
+    }
+    const ref = {}
+    if (item.label != null) {
+      if (typeof item.label !== 'string') return { ok: false, message: `evidence[${i}].label must be a string` }
+      const label = item.label.trim()
+      if (label.length > RESULT_EDIT_EVIDENCE_TEXT_MAX) return { ok: false, message: `evidence[${i}].label exceeds ${RESULT_EDIT_EVIDENCE_TEXT_MAX} chars` }
+      if (resultEditEvidenceHasMarkup(label)) return { ok: false, message: `evidence[${i}].label must not contain HTML/script markup` }
+      if (label) ref.label = label
+    }
+    if (item.url != null) {
+      if (typeof item.url !== 'string') return { ok: false, message: `evidence[${i}].url must be a string` }
+      const url = item.url.trim()
+      if (!url) return { ok: false, message: `evidence[${i}].url is empty` }
+      if (url.length > RESULT_EDIT_EVIDENCE_URL_MAX) return { ok: false, message: `evidence[${i}].url is too long` }
+      if (/\s/.test(url) || resultEditEvidenceHasMarkup(url)) return { ok: false, message: `evidence[${i}].url must not contain whitespace or markup` }
+      let parsed
+      try { parsed = new URL(url) } catch { return { ok: false, message: `evidence[${i}].url is not a valid URL` } }
+      if (parsed.protocol !== 'https:') return { ok: false, message: `evidence[${i}].url must use https://` }
+      if (!parsed.hostname) return { ok: false, message: `evidence[${i}].url must have a non-empty host` }
+      ref.type = 'url'
+      ref.url = url
+    } else if (item.attachmentId != null) {
+      if (typeof item.attachmentId !== 'string') return { ok: false, message: `evidence[${i}].attachmentId must be a string` }
+      const attachmentId = item.attachmentId.trim()
+      if (!attachmentId) return { ok: false, message: `evidence[${i}].attachmentId is empty` }
+      if (attachmentId.length > RESULT_EDIT_EVIDENCE_ATTACHMENT_ID_MAX) return { ok: false, message: `evidence[${i}].attachmentId is too long` }
+      if (resultEditEvidenceHasMarkup(attachmentId)) return { ok: false, message: `evidence[${i}].attachmentId must not contain markup` }
+      ref.type = 'attachment'
+      ref.attachmentId = attachmentId
+    } else if (item.text != null) {
+      if (typeof item.text !== 'string') return { ok: false, message: `evidence[${i}].text must be a string` }
+      const text = item.text.trim()
+      if (!text) return { ok: false, message: `evidence[${i}].text is empty` }
+      if (text.length > RESULT_EDIT_EVIDENCE_TEXT_MAX) return { ok: false, message: `evidence[${i}].text is too long` }
+      if (resultEditEvidenceHasMarkup(text)) return { ok: false, message: `evidence[${i}].text must not contain markup` }
+      ref.type = 'text'
+      ref.text = text
+    } else if (ref.label) {
+      // A safe-text label with no url/attachment/text is itself an acceptable metadata-only reference.
+      ref.type = 'text'
+    } else {
+      return { ok: false, message: `evidence[${i}] must carry one of url / attachmentId / text / label` }
+    }
+    out.push(ref)
+  }
+  return { ok: true, value: out }
+}
+
+// §3.5a normalization table (RATIFIED). Anomaly metrics are normalized per target status; work_minutes defaults
+// to the ORIGINAL stored value (an edit re-classifies, it does not fabricate work time); admin overrideMetrics
+// take precedence per-field. The returned object is fed to upsertAttendanceRecord as overrideMetrics, so it
+// FULLY shadows computeMetrics' punch-derived values (which would otherwise re-derive the original anomaly —
+// e.g. absent has no punches → computeMetrics returns 'absent' again).
+function applyResultEditMetricNormalization(targetStatus, beforeRecord, overrideMetrics) {
+  let work = Math.max(0, Math.floor(Number(beforeRecord?.work_minutes) || 0))
+  let late = Math.max(0, Math.floor(Number(beforeRecord?.late_minutes) || 0))
+  let early = Math.max(0, Math.floor(Number(beforeRecord?.early_leave_minutes) || 0))
+  switch (targetStatus) {
+    case 'normal': late = 0; early = 0; break          // on-time, full day → no lateness/early-leave
+    case 'late': early = 0; break                      // late preserved/override; early cleared
+    case 'early_leave': late = 0; break                // early preserved/override; late cleared
+    case 'late_early': break                           // preserve both
+    case 'partial': break                              // preserve
+    case 'absent': work = 0; late = 0; early = 0; break // no worked time on an absent day
+    case 'adjusted': break                             // preserve (admin may override)
+    default: break
+  }
+  if (overrideMetrics && typeof overrideMetrics === 'object') {
+    if (Number.isFinite(overrideMetrics.workMinutes)) work = Math.max(0, Math.floor(overrideMetrics.workMinutes))
+    if (Number.isFinite(overrideMetrics.lateMinutes)) late = Math.max(0, Math.floor(overrideMetrics.lateMinutes))
+    if (Number.isFinite(overrideMetrics.earlyLeaveMinutes)) early = Math.max(0, Math.floor(overrideMetrics.earlyLeaveMinutes))
+  }
+  return { workMinutes: work, lateMinutes: late, earlyLeaveMinutes: early }
+}
+
+function coerceResultEditJson(value) {
+  if (typeof value === 'string') {
+    try { return JSON.parse(value) } catch { return value }
+  }
+  return value
+}
+
+// §4.1 before/after snapshot — the full record fact persisted on the audit row, independent of policy.
+function buildResultEditSnapshot(record) {
+  if (!record || typeof record !== 'object') return {}
+  const iso = (value) => {
+    if (value == null) return null
+    const date = value instanceof Date ? value : new Date(value)
+    const time = date.getTime()
+    return Number.isFinite(time) ? date.toISOString() : null
+  }
+  return {
+    id: record.id ?? null,
+    userId: record.user_id ?? null,
+    orgId: record.org_id ?? null,
+    workDate: normalizeDateOnly(record.work_date) ?? (record.work_date != null ? String(record.work_date).slice(0, 10) : null),
+    status: record.status ?? null,
+    isWorkday: record.is_workday !== false,
+    timezone: record.timezone ?? null,
+    firstInAt: iso(record.first_in_at),
+    lastOutAt: iso(record.last_out_at),
+    workMinutes: Number(record.work_minutes ?? 0),
+    lateMinutes: Number(record.late_minutes ?? 0),
+    earlyLeaveMinutes: Number(record.early_leave_minutes ?? 0),
+    meta: normalizeMetadata(record.meta),
+  }
+}
+
+// §4.1 idempotency compare: a replayed (org_id, idempotency_key) is "already applied" only when its key
+// PAYLOAD fields match the prior audit row — compared in STORED form (trimmed reason, normalized evidence)
+// so a byte-identical replay never spuriously conflicts on whitespace/key-ordering. Any divergence → 409.
+function resultEditPayloadMatches(priorRow, payload) {
+  if (!priorRow) return false
+  if (String(priorRow.record_id) !== String(payload.recordId)) return false
+  if (String(priorRow.after_status) !== String(payload.targetStatus)) return false
+  if (String(priorRow.reason ?? '') !== String(payload.reason ?? '')) return false
+  const priorEvidence = coerceResultEditJson(priorRow.evidence) ?? []
+  if (stableJsonString(priorEvidence) !== stableJsonString(payload.evidence ?? [])) return false
+  return true
+}
+
+function mapResultEditRow(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    orgId: row.org_id,
+    recordId: row.record_id,
+    userId: row.user_id,
+    workDate: normalizeDateOnly(row.work_date) ?? (row.work_date != null ? String(row.work_date).slice(0, 10) : null),
+    beforeStatus: row.before_status,
+    afterStatus: row.after_status,
+    beforeSnapshot: coerceResultEditJson(row.before_snapshot),
+    afterSnapshot: coerceResultEditJson(row.after_snapshot),
+    reason: row.reason,
+    evidence: coerceResultEditJson(row.evidence) ?? [],
+    actorUserId: row.actor_user_id,
+    idempotencyKey: row.idempotency_key,
+    notificationDeliveryId: row.notification_delivery_id ?? null,
+    notificationSkippedReason: row.notification_skipped_reason ?? null,
+    createdAt: row.created_at,
+  }
+}
+
+// AE-1 transactional write helper. Locks the target record (id+org, cross-org miss → 404 with no leak), runs
+// the editable-source / closed-cycle / edit-window guards, applies the §3.5a normalization via
+// upsertAttendanceRecord (statusOverride + overrideMetrics, NOT a naked status UPDATE so meta tiers stay
+// consistent), and writes ONE immutable audit row. Idempotency is compare-then-{alreadyApplied|409}: a prior
+// same-key row with an identical payload returns alreadyApplied with NO second write; a divergent payload → 409.
+// MUST be called inside db.transaction so a guard failure mid-flight rolls back the record update too.
+async function applyAttendanceResultEdit(trx, options) {
+  const {
+    orgId,
+    recordId,
+    targetStatus,
+    overrideMetrics,
+    reason,
+    evidence,
+    actorUserId,
+    idempotencyKey,
+    editWindowDays,
+  } = options
+
+  const normalizedEvidence = Array.isArray(evidence) ? evidence : []
+
+  // (0) Idempotency pre-check — a replay never re-mutates the record (and AE-2 will never re-enqueue).
+  const priorRows = await trx.query(
+    'SELECT * FROM attendance_record_result_edits WHERE org_id = $1 AND idempotency_key = $2 LIMIT 1',
+    [orgId, idempotencyKey]
+  )
+  if (priorRows.length > 0) {
+    const prior = priorRows[0]
+    if (resultEditPayloadMatches(prior, { recordId, targetStatus, reason, evidence: normalizedEvidence })) {
+      return { alreadyApplied: true, edit: mapResultEditRow(prior), record: null }
+    }
+    throw new HttpError(409, 'ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT', 'idempotencyKey was already used with a different payload')
+  }
+
+  // (1) Lock the target record by id + org. Cross-org / missing → 404 with no cross-org detail.
+  const lockedRows = await trx.query(
+    'SELECT * FROM attendance_records WHERE id = $1 AND org_id = $2 FOR UPDATE',
+    [recordId, orgId]
+  )
+  const record = lockedRows[0] ?? null
+  if (!record) {
+    throw new HttpError(404, 'ATTENDANCE_RECORD_NOT_FOUND', 'attendance record not found')
+  }
+  const beforeStatus = String(record.status ?? '')
+  const workDate = normalizeDateOnly(record.work_date) ?? String(record.work_date ?? '').slice(0, 10)
+
+  // (2) Editable-source guard (§3.2 / §9.7).
+  if (!RESULT_EDIT_EDITABLE_SOURCES.has(beforeStatus)) {
+    if (beforeStatus === 'normal' && RESULT_EDIT_ABNORMAL_TARGETS.has(targetStatus)) {
+      throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_NORMAL_TO_ABNORMAL_UNSUPPORTED', 'a normal result cannot be edited into an abnormal status in v1')
+    }
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_SOURCE_NOT_EDITABLE', `source status "${beforeStatus}" is not an editable anomaly result`)
+  }
+
+  // (3) Closed-cycle guard (§6 / §9.4) — fail-closed. Any same-org closed/archived cycle covering work_date
+  // rejects with 409, even when no settlement row exists; an unavailable cycle table → 503 (never bypass).
+  let cycleRows
+  try {
+    cycleRows = await trx.query(
+      `SELECT 1 FROM attendance_payroll_cycles
+        WHERE org_id = $1 AND status IN ('closed', 'archived') AND $2::date BETWEEN start_date AND end_date
+        LIMIT 1`,
+      [orgId, workDate]
+    )
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) {
+      throw new HttpError(503, 'DB_NOT_READY', 'payroll cycle table unavailable; result edit refused (fail-closed)')
+    }
+    throw error
+  }
+  if (cycleRows.length > 0) {
+    throw new HttpError(409, 'ATTENDANCE_RESULT_EDIT_CYCLE_CLOSED', 'work_date falls inside a closed or archived payroll cycle')
+  }
+
+  // (4) Resolve the record's effective rule + timezone (drives §3.5a tier recompute + the edit window).
+  const context = await resolveWorkContext({ db: trx, orgId, userId: record.user_id, workDate })
+  const timezone = context?.rule?.timezone
+  if (!timezone || !isValidTimeZoneIdentifier(timezone)) {
+    // Fail-closed: without a resolvable zone the edit window cannot be verified safely.
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve a valid timezone for the edit window (fail-closed)')
+  }
+
+  // (5) Edit window (§3.3 / §9.1) — work_date within editWindowDays of org-tz today.
+  const todayKey = toWorkDate(new Date(), timezone)
+  const todayMs = Date.parse(`${todayKey}T00:00:00Z`)
+  const workMs = Date.parse(`${workDate}T00:00:00Z`)
+  if (!Number.isFinite(todayMs) || !Number.isFinite(workMs)) {
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', 'cannot resolve the edit window (fail-closed)')
+  }
+  const diffDays = Math.floor((todayMs - workMs) / 86400000)
+  if (diffDays > editWindowDays) {
+    throw new HttpError(422, 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED', `work_date is older than the ${editWindowDays}-day edit window`)
+  }
+
+  // (6) Apply §3.5a normalization and re-write the record through the consistency helper (statusOverride +
+  // overrideMetrics fully shadow computeMetrics; meta tiers are recomputed from the FINAL lateMinutes).
+  const metrics = applyResultEditMetricNormalization(targetStatus, record, overrideMetrics)
+  const updated = await upsertAttendanceRecord({
+    userId: record.user_id,
+    orgId,
+    workDate,
+    timezone,
+    rule: { ...context.rule, timezone },
+    updateFirstInAt: null,
+    updateLastOutAt: null,
+    mode: 'merge',
+    statusOverride: targetStatus,
+    overrideMetrics: {
+      workMinutes: metrics.workMinutes,
+      lateMinutes: metrics.lateMinutes,
+      earlyLeaveMinutes: metrics.earlyLeaveMinutes,
+    },
+    isWorkday: record.is_workday !== false,
+    leaveMinutes: 0,
+    overtimeMinutes: 0,
+    existingRow: record,
+    client: trx,
+  })
+
+  const beforeSnapshot = buildResultEditSnapshot(record)
+  const afterSnapshot = buildResultEditSnapshot(updated)
+
+  // (7) Write the immutable audit row. The UNIQUE(org_id, idempotency_key) is the concurrency backstop: a
+  // racing same-key insert from another txn surfaces as 23505 → re-run the same compare-then-{ok|409}.
+  let auditRow
+  try {
+    const inserted = await trx.query(
+      `INSERT INTO attendance_record_result_edits
+        (org_id, record_id, user_id, work_date, before_status, after_status, before_snapshot, after_snapshot,
+         reason, evidence, actor_user_id, idempotency_key)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10::jsonb, $11, $12)
+       RETURNING *`,
+      [
+        orgId,
+        recordId,
+        record.user_id,
+        workDate,
+        beforeStatus,
+        targetStatus,
+        JSON.stringify(beforeSnapshot),
+        JSON.stringify(afterSnapshot),
+        reason,
+        JSON.stringify(normalizedEvidence),
+        actorUserId,
+        idempotencyKey,
+      ]
+    )
+    auditRow = inserted[0]
+  } catch (error) {
+    if (error?.code === '23505') {
+      const raceRows = await trx.query(
+        'SELECT * FROM attendance_record_result_edits WHERE org_id = $1 AND idempotency_key = $2 LIMIT 1',
+        [orgId, idempotencyKey]
+      )
+      const prior = raceRows[0]
+      if (prior && resultEditPayloadMatches(prior, { recordId, targetStatus, reason, evidence: normalizedEvidence })) {
+        return { alreadyApplied: true, edit: mapResultEditRow(prior), record: updated }
+      }
+      throw new HttpError(409, 'ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT', 'idempotencyKey was already used with a different payload')
+    }
+    throw error
+  }
+
+  return {
+    alreadyApplied: false,
+    edit: mapResultEditRow(auditRow),
+    record: updated,
+    beforeSnapshot,
+    afterSnapshot,
+  }
+}
+
 async function batchUpsertAttendanceRecordsValues(client, rows) {
   if (!Array.isArray(rows) || rows.length === 0) return new Map()
 
@@ -18835,6 +19999,18 @@ module.exports = {
     normalizeAttendanceBonusPolicySetting,
     resolveFullAttendanceEligible,
   },
+  __attendanceReportDigestForTests: {
+    ATTENDANCE_REPORT_DIGEST_CADENCES,
+    ATTENDANCE_REPORT_DIGEST_SOURCE_TYPE,
+    buildAttendanceReportDigestPayload,
+    clampAttendanceReportDigestDayOfMonth,
+    resolveAttendanceReportDigestPeriod,
+    dueDigestCadences,
+    loadActiveReportDigestUserIds,
+    resolveDigestManagerUserIds,
+    loadAttendanceReportDigestRequestTotals,
+    runAttendanceReportDigestOnce,
+  },
   __attendanceReportFieldCatalogForTests: {
     ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS,
     ATTENDANCE_REPORT_FIELD_CATALOG_OBJECT_ID,
@@ -18955,6 +20131,12 @@ module.exports = {
     ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_VALUE_COLUMNS,
     resetAttendanceSettingsCacheForTests,
     mergeSettings,
+    normalizeAttendanceResultEditPolicySetting,
+    applyAttendanceResultEdit,
+    applyResultEditMetricNormalization,
+    validateAttendanceResultEditEvidence,
+    buildResultEditSnapshot,
+    resultEditPayloadMatches,
     calculateAttendanceComprehensiveShiftPlannedMinutes,
     buildAttendanceComprehensivePlannedMinutesFromDays,
     buildAttendanceComprehensiveActualMinutesFromSummary,
@@ -19804,6 +20986,13 @@ module.exports = {
       }).optional(),
     })
 
+    const reportDigestSendAtSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+    const reportDigestRecipientsSchema = z.array(z.enum(['self', 'owner', 'sub_owner'])).min(1)
+    const reportDigestCadenceSchema = z.object({
+      enabled: z.boolean().optional(),
+      sendAt: reportDigestSendAtSchema.optional(),
+      recipients: reportDigestRecipientsSchema.optional(),
+    }).optional()
     const settingsSchema = z.object({
       autoAbsence: z.object({
         enabled: z.boolean().optional(),
@@ -19952,6 +21141,66 @@ module.exports = {
         enabled: z.boolean().optional(),
         anyLeaveBreaksFullAttendance: z.boolean().optional(),
         lateBeyondThresholdBreaksFullAttendance: z.boolean().optional(),
+      }).optional(),
+      // 考勤统计通知订阅 RD-1 latent config. Default OFF; no producer reads it until RD-3.
+      attendanceReportDigestPolicy: z.object({
+        enabled: z.boolean().optional(),
+        timezone: z.string().refine(isValidTimeZoneIdentifier, { message: 'Invalid timezone' }).optional(),
+        channel: z.enum(['work_notification', 'email_smtp']).optional(),
+        cadences: z.object({
+          daily: reportDigestCadenceSchema,
+          weekly: z.object({
+            enabled: z.boolean().optional(),
+            weekday: z.number().int().min(1).max(7).optional(),
+            sendAt: reportDigestSendAtSchema.optional(),
+            recipients: reportDigestRecipientsSchema.optional(),
+          }).optional(),
+          monthly: z.object({
+            enabled: z.boolean().optional(),
+            dayOfMonth: z.number().int().min(1).max(31).optional(),
+            sendAt: reportDigestSendAtSchema.optional(),
+            recipients: reportDigestRecipientsSchema.optional(),
+          }).optional(),
+        }).optional(),
+      }).optional(),
+      // 补卡规则 MP-1: dormant bounded config. The runtime request path does not read this until MP-2.
+      // Supplied invalid values fail the PUT with 400; omitted values resolve through DEFAULT_SETTINGS.
+      makeupPunchPolicy: z.object({
+        enabled: z.boolean().optional(),
+        timezone: z.string().min(1).refine(isValidTimeZoneIdentifier, { message: 'Invalid IANA timezone' }).optional(),
+        cycle: z.object({
+          type: z.enum(['calendar_month']).optional(),
+          startDay: z.number().int().min(1).max(31).optional(),
+        }).optional(),
+        quota: z.object({
+          maxRequestsPerCycle: z.number().int().min(1).max(99).optional(),
+          countStatuses: z.array(z.enum(['pending', 'approved'])).min(1).optional(),
+          principal: z.enum(['self_service_user']).optional(),
+        }).optional(),
+        submitWindow: z.object({
+          unit: z.enum(['calendar_day']).optional(),
+          days: z.number().int().min(0).max(180).optional(),
+        }).optional(),
+        allowedAnomalyTypes: z.array(z.enum([
+          'missing_check_in',
+          'missing_check_out',
+          'late',
+          'severe_late',
+          'absence_late',
+          'early_leave',
+          'normal',
+        ])).min(1).optional(),
+        allowedRequestTypes: z.array(z.enum(['missed_check_in', 'missed_check_out', 'time_correction'])).min(1).optional(),
+        requireReason: z.boolean().optional(),
+        requireAttachment: z.boolean().optional(),
+      }).optional(),
+      // 异常结果编辑护栏 AE-1 (design-lock §3.3 / §9). Bounded org policy for the anomaly result-edit route.
+      // editWindowDays is enum-strict 1..366; an invalid value fails the PUT with 400.
+      attendanceResultEditPolicy: z.object({
+        enabled: z.boolean().optional(),
+        editWindowDays: z.number().int().min(1).max(366).optional(),
+        requireReason: z.boolean().optional(),
+        notifyAffectedEmployee: z.boolean().optional(),
       }).optional(),
       // 年假/法定假余额引擎 — L0 latent config (design-lock #2622). Round-trips through PUT/GET; no
       // runtime reads it until L2 (accrual). tiers = org-configurable statutory bands.
@@ -23708,6 +24957,112 @@ module.exports = {
 	    )
 
 	    context.api.http.addRoute(
+	      'POST',
+	      '/api/attendance/anomaly-result-edits',
+	      withPermission('attendance:admin', async (req, res) => {
+	        const schema = z.object({
+	          orgId: z.string().optional(),
+	          recordId: z.string().uuid(),
+	          targetStatus: z.enum(['normal', 'late', 'early_leave', 'late_early', 'partial', 'absent', 'adjusted']),
+	          reason: z.string().max(500).optional(),
+	          evidence: z.array(z.unknown()).optional(),
+	          overrideMetrics: z.object({
+	            workMinutes: z.number().int().min(0).optional(),
+	            lateMinutes: z.number().int().min(0).optional(),
+	            earlyLeaveMinutes: z.number().int().min(0).optional(),
+	          }).optional(),
+	          idempotencyKey: z.string().min(1).max(200),
+	        })
+
+	        const parsed = schema.safeParse(req.body ?? {})
+	        if (!parsed.success) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+	          return
+	        }
+
+	        const actorUserId = getUserId(req)
+	        if (!actorUserId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+	          return
+	        }
+	        const orgId = getOrgId(req)
+
+	        // idempotencyKey REQUIRED, trim 1..200; the server NEVER generates one. Missing/blank/oversized → 400,
+	        // writes nothing.
+	        const idempotencyKey = String(parsed.data.idempotencyKey ?? '').trim()
+	        if (!idempotencyKey || idempotencyKey.length > 200) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'idempotencyKey is required (1..200 chars)' } })
+	          return
+	        }
+
+	        let policy
+	        try {
+	          policy = (await getSettings(db)).attendanceResultEditPolicy ?? DEFAULT_SETTINGS.attendanceResultEditPolicy
+	        } catch (error) {
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          policy = DEFAULT_SETTINGS.attendanceResultEditPolicy
+	        }
+
+	        // enabled = master switch (default ON). The design enumerated every other guard/error code but did NOT
+	        // spec a disabled-path code; gating here (default-true so the main path is unaffected) — owner review.
+	        if (policy.enabled === false) {
+	          res.status(403).json({ ok: false, error: { code: 'ATTENDANCE_RESULT_EDIT_DISABLED', message: 'attendance result editing is disabled by policy' } })
+	          return
+	        }
+
+	        // reason: always persisted to the audit row; required (non-blank) when policy.requireReason.
+	        const reason = typeof parsed.data.reason === 'string' ? parsed.data.reason.trim() : ''
+	        if (policy.requireReason && !reason) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'reason is required' } })
+	          return
+	        }
+
+	        // evidence: metadata-only; the validator rejects raw/unsafe URLs so nothing hostile reaches the audit row.
+	        const evidenceResult = validateAttendanceResultEditEvidence(parsed.data.evidence)
+	        if (!evidenceResult.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: evidenceResult.message } })
+	          return
+	        }
+
+	        try {
+	          const result = await db.transaction(async (trx) => applyAttendanceResultEdit(trx, {
+	            orgId,
+	            recordId: parsed.data.recordId,
+	            targetStatus: parsed.data.targetStatus,
+	            overrideMetrics: parsed.data.overrideMetrics ?? null,
+	            reason,
+	            evidence: evidenceResult.value,
+	            actorUserId,
+	            idempotencyKey,
+	            editWindowDays: policy.editWindowDays,
+	          }))
+	          res.json({
+	            ok: true,
+	            data: {
+	              alreadyApplied: result.alreadyApplied === true,
+	              edit: result.edit,
+	              record: result.record ? buildResultEditSnapshot(result.record) : null,
+	            },
+	          })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
+	          }
+	          logger.error('Attendance result edit failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to edit attendance result' } })
+	        }
+	      })
+	    )
+
+	    context.api.http.addRoute(
 	      'GET',
 	      '/api/attendance/summary',
 	      withPermission('attendance:read', async (req, res) => {
@@ -25135,6 +26490,17 @@ module.exports = {
           throw error
         }
 
+        // 补卡规则 MP-2/MP-3: only the three makeup request types read this policy. Gating the settings
+        // read behind the cheap request-type check keeps leave/overtime/etc byte-identical (zero new
+        // queries) when makeupPunchPolicy is disabled. Enforcement itself runs inside the txn below.
+        let makeupPunchPolicy = null
+        if (MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
+          const settings = await getSettings(db)
+          if (settings?.makeupPunchPolicy?.enabled === true) {
+            makeupPunchPolicy = settings.makeupPunchPolicy
+          }
+        }
+
         const requestId = randomUUID()
         const approvalId = `apv_${randomUUID()}`
         const approvalPayload = buildAttendanceApprovalInstancePayload({
@@ -25158,6 +26524,21 @@ module.exports = {
             })
             if (duplicateRequest) {
               throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+            }
+            // 补卡规则 MP-2/MP-3: enforce inside the txn, after the lock + duplicate guard, so the quota
+            // count and the insert below are consistent with the per-(org,user,workDate,requestType) lock.
+            // On success, persist a FRESH per-write policy snapshot onto the request metadata that the
+            // final approval will audit (never re-reading the live policy).
+            if (makeupPunchPolicy) {
+              const enforcement = await enforceMakeupPunchPolicy(trx, {
+                policy: makeupPunchPolicy,
+                orgId,
+                subjectUserId: userId,
+                requesterId: userId,
+                requestId: null,
+                draft,
+              })
+              draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
             }
             await upsertAttendanceApprovalInstance(trx, approvalPayload)
             await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
@@ -26310,6 +27691,29 @@ module.exports = {
             }
 
             const draft = await resolveAttendanceRequestDraft(parsed.data, existingRequest)
+
+            // 补卡规则 MP-2/MP-3: only read the policy when a makeup type is involved (existing OR edited
+            // type), so non-makeup edits stay byte-identical. When enabled, cross-user editing of a makeup
+            // request is fail-closed (Q6: cannot yet audit the real submitter). Enabled-gated so disabled
+            // customers keep the current canAccessOtherUsers cross-user edit behavior.
+            const makeupTypeInvolved =
+              MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType) ||
+              MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(existingRequest.request_type)
+            let makeupPunchPolicy = null
+            if (makeupTypeInvolved) {
+              const settings = await getSettings(db)
+              if (settings?.makeupPunchPolicy?.enabled === true) {
+                makeupPunchPolicy = settings.makeupPunchPolicy
+                if (existingRequest.user_id !== requesterId) {
+                  throw new HttpError(
+                    422,
+                    'MAKEUP_PUNCH_CROSS_USER_FORBIDDEN',
+                    'Cross-user editing of makeup punch requests is not allowed while the makeup policy is enabled'
+                  )
+                }
+              }
+            }
+
             await acquireAttendanceRequestLock(trx, existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType)
             const duplicateRows = await trx.query(
               `SELECT id
@@ -26325,6 +27729,23 @@ module.exports = {
             )
             if (duplicateRows.length > 0) {
               throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+            }
+
+            // 补卡规则 MP-2/MP-3: enforce on the EDITED makeup type, inside the txn after the lock +
+            // duplicate guard, excluding the current request id from the quota count. Recompute a FRESH
+            // snapshot every successful update — resolveAttendanceRequestDraft rebuilds metadata from
+            // scratch (it never copies makeupPunchPolicySnapshot), so the stale snapshot is dropped and
+            // the metadata siblings (attachmentUrl/approvalFlow) are preserved.
+            if (makeupPunchPolicy && MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
+              const enforcement = await enforceMakeupPunchPolicy(trx, {
+                policy: makeupPunchPolicy,
+                orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
+                subjectUserId: existingRequest.user_id,
+                requesterId,
+                requestId,
+                draft,
+              })
+              draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
             }
 
             const approvalId = existingRequest.approval_instance_id || `apv_${randomUUID()}`
@@ -26891,6 +28312,32 @@ module.exports = {
                 overtimeRule: requestMetadata.overtimeRule ?? null,
                 requested_in_at: requestRow.requested_in_at,
                 requested_out_at: requestRow.requested_out_at,
+              }
+              // 补卡规则 MP-3 §5: for the three makeup types, append a SUMMARY of the PERSISTED policy
+              // snapshot (incl matchedAnomalyTypes) to the adjustment audit event. Gated on snapshot
+              // PRESENCE, never the live policy — so legacy/disabled-created pending rows carry no snapshot
+              // and grandfather through this exact same path with byte-identical event meta, and a later
+              // policy change cannot retro-rewrite an already-pending request's audit evidence.
+              const persistedMakeupSnapshot =
+                MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(requestType) &&
+                requestMetadata.makeupPunchPolicySnapshot &&
+                typeof requestMetadata.makeupPunchPolicySnapshot === 'object'
+                  ? requestMetadata.makeupPunchPolicySnapshot
+                  : null
+              if (persistedMakeupSnapshot) {
+                eventMeta.makeupPolicySnapshot = {
+                  version: persistedMakeupSnapshot.version ?? null,
+                  enabled: persistedMakeupSnapshot.enabled ?? null,
+                  cycle: persistedMakeupSnapshot.cycle ?? null,
+                  quota: persistedMakeupSnapshot.quota
+                    ? { maxRequestsPerCycle: persistedMakeupSnapshot.quota.maxRequestsPerCycle ?? null }
+                    : null,
+                  submitWindow: persistedMakeupSnapshot.submitWindow ?? null,
+                  matchedAnomalyTypes: Array.isArray(persistedMakeupSnapshot.matchedAnomalyTypes)
+                    ? [...persistedMakeupSnapshot.matchedAnomalyTypes]
+                    : [],
+                  requestEvaluatedAt: persistedMakeupSnapshot.requestEvaluatedAt ?? null,
+                }
               }
 
               await trx.query(
@@ -39924,6 +41371,16 @@ module.exports = {
 	        name: 'attendance-auto-shift-auto-write',
 	        run: () => runAttendanceAutoShiftAutoWriteOnce(db, { logger, emitEvent }),
 	      }) ?? null
+	      // RD-3 report-digest producer. Registration is harmless — the producer is dormant until
+	      // ATTENDANCE_REPORT_DIGEST_ENABLED=true AND the org policy/cadence are enabled AND a cadence is due.
+	      if (attendanceReportDigestSchedulerUnregister) {
+	        attendanceReportDigestSchedulerUnregister()
+	        attendanceReportDigestSchedulerUnregister = null
+	      }
+	      attendanceReportDigestSchedulerUnregister = context.services?.attendanceScheduler?.registerJob?.({
+	        name: 'attendance-report-digest',
+	        run: () => runAttendanceReportDigestOnce(db, { logger, emitEvent }),
+	      }) ?? null
 	    } catch (error) {
 	      logger.warn('Attendance settings preload failed', error)
 	    }
@@ -39945,6 +41402,10 @@ module.exports = {
 	    if (autoShiftAutoWriteSchedulerUnregister) {
 	      autoShiftAutoWriteSchedulerUnregister()
 	      autoShiftAutoWriteSchedulerUnregister = null
+	    }
+	    if (attendanceReportDigestSchedulerUnregister) {
+	      attendanceReportDigestSchedulerUnregister()
+	      attendanceReportDigestSchedulerUnregister = null
 	    }
 	  }
 }
