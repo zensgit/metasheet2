@@ -5537,6 +5537,15 @@ async function testReadSmokeRoute() {
         return {
           async read(req) {
             readArgs.push(req)
+            if (req.options && req.options.readMode === 'list') {
+              return {
+                records: [
+                  { FNumber: 'M-LIST-1', FName: 'SECRET-LIST-NAME', FModel: 'SECRET-MODEL', FUnitID: 'SECRET-UNIT' },
+                  { FNumber: 'M-LIST-2', FName: 'SECRET-LIST-NAME-2', FModel: 'SECRET-MODEL-2', FUnitID: 'SECRET-UNIT-2' },
+                ],
+                metadata: { mode: 'material-list-bounded-smoke', pageBounded: true, readPath: 'https://k3host/x' },
+              }
+            }
             return {
               records: [{ _k3ReferenceObjects: { unit: {} }, FName: 'SECRET-NAME', FNumber: req.filters.FNumber }],
               metadata: { requestedNumber: req.filters.FNumber, readPath: 'https://k3host/x' },
@@ -5592,6 +5601,36 @@ async function testReadSmokeRoute() {
   assert.equal(okIntent.body.data.recordPresent, true)
   assert.deepEqual(readArgs[readArgs.length - 1], { object: 'material', filters: { FNumber: 'M-002' } }, 'intent shape drives the same single FNumber read')
   assert.ok(!JSON.stringify(okIntent.body.data).includes('M-002'), 'intent-shape response is values-free')
+
+  // C3 LIST-only: the material-list preset drives a bounded list read; evidence is values-free (counts/flags only)
+  const okList = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: WRITE_USER, params: { id: 'sys_1' },
+    body: { presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list' } },
+  })
+  assertOkResponse(okList, 200)
+  assert.equal(okList.body.data.ok, true)
+  assert.equal(okList.body.data.presetId, 'k3wise.material-list.v1')
+  assert.equal(okList.body.data.mode, 'list')
+  assert.equal(okList.body.data.recordCount, 2)
+  assert.equal(okList.body.data.pageBounded, true)
+  // route consumed contract.object/mode and signaled list mode (no key → empty filter, no request pagination)
+  assert.deepEqual(readArgs[readArgs.length - 1], { object: 'material', filters: {}, options: { readMode: 'list' } }, 'list intent drives a bounded list read signal')
+  // the non-persisted overlay applied the preset-owned GetList endpoint + list config
+  const listAdapterSystem = findCalls(calls, 'createAdapter').at(-1)[1]
+  assert.equal(listAdapterSystem.config.objects.material.readPath, '/K3API/Material/GetList')
+  assert.equal(listAdapterSystem.config.objects.material.readMode, 'list')
+  assert.deepEqual(storedK3System, storedK3SystemBefore, 'list read-smoke does not mutate the stored system')
+  // values-free: no row VALUES (FNumber/FName/FModel/FUnitID) leak into the evidence
+  const okListStr = JSON.stringify(okList.body.data)
+  for (const leak of ['M-LIST-1', 'SECRET-LIST-NAME', 'SECRET-MODEL', 'SECRET-UNIT', 'k3host']) {
+    assert.ok(!okListStr.includes(leak), `list read-smoke response must not leak ${leak}`)
+  }
+  // request-supplied pagination in a list intent is fail-closed at the contract (400)
+  const listRawPagination = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: WRITE_USER, params: { id: 'sys_1' },
+    body: { presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list', limit: 500 } },
+  })
+  assert.equal(listRawPagination.statusCode, 400, 'request-supplied list pagination is fail-closed')
 
   // C2: LIST/BOM cannot enter via intent — fail-closed before any system load
   const intentBom = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {

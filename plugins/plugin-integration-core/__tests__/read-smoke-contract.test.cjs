@@ -70,4 +70,35 @@ try {
   assert.ok(!String(e.message).includes('bom') || true) // object name is a coarse allowlist token, not a value
 }
 
+// --- C3 LIST preset (#1709): list mode + key-optional normalization, still fail-closed on raw/injection ---
+const LIST = getReadSmokePreset('k3wise.material-list.v1')
+assert.deepEqual(LIST.allowedModes, ['list'])
+assert.equal(LIST.keyOptional, true)
+// list intent with a key → normalized; key preserved (mapped to an exact FNumber filter downstream)
+assert.deepEqual(
+  normalizeReadSmokeContract({ presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list', key: 'M-001' } }),
+  { presetId: 'k3wise.material-list.v1', object: 'material', mode: 'list', key: 'M-001' },
+)
+// list WITHOUT a key → key-optional → key:null (first page, no filter)
+assert.deepEqual(
+  normalizeReadSmokeContract({ presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list' } }),
+  { presetId: 'k3wise.material-list.v1', object: 'material', mode: 'list', key: null },
+)
+// shipped subset { presetId } (no key) also normalizes (key-optional preset)
+assert.deepEqual(
+  normalizeReadSmokeContract({ presetId: 'k3wise.material-list.v1' }),
+  { presetId: 'k3wise.material-list.v1', object: 'material', mode: 'list', key: null },
+)
+// list preset stays fail-closed: detail mode not allowed, BOM object not allowed
+assert.throws(() => normalizeReadSmokeContract({ presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'single_record_detail' } }), isErr('mode_not_allowed'))
+assert.throws(() => normalizeReadSmokeContract({ presetId: 'k3wise.material-list.v1', intent: { object: 'bom', mode: 'list' } }), isErr('object_not_allowed'))
+// no raw pagination/filter/path can ride into a list intent (strict intent keys: object/mode/key only)
+for (const bad of ['limit', 'top', 'pageSize', 'pageIndex', 'cursor', 'filter', 'Filter', 'readPath', 'fields']) {
+  assert.throws(
+    () => normalizeReadSmokeContract({ presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list', [bad]: 1 } }),
+    isErr('unexpected_field'),
+    `list intent raw field '${bad}' must be rejected`,
+  )
+}
+
 console.log('read-smoke-contract.test.cjs OK')

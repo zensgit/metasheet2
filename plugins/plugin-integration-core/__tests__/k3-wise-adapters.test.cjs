@@ -166,6 +166,27 @@ function createK3FetchMock() {
       response.Data[0].Data.FNumber = materialNumber
       return jsonResponse(200, response)
     }
+    if (parsed.pathname === '/K3API/Material/GetList') {
+      const data = (body && body.Data) || {}
+      if (typeof data.Filter === 'string' && data.Filter.includes('LISTFAIL')) {
+        return jsonResponse(200, { StatusCode: 500, Message: 'list query failed', Data: { DATA: [] } })
+      }
+      if (typeof data.Filter === 'string' && data.Filter.includes('EMPTY')) {
+        return jsonResponse(200, { StatusCode: 200, Message: 'OK', Data: { DATA: [] } })
+      }
+      // Bounded list response: rows live under response.Data.DATA (O4). FExtra is an unknown field the adapter
+      // MUST project away — only FNumber/FName/FModel/FUnitID survive downstream.
+      return jsonResponse(200, {
+        StatusCode: 200,
+        Message: 'OK',
+        Data: {
+          DATA: [
+            { FNumber: 'M-LIST-001', FName: 'SECRET-NAME-1', FModel: 'MODEL-1', FUnitID: 'UNIT-1', FExtra: 'IGNORED' },
+            { FNumber: 'M-LIST-002', FName: 'SECRET-NAME-2', FModel: 'MODEL-2', FUnitID: 'UNIT-2', FExtra: 'IGNORED' },
+          ],
+        },
+      })
+    }
     if (parsed.pathname === '/K3API/Material/Submit') {
       return jsonResponse(200, { success: true, submitted: body.Number })
     }
@@ -879,6 +900,96 @@ async function testK3WebApiMaterialDetailReadSmoke() {
   assert.ok(bomRead instanceof UnsupportedAdapterOperationError, 'read-only smoke does not unlock BOM reads')
 }
 
+// C3 LIST-only (#1709): bounded Material/GetList. Endpoint/pagination/fields are preset-owned; the deny-guard
+// still blocks cursor/watermark/request-pagination/BOM; evidence-bearing rows are projected to allowlisted fields.
+async function testK3WebApiMaterialListReadSmoke() {
+  const listConfig = (overrides = {}) => ({
+    baseUrl: 'https://k3.example.test',
+    autoSubmit: false,
+    autoAudit: false,
+    objects: {
+      material: {
+        operations: ['read'],
+        readPath: '/K3API/Material/GetList',
+        readMethod: 'POST',
+        readMode: 'list',
+        listMaxRows: 10,
+        listFields: ['FNumber', 'FName', 'FModel', 'FUnitID'],
+        ...overrides,
+      },
+    },
+  })
+  const { calls, fetchImpl } = createK3FetchMock()
+  const adapter = createK3WiseWebApiAdapter({ system: createK3WebApiSystem({ config: listConfig() }), fetchImpl })
+
+  // ----- happy path: bounded single page; no key → no filter -----
+  const list = await adapter.read({ object: 'material', options: { readMode: 'list' } })
+  assert.equal(list.records.length, 2, 'bounded list returns the mocked rows')
+  assert.equal(list.metadata.mode, 'material-list-bounded-smoke')
+  assert.equal(list.metadata.readOnly, true)
+  assert.equal(list.metadata.pageBounded, true)
+  assert.equal(list.metadata.readPath, '/K3API/Material/GetList')
+  // rows projected to the allowlisted fields ONLY (FExtra dropped)
+  assert.deepEqual(Object.keys(list.records[0]).sort(), ['FModel', 'FName', 'FNumber', 'FUnitID'])
+  assert.equal(list.records[0].FExtra, undefined, 'unknown response fields are projected away')
+  // issued GetList body: preset-owned bounded pagination + fields; empty filter with no key
+  const listCalls = calls.filter((call) => call.pathname === '/K3API/Material/GetList')
+  assert.equal(listCalls.length, 1, 'list read calls Material/GetList once')
+  assert.equal(listCalls[0].options.method, 'POST')
+  assert.deepEqual(listCalls[0].body, {
+    Data: { Top: 10, PageSize: 10, PageIndex: 1, Filter: '', OrderBy: 'FNumber', Fields: 'FNumber,FName,FModel,FUnitID' },
+  })
+  // read-only: never Save/Submit/Audit/GetDetail
+  for (const banned of ['/K3API/Material/Save', '/K3API/Material/Submit', '/K3API/Material/Audit', '/K3API/Material/GetDetail']) {
+    assert.equal(calls.some((call) => call.pathname === banned), false, `list read must not call ${banned}`)
+  }
+
+  // ----- key → internally composed EXACT FNumber filter (never a raw caller expression) -----
+  const keyed = createK3FetchMock()
+  const keyedAdapter = createK3WiseWebApiAdapter({ system: createK3WebApiSystem({ config: listConfig() }), fetchImpl: keyed.fetchImpl })
+  await keyedAdapter.read({ object: 'material', filters: { FNumber: 'M-001' }, options: { readMode: 'list' } })
+  assert.equal(keyed.calls.find((c) => c.pathname === '/K3API/Material/GetList').body.Data.Filter, "FNumber='M-001'", 'caller key maps to an exact internal FNumber filter')
+
+  // ----- empty page: empty Data.DATA is a valid empty result (recordPresent false), not an error -----
+  const empty = createK3FetchMock()
+  const emptyAdapter = createK3WiseWebApiAdapter({ system: createK3WebApiSystem({ config: listConfig() }), fetchImpl: empty.fetchImpl })
+  const emptyRead = await emptyAdapter.read({ object: 'material', filters: { FNumber: 'EMPTY' }, options: { readMode: 'list' } })
+  assert.equal(emptyRead.records.length, 0, 'empty Data.DATA is a valid empty page, not an error')
+  assert.equal(emptyRead.metadata.mode, 'material-list-bounded-smoke')
+
+  // ----- HARD CAP: a preset asking for 999 rows is still capped at 10, PageIndex pinned to 1 -----
+  const capped = createK3FetchMock()
+  const cappedAdapter = createK3WiseWebApiAdapter({ system: createK3WebApiSystem({ config: listConfig({ listMaxRows: 999 }) }), fetchImpl: capped.fetchImpl })
+  await cappedAdapter.read({ object: 'material', options: { readMode: 'list' } })
+  const cappedBody = capped.calls.find((c) => c.pathname === '/K3API/Material/GetList').body
+  assert.equal(cappedBody.Data.Top, 10, 'Top hard-capped at 10 regardless of preset value')
+  assert.equal(cappedBody.Data.PageSize, 10, 'PageSize hard-capped at 10 regardless of preset value')
+  assert.equal(cappedBody.Data.PageIndex, 1, 'PageIndex pinned to 1 (single page)')
+
+  // ----- ADVERSARIAL negative controls: the deny-guard still fires on the list path -----
+  const cursorList = await adapter.read({ object: 'material', cursor: 'next', options: { readMode: 'list' } }).catch((e) => e)
+  assert.equal((cursorList.details || {}).code, 'K3_WISE_READ_LIST_UNSUPPORTED', 'cursor rejected on list path')
+  const watermarkList = await adapter.read({ object: 'material', watermark: { FModifyDate: 'x' }, options: { readMode: 'list' } }).catch((e) => e)
+  assert.equal((watermarkList.details || {}).code, 'K3_WISE_READ_LIST_UNSUPPORTED', 'watermark rejected on list path')
+  const reqPagination = await adapter.read({ object: 'material', options: { readMode: 'list', limit: 500 } }).catch((e) => e)
+  assert.equal((reqPagination.details || {}).code, 'K3_WISE_READ_LIST_UNSUPPORTED', 'request-supplied pagination rejected (preset-owned)')
+  const injection = await adapter.read({ object: 'material', filters: { FNumber: "M' OR '1'='1" }, options: { readMode: 'list' } }).catch((e) => e)
+  assert.equal((injection.details || {}).code, 'K3_WISE_READ_FILTER_UNSUPPORTED', 'filter-injection-shaped FNumber rejected')
+  const rawFilter = await adapter.read({ object: 'material', filters: { Filter: '1=1' }, options: { readMode: 'list' } }).catch((e) => e)
+  assert.equal((rawFilter.details || {}).code, 'K3_WISE_READ_FILTER_UNSUPPORTED', 'raw caller filter expression rejected')
+
+  // ----- business failure surfaces as a read error (not a write path) -----
+  const fail = createK3FetchMock()
+  const failAdapter = createK3WiseWebApiAdapter({ system: createK3WebApiSystem({ config: listConfig() }), fetchImpl: fail.fetchImpl })
+  const failed = await failAdapter.read({ object: 'material', filters: { FNumber: 'LISTFAIL' }, options: { readMode: 'list' } }).catch((e) => e)
+  assert.ok(failed instanceof K3WiseWebApiAdapterError, 'list business failure is a read error')
+  assert.equal(failed.details.code, 'K3_WISE_READ_BUSINESS_ERROR')
+
+  // ----- BOM stays locked: a material list preset does NOT unlock bom -----
+  const bomList = await adapter.read({ object: 'bom', options: { readMode: 'list' } }).catch((e) => e)
+  assert.ok(bomList instanceof UnsupportedAdapterOperationError, 'bom is not unlocked by the material list preset')
+}
+
 async function testK3WebApiAuthorityCodeToken() {
   const { calls, fetchImpl } = createK3FetchMock()
   const adapter = createK3WiseWebApiAdapter({
@@ -1534,6 +1645,7 @@ async function testK3WebApiAutoFlagCoercion() {
 async function main() {
   await testK3WebApiAdapter()
   await testK3WebApiMaterialDetailReadSmoke()
+  await testK3WebApiMaterialListReadSmoke()
   await testK3WebApiAuthorityCodeToken()
   await testK3WebApiSaveBusinessEvidence()
   await testK3WebApiNestedDataSaveParse()

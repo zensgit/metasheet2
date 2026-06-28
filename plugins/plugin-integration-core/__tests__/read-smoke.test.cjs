@@ -39,13 +39,30 @@ assert.equal(getReadSmokePreset('__proto__'), undefined)
 // catalog frozen — no user/runtime mutation
 assert.throws(() => { READ_SMOKE_PRESETS['x.v1'] = { requiredKind: 'http' } }, TypeError, 'catalog is frozen')
 
-// --- forced single-record read request: FNumber filter only, no list/pagination/cursor/watermark/BOM ---
-const reqObj = buildReadSmokeRequest(PRESET, 'M-001')
+// --- detail read request builder: consumes the normalized contract.object/mode (#3247); FNumber filter only ---
+const reqObj = buildReadSmokeRequest(PRESET, { presetId: PRESET.presetId, object: 'material', mode: 'single_record_detail', key: 'M-001' })
 assert.deepEqual(reqObj, { object: 'material', filters: { FNumber: 'M-001' } })
 assert.equal(reqObj.cursor, undefined)
 assert.equal(reqObj.limit, undefined)
 assert.equal(reqObj.watermark, undefined)
 assert.equal(reqObj.pagination, undefined)
+
+// --- C3 LIST builder: dispatches on contract.mode='list'; signals list mode + optional FNumber filter only ---
+const LIST_PRESET = getReadSmokePreset('k3wise.material-list.v1')
+assert.ok(LIST_PRESET, 'list preset is registered')
+assert.deepEqual(LIST_PRESET.allowedModes, ['list'])
+assert.equal(LIST_PRESET.keyOptional, true)
+assert.equal(LIST_PRESET.readConfigOverlay.objects.material.readPath, '/K3API/Material/GetList')
+assert.equal(LIST_PRESET.readConfigOverlay.objects.material.readMode, 'list')
+// list with an explicit key → exact FNumber filter signal; pagination/path NOT in the request (preset-owned)
+const listReqKeyed = buildReadSmokeRequest(LIST_PRESET, { presetId: LIST_PRESET.presetId, object: 'material', mode: 'list', key: 'M-001' })
+assert.deepEqual(listReqKeyed, { object: 'material', filters: { FNumber: 'M-001' }, options: { readMode: 'list' } })
+assert.equal(listReqKeyed.cursor, undefined)
+assert.equal(listReqKeyed.limit, undefined)
+assert.equal(listReqKeyed.pagination, undefined)
+// list with no key → first page, no filter
+const listReqNoKey = buildReadSmokeRequest(LIST_PRESET, { presetId: LIST_PRESET.presetId, object: 'material', mode: 'list', key: null })
+assert.deepEqual(listReqNoKey, { object: 'material', filters: {}, options: { readMode: 'list' } })
 
 // --- non-persisted read config overlay: target-side Save config is preserved, read config is in-memory only ---
 const storedSystem = {
@@ -87,7 +104,7 @@ const okResult = {
 }
 const ev = readSmokeSuccessEvidence(PRESET, okResult)
 assert.deepEqual(ev, {
-  ok: true, presetId: 'k3wise.material-detail.v1', object: 'material', recordPresent: true, referenceObjectCount: 2,
+  ok: true, presetId: 'k3wise.material-detail.v1', object: 'material', recordPresent: true, referenceObjectCount: 2, recordCount: 1,
 })
 // nothing sensitive leaks (key / material values / raw / metadata / host)
 const evStr = JSON.stringify(ev)
@@ -99,11 +116,28 @@ assert.equal(ev.raw, undefined)
 assert.equal(ev.metadata, undefined)
 // empty / missing records → recordPresent false, count 0
 assert.deepEqual(readSmokeSuccessEvidence(PRESET, { records: [] }), {
-  ok: true, presetId: 'k3wise.material-detail.v1', object: 'material', recordPresent: false, referenceObjectCount: 0,
+  ok: true, presetId: 'k3wise.material-detail.v1', object: 'material', recordPresent: false, referenceObjectCount: 0, recordCount: 0,
 })
 assert.deepEqual(readSmokeSuccessEvidence(PRESET, {}), {
-  ok: true, presetId: 'k3wise.material-detail.v1', object: 'material', recordPresent: false, referenceObjectCount: 0,
+  ok: true, presetId: 'k3wise.material-detail.v1', object: 'material', recordPresent: false, referenceObjectCount: 0, recordCount: 0,
 })
+
+// --- C3 LIST evidence: values-free counts/flags only; row VALUES (FNumber/FName/FModel/FUnitID) never surface ---
+const listResult = {
+  records: [
+    { FNumber: 'M-LIST-1', FName: 'SECRET-LIST-NAME', FModel: 'SECRET-MODEL', FUnitID: 'SECRET-UNIT' },
+    { FNumber: 'M-LIST-2', FName: 'SECRET-LIST-NAME-2', FModel: 'SECRET-MODEL-2', FUnitID: 'SECRET-UNIT-2' },
+  ],
+  metadata: { mode: 'material-list-bounded-smoke', pageBounded: true },
+}
+const listEv = readSmokeSuccessEvidence(LIST_PRESET, listResult)
+assert.deepEqual(listEv, {
+  ok: true, presetId: 'k3wise.material-list.v1', object: 'material', recordPresent: true, referenceObjectCount: 0, recordCount: 2, mode: 'list', pageBounded: true,
+})
+const listEvStr = JSON.stringify(listEv)
+for (const leak of ['M-LIST-1', 'SECRET-LIST-NAME', 'SECRET-MODEL', 'SECRET-UNIT', 'FName', 'FModel', 'FUnitID']) {
+  assert.ok(!listEvStr.includes(leak), `list evidence must not leak ${leak}`)
+}
 
 // --- error evidence: coarse code + type ONLY (never the message, which may carry the key/values) ---
 class FakeAdapterError extends Error {

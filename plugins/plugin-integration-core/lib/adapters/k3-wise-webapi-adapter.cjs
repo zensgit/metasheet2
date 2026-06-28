@@ -598,6 +598,110 @@ function assertMaterialDetailReadOnlyScope(request) {
   }
 }
 
+// C3 LIST-only scope guard (#1709). The single-record deny-guard above stays intact for detail reads; this is the
+// sibling guard for the ONE authorized bounded list path. It keeps cursor, watermark, request-supplied pagination,
+// BOM, and any non-material object BLOCKED — only an optional FNumber filter rides in. Pagination/endpoint/fields
+// are preset-owned and applied by the caller, never from the request.
+const LIST_HARD_CAP = 10
+const MATERIAL_NUMBER_PATTERN = /^[A-Za-z0-9._-]{1,64}$/
+function assertMaterialListReadOnlyScope(request) {
+  if (request.object !== 'material') {
+    throw new UnsupportedAdapterOperationError('K3 WISE WebAPI bounded list supports only material', {
+      kind: 'erp:k3-wise-webapi',
+      object: request.object,
+      operation: 'read',
+    })
+  }
+  if (request.cursor) {
+    throw new AdapterValidationError('K3 WISE Material bounded list does not support cursor pagination', {
+      code: 'K3_WISE_READ_LIST_UNSUPPORTED',
+      object: request.object,
+      field: 'cursor',
+    })
+  }
+  if (Object.keys(request.watermark || {}).length > 0) {
+    throw new AdapterValidationError('K3 WISE Material bounded list does not support watermark reads', {
+      code: 'K3_WISE_READ_LIST_UNSUPPORTED',
+      object: request.object,
+      field: 'watermark',
+    })
+  }
+  // Pagination is preset-owned — a request-supplied limit/top/pageSize/pageIndex is rejected (defense in depth;
+  // the contract normalizer already strips these before the adapter is reached).
+  const options = isPlainObject(request.options) ? request.options : {}
+  for (const field of ['limit', 'top', 'pageSize', 'pageIndex', 'page']) {
+    if (options[field] !== undefined) {
+      throw new AdapterValidationError('K3 WISE Material bounded list pagination is preset-owned', {
+        code: 'K3_WISE_READ_LIST_UNSUPPORTED',
+        object: request.object,
+        field,
+      })
+    }
+  }
+  // Only an FNumber filter may ride in (optional). No raw caller filter expression.
+  const allowedFilterKeys = new Set(['FNumber', 'number', 'materialNumber', 'templateMaterialNumber', 'referenceFields'])
+  const unknownFilters = Object.keys(request.filters || {}).filter((key) => !allowedFilterKeys.has(key))
+  if (unknownFilters.length > 0) {
+    throw new AdapterValidationError('K3 WISE Material bounded list supports only an FNumber filter', {
+      code: 'K3_WISE_READ_FILTER_UNSUPPORTED',
+      object: request.object,
+      fields: unknownFilters,
+    })
+  }
+}
+
+// Internally compose the FNumber filter (O3): exact match, FNumber only, never a raw caller expression. The caller
+// key is validated against a strict material-number charset to prevent K3 filter injection; anything else fails
+// closed. Returns '' (no filter → first page) when no key is supplied.
+function composeBoundedFNumberFilter(request) {
+  const filters = isPlainObject(request.filters) ? request.filters : {}
+  const raw = firstDefined(filters.FNumber, filters.number, filters.materialNumber, filters.templateMaterialNumber)
+  if (isBlankValue(raw)) return ''
+  const value = String(raw).trim()
+  if (!MATERIAL_NUMBER_PATTERN.test(value)) {
+    throw new AdapterValidationError('K3 WISE Material bounded list FNumber filter is not a valid material number', {
+      code: 'K3_WISE_READ_FILTER_UNSUPPORTED',
+      object: request.object,
+      field: 'FNumber',
+    })
+  }
+  return `FNumber='${value}'`
+}
+
+// Bounded single-page list body (O2): Top/PageSize hard-capped at 10, PageIndex fixed at 1, no cursor. Fields and
+// page size are preset-owned; the hard cap applies regardless of what the preset config requests.
+function buildMaterialListBody(objectConfig, filter) {
+  const maxRows = Math.min(Number(objectConfig.listMaxRows) || LIST_HARD_CAP, LIST_HARD_CAP)
+  const fields = Array.isArray(objectConfig.listFields) && objectConfig.listFields.length > 0
+    ? objectConfig.listFields.filter((field) => typeof field === 'string' && field.trim())
+    : ['FNumber', 'FName', 'FModel', 'FUnitID']
+  return {
+    Data: {
+      Top: maxRows,
+      PageSize: maxRows,
+      PageIndex: 1,
+      Filter: filter,
+      OrderBy: 'FNumber',
+      Fields: fields.join(','),
+    },
+  }
+}
+
+// Extract bounded list rows from response.Data.DATA (O4), projecting ONLY the allowlisted fields so unknown
+// response fields never carry downstream.
+function extractMaterialListRows(data, fields) {
+  const dataNode = isPlainObject(data) && isPlainObject(data.Data) ? data.Data : null
+  const rows = dataNode && Array.isArray(dataNode.DATA) ? dataNode.DATA : []
+  const projectFields = Array.isArray(fields) && fields.length > 0 ? fields : ['FNumber', 'FName', 'FModel', 'FUnitID']
+  return rows.filter(isPlainObject).map((row) => {
+    const projected = {}
+    for (const field of projectFields) {
+      if (row[field] !== undefined) projected[field] = row[field]
+    }
+    return projected
+  })
+}
+
 function defaultMaterialReferenceFields(objectConfig) {
   return Array.isArray(objectConfig.schema)
     ? objectConfig.schema
@@ -1117,6 +1221,60 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       throw new AdapterValidationError(`K3 WISE object is not configured: ${request.object}`, { object: request.object })
     }
     ensureOperation(normalizedSystem.kind, request.object, objectConfig, 'read')
+    // C3 LIST-only (#1709): open the bounded single-page list read ONLY when the PRESET-OWNED objectConfig declares
+    // readMode 'list' (never request-supplied). Everything else falls through to the single-record detail path,
+    // whose deny-guard still blocks list/cursor/watermark/BOM.
+    if (objectConfig.readMode === 'list') {
+      assertMaterialListReadOnlyScope(request)
+      const listReadPath = objectConfig.readPath
+        ? assertRelativePath(objectConfig.readPath, 'object.readPath')
+        : null
+      if (!listReadPath) {
+        throw new K3WiseWebApiAdapterError('K3 WISE list read endpoint is not configured for material', {
+          code: 'K3_WISE_READ_NOT_CONFIGURED',
+          object: request.object,
+        })
+      }
+      const listFilter = composeBoundedFNumberFilter(request)
+      const listBody = buildMaterialListBody(objectConfig, listFilter)
+      const listAuth = await login()
+      let listResponse
+      try {
+        listResponse = await requestJson(listReadPath, {
+          method: objectConfig.readMethod || 'POST',
+          query: listAuth.query,
+          headers: listAuth.headers,
+          body: listBody,
+        })
+      } catch (error) {
+        throw new K3WiseWebApiAdapterError(`K3 WISE WebAPI list read failed: ${error && error.message ? error.message : String(error)}`, {
+          code: 'K3_WISE_READ_FAILED',
+          object: request.object,
+          status: error && error.status,
+          path: listReadPath,
+        })
+      }
+      if (!businessSuccess(listResponse.data, config)) {
+        throw new K3WiseWebApiAdapterError(String(responseMessage(listResponse.data, config, 'K3 WISE list read business response failed')), {
+          code: 'K3_WISE_READ_BUSINESS_ERROR',
+          object: request.object,
+          responseCode: responseFailureCode(listResponse.data, config, 'K3_WISE_READ_BUSINESS_ERROR'),
+        })
+      }
+      const listRows = extractMaterialListRows(listResponse.data, objectConfig.listFields)
+      return createReadResult({
+        records: listRows,
+        raw: listResponse.data,
+        metadata: {
+          object: request.object,
+          mode: 'material-list-bounded-smoke',
+          readPath: listReadPath,
+          readOnly: true,
+          pageBounded: true,
+          maxRows: Math.min(Number(objectConfig.listMaxRows) || LIST_HARD_CAP, LIST_HARD_CAP),
+        },
+      })
+    }
     assertMaterialDetailReadOnlyScope(request)
 
     const readPath = objectConfig.readPath

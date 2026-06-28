@@ -29,6 +29,35 @@ const READ_SMOKE_PRESETS = Object.freeze({
       }),
     }),
   }),
+  // C3 LIST-only (#1709, owner/customer GATE 2026-06-27; approved values-free wire contract). Bounded,
+  // single-page Material list. Endpoint/method/pagination/fields are PRESET-OWNED (never request-supplied):
+  // POST /K3API/Material/GetList, body.Data.{Top,PageSize,PageIndex} hard-capped (PageIndex=1, no cursor),
+  // body.Data.Fields = FNumber/FName/FModel/FUnitID. Read-only; no BOM/resolver/Save/Submit/Audit/write.
+  'k3wise.material-list.v1': Object.freeze({
+    presetId: 'k3wise.material-list.v1',
+    requiredKind: 'erp:k3-wise-webapi',
+    object: 'material',
+    allowedObjects: Object.freeze(['material']),
+    allowedModes: Object.freeze(['list']),
+    defaultObject: 'material',
+    defaultMode: 'list',
+    // LIST is key-OPTIONAL: an explicit key maps ONLY to an internally-composed exact FNumber filter (O3);
+    // absent → first page, no filter. A raw caller filter expression can never ride in (strict contract keys).
+    keyOptional: true,
+    readConfigOverlay: Object.freeze({
+      objects: Object.freeze({
+        material: Object.freeze({
+          operations: Object.freeze(['read']),
+          readPath: '/K3API/Material/GetList',
+          readMethod: 'POST',
+          readMode: 'list',
+          // Bounded pagination is preset-owned; the adapter additionally hard-caps at 10 regardless of this value.
+          listMaxRows: 10,
+          listFields: Object.freeze(['FNumber', 'FName', 'FModel', 'FUnitID']),
+        }),
+      }),
+    }),
+  }),
 })
 
 function isPlainObject(value) {
@@ -55,9 +84,19 @@ function getReadSmokePreset(presetId) {
   return Object.prototype.hasOwnProperty.call(READ_SMOKE_PRESETS, presetId) ? READ_SMOKE_PRESETS[presetId] : undefined
 }
 
-// Forced single-record read request. Single explicit key only — no list/pagination/cursor/watermark/BOM.
-function buildReadSmokeRequest(preset, key) {
-  return { object: preset.object, filters: { FNumber: key } }
+// Read request builder — dispatches on the NORMALIZED contract.object/mode (C3 acceptance lock #3247). It never
+// silently reuses the single-record GetDetail shape for a list read. The adapter derives the endpoint + bounded
+// pagination + fields from the preset-owned objectConfig; this builder only signals object + mode (+ optional key).
+function buildReadSmokeRequest(preset, contract) {
+  const object = contract && typeof contract.object === 'string' ? contract.object : preset.object
+  if (contract && contract.mode === 'list') {
+    // LIST: bounded single page; endpoint/pagination are preset-owned (adapter-side). An optional key maps ONLY
+    // to an internally-composed exact FNumber filter; absent → first page, no filter. No request-supplied paging.
+    const filters = contract.key ? { FNumber: contract.key } : {}
+    return { object, filters, options: { readMode: 'list' } }
+  }
+  // single_record_detail (default): forced single explicit key; no list/pagination/cursor/watermark/BOM.
+  return { object, filters: { FNumber: contract ? contract.key : undefined } }
 }
 
 // Non-persisted preset overlay for the credentialed read-smoke route. Entity-machine validation
@@ -101,13 +140,22 @@ function readSmokeSuccessEvidence(preset, result) {
     const refs = records[0] && records[0]._k3ReferenceObjects
     referenceObjectCount = refs && typeof refs === 'object' ? Object.keys(refs).length : 0
   }
-  return {
+  const meta = result && typeof result.metadata === 'object' && result.metadata ? result.metadata : {}
+  const evidence = {
     ok: true,
     presetId: preset.presetId,
     object: preset.object,
     recordPresent,
     referenceObjectCount,
+    // Count only — never the row VALUES (FNumber/FName/FModel/FUnitID stay out of evidence).
+    recordCount: records.length,
   }
+  // LIST mode: surface the bounded-page flag (values-free) so callers can confirm paging stayed capped.
+  if (meta.mode === 'material-list-bounded-smoke') {
+    evidence.mode = 'list'
+    evidence.pageBounded = meta.pageBounded === true
+  }
+  return evidence
 }
 
 // Values-free error evidence. Returns ONLY a coarse code + type — never the error message, which may carry
@@ -185,11 +233,12 @@ function normalizeReadSmokeContract(input) {
   if (!Array.isArray(preset.allowedModes) || !preset.allowedModes.includes(mode)) {
     throw new ReadSmokeContractError('mode_not_allowed', 'mode is not allowlisted for this preset')
   }
-  // Key is runtime-only and never echoed; require a non-empty string.
+  // Key is runtime-only and never echoed. Required for single-record reads; OPTIONAL for key-optional presets
+  // (LIST: absent key → first-page/no-filter; present key → internally-composed exact FNumber filter).
   const key = typeof rawKey === 'string' ? rawKey.trim() : ''
-  if (!key) throw new ReadSmokeContractError('key_required', 'a non-empty key is required')
+  if (!key && !preset.keyOptional) throw new ReadSmokeContractError('key_required', 'a non-empty key is required')
 
-  return { presetId: preset.presetId, object, mode, key }
+  return { presetId: preset.presetId, object, mode, key: key || null }
 }
 
 module.exports = {

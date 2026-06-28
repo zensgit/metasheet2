@@ -1604,10 +1604,11 @@ function createHandlers(services, options = {}) {
       })
     },
 
-    // #1709 follow-up: generic read-smoke preset route (v1: K3 Material/GetDetail preset only). Built-in
-    // preset catalog ONLY — no user/request-supplied preset. Read-only: forced single read, no list/
-    // pagination/cursor/watermark/BOM, no Save/Submit/Audit, no production write. Loads credentials via the
-    // backend getExternalSystemForAdapter context (never the public, credential-stripped response) and never
+    // #1709 follow-up: generic read-smoke preset route. v1 presets: K3 Material/GetDetail single-record AND the
+    // C3 bounded Material/GetList (LIST-only, owner/customer GATE 2026-06-27). Built-in preset catalog ONLY — no
+    // user/request-supplied preset, path, method, payload, or pagination. Read-only: a single record read OR one
+    // bounded list page (no cursor/watermark/BOM), no Save/Submit/Audit, no production write. Loads credentials via
+    // the backend getExternalSystemForAdapter context (never the public, credential-stripped response) and never
     // modifies the system's role/config. Evidence is values-free.
     async externalSystemReadSmoke(req, res) {
       // Requires WRITE access: although the operation is read-only, this is an active credentialed outbound
@@ -1639,7 +1640,7 @@ function createHandlers(services, options = {}) {
       const adapter = adapterRegistry.createAdapter(adapterSystem, { principal: requestPrincipal(req) })
       // Forced single read only; values-free evidence on success or failure (never key/raw/values/credentials).
       try {
-        const result = await adapter.read(buildReadSmokeRequest(preset, contract.key))
+        const result = await adapter.read(buildReadSmokeRequest(preset, contract))
         return sendOk(res, readSmokeSuccessEvidence(preset, result))
       } catch (error) {
         return sendOk(res, readSmokeErrorEvidence(preset, error))
