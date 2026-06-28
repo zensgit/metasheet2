@@ -49,11 +49,24 @@ Date fields are stored as `toISOString()` (UTC). ISO strings sort chronologicall
 plain string `BETWEEN` — no `::timestamptz` cast that could throw on legacy junk. The exact predicate
 (`isDateReminderDue`) runs in JS on the bounded candidate set.
 
+### Save-boundary validation — the UI contract sunk into the API ([P2] review fix)
+The editor only offers `date`/`dateTime` fields, but a direct API / import / script write could persist any
+`dateFieldId` (incl. a non-date field), a negative `offsetDays`, or a non-UTC `timezone` — the scan would then
+warn+skip or mis-fire on an arbitrary parseable-string field. The "date-field reminder" contract was locked in
+the UI only. `validateDateFieldTriggerAtSave` (called from both `createRule` and `updateRule`, after the next
+trigger is composed) **fail-closes** it: `dateFieldId` must EXIST on the sheet and be a `date`/`dateTime` field;
+`offsetDays` a finite non-negative integer; `direction ∈ {before, after}`; `timeOfDay` a valid `HH:mm`; and a
+non-UTC `timezone` is **rejected** (not accept-and-ignore — v1 honors only UTC, so the saved rule's behavior
+matches its config). Any violation → `AutomationRuleValidationError` → 400. Mirrors the existing
+`assertResultWritebackFieldsAtSave` save-time field check. Also: `runDateReminderScanNow` now honors the
+`enabled` gate (a disabled rule is a no-op via the deterministic seam, parity with the scheduler).
+
 ## 4. Files
 
 Backend: `automation-date-reminder.ts` (pure core, new) · `automation-triggers.ts` (type) ·
 `automation-scheduler.ts` (register the scan cadence) · `automation-service.ts` (`evaluateDateReminders`
-scan/claim/fire + `runDateReminderScanNow` ops/test seam + VALID_TRIGGER_TYPES + 3 registration points) ·
+scan/claim/fire + `runDateReminderScanNow` ops/test seam (enabled-gated) + `validateDateFieldTriggerAtSave`
+wired into create/updateRule + VALID_TRIGGER_TYPES + 3 registration points) ·
 migrations: `…_add_date_field_trigger_type` (widen CHECK) + `…_create_date_reminder_fires` (ledger, FK
 ON DELETE CASCADE). Frontend: `types.ts` · `meta-automation-labels.ts` · `MetaAutomationRuleEditor.vue`
 (trigger option + date-field/offset/direction/time config + submit normalization).
@@ -62,13 +75,19 @@ ON DELETE CASCADE). Frontend: `types.ts` · `meta-automation-labels.ts` · `Meta
 
 - **Pure unit (no DB) — 16/16:** occurrence purity + day-bucketing + before/after/offset/default-time +
   null-safety; firing-window (due / future / out-of-window / before-creation); clamp; candidate range.
-- **Real-DB integration — 5/5** (`multitable-date-reminder-trigger.test.ts`, wired into `plugin-tests.yml`):
+- **Real-DB integration — 11/11** (`multitable-date-reminder-trigger.test.ts`, wired into `plugin-tests.yml`):
   DR-1 due record fires once (claim row + `update_record` marker stamped via the record context) · DR-2
   idempotent (no new claim, no new execution on re-scan) · **DR-3 backfill bound** (the same due record under a
   FRESH rule does NOT fire — occurrence < created_at) · DR-6 date edited to a new reminder-day fires a new
-  occurrence, old stays deduped.
-- **Two fail-first proofs:** disabling the dedup guard → DR-2 RED (re-fire); disabling the `created_at`
-  predicate → DR-3 RED (fresh rule backfills `claimCount=1`). Both restored → green.
+  occurrence, old stays deduped · **DR-VAL ×4** (unknown field / non-date string field / negative offset /
+  non-UTC timezone all → validation error at save) + valid date config saves · **DR-DISABLED** (a disabled
+  rule is a no-op via the seam).
+- **Three fail-first proofs:** disabling the dedup guard → DR-2 RED (re-fire); disabling the `created_at`
+  predicate → DR-3 RED (fresh rule backfills `claimCount=1`); disabling the save-boundary validator → the 4
+  DR-VAL rejection tests RED (bad-config rules persist). All restored → green.
+- **No regression on shared paths:** `createRule`/`updateRule` are shared — the shared automation unit suites
+  (`multitable-automation-service`, `automation-v1`) stay green; the validator no-ops for every non-date_field
+  trigger.
 - **Typecheck:** backend `tsc --noEmit` exit 0; frontend `vue-tsc -b` exit 0; editor + labels specs 106/106
   (trigger-option count 7→8 updated in place; a new render test added).
 

@@ -794,6 +794,9 @@ export class AutomationService {
     const writebackFieldError = await this.assertResultWritebackFieldsAtSave(sheetId, actionsForValidation)
     if (writebackFieldError) throw new AutomationRuleValidationError(writebackFieldError)
 
+    const dateTriggerError = await this.validateDateFieldTriggerAtSave(sheetId, input.triggerType, input.triggerConfig ?? null)
+    if (dateTriggerError) throw new AutomationRuleValidationError(dateTriggerError)
+
     const row = {
       id: ruleId,
       sheet_id: sheetId,
@@ -953,6 +956,22 @@ export class AutomationService {
     if (input.conditions !== undefined) updates.conditions = input.conditions ? JSON.stringify(input.conditions) : null
     if (input.actions !== undefined) updates.actions = normalizedActionsForUpdate ? JSON.stringify(normalizedActionsForUpdate) : null
     if (input.executionMode !== undefined) updates.execution_mode = normalizedExecutionModeForUpdate ?? normalizeExecutionMode(input.executionMode)
+
+    // W (date-reminder): validate a RESULTING schedule.date_field trigger at the SAVE boundary — fires when the
+    // trigger type/config is being changed and the result is a date_field rule (explicit type, or a config
+    // change on an existing date_field rule). Mirrors createRule's gate so the API can't bypass the UI contract.
+    if (input.triggerType !== undefined || input.triggerConfig !== undefined) {
+      const existingForTrigger = await this.getRule(ruleId)
+      if (!existingForTrigger || existingForTrigger.sheet_id !== sheetId) return null
+      const nextTriggerType = input.triggerType ?? existingForTrigger.trigger_type
+      const nextTriggerConfig = input.triggerConfig !== undefined ? input.triggerConfig : existingForTrigger.trigger_config
+      const dateTriggerError = await this.validateDateFieldTriggerAtSave(
+        sheetId,
+        nextTriggerType,
+        nextTriggerConfig as Record<string, unknown> | null,
+      )
+      if (dateTriggerError) throw new AutomationRuleValidationError(dateTriggerError)
+    }
 
     if (Object.keys(updates).length === 0) return this.getRule(ruleId)
 
@@ -1160,9 +1179,71 @@ export class AutomationService {
   async runDateReminderScanNow(ruleId: string): Promise<void> {
     const rule = await this.getRule(ruleId)
     if (!rule) return
+    // A DISABLED rule never fires via the scheduler (registerSchedule gates on enabled); the deterministic
+    // ops/test seam honors the same gate so a disabled rule can't be made to fire through this path.
+    if (!rule.enabled) return
     const execRule = toExecutorRule(rule)
     if (execRule.trigger.type !== 'schedule.date_field') return
     await this.evaluateDateReminders(execRule)
+  }
+
+  /**
+   * Date-reminder SAVE-boundary validator — sink the editor's date-field contract into createRule/updateRule
+   * so a direct API / import / script write cannot persist a `schedule.date_field` rule that looks saved but
+   * silently skips or mis-fires at scan. Returns a validation-error string (→ AutomationRuleValidationError →
+   * 400) or null. No-op for any other trigger type.
+   *
+   * Enforces: dateFieldId EXISTS on this sheet AND is a `date`/`dateTime` field (not an arbitrary string
+   * field that happens to parse); offsetDays is a finite non-negative integer; direction ∈ {before, after};
+   * timeOfDay (if given) is HH:mm; timezone is rejected unless 'UTC' (v1 honors only UTC — reject, don't
+   * accept-and-ignore, so the saved rule's behavior matches its config).
+   */
+  private async validateDateFieldTriggerAtSave(
+    sheetId: string,
+    triggerType: string,
+    triggerConfig: Record<string, unknown> | null | undefined,
+  ): Promise<string | null> {
+    if (triggerType !== 'schedule.date_field') return null
+    const cfg = isRecord(triggerConfig) ? triggerConfig : {}
+
+    const dateFieldId = typeof cfg.dateFieldId === 'string' ? cfg.dateFieldId.trim() : ''
+    if (!dateFieldId) return 'schedule.date_field requires a dateFieldId'
+
+    if (cfg.direction !== 'before' && cfg.direction !== 'after') {
+      return "schedule.date_field direction must be 'before' or 'after'"
+    }
+
+    const offsetDays = cfg.offsetDays
+    if (
+      typeof offsetDays !== 'number' ||
+      !Number.isFinite(offsetDays) ||
+      !Number.isInteger(offsetDays) ||
+      offsetDays < 0
+    ) {
+      return 'schedule.date_field offsetDays must be a non-negative integer'
+    }
+
+    if (cfg.timeOfDay !== undefined && cfg.timeOfDay !== null && cfg.timeOfDay !== '') {
+      const t = typeof cfg.timeOfDay === 'string' ? cfg.timeOfDay : ''
+      const m = /^(\d{1,2}):(\d{2})$/.exec(t)
+      if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) {
+        return 'schedule.date_field timeOfDay must be HH:mm (00:00–23:59)'
+      }
+    }
+
+    if (cfg.timezone !== undefined && cfg.timezone !== null && cfg.timezone !== '' && cfg.timezone !== 'UTC') {
+      return `schedule.date_field timezone v1 supports only 'UTC' (got ${String(cfg.timezone)})`
+    }
+
+    const res = await this.queryFn('SELECT type FROM meta_fields WHERE sheet_id = $1 AND id = $2', [sheetId, dateFieldId])
+    const row = (res.rows as Array<{ type: unknown }>)[0]
+    if (!row) return `schedule.date_field dateFieldId not found on sheet: ${dateFieldId}`
+    const fieldType = typeof row.type === 'string' ? row.type : ''
+    if (fieldType !== 'date' && fieldType !== 'dateTime') {
+      return `schedule.date_field dateFieldId must be a date/dateTime field (got ${fieldType || 'unknown'})`
+    }
+
+    return null
   }
 
   /**

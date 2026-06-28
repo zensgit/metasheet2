@@ -103,7 +103,8 @@ describeIfDatabase('multitable date-reminder trigger — scan/claim/fire (real D
     svc.shutdown()
     await q('DELETE FROM meta_automation_date_reminder_fires WHERE rule_id = ANY($1::text[])', [[RULE_BACKDATED, RULE_FRESH]]).catch(() => {})
     await q('DELETE FROM multitable_automation_executions WHERE rule_id = ANY($1::text[])', [[RULE_BACKDATED, RULE_FRESH]]).catch(() => {})
-    await q('DELETE FROM automation_rules WHERE id = ANY($1::text[])', [[RULE_BACKDATED, RULE_FRESH]]).catch(() => {})
+    // Sheet-scoped so the save-validation goldens' throwaway rules are reaped too (FK cascades their ledger rows).
+    await q('DELETE FROM automation_rules WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
@@ -151,5 +152,56 @@ describeIfDatabase('multitable date-reminder trigger — scan/claim/fire (real D
     // both occurrences (today + yesterday) are now in the ledger for REC_DUE.
     const occRows = await q('SELECT count(*)::int AS n FROM meta_automation_date_reminder_fires WHERE rule_id = $1 AND record_id = $2', [RULE_BACKDATED, REC_DUE])
     expect((occRows.rows as Array<{ n: number }>)[0].n).toBe(2)
+  })
+
+  // ── P2: SAVE-boundary validation — the UI's date-field contract is enforced in createRule/updateRule, so a
+  // direct API / import / script write cannot persist a rule that looks saved but skips/mis-fires at scan. ──
+  const mkDateRule = (triggerConfig: Record<string, unknown>) => ({
+    name: `dr-val ${TS}`,
+    triggerType: 'schedule.date_field',
+    triggerConfig,
+    actionType: 'update_record',
+    actionConfig: { fields: { [FLD_MARK]: 'reminded' } },
+  }) as never
+
+  test('DR-VAL: rejects an unknown dateFieldId at save (not found on sheet)', async () => {
+    await expect(svc.createRule(SHEET, mkDateRule({ dateFieldId: `nope_${TS}`, offsetDays: 3, direction: 'before' })))
+      .rejects.toThrow(/dateFieldId not found/i)
+  })
+
+  test('DR-VAL: rejects a NON-date field (string) at save', async () => {
+    await expect(svc.createRule(SHEET, mkDateRule({ dateFieldId: FLD_MARK, offsetDays: 3, direction: 'before' })))
+      .rejects.toThrow(/must be a date\/dateTime field/i)
+  })
+
+  test('DR-VAL: rejects a negative offsetDays at save', async () => {
+    await expect(svc.createRule(SHEET, mkDateRule({ dateFieldId: FLD_DATE, offsetDays: -1, direction: 'before' })))
+      .rejects.toThrow(/offsetDays must be a non-negative integer/i)
+  })
+
+  test('DR-VAL: rejects a non-UTC timezone at save (v1 honors only UTC — reject, not accept-and-ignore)', async () => {
+    await expect(svc.createRule(SHEET, mkDateRule({ dateFieldId: FLD_DATE, offsetDays: 3, direction: 'before', timezone: 'America/New_York' })))
+      .rejects.toThrow(/timezone v1 supports only 'UTC'/i)
+  })
+
+  test('DR-VAL: a valid date field + config saves successfully', async () => {
+    const ok = await svc.createRule(SHEET, mkDateRule({ dateFieldId: FLD_DATE, offsetDays: 1, direction: 'after', timeOfDay: '08:30' }))
+    expect(ok.id).toBeTruthy()
+    expect(ok.trigger_type).toBe('schedule.date_field')
+  })
+
+  test('DR-DISABLED: a DISABLED date_field rule is a no-op via runDateReminderScanNow (enabled gate honored)', async () => {
+    const disabled = await svc.createRule(SHEET, {
+      name: `dr-disabled ${TS}`,
+      triggerType: 'schedule.date_field',
+      triggerConfig: { dateFieldId: FLD_DATE, offsetDays: 3, direction: 'before', timeOfDay: '00:00' },
+      actionType: 'update_record',
+      actionConfig: { fields: { [FLD_MARK]: 'reminded' } },
+      enabled: false,
+    } as never)
+    // Backdate so an ENABLED rule WOULD fire for REC_DUE — isolating "disabled" as the only reason it doesn't.
+    await q('UPDATE automation_rules SET created_at = $1 WHERE id = $2', [iso(TS - 10 * DAY), disabled.id])
+    await svc.runDateReminderScanNow(disabled.id)
+    expect(await claimCount(disabled.id)).toBe(0)
   })
 })
