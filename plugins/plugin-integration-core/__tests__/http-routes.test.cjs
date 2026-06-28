@@ -5537,6 +5537,12 @@ async function testReadSmokeRoute() {
         return {
           async read(req) {
             readArgs.push(req)
+            if (req.options && req.options.k3ReadMode === 'list') {
+              return {
+                records: [{ FName: 'SECRET-LIST-NAME', FNumber: 'M-LIST-001' }, { FName: 'SECRET-LIST-NAME-2', FNumber: 'M-LIST-002' }],
+                metadata: { readPath: 'https://k3host/K3API/Material/List' },
+              }
+            }
             return {
               records: [{ _k3ReferenceObjects: { unit: {} }, FName: 'SECRET-NAME', FNumber: req.filters.FNumber }],
               metadata: { requestedNumber: req.filters.FNumber, readPath: 'https://k3host/x' },
@@ -5593,18 +5599,59 @@ async function testReadSmokeRoute() {
   assert.deepEqual(readArgs[readArgs.length - 1], { object: 'material', filters: { FNumber: 'M-002' } }, 'intent shape drives the same single FNumber read')
   assert.ok(!JSON.stringify(okIntent.body.data).includes('M-002'), 'intent-shape response is values-free')
 
-  // C2: LIST/BOM cannot enter via intent — fail-closed before any system load
+  // C3: LIST-only preset accepts the explicit intent shape and drives a bounded preset-owned list read.
+  const okList = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: WRITE_USER, params: { id: 'sys_1' },
+    body: { presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list' } },
+  })
+  assertOkResponse(okList, 200)
+  assert.equal(okList.body.data.ok, true)
+  assert.equal(okList.body.data.presetId, 'k3wise.material-list.v1')
+  assert.equal(okList.body.data.object, 'material')
+  assert.equal(okList.body.data.mode, 'list')
+  assert.equal(okList.body.data.recordCount, 2)
+  assert.deepEqual(readArgs[readArgs.length - 1], { object: 'material', limit: 10, options: { k3ReadMode: 'list' } }, 'LIST uses preset-owned bounded pagination only')
+  const listAdapterSystem = findCalls(calls, 'createAdapter').at(-1)[1]
+  assert.deepEqual(listAdapterSystem.config.objects.material, {
+    operations: ['upsert', 'read'],
+    savePath: '/K3API/Material/Save',
+    readPath: '/K3API/Material/List',
+    readMethod: 'POST',
+    readMode: 'list',
+    readListBodyTemplate: { Data: { PageIndex: 1 } },
+    pageIndexField: 'PageIndex',
+    pageSizeField: 'PageSize',
+    maxListLimit: 10,
+  }, 'LIST applies the non-persisted Material/List overlay before adapter creation')
+  const okListStr = JSON.stringify(okList.body.data)
+  for (const leak of ['M-LIST-001', 'SECRET-LIST-NAME', 'k3host', 'readPath']) {
+    assert.ok(!okListStr.includes(leak), `LIST read-smoke response must not leak ${leak}`)
+  }
+
+  // C2/C3: unauthorized LIST/BOM/raw fields fail closed before any system load.
+  const systemLoadCountBeforeInvalid = findCalls(calls, 'getExternalSystemForAdapter').length
   const intentBom = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
     user: WRITE_USER, params: { id: 'sys_1' },
     body: { presetId: 'k3wise.material-detail.v1', intent: { object: 'bom', mode: 'single_record_detail', key: 'M-003' } },
   })
   assert.equal(intentBom.statusCode, 400, 'intent.object=bom is fail-closed (not allowlisted)')
+  assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, systemLoadCountBeforeInvalid, 'invalid intent fails before system load')
   // C2: raw config in intent (readPath) cannot ride in
   const intentRaw = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
     user: WRITE_USER, params: { id: 'sys_1' },
     body: { presetId: 'k3wise.material-detail.v1', intent: { object: 'material', mode: 'single_record_detail', key: 'M-004', readPath: '/evil' } },
   })
   assert.equal(intentRaw.statusCode, 400, 'raw config in intent is fail-closed')
+  const listRaw = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: WRITE_USER, params: { id: 'sys_1' },
+    body: { presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list', limit: 500 } },
+  })
+  assert.equal(listRaw.statusCode, 400, 'LIST request-supplied pagination is fail-closed')
+  const listKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: WRITE_USER, params: { id: 'sys_1' },
+    body: { presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list', key: 'M-004' } },
+  })
+  assert.equal(listKey.statusCode, 400, 'LIST request-supplied key/filter is fail-closed')
 
   // write-gated: a read-only integration user cannot trigger the credentialed probe (existence-oracle risk)
   const denied = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {

@@ -166,6 +166,25 @@ function createK3FetchMock() {
       response.Data[0].Data.FNumber = materialNumber
       return jsonResponse(200, response)
     }
+    if (parsed.pathname === '/K3API/Material/List') {
+      const pageSize = body && body.Data && body.Data.PageSize
+      if (!pageSize) {
+        return jsonResponse(200, {
+          StatusCode: 201,
+          Message: 'PageSize is required',
+          Data: [],
+        })
+      }
+      return jsonResponse(200, {
+        StatusCode: 200,
+        Message: 'Material list succeeded',
+        Data: [
+          { FNumber: 'MAT-LIST-001', FName: 'Material 1' },
+          { FNumber: 'MAT-LIST-002', FName: 'Material 2' },
+          { FNumber: 'MAT-LIST-003', FName: 'Material 3' },
+        ],
+      })
+    }
     if (parsed.pathname === '/K3API/Material/Submit') {
       return jsonResponse(200, { success: true, submitted: body.Number })
     }
@@ -879,6 +898,123 @@ async function testK3WebApiMaterialDetailReadSmoke() {
   assert.ok(bomRead instanceof UnsupportedAdapterOperationError, 'read-only smoke does not unlock BOM reads')
 }
 
+async function testK3WebApiMaterialListReadSmoke() {
+  const { calls, fetchImpl } = createK3FetchMock()
+  const adapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test',
+        autoSubmit: false,
+        autoAudit: false,
+        objects: {
+          material: {
+            operations: ['read'],
+            readPath: '/K3API/Material/List',
+            readMethod: 'POST',
+            readMode: 'list',
+            readListBodyTemplate: { Data: { PageIndex: 1 } },
+            pageIndexField: 'PageIndex',
+            pageSizeField: 'PageSize',
+            maxListLimit: 3,
+          },
+        },
+      },
+    }),
+    fetchImpl,
+  })
+
+  const read = await adapter.read({
+    object: 'material',
+    limit: 2,
+    options: { k3ReadMode: 'list' },
+  })
+
+  assert.equal(read.records.length, 2, 'Material/List smoke returns only the bounded requested count')
+  assert.equal(read.nextCursor, null, 'bounded LIST smoke is a one-page probe with no cursor')
+  assert.equal(read.done, true, 'bounded LIST smoke is terminal')
+  assert.equal(read.metadata.mode, 'material-list-smoke')
+  assert.equal(read.metadata.readOnly, true)
+  assert.equal(read.metadata.requestedLimit, 2)
+  assert.equal(read.metadata.returnedRecordCount, 2)
+  assert.equal(read.metadata.readPath, '/K3API/Material/List')
+
+  const listCalls = calls.filter((call) => call.pathname === '/K3API/Material/List')
+  assert.equal(listCalls.length, 1, 'LIST smoke calls Material/List once')
+  assert.equal(listCalls[0].options.method, 'POST')
+  assert.equal(listCalls[0].options.headers['X-K3-Session'], 'k3-session-1')
+  assert.deepEqual(listCalls[0].body, {
+    Data: { PageIndex: 1, PageSize: 2 },
+  })
+  assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Save'), false, 'LIST smoke must not Save')
+  assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Submit'), false, 'LIST smoke must not Submit')
+  assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Audit'), false, 'LIST smoke must not Audit')
+
+  const filtered = await adapter.read({
+    object: 'material',
+    limit: 2,
+    filters: { FNumber: 'MAT-LIST-001' },
+    options: { k3ReadMode: 'list' },
+  }).catch((error) => error)
+  assert.ok(filtered instanceof AdapterValidationError, 'LIST smoke rejects request-supplied filters')
+  assert.equal(filtered.details.code, 'K3_WISE_READ_LIST_FILTER_UNSUPPORTED')
+
+  const cursorRead = await adapter.read({
+    object: 'material',
+    limit: 2,
+    cursor: 'next-page',
+    options: { k3ReadMode: 'list' },
+  }).catch((error) => error)
+  assert.ok(cursorRead instanceof AdapterValidationError, 'LIST smoke rejects cursor pagination')
+  assert.equal(cursorRead.details.code, 'K3_WISE_READ_LIST_CURSOR_UNSUPPORTED')
+
+  const watermarkRead = await adapter.read({
+    object: 'material',
+    limit: 2,
+    watermark: { FModifyDate: '2026-05-01T00:00:00Z' },
+    options: { k3ReadMode: 'list' },
+  }).catch((error) => error)
+  assert.ok(watermarkRead instanceof AdapterValidationError, 'LIST smoke rejects watermark reads')
+  assert.equal(watermarkRead.details.code, 'K3_WISE_READ_LIST_WATERMARK_UNSUPPORTED')
+
+  const tooLarge = await adapter.read({
+    object: 'material',
+    limit: 4,
+    options: { k3ReadMode: 'list' },
+  }).catch((error) => error)
+  assert.ok(tooLarge instanceof AdapterValidationError, 'LIST smoke rejects limits above the preset bound')
+  assert.equal(tooLarge.details.code, 'K3_WISE_READ_LIST_LIMIT_EXCEEDED')
+
+  const modeMismatch = await adapter.read({
+    object: 'material',
+    filters: { FNumber: 'MAT-LIST-001' },
+    options: { k3ReadMode: 'single_record_detail' },
+  }).catch((error) => error)
+  assert.ok(modeMismatch instanceof AdapterValidationError, 'list-mode object config cannot be used as a detail read')
+  assert.equal(modeMismatch.details.code, 'K3_WISE_READ_MODE_MISMATCH')
+
+  const detailConfigAdapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test',
+        objects: {
+          material: {
+            operations: ['read'],
+            readPath: '/K3API/Material/GetDetail',
+          },
+        },
+      },
+    }),
+    fetchImpl,
+  })
+  const listWithoutConfig = await detailConfigAdapter.read({
+    object: 'material',
+    limit: 2,
+    options: { k3ReadMode: 'list' },
+  }).catch((error) => error)
+  assert.ok(listWithoutConfig instanceof AdapterValidationError, 'LIST cannot be activated by request option without list-mode config')
+  assert.equal(listWithoutConfig.details.code, 'K3_WISE_READ_LIST_NOT_CONFIGURED')
+}
+
 async function testK3WebApiAuthorityCodeToken() {
   const { calls, fetchImpl } = createK3FetchMock()
   const adapter = createK3WiseWebApiAdapter({
@@ -1534,6 +1670,7 @@ async function testK3WebApiAutoFlagCoercion() {
 async function main() {
   await testK3WebApiAdapter()
   await testK3WebApiMaterialDetailReadSmoke()
+  await testK3WebApiMaterialListReadSmoke()
   await testK3WebApiAuthorityCodeToken()
   await testK3WebApiSaveBusinessEvidence()
   await testK3WebApiNestedDataSaveParse()

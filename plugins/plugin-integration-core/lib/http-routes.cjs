@@ -1604,11 +1604,12 @@ function createHandlers(services, options = {}) {
       })
     },
 
-    // #1709 follow-up: generic read-smoke preset route (v1: K3 Material/GetDetail preset only). Built-in
-    // preset catalog ONLY — no user/request-supplied preset. Read-only: forced single read, no list/
-    // pagination/cursor/watermark/BOM, no Save/Submit/Audit, no production write. Loads credentials via the
-    // backend getExternalSystemForAdapter context (never the public, credential-stripped response) and never
-    // modifies the system's role/config. Evidence is values-free.
+    // #1709 follow-up: generic read-smoke preset route. Built-in preset catalog ONLY — no
+    // user/request-supplied preset. Read-only: forced single-record detail read or the C3 customer-gated,
+    // bounded LIST preset; no request-supplied pagination/filtering, no BOM/resolver, no Save/Submit/Audit,
+    // no production write. Loads credentials via the backend getExternalSystemForAdapter context (never the
+    // public, credential-stripped response) and never modifies the system's role/config. Evidence is
+    // values-free.
     async externalSystemReadSmoke(req, res) {
       // Requires WRITE access: although the operation is read-only, this is an active credentialed outbound
       // probe of K3 and returns an existence signal (recordPresent) a read user could enumerate against keys.
@@ -1637,12 +1638,12 @@ function createHandlers(services, options = {}) {
       }
       const adapterSystem = applyReadSmokePresetOverlay(system, preset)
       const adapter = adapterRegistry.createAdapter(adapterSystem, { principal: requestPrincipal(req) })
-      // Forced single read only; values-free evidence on success or failure (never key/raw/values/credentials).
+      // Preset-owned read only; values-free evidence on success or failure (never key/raw/values/credentials).
       try {
-        const result = await adapter.read(buildReadSmokeRequest(preset, contract.key))
-        return sendOk(res, readSmokeSuccessEvidence(preset, result))
+        const result = await adapter.read(buildReadSmokeRequest(preset, contract))
+        return sendOk(res, readSmokeSuccessEvidence(preset, result, contract))
       } catch (error) {
-        return sendOk(res, readSmokeErrorEvidence(preset, error))
+        return sendOk(res, readSmokeErrorEvidence(preset, error, contract))
       }
     },
 
