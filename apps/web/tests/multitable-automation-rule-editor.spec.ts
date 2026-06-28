@@ -558,6 +558,9 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saved.mock.calls[0][0].actions).toEqual([
       { type: 'start_approval', config: { templateId: 'tmpl_1', formDataMapping: { amount: 'fld_2' } } },
     ])
+    // [P1] start_approval REQUIRES execution_mode workflow_job_v1 — the editor must auto-enable it on save,
+    // else the server fail-closes the rule and the authoring path silently breaks.
+    expect(saved.mock.calls[0][0].executionMode).toBe('workflow_job_v1')
   })
 
   it('backfills + round-trips a form.submitted → start_approval rule (the combo, both directions)', async () => {
@@ -581,6 +584,24 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saved.mock.calls[0][0].actions).toEqual([
       { type: 'start_approval', config: { templateId: 'tmpl_9', formDataMapping: { amount: 'fld_2' } } },
     ])
+    expect(saved.mock.calls[0][0].executionMode).toBe('workflow_job_v1')
+  })
+
+  it('force-corrects a loaded LEGACY start_approval rule (executionMode: null) to workflow_job_v1 on save', async () => {
+    const saved = vi.fn()
+    const rule = {
+      id: 'atr_sa_legacy', sheetId: 'sheet_1', name: 'legacy sa', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: { templateId: 'tmpl_9', formDataMapping: { amount: 'fld_2' } },
+      enabled: true, executionMode: null,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    // The backend fail-closes a legacy start_approval rule; the editor force-corrects on save — parity with
+    // wait_for_callback's A6-2b golden. (buildPayload enforces job-mode regardless of the loaded null.)
+    expect(saved.mock.calls[0][0].executionMode).toBe('workflow_job_v1')
   })
 
   it('can add and remove conditions', async () => {

@@ -31,12 +31,27 @@ API. So "form submit → start approval" couldn't be built in the UI. This expos
 The UI is **authoring, not the validation gate** — `validateStartApprovalConfig` already fail-closes templateId
 + non-empty mapping at save (create/updateRule), so a bad/incomplete config is rejected server-side regardless.
 
+### [P1] start_approval requires `workflow_job_v1` — the editor must auto-enable it (review fix)
+The backend (`collectNestedAutomationActions` / `validateStartApprovalActionConfigs`) fail-closes any
+`start_approval` rule whose `execution_mode` isn't `workflow_job_v1`. Adding `start_approval` to the *selectable*
+actions alone was a **dead config**: the editor's `JOB_MODE_REQUIRING_ACTION_TYPES` was still
+`['wait_for_callback','condition_branch','parallel_branch']`, so save emitted `executionMode: null` and the server
+rejected the rule — breaking the very "form.submitted → start_approval from the UI" path this slice exists for.
+Fix: add `start_approval` to `JOB_MODE_REQUIRING_ACTION_TYPES` (selecting it now force-on-locks the job-mode
+toggle, and `buildPayload` enforces it regardless of toggle/loaded state — parity with `wait_for_callback`).
+
 ## 3. Verification
 
-- **Editor + labels specs — 110/110** (`apps/web`): `start_approval` is a selectable action; selecting it renders
-  the template + mapping config; a rule **saves** as `{type:'start_approval', config:{templateId, formDataMapping}}`;
-  and a **form.submitted → start_approval** rule **backfills** (templateId + mapping rows repopulate) and
-  **round-trips** on save (both directions, the combo the use-case needs). `vue-tsc -b` exit 0.
+- **Editor + labels specs — all green** (`apps/web`): `start_approval` is a selectable action; selecting it renders
+  the template + mapping config; a rule **saves** as `{type:'start_approval', config:{templateId, formDataMapping}}`
+  **with `executionMode: 'workflow_job_v1'`** ([P1] asserted in both save specs); a **form.submitted →
+  start_approval** rule **backfills** (templateId + mapping rows repopulate) and **round-trips** on save (both
+  directions); and a loaded **legacy** start_approval rule (`executionMode: null`) is **force-corrected** to
+  `workflow_job_v1` on save (parity with `wait_for_callback` A6-2b). `vue-tsc -b` exit 0.
+- **[P1] fail-first:** removing `start_approval` from `JOB_MODE_REQUIRING_ACTION_TYPES` → all 3 start_approval
+  executionMode goldens RED (`expected null to be 'workflow_job_v1'`) — the exact server-reject bug. Restored → green.
+- **No regression on shared action-type machinery:** broader automation web specs (manager, condition/parallel
+  branch editors, log viewer) stay green.
 - **Save-boundary validation — already covered** (no duplication): `automation-v1.test.ts` W6-1 "createRule rejects
   invalid start_approval config before persistence" → `actionConfig.templateId is required`. The UI relies on this.
 - **Backend capability re-check — 14/14** (`multitable-automation-start-approval`, real DB): `start_approval`

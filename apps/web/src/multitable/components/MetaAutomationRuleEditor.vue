@@ -1882,11 +1882,13 @@ function draftFromRule(rule: AutomationRule): Draft {
 const draft = ref<Draft>(emptyDraft())
 const conditionEditorEntries = computed(() => collectConditionEditorEntries(draft.value.conditions.conditions))
 
-// A6-2b/A6-3-2a/A6-3-4: wait_for_callback, condition_branch, and parallel_branch all REQUIRE execution_mode
-// 'workflow_job_v1' — the backend fail-closes a legacy rule that contains either. So whenever such
-// an action is present the job-mode toggle is forced on (and disabled), and buildPayload enforces it
-// regardless of toggle/loaded state.
-const JOB_MODE_REQUIRING_ACTION_TYPES: AutomationActionType[] = ['wait_for_callback', 'condition_branch', 'parallel_branch']
+// A6-2b/A6-3-2a/A6-3-4 + start_approval (W6-1): wait_for_callback, condition_branch, parallel_branch, AND
+// start_approval all REQUIRE execution_mode 'workflow_job_v1' — the backend (collectNestedAutomationActions /
+// validateStartApprovalActionConfigs) fail-closes a legacy rule that contains any of them. So whenever such an
+// action is present the job-mode toggle is forced on (and disabled), and buildPayload enforces it regardless
+// of toggle/loaded state. (start_approval MUST be here, else the editor would save executionMode:null and the
+// server would reject the rule — breaking the "form.submitted → start_approval" authoring path.)
+const JOB_MODE_REQUIRING_ACTION_TYPES: AutomationActionType[] = ['wait_for_callback', 'condition_branch', 'parallel_branch', 'start_approval']
 const requiresJobMode = computed(() =>
   draft.value.actions.some((a) => JOB_MODE_REQUIRING_ACTION_TYPES.includes(a.type)),
 )
