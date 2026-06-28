@@ -179,7 +179,11 @@ assert.deepEqual(readSmokeSuccessEvidence(LIST_PRESET, { records: [{ FNumber: 'M
 
 // --- error evidence: coarse code + type ONLY (never the message, which may carry the key/values) ---
 class FakeAdapterError extends Error {
-  constructor() { super('material M-001 failed with secret value 42'); this.name = 'K3WiseWebApiAdapterError'; this.code = 'K3_WISE_READ_BUSINESS_ERROR' }
+  constructor() {
+    super('material M-001 failed with secret value 42')
+    this.name = 'K3WiseWebApiAdapterError'
+    this.details = { code: 'K3_WISE_READ_BUSINESS_ERROR' }
+  }
 }
 const errEv = readSmokeErrorEvidence(PRESET, new FakeAdapterError(), { object: 'material', mode: 'single_record_detail' })
 assert.deepEqual(errEv, {
@@ -189,6 +193,15 @@ assert.deepEqual(errEv, {
 const errStr = JSON.stringify(errEv)
 for (const leak of ['M-001', '42', 'failed with secret']) {
   assert.ok(!errStr.includes(leak), `error evidence must not leak ${leak}`)
+}
+const unsafeDetails = new Error('material M-001 failed with secret value 42')
+unsafeDetails.name = 'K3WiseWebApiAdapterError'
+unsafeDetails.details = { code: 'M-001 failed with secret value 42' }
+const unsafeEv = readSmokeErrorEvidence(PRESET, unsafeDetails, { object: 'material', mode: 'single_record_detail' })
+assert.equal(unsafeEv.errorCode, 'READ_SMOKE_READ_FAILED', 'non-enum details.code is not surfaced')
+const unsafeStr = JSON.stringify(unsafeEv)
+for (const leak of ['M-001', '42', 'failed with secret']) {
+  assert.ok(!unsafeStr.includes(leak), `unsafe details.code must not leak ${leak}`)
 }
 // error without code/name → safe defaults
 const bare = readSmokeErrorEvidence(PRESET, {}, { object: 'material', mode: 'single_record_detail' })
