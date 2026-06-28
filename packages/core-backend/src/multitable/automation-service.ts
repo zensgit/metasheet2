@@ -6,8 +6,7 @@ import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, type AutomationTriggerType } fro
 import {
   computeDateReminderOccurrence,
   isDateReminderDue,
-  dateReminderScanIntervalMs,
-  dateReminderScanWindowMs,
+  DATE_REMINDER_GRACE_WINDOW_MS,
   dateReminderCandidateDateRange,
   type ScheduleDateFieldConfig,
 } from './automation-date-reminder'
@@ -1126,7 +1125,8 @@ export class AutomationService {
     }
 
     const nowMs = Date.now()
-    const scanWindowMs = dateReminderScanWindowMs(dateReminderScanIntervalMs(config))
+    // DR-D: fixed grace window (decoupled from any per-rule cadence) — bounds backfill + missed-tick catch-up.
+    const scanWindowMs = DATE_REMINDER_GRACE_WINDOW_MS
     const createdAtMs = new Date(rule.createdAt).getTime()
     const ruleCreatedAtMs = Number.isNaN(createdAtMs) ? 0 : createdAtMs
     const { loIso, hiIso } = dateReminderCandidateDateRange(nowMs, config, scanWindowMs)

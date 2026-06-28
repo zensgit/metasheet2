@@ -6,7 +6,11 @@
  */
 
 import { Logger } from '../core/logger'
-import { dateReminderScanIntervalMs, type ScheduleDateFieldConfig } from './automation-date-reminder'
+import {
+  nextDateReminderTimerDelayMs,
+  dateReminderTimeOfDayPassed,
+  type ScheduleDateFieldConfig,
+} from './automation-date-reminder'
 import type { AutomationRule } from './automation-executor'
 import type { RedisLeaderLock } from './redis-leader-lock'
 
@@ -464,9 +468,27 @@ export class AutomationScheduler {
     this.unregister(rule.id)
 
     const trigger = rule.trigger
+
+    // schedule.date_field — DR-A/DR-B: NOT a boot-anchored fixed interval. The scan is aligned to the rule's
+    // UTC `timeOfDay` via a self-re-arming setTimeout, plus ONE bounded catch-up if today's time already passed
+    // at register/restart. Correctness still lives in the firing-window predicate (it bounds the catch-up so it
+    // can never backfill-blast). The DEDUP/backfill window is the fixed DATE_REMINDER_GRACE_WINDOW_MS constant
+    // (DR-D) — not a per-rule cadence.
+    if (trigger.type === 'schedule.date_field') {
+      if (!this.isLeader) {
+        logger.debug(`Rule ${rule.id}: non-leader instance — skipping timer`)
+        return
+      }
+      const config = trigger.config as Partial<ScheduleDateFieldConfig>
+      if (dateReminderTimeOfDayPassed(config.timeOfDay, Date.now())) {
+        this.runScheduledRule(rule)
+      }
+      this.armDateFieldTimer(rule, config)
+      return
+    }
+
     let intervalMs: number | null = null
     let cronExpression: string | null = null
-
     if (trigger.type === 'schedule.interval') {
       intervalMs = typeof trigger.config.intervalMs === 'number' ? trigger.config.intervalMs : null
       if (!intervalMs || intervalMs < 1000) {
@@ -483,11 +505,6 @@ export class AutomationScheduler {
         logger.warn(`Rule ${rule.id}: unsupported cron expression: ${cronExpression}`)
         return
       }
-    } else if (trigger.type === 'schedule.date_field') {
-      // Date-reminder: a fixed SCAN cadence (default daily). The timer fires the same callback as cron, but
-      // the service callback branches on the type and runs evaluateDateReminders (scan → claim → fire) rather
-      // than executing the rule once. Correctness lives in the firing-window predicate, not the cadence.
-      intervalMs = dateReminderScanIntervalMs(trigger.config as Partial<ScheduleDateFieldConfig>)
     } else {
       // Not a schedule trigger — skip
       return
@@ -504,9 +521,7 @@ export class AutomationScheduler {
       return
     }
 
-    const timer = setInterval(() => {
-      this.runScheduledRule(rule)
-    }, intervalMs)
+    const timer = setInterval(() => this.runScheduledRule(rule), intervalMs)
 
     // Prevent timer from keeping the process alive in tests
     if (typeof timer.unref === 'function') {
@@ -515,6 +530,27 @@ export class AutomationScheduler {
 
     this.timers.set(rule.id, timer)
     logger.info(`Registered schedule for rule ${rule.id} (interval: ${intervalMs}ms)`)
+  }
+
+  /**
+   * DR-A: arm a setTimeout to the rule's NEXT UTC `timeOfDay` boundary; on fire, run the scan and re-arm for
+   * the next day — UNLESS the rule was unregistered/replaced meanwhile (the stored timer is no longer this one,
+   * so the `=== timer` guard stops the re-arm). No boot-time anchoring. Leader-only (caller guards). The handle
+   * lives in `this.timers`, so `unregister`'s clear cancels a pending fire.
+   */
+  private armDateFieldTimer(rule: AutomationRule, config: Partial<ScheduleDateFieldConfig>): void {
+    const delay = nextDateReminderTimerDelayMs(config.timeOfDay, Date.now())
+    const timer = setTimeout(() => {
+      this.runScheduledRule(rule)
+      if (this.timers.get(rule.id) === timer) {
+        this.armDateFieldTimer(rule, config)
+      }
+    }, delay)
+    if (typeof timer.unref === 'function') {
+      timer.unref()
+    }
+    this.timers.set(rule.id, timer)
+    logger.info(`Registered date-reminder schedule for rule ${rule.id} (next scan in ${delay}ms, timeOfDay=${config.timeOfDay ?? '09:00'} UTC)`)
   }
 
   /**

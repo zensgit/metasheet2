@@ -98,6 +98,7 @@
             </select>
             <label class="meta-rule-editor__label">{{ isZh ? '触发时间（UTC，可选）' : 'Time of day (UTC, optional)' }}</label>
             <input v-model="draft.triggerConfig.timeOfDay" class="meta-rule-editor__input" type="time" placeholder="09:00" data-field="timeOfDay" />
+            <div class="meta-rule-editor__hint" data-field="dateFieldTimeHint">{{ isZh ? '每天按此 UTC 时间触发；服务重启后会补发当天到点的提醒。' : 'Fires daily at this UTC time; a restart catches up today\'s due reminders.' }}</div>
           </template>
         </section>
 

@@ -1,6 +1,6 @@
 # Date-reminder `timeOfDay`-aligned scheduling — Design Lock
 
-> Status: **PROPOSED — awaiting owner ratify. NO runtime built.** Follow-up to #3329 (`e64414297`, `schedule.date_field` on `main`). Grounding: `origin/main` @ `bb350be40`. Closes the owner-found P2: `timeOfDay` does not drive *when* the scan runs — it is only a threshold inside the due-predicate.
+> Status: **RATIFIED (owner-specified) + BUILT + VERIFIED.** Owner ratified option 1 with the full 5-point spec (grace = 48h, decouple `scanIntervalMs`); built on this branch — see `docs/development/multitable-date-reminder-timeofday-alignment-dev-verification-20260628.md`. Follow-up to #3329 (`e64414297`, `schedule.date_field` on `main`). Grounding: `origin/main` @ `bb350be40`. Closes the owner-found P2: `timeOfDay` did not drive *when* the scan runs — it was only a threshold inside the due-predicate.
 
 ## 1. The defect (owner-found, P2)
 `schedule.date_field` registers a boot-anchored `setInterval(scanIntervalMs)` (default 24h) — `automation-scheduler.ts:289`; the timer fires the cron callback with **no first-tick alignment and no immediate catch-up** (`:305`). So a rule configured for `09:00` fires whenever the daily tick happens to land relative to **server boot time** — e.g. boot at UTC 03:00 ⇒ first fire ~next day 03:00, ≈18h late. Meanwhile the UI ("触发时间（UTC）", `MetaAutomationRuleEditor.vue:99`) and the core comment ("when on reminder day to fire", `automation-date-reminder.ts:33`) both promise a precise fire time. The real-DB tests only drive `runDateReminderScanNow`, so the scheduler cadence is **untested**. → behavior contradicts the promise, and it's unverified.
@@ -46,7 +46,6 @@ UTC-only day bucketing (tz-aware boundary deferred); whole-day offsets only; led
 ## 6. Build sequence (post-ratify only)
 design-lock ratified → DR-A/DR-B scheduler rewrite + DR-D core decouple + DR-E text → DR-4 fake-timer golden + real-DB aligned-path case → backend `tsc` + frontend `vue-tsc` + editor specs → dev/verification MD → PR (held for review, not auto-merged).
 
-## 7. Open decisions for owner
-- **DR-D shape**: remove `scanIntervalMs` from config (recommended) vs keep-as-internal-catch-up-only. 
-- **Grace window value**: 48h (recommended) — confirm or set.
-- Anything else to pin before I build.
+## 7. Resolved decisions (owner-ratified)
+- **DR-D shape** → per the owner's "改名/约束成内部 catch-up 参数": `scanIntervalMs` is RETAINED in the config type but marked `@deprecated`/ignored (drives neither scheduling nor the window), so older persisted rules don't break and it can no longer masquerade as the trigger time. The window is the fixed `DATE_REMINDER_GRACE_WINDOW_MS` constant; `dateReminderScanWindowMs`/`dateReminderScanIntervalMs` removed.
+- **Grace window value** → **48h** (2× daily grace), ratified.
