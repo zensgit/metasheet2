@@ -221,4 +221,32 @@ describeIfDatabase('multitable T8-1 PIT undelete-execute (real DB)', () => {
       await q(`DROP FUNCTION IF EXISTS ${FN}()`, []).catch(() => {})
     }
   })
+
+  test('(m) multi-resurrect forced failure is all-or-nothing — no earlier resurrect survives a later insert failure', async () => {
+    process.env[FLAG] = 'true'
+    const U2 = `rec_un_zmulti_${TS}`
+    await rev(U2, 1, 'create', { [NAME]: 'u2-at-T1', [LINK]: [L] }, T0)
+    const pv = await preview(T1)
+    expect(pv.status).toBe(200)
+    expect(pv.body?.data?.undeleteRecordIds).toHaveLength(2)
+    expect(pv.body?.data?.undeleteRecordIds).toEqual(expect.arrayContaining([U, U2]))
+
+    const FN = `un_multi_fail_${TS}`, TRG = `un_multi_fail_trg_${TS}`
+    await q(`CREATE OR REPLACE FUNCTION ${FN}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'forced multi undelete insert failure'; END; $fn$`, [])
+    await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_records`, [])
+    await q(`CREATE TRIGGER ${TRG} BEFORE INSERT ON meta_records FOR EACH ROW WHEN (NEW.id = '${U2}') EXECUTE FUNCTION ${FN}()`, [])
+    try {
+      const x = await execute(T1, pv.body?.data?.previewIdentity, 'undelete')
+      expect(x.status).toBeGreaterThanOrEqual(409)
+      expect(await liveRow(U)).toBeUndefined()
+      expect(await liveRow(U2)).toBeUndefined()
+      expect(await outboundEdges(U)).toBe(0)
+      expect(await outboundEdges(U2)).toBe(0)
+      expect(await revCount(U)).toBe(2) // create + delete only; no rolled-forward resurrect revision survived
+      expect(await revCount(U2)).toBe(1) // create only; no rolled-forward resurrect revision survived
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_records`, []).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${FN}()`, []).catch(() => {})
+    }
+  })
 })
