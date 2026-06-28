@@ -108,6 +108,12 @@ function localDateKeyOffset(days: number): string {
   return `${year}-${month}-${day}`
 }
 
+function utcDateKeyOffset(days: number): string {
+  const date = new Date()
+  date.setUTCDate(date.getUTCDate() + days)
+  return date.toISOString().slice(0, 10)
+}
+
 function dateOnlyForTest(value: unknown): string {
   if (value instanceof Date) return value.toISOString().slice(0, 10)
   return String(value ?? '').slice(0, 10)
@@ -5488,23 +5494,38 @@ attendanceIntegrationDescribe(
     if (!dbUrl) return
     const pool = new Pool({ connectionString: dbUrl })
     const runSuffix = Date.now().toString(36)
+    const orgId = `rules-me-org-${runSuffix}`
+    const foreignOrgId = `rules-me-foreign-org-${runSuffix}`
     const meId = `rules-me-${runSuffix}`
     const otherId = `rules-me-other-${runSuffix}`
+    const foreignOnlyId = `rules-me-foreign-only-${runSuffix}`
     const adminId = `rules-me-admin-${runSuffix}`
+    const defaultRuleId = randomUuidV4()
     const ruleSetId = randomUuidV4()
     const attendanceGroupId = randomUuidV4()
+    const extraAttendanceGroupId = randomUuidV4()
     const scheduleGroupAId = randomUuidV4()
     const scheduleGroupBId = randomUuidV4()
-    const asOf = '2026-06-15'
-    const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
-    const employeeTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(meId)}&tenantId=default&roles=employee&perms=attendance:read`)
+    const asOf = utcDateKeyOffset(0)
+    const scheduleFrom = utcDateKeyOffset(-10)
+    const scheduleTo = utcDateKeyOffset(10)
+    const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+    const employeeTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(meId)}&tenantId=${encodeURIComponent(orgId)}&roles=employee&perms=attendance:read`)
+    const noGroupTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(otherId)}&tenantId=${encodeURIComponent(orgId)}&roles=employee&perms=attendance:read`)
+    const foreignOnlyTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(foreignOnlyId)}&tenantId=${encodeURIComponent(orgId)}&roles=employee&perms=attendance:read`)
     const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
     const employeeToken = (employeeTokenRes.body as { token?: string } | undefined)?.token
+    const noGroupToken = (noGroupTokenRes.body as { token?: string } | undefined)?.token
+    const foreignOnlyToken = (foreignOnlyTokenRes.body as { token?: string } | undefined)?.token
     expect(adminToken).toBeTruthy()
     expect(employeeToken).toBeTruthy()
-    if (!adminToken || !employeeToken) { await pool.end().catch(() => undefined); return }
+    expect(noGroupToken).toBeTruthy()
+    expect(foreignOnlyToken).toBeTruthy()
+    if (!adminToken || !employeeToken || !noGroupToken || !foreignOnlyToken) { await pool.end().catch(() => undefined); return }
     const adminHeaders = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
     const headers = { Authorization: `Bearer ${employeeToken}` }
+    const noGroupHeaders = { Authorization: `Bearer ${noGroupToken}` }
+    const foreignOnlyHeaders = { Authorization: `Bearer ${foreignOnlyToken}` }
     const originalSettingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
     const originalSettings = (originalSettingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
     try {
@@ -5522,37 +5543,45 @@ attendanceIntegrationDescribe(
       })
       await pool.query(
         `INSERT INTO users (id, email, name, password_hash, is_active)
-         VALUES ($1, $2, $3, 'no-login', true), ($4, $5, $6, 'no-login', true)
+         VALUES ($1, $2, $3, 'no-login', true), ($4, $5, $6, 'no-login', true), ($7, $8, $9, 'no-login', true)
          ON CONFLICT (id) DO UPDATE SET is_active = true`,
-        [meId, `${meId}@example.com`, meId, otherId, `${otherId}@example.com`, otherId],
+        [meId, `${meId}@example.com`, meId, otherId, `${otherId}@example.com`, otherId, foreignOnlyId, `${foreignOnlyId}@example.com`, foreignOnlyId],
       )
       await pool.query(
         `INSERT INTO user_orgs (user_id, org_id, is_active)
-         VALUES ($1, 'default', true), ($2, 'default', true)
+         VALUES ($1, $4, true), ($2, $4, true), ($3, $5, true)
          ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
-        [meId, otherId],
+        [meId, otherId, foreignOnlyId, orgId, foreignOrgId],
+      )
+      await pool.query(`UPDATE attendance_rules SET is_default = false WHERE org_id = $1 AND is_default = true`, [orgId])
+      await pool.query(
+        `INSERT INTO attendance_rules
+           (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes,
+            severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default)
+         VALUES ($1, $2, $3, 'Asia/Shanghai', '08:30', '17:45', 7, 9, 33, 66, 11, '[1,3,5]'::jsonb, true)`,
+        [defaultRuleId, orgId, `Rules Me Runtime Rule ${runSuffix}`],
       )
       await pool.query(
         `INSERT INTO attendance_rule_sets (id, org_id, name, version, scope, config, is_default)
-         VALUES ($1, 'default', $2, 1, 'org', $3::jsonb, false)`,
-        [ruleSetId, `Rules Me Rule Set ${runSuffix}`, JSON.stringify({ source: 'manual', sensitive: `rule-set-secret-${runSuffix}` })],
+         VALUES ($1, $2, $3, 1, 'org', $4::jsonb, false)`,
+        [ruleSetId, orgId, `Rules Me Rule Set ${runSuffix}`, JSON.stringify({ source: 'manual', sensitive: `rule-set-secret-${runSuffix}` })],
       )
       await pool.query(
         `INSERT INTO attendance_groups (id, org_id, name, code, timezone, rule_set_id, attendance_type, created_at, updated_at)
-         VALUES ($1, 'default', $2, $3, 'Asia/Shanghai', $4, 'scheduled_shift', now(), now())`,
-        [attendanceGroupId, `Rules Me Group ${runSuffix}`, `rules-me-${runSuffix}`, ruleSetId],
+         VALUES ($1, $2, $3, $4, 'Asia/Shanghai', $5, 'scheduled_shift', now(), now())`,
+        [attendanceGroupId, orgId, `Rules Me Group ${runSuffix}`, `rules-me-${runSuffix}`, ruleSetId],
       )
       await pool.query(
         `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
-         VALUES ('default', $1, $2, now(), now())`,
-        [attendanceGroupId, meId],
+         VALUES ($1, $2, $3, now(), now())`,
+        [orgId, attendanceGroupId, meId],
       )
       await pool.query(
         `INSERT INTO attendance_schedule_groups
            (id, org_id, name, code, attendance_group_id, department_ref, source, is_active, created_by, updated_by, created_at, updated_at)
          VALUES
-           ($1, 'default', $2, $3, $7, 'dept-a', 'manual', true, $8, $8, now(), now()),
-           ($4, 'default', $5, $6, $7, 'dept-b', 'manual', true, $8, $8, now(), now())`,
+           ($1, $9, $2, $3, $7, 'dept-a', 'manual', true, $8, $8, now(), now()),
+           ($4, $9, $5, $6, $7, 'dept-b', 'manual', true, $8, $8, now(), now())`,
         [
           scheduleGroupAId,
           `Rules Me Schedule A ${runSuffix}`,
@@ -5562,15 +5591,16 @@ attendanceIntegrationDescribe(
           `rules-me-sgb-${runSuffix}`,
           attendanceGroupId,
           adminId,
+          orgId,
         ],
       )
       await pool.query(
         `INSERT INTO attendance_schedule_group_members
            (org_id, schedule_group_id, user_id, effective_from, effective_to, role, source, created_by, updated_by, created_at, updated_at)
          VALUES
-           ('default', $1, $3, '2026-01-01', '2026-12-31', 'member', 'manual', $4, $4, now(), now()),
-           ('default', $2, $3, '2026-06-01', '2026-06-30', 'backup', 'manual', $4, $4, now(), now())`,
-        [scheduleGroupAId, scheduleGroupBId, meId, adminId],
+           ($1, $2, $4, $5, $6, 'member', 'manual', $7, $7, now(), now()),
+           ($1, $3, $4, $5, $6, 'backup', 'manual', $7, $7, now(), now())`,
+        [orgId, scheduleGroupAId, scheduleGroupBId, meId, scheduleFrom, scheduleTo, adminId],
       )
 
       const res = await requestJson(`${baseUrl}/api/attendance/rules/me?asOf=${asOf}`, { headers })
@@ -5589,7 +5619,7 @@ attendanceIntegrationDescribe(
         warnings?: Array<{ code?: string }>
       } | undefined
       expect(data?.userId).toBe(meId)
-      expect(data?.orgId).toBe('default')
+      expect(data?.orgId).toBe(orgId)
       expect(data?.resolvedForDate).toBe(asOf)
       expect(data?.assignment?.attendanceGroups).toHaveLength(1)
       expect(data?.assignment?.attendanceGroups?.[0]).toMatchObject({
@@ -5598,7 +5628,20 @@ attendanceIntegrationDescribe(
         ruleSetId,
       })
       expect(data?.assignment?.scheduleGroups).toHaveLength(2)
-      expect(data?.runtimeRule).toMatchObject({ source: 'rule', timezone: expect.any(String) })
+      expect(data?.runtimeRule).toMatchObject({
+        source: 'rule',
+        id: defaultRuleId,
+        name: `Rules Me Runtime Rule ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        workStartTime: '08:30:00',
+        workEndTime: '17:45:00',
+        lateGraceMinutes: 7,
+        earlyGraceMinutes: 9,
+        severeLateThresholdMinutes: 33,
+        absenceLateThresholdMinutes: 66,
+        roundingMinutes: 11,
+        workingDays: [1, 3, 5],
+      })
       expect(data?.configuredGroupRule).toMatchObject({ groupId: attendanceGroupId, ruleSetId, enforcement: 'not_user_calc_chain' })
       expect(data?.punchPolicy).toMatchObject({
         source: 'org_settings',
@@ -5610,10 +5653,47 @@ attendanceIntegrationDescribe(
       const warningCodes = new Set((data?.warnings ?? []).map((warning: { code?: string }) => warning.code))
       expect(warningCodes.has('MULTIPLE_SCHEDULE_GROUPS')).toBe(true)
       expect(warningCodes.has('SCHEDULE_GROUP_WINDOW_OVERLAP')).toBe(true)
+      expect(warningCodes.has('DEFAULT_RULE_FALLBACK')).toBe(true)
       expect(warningCodes.has('GROUP_RULE_SET_PREVIEW_DIVERGENCE')).toBe(true)
       expect(res.raw).not.toContain(`secret-flow-${runSuffix}`)
       expect(res.raw).not.toContain(`rule-set-secret-${runSuffix}`)
       expect(res.raw).not.toContain('geoFence')
+
+      const noGroupRes = await requestJson(`${baseUrl}/api/attendance/rules/me?asOf=${asOf}`, { headers: noGroupHeaders })
+      expect(noGroupRes.status, noGroupRes.raw).toBe(200)
+      const noGroupData = (noGroupRes.body as { data?: { assignment?: { attendanceGroups?: unknown[], scheduleGroups?: unknown[] }, warnings?: Array<{ code?: string }> } } | undefined)?.data
+      expect(noGroupData?.assignment?.attendanceGroups).toHaveLength(0)
+      expect(noGroupData?.assignment?.scheduleGroups).toHaveLength(0)
+      const noGroupWarningCodes = new Set((noGroupData?.warnings ?? []).map((warning) => warning.code))
+      expect(noGroupWarningCodes.has('NO_ATTENDANCE_GROUP')).toBe(true)
+      expect(noGroupWarningCodes.has('DEFAULT_RULE_FALLBACK')).toBe(true)
+
+      const foreignOrgRes = await requestJson(`${baseUrl}/api/attendance/rules/me?asOf=${asOf}`, { headers: foreignOnlyHeaders })
+      expect(foreignOrgRes.status).toBe(404)
+      expect((foreignOrgRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('USER_NOT_IN_ORG')
+
+      await pool.query(
+        `INSERT INTO attendance_groups (id, org_id, name, code, timezone, attendance_type, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'Asia/Shanghai', 'scheduled_shift', now(), now())`,
+        [extraAttendanceGroupId, orgId, `Rules Me Extra Group ${runSuffix}`, `rules-me-extra-${runSuffix}`],
+      )
+      await pool.query(
+        `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
+         VALUES ($1, $2, $3, now(), now())`,
+        [orgId, extraAttendanceGroupId, meId],
+      )
+      const multiAttendanceGroupRes = await requestJson(`${baseUrl}/api/attendance/rules/me?asOf=${asOf}`, { headers })
+      expect(multiAttendanceGroupRes.status, multiAttendanceGroupRes.raw).toBe(200)
+      const multiAttendanceGroupData = (multiAttendanceGroupRes.body as { data?: { assignment?: { attendanceGroups?: unknown[] }, warnings?: Array<{ code?: string }> } } | undefined)?.data
+      expect(multiAttendanceGroupData?.assignment?.attendanceGroups).toHaveLength(2)
+      const multiAttendanceWarningCodes = new Set((multiAttendanceGroupData?.warnings ?? []).map((warning) => warning.code))
+      expect(multiAttendanceWarningCodes.has('MULTIPLE_ATTENDANCE_GROUPS')).toBe(true)
+
+      for (const outOfRange of [utcDateKeyOffset(-32), utcDateKeyOffset(32)]) {
+        const rangeRes = await requestJson(`${baseUrl}/api/attendance/rules/me?asOf=${outOfRange}`, { headers })
+        expect(rangeRes.status).toBe(400)
+        expect((rangeRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ATTENDANCE_RULES_ME_AS_OF_OUT_OF_RANGE')
+      }
 
       const spoofQuery = await requestJson(`${baseUrl}/api/attendance/rules/me?asOf=${asOf}&userId=${encodeURIComponent(otherId)}`, { headers })
       expect(spoofQuery.status).toBe(400)
@@ -5633,13 +5713,14 @@ attendanceIntegrationDescribe(
           geoFence: originalSettings.geoFence ?? null,
         }),
       }).catch(() => undefined)
-      await pool.query(`DELETE FROM attendance_schedule_group_members WHERE user_id = ANY($1::text[])`, [[meId, otherId]]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_schedule_group_members WHERE user_id = ANY($1::text[])`, [[meId, otherId, foreignOnlyId]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_schedule_groups WHERE id = ANY($1::uuid[])`, [[scheduleGroupAId, scheduleGroupBId]]).catch(() => undefined)
-      await pool.query(`DELETE FROM attendance_group_members WHERE user_id = ANY($1::text[])`, [[meId, otherId]]).catch(() => undefined)
-      await pool.query(`DELETE FROM attendance_groups WHERE id = $1`, [attendanceGroupId]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_group_members WHERE user_id = ANY($1::text[])`, [[meId, otherId, foreignOnlyId]]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_groups WHERE id = ANY($1::uuid[])`, [[attendanceGroupId, extraAttendanceGroupId]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_rule_sets WHERE id = $1`, [ruleSetId]).catch(() => undefined)
-      await pool.query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [[meId, otherId]]).catch(() => undefined)
-      await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[meId, otherId]]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_rules WHERE id = $1`, [defaultRuleId]).catch(() => undefined)
+      await pool.query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [[meId, otherId, foreignOnlyId]]).catch(() => undefined)
+      await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[meId, otherId, foreignOnlyId]]).catch(() => undefined)
       await pool.end().catch(() => undefined)
     }
   })

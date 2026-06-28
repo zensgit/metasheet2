@@ -15199,6 +15199,7 @@ const ATTENDANCE_RULES_ME_FORBIDDEN_HEADER_KEYS = new Set([
   'x-attendance-group-id',
   'x-schedule-group-id',
 ])
+const ATTENDANCE_RULES_ME_AS_OF_WINDOW_DAYS = 31
 
 function hasOwnRequestKey(input, forbiddenKeys) {
   if (!input || typeof input !== 'object') return false
@@ -15220,6 +15221,13 @@ function getAttendanceRulesMeOrgId(req) {
   // Existing dev-token attendance tests do not mint org/workspace claims. Keep
   // that local/default compatibility without accepting request-level org overrides.
   return DEFAULT_ORG_ID
+}
+
+function isAttendanceRulesMeAsOfInRange(resolvedForDate, now = new Date()) {
+  const today = now.toISOString().slice(0, 10)
+  const min = addDaysToDateKey(today, -ATTENDANCE_RULES_ME_AS_OF_WINDOW_DAYS) ?? today
+  const max = addDaysToDateKey(today, ATTENDANCE_RULES_ME_AS_OF_WINDOW_DAYS) ?? today
+  return resolvedForDate >= min && resolvedForDate <= max
 }
 
 function mapAttendanceRulesMeRuntimeRule(context) {
@@ -41015,6 +41023,10 @@ module.exports = {
         const resolvedForDate = asOfRaw ? normalizeDateOnlyStrict(asOfRaw) : new Date().toISOString().slice(0, 10)
         if (!resolvedForDate) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'asOf must use YYYY-MM-DD' } })
+          return
+        }
+        if (!isAttendanceRulesMeAsOfInRange(resolvedForDate)) {
+          res.status(400).json({ ok: false, error: { code: 'ATTENDANCE_RULES_ME_AS_OF_OUT_OF_RANGE', message: 'asOf must be within 31 days of today' } })
           return
         }
 
