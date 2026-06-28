@@ -115,3 +115,17 @@ Undelete-execute (Tier 4 defer); cross-base config restore; any FE; bulk/multi-e
 
 > Nothing here ships without (a) approving this lock and (b) a per-tier greenlight; the dangerous
 > tiers (3/4) additionally need their own sign-off, mirroring the T8-2 destructive discipline.
+
+## Amendment / closeout (2026-06-27)
+
+Reconciled against as-built `main` — full record in
+`multitable-t9w-unsafe-restore-line-closeout-dev-verification-20260627.md`. Summary:
+- **U-2 "lossy retype" premise corrected → schema-only / lossless** (`isSupportedFieldRetypeRevert`;
+  no cell-value coerce/drop). The original [P1] loss-magnitude-in-drift gate does NOT apply to the
+  shipped schema-only path — it belongs to a FUTURE destructive value-transform retype (separate
+  owner sign-off; preview identity binds a loss summary; preview↔execute loss mismatch → 409).
+- **execute-response redaction** is a future contract lock, not a current leak (execute returns only
+  `restored:{revisionId,entityType,entityId,changedKeys}`; read + preview already redact via
+  `redactConditionalReadRuleLiterals`).
+- **U-L8 default**: prefer the full-read gate; a scoped `undisclosed` marker must be constant.
+- **Tier 1 audit** = the forward `meta_config_revisions` row (`source='restore'` + `restoredFromId`).

@@ -3,7 +3,7 @@
  * FORWARD (re-applies its `before` state as a new change), drift-guarded (T9-W-L5) and forward-only (T9-W-L1).
  *
  * v1 SAFE subset (T9-W-L6): field `name`/`order` reverts + all view config reverts (display-only, non-lossy).
- * Everything else — field `type`/`property` (potentially lossy), create/delete (undelete), permission — is GATED in
+ * Everything else — field `type`/`property` (schema-only revert; gated at classify, route opens a scalar-safe Tier-2 subset), create/delete (undelete), permission — is GATED in
  * this slice and refused fail-closed. sheet_config is also `gated` at the classify layer (classifyRevert); the ROUTE
  * opens only a narrow Tier-1 subset (an `update` whose changed keys ⊆ {conditionalReadRules,
  * rowLevelReadPermissionsEnabled}, per isSupportedSheetConfigRevert) behind MULTITABLE_ENABLE_SHEET_CONFIG_REVERT —
@@ -34,7 +34,7 @@ export function classifyRevert(rev: Pick<ConfigRevisionRow, 'entity_type' | 'act
   if (rev.entity_type === 'view') return { kind: 'safe' } // view config is display-only, non-lossy
   if (rev.entity_type === 'field') {
     const unsafe = rev.changed_keys.filter((k) => !SAFE_FIELD_KEYS.has(k))
-    if (unsafe.length > 0) return { kind: 'gated', reason: `field ${unsafe.join('/')} reverts are not supported in this slice (potentially lossy)` }
+    if (unsafe.length > 0) return { kind: 'gated', reason: `field ${unsafe.join('/')} reverts are gated at the classify layer (type/property is route-gated to a scalar schema-only subset; see isSupportedFieldRetypeRevert)` }
     return { kind: 'safe' }
   }
   return { kind: 'gated', reason: `${rev.entity_type} reverts are not supported in this slice` }
