@@ -8035,6 +8035,12 @@ export function univerMetaRouter(): Router {
             if (vq.rows.length === 0) return { status: 409, code: 'ENTITY_GONE', message: 'The view no longer exists; cannot un-create.' }
             viewRow = vq.rows[0]
           }
+          // Fail-closed sheet-consistency guard (mirrors the sheet_config entity_id≡sheet_id guard): the cascade's
+          // column-strip / order-shift / view-cleanup all scope by sheet_id, and computeUncreatePlan builds the plan
+          // on the ENTITY's own sheet_id — so the drop MUST run on that same basis. If the entity's sheet_id diverges
+          // from the revision's, refuse rather than clean the wrong sheet (inert in normal operation; this is defense).
+          const entitySheetId = String((rev.entity_type === 'field' ? fieldRow : viewRow).sheet_id ?? '')
+          if (entitySheetId !== sheetId) return { status: 400, code: 'INVALID_REVISION', message: 'The config entity belongs to a different sheet than its revision; refusing to un-create.' }
           // U3-L4: recompute the plan from the locked current state + verify the opaque planHash → ONE generic
           // PLAN_DRIFT on any divergence (the hash cannot reveal WHICH input moved — that would itself be an oracle).
           const plan = await computeUncreatePlan(query, rev)
@@ -8049,12 +8055,12 @@ export function univerMetaRouter(): Router {
           }
           if (rev.entity_type === 'field') {
             await dropFieldCascade(query, {
-              sheetId, fieldId: rev.entity_id,
+              sheetId: entitySheetId, fieldId: rev.entity_id,
               fieldRow: { name: String(fieldRow.name), type: String(fieldRow.type), property: fieldRow.property, order: Number(fieldRow.order ?? 0) },
               actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id,
             })
           } else {
-            await dropViewCascade(query, { sheetId, viewId: rev.entity_id, viewRow, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
+            await dropViewCascade(query, { sheetId: entitySheetId, viewId: rev.entity_id, viewRow, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
           }
           return null
         })
