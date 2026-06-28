@@ -1,5 +1,5 @@
 import jwt, { type SignOptions } from 'jsonwebtoken'
-import { createHash } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { secretManager } from '../security/SecretManager'
 import { resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 
@@ -263,6 +263,74 @@ export function verifyConfigRestorePreviewIdentity(token: string, expected: Conf
   if (payload.entityType !== expected.entityType) return { valid: false, reason: 'mismatch_entityType' }
   if (payload.entityId !== expected.entityId) return { valid: false, reason: 'mismatch_entityId' }
   if (payload.baselineHash !== expected.baselineHash) return { valid: false, reason: 'mismatch_baselineHash' }
+  if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
+  return { valid: true }
+}
+
+// ── T9-W Tier 3 (U-3) un-create preview-identity (design-lock U3-L4) ──────────────────────────────────────────
+// Un-create (revert a config `create` = DROP the entity) binds an OPAQUE `planHash` INSTEAD OF baselineHash: a
+// create's changed_keys is the full config set, so the Tier-1/2 baselineHash/driftConflict (`current != after`)
+// would FALSE-trip on a benign post-create rename when we are dropping the entity anyway. planHash =
+// HMAC(secret, canonical(BLAST-RADIUS plan)) — entity-alive + cascade view-id set + order-shift set + (field)
+// column-data-presence — computed SERVER-SIDE only; the raw plan is NEVER a claim or a response field (U3-L5
+// no-oracle). HMAC-keyed (not the plain sha256 that baselineHash uses) because the column-data-presence input is
+// ~1 bit: a plain hash in the client-decodable JWT would be brute-forceable to confirm hidden-column data presence;
+// the server key makes it a PRF. `type: 'config-uncreate-preview'` keeps it DISJOINT from the Tier-1/2 config
+// identity (an un-create token can never drive a Tier-1/2 restore, and vice versa). Cosmetic config (e.g. name) is
+// NOT a plan input → a benign rename does not drift; execute compares the single planHash → ONE generic PLAN_DRIFT.
+export interface UncreatePlan {
+  entityAlive: boolean
+  /** view ids whose config currently references the dropped field (cleaned on drop). [] for view un-create. */
+  cascadeViewIds: string[]
+  /** trailing field ids whose `order` shifts on drop. [] for view un-create. */
+  orderShiftIds: string[]
+  /** (field) whether any record currently has a non-null value for the column. false for view un-create. */
+  columnDataPresent: boolean
+}
+export function hashUncreatePlan(plan: UncreatePlan): string {
+  const canon = {
+    entityAlive: plan.entityAlive === true,
+    cascadeViewIds: [...plan.cascadeViewIds].sort(),
+    orderShiftIds: [...plan.orderShiftIds].sort(),
+    columnDataPresent: plan.columnDataPresent === true,
+  }
+  return createHmac('sha256', getSecret()).update(JSON.stringify(canon)).digest('hex')
+}
+
+export interface ConfigUncreatePreviewIdentityClaims {
+  sheetId: string
+  revisionId: string
+  entityType: string
+  entityId: string
+  /** opaque HMAC over the blast-radius plan (hashUncreatePlan); raw plan fields are NEVER claims or response fields. */
+  planHash: string
+  actorId: string
+}
+
+export function mintConfigUncreatePreviewIdentity(claims: ConfigUncreatePreviewIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
+  return jwt.sign({ type: 'config-uncreate-preview', ...claims }, getSecret(), { algorithm: 'HS256', expiresIn } as SignOptions)
+}
+
+export interface ConfigUncreateVerifyResult {
+  valid: boolean
+  // `plan_drift` = the planHash diverged (entity gone / new view ref / new column data / order-set changed) — the
+  // route maps it to ONE generic 409 PLAN_DRIFT (no sub-reason; the opaque hash cannot reveal which input moved).
+  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_revisionId' | 'mismatch_entityType' | 'mismatch_entityId' | 'plan_drift' | 'mismatch_actorId'
+}
+
+export function verifyConfigUncreatePreviewIdentity(token: string, expected: ConfigUncreatePreviewIdentityClaims): ConfigUncreateVerifyResult {
+  let payload: Partial<ConfigUncreatePreviewIdentityClaims> & { type?: string }
+  try {
+    payload = jwt.verify(token, getSecret()) as Partial<ConfigUncreatePreviewIdentityClaims> & { type?: string }
+  } catch (e) {
+    return { valid: false, reason: (e as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid' }
+  }
+  if (payload.type !== 'config-uncreate-preview') return { valid: false, reason: 'wrong_type' }
+  if (payload.sheetId !== expected.sheetId) return { valid: false, reason: 'mismatch_sheetId' }
+  if (payload.revisionId !== expected.revisionId) return { valid: false, reason: 'mismatch_revisionId' }
+  if (payload.entityType !== expected.entityType) return { valid: false, reason: 'mismatch_entityType' }
+  if (payload.entityId !== expected.entityId) return { valid: false, reason: 'mismatch_entityId' }
+  if (payload.planHash !== expected.planHash) return { valid: false, reason: 'plan_drift' }
   if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
   return { valid: true }
 }

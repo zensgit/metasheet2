@@ -100,6 +100,23 @@ export function isSupportedFieldRetypeRevert(rev: ConfigRevisionRow): boolean {
   return !FIELD_RETYPE_EXCLUDED_TYPES.has(beforeType) && !FIELD_RETYPE_EXCLUDED_TYPES.has(afterType)
 }
 
+/**
+ * T9-W Tier 3 (U-3) — un-create. Reverting a `create` revision forward-only = DROPPING the entity that revision
+ * created (a create's `before` is null, so the reverted-to state is non-existence). v1 (design-lock U3-L1) opens ONLY
+ * field/view create-reverts — the two entity types a forward create-route records. sheet_config create (1-row,
+ * nonsensical to un-create), permission (permission-revert, held), and `delete`-reverts (undelete = Tier 4) stay
+ * gated. classifyRevert returns `gated` for every create (action !== 'update'), so the route opens THIS subset behind
+ * MULTITABLE_ENABLE_CONFIG_UNCREATE via this predicate (mirrors the Tier-1/2 predicate pattern).
+ *
+ * Pure & structural ONLY: the destructive cascade (drop + column-data loss), the no-oracle preview (U3-L5), and the
+ * opaque HMAC plan-hash drift control (U3-L4) live at the route (config-restore-execute), NOT here. This decides only
+ * "is this revision an un-create the flag may open".
+ */
+export const UNCREATE_ENTITY_TYPES: ReadonlySet<string> = new Set(['field', 'view'])
+export function isSupportedUncreate(rev: Pick<ConfigRevisionRow, 'entity_type' | 'action'>): boolean {
+  return rev.action === 'create' && UNCREATE_ENTITY_TYPES.has(rev.entity_type)
+}
+
 const stable = (v: unknown): string => JSON.stringify(v ?? null)
 function pick(snapshot: Record<string, unknown>, keys: string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {}
