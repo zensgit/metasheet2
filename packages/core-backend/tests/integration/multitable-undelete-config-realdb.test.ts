@@ -362,4 +362,19 @@ describeIfDatabase('multitable config undelete — T9-W Tier 4 / U-4 (real DB)',
     const row = (await q('SELECT sheet_id FROM meta_fields WHERE id=$1', [F])).rows[0] as { sheet_id: string } | undefined
     expect(row?.sheet_id).toBe(s) // recreated on the delete revision's own sheet_id
   })
+
+  test('(n) held-surface tripwire: a permission delete revision stays gated (422) even with the undelete flag ON', async () => {
+    process.env[FLAG] = 'true' // undelete flag ON
+    const s = await freshSheet('n')
+    // isSupportedUndelete is field/view-ONLY — the undelete flag must NOT open the permission (or sheet_config) surface.
+    const r = await q(
+      `INSERT INTO meta_config_revisions (sheet_id, entity_type, entity_id, action, before, after, changed_keys, batch_id, actor_id, source)
+       VALUES ($1,'permission',$2,'delete',$3::jsonb,NULL,$4::text[],gen_random_uuid(),$5,'mutation') RETURNING id`,
+      [s, `field:${mkFieldId()}`, JSON.stringify({ subjectType: 'user', subjectId: 'u1', visible: true, readOnly: false }), ['subjectType', 'subjectId', 'visible', 'readOnly'], MANAGER.id],
+    )
+    const permRev = (r.rows[0] as { id: string }).id
+    const x = await execute(s, { revisionId: permRev, previewToken: 'any-token', confirm: 'undelete' })
+    expect(x.status).toBe(422) // still gated — the undelete flag did not open the permission surface
+    expect(x.body?.error?.code).toBe('RESTORE_NOT_SUPPORTED')
+  })
 })
