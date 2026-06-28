@@ -290,6 +290,9 @@ describe('Approval RBAC boundary verification', () => {
 
     it('POST .../dry-run previews a requester.role in [...] condition when sample roles are supplied (RA-1b)', async () => {
       authState.user = templateManager()
+      // RA-1b: dry-run runs the SAME curated gate as publish — the curated set (roles.approval_usable=true)
+      // must include the literal for the preview to proceed.
+      pgState.pool.query.mockResolvedValue({ rows: [{ id: 'finance_approver' }], rowCount: 1 })
       const res = await request(app)
         .post('/api/approval-templates/formula-condition/dry-run')
         .send({
@@ -301,6 +304,26 @@ describe('Approval RBAC boundary verification', () => {
 
       expect(res.status).toBe(200)
       expect(res.body).toEqual({ data: { success: true, result: true } })
+    })
+
+    it('POST .../dry-run rejects an UNCURATED requester.role literal with NOT_CURATED (preview matches publish)', async () => {
+      authState.user = templateManager()
+      // curated set = ONLY finance_approver; "admin" is NOT approval_usable → must be rejected, fail-closed,
+      // so preview cannot greenlight a route that publish would reject.
+      pgState.pool.query.mockResolvedValue({ rows: [{ id: 'finance_approver' }], rowCount: 1 })
+      const res = await request(app)
+        .post('/api/approval-templates/formula-condition/dry-run')
+        .send({
+          expression: 'requester.role in ["admin"]',
+          formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+          formData: {},
+          requester: { roles: ['admin'] },
+        })
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.success).toBe(false)
+      expect(res.body.data.error.code).toBe('APPROVAL_REQUESTER_ROLE_NOT_CURATED')
+      expect(res.body.data.error.message).toContain('admin')
     })
 
     it('POST .../dry-run: a requester.* condition without a sample requester is unpreviewable (success:false, not a phantom true)', async () => {

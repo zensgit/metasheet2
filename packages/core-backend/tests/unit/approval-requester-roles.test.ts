@@ -19,4 +19,18 @@ describe('resolveApprovalRequesterRoleIds (RA-1b fresh user_roles resolver)', ()
       Promise.reject(new Error('user_roles read failed'))
     await expect(resolveApprovalRequesterRoleIds('u-1', boom)).rejects.toThrow('user_roles read failed')
   })
+
+  it('RA-1b CURATED-VOCABULARY: filters to approval_usable roles via a JOIN on `roles` (SQL lock)', async () => {
+    // The stub ignores the SQL text (real curation lives in the DB), so assert the SQL itself JOINs `roles`
+    // and filters approval_usable — the real-DB test proves the runtime behaviour. Without the JOIN, a
+    // SYSTEM role the requester holds would leak into directoryRoles.
+    let capturedSql = ''
+    const q = <Row>(text: string, _params?: unknown[]): Promise<{ rows: Row[] }> => {
+      capturedSql = text
+      return Promise.resolve({ rows: [{ role_id: 'finance_approver' }] as unknown as Row[] })
+    }
+    expect(await resolveApprovalRequesterRoleIds('u-1', q)).toEqual(['finance_approver'])
+    expect(capturedSql).toMatch(/JOIN\s+roles/i)
+    expect(capturedSql).toMatch(/approval_usable\s*=\s*true/i)
+  })
 })

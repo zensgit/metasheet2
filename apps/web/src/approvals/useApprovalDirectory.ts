@@ -113,6 +113,10 @@ export function useApprovalDirectory({ apiFetch = defaultApiFetch }: UseApproval
     }
   }
 
+  // TODO(RA-1b FE): this loads ALL roles for the SHARED static_role approver picker (correct — static_role is
+  // NOT curated). When a DEDICATED formula `requester.role` picker is added, point it at the curated endpoint
+  // `GET /api/approval-templates/directory/formula-roles` (approval_usable=true only). The BE publish + dry-run
+  // HARD GATE already enforces curation regardless, so this is convenience, not the security boundary.
   async function loadRoles(): Promise<void> {
     rolesLoading.value = true
     statusMessage.value = ''

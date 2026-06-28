@@ -1714,19 +1714,19 @@ async function validateLinkFieldConfig(
     return `链接字段 foreignBaseId 需与外表实际 base 一致：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} 实际 base=${actualForeignBaseId ?? 'null'}，声明=${claimed ?? 'null'}`
   }
   if (baseIdsAreCrossBase(sourceBaseId, actualForeignBaseId)) {
-    // Bidirectional / mirror links MVP (design 2026-06-14 §7.2) — cross-base bidirectional is DEFERRED.
-    // A two-way link must be same-base, even if it carries a valid cross-base `foreignBaseId` opt-in
-    // (this fires BEFORE the ②b opt-in short-circuit so the opt-in cannot rescue a cross-base pairing).
-    // Uses only this field's own config, so create-order / paired-field existence is irrelevant.
-    if (linkCfg.twoWay === true) {
-      return `二维（双向）链接 MVP 不支持跨 base 配对：源表 base=${sourceBaseId ?? 'null'}，外表 ${linkCfg.foreignSheetId} base=${actualForeignBaseId ?? 'null'}`
-    }
-    // ②b opt-in short-circuit — a cross-base link is allowed IFF it carries an EXPLICIT foreignBaseId
-    // EQUAL to the foreign sheet's real base (claim == truth; you can't declare a wrong base). A
-    // degenerate null/legacy-base foreign sheet has no concrete base to claim, so it can never opt in
-    // (claimed===null falls through to reject; a non-null claim !== null actual also rejects). This is a
-    // pure consistency gate — the foreign READ-permission check is §3 (base-read) + §2a.3 (field mask),
-    // NOT here (adding a perm check in this structural wall would over-reach).
+    // ②b read-only cross-base mirror v1 (2026-06-27) — cross-base bidirectional (twoWay) is now ALLOWED on
+    // the SAME terms as a one-way cross-base link (the earlier §7.2 blanket deferral of twoWay is lifted).
+    // The derived (mirror) side stays read-only by codec (field-codecs.ts: mirrorOf ⇒ readOnly), so this
+    // opens only a reverse READ-projection, never a cross-base write path. The realtime mirror-invalidation
+    // fan-out is deferred for cross-base (record-write-service.ts collectMirrorInvalidation) — harmless: the
+    // reverse read recomputes + base-masks on every fetch.
+    // ②b opt-in short-circuit — a cross-base link (one-way OR twoWay) is allowed IFF it carries an EXPLICIT
+    // foreignBaseId EQUAL to the foreign sheet's real base (claim == truth; you can't declare a wrong base —
+    // a wrong claim is already rejected above). A degenerate null/legacy-base foreign sheet has no concrete
+    // base to claim, so it can never opt in (claimed===null falls through to reject). This is a pure
+    // consistency gate — the foreign READ-permission check is §3 (base-read) + §2a.3 (field mask), NOT here
+    // (a perm check in this structural wall would over-reach). Uses only this field's own config, so
+    // create-order / paired-field existence is irrelevant.
     if (claimed !== null) {
       return null
     }
@@ -2661,26 +2661,55 @@ async function loadLinkValuesByRecord(
  *
  * FORWARD link fields are deliberately left UNTOUCHED: their raw-id posture is pre-existing and shared
  * repo-wide (an outbound edge this record authored), and the task scopes this fix to mirror fields only.
- * Same-base only by construction (cross-base twoWay/mirror is rejected at field-create), so the cross-base
- * coarse gate `buildLinkSummaries` adds on top of `resolveReadableSheetIds` is a no-op here — sheet-level
- * read IS the exact gate. Idempotent / order-independent: mutates `row.data` in place for denied mirrors only.
+ * TWO gates, both REDUCE-only (never widen): (1) the same-base / sheet-level gate `resolveReadableSheetIds`
+ * keyed on `cfg.foreignSheetId`; (2) ②b read-only cross-base mirror v1 (2026-06-27) — when a mirror's
+ * foreign sheet lives in a DIFFERENT base, a base-read COARSE gate (`resolveBaseReadable`, parity with
+ * `resolveForeignFieldReadability` §3.2 Sink A and `buildLinkSummaries` Sink B-1) empties the reverse
+ * projection for a sheet-readable-but-base-unreadable actor (no foreign-record id/count leak). Same-base
+ * mirrors never reach gate (2). Idempotent / order-independent: mutates `row.data` in place for denied
+ * mirrors only. NOTE: the inline `linkSummaries` projection of the SAME reverse edge is gated independently
+ * in `buildLinkSummaries` (Sink B-1) — both wires must hold; the goldens cover each separately.
  */
 async function maskDerivedMirrorFieldIds(
   req: Request,
   query: QueryFn,
+  // The sheet the `rows` belong to — the SOURCE base is resolved from it (parity with applyLookupRollup) to
+  // decide cross-base per mirror foreign sheet. Not derivable from `rows` (records carry no sheet/base id).
+  sourceSheetId: string,
   rows: UniverMetaRecord[],
   relationalLinkFields: RelationalLinkField[],
 ): Promise<void> {
   const mirrorFields = relationalLinkFields.filter((l) => l.cfg.mirrorOf)
   if (mirrorFields.length === 0 || rows.length === 0) return
+  // Gate (1): same-base / sheet-level read — UNCHANGED (never loosened).
   const readableSheetIds = await resolveReadableSheetIds(
     req,
     query,
     mirrorFields.map((l) => l.cfg.foreignSheetId),
   )
+  // Gate (2): ②b cross-base base-read. Resolve the source base once, then for each DISTINCT cross-base
+  // mirror foreign sheet require base-read; deny → mask. Memoized per base; a null foreign base is
+  // unreadable by definition (also crash-safe vs resolveBaseReadable, which rejects an empty id).
+  const sourceBaseId = (await loadSheetRowShared(query, sourceSheetId))?.baseId ?? null
+  const crossBaseDeniedForeignSheetIds = new Set<string>()
+  const baseReadableCache = new Map<string, boolean>()
+  for (const foreignSheetId of new Set(mirrorFields.map((l) => l.cfg.foreignSheetId))) {
+    const foreignBaseId = (await loadSheetRowShared(query, foreignSheetId))?.baseId ?? null
+    if (foreignBaseId === sourceBaseId) continue // same-base → gate (1) is the exact gate
+    if (foreignBaseId == null) {
+      crossBaseDeniedForeignSheetIds.add(foreignSheetId)
+      continue
+    }
+    let readable = baseReadableCache.get(foreignBaseId)
+    if (readable === undefined) {
+      readable = await resolveBaseReadable(req, query, foreignBaseId)
+      baseReadableCache.set(foreignBaseId, readable)
+    }
+    if (!readable) crossBaseDeniedForeignSheetIds.add(foreignSheetId)
+  }
   for (const row of rows) {
     for (const { fieldId, cfg } of mirrorFields) {
-      if (!readableSheetIds.has(cfg.foreignSheetId)) {
+      if (!readableSheetIds.has(cfg.foreignSheetId) || crossBaseDeniedForeignSheetIds.has(cfg.foreignSheetId)) {
         row.data[fieldId] = []
       }
     }
@@ -8737,6 +8766,12 @@ export function univerMetaRouter(): Router {
           // masked diff — undelete re-creates the whole record; read-masking still applies on later reads). The
           // snapshotHash binds the exact target into the resurrect identity (a deleted record has no live version).
           const snap = asRec(target.data)
+          // Schema-drift guard (parity with the live-revert branch below): if the T-snapshot carries a field that no
+          // longer exists in the current schema, do NOT resurrect — re-inserting would write a stale field key into
+          // meta_records.data. Exclude it (counted as drift → re-preview), never resurrect a schema-drifted snapshot.
+          let resurrectDrift = false
+          for (const fid of Object.keys(snap)) if (!fieldById.has(fid)) { resurrectDrift = true; break }
+          if (resurrectDrift) { driftCount++; continue }
           resurrects.push({ recordId, snapshot: snap, snapshotHash: hashPreviewChanges(Object.entries(snap).map(([fieldId, value]) => ({ fieldId, op: 'set', value }))) })
           undeleteCount++; continue
         }
@@ -8753,6 +8788,10 @@ export function univerMetaRouter(): Router {
     }
     const createdAfterTIds: string[] = []
     for (const id of liveById.keys()) if (!stateMap.has(id) && !deniedIds.has(id)) { keptCreatedAfterT++; createdAfterTIds.push(id) } // created after T (visible) → KEPT by revert; the DELETE-SET for reset (T8-2)
+    // Unified ceiling (T8-1): the early `recordCount` guard counts LIVE rows only — a sheet with few live records but a
+    // large deleted history could resurrect far more than the ceiling. Re-check the EFFECTIVE write set (reverts +
+    // resurrects) so undelete can't bypass SHEET_REVERT_MAX_RECORDS.
+    if (reverts.length + resurrects.length > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount: reverts.length + resurrects.length }
     return { reverts, resurrects, undeleteCount, keptCreatedAfterT, createdAfterTIds, driftCount, patchContext }
   }
 
@@ -8906,6 +8945,46 @@ export function univerMetaRouter(): Router {
       const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions } = patchContext
       const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
         ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
+      // T8-1 undelete — run FIRST (atomic, all-or-nothing) so a resurrect conflict aborts the request with ZERO writes
+      // BEFORE any best-effort field-revert is applied (no mixed partial). Each resurrect re-inserts the FULL T-snapshot
+      // (schema-drift-rejected in computeSheetRevert) under its ORIGINAL id with a FOR UPDATE id-collision reject (L1),
+      // rebuilds OUTBOUND meta_links (L3; NO inbound — L4 A: inbound re-appears on the linking record's next save), and
+      // appends a 'restore' create-revision (the Time Machine source, NOT a plain 'rest' create). Realtime post-commit.
+      const resurrectedIds: string[] = []
+      if (resurrects.length > 0) {
+        const linkFieldIds = fields.filter((f) => f.type === 'link').map((f) => f.id)
+        const undeleteActorId = getRequestActorId(req)
+        try {
+          await pool.transaction(async ({ query }) => {
+            const sheetAlive = await query('SELECT 1 FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
+            if ((sheetAlive.rows as unknown[]).length === 0) throw new RecordServiceRestoreConflictError(`Cannot undelete: sheet no longer exists: ${sheetId}`)
+            for (const r of resurrects) {
+              const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [r.recordId])
+              if ((occupied.rows as unknown[]).length > 0) throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
+              try {
+                await query('INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, created_at, updated_at) VALUES ($1, $2, $3::jsonb, 1, $4, $4, now(), now())', [r.recordId, sheetId, JSON.stringify(r.snapshot), undeleteActorId])
+              } catch (e) {
+                if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
+                throw e
+              }
+              for (const fieldId of linkFieldIds) {
+                for (const foreignId of normalizeLinkIds(r.snapshot[fieldId])) {
+                  await query('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING', [`lnk_${randomUUID()}`.slice(0, 50), fieldId, r.recordId, foreignId])
+                }
+              }
+              await recordRecordRevision(query, { sheetId, recordId: r.recordId, version: 1, action: 'create', source: 'restore', changedFieldIds: Object.keys(r.snapshot), patch: r.snapshot, snapshot: r.snapshot, actorId: undeleteActorId })
+              resurrectedIds.push(r.recordId)
+            }
+          })
+        } catch (err) {
+          if (err instanceof RecordServiceRestoreConflictError) return res.status(409).json({ ok: false, error: { code: 'UNDELETE_CONFLICT', message: `${err.message}; the sheet changed since preview — re-preview` } })
+          throw err
+        }
+        for (const recordId of resurrectedIds) { // post-commit realtime, mirrors restoreRecord
+          publishMultitableSheetRealtime({ spreadsheetId: sheetId, actorId: undeleteActorId, source: 'multitable', kind: 'record-created', recordId, recordIds: [recordId] })
+          eventBus.emit('multitable.record.created', { sheetId, recordId, actorId: undeleteActorId })
+        }
+      }
       const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
       const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
       if (yjsInvalidator) recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
@@ -8929,46 +9008,6 @@ export function univerMetaRouter(): Router {
         }
       }
       const revertedCount = outcomes.filter((o) => o.status === 'reverted').length
-      // T8-1 undelete (design-lock L1/L3/L4/L6/L7): resurrect the deleted-at-T records in ONE transaction —
-      // all-or-nothing, DISTINCT from the best-effort field-reverts above (MIXED semantics; see the dev MD). Each
-      // resurrect re-inserts the FULL T-snapshot under its ORIGINAL id with a FOR UPDATE id-collision reject (L1),
-      // rebuilds OUTBOUND meta_links from the snapshot (L3; NO inbound — L4 A: inbound re-appears when the linking
-      // record is next saved), and appends a 'rest' create-revision. Realtime create events fire post-commit (L7).
-      const resurrectedIds: string[] = []
-      if (resurrects.length > 0) {
-        const linkFieldIds = fields.filter((f) => f.type === 'link').map((f) => f.id)
-        const undeleteActorId = getRequestActorId(req)
-        try {
-          await pool.transaction(async ({ query }) => {
-            const sheetAlive = await query('SELECT 1 FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-            if ((sheetAlive.rows as unknown[]).length === 0) throw new RecordServiceRestoreConflictError(`Cannot undelete: sheet no longer exists: ${sheetId}`)
-            for (const r of resurrects) {
-              const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [r.recordId])
-              if ((occupied.rows as unknown[]).length > 0) throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
-              try {
-                await query('INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, created_at, updated_at) VALUES ($1, $2, $3::jsonb, 1, $4, $4, now(), now())', [r.recordId, sheetId, JSON.stringify(r.snapshot), undeleteActorId])
-              } catch (e) {
-                if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
-                throw e
-              }
-              for (const fieldId of linkFieldIds) {
-                for (const foreignId of normalizeLinkIds(r.snapshot[fieldId])) {
-                  await query('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING', [`lnk_${randomUUID()}`.slice(0, 50), fieldId, r.recordId, foreignId])
-                }
-              }
-              await recordRecordRevision(query, { sheetId, recordId: r.recordId, version: 1, action: 'create', source: 'rest', changedFieldIds: Object.keys(r.snapshot), patch: r.snapshot, snapshot: r.snapshot, actorId: undeleteActorId })
-              resurrectedIds.push(r.recordId)
-            }
-          })
-        } catch (err) {
-          if (err instanceof RecordServiceRestoreConflictError) return res.status(409).json({ ok: false, error: { code: 'UNDELETE_CONFLICT', message: `${err.message}; the sheet changed since preview — re-preview` } })
-          throw err
-        }
-        for (const recordId of resurrectedIds) { // post-commit realtime, mirrors restoreRecord
-          publishMultitableSheetRealtime({ spreadsheetId: sheetId, actorId: undeleteActorId, source: 'multitable', kind: 'record-created', recordId, recordIds: [recordId] })
-          eventBus.emit('multitable.record.created', { sheetId, recordId, actorId: undeleteActorId })
-        }
-      }
       return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount, resurrectedCount: resurrectedIds.length, undeleteRecordIds: resurrectedIds } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
@@ -12334,7 +12373,7 @@ export function univerMetaRouter(): Router {
 
         // B3 review nit: blank a DERIVED (mirror) field's raw reverse ids for an actor who can't read the
         // mirror's foreign sheet — parity with the buildLinkSummaries gate below. Forward links untouched.
-        await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), rows, relationalLinkFields)
+        await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), sheetId, rows, relationalLinkFields)
       }
 
       await applyLookupRollup(
@@ -13077,7 +13116,7 @@ export function univerMetaRouter(): Router {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
       // B3 review nit: blank a mirror field's raw reverse ids for a foreign-sheet-denied actor (write-echo).
-      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), view.sheetId, [record], relationalLinkFields)
       record.data = filterRecordDataByFieldIds(record.data, readableEchoFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
@@ -13311,7 +13350,7 @@ export function univerMetaRouter(): Router {
         record.data[fieldId] = linkValuesByRecord.get(record.id)?.get(fieldId) ?? []
       }
       // B3 review nit: blank a mirror field's raw reverse ids for a foreign-sheet-denied actor (write-echo).
-      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), sheetId, [record], relationalLinkFields)
       record.data = filterRecordDataByFieldIds(record.data, readableEchoFieldIds)
       const attachmentSummaries = attachmentFields.length > 0
         ? filterSingleRecordFieldSummaryMap(
@@ -13588,7 +13627,7 @@ export function univerMetaRouter(): Router {
       }
       // B3 review nit: blank a mirror field's raw reverse ids for an actor who can't read the mirror's
       // foreign sheet (parity with the buildLinkSummaries gate below). Forward links untouched.
-      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), [record], relationalLinkFields)
+      await maskDerivedMirrorFieldIds(req, pool.query.bind(pool), sheetId, [record], relationalLinkFields)
       await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, [record], relationalLinkFields, linkValuesByRecord)
       const visiblePropertyFields = filterVisiblePropertyFields(fields)
       // #2015 read-path field mask: D3c security composite (layer-2 property.hidden ∧ layer-3
