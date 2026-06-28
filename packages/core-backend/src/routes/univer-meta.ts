@@ -73,7 +73,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -90,6 +90,7 @@ import {
   isSupportedSheetConfigRevert,
   isFieldRetypeRevert,
   isSupportedFieldRetypeRevert,
+  isSupportedUncreate,
   computeRevertPreview,
   loadEntityConfigSnapshot,
   applyConfigRevert,
@@ -5879,6 +5880,147 @@ class PermissionError extends Error {
   }
 }
 
+// ── T9-W Tier 3 (U-3) un-create: shared destructive drop cascades + plan digest ───────────────────────────────
+// (U3-L2) The forward DELETE /fields|/views cascades, extracted txn-parameterized so the un-create execute reuses
+// the IDENTICAL effect (no orphans/residue). `query` is a transaction handle → runs inside EITHER the forward
+// route's txn OR the un-create execute's txn. `source`/`restoredFromId` thread into the ENTITY's OWN delete
+// revision only (cascade order-shift/view-cleanup revisions stay 'mutation'); the forward route passes the default.
+type TxnQuery = (text: string, params: any[]) => Promise<any>
+
+/** The view-config cleanup a field-drop applies (drop the field from a view's filter/sort/group/hidden). Pure. */
+function cleanupViewConfigForField(fieldId: string, args: {
+  filterInfo: Record<string, unknown>
+  sortInfo: Record<string, unknown>
+  groupInfo: Record<string, unknown>
+  hiddenFieldIds: string[]
+}) {
+  const nextHidden = args.hiddenFieldIds.filter((id) => id !== fieldId)
+  const rawSortRules = Array.isArray(args.sortInfo.rules) ? args.sortInfo.rules : []
+  const nextSortRules = rawSortRules.filter((r) => isPlainObject(r) && r.fieldId !== fieldId)
+  const nextSortInfo = nextSortRules.length > 0 ? { ...args.sortInfo, rules: nextSortRules } : {}
+  const nextGroupInfo = args.groupInfo.fieldId === fieldId ? {} : args.groupInfo
+  const rawConditions = Array.isArray(args.filterInfo.conditions) ? args.filterInfo.conditions : []
+  const nextConditions = rawConditions.filter((c) => isPlainObject(c) && c.fieldId !== fieldId)
+  const nextFilterInfo = nextConditions.length > 0 ? { ...args.filterInfo, conditions: nextConditions } : {}
+  return { nextHidden, nextSortInfo, nextGroupInfo, nextFilterInfo }
+}
+
+/** Whether dropping `fieldId` would CHANGE this view's config — drives BOTH the real cascade and the plan digest. */
+function viewConfigChangedByFieldDrop(fieldId: string, v: any): boolean {
+  const filterInfo = normalizeJson(v.filter_info)
+  const sortInfo = normalizeJson(v.sort_info)
+  const groupInfo = normalizeJson(v.group_info)
+  const hiddenFieldIds = normalizeJsonArray(v.hidden_field_ids)
+  const { nextHidden, nextSortInfo, nextGroupInfo, nextFilterInfo } = cleanupViewConfigForField(fieldId, { filterInfo, sortInfo, groupInfo, hiddenFieldIds })
+  return (
+    nextHidden.length !== hiddenFieldIds.length ||
+    JSON.stringify(nextSortInfo) !== JSON.stringify(sortInfo) ||
+    JSON.stringify(nextGroupInfo) !== JSON.stringify(groupInfo) ||
+    JSON.stringify(nextFilterInfo) !== JSON.stringify(filterInfo)
+  )
+}
+
+/** U3-L2: forward field-delete cascade, txn-parameterized. Shared by DELETE /fields AND un-create execute. */
+async function dropFieldCascade(query: TxnQuery, opts: {
+  sheetId: string
+  fieldId: string
+  fieldRow: { name: string; type: string; property: unknown; order: number }
+  actorId: string | null
+  source?: 'mutation' | 'restore'
+  restoredFromId?: string | null
+}): Promise<void> {
+  const { sheetId, fieldId, fieldRow, actorId } = opts
+  const order = Number(fieldRow.order ?? 0)
+  const configBatchId = randomUUID() // one batchId — the deleted field + the order-shift of later fields share it
+  await query('DELETE FROM meta_fields WHERE id = $1', [fieldId])
+  await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
+  await recordConfigRevision(query, {
+    sheetId, entityType: 'field', entityId: fieldId, action: 'delete',
+    ...fieldDeleteDiff({ name: String(fieldRow.name), type: String(fieldRow.type), property: fieldRow.property, order }),
+    batchId: configBatchId, actorId,
+    source: opts.source ?? 'mutation', restoredFromId: opts.restoredFromId ?? null,
+  })
+  try {
+    await query('DELETE FROM meta_links WHERE field_id = $1', [fieldId])
+  } catch (err) {
+    if (!isUndefinedTableError(err, 'meta_links')) throw err
+  }
+  // lock-exempt: field-delete schema op — drops the deleted field's key sheet-wide; not a per-record user edit.
+  await query('UPDATE meta_records SET data = data - $1 WHERE sheet_id = $2', [fieldId, sheetId])
+  const shiftedDel = ((await query('UPDATE meta_fields SET "order" = "order" - 1 WHERE sheet_id = $1 AND "order" > $2 RETURNING id, "order"', [sheetId, order])) as any).rows as Array<{ id: string; order: number }>
+  await recordFieldOrderShifts(query, sheetId, shiftedDel.map((r) => ({ id: String(r.id), newOrder: Number(r.order) })), -1, configBatchId, actorId)
+  const views = await query(
+    'SELECT id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1',
+    [sheetId],
+  )
+  for (const v of (views as any).rows as any[]) {
+    const beforeView = viewConfigSnapshotFromRow(v)
+    const filterInfo = normalizeJson(v.filter_info)
+    const sortInfo = normalizeJson(v.sort_info)
+    const groupInfo = normalizeJson(v.group_info)
+    const hiddenFieldIds = normalizeJsonArray(v.hidden_field_ids)
+    const { nextHidden, nextSortInfo, nextGroupInfo, nextFilterInfo } = cleanupViewConfigForField(fieldId, { filterInfo, sortInfo, groupInfo, hiddenFieldIds })
+    const changed =
+      nextHidden.length !== hiddenFieldIds.length ||
+      JSON.stringify(nextSortInfo) !== JSON.stringify(sortInfo) ||
+      JSON.stringify(nextGroupInfo) !== JSON.stringify(groupInfo) ||
+      JSON.stringify(nextFilterInfo) !== JSON.stringify(filterInfo)
+    if (!changed) continue
+    await query(
+      'UPDATE meta_views SET filter_info = $2::jsonb, sort_info = $3::jsonb, group_info = $4::jsonb, hidden_field_ids = $5::jsonb WHERE id = $1',
+      [String(v.id), JSON.stringify(nextFilterInfo), JSON.stringify(nextSortInfo), JSON.stringify(nextGroupInfo), JSON.stringify(nextHidden)],
+    )
+    const afterView = { ...beforeView, filterInfo: nextFilterInfo, sortInfo: nextSortInfo, groupInfo: nextGroupInfo, hiddenFieldIds: nextHidden }
+    const cascadeDiff = configUpdateDiff(beforeView, afterView, VIEW_CONFIG_HISTORY_KEYS)
+    if (cascadeDiff) {
+      await recordConfigRevision(query, {
+        sheetId, entityType: 'view', entityId: String(v.id), action: 'update',
+        before: cascadeDiff.before, after: cascadeDiff.after, changedKeys: cascadeDiff.changedKeys,
+        batchId: configBatchId, actorId,
+      })
+    }
+  }
+}
+
+/** U3-L2: forward view-delete cascade, txn-parameterized. Shared by DELETE /views AND un-create execute. */
+async function dropViewCascade(query: TxnQuery, opts: {
+  sheetId: string
+  viewId: string
+  viewRow: any
+  actorId: string | null
+  source?: 'mutation' | 'restore'
+  restoredFromId?: string | null
+}): Promise<void> {
+  const { sheetId, viewId, viewRow, actorId } = opts
+  await query('DELETE FROM meta_views WHERE id = $1', [viewId])
+  await recordConfigRevision(query, {
+    sheetId, entityType: 'view', entityId: viewId, action: 'delete',
+    ...configDeleteDiff(viewConfigSnapshotFromRow(viewRow), VIEW_CONFIG_HISTORY_KEYS),
+    batchId: randomUUID(), actorId,
+    source: opts.source ?? 'mutation', restoredFromId: opts.restoredFromId ?? null,
+  })
+}
+
+/** U3-L4: the SERVER-SIDE blast-radius plan for an un-create — feeds hashUncreatePlan ONLY (NEVER the response). */
+async function computeUncreatePlan(query: TxnQuery, rev: ConfigRevisionRow): Promise<UncreatePlan> {
+  if (rev.entity_type === 'view') {
+    const exists = ((await query('SELECT 1 FROM meta_views WHERE id = $1', [rev.entity_id])) as any).rows.length > 0
+    return { entityAlive: exists, cascadeViewIds: [], orderShiftIds: [], columnDataPresent: false }
+  }
+  const fres = (await query('SELECT id, sheet_id, "order" FROM meta_fields WHERE id = $1', [rev.entity_id])) as any
+  if (fres.rows.length === 0) return { entityAlive: false, cascadeViewIds: [], orderShiftIds: [], columnDataPresent: false }
+  const frow = fres.rows[0]
+  const sheetId = String(frow.sheet_id)
+  const order = Number(frow.order ?? 0)
+  const views = (await query('SELECT id, filter_info, sort_info, group_info, hidden_field_ids FROM meta_views WHERE sheet_id = $1', [sheetId])) as any
+  const cascadeViewIds = (views.rows as any[]).filter((v) => viewConfigChangedByFieldDrop(rev.entity_id, v)).map((v) => String(v.id))
+  const shiftRows = (await query('SELECT id FROM meta_fields WHERE sheet_id = $1 AND "order" > $2', [sheetId, order])) as any
+  const orderShiftIds = (shiftRows.rows as any[]).map((r) => String(r.id))
+  // EXISTS via data->>key IS NOT NULL (the key present with a non-null value) — NOT the `?` operator. Coarse bit only.
+  const dataRows = (await query('SELECT 1 FROM meta_records WHERE sheet_id = $1 AND data->>$2 IS NOT NULL LIMIT 1', [sheetId, rev.entity_id])) as any
+  return { entityAlive: true, cascadeViewIds, orderShiftIds, columnDataPresent: dataRows.rows.length > 0 }
+}
+
 export function univerMetaRouter(): Router {
   const router = Router()
 
@@ -7754,6 +7896,27 @@ export function univerMetaRouter(): Router {
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
         : (capabilities.canManageFields || capabilities.canManageViews || capabilities.canManageSheetAccess)
       if (!cap) return sendForbidden(res)
+      // T9-W Tier 3 (U-3): un-create = revert a field/view `create` = DROP the created entity. Behind its own
+      // default-off flag. Preview is read-only: compute the SERVER-SIDE blast-radius plan, bind it as an OPAQUE
+      // planHash (U3-L4), and return an UNDISCLOSED summary (U3-L5: name the entity + the destructive consequence,
+      // NO counts, NO raw plan fields). classifyRevert stays gated for every create, so this isSupportedUncreate
+      // branch is the ONLY confirmable create-revert path — sheet_config/permission creates fall through to gated.
+      if (isSupportedUncreate(rev)) {
+        if (process.env.MULTITABLE_ENABLE_CONFIG_UNCREATE !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'CONFIG_UNCREATE_DISABLED', message: 'config un-create is disabled (MULTITABLE_ENABLE_CONFIG_UNCREATE off).' } })
+        }
+        const plan = await computeUncreatePlan(pool.query.bind(pool), rev)
+        if (!plan.entityAlive) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot preview an un-create.' } })
+        const previewToken = mintConfigUncreatePreviewIdentity({
+          sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+          planHash: hashUncreatePlan(plan), actorId: access.userId,
+        })
+        const entityName = typeof rev.after?.name === 'string' ? (rev.after.name as string) : undefined
+        const note = rev.entity_type === 'field'
+          ? 'Un-creating this field permanently drops its column and every value in it (all created after this point) from every record. This cannot be undone.'
+          : 'Un-creating this view permanently removes its saved configuration. This cannot be undone.'
+        return res.json({ ok: true, data: { uncreate: { entityType: rev.entity_type, entityId: rev.entity_id, entityName, note }, previewToken } })
+      }
       // T9-W Tier 2 (U-2): field type/property revert is behind its OWN per-tier flag (default off). Schema-only +
       // scalar-safe (isSupportedFieldRetypeRevert); mirrors the forward PATCH (no value migration). A non-retype
       // field revert (name/order only) is unaffected and stays on the existing safe path.
@@ -7848,6 +8011,63 @@ export function univerMetaRouter(): Router {
         if (rev.entity_id !== rev.sheet_id) {
           return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'sheet_config revision entity_id does not match its sheet.' } })
         }
+      }
+      // T9-W Tier 3 (U-3) un-create EXECUTE — DROP the field/view this `create` revision created. Behind the flag +
+      // typed confirm. ONE txn: re-fetch FOR UPDATE → recompute the plan → verify the OPAQUE planHash (U3-L4): any
+      // blast-radius drift (entity gone / new view ref / new column data / order-set changed) → ONE generic 409
+      // PLAN_DRIFT (no sub-reason). Then drop via the SHARED forward-delete cascade (U3-L2) with source='restore'
+      // (U3-L3). Atomic via the failure-object pattern — a guard returns the failure object with zero writes.
+      if (isSupportedUncreate(rev)) {
+        if (process.env.MULTITABLE_ENABLE_CONFIG_UNCREATE !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'CONFIG_UNCREATE_DISABLED', message: 'config un-create is disabled (MULTITABLE_ENABLE_CONFIG_UNCREATE off).' } })
+        }
+        const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
+        if (confirm.trim() !== 'uncreate') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "uncreate" to confirm dropping the created entity.' } })
+        const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+          let fieldRow: any = null
+          let viewRow: any = null
+          if (rev.entity_type === 'field') {
+            const f = (await query('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1 FOR UPDATE', [rev.entity_id])) as any
+            if (f.rows.length === 0) return { status: 409, code: 'ENTITY_GONE', message: 'The field no longer exists; cannot un-create.' }
+            fieldRow = f.rows[0]
+          } else {
+            const vq = (await query('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1 FOR UPDATE', [rev.entity_id])) as any
+            if (vq.rows.length === 0) return { status: 409, code: 'ENTITY_GONE', message: 'The view no longer exists; cannot un-create.' }
+            viewRow = vq.rows[0]
+          }
+          // Fail-closed sheet-consistency guard (mirrors the sheet_config entity_id≡sheet_id guard): the cascade's
+          // column-strip / order-shift / view-cleanup all scope by sheet_id, and computeUncreatePlan builds the plan
+          // on the ENTITY's own sheet_id — so the drop MUST run on that same basis. If the entity's sheet_id diverges
+          // from the revision's, refuse rather than clean the wrong sheet (inert in normal operation; this is defense).
+          const entitySheetId = String((rev.entity_type === 'field' ? fieldRow : viewRow).sheet_id ?? '')
+          if (entitySheetId !== sheetId) return { status: 400, code: 'INVALID_REVISION', message: 'The config entity belongs to a different sheet than its revision; refusing to un-create.' }
+          // U3-L4: recompute the plan from the locked current state + verify the opaque planHash → ONE generic
+          // PLAN_DRIFT on any divergence (the hash cannot reveal WHICH input moved — that would itself be an oracle).
+          const plan = await computeUncreatePlan(query, rev)
+          const verdict = verifyConfigUncreatePreviewIdentity(previewToken, {
+            sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+            planHash: hashUncreatePlan(plan), actorId: access.userId,
+          })
+          if (!verdict.valid) {
+            if (verdict.reason === 'plan_drift') return { status: 409, code: 'PLAN_DRIFT', message: 'The un-create plan changed since preview; re-preview before un-creating.' }
+            if (verdict.reason === 'expired') return { status: 410, code: 'PREVIEW_EXPIRED', message: 'The preview identity expired; re-preview before un-creating.' }
+            return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before un-creating.' }
+          }
+          if (rev.entity_type === 'field') {
+            await dropFieldCascade(query, {
+              sheetId: entitySheetId, fieldId: rev.entity_id,
+              fieldRow: { name: String(fieldRow.name), type: String(fieldRow.type), property: fieldRow.property, order: Number(fieldRow.order ?? 0) },
+              actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id,
+            })
+          } else {
+            await dropViewCascade(query, { sheetId: entitySheetId, viewId: rev.entity_id, viewRow, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
+          }
+          return null
+        })
+        if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+        if (rev.entity_type === 'field') invalidateFieldCache(sheetId)
+        invalidateViewConfigCache()
+        return res.json({ ok: true, data: { uncreated: { entityType: rev.entity_type, entityId: rev.entity_id } } })
       }
       const classify = classifyRevert(rev)
       // classifyRevert stays PURE; the route SUPPORTS only the flag-opened supported subsets — Tier-1 sheet_config
@@ -10174,27 +10394,6 @@ export function univerMetaRouter(): Router {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'fieldId is required' } })
     }
 
-    const cleanupViewConfig = (args: {
-      filterInfo: Record<string, unknown>
-      sortInfo: Record<string, unknown>
-      groupInfo: Record<string, unknown>
-      hiddenFieldIds: string[]
-    }) => {
-      const nextHidden = args.hiddenFieldIds.filter((id) => id !== fieldId)
-
-      const rawSortRules = Array.isArray(args.sortInfo.rules) ? args.sortInfo.rules : []
-      const nextSortRules = rawSortRules.filter((r) => isPlainObject(r) && r.fieldId !== fieldId)
-      const nextSortInfo = nextSortRules.length > 0 ? { ...args.sortInfo, rules: nextSortRules } : {}
-
-      const nextGroupInfo = args.groupInfo.fieldId === fieldId ? {} : args.groupInfo
-
-      const rawConditions = Array.isArray(args.filterInfo.conditions) ? args.filterInfo.conditions : []
-      const nextConditions = rawConditions.filter((c) => isPlainObject(c) && c.fieldId !== fieldId)
-      const nextFilterInfo = nextConditions.length > 0 ? { ...args.filterInfo, conditions: nextConditions } : {}
-
-      return { nextHidden, nextSortInfo, nextGroupInfo, nextFilterInfo }
-    }
-
     try {
       const pool = poolManager.get()
       const existing = await pool.query('SELECT id, sheet_id FROM meta_fields WHERE id = $1', [fieldId])
@@ -10207,84 +10406,12 @@ export function univerMetaRouter(): Router {
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
         const row = (existing as any).rows[0]
         const sheetId = String(row.sheet_id)
-        const order = Number(row.order ?? 0)
-        const configBatchId = randomUUID() // T9-R1: one batchId — the deleted field + the order-shift of later fields share it
-
-        await query('DELETE FROM meta_fields WHERE id = $1', [fieldId])
-        await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
-
-        // T9: record the field deletion (before = the deleted field's config). Any cascade view-config cleanup below
-        // is recorded under the SAME batchId so the operation remains one logical config-change batch (T9-L7).
-        await recordConfigRevision(query, {
-          sheetId, entityType: 'field', entityId: fieldId, action: 'delete',
-          ...fieldDeleteDiff({ name: String(row.name), type: String(row.type), property: row.property, order }),
-          batchId: configBatchId, actorId: getRequestActorId(req),
+        // U3-L2: the field-delete cascade is the shared dropFieldCascade (also used by the un-create execute).
+        await dropFieldCascade(query, {
+          sheetId, fieldId,
+          fieldRow: { name: String(row.name), type: String(row.type), property: row.property, order: Number(row.order ?? 0) },
+          actorId: getRequestActorId(req),
         })
-
-        try {
-          await query('DELETE FROM meta_links WHERE field_id = $1', [fieldId])
-        } catch (err) {
-          if (!isUndefinedTableError(err, 'meta_links')) throw err
-        }
-
-        // lock-exempt: field-delete schema op — drops the deleted field's key sheet-wide; not a per-record user edit.
-        await query('UPDATE meta_records SET data = data - $1 WHERE sheet_id = $2', [fieldId, sheetId])
-        // T9-R1: deleting a field shifts later fields' order -1 — record each shifted field under the same batchId.
-        const shiftedDel = ((await query('UPDATE meta_fields SET "order" = "order" - 1 WHERE sheet_id = $1 AND "order" > $2 RETURNING id, "order"', [sheetId, order])) as any).rows as Array<{ id: string; order: number }>
-        await recordFieldOrderShifts(query, sheetId, shiftedDel.map((r) => ({ id: String(r.id), newOrder: Number(r.order) })), -1, configBatchId, getRequestActorId(req))
-
-        const views = await query(
-          'SELECT id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1',
-          [sheetId],
-        )
-        for (const v of (views as any).rows as any[]) {
-          const beforeView = viewConfigSnapshotFromRow(v)
-          const filterInfo = normalizeJson(v.filter_info)
-          const sortInfo = normalizeJson(v.sort_info)
-          const groupInfo = normalizeJson(v.group_info)
-          const hiddenFieldIds = normalizeJsonArray(v.hidden_field_ids)
-
-          const { nextHidden, nextSortInfo, nextGroupInfo, nextFilterInfo } = cleanupViewConfig({
-            filterInfo,
-            sortInfo,
-            groupInfo,
-            hiddenFieldIds,
-          })
-
-          const changed =
-            nextHidden.length !== hiddenFieldIds.length ||
-            JSON.stringify(nextSortInfo) !== JSON.stringify(sortInfo) ||
-            JSON.stringify(nextGroupInfo) !== JSON.stringify(groupInfo) ||
-            JSON.stringify(nextFilterInfo) !== JSON.stringify(filterInfo)
-          if (!changed) continue
-
-          await query(
-            'UPDATE meta_views SET filter_info = $2::jsonb, sort_info = $3::jsonb, group_info = $4::jsonb, hidden_field_ids = $5::jsonb WHERE id = $1',
-            [String(v.id), JSON.stringify(nextFilterInfo), JSON.stringify(nextSortInfo), JSON.stringify(nextGroupInfo), JSON.stringify(nextHidden)],
-          )
-          const afterView = {
-            ...beforeView,
-            filterInfo: nextFilterInfo,
-            sortInfo: nextSortInfo,
-            groupInfo: nextGroupInfo,
-            hiddenFieldIds: nextHidden,
-          }
-          const cascadeDiff = configUpdateDiff(beforeView, afterView, VIEW_CONFIG_HISTORY_KEYS)
-          if (cascadeDiff) {
-            await recordConfigRevision(query, {
-              sheetId,
-              entityType: 'view',
-              entityId: String(v.id),
-              action: 'update',
-              before: cascadeDiff.before,
-              after: cascadeDiff.after,
-              changedKeys: cascadeDiff.changedKeys,
-              batchId: configBatchId,
-              actorId: getRequestActorId(req),
-            })
-          }
-        }
-
         return { deleted: fieldId, sheetId }
       })
 
@@ -11048,16 +11175,8 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
       await pool.transaction(async ({ query }) => {
-        await query('DELETE FROM meta_views WHERE id = $1', [viewId])
-        await recordConfigRevision(query, {
-          sheetId,
-          entityType: 'view',
-          entityId: viewId,
-          action: 'delete',
-          ...configDeleteDiff(viewConfigSnapshotFromRow(row), VIEW_CONFIG_HISTORY_KEYS),
-          batchId: randomUUID(),
-          actorId: getRequestActorId(req),
-        })
+        // U3-L2: the view-delete cascade is the shared dropViewCascade (also used by the un-create execute).
+        await dropViewCascade(query, { sheetId, viewId, viewRow: row, actorId: getRequestActorId(req) })
       })
       invalidateViewConfigCache(viewId)
       return res.json({ ok: true, data: { deleted: viewId } })
