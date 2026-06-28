@@ -554,6 +554,53 @@ export function formulaReferencesRequesterAttribute(expression: string, attr: st
   return astReferencesRequesterAttribute(ast, attr)
 }
 
+/** Collect every role-id string literal used by a `requester.role in [...]` membership node anywhere in
+ *  the formula (including nested inside AND/OR/NOT). Walks the parsed AST, so a string literal like
+ *  "admin" appearing as a comparison operand — not inside a role membership array — is NOT collected.
+ *  Mirrors `formulaReferencesRequesterAttribute`: returns `[]` on a parse error or when there is no role
+ *  membership. The returned list is the UNIQUE union of all role literals (order-preserving). */
+function astRequesterRoleLiterals(ast: FormulaAst, out: string[], seen: Set<string>): void {
+  switch (ast.kind) {
+    case 'membership':
+      if (ast.attr in ROLE_REQUESTER_ATTRS) {
+        for (const element of ast.elements) {
+          if (!seen.has(element)) {
+            seen.add(element)
+            out.push(element)
+          }
+        }
+      }
+      return
+    case 'unary':
+      astRequesterRoleLiterals(ast.expr, out, seen)
+      return
+    case 'binary':
+    case 'compare':
+      astRequesterRoleLiterals(ast.left, out, seen)
+      astRequesterRoleLiterals(ast.right, out, seen)
+      return
+    default:
+      return
+  }
+}
+
+/** RA-1b CURATED-VOCABULARY: extract the unique role-id literals an expression routes on via
+ *  `requester.role in [...]`. The HARD GATE (publish + dry-run) feeds these into the curated-set check so
+ *  an author can never route on an uncurated (e.g. admin/system) role. `[]` for non-role formulas and for
+ *  a parse error (callers either re-validate elsewhere or treat an unparseable formula as routing on
+ *  nothing). */
+export function extractRequesterRoleLiterals(expression: string): string[] {
+  let ast: FormulaAst
+  try {
+    ast = parseFormula(expression)
+  } catch {
+    return []
+  }
+  const out: string[] = []
+  astRequesterRoleLiterals(ast, out, new Set<string>())
+  return out
+}
+
 function formFieldTypeToFormulaType(field: FormField): FormulaType | 'unsupported' {
   switch (field.type) {
     case 'number':

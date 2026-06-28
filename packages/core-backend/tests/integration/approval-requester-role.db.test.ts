@@ -21,10 +21,12 @@ import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 const REQ = `rrole-req-${TS}`
+const REQ_UNCURATED = `rrole-req-unc-${TS}` // holds ONLY an uncurated role → curated set is genuine-empty
 const APPROVER = `rrole-appr-${TS}`
 const FIN = `rrole-fin-${TS}`
 const OTHER = `rrole-oth-${TS}`
-const ROLE = `finance_approver-${TS}` // seeded into user_roles; MUST match the membership literal below
+const ROLE = `finance_approver-${TS}` // CURATED (approval_usable=true); MUST match the membership literal below
+const UNCURATED_ROLE = `system_admin-${TS}` // approval_usable=false — an author must NOT be able to route on it
 
 async function canListen(): Promise<boolean> {
   return await new Promise((r) => {
@@ -73,22 +75,34 @@ describeIfDatabase('requester.role — real-DB create->reload->dispatch round-tr
   let base = ''
   let reqTok = ''
   let apprTok = ''
+  let reqUncuratedTok = ''
 
   beforeAll(async () => {
     expect(await canListen()).toBe(true)
     await ensureApprovalSchemaReady()
     const pool = poolManager.get()
-    // RBAC table guard (defensive — present via migrations in the CI lane; matches the real schema).
+    // RBAC table guards (defensive — present via migrations in the CI lane; matches the real schema).
     await pool.query(`CREATE TABLE IF NOT EXISTS user_roles (user_id varchar(255) NOT NULL, role_id varchar(255) NOT NULL, created_at timestamp DEFAULT CURRENT_TIMESTAMP NOT NULL)`)
+    await pool.query(`CREATE TABLE IF NOT EXISTS roles (id text PRIMARY KEY, name text NOT NULL, created_at timestamptz DEFAULT now() NOT NULL, updated_at timestamptz DEFAULT now() NOT NULL)`)
+    // RA-1b CURATED-VOCABULARY: ensure the curated column exists (whether or not the migration ran in this
+    // lane), then seed a CURATED role (approval_usable=true) and an UNCURATED role (false). The resolver
+    // JOINs `roles` on approval_usable, and the publish HARD GATE enforces the same curated set.
+    await pool.query(`ALTER TABLE roles ADD COLUMN IF NOT EXISTS approval_usable boolean NOT NULL DEFAULT false`)
+    await pool.query(`INSERT INTO roles (id, name, approval_usable) VALUES ($1, $2, true) ON CONFLICT (id) DO UPDATE SET approval_usable = true`, [ROLE, ROLE])
+    await pool.query(`INSERT INTO roles (id, name, approval_usable) VALUES ($1, $2, false) ON CONFLICT (id) DO UPDATE SET approval_usable = false`, [UNCURATED_ROLE, UNCURATED_ROLE])
     // Seed: the requester user + a single user_roles row. NO directory account needed — requester.role reads
     // straight off user_roles, independent of the directory snapshot.
     await pool.query(`INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x') ON CONFLICT (id) DO NOTHING`, [REQ, `${REQ}@x.test`])
     await pool.query(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [REQ, ROLE])
+    // A second requester holding ONLY an UNCURATED role → curated set resolves to [] (genuine-empty).
+    await pool.query(`INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x') ON CONFLICT (id) DO NOTHING`, [REQ_UNCURATED, `${REQ_UNCURATED}@x.test`])
+    await pool.query(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [REQ_UNCURATED, UNCURATED_ROLE])
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
     base = `http://127.0.0.1:${server.getAddress()!.port}`
     reqTok = await tok(base, REQ)
     apprTok = await tok(base, APPROVER)
+    reqUncuratedTok = await tok(base, REQ_UNCURATED)
   })
 
   afterAll(async () => {
@@ -105,8 +119,9 @@ describeIfDatabase('requester.role — real-DB create->reload->dispatch round-tr
         await pool.query(`DELETE FROM approval_published_definitions WHERE template_id = ANY($1::uuid[])`, [tids])
         await pool.query(`DELETE FROM approval_templates WHERE id = ANY($1::uuid[])`, [tids])
       }
-      await pool.query(`DELETE FROM user_roles WHERE user_id = $1`, [REQ])
-      await pool.query(`DELETE FROM users WHERE id = $1`, [REQ])
+      await pool.query(`DELETE FROM user_roles WHERE user_id = ANY($1::varchar[])`, [[REQ, REQ_UNCURATED]])
+      await pool.query(`DELETE FROM users WHERE id = ANY($1::varchar[])`, [[REQ, REQ_UNCURATED]])
+      await pool.query(`DELETE FROM roles WHERE id = ANY($1::text[])`, [[ROLE, UNCURATED_ROLE]])
     } catch {
       /* best effort */
     }
@@ -162,5 +177,68 @@ describeIfDatabase('requester.role — real-DB create->reload->dispatch round-tr
     )).rows.map((r) => r.assignee_id)
     expect(assignees).toContain(FIN)
     expect(assignees).not.toContain(OTHER)
+  })
+
+  // RA-1b CURATED-VOCABULARY: a graph whose membership literal references an UNCURATED role must FAIL at
+  // publish (the HARD GATE), even though create-time draft authoring accepts it.
+  it('FAILS publish when a requester.role literal is UNCURATED (APPROVAL_REQUESTER_ROLE_NOT_CURATED)', async () => {
+    const key = `rrole-${TS}-uncurated`
+    const graph = JSON.parse(JSON.stringify(GRAPH)) as typeof GRAPH
+    const condition = graph.nodes.find((n) => n.key === 'condition_1')!
+    ;(condition.config as { branches: Array<{ formula: { expression: string } }> }).branches[0].formula.expression =
+      `requester.role in ["${UNCURATED_ROLE}"]`
+    const created = await req(base, '/api/approval-templates', reqTok, {
+      method: 'POST',
+      body: { key, name: key, formSchema: { fields: [{ id: 'reason', type: 'text', label: 'r', required: true }] }, approvalGraph: graph },
+    })
+    expect(created.status, await created.clone().text()).toBe(201) // draft authoring accepts it
+    const tid = ((await created.json()) as { id: string }).id
+
+    const publishRes = await req(base, `/api/approval-templates/${tid}/publish`, reqTok, { method: 'POST', body: { policy: { allowRevoke: true } } })
+    expect(publishRes.status, await publishRes.clone().text()).toBe(400)
+    const body = (await publishRes.json()) as { code?: string; error?: { code?: string } }
+    expect(body.code ?? body.error?.code).toBe('APPROVAL_REQUESTER_ROLE_NOT_CURATED')
+  })
+
+  // RA-1b GENUINE-EMPTY SEMANTICS: role is a PREDICATE, not a routing key. A requester whose CURATED role
+  // set is empty (holds only an uncurated role) must NOT be 422-rejected at create — it routes to DEFAULT.
+  it('a requester with ZERO curated roles routes to the DEFAULT edge (NOT a 422 reject)', async () => {
+    const key = `rrole-${TS}-genuine-empty`
+    const created = await req(base, '/api/approval-templates', reqTok, {
+      method: 'POST',
+      body: { key, name: key, formSchema: { fields: [{ id: 'reason', type: 'text', label: 'r', required: true }] }, approvalGraph: GRAPH },
+    })
+    expect(created.status, await created.clone().text()).toBe(201)
+    const tid = ((await created.json()) as { id: string }).id
+    expect((await req(base, `/api/approval-templates/${tid}/publish`, reqTok, { method: 'POST', body: { policy: { allowRevoke: true } } })).status).toBe(200)
+
+    // REQ_UNCURATED holds only the UNCURATED role → curated set []. createApproval MUST succeed (no 422).
+    const started = await req(base, '/api/approvals', reqUncuratedTok, { method: 'POST', body: { templateId: tid, formData: { reason: 'r' } } })
+    expect(started.status, await started.clone().text()).toBeLessThan(300)
+    const startBody = (await started.json()) as { id?: string; data?: { id: string } }
+    const iid = startBody.id ?? startBody.data!.id
+
+    const pool = poolManager.get()
+    // directoryRoles frozen as [] (genuine-empty), not omitted — so dispatch threads [] → membership false.
+    const snap = (await pool.query<{ requester_snapshot: { directoryRoles?: string[] } | null }>(
+      `SELECT requester_snapshot FROM approval_instances WHERE id = $1`,
+      [iid],
+    )).rows[0]
+    expect(snap.requester_snapshot?.directoryRoles).toEqual([])
+
+    // approve approval_1 → condition evaluates membership(["finance"], []) = false → DEFAULT edge (other).
+    const approved = await req(base, `/api/approvals/${iid}/actions`, apprTok, { method: 'POST', body: { action: 'approve' } })
+    expect(approved.status, await approved.clone().text()).toBeLessThan(300)
+    const after = (await pool.query<{ current_node_key: string | null }>(
+      `SELECT current_node_key FROM approval_instances WHERE id = $1`,
+      [iid],
+    )).rows[0]
+    expect(after.current_node_key).toBe('approval_other')
+    const assignees = (await pool.query<{ assignee_id: string }>(
+      `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1 AND assignment_type = 'user' AND is_active = TRUE`,
+      [iid],
+    )).rows.map((r) => r.assignee_id)
+    expect(assignees).toContain(OTHER)
+    expect(assignees).not.toContain(FIN)
   })
 })
