@@ -144,6 +144,19 @@ describeIfDatabase('OAPI-2a token WRITE routes (real DB)', () => {
     expect((await auditRows(tokWriteId)).some((r) => r.outcome === 'committed' && r.operation === 'upsert')).toBe(true)
   })
 
+  test('OAPI-2b: records:write → DELETE /records/:id soft-deletes + committed audit (operation=delete); wrong-scope 403', async () => {
+    const REC_DEL = `rec_oapi2b_del_${TS}`
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [REC_DEL, SHEET_ID, JSON.stringify({ [STATUS]: 'to-delete' })])
+    // wrong scope → 403, record still present (no destructive action without records:write)
+    expect((await request(app).delete(`/api/multitable/records/${REC_DEL}`).set('Authorization', `Bearer ${tokWrongScope}`)).status).toBe(403)
+    expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [REC_DEL])).rows.length).toBe(1)
+    // records:write → soft delete (removed from the live table → trash; not a hard purge)
+    const res = await request(app).delete(`/api/multitable/records/${REC_DEL}`).set('Authorization', `Bearer ${tokWrite}`)
+    expect([200, 204]).toContain(res.status)
+    expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [REC_DEL])).rows.length).toBe(0)
+    expect((await auditRows(tokWriteId)).some((r) => r.outcome === 'committed' && r.operation === 'delete')).toBe(true)
+  })
+
   test('wrong scope (records:read) → POST /records 403 + NO create + a denied audit row', async () => {
     const before = await recordCount()
     const res = await post('/api/multitable/records', tokWrongScope, { sheetId: SHEET_ID, data: { [STATUS]: 'should-not-exist' } })

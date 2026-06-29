@@ -72,7 +72,7 @@ export function isOapiReadAllowlistRequest(method: string, path: string, authHea
  * `requireScope` (univer-meta.ts / comments.ts) — the same over-match hazard as the read list: an entry
  * without a mounted `requireScope` is a silent no-auth bypass (`requireScope` fail-opens with no scopes).
  *
- * `DELETE /records/:id` is intentionally **absent** — it is OAPI-2b, gated after 2a (design-lock §4). So are
+ * `DELETE /records/:id` is included as OAPI-2b (single-record SOFT delete; design-lock §4). Still **absent**:
  * `/records/:id/lock`, `/records/:id/restore`, comment edit/delete (`PATCH`/`DELETE /api/comments/:id`), and
  * the public-form submit path `POST /api/multitable/views/:id/submit` (its own `publicToken` gate, disjoint).
  */
@@ -81,6 +81,9 @@ const OAPI_WRITE_ROUTES: readonly { method: string; pattern: RegExp }[] = [
   { method: 'POST', pattern: /^\/api\/multitable\/records$/ },
   // records:write — PATCH /records/:recordId (update). Exactly one id segment: not /records/:id/lock.
   { method: 'PATCH', pattern: /^\/api\/multitable\/records\/[^/]+$/ },
+  // records:write — DELETE /records/:recordId (OAPI-2b: single-record SOFT delete only). Exactly one id
+  // segment: not /records/:id/lock. No bulk-by-filter endpoint exists; hard purge stays session/admin-only.
+  { method: 'DELETE', pattern: /^\/api\/multitable\/records\/[^/]+$/ },
   // records:write — POST /patch (batch upsert).
   { method: 'POST', pattern: /^\/api\/multitable\/patch$/ },
   // comments:write — POST /api/comments (comment CREATE only). NOT PATCH/DELETE /api/comments/:id (edit/delete).

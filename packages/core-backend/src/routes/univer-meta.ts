@@ -14886,7 +14886,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.delete('/records/:recordId', async (req: Request, res: Response) => {
+  router.delete('/records/:recordId', apiTokenAuth, oapiWriteAuditBoundary('delete', 'records:write'), requireScope('records:write'), apiTokenWriteRateLimit, async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId : ''
     if (!recordId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
@@ -14911,6 +14911,7 @@ export function univerMetaRouter(): Router {
           const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
           return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
         },
+        oapiAudit: buildOapiAuditContext(req, 'delete', 'records:write'),
       })
 
       return res.json({ ok: true, data: { deleted: recordId } })

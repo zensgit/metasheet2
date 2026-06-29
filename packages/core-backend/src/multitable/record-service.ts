@@ -204,6 +204,8 @@ export type RecordDeleteInput = {
   resolveSheetAccess: (
     sheetId: string,
   ) => Promise<{ capabilities: MultitableCapabilities; sheetScope?: SheetPermissionScope }>
+  /** OAPI-2b (§6): present only for a token delete → committed audit row inserted IN-TXN (fail-closed). No-op for session. */
+  oapiAudit?: OapiWriteAuditContext
 }
 
 export type RecordDeleteResult = {
@@ -841,6 +843,11 @@ export class RecordService {
 
       // lock-guarded: single DELETE — ensureRecordNotLocked enforced above (rejects before this txn).
       await query('DELETE FROM meta_records WHERE id = $1', [recordId])
+
+      // OAPI-2b §6: committed token-delete audit INSIDE the (soft-)delete txn (fail-closed). No-op for session.
+      if (input.oapiAudit) {
+        await insertCommittedAuditInTxn(query, input.oapiAudit, { recordIds: [recordId] })
+      }
     })
 
     publishMultitableSheetRealtime({

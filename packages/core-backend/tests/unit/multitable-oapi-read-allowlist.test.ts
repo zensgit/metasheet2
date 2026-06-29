@@ -85,6 +85,7 @@ describe('OAPI-2a write-allowlist gate matcher (method-bound)', () => {
   test('ALLOWS: mst_ + the exact write (method, path) pairs', () => {
     expect(isOapiWriteAllowlistRequest('POST', '/api/multitable/records', MST)).toBe(true)
     expect(isOapiWriteAllowlistRequest('PATCH', '/api/multitable/records/rec_1', MST)).toBe(true)
+    expect(isOapiWriteAllowlistRequest('DELETE', '/api/multitable/records/rec_1', MST)).toBe(true) // OAPI-2b
     expect(isOapiWriteAllowlistRequest('POST', '/api/multitable/patch', MST)).toBe(true)
     expect(isOapiWriteAllowlistRequest('POST', '/api/comments', MST)).toBe(true)
   })
@@ -109,8 +110,8 @@ describe('OAPI-2a write-allowlist gate matcher (method-bound)', () => {
   })
 
   test('DENIES: destructive + adjacent + out-of-scope write traps (fail-closed)', () => {
-    // DELETE is OAPI-2b — NOT yet token-exposed
-    expect(isOapiWriteAllowlistRequest('DELETE', '/api/multitable/records/rec_1', MST)).toBe(false)
+    // DELETE /records/:id is now OAPI-2b (allowed above); but DELETE on the collection (no id) is not a route
+    expect(isOapiWriteAllowlistRequest('DELETE', '/api/multitable/records', MST)).toBe(false)
     // collaboration / undelete primitives — not in the matrix
     expect(isOapiWriteAllowlistRequest('POST', '/api/multitable/records/rec_1/lock', MST)).toBe(false)
     expect(isOapiWriteAllowlistRequest('POST', '/api/multitable/sheets/s1/records/rec_1/restore', MST)).toBe(false)
@@ -131,12 +132,13 @@ describe('isOapiAllowlistRequest — union of read (GET) + write (method-bound)'
     expect(isOapiAllowlistRequest('GET', '/api/comments', MST)).toBe(true)
     expect(isOapiAllowlistRequest('POST', '/api/multitable/records', MST)).toBe(true)
     expect(isOapiAllowlistRequest('PATCH', '/api/multitable/records/rec_1', MST)).toBe(true)
+    expect(isOapiAllowlistRequest('DELETE', '/api/multitable/records/rec_1', MST)).toBe(true)
     expect(isOapiAllowlistRequest('POST', '/api/multitable/patch', MST)).toBe(true)
     expect(isOapiAllowlistRequest('POST', '/api/comments', MST)).toBe(true)
   })
 
   test('DENIES the traps in the union (no read/write cross-leak)', () => {
-    expect(isOapiAllowlistRequest('DELETE', '/api/multitable/records/rec_1', MST)).toBe(false)
+    expect(isOapiAllowlistRequest('DELETE', '/api/multitable/records', MST)).toBe(false) // no id → not the 2b delete route
     expect(isOapiAllowlistRequest('POST', '/api/multitable/views/v1/submit', MST)).toBe(false)
     expect(isOapiAllowlistRequest('POST', '/api/multitable/records/rec_1/lock', MST)).toBe(false)
     expect(isOapiAllowlistRequest('PATCH', '/api/comments/cmt_1', MST)).toBe(false)
