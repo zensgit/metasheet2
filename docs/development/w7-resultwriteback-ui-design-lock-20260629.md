@@ -72,11 +72,23 @@ config, after the form-data mapping. It is three optional field pickers — noth
 
 - Each picker is a `<select>` over **`fields`** (the rule's current source-sheet fields — the same
   list the `formDataMapping` value picker already uses). Empty option = "not written".
-- **Lightweight, advisory type filter/hint** mirroring the backend type contract (§1): only offer
-  (or visibly hint) `string`/`longText`/`select` for status, `string`/`longText` for approver,
-  `string`/`longText`/`dateTime` for completedAt. This is a convenience to steer the author toward a
-  valid choice; **`assertResultWritebackFields` remains the authority** — the UI does not re-implement
-  the `select`-must-include-`approved` check or block save on it.
+- **Type filter is a HINT, never a GATE — and the current configured value is always preserved in the
+  options.** Each picker's option set is the type-compatible source fields (`string`/`longText`/`select`
+  for status, `string`/`longText` for approver, `string`/`longText`/`dateTime` for completedAt) **PLUS
+  the currently-configured field id** — always present and selected, even when that field has been
+  deleted, retyped to an incompatible type, or is otherwise absent from the current `fields`, rendered
+  as a marked "当前值 / 未知字段 / 不兼容" option. Compatibility is a *visible hint* only; the picker
+  never *excludes* the current value and never blocks save. **`assertResultWritebackFields` remains the
+  authority** — the UI does not re-implement the `select`-must-include-`approved` check.
+
+> **P2 (must-fix — why the current value MUST stay in the options):** if a picker listed only
+> type-compatible fields, a configured-but-now-incompatible/deleted/missing target would fall out of
+> the options, the `<select>` would silently render **empty**, and an unedited save would then trip
+> §4's omit-when-empty rule → **the backwrite config is silently deleted** rather than rejected by the
+> backend. That is exactly the lossy round-trip this PR exists to prevent, re-introduced through the
+> type filter. Preserving the current value as a selectable option closes it: "empty" then
+> unambiguously means "the author chose none," and a stale/incompatible target is carried back verbatim
+> for the backend to fail-fast.
 - Stable `data-field` hooks for tests: `resultWritebackStatusField` / `…ApproverField` /
   `…CompletedAtField`.
 - **Job-mode unchanged** — `start_approval` already force-locks `executionMode: workflow_job_v1`
@@ -97,9 +109,14 @@ config, after the form-data mapping. It is three optional field pickers — noth
   - if **all three are empty, omit the `resultWriteback` key entirely** (do **not** emit `{}` — the
     backend rejects an empty mapping). This makes "no writeback configured" round-trip to *absence*,
     not to an invalid empty object.
-- **Guarantee:** for any backend-valid saved config, *load → save with no edits* yields an
-  **identical** `resultWriteback` (including the all-empty → omitted case). This is the fail-first
-  test in §5.
+  - **omit-when-empty is safe *only because* the current value is never dropped from the picker
+    (§3 P2):** a picker reads empty **iff** the author actively cleared it, never because a configured
+    value couldn't be displayed. So an unchanged load → save carries every original field id back
+    **verbatim** — a stale/incompatible/missing target reaches the backend and is rejected by
+    `assertResultWritebackFields` (fail-fast), and is **never** silently omitted by the UI.
+- **Guarantee:** for any saved config — *including one whose target fields are now incompatible-typed,
+  deleted, or absent from the current sheet* — *load → save with no edits* yields an **identical**
+  `resultWriteback` (and the all-empty → omitted case). The **two** fail-first tests in §5 lock this.
 
 ## 5. Test plan
 
@@ -112,6 +129,13 @@ config, after the form-data mapping. It is three optional field pickers — noth
   edits, assert the saved `config.resultWriteback` is unchanged. **Fail-first:** without the
   `buildActionPayload` change, this test must go RED (saved config drops `resultWriteback`) — proving
   the test exercises the real bug, not a tautology.
+- **Stale/incompatible round-trip fail-first (P2)** — load a rule whose `resultWriteback` targets a
+  field that is **incompatible-typed, deleted, or absent** from the current `fields`; save **without
+  editing**; assert the saved `config.resultWriteback` **still carries the original field id** (it must
+  **not** become absent/omitted). **Fail-first:** with a type-filtered picker that drops the current
+  value, this goes RED (value renders empty → save omits it) — proving the picker-preserves-current-
+  value rule (§3 P2) is what saves the config, and that the backend (not the UI) is what rejects a
+  stale target.
 - **Type hint (advisory)** — a non-conforming target is hinted but the UI does **not** block save;
   the spec asserts the hint, not a UI-side rejection (the backend save-validation owns rejection;
   not duplicated here).
@@ -142,11 +166,12 @@ config, after the form-data mapping. It is three optional field pickers — noth
   spread); **omit the key when all empty** (fixes the lossy round-trip / avoids the rejected empty
   `{}`); also pass `config.requester` through if present (§6).
 - 🔒 **D3** — `draftConfigFromAction`: backfill `config.resultWriteback` into the three pickers.
-- 🔒 **D4** — advisory type filter/hint per the backend field-type contract (backend stays the
-  authority).
+- 🔒 **D4 (P2 must-fix)** — picker options = type-compatible fields **+ the currently-configured value**
+  (always preserved + marked, never excluded by the type filter); type is a hint, not a gate. Guarantees
+  "empty = author cleared it," so omit-when-empty can't silently delete a stale/incompatible config.
 - 🔒 **D5** — `meta-automation-labels` keys for the new labels (i18n extension point).
 - 🔒 **D6** — specs: render · save-shape (incl. omit-when-empty) · round-trip lossy-drop **fail-first**
-  · no-regression · `vue-tsc -b` green.
+  · **stale/incompatible round-trip fail-first (P2)** · no-regression · `vue-tsc -b` green.
 
 ## 8. Landing
 
