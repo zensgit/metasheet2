@@ -93,9 +93,10 @@ ON DELETE CASCADE). Frontend: `types.ts` · `meta-automation-labels.ts` · `Meta
 
 ## 6. Boundaries / deferred (named, not silent)
 
-- **Retention/aging** of `meta_automation_date_reminder_fires` is NOT built — rows are reaped on rule delete
-  (FK CASCADE) but long-lived rules grow the ledger. Deferred debt (the NiFi provenance benchmark flagged
-  retention as the bounded gap); a separate aging slice.
+- **Retention/aging** of `meta_automation_date_reminder_fires` was NOT built in this initial slice — rows were
+  reaped on rule delete (FK CASCADE), but long-lived rules could grow the ledger. Follow-up shipped a fixed
+  365-day `fired_at` retention sweep; see
+  `docs/development/multitable-date-reminder-ledger-retention-dev-verification-20260629.md`.
 - **Timezone:** v1 buckets in UTC (date fields are stored UTC). `timezone` is persisted but only `'UTC'` is
   honored; tz-aware day boundaries need an IANA tz library — deferred.
 - **Sub-day offsets:** day-bucketing assumes whole-day `offsetDays`; hour-level offsets would revisit the key

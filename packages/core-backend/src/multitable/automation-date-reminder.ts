@@ -58,6 +58,19 @@ export interface ScheduleDateFieldConfig {
  */
 export const DATE_REMINDER_GRACE_WINDOW_MS = 2 * DAY_MS
 
+/**
+ * Retain the date-reminder idempotency ledger for one year. The ledger is a dedupe/audit record, not user
+ * content; rule deletion still cascades immediately, while long-lived active rules age by actual `fired_at`.
+ */
+export const DATE_REMINDER_LEDGER_RETENTION_DAYS = 365
+export const DATE_REMINDER_LEDGER_RETENTION_MS = DATE_REMINDER_LEDGER_RETENTION_DAYS * DAY_MS
+export const DATE_REMINDER_LEDGER_SWEEP_INTERVAL_MS = DAY_MS
+
+/** PURE cutoff for ledger aging. Rows with fired_at older than this can be deleted. */
+export function dateReminderLedgerRetentionCutoffIso(nowMs: number): string {
+  return new Date(nowMs - DATE_REMINDER_LEDGER_RETENTION_MS).toISOString()
+}
+
 /** Parse 'HH:mm' → minutes-since-midnight, or 540 (09:00) on junk. */
 function parseTimeOfDayMinutes(timeOfDay: string | undefined): number {
   if (typeof timeOfDay !== 'string') return 9 * 60

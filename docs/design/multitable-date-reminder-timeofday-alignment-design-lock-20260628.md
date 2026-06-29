@@ -41,7 +41,7 @@ Locks DR-A/DR-B/DR-C with `vi.useFakeTimers()` (no real DB needed for the timing
 Plus: the existing 16 pure unit + 11 real-DB tests stay green; add/extend a real-DB case asserting the aligned path (not just `runDateReminderScanNow`) fires once.
 
 ## 5. Scope / non-goals (unchanged from #3329)
-UTC-only day bucketing (tz-aware boundary deferred); whole-day offsets only; ledger retention/aging deferred; at-most-once delivery. This lock touches **only** *when the scan runs* + the `scanIntervalMs`/window decoupling — not the occurrence math, the dedup ledger, or the UTC semantic.
+UTC-only day bucketing (tz-aware boundary deferred); whole-day offsets only; at-most-once delivery. Ledger retention/aging was deferred by this lock and closed by the fixed 365-day `fired_at` sweep follow-up. This lock touches **only** *when the scan runs* + the `scanIntervalMs`/window decoupling — not the occurrence math, the dedup ledger, or the UTC semantic.
 
 ## 6. Build sequence (post-ratify only)
 design-lock ratified → DR-A/DR-B scheduler rewrite + DR-D core decouple + DR-E text → DR-4 fake-timer golden + real-DB aligned-path case → backend `tsc` + frontend `vue-tsc` + editor specs → dev/verification MD → PR (held for review, not auto-merged).

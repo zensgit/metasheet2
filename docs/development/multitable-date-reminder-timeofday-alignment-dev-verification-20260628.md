@@ -34,9 +34,11 @@
 - `timeOfDay` drives the actual fire time (UTC), bounded catch-up on restart, never a backfill-blast. ✓
 - The dedup/backfill window is a fixed 48h constant — a per-rule/script `scanIntervalMs` can no longer distort it. ✓
 - Claim ledger + at-most-once unchanged; cron/interval scheduling unchanged. ✓
-- Scope unchanged from #3329: UTC-only bucketing, whole-day offsets, ledger retention deferred. ✓
+- Scope unchanged from #3329: UTC-only bucketing and whole-day offsets stay deferred. Ledger retention was
+  closed by the 365-day `fired_at` sweep follow-up. ✓
 
 ## 6. Boundary / deferred (named)
 - **Boot-scan burst (behavior delta vs the old `setInterval`):** DR-B runs one `evaluateDateReminders` per `date_field` rule on register, so a leader boot/failover *after* `timeOfDay` with N such rules kicks off ~N near-simultaneous catch-up scans (the old boot-anchored `setInterval` deferred the first scan instead). Each scan is bounded + idempotent, so it's correct; at scale a future slice could stagger/coalesce the catch-up. Non-blocking at current rule counts.
 - **Re-enable-after-48h catch-up (named, not a backfill surprise):** disable a `date_field` rule for >48h then re-enable it after `timeOfDay` → the register-time catch-up fires the trailing-48h occurrences that were never claimed (the floor is the *preserved* `effectiveAt`, which is genuinely old — re-enable is not a re-activation). This is within the accepted recent window + at-most-once, and re-enable is an explicit operator action, so it's the intended semantic; flagged so it isn't re-filed as a backfill bug.
-- Unchanged deferred from #3329: tz-aware day boundaries, sub-day offsets, `date_reminder_fires` retention/aging.
+- Unchanged deferred from #3329: tz-aware day boundaries and sub-day offsets. `date_reminder_fires`
+  retention/aging is closed by the fixed 365-day `fired_at` sweep follow-up.

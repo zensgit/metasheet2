@@ -140,6 +140,31 @@ describeIfDatabase('multitable date-reminder trigger — scan/claim/fire (real D
     expect(await execCount(RULE_BACKDATED)).toBe(execsBefore) // and therefore fired nothing
   })
 
+  test('DR-RET: 365d ledger retention deletes old fired_at rows and keeps recent dedupe rows', async () => {
+    const OLD_LEDGER_RECORD = `rec_dr_ledger_old_${TS}`
+    const RECENT_LEDGER_RECORD = `rec_dr_ledger_recent_${TS}`
+    await q(
+      `INSERT INTO meta_automation_date_reminder_fires (rule_id, record_id, occurrence_ts, fired_at)
+       VALUES ($1,$2,$3::timestamptz,$4::timestamptz)`,
+      [RULE_BACKDATED, OLD_LEDGER_RECORD, iso(TS - 400 * DAY), iso(TS - 366 * DAY)],
+    )
+    await q(
+      `INSERT INTO meta_automation_date_reminder_fires (rule_id, record_id, occurrence_ts, fired_at)
+       VALUES ($1,$2,$3::timestamptz,$4::timestamptz)`,
+      [RULE_BACKDATED, RECENT_LEDGER_RECORD, iso(TS - 20 * DAY), iso(TS - 364 * DAY)],
+    )
+
+    expect(await svc.sweepDateReminderLedger(TS)).toBeGreaterThanOrEqual(1)
+
+    const rows = await q(
+      `SELECT record_id FROM meta_automation_date_reminder_fires
+        WHERE rule_id = $1 AND record_id = ANY($2::text[])
+        ORDER BY record_id`,
+      [RULE_BACKDATED, [OLD_LEDGER_RECORD, RECENT_LEDGER_RECORD]],
+    )
+    expect((rows.rows as Array<{ record_id: string }>).map((r) => r.record_id)).toEqual([RECENT_LEDGER_RECORD])
+  })
+
   test('DR-3: BACKFILL bound — the SAME due record under a FRESH rule does NOT fire (occurrence < floor = effectiveAt ≈ created_at)', async () => {
     await svc.runDateReminderScanNow(RULE_FRESH)
     // REC_DUE is fetched by the SQL window, but its occurrence (today 00:00) predates the fresh rule's FLOOR
