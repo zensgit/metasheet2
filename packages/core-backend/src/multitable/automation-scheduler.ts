@@ -151,9 +151,56 @@ function cronMatches(parsed: ParsedCronExpression, date: Date): boolean {
   return domMatches || dowMatches
 }
 
+/** Leap-safe maximum day each month (1..12) can host (February = 29). */
+const MONTH_MAX_DAYS: Readonly<Record<number, number>> = {
+  1: 31, 2: 29, 3: 31, 4: 30, 5: 31, 6: 30,
+  7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31,
+}
+
+/**
+ * True when a PARSED cron's day fields can never select a real calendar day.
+ * Provably safe — only reports "impossible" when day-of-week is a wildcard
+ * (otherwise the DOM/DOW OR-semantics could still match via a weekday, so the
+ * day is reachable), day-of-month is restricted, and the smallest requested
+ * day-of-month exceeds the largest day ANY restricted month can host.
+ */
+function dayUnreachable(parsed: ParsedCronExpression): boolean {
+  // DOW restricted → a matching weekday can occur regardless of DOM (OR-semantics).
+  if (!parsed.dayOfWeekWildcard) return false
+  // DOM wildcard → every day is allowed.
+  if (parsed.dayOfMonthWildcard) return false
+
+  let maxHostableDay = 0
+  for (const m of parsed.month) {
+    const d = MONTH_MAX_DAYS[m] ?? 31
+    if (d > maxHostableDay) maxHostableDay = d
+  }
+  let minRequestedDay = Infinity
+  for (const d of parsed.dayOfMonth) {
+    if (d < minRequestedDay) minRequestedDay = d
+  }
+  return minRequestedDay > maxHostableDay
+}
+
+/**
+ * Cheap pre-check exposing {@link dayUnreachable} for a raw cron string so
+ * `nextCronOccurrenceMs` (and tests) can prune day-impossible expressions —
+ * e.g. `0 0 30 2 *` (February 30th) — instead of scanning ~5 years of minutes.
+ * Returns `false` for unparseable input (that null path is handled by the
+ * caller's own parse). February uses 29 so `0 0 29 2 *` is NOT pruned.
+ */
+export function cronHasNoMatchingDay(expression: string): boolean {
+  const parsed = parseCronExpression(expression)
+  if (!parsed) return false
+  return dayUnreachable(parsed)
+}
+
 export function nextCronOccurrenceMs(expression: string, fromMs: number = Date.now()): number | null {
   const parsed = parseCronExpression(expression)
   if (!parsed) return null
+  // Fast path: a day-impossible cron (e.g. Feb 30) would otherwise scan the full
+  // ~5-year window before returning null. Short-circuit it up front.
+  if (dayUnreachable(parsed)) return null
   const minuteMs = 60 * 1000
   let candidate = Math.floor(fromMs / minuteMs) * minuteMs + minuteMs
   const max = candidate + 5 * 366 * 24 * 60 * minuteMs
@@ -342,7 +389,7 @@ export class AutomationScheduler {
     this.isLeader = false
     this.setLeaderGauge('relinquished')
     for (const [ruleId, timer] of this.timers.entries()) {
-      clearTimeout(timer)
+      this.clearTimer(timer)
       logger.info(`Cleared schedule for rule ${ruleId} after leader loss`)
     }
     this.timers.clear()
@@ -368,6 +415,19 @@ export class AutomationScheduler {
     } catch (err) {
       logger.error(`Scheduled rule ${rule.id} execution failed`, err instanceof Error ? err : undefined)
     }
+  }
+
+  /**
+   * Cancel a rule timer. The `timers` map mixes setTimeout handles (cron,
+   * which re-arm) and setInterval handles (interval / date_field scans).
+   * Node's `clearTimeout` cancels both kinds — they share one `Timeout`
+   * object — so routing every rule-timer teardown through this one helper
+   * keeps the call sites consistent without tracking each handle's kind. The
+   * renewal loop is cleared separately with `clearInterval`; it is not a rule
+   * timer and never enters this map.
+   */
+  private clearTimer(timer: NodeJS.Timeout): void {
+    clearTimeout(timer)
   }
 
   private registerCron(rule: AutomationRule, expression: string): void {
@@ -463,7 +523,7 @@ export class AutomationScheduler {
   unregister(ruleId: string): void {
     const timer = this.timers.get(ruleId)
     if (timer) {
-      clearTimeout(timer)
+      this.clearTimer(timer)
       this.timers.delete(ruleId)
       logger.info(`Unregistered schedule for rule ${ruleId}`)
     }
@@ -488,7 +548,7 @@ export class AutomationScheduler {
    */
   destroy(): void {
     for (const [ruleId, timer] of this.timers.entries()) {
-      clearTimeout(timer)
+      this.clearTimer(timer)
       logger.info(`Destroyed schedule for rule ${ruleId}`)
     }
     this.timers.clear()

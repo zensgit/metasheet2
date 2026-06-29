@@ -118,6 +118,42 @@ describe('AutomationScheduler — leader lock', () => {
     scheduler.destroy()
   })
 
+  it('non-leader scheduler does not schedule a cron timer (cron-isolated)', async () => {
+    // Sharper sibling of the combined "any schedule trigger" test above: this
+    // registers ONLY a cron rule on a non-leader, so the cron branch is pinned
+    // in isolation. A regression that scheduled cron-on-non-leader while leaving
+    // the interval path correct could otherwise hide behind the combined test's
+    // aggregate activeCount assertion. This locks the cross-replica
+    // double-fire guard specifically for the cron path.
+    const shared = sharedStore
+    shared.set('automation-scheduler:leader', {
+      value: 'external-owner',
+      expireAt: Date.now() + 10_000,
+    })
+
+    const client = new MemoryLeaderLockClient(shared)
+    const lock = new RedisLeaderLock({ client })
+
+    const scheduler = new AutomationScheduler(vi.fn(), {
+      leaderLock: lock,
+      ownerId: 'loser',
+      ttlMs: 10_000,
+      renewIntervalMs: 10_000,
+    })
+    await scheduler.ready
+    expect(scheduler.leader).toBe(false)
+
+    scheduler.register({
+      ...makeIntervalRule('rule_cron_only'),
+      trigger: { type: 'schedule.cron', config: { expression: '15 9 * * *' } },
+    })
+
+    expect(scheduler.isRegistered('rule_cron_only')).toBe(false)
+    expect(scheduler.activeCount).toBe(0)
+
+    scheduler.destroy()
+  })
+
   it('legacy constructor (no leader options) always acts as leader and preserves old behaviour', async () => {
     const scheduler = new AutomationScheduler(vi.fn())
     await scheduler.ready
