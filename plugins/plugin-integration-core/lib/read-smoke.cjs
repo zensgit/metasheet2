@@ -60,6 +60,8 @@ const READ_SMOKE_PRESETS = Object.freeze({
           readListFields: Object.freeze(['FNumber', 'FName', 'FModel', 'FUnitID']),
           readListOrderBy: 'FNumber',
           readListFilterField: 'FNumber',
+          readListFilterMode: 'contains_like',
+          readListFilterEscape: 'k3_freeform',
           topField: 'Top',
           pageIndexField: 'PageIndex',
           pageSizeField: 'PageSize',
@@ -94,6 +96,11 @@ function readSmokeListShapeProbeEvidence(value) {
     hasEvidence = true
   }
   return hasEvidence ? evidence : null
+}
+
+function readSmokeSafeCount(value) {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value
+  return null
 }
 
 function mergeOperations(existing, required) {
@@ -197,6 +204,8 @@ function readSmokeSuccessEvidence(preset, result, contract = {}) {
   if (result && result.metadata && typeof result.metadata.dataDataPresent === 'boolean') {
     evidence.dataDataPresent = result.metadata.dataDataPresent
   }
+  const dataRowCount = readSmokeSafeCount(result && result.metadata && result.metadata.dataRowCount)
+  if (dataRowCount !== null) evidence.dataRowCount = dataRowCount
   const listShapeProbe = readSmokeListShapeProbeEvidence(result && result.metadata && result.metadata.listShapeProbe)
   if (listShapeProbe) evidence.listShapeProbe = listShapeProbe
   return evidence
@@ -223,6 +232,8 @@ function readSmokeErrorEvidence(preset, error, contract = {}) {
   if (error && error.details && typeof error.details.dataDataPresent === 'boolean') {
     evidence.dataDataPresent = error.details.dataDataPresent
   }
+  const dataRowCount = readSmokeSafeCount(error && error.details && error.details.dataRowCount)
+  if (dataRowCount !== null) evidence.dataRowCount = dataRowCount
   const listShapeProbe = readSmokeListShapeProbeEvidence(error && error.details && error.details.listShapeProbe)
   if (listShapeProbe) evidence.listShapeProbe = listShapeProbe
   return evidence
@@ -239,7 +250,7 @@ function readSmokeSafeErrorCode(value) {
 // { presetId, intent:{ object, mode, key } } shape with the shipped read-smoke { presetId, key } subset by
 // normalizing BOTH detail shapes to one output { presetId, object, mode, key }. C3 LIST uses the explicit
 // intent shape and returns { presetId, object, mode } or an optional key that maps only to the preset-owned
-// internal FNumber prefix filter. Fail-closed + values-free: a raw
+// internal preset-owned LIST filter. Fail-closed + values-free: a raw
 // path/method/headers/
 // body/response/credential/config can never ride in (strict key allowlist); unknown preset/object/mode → a
 // coarse reason; the key is never echoed in an error.

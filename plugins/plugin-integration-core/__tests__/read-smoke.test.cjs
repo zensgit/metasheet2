@@ -45,6 +45,8 @@ assert.deepEqual(LIST_PRESET.readConfigOverlay, {
       readListFields: ['FNumber', 'FName', 'FModel', 'FUnitID'],
       readListOrderBy: 'FNumber',
       readListFilterField: 'FNumber',
+      readListFilterMode: 'contains_like',
+      readListFilterEscape: 'k3_freeform',
       topField: 'Top',
       pageIndexField: 'PageIndex',
       pageSizeField: 'PageSize',
@@ -129,6 +131,8 @@ assert.deepEqual(listOverlayedSystem.config.objects.material, {
   readListFields: ['FNumber', 'FName', 'FModel', 'FUnitID'],
   readListOrderBy: 'FNumber',
   readListFilterField: 'FNumber',
+  readListFilterMode: 'contains_like',
+  readListFilterEscape: 'k3_freeform',
   topField: 'Top',
   pageIndexField: 'PageIndex',
   pageSizeField: 'PageSize',
@@ -181,6 +185,7 @@ assert.deepEqual(readSmokeSuccessEvidence(LIST_PRESET, {
   raw: { Data: { SECRET: 'never leak' } },
   metadata: {
     dataDataPresent: false,
+    dataRowCount: 0,
     listShapeProbe: {
       dataData: false,
       dataLowerData: false,
@@ -202,6 +207,7 @@ assert.deepEqual(readSmokeSuccessEvidence(LIST_PRESET, {
   recordCount: 0,
   referenceObjectCount: 0,
   dataDataPresent: false,
+  dataRowCount: 0,
   listShapeProbe: {
     dataData: false,
     dataLowerData: false,
@@ -235,6 +241,7 @@ listError.name = 'K3WiseWebApiAdapterError'
 listError.details = {
   code: 'K3_WISE_READ_LIST_ENVELOPE_UNRECOGNIZED',
   dataDataPresent: true,
+  dataRowCount: 1,
   listShapeProbe: {
     dataData: true,
     dataLowerData: false,
@@ -251,6 +258,7 @@ assert.deepEqual(readSmokeErrorEvidence(LIST_PRESET, listError, { object: 'mater
   errorCode: 'K3_WISE_READ_LIST_ENVELOPE_UNRECOGNIZED',
   errorType: 'K3WiseWebApiAdapterError',
   dataDataPresent: true,
+  dataRowCount: 1,
   listShapeProbe: {
     dataData: true,
     dataLowerData: false,
