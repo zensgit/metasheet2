@@ -49,3 +49,6 @@ design-lock ratified → DR-A/DR-B scheduler rewrite + DR-D core decouple + DR-E
 ## 7. Resolved decisions (owner-ratified)
 - **DR-D shape** → per the owner's "改名/约束成内部 catch-up 参数": `scanIntervalMs` is RETAINED in the config type but marked `@deprecated`/ignored (drives neither scheduling nor the window), so older persisted rules don't break and it can no longer masquerade as the trigger time. The window is the fixed `DATE_REMINDER_GRACE_WINDOW_MS` constant; `dateReminderScanWindowMs`/`dateReminderScanIntervalMs` removed.
 - **Grace window value** → **48h** (2× daily grace), ratified.
+
+## 8. P1 addendum (owner review round 2) — conversion-backfill floor `effectiveAt`
+The owner's review of the built PR found a sharper backfill edge: DR-B catch-up + a floor of `rule.createdAt` means a months-old automation **converted** into `schedule.date_field` immediately backfills the last 48h (the row predates its life as a reminder). **Resolved:** a SERVER-SET `effectiveAt` on the date_field config = activation instant; floor = `max(createdAt, effectiveAt)`. Set on create-as-date_field and on transition INTO date_field; preserved on stay/config-edit; never reset by action-only edits; never client-trusted (overwritten on activation); absent ⇒ falls back to `createdAt` (pre-fix rules). Proven by real-DB **DR-7** + 4 pure floor cases. Detail in the dev/verification MD §0.

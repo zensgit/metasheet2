@@ -35,6 +35,14 @@ export interface ScheduleDateFieldConfig {
   /** Persisted but v1 honors only 'UTC' (documented limitation). */
   timezone?: string
   /**
+   * SERVER-SET activation instant (ISO): when this rule BECAME a date-reminder (create-as-date_field or a
+   * conversion from another trigger). The firing floor is `max(rule.createdAt, effectiveAt)`, so a rule
+   * converted from a months-old automation never backfills occurrences from before its conversion. Never
+   * client-trusted — overwritten on activation, preserved verbatim while the rule stays date_field. Absent on
+   * pre-fix rules ⇒ the floor falls back to `createdAt`.
+   */
+  effectiveAt?: string
+  /**
    * @deprecated v1 IGNORES this (DR-D). Scheduling is `timeOfDay`-aligned daily (see automation-scheduler),
    * and the dedup/backfill window is the fixed `DATE_REMINDER_GRACE_WINDOW_MS` constant — neither rides on a
    * per-rule cadence knob. Retained only so older persisted rules don't break; it drives nothing.
@@ -115,8 +123,10 @@ export function computeDateReminderOccurrence(
  *   - it is within the recent scan window (`occurrence > now - scanWindowMs`) — so a fresh rule on a sheet of
  *     long-past records does NOT backfill-blast, and a replica that was down longer than the window skips
  *     missed reminders rather than replaying history, AND
- *   - it is at/after the rule's creation (`occurrence >= ruleCreatedAtMs`) — a rule never reaches into the
- *     past relative to when it was authored.
+ *   - it is at/after the rule's FLOOR (`occurrence >= floorMs`) — a rule never reaches into the past relative
+ *     to when it was authored AS A DATE-REMINDER. The floor is `dateReminderFloorMs` = max(createdAt,
+ *     effectiveAt), so a rule CONVERTED from another trigger (old createdAt) never backfills before its
+ *     conversion.
  * `scanWindowMs` is the fixed `DATE_REMINDER_GRACE_WINDOW_MS` grace (DR-D — decoupled from any per-rule
  * cadence). At-most-once by construction (paired with claim-then-fire). All bounds are explicit product
  * semantics, locked by goldens.
@@ -125,14 +135,27 @@ export function isDateReminderDue(
   occurrenceIso: string,
   nowMs: number,
   scanWindowMs: number,
-  ruleCreatedAtMs: number,
+  floorMs: number,
 ): boolean {
   const occ = new Date(occurrenceIso).getTime()
   if (Number.isNaN(occ)) return false
   if (occ > nowMs) return false // not yet due
   if (occ <= nowMs - scanWindowMs) return false // older than the recent window — never backfill
-  if (occ < ruleCreatedAtMs) return false // rule does not reach into the past
+  if (occ < floorMs) return false // rule does not reach before its authoring/activation
   return true
+}
+
+/**
+ * The "no reach before authoring" FLOOR for a date-reminder = max(rule createdAt, the date-field activation
+ * `effectiveAt`). `effectiveAt` is SERVER-SET when the rule becomes a date_field rule (create or conversion),
+ * so a rule converted from a months-old automation does not treat its old `createdAt` as the floor and
+ * backfill the recent window. Falls back to `createdAt` when `effectiveAt` is absent/unparseable (pre-fix
+ * date_field rules, which were authored as date_field at createdAt). PURE.
+ */
+export function dateReminderFloorMs(ruleCreatedAtMs: number, effectiveAt: string | undefined): number {
+  if (typeof effectiveAt !== 'string' || !effectiveAt) return ruleCreatedAtMs
+  const eff = new Date(effectiveAt).getTime()
+  return Number.isNaN(eff) ? ruleCreatedAtMs : Math.max(ruleCreatedAtMs, eff)
 }
 
 /**

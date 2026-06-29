@@ -8,6 +8,7 @@ import { describe, expect, test } from 'vitest'
 import {
   computeDateReminderOccurrence,
   isDateReminderDue,
+  dateReminderFloorMs,
   DATE_REMINDER_GRACE_WINDOW_MS,
   nextDateReminderTimerDelayMs,
   dateReminderTimeOfDayPassed,
@@ -94,6 +95,34 @@ describe('isDateReminderDue — firing window (backfill bound)', () => {
 
   test('unparseable occurrence ⇒ false', () => {
     expect(isDateReminderDue('garbage', now, window, created)).toBe(false)
+  })
+})
+
+describe('dateReminderFloorMs — max(createdAt, effectiveAt) closes the conversion-backfill hole', () => {
+  const created = Date.parse('2026-01-01T00:00:00.000Z') // months ago
+  const activated = Date.parse('2026-06-25T10:00:00.000Z') // converted today
+
+  test('CONVERTED rule: floor is the (later) activation, not the old createdAt', () => {
+    expect(dateReminderFloorMs(created, '2026-06-25T10:00:00.000Z')).toBe(activated)
+  })
+
+  test('absent effectiveAt (pre-fix date_field rule) ⇒ falls back to createdAt (no behavior change)', () => {
+    expect(dateReminderFloorMs(created, undefined)).toBe(created)
+    expect(dateReminderFloorMs(created, '')).toBe(created)
+    expect(dateReminderFloorMs(created, 'not-a-date')).toBe(created)
+  })
+
+  test('effectiveAt earlier than createdAt ⇒ createdAt wins (max)', () => {
+    expect(dateReminderFloorMs(activated, '2026-01-01T00:00:00.000Z')).toBe(activated)
+  })
+
+  test('a past-48h occurrence on a CONVERTED rule is NOT due (floored by activation)', () => {
+    const nowMs = Date.parse('2026-06-25T10:30:00.000Z')
+    const floor = dateReminderFloorMs(created, '2026-06-25T10:00:00.000Z') // activation 10:00
+    // occurrence 09:00 today — within the 48h window + after old createdAt, but BEFORE activation.
+    expect(isDateReminderDue('2026-06-25T09:00:00.000Z', nowMs, DATE_REMINDER_GRACE_WINDOW_MS, floor)).toBe(false)
+    // without the fix (floor = old createdAt) it WOULD have fired:
+    expect(isDateReminderDue('2026-06-25T09:00:00.000Z', nowMs, DATE_REMINDER_GRACE_WINDOW_MS, created)).toBe(true)
   })
 })
 
