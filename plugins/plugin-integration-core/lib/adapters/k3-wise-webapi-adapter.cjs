@@ -762,10 +762,32 @@ function buildListReadBody(request, objectConfig) {
     const filterField = typeof objectConfig.readListFilterField === 'string' && objectConfig.readListFilterField.trim()
       ? objectConfig.readListFilterField.trim()
       : 'FNumber'
-    const escaped = escapeK3LikePrefix(listKey)
-    template[bodyKey].Filter = `${filterField} LIKE '${escaped}%'`
+    template[bodyKey].Filter = buildListFilterExpression(filterField, listKey, objectConfig)
   }
   return template
+}
+
+function buildListFilterExpression(filterField, listKey, objectConfig) {
+  const filterMode = typeof objectConfig.readListFilterMode === 'string' && objectConfig.readListFilterMode.trim()
+    ? objectConfig.readListFilterMode.trim()
+    : 'prefix_like'
+  const escapeMode = typeof objectConfig.readListFilterEscape === 'string' && objectConfig.readListFilterEscape.trim()
+    ? objectConfig.readListFilterEscape.trim()
+    : 'tsql_like'
+  if (filterMode === 'contains_like') {
+    const escaped = escapeMode === 'k3_freeform'
+      ? escapeK3FilterStringLiteral(listKey)
+      : escapeK3LikePrefix(listKey)
+    return `${filterField} like '%${escaped}%'`
+  }
+  const escaped = escapeMode === 'k3_freeform'
+    ? escapeK3FilterStringLiteral(listKey)
+    : escapeK3LikePrefix(listKey)
+  return `${filterField} LIKE '${escaped}%'`
+}
+
+function escapeK3FilterStringLiteral(value) {
+  return String(value).replace(/'/g, "''")
 }
 
 function escapeK3LikePrefix(value) {
@@ -802,6 +824,20 @@ function materialListShapeProbe(data) {
 function materialListDataDataPresent(data) {
   const probe = materialListShapeProbe(data)
   return probe.dataData || probe.dataLowerData
+}
+
+function materialListRowCount(data) {
+  const value = firstDefined(
+    getPath(data, 'Data.ROWCOUNT'),
+    getPath(data, 'Data.rowCount'),
+    getPath(data, 'Data.RowCount'),
+  )
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value.trim())
+    if (Number.isInteger(parsed) && parsed >= 0) return parsed
+  }
+  return null
 }
 
 function materialListBusinessSuccess(data, config) {
@@ -1327,6 +1363,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
 
       const listShapeProbe = materialListShapeProbe(readResponse.data)
       const dataDataPresent = listShapeProbe.dataData || listShapeProbe.dataLowerData
+      const dataRowCount = materialListRowCount(readResponse.data)
       if (!materialListBusinessSuccess(readResponse.data, config)) {
         const failureCode = materialListBusinessFailureCode(readResponse.data)
         throw new K3WiseWebApiAdapterError(String(responseMessage(readResponse.data, config, 'K3 WISE list read business response failed')), {
@@ -1334,6 +1371,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           object: request.object,
           responseCode: responseFailureCode(readResponse.data, config, failureCode),
           dataDataPresent,
+          dataRowCount,
           listShapeProbe,
         })
       }
@@ -1348,6 +1386,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           requestedLimit: request.limit,
           returnedRecordCount: records.length,
           dataDataPresent,
+          dataRowCount,
           listShapeProbe,
           readPath,
           readOnly: true,

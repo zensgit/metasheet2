@@ -933,6 +933,8 @@ async function testK3WebApiMaterialListReadSmoke() {
             readListFields: ['FNumber', 'FName', 'FModel', 'FUnitID'],
             readListOrderBy: 'FNumber',
             readListFilterField: 'FNumber',
+            readListFilterMode: 'contains_like',
+            readListFilterEscape: 'k3_freeform',
             topField: 'Top',
             pageIndexField: 'PageIndex',
             pageSizeField: 'PageSize',
@@ -963,6 +965,7 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.equal(read.metadata.requestedLimit, 2)
   assert.equal(read.metadata.returnedRecordCount, 2)
   assert.equal(read.metadata.dataDataPresent, true)
+  assert.equal(read.metadata.dataRowCount, 3)
   assert.deepEqual(read.metadata.listShapeProbe, {
     dataData: true,
     dataLowerData: false,
@@ -988,13 +991,13 @@ async function testK3WebApiMaterialListReadSmoke() {
     },
   })
   const filteredByKey = await adapter.read(buildMarkedListRequest({ object: 'material', mode: 'list', key: "MAT-'A" }))
-  assert.equal(filteredByKey.records.length, 2, 'LIST key is an internal bounded-prefix input, not a caller raw filter')
+  assert.equal(filteredByKey.records.length, 2, 'LIST key is an internal bounded filter input, not a caller raw filter')
   const filteredCall = calls.filter((call) => call.pathname === '/K3API/Material/GetList').at(-1)
-  assert.equal(filteredCall.body.Data.Filter, "FNumber LIKE 'MAT-''A%'", 'LIST key is mapped to an escaped FNumber prefix filter')
-  const wildcardKey = await adapter.read(buildMarkedListRequest({ object: 'material', mode: 'list', key: 'MAT%_[' }))
-  assert.equal(wildcardKey.records.length, 2, 'LIST wildcard key still runs as a bounded internal prefix input')
+  assert.equal(filteredCall.body.Data.Filter, "FNumber like '%MAT-''A%'", 'LIST key is mapped to the documented K3 contains-like filter')
+  const wildcardKey = await adapter.read(buildMarkedListRequest({ object: 'material', mode: 'list', key: 'MAT_001' }))
+  assert.equal(wildcardKey.records.length, 2, 'LIST wildcard-shaped key still runs as a bounded internal input')
   const wildcardCall = calls.filter((call) => call.pathname === '/K3API/Material/GetList').at(-1)
-  assert.equal(wildcardCall.body.Data.Filter, "FNumber LIKE 'MAT[%][_][[]%'", 'LIST key escapes LIKE wildcards before appending the prefix wildcard')
+  assert.equal(wildcardCall.body.Data.Filter, "FNumber like '%MAT_001%'", 'LIST key uses K3 freeform quoting instead of T-SQL bracket escaping')
   assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Save'), false, 'LIST smoke must not Save')
   assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Submit'), false, 'LIST smoke must not Submit')
   assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Audit'), false, 'LIST smoke must not Audit')
@@ -1027,7 +1030,7 @@ async function testK3WebApiMaterialListReadSmoke() {
       return jsonResponse(200, {
         StatusCode: 200,
         Message: 'Material list succeeded',
-        Data: {},
+        Data: { ROWCOUNT: 0, DATA: null },
       })
     }
     return fetchImpl(url, options)
@@ -1053,8 +1056,9 @@ async function testK3WebApiMaterialListReadSmoke() {
     fetchImpl: missingRowsFetchImpl,
   })
   const missingRows = await missingRowsAdapter.read(buildMarkedListRequest({ object: 'material', mode: 'list' }, 2))
-  assert.equal(missingRows.records.length, 0, 'LIST success envelope without Data.DATA remains an empty bounded page')
+  assert.equal(missingRows.records.length, 0, 'LIST success envelope with ROWCOUNT=0 and DATA=null remains an empty bounded page')
   assert.equal(missingRows.metadata.dataDataPresent, false, 'LIST success evidence carries a values-free rows-shape diagnostic')
+  assert.equal(missingRows.metadata.dataRowCount, 0, 'LIST success evidence carries values-free Data.ROWCOUNT')
   assert.deepEqual(missingRows.metadata.listShapeProbe, {
     dataData: false,
     dataLowerData: false,
@@ -1099,6 +1103,7 @@ async function testK3WebApiMaterialListReadSmoke() {
   const alternateRows = await alternateRowsAdapter.read(buildMarkedListRequest({ object: 'material', mode: 'list' }, 2))
   assert.equal(alternateRows.records.length, 0, 'shape probe does not silently widen the extractor')
   assert.equal(alternateRows.metadata.dataDataPresent, false)
+  assert.equal(alternateRows.metadata.dataRowCount, null)
   assert.deepEqual(alternateRows.metadata.listShapeProbe, {
     dataData: false,
     dataLowerData: false,
@@ -1144,6 +1149,7 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.ok(rejected instanceof K3WiseWebApiAdapterError, 'LIST explicit failure marker is rejected before row extraction')
   assert.equal(rejected.details.code, 'K3_WISE_READ_LIST_REJECTED')
   assert.equal(rejected.details.dataDataPresent, true)
+  assert.equal(rejected.details.dataRowCount, null)
   assert.deepEqual(rejected.details.listShapeProbe, {
     dataData: true,
     dataLowerData: false,
@@ -1188,6 +1194,7 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.ok(unrecognized instanceof K3WiseWebApiAdapterError, 'LIST rows under Data.DATA with an unrecognized envelope gets a response-shape diagnostic')
   assert.equal(unrecognized.details.code, 'K3_WISE_READ_LIST_ENVELOPE_UNRECOGNIZED')
   assert.equal(unrecognized.details.dataDataPresent, true)
+  assert.equal(unrecognized.details.dataRowCount, null)
   assert.deepEqual(unrecognized.details.listShapeProbe, {
     dataData: true,
     dataLowerData: false,

@@ -5544,6 +5544,7 @@ async function testReadSmokeRoute() {
                 records: [{ FName: 'SECRET-LIST-NAME', FNumber: 'M-LIST-001' }, { FName: 'SECRET-LIST-NAME-2', FNumber: 'M-LIST-002' }],
                 metadata: {
                   readPath: 'https://k3host/K3API/Material/GetList',
+                  dataRowCount: 2,
                   listShapeProbe: {
                     dataData: false,
                     dataLowerData: false,
@@ -5625,6 +5626,7 @@ async function testReadSmokeRoute() {
   assert.equal(okList.body.data.object, 'material')
   assert.equal(okList.body.data.mode, 'list')
   assert.equal(okList.body.data.recordCount, 2)
+  assert.equal(okList.body.data.dataRowCount, 2)
   assert.deepEqual(okList.body.data.listShapeProbe, {
     dataData: false,
     dataLowerData: false,
@@ -5652,6 +5654,8 @@ async function testReadSmokeRoute() {
     readListFields: ['FNumber', 'FName', 'FModel', 'FUnitID'],
     readListOrderBy: 'FNumber',
     readListFilterField: 'FNumber',
+    readListFilterMode: 'contains_like',
+    readListFilterEscape: 'k3_freeform',
     topField: 'Top',
     pageIndexField: 'PageIndex',
     pageSizeField: 'PageSize',
@@ -5671,7 +5675,7 @@ async function testReadSmokeRoute() {
   assert.equal(keyedListReadArg.object, 'material')
   assert.equal(keyedListReadArg.limit, 10)
   assert.equal(keyedListReadArg.options.k3ReadMode, 'list')
-  assert.equal(keyedListReadArg.options.listKey, 'M-004', 'LIST key maps only to the internal FNumber prefix input')
+  assert.equal(keyedListReadArg.options.listKey, 'M-004', 'LIST key maps only to the internal preset-owned LIST filter input')
   assert.equal(keyedListReadArg.options[READ_SMOKE_LIST_REQUEST_MARKER], true, 'keyed LIST route supplies the internal route-only marker')
   assert.ok(!JSON.stringify(okListKey.body.data).includes('M-004'), 'LIST key is not echoed in values-free evidence')
 
@@ -5745,6 +5749,7 @@ async function testReadSmokeRoute() {
         e.details = {
           code: 'K3_WISE_READ_LIST_REJECTED',
           dataDataPresent: true,
+          dataRowCount: 1,
           listShapeProbe: {
             dataData: true,
             dataLowerData: false,
@@ -5770,6 +5775,7 @@ async function testReadSmokeRoute() {
   assert.equal(fail.body.data.errorCode, 'K3_WISE_READ_LIST_REJECTED')
   assert.equal(fail.body.data.errorType, 'K3WiseWebApiAdapterError')
   assert.equal(fail.body.data.dataDataPresent, true)
+  assert.equal(fail.body.data.dataRowCount, 1)
   assert.deepEqual(fail.body.data.listShapeProbe, {
     dataData: true,
     dataLowerData: false,
