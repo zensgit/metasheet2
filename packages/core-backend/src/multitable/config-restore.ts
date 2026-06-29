@@ -183,6 +183,20 @@ export function parsePermissionEntityId(entityId: string): { scope: PermissionSc
   return null
 }
 
+/**
+ * Fail-closed identity guard: a permission revision's `before` snapshot MUST describe the SAME subject/entity as the
+ * entity_id (`parts`) the apply writes to. The apply already keys off `parts` (not the snapshot's embedded subject),
+ * so a mismatch can't laundry an escalation onto another subject — but a mismatched snapshot is a malformed/forged
+ * revision and is refused (analogous to the sheet_config `entity_id ≡ sheet_id` guard).
+ */
+export function permissionTargetMatchesParts(scope: PermissionScope, target: Record<string, unknown> | null | undefined, parts: string[]): boolean {
+  if (!target) return true // revoke (before=null) has no embedded subject to disagree
+  const s = (v: unknown) => String(v ?? '')
+  if (scope === 'field') return s(target.fieldId) === parts[0] && s(target.subjectType) === parts[1] && s(target.subjectId) === parts[2]
+  if (scope === 'view') return s(target.viewId) === parts[0] && s(target.subjectType) === parts[1] && s(target.subjectId) === parts[2]
+  return s(target.subjectType) === parts[0] && s(target.subjectId) === parts[1]
+}
+
 const stable = (v: unknown): string => JSON.stringify(v ?? null)
 function pick(snapshot: Record<string, unknown>, keys: string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {}

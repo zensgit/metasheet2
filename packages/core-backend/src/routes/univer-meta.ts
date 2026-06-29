@@ -95,6 +95,7 @@ import {
   isPermissionRevert,
   permissionRevertDirection,
   parsePermissionEntityId,
+  permissionTargetMatchesParts,
   type PermissionScope,
   computeRevertPreview,
   loadEntityConfigSnapshot,
@@ -8286,7 +8287,16 @@ export function univerMetaRouter(): Router {
         const confirmPerm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
         if (confirmPerm.trim() !== 'revert-permission') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "revert-permission" to confirm reducing access.' } })
         const target = (rev.before ?? null) as Record<string, unknown> | null
+        // Fail-closed identity guard: the `before` snapshot must describe the SAME subject/entity as the entity_id the
+        // apply writes to (the apply keys off `parts`, so this can't laundry an escalation — but a mismatch = malformed).
+        if (!permissionTargetMatchesParts(parsedPerm.scope, target, parsedPerm.parts)) {
+          return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'Permission revision before-snapshot does not match its entity id.' } })
+        }
         const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+          // Never-escalate-under-concurrency: lock the sheet row so the live-grant read → direction re-check → apply
+          // cannot interleave with another grant write on this sheet. (Enablement gate: the forward grant/revoke routes
+          // must take the same lock for full coverage — tracked in the dev-verification honest gaps.)
+          await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
           const live = await loadLivePermissionGrant(query, parsedPerm.scope, parsedPerm.parts, sheetId)
           const verdict = verifyConfigPermissionRevertPreviewIdentity(previewToken, { sheetId, revisionId, entityId: rev.entity_id, currentGrantHash: hashPermissionGrant(live), actorId: access.userId })
           if (!verdict.valid) {
