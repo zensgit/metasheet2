@@ -1011,6 +1011,42 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.ok(tooLarge instanceof AdapterValidationError, 'LIST smoke rejects limits above the preset bound')
   assert.equal(tooLarge.details.code, 'K3_WISE_READ_LIST_LIMIT_EXCEEDED')
 
+  const businessFailureFetchImpl = async (url, options) => {
+    const parsed = new URL(url)
+    if (parsed.pathname === '/K3API/Material/GetList') {
+      return jsonResponse(200, {
+        StatusCode: 200,
+        Message: 'private material list request rejected',
+        Data: { Code: 'N' },
+      })
+    }
+    return fetchImpl(url, options)
+  }
+  const businessFailureAdapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test',
+        objects: {
+          material: {
+            operations: ['read'],
+            readPath: '/K3API/Material/GetList',
+            readMethod: 'POST',
+            readMode: 'list',
+            readListBodyTemplate: { Data: { Top: 10, PageIndex: 1 } },
+            pageIndexField: 'PageIndex',
+            pageSizeField: 'PageSize',
+            maxListLimit: 3,
+          },
+        },
+      },
+    }),
+    fetchImpl: businessFailureFetchImpl,
+  })
+  const businessFailure = await businessFailureAdapter.read(buildMarkedListRequest({ object: 'material', mode: 'list' }, 2)).catch((error) => error)
+  assert.ok(businessFailure instanceof K3WiseWebApiAdapterError, 'LIST non-success envelope fails as a business response')
+  assert.equal(businessFailure.details.code, 'K3_WISE_READ_LIST_BUSINESS_ERROR')
+  assert.ok(!businessFailure.message.includes('private material'), 'LIST business error message stays values-free')
+
   const malformedFetchImpl = async (url, options) => {
     const parsed = new URL(url)
     if (parsed.pathname === '/K3API/Material/GetList') {
@@ -1044,7 +1080,7 @@ async function testK3WebApiMaterialListReadSmoke() {
   })
   const malformed = await malformedAdapter.read(buildMarkedListRequest({ object: 'material', mode: 'list' }, 2)).catch((error) => error)
   assert.ok(malformed instanceof K3WiseWebApiAdapterError, 'LIST success envelope without Data.DATA fails closed')
-  assert.equal(malformed.details.code, 'K3_WISE_READ_BUSINESS_ERROR')
+  assert.equal(malformed.details.code, 'K3_WISE_READ_LIST_ROWS_MISSING')
 
   const modeMismatch = await adapter.read({
     object: 'material',

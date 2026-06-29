@@ -789,7 +789,7 @@ function materialListRowsCandidate(data) {
 
 function materialListBusinessSuccess(data, config) {
   if (hasExplicitBusinessFailure(data)) return false
-  return businessSuccess(data, config) && materialListRowsCandidate(data) !== null
+  return businessSuccess(data, config)
 }
 
 function buildMaterialReadRecord(detail, request, objectConfig) {
@@ -1299,14 +1299,22 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       }
 
       if (!materialListBusinessSuccess(readResponse.data, config)) {
-        throw new K3WiseWebApiAdapterError(String(responseMessage(readResponse.data, config, 'K3 WISE list read business response failed')), {
-          code: 'K3_WISE_READ_BUSINESS_ERROR',
+        throw new K3WiseWebApiAdapterError('K3 WISE list read business response failed', {
+          code: 'K3_WISE_READ_LIST_BUSINESS_ERROR',
           object: request.object,
-          responseCode: responseFailureCode(readResponse.data, config, 'K3_WISE_READ_BUSINESS_ERROR'),
+          responseCode: responseFailureCode(readResponse.data, config, 'K3_WISE_READ_LIST_BUSINESS_ERROR'),
         })
       }
 
-      const records = (materialListRowsCandidate(readResponse.data) || []).slice(0, request.limit)
+      const rows = materialListRowsCandidate(readResponse.data)
+      if (rows === null) {
+        throw new K3WiseWebApiAdapterError('K3 WISE list read rows container missing', {
+          code: 'K3_WISE_READ_LIST_ROWS_MISSING',
+          object: request.object,
+        })
+      }
+
+      const records = rows.slice(0, request.limit)
       return createReadResult({
         records,
         raw: readResponse.data,
