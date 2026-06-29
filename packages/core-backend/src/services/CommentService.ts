@@ -14,6 +14,7 @@ import type { CollabService } from './CollabService'
 import { db } from '../db/db'
 import { nowTimestamp } from '../db/type-helpers'
 import { buildCommentInboxRoom, buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
+import { insertCommittedAuditKysely, type OapiWriteAuditContext } from '../multitable/oapi-write-audit'
 import { notifyRecordSubscribersWithKysely } from '../multitable/record-subscription-service'
 
 /**
@@ -265,6 +266,8 @@ export class CommentService {
     authorId: string
     parentId?: string
     mentions?: string[]
+    /** OAPI-2a (§6): present only for a token comment-create → committed audit row inserted atomically with the comment (fail-closed). No-op for session. */
+    oapiAudit?: OapiWriteAuditContext
   }): Promise<Comment> {
     const id = `cmt_${randomUUID()}`
     const mentions = this.normalizeMentions(data.mentions ?? this.parseMentions(data.content))
@@ -298,25 +301,33 @@ export class CommentService {
       }
     }
 
-    await db
-      .insertInto('meta_comments')
-      .values({
-        id,
-        spreadsheet_id: data.spreadsheetId,
-        row_id: data.rowId,
-        field_id: effectiveFieldId ?? null,
-        target_type: 'meta_record',
-        target_id: data.rowId,
-        target_field_id: effectiveFieldId ?? null,
-        container_type: 'meta_sheet',
-        container_id: data.spreadsheetId,
-        content: data.content,
-        author_id: data.authorId,
-        parent_id: data.parentId ?? null,
-        resolved: false,
-        mentions: JSON.stringify(mentions),
+    const commentValues = {
+      id,
+      spreadsheet_id: data.spreadsheetId,
+      row_id: data.rowId,
+      field_id: effectiveFieldId ?? null,
+      target_type: 'meta_record',
+      target_id: data.rowId,
+      target_field_id: effectiveFieldId ?? null,
+      container_type: 'meta_sheet',
+      container_id: data.spreadsheetId,
+      content: data.content,
+      author_id: data.authorId,
+      parent_id: data.parentId ?? null,
+      resolved: false,
+      mentions: JSON.stringify(mentions),
+    }
+    if (data.oapiAudit) {
+      // OAPI-2a §6: a token comment-create + its committed audit row are atomic (fail-closed) — a failed
+      // audit insert rolls back the comment. Session creates take the unchanged bare insert below.
+      const auditCtx = data.oapiAudit
+      await db.transaction().execute(async (trx) => {
+        await trx.insertInto('meta_comments').values(commentValues).execute()
+        await insertCommittedAuditKysely(trx, auditCtx, { detail: { commentId: id } })
       })
-      .execute()
+    } else {
+      await db.insertInto('meta_comments').values(commentValues).execute()
+    }
 
     const comment = await this.getComment(id)
     if (!comment) {

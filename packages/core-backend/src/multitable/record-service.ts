@@ -19,6 +19,7 @@ import {
   type MultitableField,
 } from './field-codecs'
 import { createPersonMemberResolver, personRestrictGroupIds } from './person-field-restriction'
+import { insertCommittedAuditInTxn, type OapiWriteAuditContext } from './oapi-write-audit'
 import {
   HierarchyCycleError,
   assertNoHierarchyParentCycle,
@@ -185,6 +186,8 @@ export type RecordCreateInput = {
   data: Record<string, unknown>
   actorId: string | null
   capabilities: MultitableCapabilities
+  /** OAPI-2a (§6): present only for a token write → committed audit row inserted IN-TXN (fail-closed). No-op for session. */
+  oapiAudit?: OapiWriteAuditContext
 }
 
 export type RecordCreateResult = {
@@ -201,6 +204,8 @@ export type RecordDeleteInput = {
   resolveSheetAccess: (
     sheetId: string,
   ) => Promise<{ capabilities: MultitableCapabilities; sheetScope?: SheetPermissionScope }>
+  /** OAPI-2b (§6): present only for a token delete → committed audit row inserted IN-TXN (fail-closed). No-op for session. */
+  oapiAudit?: OapiWriteAuditContext
 }
 
 export type RecordDeleteResult = {
@@ -217,6 +222,8 @@ export type RecordPatchInput = {
   access: AccessInfo
   capabilities: MultitableCapabilities
   sheetScope?: SheetPermissionScope
+  /** OAPI-2a (§6): present only for a token write → committed audit row inserted IN-TXN (fail-closed). No-op for session. */
+  oapiAudit?: OapiWriteAuditContext
 }
 
 export type RecordPatchResult = {
@@ -691,6 +698,11 @@ export class RecordService {
         snapshot: patch,
       })
 
+      // OAPI-2a §6: committed token-write audit INSIDE the create txn (fail-closed). No-op for session.
+      if (input.oapiAudit) {
+        await insertCommittedAuditInTxn(query, input.oapiAudit, { recordIds: [recordId] })
+      }
+
       return inserted
     })
 
@@ -831,6 +843,11 @@ export class RecordService {
 
       // lock-guarded: single DELETE — ensureRecordNotLocked enforced above (rejects before this txn).
       await query('DELETE FROM meta_records WHERE id = $1', [recordId])
+
+      // OAPI-2b §6: committed token-delete audit INSIDE the (soft-)delete txn (fail-closed). No-op for session.
+      if (input.oapiAudit) {
+        await insertCommittedAuditInTxn(query, input.oapiAudit, { recordIds: [recordId] })
+      }
     })
 
     publishMultitableSheetRealtime({
@@ -1318,6 +1335,12 @@ export class RecordService {
         if (ids.length === 0) {
           await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
         }
+      }
+
+      // OAPI-2a §6: committed token-write audit INSIDE the patch txn (fail-closed); fires on a successful
+      // PATCH whether or not fields changed. No-op for session (no oapiAudit).
+      if (input.oapiAudit) {
+        await insertCommittedAuditInTxn(query, input.oapiAudit, { recordIds: [recordId] })
       }
     })
 
