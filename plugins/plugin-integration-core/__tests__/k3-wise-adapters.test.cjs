@@ -966,6 +966,11 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.equal(read.metadata.returnedRecordCount, 2)
   assert.equal(read.metadata.dataDataPresent, true)
   assert.equal(read.metadata.dataRowCount, 3)
+  // Paging echo (#1709): K3 echoes the page size/index it applied; we surface requested-vs-echoed (values-free).
+  assert.equal(read.metadata.dataPageSize, 2, 'LIST surfaces K3-echoed Data.PAGESIZE')
+  assert.equal(read.metadata.dataPageIndex, 1, 'LIST surfaces K3-echoed Data.PAGEINDEX')
+  assert.equal(read.metadata.requestedLimit, 2, 'LIST surfaces requested page size/Top')
+  assert.equal(read.metadata.requestedPageIndex, 1, 'LIST surfaces requested PageIndex')
   assert.deepEqual(read.metadata.listShapeProbe, {
     dataData: true,
     dataLowerData: false,
@@ -1023,6 +1028,48 @@ async function testK3WebApiMaterialListReadSmoke() {
   const tooLarge = await adapter.read(buildMarkedListRequest({ object: 'material', mode: 'list' }, 4)).catch((error) => error)
   assert.ok(tooLarge instanceof AdapterValidationError, 'LIST smoke rejects limits above the preset bound')
   assert.equal(tooLarge.details.code, 'K3_WISE_READ_LIST_LIMIT_EXCEEDED')
+
+  // C3 LIST paging-echo diagnostic (#1709): the live no-key signature — K3 reports rows exist (ROWCOUNT>0) but
+  // returns a null DATA page and echoes a page size/index that does NOT match what we requested. Surfacing
+  // requested-vs-echoed paging (values-free counts) localizes a paging-param mismatch with no customer round-trip.
+  const pagingEchoFetchImpl = async (url, options) => {
+    const parsed = new URL(url)
+    if (parsed.pathname === '/K3API/Material/GetList') {
+      return jsonResponse(200, {
+        StatusCode: 200,
+        Message: 'Material list succeeded',
+        Data: { ROWCOUNT: 30134, PAGESIZE: 0, PAGEINDEX: 0, DATA: null },
+      })
+    }
+    return fetchImpl(url, options)
+  }
+  const pagingEchoAdapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test',
+        objects: {
+          material: {
+            operations: ['read'],
+            readPath: '/K3API/Material/GetList',
+            readMethod: 'POST',
+            readMode: 'list',
+            readListBodyTemplate: { Data: { Top: 10, PageIndex: 1 } },
+            pageIndexField: 'PageIndex',
+            pageSizeField: 'PageSize',
+            maxListLimit: 3,
+          },
+        },
+      },
+    }),
+    fetchImpl: pagingEchoFetchImpl,
+  })
+  const pagingEcho = await pagingEchoAdapter.read(buildMarkedListRequest({ object: 'material', mode: 'list' }, 2))
+  assert.equal(pagingEcho.records.length, 0, 'paging-echo list returns an empty bounded page, not a crash')
+  assert.equal(pagingEcho.metadata.dataRowCount, 30134, 'K3 reports rows exist via Data.ROWCOUNT')
+  assert.equal(pagingEcho.metadata.dataPageSize, 0, 'K3 echoes the page size it applied (0 here = did not accept requested page)')
+  assert.equal(pagingEcho.metadata.dataPageIndex, 0, 'K3 echoes the page index it applied')
+  assert.equal(pagingEcho.metadata.requestedLimit, 2, 'requested page size/Top surfaced for the requested-vs-echoed comparison')
+  assert.equal(pagingEcho.metadata.requestedPageIndex, 1, 'requested page index surfaced for the comparison')
 
   const missingRowsFetchImpl = async (url, options) => {
     const parsed = new URL(url)

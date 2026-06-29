@@ -177,6 +177,27 @@ assert.deepEqual(readSmokeSuccessEvidence(PRESET, { records: [] }, { object: 'ma
 assert.deepEqual(readSmokeSuccessEvidence(PRESET, {}, { object: 'material', mode: 'single_record_detail' }), {
   ok: true, presetId: 'k3wise.material-detail.v1', object: 'material', mode: 'single_record_detail', recordPresent: false, recordCount: 0, referenceObjectCount: 0,
 })
+// C3 LIST paging echo (#1709): surfaces ONLY allowlisted values-free paging counts (K3-echoed page size/index +
+// requested paging); a non-count value under the same metadata (materialNumber) is never surfaced.
+const pagingEcho = readSmokeSuccessEvidence(LIST_PRESET, {
+  records: [],
+  metadata: {
+    dataRowCount: 30134,
+    dataPageSize: 0,
+    dataPageIndex: 0,
+    requestedLimit: 10,
+    requestedPageIndex: 1,
+    materialNumber: 'SECRET-MAT-001',
+  },
+}, { object: 'material', mode: 'list' })
+assert.deepEqual(pagingEcho, {
+  ok: true, presetId: 'k3wise.material-list.v1', object: 'material', mode: 'list',
+  recordPresent: false, recordCount: 0, referenceObjectCount: 0,
+  dataRowCount: 30134, dataPageSize: 0, dataPageIndex: 0, requestedLimit: 10, requestedPageIndex: 1,
+})
+assert.ok(!JSON.stringify(pagingEcho).includes('SECRET-MAT-001'), 'paging-echo evidence does not leak a material value')
+assert.ok(!JSON.stringify(pagingEcho).includes('materialNumber'), 'paging-echo evidence drops non-allowlisted metadata keys')
+
 assert.deepEqual(readSmokeSuccessEvidence(LIST_PRESET, { records: [{ FNumber: 'M-001' }, { FNumber: 'M-002' }] }, { object: 'material', mode: 'list' }), {
   ok: true, presetId: 'k3wise.material-list.v1', object: 'material', mode: 'list', recordPresent: true, recordCount: 2, referenceObjectCount: 0,
 })
