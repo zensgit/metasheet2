@@ -400,6 +400,48 @@ export function verifyConfigUndeletePreviewIdentity(token: string, expected: Con
   return { valid: true }
 }
 
+// ── T9-W permission-revert preview-identity (design-lock #3342, de-escalation-only) ───────────────────────────
+// Disjoint `type:'config-permission-revert-preview'`. Binds the CURRENT live grant via `currentGrantHash` (HMAC),
+// so a grant changed between preview and execute → drift → 409. The de-escalation direction is re-checked against
+// the LIVE grant at execute too (the load-bearing never-escalate guard lives in the route, not just this token).
+export function hashPermissionGrant(grant: Record<string, unknown> | null | undefined): string {
+  return createHmac('sha256', getSecret()).update(JSON.stringify(grant ?? null)).digest('hex')
+}
+
+export interface ConfigPermissionRevertPreviewIdentityClaims {
+  sheetId: string
+  revisionId: string
+  entityId: string
+  /** HMAC over the subject's current live grant — drift since preview → reject. */
+  currentGrantHash: string
+  actorId: string
+}
+
+export function mintConfigPermissionRevertPreviewIdentity(claims: ConfigPermissionRevertPreviewIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
+  return jwt.sign({ type: 'config-permission-revert-preview', ...claims }, getSecret(), { algorithm: 'HS256', expiresIn } as SignOptions)
+}
+
+export interface ConfigPermissionRevertVerifyResult {
+  valid: boolean
+  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_revisionId' | 'mismatch_entityId' | 'grant_drift' | 'mismatch_actorId'
+}
+
+export function verifyConfigPermissionRevertPreviewIdentity(token: string, expected: ConfigPermissionRevertPreviewIdentityClaims): ConfigPermissionRevertVerifyResult {
+  let payload: Partial<ConfigPermissionRevertPreviewIdentityClaims> & { type?: string }
+  try {
+    payload = jwt.verify(token, getSecret()) as Partial<ConfigPermissionRevertPreviewIdentityClaims> & { type?: string }
+  } catch (e) {
+    return { valid: false, reason: (e as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid' }
+  }
+  if (payload.type !== 'config-permission-revert-preview') return { valid: false, reason: 'wrong_type' }
+  if (payload.sheetId !== expected.sheetId) return { valid: false, reason: 'mismatch_sheetId' }
+  if (payload.revisionId !== expected.revisionId) return { valid: false, reason: 'mismatch_revisionId' }
+  if (payload.entityId !== expected.entityId) return { valid: false, reason: 'mismatch_entityId' }
+  if (payload.currentGrantHash !== expected.currentGrantHash) return { valid: false, reason: 'grant_drift' }
+  if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
+  return { valid: true }
+}
+
 // ── T8-2 Reset-to-T (DESTRUCTIVE) preview-identity ────────────────────────────────────────────────────────────
 // Reset = Revert (surviving records to their T-state) + SOFT-DELETE the records CREATED AFTER T. Its identity is
 // DISJOINT from revert (`type: 'restore-preview-pit-reset'`), so a revert token can never trigger a destructive

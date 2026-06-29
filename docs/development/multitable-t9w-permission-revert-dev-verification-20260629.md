@@ -1,0 +1,30 @@
+# T9-W permission-revert — development & verification
+
+**Date:** 2026-06-29 · **Design-lock:** `multitable-t9w-permission-revert-designlock-20260628.md` (#3342, **owner-ratified**: de-escalation-only v1 + `canManageSheetAccess` floor). **Flag default-off** (`MULTITABLE_ENABLE_PERMISSION_REVERT`). The **last and highest-blast-radius** slice of the T9-W config-restore line (Tier 1/2/3/4 already on main). Built on post-#3343 main.
+
+## What was built
+Reverting a `permission` config revision re-applies its `before` grant state — but **only when that strictly reduces the subject's access** (de-escalation). The route **can never increase anyone's access**: any revert that would raise access on net is refused (422). The re-grant/escalation direction stays deferred (a future per-grant re-grant policy).
+
+## The safety property (load-bearing)
+Access is modeled as a **single total order per scope** (more = higher rank): sheet `none<read<write-own<write<admin`, view `none<read<write<admin`, field `hidden(0)<read-only(1)<read-write(2)` (visible=false dominates → hidden; else readOnly distinguishes). `permissionRevertDirection(scope, before, live)` = `de-escalation` iff `rank(before) < rank(live)`, `escalation` iff `>`, else `noop`. The **execute re-checks this against the LIVE grant inside the txn** (not the recorded `after`) and applies **only** on `de-escalation`; `escalation`/`noop` → **422 `RESTORE_NOT_SUPPORTED`**. Because the apply sets the grant to `before` whose rank is strictly **<** live, access can only ever **decrease**.
+
+> Note — a justified deviation from the design-lock's 2-axis field model (`visible` × `readOnly` with a 'mixed' case): field *effective* access **is** a total order (when `visible=false` the subject has no access regardless of `readOnly`), so 'mixed' is spurious. The single rank is both correct and strictly conservative — any field change that isn't a pure reduction classifies as `escalation` and is refused.
+
+## Locked decisions → implementation
+- **PR-L1/L2 — de-escalation-only direction classifier (pure).** `permissionAccessRank` + `permissionRevertDirection` (`config-restore.ts`); `isPermissionRevert(rev)=entity_type==='permission'`. `classifyRevert` untouched (stays pure).
+- **PR-L3 — live re-check, not the stale `after`.** Execute re-loads the live grant and re-runs the direction check against it; the recorded `after` is never trusted for the safety decision.
+- **PR-L4 — disjoint identity + grant drift.** `type:'config-permission-revert-preview'` binds `currentGrantHash` (HMAC over the live grant); execute re-hashes the live grant → drift → **409 `GRANT_DRIFT`**.
+- **PR-L5 — flag + ABOVE-baseline floor + typed confirm + single-txn.** Default-off `MULTITABLE_ENABLE_PERMISSION_REVERT`; floor **tightened to `canManageSheetAccess`** for `permission` in the route cap block (was the loose `||` else-branch); typed `confirm:'revert-permission'`; the re-check + apply run in one `pool.transaction`.
+- **PR-L6 — no-oracle.** Preview returns only `{ scope, direction, supported, note }` (+ token) — no other subjects' grants, no counts.
+- **PR-L7 — append-only audit.** `applyPermissionDeEscalation` sets the grant to `before` (null ⇒ revoke), mirroring each forward grant write (`field_permissions` upsert/delete · `meta_view_permissions` delete+insert · `spreadsheet_permissions` managed-code delete+insert), and records a `source='restore'` permission revision.
+
+## Verification
+| What | How | Status |
+|---|---|---|
+| Type-safety | `tsc --noEmit` | ✅ 0 errors |
+| Real-DB goldens (a–l) | `multitable-permission-revert-realdb.test.ts`, **registered in `plugin-tests.yml`** | ⏳ run in CI (no local postgres) |
+| Coverage | (a) flag-off → 403 · (b) floor (no `canManageSheetAccess`) → 403 · (c) happy sheet de-escalation (admin→read) + `source='restore'` revision · (d) revoke (before=null) · (e) **escalation refused** (before>live → 422, grant unchanged) · (f) **noop refused** (before==live → 422) · (g) **LIVE re-check** (live lowered after preview so before is no longer < live → 422, not applied) · (h) **grant drift** (live changed since preview → 409) · (i) field-scope de-escalation · (j) view-scope de-escalation · (k) typed-confirm · (l) **no-oracle** (response leaks no other grant / no count) | ⏳ in CI |
+| **Honest gaps** | (1) goldens CI-proven, not local — **watch (c)/(e)/(g)** (the apply, the escalation refusal, the live re-check — the three that prove "never escalates"). (2) the **re-grant/escalation direction is deferred** (out of scope; would need a per-grant re-grant policy). (3) `spreadsheet_permissions` managed-code set is mirrored from the forward write; a non-managed perm_code outside that set is left untouched by design. (4) **flag-on live smoke** before rollout. | ⬜ stated |
+
+## Scope
+**De-escalation-only permission revert (field/view/sheet).** OUT: the **re-grant / escalation direction** (deferred pending a per-grant re-grant policy) · bulk/subject-wide revert · cross-base · FE. Enabling `MULTITABLE_ENABLE_PERMISSION_REVERT` stays a runbook step (flag-on smoke). **This closes the T9-W config-restore line** — Tier 1 (sheet_config) · Tier 2 (field retype) · Tier 3 (un-create) · Tier 4 (field-undelete) all shipped; permission-revert is the de-escalation-only capstone.
