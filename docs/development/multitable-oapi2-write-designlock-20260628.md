@@ -5,7 +5,9 @@
 > `multitable-openapi-token-auth-designlock-20260619.md` (do **not** reopen it). This is the **write slice
 > (OAPI-2)** of that lock: it does **not** re-decide the ratified §2.1 route matrix, §2.3 Option A, §2.4
 > token-wins + 600/min, or §3 invariants — it specifies **how** they are implemented for writes.
-> Grounding: `origin/main` @ `33fde1347`. Owner-gated: enables a **mutating** public API surface.
+> Grounding: `origin/main` @ `33fde1347` (validation anchor; the token-auth / OAPI allowlist / write-route
+> surface was re-confirmed **unchanged** on later main through `c179dc078` — intervening hunks are unrelated
+> T9-W / date-reminder changes). Owner-gated: enables a **mutating** public API surface.
 > **Ratifying this lock does NOT start the build.** The OAPI-2a runtime is a **separate opt-in GO** after this
 > (read-only-first phasing, canonical §4); no `apiTokenAuth` is mounted on any write route until that GO.
 
