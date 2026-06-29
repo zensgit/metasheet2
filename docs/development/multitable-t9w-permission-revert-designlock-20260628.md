@@ -1,4 +1,4 @@
-# T9-W permission-revert — DESIGN-LOCK (PROPOSED)
+# T9-W permission-revert — DESIGN-LOCK (RATIFIED · runtime shipped #3361)
 
 **Date:** 2026-06-28 · **Type:** T9-W unsafe-restore write-slice design-lock, narrowed v1. Docs-only; locks scope + per-decision bars **before any runtime code**. The **last and highest-blast-radius** link on the config-restore line — it touches the access-control surface itself.
 
