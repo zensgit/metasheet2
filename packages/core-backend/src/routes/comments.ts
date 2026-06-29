@@ -7,6 +7,7 @@ import { Logger } from '../core/logger'
 import { rbacGuard } from '../rbac/rbac'
 import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
 import { apiTokenWriteRateLimit } from '../middleware/rate-limiter'
+import { oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import {
   CommentAccessError,
   CommentConflictError,
@@ -295,7 +296,7 @@ export function commentsRouter(injector?: Injector): Router {
     }
   })
 
-  router.post('/api/comments', apiTokenAuth, requireScope('comments:write'), apiTokenWriteRateLimit, rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
+  router.post('/api/comments', apiTokenAuth, oapiWriteAuditBoundary('create', 'comments:write'), requireScope('comments:write'), apiTokenWriteRateLimit, rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
     const schema = z.object({
       spreadsheetId: z.string().min(1).optional(),
       containerId: z.string().min(1).optional(),
