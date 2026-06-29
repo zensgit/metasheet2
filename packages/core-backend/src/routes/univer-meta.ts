@@ -156,7 +156,7 @@ import { validateRecord, getDefaultValidationRules } from '../multitable/field-v
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue, validatePersonValue } from '../multitable/field-codecs'
 import { apiTokenWriteRateLimit, conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
-import { oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
+import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
 import {
   AutomationRuleValidationError,
@@ -13671,6 +13671,7 @@ export function univerMetaRouter(): Router {
         access,
         capabilities,
         sheetScope,
+        oapiAudit: buildOapiAuditContext(req, 'update', 'records:write'),
       })
       const fields = patchResult.fields
       const nextVersion = patchResult.version
@@ -14657,6 +14658,7 @@ export function univerMetaRouter(): Router {
         capabilities,
         actorId: getRequestActorId(req),
         data,
+        oapiAudit: buildOapiAuditContext(req, 'create', 'records:write'),
       })
 
       // F4 (#2106 §3 F4): the create echo previously returned result.data UNMASKED, so a field_permissions-
@@ -15260,6 +15262,7 @@ export function univerMetaRouter(): Router {
               capabilities,
               sheetScope,
               access,
+              oapiAudit: buildOapiAuditContext(req, 'upsert', 'records:write'),
             })
             updated.push(...result.updated)
             if (result.records) records.push(...(result.records as Array<{ recordId: string; data: Record<string, unknown> }>))
@@ -15302,6 +15305,7 @@ export function univerMetaRouter(): Router {
         capabilities,
         sheetScope,
         access,
+        oapiAudit: buildOapiAuditContext(req, 'upsert', 'records:write'),
       })
 
       return res.json({
