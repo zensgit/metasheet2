@@ -38,7 +38,13 @@
             <option value="schedule.cron">{{ automationTriggerTypeLabel('schedule.cron', isZh) }}</option>
             <option value="schedule.interval">{{ automationTriggerTypeLabel('schedule.interval', isZh) }}</option>
             <option value="schedule.date_field">{{ automationTriggerTypeLabel('schedule.date_field', isZh) }}</option>
-            <option value="webhook.received">{{ automationTriggerTypeLabel('webhook.received', isZh) }}</option>
+            <!--
+              `webhook.received` is intentionally NOT offered here: it is runtime-inert today
+              (no inbound ingestion route exists, the scheduler skips it, and it has no
+              TRIGGER_TYPE_BY_EVENT entry), so a saved rule would silently never fire. This is a
+              UI-only removal — the backend trigger-type enum is deliberately left intact pending a
+              real inbound webhook endpoint, at which point this option can be re-exposed.
+            -->
           </select>
 
           <!-- field.value_changed config -->

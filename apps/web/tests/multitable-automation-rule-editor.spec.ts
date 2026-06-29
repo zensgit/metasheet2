@@ -218,8 +218,11 @@ describe('MetaAutomationRuleEditor', () => {
     const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
     expect(triggerSelect).toBeTruthy()
     // record.created/updated/deleted + field.value_changed + form.submitted + schedule.cron/interval/date_field
-    // + webhook.received
-    expect(triggerSelect.options.length).toBe(9)
+    // `webhook.received` is intentionally NOT selectable: it is runtime-inert (no inbound ingestion
+    // route, scheduler skips it, no TRIGGER_TYPE_BY_EVENT entry) so a saved rule would never fire.
+    expect(triggerSelect.options.length).toBe(8)
+    const triggerValues = Array.from(triggerSelect.options).map((option) => option.value)
+    expect(triggerValues).not.toContain('webhook.received')
   })
 
   it('localizes core rule editor chrome in zh-CN while keeping raw select values', async () => {
