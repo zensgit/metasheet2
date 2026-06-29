@@ -1,11 +1,26 @@
-# Multitable Open-API Token Auth — OAPI-4 Per-Base/Sheet Scoped Tokens Design-Lock (PROPOSED)
+# Multitable Open-API Token Auth — OAPI-4 Per-Base/Sheet Scoped Tokens Design-Lock (RATIFIED)
 
-> Status: **PROPOSED 2026-06-29.** Extends the **RATIFIED** canonical lock
+> Status: **RATIFIED 2026-06-29** (owner-signed; see **Ratification** below). The §9 decisions are settled;
+> this doc is read-only post-ratification. Extends the **RATIFIED** canonical lock
 > `multitable-openapi-token-auth-designlock-20260619.md` (§2.3 **Option B**, named there as OAPI-4) and the
-> shipped OAPI-2a/2b write runtime (#3365). Design only — no runtime, no migration mounted until §9 ratifies;
-> the build is a separate opt-in. Grounding: `origin/main` after #3365 (`multitable_api_tokens` has `id`,
-> `scopes jsonb`, `created_by`; **no base/sheet columns**). Owner-gated: this **narrows** a mutating surface
-> (strictly tightening), but the enforcement is security-critical and shared with the read path.
+> shipped OAPI-2a/2b write runtime (#3365). Grounding: `origin/main` after #3365 (`multitable_api_tokens` has
+> `id`, `scopes jsonb`, `created_by`; **no base/sheet columns**). Owner-gated: this **narrows** a mutating
+> surface (strictly tightening), but the enforcement is security-critical and shared with the read path.
+> **Ratifying this lock does NOT start the build.** OAPI-4a (records runtime) is a **separate opt-in GO** after
+> this; no columns/guard are added until that GO.
+
+## Ratification (owner-signed 2026-06-29)
+The §9 decisions are ratified as the recommended defaults; the review fixes (guard middleware-order, the
+`req.oapiAuditReason` interface, and server-side comment target resolution) landed before sign-off:
+1. **Granularity** = `base_ids[]` + `sheet_ids[]` whitelists with §3 AND-composition (subsumes the simpler "bases XOR sheets").
+2. **Cross-base / multi-target** = fail-closed: **every** touched base/sheet must be in-scope.
+3. **Legacy** = unscoped (creator-wide); additive nullable migration, **no backfill** → no token changes on deploy; opt-in per token.
+4. **Out-of-scope** = 403 `OUT_OF_SCOPE` (distinct from `INSUFFICIENT_SCOPE`) + a denied write-audit row carrying a scrubbed `detail.reason`.
+5. **Enforcement** = one shared `oapiScopeGuard` after `apiTokenAuth`, uniform on read + write, **no-op for session**; locked write-route order `apiTokenAuth → oapiWriteAuditBoundary → apiTokenWriteRateLimit → oapiScopeGuard → requireScope → [rbacGuard] → handler`.
+6. **Phasing** = OAPI-4a records → OAPI-4b comments → OAPI-4c UI, each a separate opt-in; every real-DB golden wired into `plugin-tests.yml`'s real-DB allowlist (verify it RAN).
+7. **Pre-handler target resolution** everywhere (aggregate/summary reads, multi-sheet `/patch`, comments from the container/target row); any route that genuinely can't resolve → an explicit, audited carve-out, never a silent bypass.
+
+> The OAPI-4a runtime remains a **separate GO** and is not authorized by this ratification.
 
 ## 0. Why scope before more surfaces
 OAPI-2 opened token **writes** (Option A: a token acts as its creator, capability-scoped, creator-wide). The
@@ -109,7 +124,7 @@ the step's test output with passing counts" (verify it RAN), not merely "CI is g
   client-supplied baseId).
 - Revoking/scoping takes effect next request (no cached token scope beyond the request).
 
-## 9. Decisions for the owner (ratify before any build)
+## 9. Decisions — RATIFIED 2026-06-29 (all at the recommended default; see Ratification, top)
 1. **Granularity model:** `base_ids[]` + `sheet_ids[]` whitelists with the §3 AND-composition — *or* simpler
    "a token is scoped to bases XOR sheets, not both"? *(Recommend both-as-whitelists; it subsumes the simpler case.)*
 2. **Cross-base/multi-target rule:** require **every** touched base/sheet in-scope (§3)? *(Recommend yes — fail-closed.)*
