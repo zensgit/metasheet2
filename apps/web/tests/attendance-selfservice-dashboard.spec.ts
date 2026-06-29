@@ -263,7 +263,7 @@ function installOverviewMock(): void {
             workEndTime: '18:00',
             workingDays: [1, 2, 3, 4, 5],
             lateGraceMinutes: 5,
-            earlyLeaveGraceMinutes: 5,
+            earlyGraceMinutes: 5,
             severeLateThresholdMinutes: 30,
             absenceLateThresholdMinutes: 60,
             geofence: 'raw-geofence-secret',
@@ -607,6 +607,22 @@ describe('Attendance self-service dashboard', () => {
     expect(container?.querySelector('[data-selfservice-primary-action]')?.textContent).toContain('Resolve anomaly reminders')
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('Adjusted')
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('manual correction')
+  })
+
+  it('updates self-service rules weekday labels when the locale changes', async () => {
+    useLocale().setLocale('en')
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const rulesCard = () => container?.querySelector('[data-selfservice-card="rules"]')?.textContent ?? ''
+    expect(rulesCard()).toContain('Mon, Tue, Wed, Thu, Fri')
+
+    useLocale().setLocale('zh-CN')
+    await flushUi(4)
+
+    expect(rulesCard()).toContain('周一, 周二, 周三, 周四, 周五')
+    expect(rulesCard()).not.toContain('Mon, Tue, Wed, Thu, Fri')
   })
 
   it('clears stale self-service rules while a reload is in flight', async () => {

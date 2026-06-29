@@ -1352,6 +1352,16 @@ export class MultitableApiClient {
     return this.parseJson(res)
   }
 
+  /**
+   * List APPROVAL templates (distinct from the multitable templates above) for the start_approval action's
+   * template picker. Guarded server-side by `approvals:read` — an automation author lacking that permission
+   * gets 401/403, which the editor degrades to a free-text template-id input (never a hard dependency).
+   */
+  async listApprovalTemplates(): Promise<{ data: Array<{ id: string; name?: string }>; total: number }> {
+    const res = await this.fetch('/api/approval-templates')
+    return this.parseJson(res)
+  }
+
   async installTemplate(templateId: string, input: InstallTemplateInput = {}): Promise<InstallTemplateResult> {
     const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}/install`, {
       method: 'POST',

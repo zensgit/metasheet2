@@ -8,9 +8,9 @@
  * day-bucketed reminder instant (NOT the wall-clock fire time — `fired_at` records that), so editing a
  * deadline to a NEW day produces a NEW occurrence (fires once) while same-day edits stay deduped.
  *
- * FK → automation_rules(id) ON DELETE CASCADE: deleting a rule reaps its ledger rows (the common churn).
- * Retention/aging of long-lived rows is intentionally NOT built here — deferred debt (see the dev doc; the
- * NiFi provenance benchmark flagged retention as the bounded gap). Pure DDL; idempotent.
+ * FK → automation_rules(id) ON DELETE CASCADE: deleting a rule reaps its ledger rows (the common churn). Long
+ * lived active rules are aged by the service's fixed 365-day `fired_at` retention sweep. Pure DDL;
+ * idempotent.
  */
 import { sql, type Kysely } from 'kysely'
 

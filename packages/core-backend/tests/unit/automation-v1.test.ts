@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { evaluateCondition, evaluateConditions, type AutomationCondition, type ConditionGroup } from '../../src/multitable/automation-conditions'
 import { AutomationExecutor, type AutomationRule, type AutomationDeps, type AutomationExecution } from '../../src/multitable/automation-executor'
-import { AutomationScheduler, parseCronToIntervalMs } from '../../src/multitable/automation-scheduler'
+import { AutomationScheduler, cronHasNoMatchingDay, nextCronOccurrenceMs, parseCronToIntervalMs } from '../../src/multitable/automation-scheduler'
 import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, ALL_TRIGGER_TYPES } from '../../src/multitable/automation-triggers'
 import type { AutomationTrigger, AutomationTriggerType } from '../../src/multitable/automation-triggers'
 import { EventBus } from '../../src/integration/events/event-bus'
@@ -1945,12 +1945,83 @@ describe('AutomationScheduler', () => {
     expect(scheduler.isRegistered('rule_1')).toBe(true)
   })
 
-  it('rejects unsupported cron expression', () => {
+  it('registers complex cron expressions instead of treating them as unsupported intervals', () => {
     const rule = createMockRule({
       trigger: { type: 'schedule.cron', config: { expression: '0 12 1 */2 *' } },
     })
     scheduler.register(rule)
+    expect(scheduler.isRegistered('rule_1')).toBe(true)
+  })
+
+  it('accepts the editor-emitted triggerConfig.cron key as the cron expression source', () => {
+    const rule = createMockRule({
+      trigger: { type: 'schedule.cron', config: { cron: '15 9 * * *' } },
+    })
+    scheduler.register(rule)
+    expect(scheduler.isRegistered('rule_1')).toBe(true)
+  })
+
+  it('fires cron rules at the next matching UTC wall-clock minute', async () => {
+    scheduler.destroy()
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-06-28T09:14:30.000Z'))
+      const callback = vi.fn()
+      const cronScheduler = new AutomationScheduler(callback)
+      const rule = createMockRule({
+        trigger: { type: 'schedule.cron', config: { expression: '15 9 * * *' } },
+      })
+      cronScheduler.register(rule)
+      await vi.advanceTimersByTimeAsync(29_999)
+      expect(callback).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(callback).toHaveBeenCalledTimes(1)
+      cronScheduler.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('re-arms a cron rule after each fire (fires at consecutive occurrences)', async () => {
+    scheduler.destroy()
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-06-28T09:14:30.000Z'))
+      const cb = vi.fn()
+      const cronScheduler = new AutomationScheduler(cb)
+      cronScheduler.register(createMockRule({
+        trigger: { type: 'schedule.cron', config: { expression: '15 9 * * *' } },
+      }))
+      // First occurrence: 2026-06-28T09:15:00Z.
+      await vi.advanceTimersByTimeAsync(46_000)
+      expect(cb).toHaveBeenCalledTimes(1)
+      // After firing, the rule must re-arm itself (still registered).
+      expect(cronScheduler.isRegistered('rule_1')).toBe(true)
+      // Second occurrence: next day 2026-06-29T09:15:00Z (~24h later).
+      await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000)
+      expect(cb).toHaveBeenCalledTimes(2)
+      expect(cronScheduler.isRegistered('rule_1')).toBe(true)
+      cronScheduler.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('unregister and destroy clear a cron (setTimeout-backed) timer', () => {
+    scheduler.register(createMockRule({
+      trigger: { type: 'schedule.cron', config: { expression: '15 9 * * *' } },
+    }))
+    expect(scheduler.isRegistered('rule_1')).toBe(true)
+    scheduler.unregister('rule_1')
     expect(scheduler.isRegistered('rule_1')).toBe(false)
+    expect(scheduler.activeCount).toBe(0)
+
+    scheduler.register(createMockRule({
+      trigger: { type: 'schedule.cron', config: { expression: '15 9 * * *' } },
+    }))
+    expect(scheduler.activeCount).toBe(1)
+    scheduler.destroy()
+    expect(scheduler.activeCount).toBe(0)
   })
 
   it('destroy clears all timers', () => {
@@ -1983,6 +2054,81 @@ describe('parseCronToIntervalMs', () => {
   })
   it('too few parts returns null', () => {
     expect(parseCronToIntervalMs('* * *')).toBe(null)
+  })
+})
+
+describe('nextCronOccurrenceMs', () => {
+  it('aligns daily wall-clock cron to the requested UTC minute', () => {
+    const from = Date.parse('2026-06-28T09:14:30.000Z')
+    expect(new Date(nextCronOccurrenceMs('15 9 * * *', from)!).toISOString()).toBe('2026-06-28T09:15:00.000Z')
+  })
+
+  it('supports list/range/step fields for month-scoped cron', () => {
+    const from = Date.parse('2026-01-31T12:00:00.000Z')
+    expect(new Date(nextCronOccurrenceMs('0 12 1 */2 *', from)!).toISOString()).toBe('2026-03-01T12:00:00.000Z')
+  })
+
+  it('treats stepped day-of-month as restricted, not as an every-day wildcard', () => {
+    const from = Date.parse('2026-01-01T10:00:00.000Z')
+    expect(new Date(nextCronOccurrenceMs('0 9 */2 * *', from)!).toISOString()).toBe('2026-01-03T09:00:00.000Z')
+  })
+
+  it('uses either day-of-month or day-of-week when both are restricted', () => {
+    const from = Date.parse('2026-06-28T00:00:00.000Z') // Sunday
+    expect(new Date(nextCronOccurrenceMs('0 9 15 * 1', from)!).toISOString()).toBe('2026-06-29T09:00:00.000Z')
+  })
+
+  it('treats day-of-week 7 as Sunday inside ranges', () => {
+    const from = Date.parse('2026-06-27T09:00:00.000Z') // Saturday
+    expect(new Date(nextCronOccurrenceMs('0 9 * * 1-7', from)!).toISOString()).toBe('2026-06-28T09:00:00.000Z')
+  })
+
+  it('rejects invalid cron syntax', () => {
+    expect(nextCronOccurrenceMs('0 25 * * *', Date.parse('2026-06-28T00:00:00.000Z'))).toBeNull()
+    expect(nextCronOccurrenceMs('* * *', Date.parse('2026-06-28T00:00:00.000Z'))).toBeNull()
+  })
+
+  it('returns null for a parseable but never-matching cron (February 30th)', () => {
+    expect(nextCronOccurrenceMs('0 0 30 2 *', Date.parse('2026-06-28T00:00:00.000Z'))).toBeNull()
+  })
+
+  it('does not over-prune a valid leap-year February 29th cron', () => {
+    // Guards the N4 short-circuit: Feb 29 IS reachable on leap years, so it must
+    // resolve, not get nulled. Next leap Feb 29 after 2026-06-28 is 2028.
+    expect(
+      new Date(nextCronOccurrenceMs('0 0 29 2 *', Date.parse('2026-06-28T00:00:00.000Z'))!).toISOString(),
+    ).toBe('2028-02-29T00:00:00.000Z')
+  })
+
+  it('does not over-prune a DOW-restricted cron whose day-of-month is calendar-impossible', () => {
+    // `0 0 30 2 1`: Feb 30 never exists, but DOW=Monday is restricted, so the
+    // DOM/DOW OR-semantics still match February Mondays — must NOT be nulled.
+    expect(
+      nextCronOccurrenceMs('0 0 30 2 1', Date.parse('2026-06-28T00:00:00.000Z')),
+    ).not.toBeNull()
+  })
+})
+
+describe('cronHasNoMatchingDay', () => {
+  it('flags day-of-month values no restricted month can host', () => {
+    expect(cronHasNoMatchingDay('0 0 30 2 *')).toBe(true) // February tops out at 29
+    expect(cronHasNoMatchingDay('0 0 31 4 *')).toBe(true) // April has 30 days
+    expect(cronHasNoMatchingDay('0 0 31 4,6,9,11 *')).toBe(true) // all 30-day months
+  })
+
+  it('does not flag reachable days (leap Feb 29, DOW-restricted, 31-day months, wildcards)', () => {
+    expect(cronHasNoMatchingDay('0 0 29 2 *')).toBe(false) // Feb 29 exists on leap years
+    expect(cronHasNoMatchingDay('0 0 30 2 1')).toBe(false) // DOW restricted → OR-match a Monday
+    expect(cronHasNoMatchingDay('0 0 31 5 *')).toBe(false) // May has 31 days
+    expect(cronHasNoMatchingDay('0 0 31 4,5 *')).toBe(false) // May (31) can host it
+    expect(cronHasNoMatchingDay('0 0 15 * *')).toBe(false) // month wildcard
+    expect(cronHasNoMatchingDay('0 0 * * *')).toBe(false) // day-of-month wildcard
+    expect(cronHasNoMatchingDay('* * * * *')).toBe(false) // all wildcard
+  })
+
+  it('returns false for unparseable input (null parse is handled by the caller)', () => {
+    expect(cronHasNoMatchingDay('0 25 * * *')).toBe(false)
+    expect(cronHasNoMatchingDay('* * *')).toBe(false)
   })
 })
 

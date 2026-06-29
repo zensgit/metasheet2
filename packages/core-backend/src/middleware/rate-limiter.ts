@@ -131,8 +131,9 @@ export class RedisRateLimitStore implements RateLimitStore {
 export interface RateLimiterOptions {
   /** Time window in milliseconds */
   windowMs: number
-  /** Maximum number of requests allowed within the window */
-  maxRequests: number
+  /** Maximum number of requests allowed within the window. A function is evaluated PER-REQUEST (runtime cap),
+   *  so an env-driven cap is honored regardless of when the limiter module was first imported. */
+  maxRequests: number | (() => number)
   /** Prefix used to namespace keys (e.g. 'public-form-submit') */
   keyPrefix: string
   /** Optional Redis client — enables distributed rate limiting.
@@ -181,7 +182,8 @@ export function createRateLimiter(options: RateLimiterOptions) {
     const key = `ratelimit:${keyPrefix}:${rawKey}`
 
     const handleResult = (result: { count: number; ttlMs: number }) => {
-      if (result.count > maxRequests) {
+      const max = typeof maxRequests === 'function' ? maxRequests() : maxRequests
+      if (result.count > max) {
         const retryAfterSeconds = Math.ceil(result.ttlMs / 1000)
         res.set('Retry-After', String(retryAfterSeconds))
         if (onLimited) {
@@ -266,4 +268,32 @@ export function conditionalPublicRateLimiter(
       next()
     }
   }
+}
+
+/**
+ * OAPI-2a per-token write limiter — 600 req/min keyed by the API token's OWN id (`req.apiTokenId`, set by
+ * `apiTokenAuth`); 429 on exceed (design-lock §7 / §2.4 "600/min/token").
+ */
+const oapiTokenWriteLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  // Default 600/min/token (design-lock §7). Env-overridable so a low-cap golden can prove that even
+  // wrong-scope write attempts are rate-limited (the limiter runs BEFORE requireScope on every route).
+  maxRequests: () => Number(process.env.OAPI_WRITE_RATE_LIMIT_MAX) || 600,
+  keyPrefix: 'oapi-token-write',
+  keyFn: (req: Request) => req.apiTokenId,
+})
+
+/**
+ * Apply the per-token write limiter ONLY to token-authenticated requests. This is a **strict no-op for
+ * session (non-token) requests**: `createRateLimiter` falls back to `userId`/`req.ip` when `keyFn` returns
+ * undefined (see the `rawKey` line above), which on these SESSION-SHARED write routes would wrongly throttle
+ * ordinary user edits. Short-circuiting on a missing `apiTokenId` keeps session writes unthrottled by this
+ * limiter while every `mst_` token write is capped per-token.
+ */
+export function apiTokenWriteRateLimit(req: Request, res: Response, next: NextFunction): void {
+  if (!req.apiTokenId) {
+    next()
+    return
+  }
+  oapiTokenWriteLimiter(req, res, next)
 }

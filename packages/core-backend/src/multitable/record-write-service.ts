@@ -38,6 +38,7 @@ import {
   type NotifyRecordSubscribersInput,
 } from './record-subscription-service'
 import { ensureRecordNotLocked } from './record-lock'
+import { insertCommittedAuditInTxn, type OapiWriteAuditContext } from './oapi-write-audit'
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrors the ones in univer-meta.ts to avoid coupling)
@@ -253,6 +254,12 @@ export interface RecordPatchInput {
    * that doc immediately after would tear out a live editor's state.
    */
   source?: RecordPostCommitContext['source']
+  /**
+   * OAPI-2a (§6): present only for an `mst_` token write. When set, a `committed` audit row is inserted
+   * INSIDE this patch's mutation transaction, so a failed audit insert rolls the write back (fail-closed).
+   * Absent for session writes → strict no-op (the session write path is unchanged).
+   */
+  oapiAudit?: OapiWriteAuditContext
 }
 
 export interface RecordPatchResult {
@@ -997,6 +1004,15 @@ export class RecordWriteService {
         }
 
         updated.push({ recordId, version: nextVersion })
+      }
+
+      // OAPI-2a §6: committed token-write audit, INSIDE the mutation txn → a failed insert rolls back the
+      // write (fail-closed). No-op for session writes (no oapiAudit context).
+      if (input.oapiAudit) {
+        await insertCommittedAuditInTxn(query, input.oapiAudit, {
+          recordIds: updated.map((u) => u.recordId),
+          batchCount: updated.length,
+        })
       }
 
       return updated

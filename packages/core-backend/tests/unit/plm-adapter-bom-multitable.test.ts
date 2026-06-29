@@ -224,6 +224,30 @@ describe('PLMAdapter.updateBomMultitableLine (PLM-COLLAB P3 — thin success-onl
     expect(result.data?.[0]).toEqual({ ok: true, bom_line_id: 'R8' })
   })
 
+  it('mints a FRESH per-edit Idempotency-Key header on each governed write (two successive writes generate DIFFERENT keys)', async () => {
+    const adapter = createAdapter('yuantus')
+    const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })
+    ;(adapter as never as { select: unknown }).select = select
+
+    await adapter.updateBomMultitableLine('P4', 'R8', { quantity: 6 })
+    await adapter.updateBomMultitableLine('P4', 'R8', { quantity: 7 })
+
+    expect(select).toHaveBeenCalledTimes(2)
+    const [, firstOptions] = select.mock.calls[0]
+    const [, secondOptions] = select.mock.calls[1]
+    const firstKey = firstOptions.headers['Idempotency-Key']
+    const secondKey = secondOptions.headers['Idempotency-Key']
+
+    // present and NON-EMPTY on each call (the per-edit governed-write seam)
+    expect(typeof firstKey).toBe('string')
+    expect(firstKey.length).toBeGreaterThan(0)
+    expect(typeof secondKey).toBe('string')
+    expect(secondKey.length).toBeGreaterThan(0)
+
+    // per-edit generation: a retried/second write must NOT reuse the same key
+    expect(firstKey).not.toBe(secondKey)
+  })
+
   it('null cell is a real "clear" edit, not empty: kept in payload, request issued', async () => {
     const adapter = createAdapter('yuantus')
     const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })

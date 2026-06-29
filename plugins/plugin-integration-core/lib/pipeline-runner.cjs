@@ -232,19 +232,26 @@ function shouldRequireWatermarkTiebreaker(context, mode) {
   return mode === 'incremental' && context.sourceSystem && context.sourceSystem.kind === DATA_SOURCE_SQL_READONLY_KIND
 }
 
+function systemRoleLabel(field) {
+  if (field === 'sourceSystem') return 'source'
+  if (field === 'targetSystem') return 'target'
+  return 'external system'
+}
+
 function assertActiveSystem(system, field) {
   if (!system) {
     throw new PipelineRunnerError(`${field} external system not found`, { field })
   }
   if (system.status && system.status !== 'active') {
-    // Stale-status legibility: an `error` source usually means a recovered-but-not-retested connection
+    // Stale-status legibility: an `error` system usually means a recovered-but-not-retested connection
     // (e.g. the Bridge Agent was restarted) — point the operator at the retest/reactivate action rather
     // than letting them think the dry-run itself broke. `inactive` is deliberate (a test won't reactivate
     // it), so it gets a different hint.
+    const role = systemRoleLabel(field)
     const hint = system.status === 'error'
-      ? ' — the source connection last failed its test; retest/reactivate it (Workbench 测试连接) then re-run'
+      ? ` — the ${role} connection last failed its test; retest/reactivate it (Workbench 测试连接) then re-run`
       : system.status === 'inactive'
-        ? ' — the source is inactive; activate it before running'
+        ? ` — the ${role} is inactive; activate it before running`
         : ` (status=${system.status})`
     throw new PipelineRunnerError(`${field} external system is not active${hint}`, {
       field,

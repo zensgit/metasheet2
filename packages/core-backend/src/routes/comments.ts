@@ -6,6 +6,8 @@ import { ICommentService, type CommentQueryOptions } from '../di/identifiers'
 import { Logger } from '../core/logger'
 import { rbacGuard } from '../rbac/rbac'
 import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
+import { apiTokenWriteRateLimit } from '../middleware/rate-limiter'
+import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import {
   CommentAccessError,
   CommentConflictError,
@@ -294,7 +296,7 @@ export function commentsRouter(injector?: Injector): Router {
     }
   })
 
-  router.post('/api/comments', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
+  router.post('/api/comments', apiTokenAuth, oapiWriteAuditBoundary('create', 'comments:write'), apiTokenWriteRateLimit, requireScope('comments:write'), rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
     const schema = z.object({
       spreadsheetId: z.string().min(1).optional(),
       containerId: z.string().min(1).optional(),
@@ -332,6 +334,7 @@ export function commentsRouter(injector?: Injector): Router {
         parentId: parsed.data.parentId,
         mentions: parsed.data.mentions,
         authorId: getUserId(req),
+        oapiAudit: buildOapiAuditContext(req, 'create', 'comments:write'),
       })
       return res.status(201).json({ ok: true, data: { comment } })
     } catch (error) {

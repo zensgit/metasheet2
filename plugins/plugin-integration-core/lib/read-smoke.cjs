@@ -60,6 +60,8 @@ const READ_SMOKE_PRESETS = Object.freeze({
           readListFields: Object.freeze(['FNumber', 'FName', 'FModel', 'FUnitID']),
           readListOrderBy: 'FNumber',
           readListFilterField: 'FNumber',
+          readListFilterMode: 'contains_like',
+          readListFilterEscape: 'k3_freeform',
           topField: 'Top',
           pageIndexField: 'PageIndex',
           pageSizeField: 'PageSize',
@@ -72,6 +74,33 @@ const READ_SMOKE_PRESETS = Object.freeze({
 
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+const READ_SMOKE_LIST_SHAPE_PROBE_KEYS = Object.freeze([
+  'dataData',
+  'dataLowerData',
+  'dataRows',
+  'resultData',
+  'resultRows',
+  'rows',
+  'topLevelArray',
+])
+
+function readSmokeListShapeProbeEvidence(value) {
+  if (!isPlainObject(value)) return null
+  const evidence = {}
+  let hasEvidence = false
+  for (const key of READ_SMOKE_LIST_SHAPE_PROBE_KEYS) {
+    if (typeof value[key] !== 'boolean') continue
+    evidence[key] = value[key]
+    hasEvidence = true
+  }
+  return hasEvidence ? evidence : null
+}
+
+function readSmokeSafeCount(value) {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value
+  return null
 }
 
 function mergeOperations(existing, required) {
@@ -151,9 +180,8 @@ function applyReadSmokePresetOverlay(system, preset) {
   }
 }
 
-// Values-free evidence from a successful read. Extracts ONLY recordPresent (boolean) + referenceObjectCount
-// (count) from the result's records — never the record values, metadata (which carries the key as
-// requestedNumber + a readPath), or raw payload.
+// Values-free evidence from a successful read. Extracts ONLY booleans/counts from the result — never
+// record values, raw payload, or metadata that may carry a key/readPath.
 function readSmokeSuccessEvidence(preset, result, contract = {}) {
   const records = result && Array.isArray(result.records) ? result.records : []
   const recordPresent = records.length > 0
@@ -164,7 +192,7 @@ function readSmokeSuccessEvidence(preset, result, contract = {}) {
     const refs = records[0] && records[0]._k3ReferenceObjects
     referenceObjectCount = refs && typeof refs === 'object' ? Object.keys(refs).length : 0
   }
-  return {
+  const evidence = {
     ok: true,
     presetId: preset.presetId,
     object,
@@ -173,6 +201,14 @@ function readSmokeSuccessEvidence(preset, result, contract = {}) {
     recordCount: records.length,
     referenceObjectCount,
   }
+  if (result && result.metadata && typeof result.metadata.dataDataPresent === 'boolean') {
+    evidence.dataDataPresent = result.metadata.dataDataPresent
+  }
+  const dataRowCount = readSmokeSafeCount(result && result.metadata && result.metadata.dataRowCount)
+  if (dataRowCount !== null) evidence.dataRowCount = dataRowCount
+  const listShapeProbe = readSmokeListShapeProbeEvidence(result && result.metadata && result.metadata.listShapeProbe)
+  if (listShapeProbe) evidence.listShapeProbe = listShapeProbe
+  return evidence
 }
 
 // Values-free error evidence. Returns ONLY a coarse code + type — never the error message, which may carry
@@ -180,11 +216,12 @@ function readSmokeSuccessEvidence(preset, result, contract = {}) {
 function readSmokeErrorEvidence(preset, error, contract = {}) {
   // Use the error's own enum-like code + name only (both values-free). Never fall back to constructor.name
   // (a plain thrown object would surface 'Object', which is noise) and never read the message.
-  const code = error && typeof error.code === 'string' && error.code ? error.code : null
+  const code = readSmokeSafeErrorCode(error && error.code) ||
+    readSmokeSafeErrorCode(error && error.details && error.details.code)
   const name = error && typeof error.name === 'string' && error.name ? error.name : null
   const object = typeof contract.object === 'string' && contract.object ? contract.object : preset.object
   const mode = typeof contract.mode === 'string' && contract.mode ? contract.mode : preset.defaultMode
-  return {
+  const evidence = {
     ok: false,
     presetId: preset.presetId,
     object,
@@ -192,13 +229,28 @@ function readSmokeErrorEvidence(preset, error, contract = {}) {
     errorCode: code || 'READ_SMOKE_READ_FAILED',
     errorType: name || 'Error',
   }
+  if (error && error.details && typeof error.details.dataDataPresent === 'boolean') {
+    evidence.dataDataPresent = error.details.dataDataPresent
+  }
+  const dataRowCount = readSmokeSafeCount(error && error.details && error.details.dataRowCount)
+  if (dataRowCount !== null) evidence.dataRowCount = dataRowCount
+  const listShapeProbe = readSmokeListShapeProbeEvidence(error && error.details && error.details.listShapeProbe)
+  if (listShapeProbe) evidence.listShapeProbe = listShapeProbe
+  return evidence
+}
+
+function readSmokeSafeErrorCode(value) {
+  if (typeof value !== 'string') return null
+  const code = value.trim()
+  if (!code || code.length > 80) return null
+  return /^[A-Z0-9_:-]+$/.test(code) ? code : null
 }
 
 // C1 contract normalizer (#1709 / C0 #3242). Reconciles the forward-looking
 // { presetId, intent:{ object, mode, key } } shape with the shipped read-smoke { presetId, key } subset by
 // normalizing BOTH detail shapes to one output { presetId, object, mode, key }. C3 LIST uses the explicit
 // intent shape and returns { presetId, object, mode } or an optional key that maps only to the preset-owned
-// internal FNumber prefix filter. Fail-closed + values-free: a raw
+// internal preset-owned LIST filter. Fail-closed + values-free: a raw
 // path/method/headers/
 // body/response/credential/config can never ride in (strict key allowlist); unknown preset/object/mode → a
 // coarse reason; the key is never echoed in an error.

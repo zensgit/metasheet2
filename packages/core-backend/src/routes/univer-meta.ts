@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express'
-import { randomUUID } from 'crypto'
+import { randomUUID, createHash } from 'crypto'
 import * as path from 'path'
 import { Router } from 'express'
 import { z } from 'zod'
@@ -73,7 +73,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -91,6 +91,12 @@ import {
   isFieldRetypeRevert,
   isSupportedFieldRetypeRevert,
   isSupportedUncreate,
+  isSupportedUndelete,
+  isPermissionRevert,
+  permissionRevertDirection,
+  parsePermissionEntityId,
+  permissionTargetMatchesParts,
+  type PermissionScope,
   computeRevertPreview,
   loadEntityConfigSnapshot,
   applyConfigRevert,
@@ -149,7 +155,8 @@ import { FormulaEngine } from '../formula/engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue, validatePersonValue } from '../multitable/field-codecs'
-import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
+import { apiTokenWriteRateLimit, conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
+import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
 import {
   AutomationRuleValidationError,
@@ -6021,6 +6028,126 @@ async function computeUncreatePlan(query: TxnQuery, rev: ConfigRevisionRow): Pro
   return { entityAlive: true, cascadeViewIds, orderShiftIds, columnDataPresent: dataRows.rows.length > 0 }
 }
 
+// ── T9-W Tier 4 (U-4) config-undelete: recreate-from-`before` + plan digest (design-lock U4-L2/L4) ─────────────
+const stableConfigString = (obj: Record<string, unknown>): string => {
+  const sorted: Record<string, unknown> = {}
+  for (const k of Object.keys(obj).sort()) sorted[k] = obj[k]
+  return JSON.stringify(sorted)
+}
+
+/** U4-L5: the SERVER-SIDE recreate plan — feeds hashUndeletePlan ONLY (NEVER the response). */
+async function computeUndeletePlan(query: TxnQuery, rev: ConfigRevisionRow): Promise<UndeletePlan> {
+  const before = (rev.before ?? {}) as Record<string, unknown>
+  const targetConfigHash = createHash('sha256').update(stableConfigString(before)).digest('hex')
+  if (rev.entity_type === 'view') {
+    const occupied = ((await query('SELECT 1 FROM meta_views WHERE id = $1', [rev.entity_id])) as any).rows.length > 0
+    return { idFree: !occupied, insertOrder: 0, trailingShiftIds: [], targetConfigHash }
+  }
+  const occupied = ((await query('SELECT 1 FROM meta_fields WHERE id = $1', [rev.entity_id])) as any).rows.length > 0
+  const insertOrder = Number(before.order ?? 0)
+  const shiftRows = (await query('SELECT id FROM meta_fields WHERE sheet_id = $1 AND "order" >= $2', [String(rev.sheet_id), insertOrder])) as any
+  const trailingShiftIds = (shiftRows.rows as any[]).map((r) => String(r.id))
+  return { idFree: !occupied, insertOrder, trailingShiftIds, targetConfigHash }
+}
+
+/** U4-L2/L3: recreate a deleted FIELD from its `before` (DEFINITION-ONLY) at its original order (trailing shift +1). */
+async function recreateFieldFromConfig(query: TxnQuery, opts: {
+  sheetId: string; fieldId: string; before: Record<string, unknown>; actorId: string | null; source?: 'mutation' | 'restore'; restoredFromId?: string | null
+}): Promise<void> {
+  const { sheetId, fieldId, before, actorId } = opts
+  const name = String(before.name ?? '')
+  const type = String(before.type ?? 'string')
+  const property = before.property ?? {}
+  const order = Number(before.order ?? 0)
+  const configBatchId = randomUUID()
+  // U4-L2: re-insert at the original order — shift trailing fields +1 (the inverse of the delete's -1), record each.
+  const shifted = ((await query('UPDATE meta_fields SET "order" = "order" + 1 WHERE sheet_id = $1 AND "order" >= $2 RETURNING id, "order"', [sheetId, order])) as any).rows as Array<{ id: string; order: number }>
+  await recordFieldOrderShifts(query, sheetId, shifted.map((r) => ({ id: String(r.id), newOrder: Number(r.order) })), 1, configBatchId, actorId)
+  try {
+    await query('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1, $2, $3, $4, $5::jsonb, $6)', [fieldId, sheetId, name, type, JSON.stringify(property), order])
+  } catch (e) {
+    if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Config entity id is occupied, cannot undelete: ${fieldId}`)
+    throw e
+  }
+  // DEFINITION-ONLY (U4-L3): column values / meta_links / auto-number are NOT recovered; the field is NOT re-added to
+  // any view config (lazy view re-integration). Record the recreate as a `create` revision (source='restore').
+  await recordConfigRevision(query, {
+    sheetId, entityType: 'field', entityId: fieldId, action: 'create',
+    ...fieldCreateDiff({ name, type, property, order }),
+    batchId: configBatchId, actorId,
+    source: opts.source ?? 'mutation', restoredFromId: opts.restoredFromId ?? null,
+  })
+}
+
+/** U4-L2: recreate a deleted VIEW from its `before` (clean, non-lossy). */
+async function recreateViewFromConfig(query: TxnQuery, opts: {
+  sheetId: string; viewId: string; before: Record<string, unknown>; actorId: string | null; source?: 'mutation' | 'restore'; restoredFromId?: string | null
+}): Promise<void> {
+  const { sheetId, viewId, before, actorId } = opts
+  try {
+    await query(
+      'INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)',
+      [viewId, sheetId, String(before.name ?? ''), String(before.type ?? 'grid'), JSON.stringify(before.filterInfo ?? {}), JSON.stringify(before.sortInfo ?? {}), JSON.stringify(before.groupInfo ?? {}), JSON.stringify(before.hiddenFieldIds ?? []), JSON.stringify(before.config ?? {})],
+    )
+  } catch (e) {
+    if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Config entity id is occupied, cannot undelete: ${viewId}`)
+    throw e
+  }
+  await recordConfigRevision(query, {
+    sheetId, entityType: 'view', entityId: viewId, action: 'create',
+    ...configCreateDiff(before, VIEW_CONFIG_HISTORY_KEYS as unknown as ReadonlyArray<string>),
+    batchId: randomUUID(), actorId,
+    source: opts.source ?? 'mutation', restoredFromId: opts.restoredFromId ?? null,
+  })
+}
+
+// ── T9-W permission-revert (de-escalation-only) helpers ───────────────────────────────────────────────────────
+type PermGrant = Record<string, unknown> | null
+
+/** Read the subject's CURRENT live grant for a permission entity (field/view/sheet); null = no grant. */
+async function loadLivePermissionGrant(query: TxnQuery, scope: PermissionScope, parts: string[], sheetId: string): Promise<PermGrant> {
+  if (scope === 'field') {
+    const [fieldId, subjectType, subjectId] = parts
+    const r = (await query('SELECT visible, read_only FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_type = $3 AND subject_id = $4', [sheetId, fieldId, subjectType, subjectId])) as any
+    const row = r.rows[0] as { visible?: boolean; read_only?: boolean } | undefined
+    return row ? { fieldId, subjectType, subjectId, visible: row.visible !== false, readOnly: row.read_only === true } : null
+  }
+  if (scope === 'view') {
+    const [viewId, subjectType, subjectId] = parts
+    const r = (await query('SELECT permission FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3', [viewId, subjectType, subjectId])) as any
+    const row = r.rows[0] as { permission?: string } | undefined
+    return row && typeof row.permission === 'string' ? { viewId, subjectType, subjectId, permission: row.permission } : null
+  }
+  const [subjectType, subjectId] = parts
+  const r = (await query('SELECT perm_code FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = $2 AND subject_id = $3 AND perm_code = ANY($4::text[])', [sheetId, subjectType, subjectId, MANAGED_SHEET_PERMISSION_CODES])) as any
+  const accessLevel = deriveSheetAccessLevel((r.rows as Array<{ perm_code: string }>).map((x) => String(x.perm_code)))
+  return accessLevel ? { subjectType, subjectId, accessLevel } : null
+}
+
+/** Apply a de-escalation: set the grant to `target` (rev.before; null = revoke), mirroring the forward grant write,
+ * + record a source='restore' permission revision (live → target). Caller MUST have verified de-escalation vs live. */
+async function applyPermissionDeEscalation(query: TxnQuery, opts: { scope: PermissionScope; parts: string[]; sheetId: string; entityId: string; live: PermGrant; target: PermGrant; actorId: string | null; restoredFromId: string | null }): Promise<void> {
+  const { scope, parts, sheetId, entityId, live, target, actorId, restoredFromId } = opts
+  if (scope === 'field') {
+    const [fieldId, subjectType, subjectId] = parts
+    if (!target) await query('DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_type = $3 AND subject_id = $4', [sheetId, fieldId, subjectType, subjectId])
+    else await query('INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (sheet_id, field_id, subject_type, subject_id) DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only', [sheetId, fieldId, subjectType, subjectId, target.visible !== false, target.readOnly === true])
+  } else if (scope === 'view') {
+    const [viewId, subjectType, subjectId] = parts
+    await query('DELETE FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3', [viewId, subjectType, subjectId])
+    if (target && typeof target.permission === 'string' && target.permission !== 'none') await query('INSERT INTO meta_view_permissions(view_id, subject_type, subject_id, permission) VALUES ($1,$2,$3,$4)', [viewId, subjectType, subjectId, target.permission])
+  } else {
+    const [subjectType, subjectId] = parts
+    await query('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = $2 AND subject_id = $3 AND perm_code = ANY($4::text[])', [sheetId, subjectType, subjectId, MANAGED_SHEET_PERMISSION_CODES])
+    const al = target && typeof target.accessLevel === 'string' ? target.accessLevel : null
+    const code = al && al !== 'none' ? (CANONICAL_SHEET_PERMISSION_CODE_BY_ACCESS_LEVEL as Record<string, string>)[al] : undefined
+    if (code) await query('INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code) VALUES ($1,$2,$3,$4,$5)', [sheetId, subjectType === 'user' ? subjectId : null, subjectType, subjectId, code])
+  }
+  const keys = (scope === 'field' ? FIELD_PERMISSION_HISTORY_KEYS : scope === 'view' ? VIEW_PERMISSION_HISTORY_KEYS : SHEET_PERMISSION_HISTORY_KEYS) as unknown as ReadonlyArray<string>
+  const diff = live && target ? configUpdateDiff(live, target, keys) : live ? configDeleteDiff(live, keys) : target ? configCreateDiff(target, keys) : null
+  if (diff) await recordConfigRevision(query, { sheetId, entityType: 'permission', entityId, action: live && target ? 'update' : live ? 'delete' : 'create', before: diff.before, after: diff.after, changedKeys: diff.changedKeys, batchId: randomUUID(), actorId, source: 'restore', restoredFromId })
+}
+
 export function univerMetaRouter(): Router {
   const router = Router()
 
@@ -7894,6 +8021,7 @@ export function univerMetaRouter(): Router {
       const cap = rev.entity_type === 'field' ? capabilities.canManageFields
         : rev.entity_type === 'view' ? capabilities.canManageViews
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
+        : rev.entity_type === 'permission' ? capabilities.canManageSheetAccess
         : (capabilities.canManageFields || capabilities.canManageViews || capabilities.canManageSheetAccess)
       if (!cap) return sendForbidden(res)
       // T9-W Tier 3 (U-3): un-create = revert a field/view `create` = DROP the created entity. Behind its own
@@ -7916,6 +8044,38 @@ export function univerMetaRouter(): Router {
           ? 'Un-creating this field permanently drops its column and every value in it (all created after this point) from every record. This cannot be undone.'
           : 'Un-creating this view permanently removes its saved configuration. This cannot be undone.'
         return res.json({ ok: true, data: { uncreate: { entityType: rev.entity_type, entityId: rev.entity_id, entityName, note }, previewToken } })
+      }
+      // T9-W Tier 4 (U-4): undelete — reverting a field/view DELETE = RECREATE the entity from its `before`. Behind
+      // its own default-off flag; disjoint plan-hash identity; definition-only (values/links/auto-number gone).
+      if (isSupportedUndelete(rev)) {
+        if (process.env.MULTITABLE_ENABLE_CONFIG_UNDELETE !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'CONFIG_UNDELETE_DISABLED', message: 'config undelete is disabled (MULTITABLE_ENABLE_CONFIG_UNDELETE off).' } })
+        }
+        const plan = await computeUndeletePlan(pool.query.bind(pool), rev)
+        const previewToken = mintConfigUndeletePreviewIdentity({
+          sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+          undeleteHash: hashUndeletePlan(plan), actorId: access.userId,
+        })
+        const entityName = typeof (rev.before as { name?: unknown })?.name === 'string' ? ((rev.before as { name?: string }).name as string) : undefined
+        const note = rev.entity_type === 'field'
+          ? 'Undeleting recreates this field definition (name/type/config) at its original position. Its previous cell values, link references, and auto-number counter are gone and are NOT restored.'
+          : 'Undeleting recreates this view with its saved configuration.'
+        // U4-L5 no-oracle: name + losses note + an id-collision flag; NO counts, NO raw plan fields.
+        return res.json({ ok: true, data: { undelete: { entityType: rev.entity_type, entityId: rev.entity_id, entityName, note, idCollision: !plan.idFree }, previewToken } })
+      }
+      // T9-W permission-revert (de-escalation-only). The cap block above already requires canManageSheetAccess for
+      // permission. Open ONLY when restoring `before` reduces access vs the LIVE grant; escalation/noop is surfaced
+      // unsupported (execute 422s it). No-oracle: report the subject's own direction, never other subjects' grants.
+      if (isPermissionRevert(rev)) {
+        if (process.env.MULTITABLE_ENABLE_PERMISSION_REVERT !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'PERMISSION_REVERT_DISABLED', message: 'permission revert is disabled (MULTITABLE_ENABLE_PERMISSION_REVERT off).' } })
+        }
+        const parsedPerm = parsePermissionEntityId(rev.entity_id)
+        if (!parsedPerm) return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'Malformed permission entity id.' } })
+        const live = await loadLivePermissionGrant(pool.query.bind(pool), parsedPerm.scope, parsedPerm.parts, sheetId)
+        const dir = permissionRevertDirection(parsedPerm.scope, rev.before as Record<string, unknown> | null, live)
+        const previewToken = mintConfigPermissionRevertPreviewIdentity({ sheetId, revisionId, entityId: rev.entity_id, currentGrantHash: hashPermissionGrant(live), actorId: access.userId })
+        return res.json({ ok: true, data: { permissionRevert: { scope: parsedPerm.scope, direction: dir, supported: dir === 'de-escalation', note: dir === 'de-escalation' ? "This revert REDUCES the subject's access to its earlier, lower state." : 'Refused: this revert would not reduce access (only de-escalation is permitted).' }, previewToken } })
       }
       // T9-W Tier 2 (U-2): field type/property revert is behind its OWN per-tier flag (default off). Schema-only +
       // scalar-safe (isSupportedFieldRetypeRevert); mirrors the forward PATCH (no value migration). A non-retype
@@ -7997,6 +8157,7 @@ export function univerMetaRouter(): Router {
       const cap = rev.entity_type === 'field' ? capabilities.canManageFields
         : rev.entity_type === 'view' ? capabilities.canManageViews
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
+        : rev.entity_type === 'permission' ? capabilities.canManageSheetAccess
         : (capabilities.canManageFields || capabilities.canManageViews || capabilities.canManageSheetAccess)
       if (!cap) return sendForbidden(res)
       // T9-W Tier 2 (U-2): field type/property revert behind its OWN per-tier flag (default off); see preview route.
@@ -8068,6 +8229,91 @@ export function univerMetaRouter(): Router {
         if (rev.entity_type === 'field') invalidateFieldCache(sheetId)
         invalidateViewConfigCache()
         return res.json({ ok: true, data: { uncreated: { entityType: rev.entity_type, entityId: rev.entity_id } } })
+      }
+      // T9-W Tier 4 (U-4): undelete — RECREATE the field/view from the delete revision's `before`. Default-off flag;
+      // id-collision (also the idempotency guard) + plan-drift; definition-only recreate in ONE transaction.
+      if (isSupportedUndelete(rev)) {
+        if (process.env.MULTITABLE_ENABLE_CONFIG_UNDELETE !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'CONFIG_UNDELETE_DISABLED', message: 'config undelete is disabled (MULTITABLE_ENABLE_CONFIG_UNDELETE off).' } })
+        }
+        const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
+        if (confirm.trim() !== 'undelete') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "undelete" to confirm recreating the deleted entity.' } })
+        const before = (rev.before ?? {}) as Record<string, unknown>
+        const undeleteSheetId = String(rev.sheet_id)
+        let failure: { status: number; code: string; message: string } | null = null
+        try {
+          failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+            // U4-L5 id-occupied check (FOR UPDATE) — also the idempotency guard: undelete when the entity already exists → reject.
+            const table = rev.entity_type === 'field' ? 'meta_fields' : 'meta_views'
+            const occ = (await query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE`, [rev.entity_id])) as any
+            if (occ.rows.length > 0) return { status: 409, code: 'ID_COLLISION', message: 'An entity with this id already exists; cannot undelete.' }
+            // recompute the recreate plan + verify the opaque undeleteHash → ONE generic PLAN_DRIFT on divergence.
+            const plan = await computeUndeletePlan(query, rev)
+            const verdict = verifyConfigUndeletePreviewIdentity(previewToken, {
+              sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+              undeleteHash: hashUndeletePlan(plan), actorId: access.userId,
+            })
+            if (!verdict.valid) {
+              if (verdict.reason === 'plan_drift') return { status: 409, code: 'PLAN_DRIFT', message: 'The undelete plan changed since preview; re-preview before undeleting.' }
+              if (verdict.reason === 'expired') return { status: 410, code: 'PREVIEW_EXPIRED', message: 'The preview identity expired; re-preview before undeleting.' }
+              return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before undeleting.' }
+            }
+            if (rev.entity_type === 'field') {
+              await recreateFieldFromConfig(query, { sheetId: undeleteSheetId, fieldId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
+            } else {
+              await recreateViewFromConfig(query, { sheetId: undeleteSheetId, viewId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
+            }
+            return null
+          })
+        } catch (e) {
+          if (e instanceof RecordServiceRestoreConflictError) {
+            return res.status(409).json({ ok: false, error: { code: 'ID_COLLISION', message: 'An entity with this id already exists; cannot undelete.' } })
+          }
+          throw e
+        }
+        if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+        if (rev.entity_type === 'field') invalidateFieldCache(undeleteSheetId)
+        invalidateViewConfigCache()
+        return res.json({ ok: true, data: { undeleted: { entityType: rev.entity_type, entityId: rev.entity_id } } })
+      }
+      // T9-W permission-revert (de-escalation-only). Flag + canManageSheetAccess floor (cap block above) + typed
+      // confirm. The LOAD-BEARING guard re-checks direction against the LIVE grant inside the txn — the route can
+      // NEVER increase access. Escalation/noop → 422; grant drift since preview → 409.
+      if (isPermissionRevert(rev)) {
+        if (process.env.MULTITABLE_ENABLE_PERMISSION_REVERT !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'PERMISSION_REVERT_DISABLED', message: 'permission revert is disabled (MULTITABLE_ENABLE_PERMISSION_REVERT off).' } })
+        }
+        const parsedPerm = parsePermissionEntityId(rev.entity_id)
+        if (!parsedPerm) return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'Malformed permission entity id.' } })
+        const confirmPerm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
+        if (confirmPerm.trim() !== 'revert-permission') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "revert-permission" to confirm reducing access.' } })
+        const target = (rev.before ?? null) as Record<string, unknown> | null
+        // Fail-closed identity guard: the `before` snapshot must describe the SAME subject/entity as the entity_id the
+        // apply writes to (the apply keys off `parts`, so this can't laundry an escalation — but a mismatch = malformed).
+        if (!permissionTargetMatchesParts(parsedPerm.scope, target, parsedPerm.parts)) {
+          return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'Permission revision before-snapshot does not match its entity id.' } })
+        }
+        const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+          // Never-escalate-under-concurrency: lock the sheet row so the live-grant read → direction re-check → apply
+          // cannot interleave with another grant write on this sheet. (Enablement gate: the forward grant/revoke routes
+          // must take the same lock for full coverage — tracked in the dev-verification honest gaps.)
+          await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+          const live = await loadLivePermissionGrant(query, parsedPerm.scope, parsedPerm.parts, sheetId)
+          const verdict = verifyConfigPermissionRevertPreviewIdentity(previewToken, { sheetId, revisionId, entityId: rev.entity_id, currentGrantHash: hashPermissionGrant(live), actorId: access.userId })
+          if (!verdict.valid) {
+            if (verdict.reason === 'grant_drift') return { status: 409, code: 'GRANT_DRIFT', message: 'The grant changed since preview; re-preview before reverting.' }
+            if (verdict.reason === 'expired') return { status: 410, code: 'PREVIEW_EXPIRED', message: 'The preview identity expired; re-preview.' }
+            return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before reverting.' }
+          }
+          // LOAD-BEARING never-escalate guard — re-checked against the LIVE grant, not the recorded `after`.
+          if (permissionRevertDirection(parsedPerm.scope, target, live) !== 'de-escalation') {
+            return { status: 422, code: 'RESTORE_NOT_SUPPORTED', message: 'This permission revert is not a de-escalation (it would not reduce the subject\'s access); refused.' }
+          }
+          await applyPermissionDeEscalation(query, { scope: parsedPerm.scope, parts: parsedPerm.parts, sheetId, entityId: rev.entity_id, live, target, actorId: getRequestActorId(req), restoredFromId: rev.id })
+          return null
+        })
+        if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+        return res.json({ ok: true, data: { permissionReverted: { scope: parsedPerm.scope, entityId: rev.entity_id } } })
       }
       const classify = classifyRevert(rev)
       // classifyRevert stays PURE; the route SUPPORTS only the flag-opened supported subsets — Tier-1 sheet_config
@@ -8954,16 +9200,21 @@ export function univerMetaRouter(): Router {
   // synchronously, never truncated). Async-above-threshold is a follow-up; v1 hard-refuses. Env-overridable.
   const SHEET_REVERT_MAX_RECORDS = Number(process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS) > 0
     ? Math.floor(Number(process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS)) : 5000
+  type SheetRevertTooLarge = { tooLarge: true; recordCount: number; scope: 'live_sheet' | 'effective_write_set' }
+  const sheetRevertTooLargeMessage = (computed: SheetRevertTooLarge) => {
+    if (computed.scope === 'effective_write_set') return `This revert would touch ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.`
+    return `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.`
+  }
   const computeSheetRevert = async (
     pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
     access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
-  ): Promise<null | { tooLarge: true; recordCount: number } | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
+  ): Promise<null | SheetRevertTooLarge | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
     const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
     if (!patchContext) return null
     const { fieldById } = patchContext
     const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
-    if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount } // D3/PIT-6 fail-closed before the full scan
+    if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount, scope: 'live_sheet' } // D3/PIT-6 fail-closed before the full scan
     const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
     const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
     const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed) // PIT-3 mask; NO reveal (PIT-7)
@@ -9011,7 +9262,7 @@ export function univerMetaRouter(): Router {
     // Unified ceiling (T8-1): the early `recordCount` guard counts LIVE rows only — a sheet with few live records but a
     // large deleted history could resurrect far more than the ceiling. Re-check the EFFECTIVE write set (reverts +
     // resurrects) so undelete can't bypass SHEET_REVERT_MAX_RECORDS.
-    if (reverts.length + resurrects.length > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount: reverts.length + resurrects.length }
+    if (reverts.length + resurrects.length > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount: reverts.length + resurrects.length, scope: 'effective_write_set' }
     return { reverts, resurrects, undeleteCount, keptCreatedAfterT, createdAfterTIds, driftCount, patchContext }
   }
 
@@ -9104,7 +9355,7 @@ export function univerMetaRouter(): Router {
       if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: a sheet-wide revert needs a sheet-admin cap, ABOVE plain record-write (interim for a dedicated history-restore cap)
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.` } })
+      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: sheetRevertTooLargeMessage(computed) } })
       const { reverts, resurrects, undeleteCount, keptCreatedAfterT, driftCount } = computed
       const previewIdentity = (reverts.length > 0 || resurrects.length > 0)
         ? mintPitRevertPreviewIdentity({
@@ -9143,7 +9394,7 @@ export function univerMetaRouter(): Router {
       if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2: sheet-wide revert needs a sheet-admin cap, ABOVE plain record-write
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.` } })
+      if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: sheetRevertTooLargeMessage(computed) } })
       const { reverts, resurrects, patchContext } = computed
       // T8-1 undelete gate: a revert that would resurrect deleted records needs the default-off flag, the
       // canDeleteRecord floor (NEVER canEditRecord — record resurrection, not edit), and a typed confirm:'undelete'.
@@ -13360,7 +13611,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.patch('/records/:recordId', async (req: Request, res: Response) => {
+  router.patch('/records/:recordId', apiTokenAuth, oapiWriteAuditBoundary('update', 'records:write'), apiTokenWriteRateLimit, requireScope('records:write'), async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     if (!recordId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
@@ -13420,6 +13671,7 @@ export function univerMetaRouter(): Router {
         access,
         capabilities,
         sheetScope,
+        oapiAudit: buildOapiAuditContext(req, 'update', 'records:write'),
       })
       const fields = patchResult.fields
       const nextVersion = patchResult.version
@@ -14372,7 +14624,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/records', async (req: Request, res: Response) => {
+  router.post('/records', apiTokenAuth, oapiWriteAuditBoundary('create', 'records:write'), apiTokenWriteRateLimit, requireScope('records:write'), async (req: Request, res: Response) => {
     const schema = z.object({
       viewId: z.string().min(1).optional(),
       sheetId: z.string().min(1).optional(),
@@ -14406,6 +14658,7 @@ export function univerMetaRouter(): Router {
         capabilities,
         actorId: getRequestActorId(req),
         data,
+        oapiAudit: buildOapiAuditContext(req, 'create', 'records:write'),
       })
 
       // F4 (#2106 §3 F4): the create echo previously returned result.data UNMASKED, so a field_permissions-
@@ -14633,7 +14886,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.delete('/records/:recordId', async (req: Request, res: Response) => {
+  router.delete('/records/:recordId', apiTokenAuth, oapiWriteAuditBoundary('delete', 'records:write'), apiTokenWriteRateLimit, requireScope('records:write'), async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId : ''
     if (!recordId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
@@ -14658,6 +14911,7 @@ export function univerMetaRouter(): Router {
           const { capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
           return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
         },
+        oapiAudit: buildOapiAuditContext(req, 'delete', 'records:write'),
       })
 
       return res.json({ ok: true, data: { deleted: recordId } })
@@ -14913,7 +15167,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/patch', async (req: Request, res: Response) => {
+  router.post('/patch', apiTokenAuth, oapiWriteAuditBoundary('upsert', 'records:write'), apiTokenWriteRateLimit, requireScope('records:write'), async (req: Request, res: Response) => {
     const schema = z.object({
       viewId: z.string().min(1).optional(),
       sheetId: z.string().min(1).optional(),
@@ -15009,6 +15263,7 @@ export function univerMetaRouter(): Router {
               capabilities,
               sheetScope,
               access,
+              oapiAudit: buildOapiAuditContext(req, 'upsert', 'records:write'),
             })
             updated.push(...result.updated)
             if (result.records) records.push(...(result.records as Array<{ recordId: string; data: Record<string, unknown> }>))
@@ -15051,6 +15306,7 @@ export function univerMetaRouter(): Router {
         capabilities,
         sheetScope,
         access,
+        oapiAudit: buildOapiAuditContext(req, 'upsert', 'records:write'),
       })
 
       return res.json({

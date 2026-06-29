@@ -843,6 +843,8 @@ export function automationActionTypeLabel(type: AutomationActionType | UnknownAu
     case 'send_notification':
     case 'notify':
       return isZh ? '发送通知' : 'Send notification'
+    case 'start_approval':
+      return isZh ? '发起审批' : 'Start approval'
     case 'send_email':
       return isZh ? '发送邮件' : 'Send email'
     case 'send_dingtalk_group_message':

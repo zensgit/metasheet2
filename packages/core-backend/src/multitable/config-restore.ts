@@ -117,6 +117,86 @@ export function isSupportedUncreate(rev: Pick<ConfigRevisionRow, 'entity_type' |
   return rev.action === 'create' && UNCREATE_ENTITY_TYPES.has(rev.entity_type)
 }
 
+/**
+ * T9-W Tier 4 (U-4) — undelete. Reverting a `delete` revision forward-only = RECREATING the entity it removed (a
+ * delete's `before` is the full config, `after` is null). v1 (design-lock U4-L1) opens ONLY field/view delete-reverts.
+ * DEFINITION-ONLY: a field's dropped column values, meta_links, and auto-number counter are gone (no soft-delete), so
+ * undelete restores the field DEFINITION (recreated at its original order) but NOT its data — the route states this.
+ * sheet_config and permission (= permission-revert, held) stay gated. classifyRevert returns `gated` for every delete
+ * (action !== 'update'), so the route opens THIS subset behind MULTITABLE_ENABLE_CONFIG_UNDELETE via this predicate.
+ *
+ * Pure & structural ONLY: the recreate, the id-collision/plan-drift guards (U4-L5), and the no-oracle preview live at
+ * the route (config-restore-execute), NOT here.
+ */
+export function isSupportedUndelete(rev: Pick<ConfigRevisionRow, 'entity_type' | 'action'>): boolean {
+  return rev.action === 'delete' && UNCREATE_ENTITY_TYPES.has(rev.entity_type)
+}
+
+/**
+ * T9-W permission-revert (design-lock #3342, owner-ratified DE-ESCALATION-ONLY v1). Reverting a `permission`
+ * revision re-applies its `before` grant. The route opens a revert ONLY when restoring `before` would REDUCE the
+ * subject's access on the entity's single total-order access rank (it can NEVER increase access). Escalation
+ * (re-grant / raise) stays gated → 422. classifyRevert stays pure; this is structural + a pure direction oracle.
+ */
+export type PermissionScope = 'field' | 'view' | 'sheet'
+export type PermissionRevertDirection = 'de-escalation' | 'escalation' | 'noop'
+
+// Sheet/view enums are total orders (univer-meta route z.enums). Field is a derived single rank: hidden(0) <
+// read-only(1) < read-write(2) — visible=false dominates (no access), else readOnly distinguishes read vs write.
+export const SHEET_ACCESS_RANK: Readonly<Record<string, number>> = { none: 0, read: 1, 'write-own': 2, write: 3, admin: 4 }
+export const VIEW_PERMISSION_RANK: Readonly<Record<string, number>> = { none: 0, read: 1, write: 2, admin: 3 }
+
+/** Single total-order access rank for a grant snapshot (null/absent = 0 = no access). Higher = more access. */
+export function permissionAccessRank(scope: PermissionScope, grant: Record<string, unknown> | null | undefined): number {
+  if (!grant) return 0
+  if (scope === 'field') {
+    if (grant.visible === false) return 0 // hidden dominates
+    return grant.readOnly === true ? 1 : 2 // read-only < read-write
+  }
+  if (scope === 'view') { const v = grant.permission; return typeof v === 'string' && v in VIEW_PERMISSION_RANK ? VIEW_PERMISSION_RANK[v] : 0 }
+  const a = grant.accessLevel; return typeof a === 'string' && a in SHEET_ACCESS_RANK ? SHEET_ACCESS_RANK[a] : 0
+}
+
+/** Direction of restoring `before` against the CURRENT live grant. Single total order ⇒ no 'mixed'. */
+export function permissionRevertDirection(scope: PermissionScope, before: Record<string, unknown> | null | undefined, live: Record<string, unknown> | null | undefined): PermissionRevertDirection {
+  const b = permissionAccessRank(scope, before)
+  const l = permissionAccessRank(scope, live)
+  if (b < l) return 'de-escalation'
+  if (b > l) return 'escalation'
+  return 'noop'
+}
+
+export function isPermissionRevert(rev: Pick<ConfigRevisionRow, 'entity_type'>): boolean {
+  return rev.entity_type === 'permission'
+}
+
+/** Parse a permission entity_id `${scope}:${JSON.stringify(parts)}` (field/view/sheet). */
+export function parsePermissionEntityId(entityId: string): { scope: PermissionScope; parts: string[] } | null {
+  const i = entityId.indexOf(':')
+  if (i < 0) return null
+  const scope = entityId.slice(0, i)
+  if (scope !== 'field' && scope !== 'view' && scope !== 'sheet') return null
+  try {
+    const parts = JSON.parse(entityId.slice(i + 1)) as unknown
+    if (Array.isArray(parts)) return { scope, parts: parts.map((p) => String(p)) }
+  } catch { /* fall through */ }
+  return null
+}
+
+/**
+ * Fail-closed identity guard: a permission revision's `before` snapshot MUST describe the SAME subject/entity as the
+ * entity_id (`parts`) the apply writes to. The apply already keys off `parts` (not the snapshot's embedded subject),
+ * so a mismatch can't laundry an escalation onto another subject — but a mismatched snapshot is a malformed/forged
+ * revision and is refused (analogous to the sheet_config `entity_id ≡ sheet_id` guard).
+ */
+export function permissionTargetMatchesParts(scope: PermissionScope, target: Record<string, unknown> | null | undefined, parts: string[]): boolean {
+  if (!target) return true // revoke (before=null) has no embedded subject to disagree
+  const s = (v: unknown) => String(v ?? '')
+  if (scope === 'field') return s(target.fieldId) === parts[0] && s(target.subjectType) === parts[1] && s(target.subjectId) === parts[2]
+  if (scope === 'view') return s(target.viewId) === parts[0] && s(target.subjectType) === parts[1] && s(target.subjectId) === parts[2]
+  return s(target.subjectType) === parts[0] && s(target.subjectId) === parts[1]
+}
+
 const stable = (v: unknown): string => JSON.stringify(v ?? null)
 function pick(snapshot: Record<string, unknown>, keys: string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {}

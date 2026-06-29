@@ -6,9 +6,11 @@ import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, type AutomationTriggerType } fro
 import {
   computeDateReminderOccurrence,
   isDateReminderDue,
-  dateReminderScanIntervalMs,
-  dateReminderScanWindowMs,
+  dateReminderFloorMs,
+  DATE_REMINDER_GRACE_WINDOW_MS,
+  DATE_REMINDER_LEDGER_SWEEP_INTERVAL_MS,
   dateReminderCandidateDateRange,
+  dateReminderLedgerRetentionCutoffIso,
   type ScheduleDateFieldConfig,
 } from './automation-date-reminder'
 import { ensureRecordNotLocked } from './record-lock'
@@ -653,6 +655,7 @@ export class AutomationService {
   private jobService: AutomationJobService
   private suspensionService: AutomationSuspensionService
   private approvalBridgeService: AutomationApprovalBridgeService
+  private lastDateReminderLedgerSweepMs = 0
   /** Kept for backward-compat with raw SQL in executor actions */
   private queryFn: AutomationQueryFn
 
@@ -797,12 +800,19 @@ export class AutomationService {
     const dateTriggerError = await this.validateDateFieldTriggerAtSave(sheetId, input.triggerType, input.triggerConfig ?? null)
     if (dateTriggerError) throw new AutomationRuleValidationError(dateTriggerError)
 
+    // date_field rules carry a SERVER-SET activation `effectiveAt` (= now) so the firing floor is the rule's
+    // activation, not its row createdAt. Spread-then-set overwrites any client-supplied effectiveAt (no backfill bypass).
+    const persistedTriggerConfig: Record<string, unknown> =
+      input.triggerType === 'schedule.date_field'
+        ? { ...((input.triggerConfig ?? {}) as Record<string, unknown>), effectiveAt: now }
+        : ((input.triggerConfig ?? {}) as Record<string, unknown>)
+
     const row = {
       id: ruleId,
       sheet_id: sheetId,
       name: input.name ?? null,
       trigger_type: input.triggerType,
-      trigger_config: JSON.stringify(input.triggerConfig ?? {}),
+      trigger_config: JSON.stringify(persistedTriggerConfig),
       action_type: input.actionType,
       action_config: JSON.stringify(actionConfig),
       enabled: input.enabled ?? true,
@@ -822,7 +832,7 @@ export class AutomationService {
       sheet_id: sheetId,
       name: input.name ?? null,
       trigger_type: input.triggerType,
-      trigger_config: input.triggerConfig ?? {},
+      trigger_config: persistedTriggerConfig,
       action_type: input.actionType,
       action_config: actionConfig,
       enabled: input.enabled ?? true,
@@ -971,6 +981,27 @@ export class AutomationService {
         nextTriggerConfig as Record<string, unknown> | null,
       )
       if (dateTriggerError) throw new AutomationRuleValidationError(dateTriggerError)
+
+      // SERVER-SET activation floor: when the RESULT is a date_field rule, persist `effectiveAt`. Converting
+      // INTO date_field (prev type differs) activates NOW; staying date_field (config edit) PRESERVES the
+      // existing activation (fall back to created_at for pre-fix rules) so an edit never re-opens backfill.
+      // (Action-only edits never set updates.trigger_config, so they preserve effectiveAt untouched.)
+      // Overwrites the plain trigger_config set above and ignores any client-supplied effectiveAt.
+      if (nextTriggerType === 'schedule.date_field') {
+        const prevConfig = (existingForTrigger.trigger_config ?? {}) as Record<string, unknown>
+        const baseConfig: Record<string, unknown> = { ...((nextTriggerConfig as Record<string, unknown> | null) ?? {}) }
+        if (existingForTrigger.trigger_type === 'schedule.date_field') {
+          const prevEff =
+            typeof prevConfig.effectiveAt === 'string' && prevConfig.effectiveAt
+              ? prevConfig.effectiveAt
+              : existingForTrigger.created_at
+          baseConfig.effectiveAt = prevEff
+        } else {
+          baseConfig.effectiveAt = new Date().toISOString()
+        }
+        updates.trigger_config = JSON.stringify(baseConfig)
+        if (updates.trigger_type === undefined) updates.trigger_type = nextTriggerType
+      }
     }
 
     if (Object.keys(updates).length === 0) return this.getRule(ruleId)
@@ -1099,6 +1130,41 @@ export class AutomationService {
   }
 
   /**
+   * Delete old date-reminder claim rows. This is an ops/test seam and is intentionally keyed by `fired_at`
+   * (ledger age), not `occurrence_ts` (the record-relative reminder instant).
+   */
+  async sweepDateReminderLedger(nowMs = Date.now()): Promise<number> {
+    const cutoffIso = dateReminderLedgerRetentionCutoffIso(nowMs)
+    const deleted = await sql<{ count: number | string }>`
+      WITH deleted AS (
+        DELETE FROM meta_automation_date_reminder_fires
+         WHERE fired_at < ${cutoffIso}
+        RETURNING 1
+      )
+      SELECT count(*)::int AS count FROM deleted
+    `.execute(this.db)
+    return Number(deleted.rows[0]?.count ?? 0)
+  }
+
+  /**
+   * Opportunistic ledger aging: any active date-reminder scan sweeps at most once/day per process. This avoids
+   * a second scheduler while still bounding the long-lived dedupe ledger. Cleanup is best-effort; a retention
+   * failure must never block reminder delivery.
+   */
+  private async sweepDateReminderLedgerIfDue(nowMs: number): Promise<void> {
+    if (nowMs - this.lastDateReminderLedgerSweepMs < DATE_REMINDER_LEDGER_SWEEP_INTERVAL_MS) return
+    this.lastDateReminderLedgerSweepMs = nowMs
+    try {
+      const deleted = await this.sweepDateReminderLedger(nowMs)
+      if (deleted > 0) {
+        logger.info(`Date-reminder ledger retention swept ${deleted} old row(s)`)
+      }
+    } catch (err) {
+      logger.warn('Date-reminder ledger retention sweep failed; continuing reminder scan', err instanceof Error ? err : undefined)
+    }
+  }
+
+  /**
    * Date-reminder scan (`schedule.date_field`). For each record in the rule's sheet whose date field yields a
    * DUE occurrence, claim it in the idempotency ledger and fire the rule once with the record as context.
    *
@@ -1126,9 +1192,15 @@ export class AutomationService {
     }
 
     const nowMs = Date.now()
-    const scanWindowMs = dateReminderScanWindowMs(dateReminderScanIntervalMs(config))
+    await this.sweepDateReminderLedgerIfDue(nowMs)
+    // DR-D: fixed grace window (decoupled from any per-rule cadence) — bounds backfill + missed-tick catch-up.
+    const scanWindowMs = DATE_REMINDER_GRACE_WINDOW_MS
     const createdAtMs = new Date(rule.createdAt).getTime()
     const ruleCreatedAtMs = Number.isNaN(createdAtMs) ? 0 : createdAtMs
+    // FLOOR = max(createdAt, effectiveAt): a rule CONVERTED into date_field carries a server-set `effectiveAt`
+    // (its activation), so it never backfills occurrences from before the conversion even though its row
+    // createdAt is old. Falls back to createdAt for pre-fix date_field rules.
+    const ruleFloorMs = dateReminderFloorMs(ruleCreatedAtMs, config.effectiveAt)
     const { loIso, hiIso } = dateReminderCandidateDateRange(nowMs, config, scanWindowMs)
 
     // Coarse SQL pre-filter: only records whose date field falls in the window can produce a due occurrence.
@@ -1146,7 +1218,7 @@ export class AutomationService {
         typeof rec.data === 'string' ? (JSON.parse(rec.data) as Record<string, unknown>) : (rec.data ?? {})
       const occurrence = computeDateReminderOccurrence(data[dateFieldId], config)
       if (!occurrence) continue
-      if (!isDateReminderDue(occurrence, nowMs, scanWindowMs, ruleCreatedAtMs)) continue
+      if (!isDateReminderDue(occurrence, nowMs, scanWindowMs, ruleFloorMs)) continue
 
       // Claim-then-fire: insert the dedup row; fire ONLY if WE won the insert (at-most-once).
       const claim = await sql<{ record_id: string }>`

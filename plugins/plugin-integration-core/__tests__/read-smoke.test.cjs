@@ -45,6 +45,8 @@ assert.deepEqual(LIST_PRESET.readConfigOverlay, {
       readListFields: ['FNumber', 'FName', 'FModel', 'FUnitID'],
       readListOrderBy: 'FNumber',
       readListFilterField: 'FNumber',
+      readListFilterMode: 'contains_like',
+      readListFilterEscape: 'k3_freeform',
       topField: 'Top',
       pageIndexField: 'PageIndex',
       pageSizeField: 'PageSize',
@@ -129,6 +131,8 @@ assert.deepEqual(listOverlayedSystem.config.objects.material, {
   readListFields: ['FNumber', 'FName', 'FModel', 'FUnitID'],
   readListOrderBy: 'FNumber',
   readListFilterField: 'FNumber',
+  readListFilterMode: 'contains_like',
+  readListFilterEscape: 'k3_freeform',
   topField: 'Top',
   pageIndexField: 'PageIndex',
   pageSizeField: 'PageSize',
@@ -176,10 +180,52 @@ assert.deepEqual(readSmokeSuccessEvidence(PRESET, {}, { object: 'material', mode
 assert.deepEqual(readSmokeSuccessEvidence(LIST_PRESET, { records: [{ FNumber: 'M-001' }, { FNumber: 'M-002' }] }, { object: 'material', mode: 'list' }), {
   ok: true, presetId: 'k3wise.material-list.v1', object: 'material', mode: 'list', recordPresent: true, recordCount: 2, referenceObjectCount: 0,
 })
+assert.deepEqual(readSmokeSuccessEvidence(LIST_PRESET, {
+  records: [],
+  raw: { Data: { SECRET: 'never leak' } },
+  metadata: {
+    dataDataPresent: false,
+    dataRowCount: 0,
+    listShapeProbe: {
+      dataData: false,
+      dataLowerData: false,
+      dataRows: true,
+      resultData: false,
+      resultRows: false,
+      rows: false,
+      topLevelArray: false,
+      SECRET: true,
+    },
+    readPath: 'https://k3host/K3API/Material/GetList',
+  },
+}, { object: 'material', mode: 'list' }), {
+  ok: true,
+  presetId: 'k3wise.material-list.v1',
+  object: 'material',
+  mode: 'list',
+  recordPresent: false,
+  recordCount: 0,
+  referenceObjectCount: 0,
+  dataDataPresent: false,
+  dataRowCount: 0,
+  listShapeProbe: {
+    dataData: false,
+    dataLowerData: false,
+    dataRows: true,
+    resultData: false,
+    resultRows: false,
+    rows: false,
+    topLevelArray: false,
+  },
+})
 
 // --- error evidence: coarse code + type ONLY (never the message, which may carry the key/values) ---
 class FakeAdapterError extends Error {
-  constructor() { super('material M-001 failed with secret value 42'); this.name = 'K3WiseWebApiAdapterError'; this.code = 'K3_WISE_READ_BUSINESS_ERROR' }
+  constructor() {
+    super('material M-001 failed with secret value 42')
+    this.name = 'K3WiseWebApiAdapterError'
+    this.details = { code: 'K3_WISE_READ_BUSINESS_ERROR' }
+  }
 }
 const errEv = readSmokeErrorEvidence(PRESET, new FakeAdapterError(), { object: 'material', mode: 'single_record_detail' })
 assert.deepEqual(errEv, {
@@ -189,6 +235,52 @@ assert.deepEqual(errEv, {
 const errStr = JSON.stringify(errEv)
 for (const leak of ['M-001', '42', 'failed with secret']) {
   assert.ok(!errStr.includes(leak), `error evidence must not leak ${leak}`)
+}
+const listError = new Error('material M-001 rejected with secret value 42')
+listError.name = 'K3WiseWebApiAdapterError'
+listError.details = {
+  code: 'K3_WISE_READ_LIST_ENVELOPE_UNRECOGNIZED',
+  dataDataPresent: true,
+  dataRowCount: 1,
+  listShapeProbe: {
+    dataData: true,
+    dataLowerData: false,
+    dataRows: false,
+    resultData: false,
+    resultRows: false,
+    rows: false,
+    topLevelArray: false,
+    materialNumber: 'M-001',
+  },
+}
+assert.deepEqual(readSmokeErrorEvidence(LIST_PRESET, listError, { object: 'material', mode: 'list' }), {
+  ok: false, presetId: 'k3wise.material-list.v1', object: 'material', mode: 'list',
+  errorCode: 'K3_WISE_READ_LIST_ENVELOPE_UNRECOGNIZED',
+  errorType: 'K3WiseWebApiAdapterError',
+  dataDataPresent: true,
+  dataRowCount: 1,
+  listShapeProbe: {
+    dataData: true,
+    dataLowerData: false,
+    dataRows: false,
+    resultData: false,
+    resultRows: false,
+    rows: false,
+    topLevelArray: false,
+  },
+})
+const listErrorStr = JSON.stringify(readSmokeErrorEvidence(LIST_PRESET, listError, { object: 'material', mode: 'list' }))
+for (const leak of ['M-001', '42', 'materialNumber']) {
+  assert.ok(!listErrorStr.includes(leak), `LIST error evidence must not leak ${leak}`)
+}
+const unsafeDetails = new Error('material M-001 failed with secret value 42')
+unsafeDetails.name = 'K3WiseWebApiAdapterError'
+unsafeDetails.details = { code: 'M-001 failed with secret value 42' }
+const unsafeEv = readSmokeErrorEvidence(PRESET, unsafeDetails, { object: 'material', mode: 'single_record_detail' })
+assert.equal(unsafeEv.errorCode, 'READ_SMOKE_READ_FAILED', 'non-enum details.code is not surfaced')
+const unsafeStr = JSON.stringify(unsafeEv)
+for (const leak of ['M-001', '42', 'failed with secret']) {
+  assert.ok(!unsafeStr.includes(leak), `unsafe details.code must not leak ${leak}`)
 }
 // error without code/name → safe defaults
 const bare = readSmokeErrorEvidence(PRESET, {}, { object: 'material', mode: 'single_record_detail' })

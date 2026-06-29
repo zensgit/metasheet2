@@ -71,6 +71,31 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
 
   const postEdit = (body: Record<string, unknown>, token = adminToken) =>
     requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify(body) })
+  const getSettings = () =>
+    requestJson(`${baseUrl}/api/attendance/settings`, { headers: authHeaders(adminToken) })
+  const putSettings = (body: Record<string, unknown>) =>
+    requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: authHeaders(adminToken), body: JSON.stringify(body) })
+
+  type ResultEditPolicySetting = {
+    enabled?: boolean
+    editWindowDays?: unknown
+    requireReason?: boolean
+    notifyAffectedEmployee?: boolean
+  }
+
+  function isResultEditPolicySetting(policy: unknown): policy is ResultEditPolicySetting {
+    return policy !== null && typeof policy === 'object'
+  }
+
+  function resultEditPolicyWithEnabled(policy: unknown, enabled: boolean) {
+    const base = isResultEditPolicySetting(policy) ? policy : {}
+    return {
+      enabled,
+      editWindowDays: Number.isInteger(Number(base.editWindowDays)) ? Number(base.editWindowDays) : 180,
+      requireReason: typeof base.requireReason === 'boolean' ? base.requireReason : true,
+      notifyAffectedEmployee: typeof base.notifyAffectedEmployee === 'boolean' ? base.notifyAffectedEmployee : true,
+    }
+  }
 
   async function seedRecord(input: {
     userId: string
@@ -124,6 +149,52 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
       `INSERT INTO attendance_payroll_cycles (org_id, start_date, end_date, status) VALUES ($1, $2, $3, $4) RETURNING id`,
       [org, start, end, status],
     )).rows[0].id as string
+  }
+  async function withDefaultRule(input: {
+    timezone: string
+    workStartTime?: string
+    workEndTime?: string
+    lateGraceMinutes?: number
+    earlyGraceMinutes?: number
+    severeLateThresholdMinutes?: number
+    absenceLateThresholdMinutes?: number
+    roundingMinutes?: number
+    workingDays?: number[]
+  }, run: () => Promise<void>): Promise<void> {
+    const ruleId = randomUUID()
+    const previousDefaultIds = (await pool.query(
+      `SELECT id FROM attendance_rules WHERE org_id = $1 AND is_default = true`,
+      [ORG],
+    )).rows.map((row) => String(row.id))
+    try {
+      await pool.query(`UPDATE attendance_rules SET is_default = false, updated_at = now() WHERE org_id = $1 AND is_default = true`, [ORG])
+      await pool.query(
+        `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes,
+          severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, true)`,
+        [
+          ruleId,
+          ORG,
+          `ae1-rule-${ruleId}`,
+          input.timezone,
+          input.workStartTime ?? '09:00',
+          input.workEndTime ?? '18:00',
+          input.lateGraceMinutes ?? 5,
+          input.earlyGraceMinutes ?? 5,
+          input.severeLateThresholdMinutes ?? 30,
+          input.absenceLateThresholdMinutes ?? 60,
+          input.roundingMinutes ?? 5,
+          JSON.stringify(input.workingDays ?? [0, 1, 2, 3, 4, 5, 6]),
+        ],
+      )
+      await run()
+    } finally {
+      await pool.query(`DELETE FROM attendance_rules WHERE id = $1`, [ruleId]).catch(() => undefined)
+      if (previousDefaultIds.length > 0) {
+        await pool.query(`UPDATE attendance_rules SET is_default = true, updated_at = now() WHERE id = ANY($1::uuid[])`, [previousDefaultIds]).catch(() => undefined)
+      }
+    }
   }
 
   beforeAll(async () => {
@@ -208,18 +279,67 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(audit[0].notification_skipped_reason).toBeNull()
   })
 
+  it('disabled policy: returns 403 ATTENDANCE_RESULT_EDIT_DISABLED before writing audit or record changes', async () => {
+    const settings = await getSettings()
+    expect(settings.status).toBe(200)
+    const originalPolicy = dataOf(settings)?.attendanceResultEditPolicy
+    const disabled = await putSettings({ attendanceResultEditPolicy: resultEditPolicyWithEnabled(originalPolicy, false) })
+    expect(disabled.status).toBe(200)
+
+    try {
+      const userId = `u-disabled-${RUN}`
+      const workDate = ymd(2)
+      const recordId = await seedRecord({
+        userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 30, earlyLeaveMinutes: 0,
+        firstInAt: `${workDate}T01:30:00Z`, lastOutAt: `${workDate}T10:00:00Z`,
+      })
+
+      const res = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: 'policy disabled', idempotencyKey: `k-disabled-${RUN}` })
+      expect(res.status).toBe(403)
+      expect(codeOf(res)).toBe('ATTENDANCE_RESULT_EDIT_DISABLED')
+      expect(await auditRowsForRecord(recordId)).toHaveLength(0)
+
+      const rec = await recordById(recordId)
+      expect(rec.status).toBe('late')
+      expect(Number(rec.late_minutes)).toBe(30)
+    } finally {
+      await putSettings({
+        attendanceResultEditPolicy: resultEditPolicyWithEnabled(
+          originalPolicy,
+          isResultEditPolicySetting(originalPolicy) ? originalPolicy.enabled !== false : true,
+        ),
+      }).catch(() => undefined)
+    }
+  })
+
   it('§3.5a absent→normal: keeps work_minutes=0 + null punches by default; overrideMetrics.workMinutes takes precedence', async () => {
     // default: no override → work stays 0, no fabricated punches
     const u1 = `u-abs-${RUN}`
     const wd1 = ymd(3)
-    const r1 = await seedRecord({ userId: u1, workDate: wd1, status: 'absent', workMinutes: 0, lateMinutes: 0, earlyLeaveMinutes: 0, firstInAt: null, lastOutAt: null })
+    const r1 = await seedRecord({
+      userId: u1,
+      workDate: wd1,
+      status: 'absent',
+      workMinutes: 0,
+      lateMinutes: 90,
+      earlyLeaveMinutes: 15,
+      firstInAt: null,
+      lastOutAt: null,
+      meta: { severe_late_count: 1, severe_late_minutes: 90, absence_late_count: 1, warnings: ['manual-review'] },
+    })
     const e1 = await postEdit({ orgId: ORG, recordId: r1, targetStatus: 'normal', reason: '线下值班，核验后更正为正常', idempotencyKey: `k-abs1-${RUN}` })
     expect(e1.status).toBe(200)
     const rec1 = await recordById(r1)
     expect(rec1.status).toBe('normal')
     expect(Number(rec1.work_minutes)).toBe(0)
+    expect(Number(rec1.late_minutes)).toBe(0)
+    expect(Number(rec1.early_leave_minutes)).toBe(0)
     expect(rec1.first_in_at).toBeNull()
     expect(rec1.last_out_at).toBeNull()
+    expect(Number(rec1.meta?.severe_late_count ?? -1)).toBe(0)
+    expect(Number(rec1.meta?.severe_late_minutes ?? -1)).toBe(0)
+    expect(Number(rec1.meta?.absence_late_count ?? -1)).toBe(0)
+    expect(rec1.meta?.warnings).toEqual(['manual-review'])
 
     // override: admin supplies the payroll work minutes
     const u2 = `u-abs2-${RUN}`
@@ -253,6 +373,24 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(replay.status).toBe(200)
     expect(dataOf(replay).alreadyApplied).toBe(true)
     expect(await auditByKey(ORG, key)).toHaveLength(1)
+
+    // v1 decision: overrideMetrics is intentionally not part of the idempotency identity.
+    // A deliberate same-key replay with different metrics returns the first edit and does not mutate again.
+    const metricsReplay = await postEdit({
+      orgId: ORG,
+      recordId,
+      targetStatus: 'normal',
+      reason: 'verified offline',
+      overrideMetrics: { workMinutes: 1, lateMinutes: 99, earlyLeaveMinutes: 88 },
+      idempotencyKey: key,
+    })
+    expect(metricsReplay.status).toBe(200)
+    expect(dataOf(metricsReplay).alreadyApplied).toBe(true)
+    expect(await auditByKey(ORG, key)).toHaveLength(1)
+    const recAfterReplay = await recordById(recordId)
+    expect(Number(recAfterReplay.work_minutes)).toBe(480)
+    expect(Number(recAfterReplay.late_minutes)).toBe(0)
+    expect(Number(recAfterReplay.early_leave_minutes)).toBe(0)
 
     // same key, different payload (target) → 409
     const conflict = await postEdit({ orgId: ORG, recordId, targetStatus: 'absent', reason: 'verified offline', idempotencyKey: key })
@@ -336,7 +474,30 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(await auditRowsForRecord(recordId)).toHaveLength(0)
   })
 
-  it('cross-org: a record from another org → 404, no audit row, no cross-org leak', async () => {
+  it('edit-window: invalid resolved rule timezone fails closed before writing audit or mutating the record', async () => {
+    await withDefaultRule({ timezone: 'Not/AZone' }, async () => {
+      const wd = ymd(2)
+      const recordId = await seedRecord({
+        userId: `u-badtz-${RUN}`,
+        workDate: wd,
+        status: 'late',
+        lateMinutes: 30,
+        workMinutes: 480,
+        firstInAt: `${wd}T01:30:00Z`,
+        lastOutAt: `${wd}T10:00:00Z`,
+      })
+      const res = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: 'bad timezone', idempotencyKey: `k-badtz-${RUN}` })
+      expect(res.status).toBe(422)
+      expect(codeOf(res)).toBe('ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED')
+      expect(await auditRowsForRecord(recordId)).toHaveLength(0)
+
+      const rec = await recordById(recordId)
+      expect(rec.status).toBe('late')
+      expect(Number(rec.late_minutes)).toBe(30)
+    })
+  })
+
+  it('partition filter: caller orgId mismatch for a record in another org → 404, no audit row', async () => {
     const wd = ymd(2)
     const otherRecord = await seedRecord({ userId: `u-x-${RUN}`, workDate: wd, status: 'late', lateMinutes: 30, workMinutes: 480, org: ORG_OTHER, firstInAt: `${wd}T01:30:00Z`, lastOutAt: `${wd}T10:00:00Z` })
     const key = `k-xorg-${RUN}`
