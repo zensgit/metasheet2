@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { evaluateCondition, evaluateConditions, type AutomationCondition, type ConditionGroup } from '../../src/multitable/automation-conditions'
 import { AutomationExecutor, type AutomationRule, type AutomationDeps, type AutomationExecution } from '../../src/multitable/automation-executor'
-import { AutomationScheduler, parseCronToIntervalMs } from '../../src/multitable/automation-scheduler'
+import { AutomationScheduler, nextCronOccurrenceMs, parseCronToIntervalMs } from '../../src/multitable/automation-scheduler'
 import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, ALL_TRIGGER_TYPES } from '../../src/multitable/automation-triggers'
 import type { AutomationTrigger, AutomationTriggerType } from '../../src/multitable/automation-triggers'
 import { EventBus } from '../../src/integration/events/event-bus'
@@ -1945,12 +1945,41 @@ describe('AutomationScheduler', () => {
     expect(scheduler.isRegistered('rule_1')).toBe(true)
   })
 
-  it('rejects unsupported cron expression', () => {
+  it('registers complex cron expressions instead of treating them as unsupported intervals', () => {
     const rule = createMockRule({
       trigger: { type: 'schedule.cron', config: { expression: '0 12 1 */2 *' } },
     })
     scheduler.register(rule)
-    expect(scheduler.isRegistered('rule_1')).toBe(false)
+    expect(scheduler.isRegistered('rule_1')).toBe(true)
+  })
+
+  it('accepts the editor-emitted triggerConfig.cron key as the cron expression source', () => {
+    const rule = createMockRule({
+      trigger: { type: 'schedule.cron', config: { cron: '15 9 * * *' } },
+    })
+    scheduler.register(rule)
+    expect(scheduler.isRegistered('rule_1')).toBe(true)
+  })
+
+  it('fires cron rules at the next matching UTC wall-clock minute', async () => {
+    scheduler.destroy()
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-06-28T09:14:30.000Z'))
+      const callback = vi.fn()
+      const cronScheduler = new AutomationScheduler(callback)
+      const rule = createMockRule({
+        trigger: { type: 'schedule.cron', config: { expression: '15 9 * * *' } },
+      })
+      cronScheduler.register(rule)
+      await vi.advanceTimersByTimeAsync(29_999)
+      expect(callback).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(callback).toHaveBeenCalledTimes(1)
+      cronScheduler.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('destroy clears all timers', () => {
@@ -1983,6 +2012,38 @@ describe('parseCronToIntervalMs', () => {
   })
   it('too few parts returns null', () => {
     expect(parseCronToIntervalMs('* * *')).toBe(null)
+  })
+})
+
+describe('nextCronOccurrenceMs', () => {
+  it('aligns daily wall-clock cron to the requested UTC minute', () => {
+    const from = Date.parse('2026-06-28T09:14:30.000Z')
+    expect(new Date(nextCronOccurrenceMs('15 9 * * *', from)!).toISOString()).toBe('2026-06-28T09:15:00.000Z')
+  })
+
+  it('supports list/range/step fields for month-scoped cron', () => {
+    const from = Date.parse('2026-01-31T12:00:00.000Z')
+    expect(new Date(nextCronOccurrenceMs('0 12 1 */2 *', from)!).toISOString()).toBe('2026-03-01T12:00:00.000Z')
+  })
+
+  it('treats stepped day-of-month as restricted, not as an every-day wildcard', () => {
+    const from = Date.parse('2026-01-01T10:00:00.000Z')
+    expect(new Date(nextCronOccurrenceMs('0 9 */2 * *', from)!).toISOString()).toBe('2026-01-03T09:00:00.000Z')
+  })
+
+  it('uses either day-of-month or day-of-week when both are restricted', () => {
+    const from = Date.parse('2026-06-28T00:00:00.000Z') // Sunday
+    expect(new Date(nextCronOccurrenceMs('0 9 15 * 1', from)!).toISOString()).toBe('2026-06-29T09:00:00.000Z')
+  })
+
+  it('treats day-of-week 7 as Sunday inside ranges', () => {
+    const from = Date.parse('2026-06-27T09:00:00.000Z') // Saturday
+    expect(new Date(nextCronOccurrenceMs('0 9 * * 1-7', from)!).toISOString()).toBe('2026-06-28T09:00:00.000Z')
+  })
+
+  it('rejects invalid cron syntax', () => {
+    expect(nextCronOccurrenceMs('0 25 * * *', Date.parse('2026-06-28T00:00:00.000Z'))).toBeNull()
+    expect(nextCronOccurrenceMs('* * *', Date.parse('2026-06-28T00:00:00.000Z'))).toBeNull()
   })
 })
 
