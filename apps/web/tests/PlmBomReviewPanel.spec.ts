@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App as VueApp } from 'vue'
 
 const getContextMock = vi.fn()
+const updateLineMock = vi.fn()
 vi.mock('../src/services/integration/workbench', () => ({
   getPlmBomMultitableContext: (...args: unknown[]) => getContextMock(...args),
+  updatePlmBomMultitableLine: (...args: unknown[]) => updateLineMock(...args),
 }))
 
 import PlmBomReviewPanel from '../src/components/plm/PlmBomReviewPanel.vue'
@@ -55,9 +57,15 @@ afterEach(() => {
   app = null
   container?.remove()
   getContextMock.mockReset()
+  updateLineMock.mockReset()
+  vi.unstubAllGlobals()
 })
 
-describe('PlmBomReviewPanel (P3-C read-only BOM review)', () => {
+function cloneContext() {
+  return JSON.parse(JSON.stringify(CONTEXT))
+}
+
+describe('PlmBomReviewPanel (P3-C BOM review + governed write-back)', () => {
   it('is idle and does NOT call the service on mount', async () => {
     mountPanel()
     await flushUi()
@@ -66,7 +74,7 @@ describe('PlmBomReviewPanel (P3-C read-only BOM review)', () => {
   })
 
   it('loads + renders the read-only table with stable row keys, hierarchy, qty + provenance', async () => {
-    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: CONTEXT })
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
     mountPanel()
     await flushUi()
     await setPartAndLoad('P1')
@@ -79,9 +87,56 @@ describe('PlmBomReviewPanel (P3-C read-only BOM review)', () => {
     expect((rows[0] as HTMLElement).dataset.bomLineId).toBe('R1')
     expect((rows[1] as HTMLElement).dataset.bomLineId).toBe('R2')
     expect((rows[1] as HTMLElement).dataset.level).toBe('2')
-    // quantity + uom and the source provenance timestamp render
-    expect(container.textContent).toContain('2 EA')
+    // quantity + uom are editable in the standalone workbench panel
+    expect((container.querySelector('[data-testid="plm-bom-review-quantity-input"]') as HTMLInputElement).value).toBe('2')
+    expect((container.querySelector('[data-testid="plm-bom-review-uom-input"]') as HTMLInputElement).value).toBe('EA')
     expect(container.textContent).toContain('2026-06-05T00:00:00')
+  })
+
+  it('submits editable cells with a UI-owned Idempotency-Key and updates the row on success', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'submit-key-1' })
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    updateLineMock.mockResolvedValue({ ok: true, bom_line_id: 'R1' })
+    mountPanel()
+    await flushUi()
+    await setPartAndLoad('P1')
+
+    const quantity = container.querySelector('[data-testid="plm-bom-review-quantity-input"]') as HTMLInputElement
+    quantity.value = '6'
+    quantity.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="plm-bom-review-save"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(updateLineMock).toHaveBeenCalledWith('plm-ds', 'P1', 'R1', { quantity: 6 }, 'submit-key-1')
+    expect(container.textContent).toContain('写回成功。')
+    expect(quantity.value).toBe('6')
+  })
+
+  it('keeps a failed submit actionable so the user can retry the same logical edit', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'submit-key-1' })
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    updateLineMock
+      .mockResolvedValueOnce({ ok: false, status: 409, reason: 'provider-rejected', message: 'locked' })
+      .mockResolvedValueOnce({ ok: true, bom_line_id: 'R1' })
+    mountPanel()
+    await flushUi()
+    await setPartAndLoad('P1')
+
+    const refdes = container.querySelector('[data-testid="plm-bom-review-refdes-input"]') as HTMLInputElement
+    refdes.value = 'R9'
+    refdes.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    const save = container.querySelector('[data-testid="plm-bom-review-save"]') as HTMLButtonElement
+    save.click()
+    await flushUi()
+    expect(container.textContent).toContain('不可写')
+    save.click()
+    await flushUi()
+
+    expect(updateLineMock).toHaveBeenNthCalledWith(1, 'plm-ds', 'P1', 'R1', { refdes: 'R9' }, 'submit-key-1')
+    expect(updateLineMock).toHaveBeenNthCalledWith(2, 'plm-ds', 'P1', 'R1', { refdes: 'R9' }, 'submit-key-1')
+    expect(container.textContent).toContain('写回成功。')
   })
 
   it('shows the upgrade affordance (no table) when supported but not entitled', async () => {

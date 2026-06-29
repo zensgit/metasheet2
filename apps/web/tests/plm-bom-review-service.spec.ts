@@ -6,7 +6,10 @@ vi.mock('../src/utils/api', () => ({
   apiGet: (...args: unknown[]) => apiFetchMock(...args),
 }))
 
-import { getPlmBomMultitableContext } from '../src/services/integration/workbench'
+import {
+  getPlmBomMultitableContext,
+  updatePlmBomMultitableLine,
+} from '../src/services/integration/workbench'
 
 // The relay returns a BARE object (NOT the {ok,data} integration envelope).
 function rawJsonResponse(data: unknown, status = 200): Response {
@@ -68,5 +71,48 @@ describe('getPlmBomMultitableContext (P3-C consumer service)', () => {
     apiFetchMock.mockResolvedValue(rawJsonResponse({ data_source_id: 'ds-1', available: true, entitled: true, context: null, reason: 'unavailable' }))
     const r = await getPlmBomMultitableContext('ds-1', 'P1')
     expect(r).toEqual({ data_source_id: 'ds-1', available: true, entitled: true, context: null, reason: 'unavailable' })
+  })
+})
+
+describe('updatePlmBomMultitableLine (Phase 7 consumer write-back service)', () => {
+  beforeEach(() => apiFetchMock.mockReset())
+
+  it('sends the caller-owned Idempotency-Key and whitelisted patch body', async () => {
+    apiFetchMock.mockResolvedValue(rawJsonResponse({ ok: true, bom_line_id: 'R1' }))
+    const r = await updatePlmBomMultitableLine(
+      'ds-1',
+      'P1',
+      'R1',
+      { quantity: 6, refdes: null },
+      'submit-1',
+    )
+    expect(r).toEqual({ ok: true, bom_line_id: 'R1' })
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/plm-workbench/data-sources/ds-1/bom-multitable/P1/lines/R1',
+      {
+        method: 'PATCH',
+        headers: { 'Idempotency-Key': 'submit-1' },
+        body: JSON.stringify({ quantity: 6, refdes: null }),
+        suppressUnauthorizedRedirect: true,
+      },
+    )
+  })
+
+  it('returns actionable provider errors instead of throwing', async () => {
+    apiFetchMock.mockResolvedValue(rawJsonResponse({ error: 'locked', reason: 'provider-rejected' }, 409))
+    const r = await updatePlmBomMultitableLine(
+      'ds-1',
+      'P1',
+      'R1',
+      { quantity: 6 },
+      'submit-1',
+    )
+    expect(r).toEqual({ ok: false, status: 409, reason: 'provider-rejected', message: 'locked' })
+  })
+
+  it('refuses incomplete requests before fetching', async () => {
+    const r = await updatePlmBomMultitableLine('ds-1', 'P1', 'R1', {}, 'submit-1')
+    expect(r.ok).toBe(false)
+    expect(apiFetchMock).not.toHaveBeenCalled()
   })
 })
