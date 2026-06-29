@@ -1,8 +1,8 @@
-# Attendance AE-1b corrected-fact durability — design lock (PROPOSED)
+# Attendance AE-1b corrected-fact durability — design lock (RATIFIED)
 
 > Date: 2026-06-29
 > Baseline: `origin/main@46dbf4fe4` (`#3303` merged; attendance test hygiene closed)
-> Status: 🔶 **PROPOSED / awaiting owner ratification**. This document chooses the durability contract for AE-1b only. It does not authorize runtime code, UI, notifications, staging, or broader payroll-cycle freeze work.
+> Status: ✅ **RATIFIED（owner review 2026-06-29）**. This document chooses the durability contract for AE-1b only. It does not authorize runtime code, UI, notifications, staging, or broader payroll-cycle freeze work; those remain separate PRs.
 
 ## 1. Why this slice exists
 
@@ -35,9 +35,9 @@ The dangerous class is therefore **derived recompute without an explicit overrid
 
 ## 3. AE-1b decision
 
-### 3.1 Recommended fork: sticky marker + survive-but-flag
+### 3.1 Ratified fork: sticky marker + survive-but-flag
 
-Recommended fork: **(a) sticky marker at the shared upsert chokepoint + (iii) survive-but-flag on material fact divergence**.
+Ratified fork: **(a) sticky marker at the shared upsert chokepoint + (iii) survive-but-flag on material fact divergence**.
 
 AE-1b should add a small durable marker to `attendance_records.meta` when AE-1 applies a correction:
 
@@ -136,13 +136,19 @@ AE-1b runtime should be a later PR with this rough shape:
    - `buildManualResultEditFactFingerprint(rowOrValues)`
    - `detectManualResultEditConflict(existingMarker, incomingValues)`
    - `shouldPreserveManualResultEdit(existingRow, incomingOptions)`
-2. Extend `applyAttendanceResultEdit` so the `upsertAttendanceRecord` call passes `meta.manual_result_edit` tied to the inserted audit row, or performs a second same-transaction metadata update after the audit row id exists.
-3. Extend `computeAttendanceRecordUpsertValues` or the `upsertAttendanceRecord` wrapper to preserve corrected facts when:
+2. Before changing runtime behavior, enumerate every current `attendance_records.status` writer / status-choosing site (including bulk import builders, helper wrappers, direct inserts, and route-specific recompute branches), and classify each as one of:
+   - uses the marker-aware chokepoint;
+   - carries an explicit `statusOverride` / intentional override;
+   - insert-only for a missing row and cannot clobber an existing correction;
+   - out of scope with a documented reason.
+   No unclassified writer may remain in the runtime PR.
+3. Extend `applyAttendanceResultEdit` so the `upsertAttendanceRecord` call passes `meta.manual_result_edit` tied to the inserted audit row, or performs a second same-transaction metadata update after the audit row id exists.
+4. Extend `computeAttendanceRecordUpsertValues` or the `upsertAttendanceRecord` wrapper to preserve corrected facts when:
    - `existingRow.meta.manual_result_edit` exists; and
    - the incoming write does not carry an explicit result override intent.
-4. When preserving a corrected fact, compare the incoming material fact fingerprint with the marker's `correctedAgainst`; if it differs, set `reviewConflict.state='needs_review'`.
-5. Keep late-tier meta consistent with the preserved corrected metrics. A preserve path must not recompute tiers from stale derived lateness.
-6. Preserve the existing AE-1 closed/archived-cycle guard unchanged.
+5. When preserving a corrected fact, compare the incoming material fact fingerprint with the marker's `correctedAgainst`; if it differs, set `reviewConflict.state='needs_review'`.
+6. Keep late-tier meta consistent with the preserved corrected metrics. A preserve path must not recompute tiers from stale derived lateness.
+7. Preserve the existing AE-1 closed/archived-cycle guard unchanged.
 
 Open implementation detail for the runtime PR: whether the marker is written in the first upsert (without audit id, then patched after insert) or after the audit insert in the same transaction. Either is acceptable if the final row and audit row commit atomically.
 
@@ -152,6 +158,7 @@ AE-1b runtime must add real-DB tests. Minimum matrix:
 
 | Case | Setup | Action | Expected |
 |---|---|---|---|
+| Writer inventory gate | Grep/trace all current `attendance_records.status` writers and status-choosing sites | Classify each writer before code review | no unclassified writer; every clobber-capable no-override writer is either marker-aware or covered by a specific test |
 | Core durability, same facts | Seed `late`, AE edit `late -> normal` | Drive a no-`statusOverride` recompute through the shared upsert path with the same material facts | record stays `normal`; corrected metrics preserved; marker persists; no conflict flag |
 | Core durability, changed facts | Seed `late`, AE edit `late -> normal` | Drive a no-`statusOverride` recompute with materially changed punches | record stays `normal`; raw facts may update; corrected metrics preserved; `reviewConflict.state='needs_review'` |
 | Import derived row | Seed edited record | Import/update a row with punches but no explicit status | import does not silently restore `late`; conflict flag reflects whether facts changed |
@@ -175,13 +182,13 @@ AE-1b does not include:
 - A platform-wide closed-cycle freeze for punch/import/auto-absence. That is a broader consistency slice.
 - Rewriting attendance import UX or requiring every import to understand manual corrections.
 
-## 7. Owner ratification questions
+## 7. Owner ratified decisions
 
-Please ratify or adjust these before runtime:
+Owner review on 2026-06-29 ratified:
 
 1. **Sticky marker model**: use `attendance_records.meta.manual_result_edit` as the v1 durability mechanism, with the audit table remaining canonical.
 2. **Conflict semantic**: choose survive-but-flag. A no-`statusOverride` recompute preserves the corrected result; if material facts changed, it sets `reviewConflict` instead of silently clobbering or hard-blocking.
 3. **Explicit override behavior**: existing explicit-status write paths may intentionally supersede the marker, but must do so visibly and with tests.
 4. **Scope boundary**: no UI/notification/staging or broad closed-cycle freeze in AE-1b.
 
-Recommended answer: ratify all four as written, then build AE-1b runtime as one backend PR with the real-DB matrix above.
+Next step after this docs PR lands: build AE-1b runtime as one backend PR with the real-DB matrix above.
