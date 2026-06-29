@@ -962,6 +962,7 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.equal(read.metadata.readOnly, true)
   assert.equal(read.metadata.requestedLimit, 2)
   assert.equal(read.metadata.returnedRecordCount, 2)
+  assert.equal(read.metadata.dataDataPresent, true)
   assert.equal(read.metadata.readPath, '/K3API/Material/GetList')
 
   const listCalls = calls.filter((call) => call.pathname === '/K3API/Material/GetList')
@@ -1011,7 +1012,7 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.ok(tooLarge instanceof AdapterValidationError, 'LIST smoke rejects limits above the preset bound')
   assert.equal(tooLarge.details.code, 'K3_WISE_READ_LIST_LIMIT_EXCEEDED')
 
-  const malformedFetchImpl = async (url, options) => {
+  const missingRowsFetchImpl = async (url, options) => {
     const parsed = new URL(url)
     if (parsed.pathname === '/K3API/Material/GetList') {
       return jsonResponse(200, {
@@ -1022,7 +1023,7 @@ async function testK3WebApiMaterialListReadSmoke() {
     }
     return fetchImpl(url, options)
   }
-  const malformedAdapter = createK3WiseWebApiAdapter({
+  const missingRowsAdapter = createK3WiseWebApiAdapter({
     system: createK3WebApiSystem({
       config: {
         baseUrl: 'https://k3.example.test',
@@ -1040,11 +1041,82 @@ async function testK3WebApiMaterialListReadSmoke() {
         },
       },
     }),
-    fetchImpl: malformedFetchImpl,
+    fetchImpl: missingRowsFetchImpl,
   })
-  const malformed = await malformedAdapter.read(buildMarkedListRequest({ object: 'material', mode: 'list' }, 2)).catch((error) => error)
-  assert.ok(malformed instanceof K3WiseWebApiAdapterError, 'LIST success envelope without Data.DATA fails closed')
-  assert.equal(malformed.details.code, 'K3_WISE_READ_BUSINESS_ERROR')
+  const missingRows = await missingRowsAdapter.read(buildMarkedListRequest({ object: 'material', mode: 'list' }, 2))
+  assert.equal(missingRows.records.length, 0, 'LIST success envelope without Data.DATA remains an empty bounded page')
+  assert.equal(missingRows.metadata.dataDataPresent, false, 'LIST success evidence carries a values-free rows-shape diagnostic')
+
+  const rejectedFetchImpl = async (url, options) => {
+    const parsed = new URL(url)
+    if (parsed.pathname === '/K3API/Material/GetList') {
+      return jsonResponse(200, {
+        StatusCode: 200,
+        Message: 'Material list rejected',
+        Data: { Code: 'N', DATA: [{ FNumber: 'SECRET-MAT' }] },
+      })
+    }
+    return fetchImpl(url, options)
+  }
+  const rejectedAdapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test',
+        objects: {
+          material: {
+            operations: ['read'],
+            readPath: '/K3API/Material/GetList',
+            readMethod: 'POST',
+            readMode: 'list',
+            readListBodyTemplate: { Data: { Top: 10, PageIndex: 1 } },
+            pageIndexField: 'PageIndex',
+            pageSizeField: 'PageSize',
+            maxListLimit: 3,
+          },
+        },
+      },
+    }),
+    fetchImpl: rejectedFetchImpl,
+  })
+  const rejected = await rejectedAdapter.read(buildMarkedListRequest({ object: 'material', mode: 'list' }, 2)).catch((error) => error)
+  assert.ok(rejected instanceof K3WiseWebApiAdapterError, 'LIST explicit failure marker is rejected before row extraction')
+  assert.equal(rejected.details.code, 'K3_WISE_READ_LIST_REJECTED')
+  assert.equal(rejected.details.dataDataPresent, true)
+
+  const unrecognizedFetchImpl = async (url, options) => {
+    const parsed = new URL(url)
+    if (parsed.pathname === '/K3API/Material/GetList') {
+      return jsonResponse(200, {
+        Message: 'Material list payload with no success marker',
+        Data: { DATA: [{ FNumber: 'SECRET-MAT' }] },
+      })
+    }
+    return fetchImpl(url, options)
+  }
+  const unrecognizedAdapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test',
+        objects: {
+          material: {
+            operations: ['read'],
+            readPath: '/K3API/Material/GetList',
+            readMethod: 'POST',
+            readMode: 'list',
+            readListBodyTemplate: { Data: { Top: 10, PageIndex: 1 } },
+            pageIndexField: 'PageIndex',
+            pageSizeField: 'PageSize',
+            maxListLimit: 3,
+          },
+        },
+      },
+    }),
+    fetchImpl: unrecognizedFetchImpl,
+  })
+  const unrecognized = await unrecognizedAdapter.read(buildMarkedListRequest({ object: 'material', mode: 'list' }, 2)).catch((error) => error)
+  assert.ok(unrecognized instanceof K3WiseWebApiAdapterError, 'LIST rows under Data.DATA with an unrecognized envelope gets a response-shape diagnostic')
+  assert.equal(unrecognized.details.code, 'K3_WISE_READ_LIST_ENVELOPE_UNRECOGNIZED')
+  assert.equal(unrecognized.details.dataDataPresent, true)
 
   const modeMismatch = await adapter.read({
     object: 'material',

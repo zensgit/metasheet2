@@ -151,9 +151,8 @@ function applyReadSmokePresetOverlay(system, preset) {
   }
 }
 
-// Values-free evidence from a successful read. Extracts ONLY recordPresent (boolean) + referenceObjectCount
-// (count) from the result's records — never the record values, metadata (which carries the key as
-// requestedNumber + a readPath), or raw payload.
+// Values-free evidence from a successful read. Extracts ONLY booleans/counts from the result — never
+// record values, raw payload, or metadata that may carry a key/readPath.
 function readSmokeSuccessEvidence(preset, result, contract = {}) {
   const records = result && Array.isArray(result.records) ? result.records : []
   const recordPresent = records.length > 0
@@ -164,7 +163,7 @@ function readSmokeSuccessEvidence(preset, result, contract = {}) {
     const refs = records[0] && records[0]._k3ReferenceObjects
     referenceObjectCount = refs && typeof refs === 'object' ? Object.keys(refs).length : 0
   }
-  return {
+  const evidence = {
     ok: true,
     presetId: preset.presetId,
     object,
@@ -173,6 +172,10 @@ function readSmokeSuccessEvidence(preset, result, contract = {}) {
     recordCount: records.length,
     referenceObjectCount,
   }
+  if (result && result.metadata && typeof result.metadata.dataDataPresent === 'boolean') {
+    evidence.dataDataPresent = result.metadata.dataDataPresent
+  }
+  return evidence
 }
 
 // Values-free error evidence. Returns ONLY a coarse code + type — never the error message, which may carry
@@ -185,7 +188,7 @@ function readSmokeErrorEvidence(preset, error, contract = {}) {
   const name = error && typeof error.name === 'string' && error.name ? error.name : null
   const object = typeof contract.object === 'string' && contract.object ? contract.object : preset.object
   const mode = typeof contract.mode === 'string' && contract.mode ? contract.mode : preset.defaultMode
-  return {
+  const evidence = {
     ok: false,
     presetId: preset.presetId,
     object,
@@ -193,6 +196,10 @@ function readSmokeErrorEvidence(preset, error, contract = {}) {
     errorCode: code || 'READ_SMOKE_READ_FAILED',
     errorType: name || 'Error',
   }
+  if (error && error.details && typeof error.details.dataDataPresent === 'boolean') {
+    evidence.dataDataPresent = error.details.dataDataPresent
+  }
+  return evidence
 }
 
 function readSmokeSafeErrorCode(value) {
