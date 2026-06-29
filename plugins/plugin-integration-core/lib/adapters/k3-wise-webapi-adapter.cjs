@@ -787,9 +787,23 @@ function materialListRowsCandidate(data) {
   return null
 }
 
+function materialListDataDataPresent(data) {
+  return Array.isArray(getPath(data, 'Data.DATA')) || Array.isArray(getPath(data, 'Data.data'))
+}
+
 function materialListBusinessSuccess(data, config) {
-  if (hasExplicitBusinessFailure(data)) return false
-  return businessSuccess(data, config) && materialListRowsCandidate(data) !== null
+  return businessSuccess(data, config)
+}
+
+function materialListBusinessFailureCode(data) {
+  const statusCode = getStatusCode(data)
+  if (
+    hasExplicitBusinessFailure(data) ||
+    (statusCode !== null && (statusCode < 200 || statusCode >= 300))
+  ) {
+    return 'K3_WISE_READ_LIST_REJECTED'
+  }
+  return 'K3_WISE_READ_LIST_ENVELOPE_UNRECOGNIZED'
 }
 
 function buildMaterialReadRecord(detail, request, objectConfig) {
@@ -1298,11 +1312,14 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
         })
       }
 
+      const dataDataPresent = materialListDataDataPresent(readResponse.data)
       if (!materialListBusinessSuccess(readResponse.data, config)) {
+        const failureCode = materialListBusinessFailureCode(readResponse.data)
         throw new K3WiseWebApiAdapterError(String(responseMessage(readResponse.data, config, 'K3 WISE list read business response failed')), {
-          code: 'K3_WISE_READ_BUSINESS_ERROR',
+          code: failureCode,
           object: request.object,
-          responseCode: responseFailureCode(readResponse.data, config, 'K3_WISE_READ_BUSINESS_ERROR'),
+          responseCode: responseFailureCode(readResponse.data, config, failureCode),
+          dataDataPresent,
         })
       }
 
@@ -1315,6 +1332,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           mode: 'material-list-smoke',
           requestedLimit: request.limit,
           returnedRecordCount: records.length,
+          dataDataPresent,
           readPath,
           readOnly: true,
         },

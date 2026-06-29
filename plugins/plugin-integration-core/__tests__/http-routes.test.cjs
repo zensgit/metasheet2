@@ -5718,7 +5718,7 @@ async function testReadSmokeRoute() {
   const failSvc = createMockServices({
     externalSystemRegistry: { async getExternalSystemForAdapter(input) { return { id: input.id, kind: 'erp:k3-wise-webapi', credentials: {} } } },
     adapterRegistry: { createAdapter() { return {
-      async read() { const e = new Error('material M-001 secret 42'); e.name = 'K3WiseWebApiAdapterError'; e.details = { code: 'K3_WISE_READ_BUSINESS_ERROR' }; throw e },
+      async read() { const e = new Error('material M-001 secret 42'); e.name = 'K3WiseWebApiAdapterError'; e.details = { code: 'K3_WISE_READ_LIST_REJECTED', dataDataPresent: true }; throw e },
       async upsert(b) { failWrite.push(b); return {} },
     } } },
   })
@@ -5728,8 +5728,9 @@ async function testReadSmokeRoute() {
   })
   assertOkResponse(fail, 200)
   assert.equal(fail.body.data.ok, false)
-  assert.equal(fail.body.data.errorCode, 'K3_WISE_READ_BUSINESS_ERROR')
+  assert.equal(fail.body.data.errorCode, 'K3_WISE_READ_LIST_REJECTED')
   assert.equal(fail.body.data.errorType, 'K3WiseWebApiAdapterError')
+  assert.equal(fail.body.data.dataDataPresent, true)
   const failStr = JSON.stringify(fail.body.data)
   assert.ok(!failStr.includes('M-001') && !failStr.includes('42'), 'read failure evidence is values-free')
   assert.equal(failWrite.length, 0, 'no write attempted on read failure')
