@@ -48,6 +48,14 @@ section) renders **`templateId` + `formDataMapping`** only. Two problems:
    persist. (`draftConfigFromAction` does spread `...config`, so the *load* side preserves it; the
    loss is purely on save.)
 
+   **The from-scratch rebuild is intentional, not an oversight — so the fix is explicit-carry, not a
+   blanket spread.** `draftConfigFromAction` produces a *UI-only* `formDataMappingPairs` **array** of
+   draft rows; the persisted config uses the `formDataMapping` **object**. `buildActionPayload`
+   reconstructs from the managed keys precisely so those draft rows never leak into what's saved. A
+   naive `...action.config` spread would "fix" the drop by persisting draft UI state — wrong. The
+   correct fix is to **assemble `resultWriteback` explicitly** alongside `templateId`/`formDataMapping`
+   (§4), carrying only validated config, never draft scaffolding.
+
 This makes "existing JSON → UI → save → JSON unchanged" a **correctness** requirement, not a nicety.
 
 ## 3. UI design
@@ -119,15 +127,20 @@ config, after the form-data mapping. It is three optional field pickers — noth
 - **Cross-base backwrite (#4)** — writing to a record in another base is a security arc
   (permission / lock / audit / target-resolution re-lock), not a small UI extension.
 - **`requester` mode UI** — a separate v2 surface. Note: `buildActionPayload` also currently drops a
-  hand-authored `requester` on save (same from-scratch rebuild); this slice does **not** address that
-  — it is called out here only so the reviewer knows the omission is deliberate, not overlooked.
+  hand-authored `requester` on save (same from-scratch rebuild); this slice does **not** add a
+  `requester` UI. But because the writeback half-fix would otherwise make the `requester` drop *more*
+  surprising (a config with both would partially survive — `resultWriteback` persists while
+  `requester` silently vanishes), the implementation **should carry `config.requester` through if
+  present** (explicit pass-through, no UI). One cheap line that keeps the save lossless for any
+  backend-valid config, not just the keys this slice surfaces.
 
 ## 7. Gated TODO (🔒 until this lock is approved → ⬜ when GO → ✅ when landed)
 
 - 🔒 **D1** — writeback sub-block in the `start_approval` editor: three `<select>` pickers over
   `fields`, with `data-field` hooks.
-- 🔒 **D2** — `buildActionPayload`: assemble `resultWriteback`; **omit the key when all empty**
-  (fixes the lossy round-trip / avoids the rejected empty `{}`).
+- 🔒 **D2** — `buildActionPayload`: assemble `resultWriteback` (explicit-carry, not a `...config`
+  spread); **omit the key when all empty** (fixes the lossy round-trip / avoids the rejected empty
+  `{}`); also pass `config.requester` through if present (§6).
 - 🔒 **D3** — `draftConfigFromAction`: backfill `config.resultWriteback` into the three pickers.
 - 🔒 **D4** — advisory type filter/hint per the backend field-type contract (backend stays the
   authority).
