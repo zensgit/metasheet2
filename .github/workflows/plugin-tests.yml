@@ -197,6 +197,9 @@ jobs:
             tests/integration/multitable-conditional-rule-trash-realdb.test.ts \
             tests/integration/multitable-oapi1-token-read-realdb.test.ts \
             tests/integration/multitable-oapi1-comments-read-realdb.test.ts \
+            tests/integration/multitable-oapi2a-token-write-realdb.test.ts \
+            tests/integration/multitable-oapi2a-comments-write-realdb.test.ts \
+            tests/integration/multitable-oapi2a-ratelimit-realdb.test.ts \
             tests/integration/multitable-fieldperm-write-gate-patch-realdb.test.ts \
             tests/integration/multitable-conditional-rules-api.test.ts \
             tests/integration/multitable-rowlevel-readdeny-xrec.test.ts \

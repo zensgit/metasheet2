@@ -122,11 +122,15 @@ describeIfDatabase('OAPI-1 read-only API-token routes (real DB)', () => {
     expect(ids).not.toContain(REC_SECRET) // creator (non-admin) is denied this row → token is too
   })
 
-  test('READ-ONLY — the same token on a write route (POST /patch) is rejected', async () => {
+  test('READ-ONLY SCOPE — a records:read token on a write route (POST /patch) is rejected with 403 (OAPI-2a)', async () => {
+    // OAPI-2a mounts apiTokenAuth + requireScope('records:write') on POST /patch, so a records:read token now
+    // reaches requireScope and is rejected for INSUFFICIENT_SCOPE (403) — previously 401 (no auth mounted).
+    // The intent is unchanged: a read-scoped token still cannot mutate.
     const res = await request(app).post('/api/multitable/patch')
       .set('Authorization', `Bearer ${tokReadOk}`)
       .send({ sheetId: SHEET_ID, changes: [{ recordId: REC_OPEN, fieldId: STATUS, value: 'hacked' }] })
-    expect(res.status).toBe(401) // no apiTokenAuth on write → actor unset → rejected
+    expect(res.status).toBe(403)
+    expect(JSON.stringify(res.body)).toContain('INSUFFICIENT_SCOPE')
     const check = await q('SELECT data FROM meta_records WHERE id = $1', [REC_OPEN])
     expect((check.rows[0] as { data?: Record<string, unknown> })?.data?.[STATUS]).toBe('open') // unchanged
   })
