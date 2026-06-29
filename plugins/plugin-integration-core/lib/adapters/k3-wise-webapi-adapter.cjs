@@ -826,18 +826,31 @@ function materialListDataDataPresent(data) {
   return probe.dataData || probe.dataLowerData
 }
 
-function materialListRowCount(data) {
-  const value = firstDefined(
-    getPath(data, 'Data.ROWCOUNT'),
-    getPath(data, 'Data.rowCount'),
-    getPath(data, 'Data.RowCount'),
-  )
+// Values-free non-negative-integer extraction from a fixed allowlist of K3 envelope count fields. Returns a
+// count or null; never a value/string passthrough beyond a parseable integer.
+function materialListCountField(data, paths) {
+  const value = firstDefined(...paths.map((path) => getPath(data, path)))
   if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value
   if (typeof value === 'string' && value.trim()) {
     const parsed = Number(value.trim())
     if (Number.isInteger(parsed) && parsed >= 0) return parsed
   }
   return null
+}
+
+function materialListRowCount(data) {
+  return materialListCountField(data, ['Data.ROWCOUNT', 'Data.rowCount', 'Data.RowCount'])
+}
+
+// C3 LIST paging echo (#1709): K3 echoes the accepted page size/index back in the envelope. Surfacing these
+// (values-free counts) lets a no-key rerun show whether K3 accepted our requested paging — the prime suspect
+// when ROWCOUNT>0 but DATA is null/non-array.
+function materialListPageSize(data) {
+  return materialListCountField(data, ['Data.PAGESIZE', 'Data.pageSize', 'Data.PageSize'])
+}
+
+function materialListPageIndex(data) {
+  return materialListCountField(data, ['Data.PAGEINDEX', 'Data.pageIndex', 'Data.PageIndex'])
 }
 
 function materialListBusinessSuccess(data, config) {
@@ -1364,6 +1377,11 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       const listShapeProbe = materialListShapeProbe(readResponse.data)
       const dataDataPresent = listShapeProbe.dataData || listShapeProbe.dataLowerData
       const dataRowCount = materialListRowCount(readResponse.data)
+      // Paging echo: what K3 reports it applied, vs what we requested (Top=PageSize=request.limit, PageIndex=1).
+      const dataPageSize = materialListPageSize(readResponse.data)
+      const dataPageIndex = materialListPageIndex(readResponse.data)
+      const requestedLimit = request.limit
+      const requestedPageIndex = 1
       if (!materialListBusinessSuccess(readResponse.data, config)) {
         const failureCode = materialListBusinessFailureCode(readResponse.data)
         throw new K3WiseWebApiAdapterError(String(responseMessage(readResponse.data, config, 'K3 WISE list read business response failed')), {
@@ -1372,6 +1390,10 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           responseCode: responseFailureCode(readResponse.data, config, failureCode),
           dataDataPresent,
           dataRowCount,
+          dataPageSize,
+          dataPageIndex,
+          requestedLimit,
+          requestedPageIndex,
           listShapeProbe,
         })
       }
@@ -1383,10 +1405,13 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
         metadata: {
           object: request.object,
           mode: 'material-list-smoke',
-          requestedLimit: request.limit,
+          requestedLimit,
+          requestedPageIndex,
           returnedRecordCount: records.length,
           dataDataPresent,
           dataRowCount,
+          dataPageSize,
+          dataPageIndex,
           listShapeProbe,
           readPath,
           readOnly: true,

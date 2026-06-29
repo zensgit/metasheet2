@@ -103,6 +103,17 @@ function readSmokeSafeCount(value) {
   return null
 }
 
+// C3 LIST paging echo (#1709): copy ONLY the allowlisted values-free count fields (K3-echoed page size/index +
+// our requested paging) from a metadata/details source onto the evidence. Non-negative integers only.
+const READ_SMOKE_LIST_PAGING_COUNT_KEYS = Object.freeze(['dataPageSize', 'dataPageIndex', 'requestedLimit', 'requestedPageIndex'])
+function applyReadSmokePagingCounts(evidence, source) {
+  if (!source || typeof source !== 'object') return
+  for (const key of READ_SMOKE_LIST_PAGING_COUNT_KEYS) {
+    const count = readSmokeSafeCount(source[key])
+    if (count !== null) evidence[key] = count
+  }
+}
+
 function mergeOperations(existing, required) {
   const values = []
   for (const source of [existing, required]) {
@@ -206,6 +217,7 @@ function readSmokeSuccessEvidence(preset, result, contract = {}) {
   }
   const dataRowCount = readSmokeSafeCount(result && result.metadata && result.metadata.dataRowCount)
   if (dataRowCount !== null) evidence.dataRowCount = dataRowCount
+  applyReadSmokePagingCounts(evidence, result && result.metadata)
   const listShapeProbe = readSmokeListShapeProbeEvidence(result && result.metadata && result.metadata.listShapeProbe)
   if (listShapeProbe) evidence.listShapeProbe = listShapeProbe
   return evidence
@@ -234,6 +246,7 @@ function readSmokeErrorEvidence(preset, error, contract = {}) {
   }
   const dataRowCount = readSmokeSafeCount(error && error.details && error.details.dataRowCount)
   if (dataRowCount !== null) evidence.dataRowCount = dataRowCount
+  applyReadSmokePagingCounts(evidence, error && error.details)
   const listShapeProbe = readSmokeListShapeProbeEvidence(error && error.details && error.details.listShapeProbe)
   if (listShapeProbe) evidence.listShapeProbe = listShapeProbe
   return evidence
