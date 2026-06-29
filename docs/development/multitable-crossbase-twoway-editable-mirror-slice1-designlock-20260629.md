@@ -54,12 +54,17 @@ service recognizes for a flag-enabled cross-base mirror and routes to the forwar
 point — a dedicated mirror-edit route/op vs. a guarded branch in the existing patch path — is an implementation choice
 to settle at runtime; the contract is "mirror edit ⇒ canonical-forward-edge write, never a second row.")
 
-## 3. Authority model (cross-base write) — reuse, fail-closed
-Reuse the proven primitive, no new governance:
-- **Base-A (forward/canonical-edge owner) write authority** is **required** — `resolveBaseWritable(actor, baseA)` +
-  **claim==truth** on the forward field's `foreignBaseId` + **per-base quota**. This is exactly `evaluateCrossBaseWrite`'s
-  contract; factor its core out of the automation executor into a shared primitive (or call a shared `resolveBaseWritable`
-  + claim + quota helper) so both callers share one gate.
+## 3. Authority model (cross-base write) — a SHARED authority primitive (NOT a lift of the automation gate)
+Reuse the proven *logic*, no new governance — but **do NOT lift `evaluateCrossBaseWrite` wholesale.** That method
+is automation-flavored: it takes an `ExecutionContext`, and its quota / audit / actor semantics are entangled with
+the automation executor. Lifting it into the mirror-write path as a "universal truth" would muddle those semantics
+across two callers (owner guidance, 2026-06-29). **Locked approach:** extract a **context-agnostic shared authority
+primitive** — inputs `(actorId, targetBaseId, declaredBaseClaim)`, returning an explicit allow/deny + reason —
+composing `resolveBaseWritable(actor, baseA)` + **claim==truth** (forward field's `foreignBaseId`) + **per-target-base
+quota**. Both the automation executor **and** the mirror-write path then consume this one primitive; the automation
+executor's current method becomes a **thin adapter** over it (no behavior change — regression-locked by its existing
+cross-base-write goldens). This keeps quota/audit/actor semantics from drifting between callers. The mirror write
+requires **base-A (forward/canonical-edge owner) write authority** via this primitive.
 - **Decision B (ratify): also require base-B write?** Lean = **yes for v1** (require write authority on **both**
   endpoints — base A canonical + base B where the edit originates), the fail-closed default for a first
   mirror-initiated cross-base write; relax to base-A-only later if too strict. (Feishu requires only edit on the
@@ -121,4 +126,7 @@ co-lock with the mirror write, or conditional/versioned write).
 1. **Owner ratification** of §7 decisions A–F (this design-lock).
 2. **Adversarial advisor pass** on the locked design (the advisor was overloaded at lock-drafting time; run before runtime) —
    specifically the no-oracle (§4) and TOCTOU/locking (§5) surfaces.
-3. Only then: runtime, contract-first (shared authority primitive + the write-through op), goldens fail-first, default-off.
+3. Only then: runtime, **contract-first** — the FIRST runtime step is extracting the §3 context-agnostic shared
+   authority primitive and refactoring the automation executor to consume it as a thin adapter (regression-locked by
+   its existing cross-base-write goldens, zero behavior change), BEFORE the mirror-write op is built on top of it.
+   Then the write-through op, goldens fail-first, default-off.
