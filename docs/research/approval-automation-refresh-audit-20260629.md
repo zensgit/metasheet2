@@ -45,11 +45,14 @@ Surfaced by the audit, severity verified in one pass. These are not "build next"
   explicit permission (or feature-flag it off) and constrain/allowlist service-task `fetch` targets.
   This is also the convergence-doctrine breach (the "designer = preview-only" fence) — fixing the risk
   and enforcing the fence are the same action.
-- **[Sev: low–moderate] `getApproval` returns the un-redacted form snapshot** (`ApprovalProductService.ts:4239`).
-  `hidden`-field redaction lives in a separate read-layer module (`approval-form-redaction.ts`, consumed
-  at `ApprovalBridgeService.ts:777`). Any future read path that returns the product-service snapshot
-  directly would leak `hidden` fields. Recommend: a regression test asserting every approval read path
-  goes through the redaction layer (or push redaction into the snapshot getter).
+- **[Sev: low — latent, not a confirmed public leak] `ApprovalProductService.getApproval` returns the
+  un-redacted form snapshot** (`ApprovalProductService.ts:4239`); `hidden`-field redaction lives in a
+  separate read-layer module (`approval-form-redaction.ts`). The public `GET /api/approvals/:id` goes
+  through `ApprovalBridgeService.getApproval`, which **already** applies redaction
+  (`ApprovalBridgeService.ts:777`) — so today's public route is **safe**. The risk is latent: a
+  future/internal read path that returns the product-service snapshot directly would bypass redaction.
+  Recommend: a regression test asserting every approval read path goes through the redaction layer (or
+  push redaction into the snapshot getter).
 - **[Sev: low, correctness] `webhook.received` silent-never-fires trap.** Editor-selectable + validated
   + persisted, but no event map / no ingestion route → a saved rule silently never fires
   (`scheduler.ts:508`). Recommend: either build the inbound endpoint or remove it from the selectable
