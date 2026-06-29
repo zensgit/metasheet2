@@ -61,3 +61,54 @@ export function isOapiReadAllowlistRequest(method: string, path: string, authHea
   if (method !== 'GET') return false
   return OAPI_READ_PATHS.some((pattern) => pattern.test(path))
 }
+
+/**
+ * OAPI-2a write routes — **method-bound** (design-lock
+ * `docs/development/multitable-oapi2-write-designlock-20260628.md` §2, RATIFIED 2026-06-28).
+ *
+ * Unlike the read allowlist (GET-only), a write route is opened ONLY for its specific write method: a write
+ * path is never opened for GET, and a read path is never opened for a write method. Each entry is an anchored
+ * `^…$` `(method, path)` pair in **exact lockstep** with a route that mounts BOTH `apiTokenAuth` +
+ * `requireScope` (univer-meta.ts / comments.ts) — the same over-match hazard as the read list: an entry
+ * without a mounted `requireScope` is a silent no-auth bypass (`requireScope` fail-opens with no scopes).
+ *
+ * `DELETE /records/:id` is intentionally **absent** — it is OAPI-2b, gated after 2a (design-lock §4). So are
+ * `/records/:id/lock`, `/records/:id/restore`, comment edit/delete (`PATCH`/`DELETE /api/comments/:id`), and
+ * the public-form submit path `POST /api/multitable/views/:id/submit` (its own `publicToken` gate, disjoint).
+ */
+const OAPI_WRITE_ROUTES: readonly { method: string; pattern: RegExp }[] = [
+  // records:write — POST /records (create). Exactly /records: not /records/:id, not /records/:id/lock.
+  { method: 'POST', pattern: /^\/api\/multitable\/records$/ },
+  // records:write — PATCH /records/:recordId (update). Exactly one id segment: not /records/:id/lock.
+  { method: 'PATCH', pattern: /^\/api\/multitable\/records\/[^/]+$/ },
+  // records:write — POST /patch (batch upsert).
+  { method: 'POST', pattern: /^\/api\/multitable\/patch$/ },
+  // comments:write — POST /api/comments (comment CREATE only). NOT PATCH/DELETE /api/comments/:id (edit/delete).
+  { method: 'POST', pattern: /^\/api\/comments$/ },
+]
+
+/**
+ * True only for an `mst_`-token request whose `(method, path)` matches an OAPI-2a write route. Fail-closed:
+ * a wrong method on a write path, any read path, a non-token bearer, `DELETE` (2b), or any unlisted path →
+ * false → the normal JWT gate (401 for an `mst_` bearer).
+ */
+export function isOapiWriteAllowlistRequest(
+  method: string,
+  path: string,
+  authHeader: string | undefined,
+): boolean {
+  if (!isApiTokenBearer(authHeader)) return false
+  return OAPI_WRITE_ROUTES.some((route) => route.method === method && route.pattern.test(path))
+}
+
+/**
+ * THE single switch the global JWT gate (index.ts) consults: true for any allowlisted OAPI request, read
+ * (GET, OAPI-1) or write (method-bound, OAPI-2a). A match lets an `mst_` bearer skip the JWT gate to reach
+ * the per-route `apiTokenAuth` + `requireScope`; everything else falls through to a 401.
+ */
+export function isOapiAllowlistRequest(method: string, path: string, authHeader: string | undefined): boolean {
+  return (
+    isOapiReadAllowlistRequest(method, path, authHeader) ||
+    isOapiWriteAllowlistRequest(method, path, authHeader)
+  )
+}

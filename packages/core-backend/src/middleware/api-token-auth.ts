@@ -15,6 +15,8 @@ declare global {
     interface Request {
       apiTokenScopes?: ApiTokenScope[]
       apiTokenUserId?: string
+      /** The API token's own id (NOT the creator's). Used to key the per-token rate limiter. */
+      apiTokenId?: string
     }
   }
 }
@@ -63,6 +65,8 @@ export async function apiTokenAuth(
   // Attach scopes and synthetic user context
   req.apiTokenScopes = result.token.scopes
   req.apiTokenUserId = result.token.createdBy
+  // The token's own id — keys the per-token rate limiter (OAPI-2a). NOT the creator id.
+  req.apiTokenId = result.token.id
 
   // Set a minimal user object so downstream route guards work
   req.user = {

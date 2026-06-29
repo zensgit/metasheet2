@@ -155,7 +155,7 @@ import { FormulaEngine } from '../formula/engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue, validatePersonValue } from '../multitable/field-codecs'
-import { conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
+import { apiTokenWriteRateLimit, conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
 import {
   AutomationRuleValidationError,
@@ -13610,7 +13610,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.patch('/records/:recordId', async (req: Request, res: Response) => {
+  router.patch('/records/:recordId', apiTokenAuth, requireScope('records:write'), apiTokenWriteRateLimit, async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     if (!recordId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
@@ -14622,7 +14622,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/records', async (req: Request, res: Response) => {
+  router.post('/records', apiTokenAuth, requireScope('records:write'), apiTokenWriteRateLimit, async (req: Request, res: Response) => {
     const schema = z.object({
       viewId: z.string().min(1).optional(),
       sheetId: z.string().min(1).optional(),
@@ -15163,7 +15163,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/patch', async (req: Request, res: Response) => {
+  router.post('/patch', apiTokenAuth, requireScope('records:write'), apiTokenWriteRateLimit, async (req: Request, res: Response) => {
     const schema = z.object({
       viewId: z.string().min(1).optional(),
       sheetId: z.string().min(1).optional(),
