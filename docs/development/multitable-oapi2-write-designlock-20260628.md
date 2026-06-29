@@ -110,12 +110,34 @@ via session. This is an explicit test obligation (§9), not an assumption.
 session-origin.
 
 ## 6. Audit (extends §2.4 "tokenId + actorId")
-Emit on **every** token write — **success AND denied** (the denied write is the abuse signal). Proposed shape:
-`{ event: 'oapi.write', tokenId, actorId (creator), operation: create|update|upsert|delete, sheetId,
-recordId(s) | batchCount, outcome: committed|denied|error, requestId, ts }`. Emitted from the **post-commit
-hook** in `RecordWriteService` / handler so it captures the real downstream outcome (incl. a deny). **Value-scrub:**
-carry the F1 invariant — key-name redaction is insufficient; scrub secret-shaped **values** (conn-string / JDBC
-/ ODBC in error/detail text) via the shared `payload-redaction` before persisting any audit/error detail.
+Audit **every** token write attempt and its final outcome — `committed | denied | error | rate_limited` —
+because the **denied** attempt is the abuse signal §4 depends on, and a denial **never commits**. A single
+post-commit hook therefore **cannot** be the audit point: a 403/422/permission-denial has no commit, so a
+post-commit emitter would silently record only successes and drop exactly the signal we need. Two layers:
+
+- **Layer 1 — route-boundary audit (authoritative for the *attempt*).** A token-write wrapper (middleware or a
+  handler `try/finally` that runs on every exit path, including thrown denials and the rate-limit 429) records
+  the outcome of **every** attempt:
+  `{ event: 'oapi.write', tokenId, actorId (creator), operation: create|update|upsert|delete, sheetId,
+  target: recordId | batchCount, outcome: committed|denied|error|rate_limited, statusCode, requestId, ts }`.
+  This layer **guarantees** denied / error / rate-limited attempts are captured — they never reach a commit hook.
+- **Layer 2 — post-commit enrichment (committed only).** For a *committed* write, the `RecordWriteService`
+  post-commit hook supplies the **real written result** (created/updated record ids, `batchCount`, mirror
+  invalidations) to enrich the Layer-1 row. It supplements committed outcomes; it **does not and cannot** cover
+  denials, and no part of the design may claim it does.
+
+**Value-scrub:** carry the F1 invariant on both layers — key-name redaction is insufficient; scrub secret-shaped
+**values** (conn-string / JDBC / ODBC in error/detail text) via the shared `payload-redaction` before persisting
+any audit/error detail.
+
+**Audit-failure posture (locked — see §10.7):**
+- **Committed writes → fail-closed.** The committed-write audit row is written **in the same DB transaction** as
+  the mutation; if the audit insert fails, the transaction **rolls back** and the request 5xx's. No committed
+  mutation escapes its audit, at no availability coupling to an external store (same DB, same txn).
+- **Denied / error / rate-limited attempts → best-effort + mandatory alert.** These have no data transaction to
+  roll back (the request already failed); if the Layer-1 write fails, emit a high-severity **alert** + a
+  structured app-log fallback — **never silently drop**. A denial cannot be "rolled back"; the mitigation for a
+  lost abuse-signal is alerting, not blocking.
 
 ## 7. Rate limit (extends §2.4 "600/min/token")
 Bucket key = **token id**, not creator user id (a creator may mint several tokens; the canonical says
@@ -133,7 +155,9 @@ knowingly; the deferral is scoped to `POST /records` (+ `/patch` iff blind-inser
 **Per write route:** valid scope + creator-RBAC → 200/201; wrong scope → **403**; revoked/expired/no-token →
 **401**; **creator-RBAC-lacks-write → 403** (the `min` spine — not a happy-200 only); **mirror/cross-base
 write-gate still fires on the token path** (token can't write a cross-base mirror it couldn't via session);
-audit event emitted (tokenId + creator, value-scrubbed) on **success AND denied**; **429** after 600/min.
+**Layer-1 audit row emitted for every outcome** — committed, **denied (403)**, error, and **rate_limited (429)** —
+tokenId + creator, value-scrubbed; committed rows additionally carry the real record ids / `batchCount`; a forced
+audit-insert failure on a **committed** write **rolls back** the mutation (fail-closed, §6); **429** after 600/min.
 **Allowlist unit (extend `multitable-oapi-read-allowlist.test.ts`):** ALLOW the exact §2 write `(method,path)`
 pairs; DENY every §2 trap (GET-on-write, write-method-on-read-path, `/lock`, `/restore`, comment edit/delete,
 `/views/:id/submit`, and — until 2b — `DELETE /records/:id`).
@@ -141,10 +165,11 @@ pairs; DENY every §2 trap (GET-on-write, write-method-on-read-path, `/lock`, `/
 ## 10. Decisions for the owner (ratify before any build)
 1. **DELETE sequencing:** 2a (create/update/upsert + comment-create) first, **2b (DELETE)** after — *or* include DELETE in 2a now? *(Recommend 2a-first. DELETE stays in scope either way — ratified.)*
 2. **Idempotency:** ship v1 **at-least-once create** (`Idempotency-Key` as fast-follow), scoped to `POST /records`? Confirm `/patch` upsert-vs-blind-insert. *(Recommend defer.)*
-3. **Audit denied writes** too (not just success), value-scrubbed? *(Recommend yes.)*
+3. **Audit denied writes** too (not just success), value-scrubbed, via the **two-layer** model of §6 (route-boundary captures every attempt incl. denials; post-commit only enriches committed)? *(Recommend yes.)*
 4. **Provenance** = `createdBy: creator`, token distinguished only in the audit event? *(Recommend yes — the ratified acts-as-creator.)*
 5. **Allowlist generalization** to method-bound entries in lockstep + the §2 trap set — approach OK? *(Recommend yes.)*
 6. **Rate-limit bucket** = per-**token-id** (not per-creator)? *(Recommend yes — matches "600/min/token".)*
+7. **Audit-failure posture (§6):** committed writes **fail-closed** (audit in the same DB txn → rollback on audit failure); denied/error/rate-limited attempts **best-effort + mandatory alert** (no txn to roll back). *(Recommend this split — vs. the stricter "all-audit fail-closed", which would block writes during any audit-store outage.)*
 
 ## 11. Out of scope (stay gated / separate slices)
 OAPI-3 (`webhooks:manage`); OAPI-4 (Option B per-base/sheet scoping); `/lock`, `/restore`, comment
@@ -156,5 +181,6 @@ The ratified canonical already decided *which* writes are token-exposed and the 
 This slice locks the **write-specific** mechanics the canonical left to the slice: the **method-bound
 allowlist as the auth boundary** (GET-only today → exact `(method,path)` lockstep, no over-match), the
 **disjoint form-bypass precedence**, the **inherited mirror/cross-base/field/row write-gates** (token ≡ session
-downstream), **audit on success-and-denial with value-scrub**, **per-token rate limiting**, **CREATE-only
+downstream), **two-layer audit** (route-boundary captures every attempt incl. denials; post-commit enriches
+committed; fail-closed on committed) **with value-scrub**, **per-token rate limiting**, **CREATE-only
 idempotency**, and **DELETE staged behind destructive controls**. Ratify §10, then OAPI-2a is a separate build opt-in.
