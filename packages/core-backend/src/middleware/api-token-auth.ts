@@ -17,6 +17,11 @@ declare global {
       apiTokenUserId?: string
       /** The API token's own id (NOT the creator's). Used to key the per-token rate limiter. */
       apiTokenId?: string
+      /** OAPI-4a per-base/sheet scope whitelists (undefined/empty = unscoped = creator-wide). */
+      apiTokenBaseIds?: string[]
+      apiTokenSheetIds?: string[]
+      /** OAPI-4a: a scrubbed reason a 403-issuing guard sets so the write-audit boundary records it. */
+      oapiAuditReason?: string
     }
   }
 }
@@ -67,6 +72,9 @@ export async function apiTokenAuth(
   req.apiTokenUserId = result.token.createdBy
   // The token's own id — keys the per-token rate limiter (OAPI-2a). NOT the creator id.
   req.apiTokenId = result.token.id
+  // OAPI-4a per-base/sheet scope — read by `oapiScopeGuard` (undefined = unscoped = creator-wide).
+  req.apiTokenBaseIds = result.token.baseIds
+  req.apiTokenSheetIds = result.token.sheetIds
 
   // Set a minimal user object so downstream route guards work
   req.user = {
@@ -91,6 +99,9 @@ export function requireScope(scope: ApiTokenScope) {
     }
 
     if (!req.apiTokenScopes.includes(scope)) {
+      // OAPI-4a: record the capability-scope denial reason for the write-audit boundary (distinct from
+      // the base/sheet `out_of_base_sheet_scope` reason set by oapiScopeGuard).
+      req.oapiAuditReason = 'insufficient_scope'
       res.status(403).json({
         ok: false,
         error: {
