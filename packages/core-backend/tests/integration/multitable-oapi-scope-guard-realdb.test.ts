@@ -155,6 +155,13 @@ describeIfDatabase('OAPI-4a scoped-token guard (real DB)', () => {
     expect(res.body?.error?.code).toBe('OUT_OF_SCOPE')
   })
 
+  // ── (c-read) out-of-scope READ → 403 (the lock requires uniform read AND write) ──
+  test('T-c read: base-scoped token reading an out-of-scope sheet → 403 OUT_OF_SCOPE', async () => {
+    const res = await getRec(`/api/multitable/records?sheetId=${SHEET_B1}`, tBaseA)
+    expect(res.status).toBe(403)
+    expect(res.body?.error?.code).toBe('OUT_OF_SCOPE')
+  })
+
   // ── (d) legacy UNSCOPED token → unchanged (creator-wide) ──────────────────
   test('T-d unscoped token writes ANY base + reads ANY sheet (legacy creator-wide, unchanged)', async () => {
     expect([200, 201]).toContain((await post('/api/multitable/records', tUnscoped, { sheetId: SHEET_B1, data: { [FLD_B1]: 'unscoped-ok' } })).status)
