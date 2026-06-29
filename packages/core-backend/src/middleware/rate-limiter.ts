@@ -274,7 +274,9 @@ export function conditionalPublicRateLimiter(
  */
 const oapiTokenWriteLimiter = createRateLimiter({
   windowMs: 60 * 1000,
-  maxRequests: 600,
+  // Default 600/min/token (design-lock §7). Env-overridable so a low-cap golden can prove that even
+  // wrong-scope write attempts are rate-limited (the limiter runs BEFORE requireScope on every route).
+  maxRequests: Number(process.env.OAPI_WRITE_RATE_LIMIT_MAX) || 600,
   keyPrefix: 'oapi-token-write',
   keyFn: (req: Request) => req.apiTokenId,
 })

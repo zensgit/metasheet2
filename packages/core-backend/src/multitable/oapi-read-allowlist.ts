@@ -91,9 +91,10 @@ const OAPI_WRITE_ROUTES: readonly { method: string; pattern: RegExp }[] = [
 ]
 
 /**
- * True only for an `mst_`-token request whose `(method, path)` matches an OAPI-2a write route. Fail-closed:
- * a wrong method on a write path, any read path, a non-token bearer, `DELETE` (2b), or any unlisted path →
- * false → the normal JWT gate (401 for an `mst_` bearer).
+ * True only for an `mst_`-token request whose `(method, path)` matches an OAPI-2a/2b write route — including
+ * single-record `DELETE /records/:id` (OAPI-2b). Fail-closed: a wrong method on a write path, any read path,
+ * a non-token bearer, an unlisted destructive sibling (`/records/:id/lock`, `/restore`, comment edit/delete),
+ * or any other unlisted path → false → the normal JWT gate (401 for an `mst_` bearer).
  */
 export function isOapiWriteAllowlistRequest(
   method: string,

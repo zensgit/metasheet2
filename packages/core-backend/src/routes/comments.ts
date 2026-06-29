@@ -296,7 +296,7 @@ export function commentsRouter(injector?: Injector): Router {
     }
   })
 
-  router.post('/api/comments', apiTokenAuth, oapiWriteAuditBoundary('create', 'comments:write'), requireScope('comments:write'), apiTokenWriteRateLimit, rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
+  router.post('/api/comments', apiTokenAuth, oapiWriteAuditBoundary('create', 'comments:write'), apiTokenWriteRateLimit, requireScope('comments:write'), rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
     const schema = z.object({
       spreadsheetId: z.string().min(1).optional(),
       containerId: z.string().min(1).optional(),

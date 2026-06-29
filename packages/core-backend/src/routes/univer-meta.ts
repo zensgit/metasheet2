@@ -13611,7 +13611,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.patch('/records/:recordId', apiTokenAuth, oapiWriteAuditBoundary('update', 'records:write'), requireScope('records:write'), apiTokenWriteRateLimit, async (req: Request, res: Response) => {
+  router.patch('/records/:recordId', apiTokenAuth, oapiWriteAuditBoundary('update', 'records:write'), apiTokenWriteRateLimit, requireScope('records:write'), async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     if (!recordId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
@@ -14624,7 +14624,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/records', apiTokenAuth, oapiWriteAuditBoundary('create', 'records:write'), requireScope('records:write'), apiTokenWriteRateLimit, async (req: Request, res: Response) => {
+  router.post('/records', apiTokenAuth, oapiWriteAuditBoundary('create', 'records:write'), apiTokenWriteRateLimit, requireScope('records:write'), async (req: Request, res: Response) => {
     const schema = z.object({
       viewId: z.string().min(1).optional(),
       sheetId: z.string().min(1).optional(),
@@ -14886,7 +14886,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.delete('/records/:recordId', apiTokenAuth, oapiWriteAuditBoundary('delete', 'records:write'), requireScope('records:write'), apiTokenWriteRateLimit, async (req: Request, res: Response) => {
+  router.delete('/records/:recordId', apiTokenAuth, oapiWriteAuditBoundary('delete', 'records:write'), apiTokenWriteRateLimit, requireScope('records:write'), async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId : ''
     if (!recordId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
@@ -15167,7 +15167,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/patch', apiTokenAuth, oapiWriteAuditBoundary('upsert', 'records:write'), requireScope('records:write'), apiTokenWriteRateLimit, async (req: Request, res: Response) => {
+  router.post('/patch', apiTokenAuth, oapiWriteAuditBoundary('upsert', 'records:write'), apiTokenWriteRateLimit, requireScope('records:write'), async (req: Request, res: Response) => {
     const schema = z.object({
       viewId: z.string().min(1).optional(),
       sheetId: z.string().min(1).optional(),
