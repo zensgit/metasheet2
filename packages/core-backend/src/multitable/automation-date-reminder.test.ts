@@ -8,8 +8,10 @@ import { describe, expect, test } from 'vitest'
 import {
   computeDateReminderOccurrence,
   isDateReminderDue,
-  dateReminderScanIntervalMs,
-  dateReminderScanWindowMs,
+  dateReminderFloorMs,
+  DATE_REMINDER_GRACE_WINDOW_MS,
+  nextDateReminderTimerDelayMs,
+  dateReminderTimeOfDayPassed,
   dateReminderCandidateDateRange,
 } from './automation-date-reminder'
 
@@ -70,7 +72,7 @@ describe('computeDateReminderOccurrence — pure, day-bucketed', () => {
 
 describe('isDateReminderDue — firing window (backfill bound)', () => {
   const now = Date.parse('2026-06-25T12:00:00.000Z')
-  const window = dateReminderScanWindowMs(DAY) // 2 days
+  const window = DATE_REMINDER_GRACE_WINDOW_MS // 2 days
   const created = Date.parse('2026-06-01T00:00:00.000Z')
 
   test('due + within window + after creation ⇒ true', () => {
@@ -96,22 +98,61 @@ describe('isDateReminderDue — firing window (backfill bound)', () => {
   })
 })
 
-describe('dateReminderScanIntervalMs — clamp [1h, 7d], default daily', () => {
-  test('default = 24h', () => {
-    expect(dateReminderScanIntervalMs({})).toBe(DAY)
+describe('dateReminderFloorMs — max(createdAt, effectiveAt) closes the conversion-backfill hole', () => {
+  const created = Date.parse('2026-01-01T00:00:00.000Z') // months ago
+  const activated = Date.parse('2026-06-25T10:00:00.000Z') // converted today
+
+  test('CONVERTED rule: floor is the (later) activation, not the old createdAt', () => {
+    expect(dateReminderFloorMs(created, '2026-06-25T10:00:00.000Z')).toBe(activated)
   })
-  test('floor at 1h', () => {
-    expect(dateReminderScanIntervalMs({ scanIntervalMs: 1000 })).toBe(60 * 60 * 1000)
+
+  test('absent effectiveAt (pre-fix date_field rule) ⇒ falls back to createdAt (no behavior change)', () => {
+    expect(dateReminderFloorMs(created, undefined)).toBe(created)
+    expect(dateReminderFloorMs(created, '')).toBe(created)
+    expect(dateReminderFloorMs(created, 'not-a-date')).toBe(created)
   })
-  test('cap at 7d', () => {
-    expect(dateReminderScanIntervalMs({ scanIntervalMs: 999 * DAY })).toBe(7 * DAY)
+
+  test('effectiveAt earlier than createdAt ⇒ createdAt wins (max)', () => {
+    expect(dateReminderFloorMs(activated, '2026-01-01T00:00:00.000Z')).toBe(activated)
+  })
+
+  test('a past-48h occurrence on a CONVERTED rule is NOT due (floored by activation)', () => {
+    const nowMs = Date.parse('2026-06-25T10:30:00.000Z')
+    const floor = dateReminderFloorMs(created, '2026-06-25T10:00:00.000Z') // activation 10:00
+    // occurrence 09:00 today — within the 48h window + after old createdAt, but BEFORE activation.
+    expect(isDateReminderDue('2026-06-25T09:00:00.000Z', nowMs, DATE_REMINDER_GRACE_WINDOW_MS, floor)).toBe(false)
+    // without the fix (floor = old createdAt) it WOULD have fired:
+    expect(isDateReminderDue('2026-06-25T09:00:00.000Z', nowMs, DATE_REMINDER_GRACE_WINDOW_MS, created)).toBe(true)
+  })
+})
+
+describe('DR-A/DR-B timeOfDay-aligned scheduling helpers (PURE)', () => {
+  const noon = Date.parse('2026-06-25T12:00:00.000Z') // noon UTC
+
+  test('grace window is a FIXED 48h constant, decoupled from any per-rule cadence (DR-D)', () => {
+    expect(DATE_REMINDER_GRACE_WINDOW_MS).toBe(2 * DAY)
+  })
+
+  test('nextDateReminderTimerDelayMs: timeOfDay still ahead today ⇒ delay to TODAY boundary', () => {
+    expect(nextDateReminderTimerDelayMs('18:00', noon)).toBe(6 * 60 * 60 * 1000) // 12:00 → 18:00 = 6h
+  })
+
+  test('nextDateReminderTimerDelayMs: timeOfDay already passed ⇒ delay to TOMORROW boundary (no boot anchor)', () => {
+    expect(nextDateReminderTimerDelayMs('09:00', noon)).toBe(21 * 60 * 60 * 1000) // 12:00 → next 09:00 = 21h
+    expect(nextDateReminderTimerDelayMs(undefined, noon)).toBe(21 * 60 * 60 * 1000) // default 09:00
+  })
+
+  test('dateReminderTimeOfDayPassed: drives the bounded catch-up (boundary inclusive)', () => {
+    expect(dateReminderTimeOfDayPassed('09:00', noon)).toBe(true) // 12:00 > 09:00
+    expect(dateReminderTimeOfDayPassed('18:00', noon)).toBe(false) // 12:00 < 18:00
+    expect(dateReminderTimeOfDayPassed('12:00', noon)).toBe(true) // == now ⇒ passed
   })
 })
 
 describe('dateReminderCandidateDateRange — SQL pre-filter brackets the productive date value', () => {
   test("a record whose occurrence lands at NOW has its date value inside the range", () => {
     const now = Date.parse('2026-06-25T12:00:00.000Z')
-    const window = dateReminderScanWindowMs(DAY)
+    const window = DATE_REMINDER_GRACE_WINDOW_MS
     const cfg = { offsetDays: 3, direction: 'before' as const }
     const { loIso, hiIso } = dateReminderCandidateDateRange(now, cfg, window)
     // occurrence = dateDay - 3d. For occurrence ≈ now (06-25), dateDay ≈ 06-28.

@@ -34,22 +34,29 @@ export interface ScheduleDateFieldConfig {
   timeOfDay?: string
   /** Persisted but v1 honors only 'UTC' (documented limitation). */
   timezone?: string
-  /** Scan cadence override in ms (default 24h). Not load-bearing for correctness — the window is. */
+  /**
+   * SERVER-SET activation instant (ISO): when this rule BECAME a date-reminder (create-as-date_field or a
+   * conversion from another trigger). The firing floor is `max(rule.createdAt, effectiveAt)`, so a rule
+   * converted from a months-old automation never backfills occurrences from before its conversion. Never
+   * client-trusted — overwritten on activation, preserved verbatim while the rule stays date_field. Absent on
+   * pre-fix rules ⇒ the floor falls back to `createdAt`.
+   */
+  effectiveAt?: string
+  /**
+   * @deprecated v1 IGNORES this (DR-D). Scheduling is `timeOfDay`-aligned daily (see automation-scheduler),
+   * and the dedup/backfill window is the fixed `DATE_REMINDER_GRACE_WINDOW_MS` constant — neither rides on a
+   * per-rule cadence knob. Retained only so older persisted rules don't break; it drives nothing.
+   */
   scanIntervalMs?: number
 }
 
-/** Default daily scan — matches the "N days before" semantic. */
-export const DEFAULT_DATE_REMINDER_SCAN_INTERVAL_MS = DAY_MS
-
-/** Clamp the scan cadence to [1h, 7d]; default daily. */
-export function dateReminderScanIntervalMs(config: Partial<ScheduleDateFieldConfig>): number {
-  const raw = typeof config.scanIntervalMs === 'number' ? config.scanIntervalMs : DEFAULT_DATE_REMINDER_SCAN_INTERVAL_MS
-  const MIN = 60 * 60 * 1000
-  const MAX = 7 * DAY_MS
-  if (!Number.isFinite(raw) || raw < MIN) return MIN
-  if (raw > MAX) return MAX
-  return Math.floor(raw)
-}
+/**
+ * The dedup/backfill RECENT WINDOW — FIXED, decoupled from any per-rule cadence (DR-D). An occurrence fires
+ * only if it is within this window of NOW (and `>= ruleCreatedAt`), so a fresh rule never backfill-blasts and
+ * a leader down longer than the window skips missed reminders (the documented at-most-once tradeoff). 48h =
+ * 2× the daily scan grace; a script-set `scanIntervalMs` can no longer silently distort it.
+ */
+export const DATE_REMINDER_GRACE_WINDOW_MS = 2 * DAY_MS
 
 /** Parse 'HH:mm' → minutes-since-midnight, or 540 (09:00) on junk. */
 function parseTimeOfDayMinutes(timeOfDay: string | undefined): number {
@@ -60,6 +67,32 @@ function parseTimeOfDayMinutes(timeOfDay: string | undefined): number {
   const mm = Number(m[2])
   if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return 9 * 60
   return hh * 60 + mm
+}
+
+/** Today's UTC `timeOfDay` boundary (ms epoch) for the calendar day containing `nowMs`. PURE. */
+function utcTimeOfDayBoundaryMs(nowMs: number, timeOfDay: string | undefined): number {
+  const d = new Date(nowMs)
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) + parseTimeOfDayMinutes(timeOfDay) * 60 * 1000
+}
+
+/**
+ * DR-A: ms from `nowMs` until the NEXT UTC `timeOfDay` boundary (today's if still ahead, else tomorrow's).
+ * The scheduler arms a `setTimeout` to this instant and re-arms each day, so the scan runs at ~the configured
+ * time rather than anchored to server-boot time. PURE.
+ */
+export function nextDateReminderTimerDelayMs(timeOfDay: string | undefined, nowMs: number): number {
+  const today = utcTimeOfDayBoundaryMs(nowMs, timeOfDay)
+  const target = today > nowMs ? today : today + DAY_MS
+  return target - nowMs
+}
+
+/**
+ * DR-B: has today's UTC `timeOfDay` boundary already passed at `nowMs`? When true at register/restart the
+ * scheduler runs ONE immediate catch-up scan — still gated by the firing window + `ruleCreatedAt`, so it can
+ * never backfill-blast — so a deploy after the configured time still delivers today's reminders. PURE.
+ */
+export function dateReminderTimeOfDayPassed(timeOfDay: string | undefined, nowMs: number): boolean {
+  return utcTimeOfDayBoundaryMs(nowMs, timeOfDay) <= nowMs
 }
 
 /**
@@ -90,28 +123,39 @@ export function computeDateReminderOccurrence(
  *   - it is within the recent scan window (`occurrence > now - scanWindowMs`) — so a fresh rule on a sheet of
  *     long-past records does NOT backfill-blast, and a replica that was down longer than the window skips
  *     missed reminders rather than replaying history, AND
- *   - it is at/after the rule's creation (`occurrence >= ruleCreatedAtMs`) — a rule never reaches into the
- *     past relative to when it was authored.
- * `scanWindowMs` should be the scan cadence plus grace (see `dateReminderScanWindowMs`). At-most-once by
- * construction (paired with claim-then-fire). All bounds are explicit product semantics, locked by goldens.
+ *   - it is at/after the rule's FLOOR (`occurrence >= floorMs`) — a rule never reaches into the past relative
+ *     to when it was authored AS A DATE-REMINDER. The floor is `dateReminderFloorMs` = max(createdAt,
+ *     effectiveAt), so a rule CONVERTED from another trigger (old createdAt) never backfills before its
+ *     conversion.
+ * `scanWindowMs` is the fixed `DATE_REMINDER_GRACE_WINDOW_MS` grace (DR-D — decoupled from any per-rule
+ * cadence). At-most-once by construction (paired with claim-then-fire). All bounds are explicit product
+ * semantics, locked by goldens.
  */
 export function isDateReminderDue(
   occurrenceIso: string,
   nowMs: number,
   scanWindowMs: number,
-  ruleCreatedAtMs: number,
+  floorMs: number,
 ): boolean {
   const occ = new Date(occurrenceIso).getTime()
   if (Number.isNaN(occ)) return false
   if (occ > nowMs) return false // not yet due
   if (occ <= nowMs - scanWindowMs) return false // older than the recent window — never backfill
-  if (occ < ruleCreatedAtMs) return false // rule does not reach into the past
+  if (occ < floorMs) return false // rule does not reach before its authoring/activation
   return true
 }
 
-/** The recent window = one scan cadence + a grace multiple, so a single missed tick still catches up. */
-export function dateReminderScanWindowMs(scanIntervalMs: number): number {
-  return scanIntervalMs * 2
+/**
+ * The "no reach before authoring" FLOOR for a date-reminder = max(rule createdAt, the date-field activation
+ * `effectiveAt`). `effectiveAt` is SERVER-SET when the rule becomes a date_field rule (create or conversion),
+ * so a rule converted from a months-old automation does not treat its old `createdAt` as the floor and
+ * backfill the recent window. Falls back to `createdAt` when `effectiveAt` is absent/unparseable (pre-fix
+ * date_field rules, which were authored as date_field at createdAt). PURE.
+ */
+export function dateReminderFloorMs(ruleCreatedAtMs: number, effectiveAt: string | undefined): number {
+  if (typeof effectiveAt !== 'string' || !effectiveAt) return ruleCreatedAtMs
+  const eff = new Date(effectiveAt).getTime()
+  return Number.isNaN(eff) ? ruleCreatedAtMs : Math.max(ruleCreatedAtMs, eff)
 }
 
 /**

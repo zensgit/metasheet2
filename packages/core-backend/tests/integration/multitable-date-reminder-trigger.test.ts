@@ -91,9 +91,15 @@ describeIfDatabase('multitable date-reminder trigger — scan/claim/fire (real D
 
     const backdated = await svc.createRule(SHEET, ruleConfig)
     RULE_BACKDATED = backdated.id
-    // Backdate creation so REC_DUE's occurrence (today 00:00) is >= created_at — the only way a freshly-made
-    // rule could fire for it. (DR-3 keeps a FRESH rule to prove the opposite.)
-    await q('UPDATE automation_rules SET created_at = $1 WHERE id = $2', [iso(TS - 10 * DAY), RULE_BACKDATED])
+    // Backdate BOTH created_at AND the date_field activation `effectiveAt` so REC_DUE's occurrence (today
+    // 00:00) is >= the firing floor max(createdAt, effectiveAt) — the only way a rule legitimately fires for
+    // it. (Backdating created_at alone no longer suffices: createRule stamps effectiveAt=now and the floor is
+    // the activation — that IS the conversion-backfill fix, proven by DR-7.)
+    await q(
+      `UPDATE automation_rules SET created_at = $1::timestamptz,
+         trigger_config = jsonb_set(trigger_config, '{effectiveAt}', to_jsonb($2::text)) WHERE id = $3`,
+      [iso(TS - 10 * DAY), iso(TS - 10 * DAY), RULE_BACKDATED],
+    )
 
     const fresh = await svc.createRule(SHEET, ruleConfig)
     RULE_FRESH = fresh.id // created_at stays ~now → must NOT fire for the past-bucketed occurrence
@@ -134,12 +140,50 @@ describeIfDatabase('multitable date-reminder trigger — scan/claim/fire (real D
     expect(await execCount(RULE_BACKDATED)).toBe(execsBefore) // and therefore fired nothing
   })
 
-  test('DR-3: BACKFILL bound — the SAME due record under a FRESH rule does NOT fire (occurrence < created_at)', async () => {
+  test('DR-3: BACKFILL bound — the SAME due record under a FRESH rule does NOT fire (occurrence < floor = effectiveAt ≈ created_at)', async () => {
     await svc.runDateReminderScanNow(RULE_FRESH)
-    // REC_DUE is fetched by the SQL window, but its occurrence (today 00:00) predates the fresh rule's
-    // creation (~now) → isDateReminderDue rejects it → zero claims, zero fires. No day-one backfill blast.
+    // REC_DUE is fetched by the SQL window, but its occurrence (today 00:00) predates the fresh rule's FLOOR
+    // (max(createdAt, effectiveAt) ≈ now, both ~creation) → isDateReminderDue rejects it → zero claims, zero
+    // fires. No day-one backfill blast.
     expect(await claimCount(RULE_FRESH)).toBe(0)
     expect(await execCount(RULE_FRESH)).toBe(0)
+  })
+
+  test('DR-7: a rule CONVERTED into date_field does NOT backfill before its activation (effectiveAt floor, not old created_at)', async () => {
+    // A months-old NON-date_field rule, then flipped to schedule.date_field today — the conversion path that
+    // the old `created_at` floor leaked through.
+    const base = await svc.createRule(SHEET, {
+      name: `dr conv ${TS}`,
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'update_record',
+      actionConfig: { fields: { [FLD_MARK]: 'reminded' } },
+    } as never)
+    const RULE_CONVERTED = base.id
+    try {
+      // Backdate created_at 30d: WITHOUT the effectiveAt floor, REC_DUE's occurrence (today 00:00) would be
+      // >= created_at and fire — exactly the conversion-backfill hole.
+      await q('UPDATE automation_rules SET created_at = $1 WHERE id = $2', [iso(TS - 30 * DAY), RULE_CONVERTED])
+      // Flip to date_field — updateRule stamps effectiveAt = now (the activation), NOT the backdated created_at.
+      await svc.updateRule(RULE_CONVERTED, SHEET, {
+        triggerType: 'schedule.date_field',
+        triggerConfig: { dateFieldId: FLD_DATE, offsetDays: 3, direction: 'before', timeOfDay: '00:00' },
+      } as never)
+
+      const cfg = await q('SELECT trigger_config FROM automation_rules WHERE id = $1', [RULE_CONVERTED])
+      const tc = (cfg.rows[0] as { trigger_config: unknown }).trigger_config
+      const ec = (typeof tc === 'string' ? JSON.parse(tc) : tc) as { effectiveAt?: string }
+      expect(typeof ec.effectiveAt).toBe('string')
+      expect(new Date(ec.effectiveAt as string).getTime()).toBeGreaterThan(TS - DAY) // recent activation, not 30d ago
+
+      await svc.runDateReminderScanNow(RULE_CONVERTED)
+      // REC_DUE's occurrence (today 00:00) < effectiveAt (≈now) → floored → ZERO fire. Conversion never backfills.
+      expect(await claimCount(RULE_CONVERTED)).toBe(0)
+      expect(await execCount(RULE_CONVERTED)).toBe(0)
+    } finally {
+      await q('DELETE FROM meta_automation_date_reminder_fires WHERE rule_id = $1', [RULE_CONVERTED]).catch(() => {})
+      await q('DELETE FROM automation_rules WHERE id = $1', [RULE_CONVERTED]).catch(() => {})
+    }
   })
 
   test('DR-6: editing the date to a NEW reminder-day fires a NEW occurrence; the old occurrence stays deduped', async () => {
