@@ -1,4 +1,5 @@
 import { Optional } from '@wendellhu/redi'
+import { randomUUID } from 'node:crypto'
 import { IConfigService, ILogger } from '../di/identifiers'
 import { HTTPAdapter } from './HTTPAdapter'
 import type { QueryResult, DataSourceConfig } from './BaseAdapter'
@@ -2198,7 +2199,9 @@ export class PLMAdapter extends HTTPAdapter {
    * context boundary, `bomLineId` selects the row). THIN consumer contract: the payload is restricted
    * to the four editable business cells (quantity / uom / find_num / refdes), an empty patch (nothing
    * changed) is REJECTED before any mock/network branch, any non-whitelisted key is stripped, and the
-   * success envelope is the minimal { ok, bom_line_id }. Permission/unauthorized (403) and the
+   * success envelope is the minimal { ok, bom_line_id }. Each governed write mints a FRESH per-edit
+   * Idempotency-Key (randomUUID) sent as a request header, so the GOVERNED provider (Yuantus #905) can
+   * dedupe a retried write without applying it twice. Permission/unauthorized (403) and the
    * provider's line∈part validation are intentionally OUT of this consumer contract; success-only.
    */
   async updateBomMultitableLine(
@@ -2233,9 +2236,15 @@ export class PLMAdapter extends HTTPAdapter {
       return { data: [], error: new Error('BOM multitable line write-back is not supported for this PLM API mode') }
     }
 
+    // Mint a fresh per-edit Idempotency-Key so the governed provider (Yuantus #905) can dedupe a
+    // retried write without applying it twice. It rides as a request header alongside the axios
+    // instance's auth/tenant defaults, which HTTPAdapter.select merges in.
+    const idempotencyKey = randomUUID()
+
     return this.select<BomMultitableLineUpdateResult>(`/api/v1/bom/multitable/${partId}/lines/${bomLineId}`, {
       method: 'PATCH',
       data: payload,
+      headers: { 'Idempotency-Key': idempotencyKey },
     })
   }
 
