@@ -33,11 +33,24 @@ reject when out-of-scope. This covers — with the SAME check — `POST /records
 `POST /patch`, `DELETE /records/:id`, `POST /api/comments`, AND the OAPI-1 read routes (`/records`, `/view`,
 `/view-aggregate`, `/records-summary`, `/fields`, comments read). One resolver, one rule, no per-route drift.
 
+**Exact write-route chain (LOCKED — prevents replaying the OAPI-2 rate-limit/audit bypass):**
+`apiTokenAuth → oapiWriteAuditBoundary → apiTokenWriteRateLimit → oapiScopeGuard → requireScope →
+[rbacGuard (comments)] → handler`. The order is load-bearing: the **audit boundary FIRST** (its
+`res.on('finish')` listener captures every outcome, including an out-of-scope 403); the **rate-limiter BEFORE
+the scope guard** (so out-of-scope token attempts are themselves rate-limited — within cap → 403, beyond → 429
+— and cannot hammer 403s unbounded; this is exactly the OAPI-2a P1 fix, not to be undone); then `oapiScopeGuard`
+(base/sheet) and `requireScope` (capability). Read routes carry no write audit, but the same
+`apiTokenAuth → oapiScopeGuard → requireScope` relative ordering applies. **Invariant: a write route's
+out-of-scope 403 MUST be both rate-limited and recorded as a denied audit row** (§5).
+
 The single-guard model requires each route to expose a **resolvable target `{sheetId, baseId}` set BEFORE the
 handler runs**. Routes whose target is implicit or multi-valued — an aggregate/summary read, or a `/patch`
-batch spanning sheets — must surface their *full* target set to the guard. If any route genuinely cannot
-resolve its target pre-handler, it gets an **explicit, named carve-out** (enforced inside the handler, audited),
-NOT a silent bypass (§9.7).
+batch spanning sheets — must surface their *full* target set to the guard. **Comment routes are a specific
+trap:** they take a client `spreadsheetId`/`containerId`/`rowId`/`targetId`, which MUST NOT be trusted as the
+base/sheet — the guard resolves sheet→base **server-side from the comment's container / target row**, and a
+resolution miss returns a **uniform 404/403 shape** (never an existence oracle distinguishing "no such
+comment/row" from "out of scope"). If any route genuinely cannot resolve its target pre-handler, it gets an
+**explicit, named carve-out** (enforced inside the handler, audited), NOT a silent bypass (§9.7).
 
 ## 3. Scope composition (the rule)
 A target sheet `S` in base `B` is **in-scope** iff:
@@ -56,8 +69,13 @@ constrained. The migration is additive (nullable columns, no backfill). No token
 
 ## 5. Out-of-scope → 403 + audit
 A wrong-base/wrong-sheet token request → **403** (a new `OUT_OF_SCOPE` code, distinct from `INSUFFICIENT_SCOPE`)
-and, for writes, a **denied** `oapi_write_audit` row (the existing route-boundary writer already audits non-2xx;
-the `detail` notes `reason: out_of_base_sheet_scope`, value-scrubbed). No mutation occurs (the guard runs before
+and, for writes, a **denied** `oapi_write_audit` row. **Locked interface (the boundary cannot infer the reason
+on its own):** the OAPI-2 route-boundary writer derives `outcome` from the status code ONLY (429→rate_limited,
+403→denied, 5xx→error), so it cannot tell OUT_OF_SCOPE from INSUFFICIENT_SCOPE. Therefore `oapiScopeGuard`
+(and `requireScope`) MUST set a scrubbed `req.oapiAuditReason` (e.g. `out_of_base_sheet_scope` /
+`insufficient_scope`) before sending the 403; the boundary writer reads `req.oapiAuditReason` and persists it
+into the audit `detail.reason` (value-scrubbed). Without this wiring a build silently writes a bare 403-denied
+row with no reason — so it is part of the §7 acceptance, not optional. No mutation occurs (the guard runs before
 the handler). Reads simply 403 (no audit table for reads in this lock). The 403 must not leak whether the
 base/sheet exists vs. is merely out-of-scope (uniform message).
 
@@ -68,7 +86,10 @@ ordinary user edits and reads are byte-for-byte unchanged. (Same discipline that
 ## 7. Phased implementation (each a separate opt-in after ratification)
 1. **OAPI-4a** — migration + `ApiTokenService`/type plumbing + the shared scope guard mounted on the **records**
    routes (read + write). Real-DB goldens.
-2. **OAPI-4b** — the comments routes (read + write) through the same guard.
+2. **OAPI-4b** — the comments routes (read + write) through the same guard. **Comment target resolution is
+   server-side**: the guard derives `sheet → base` from the comment's **container / target row**, never from the
+   client-supplied `spreadsheetId`/`containerId`; a resolution miss returns the uniform 404/403 shape (§2), not
+   an existence oracle.
 3. **OAPI-4c (UI)** — token-create UI gains base/sheet pickers. (Tokens are mint-able via API meanwhile.)
 Real-DB goldens (per slice): in-scope → allowed; out-of-scope base → 403 + denied audit + no mutation;
 out-of-scope sheet → 403; cross-base touching an out-of-scope base → 403; **legacy (unscoped) token →
