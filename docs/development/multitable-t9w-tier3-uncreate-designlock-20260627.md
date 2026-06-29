@@ -1,4 +1,4 @@
-# T9-W Tier 3 (U-3) un-create — DESIGN-LOCK (PROPOSED)
+# T9-W Tier 3 (U-3) un-create — DESIGN-LOCK (RATIFIED · runtime shipped #3335)
 
 **Date:** 2026-06-27 · **Type:** T9-W unsafe-restore write-slice design-lock, narrowed v1. Locks scope + the per-decision bars **before any runtime code**. Docs-only. Unblocks the umbrella lock's `🔒 U-3 (HOLD) … until a separate destructive-delete sign-off` (`multitable-t9-w-unsafe-restore-design-lock-20260626.md`).
 
