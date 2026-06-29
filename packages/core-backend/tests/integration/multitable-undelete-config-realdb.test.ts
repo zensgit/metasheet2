@@ -16,10 +16,11 @@
  * id-free guard separately (→ ID_COLLISION) and the single undeleteHash (→ ONE generic 409 PLAN_DRIFT), then recreates
  * inside ONE pool.transaction.
  *
- * Goldens (a)-(m): (a) flag-off 403 · (b) permission gate · (c) happy FIELD undelete (definition + trailing shift +
+ * Goldens (a)-(n) + (k2): (a) flag-off 403 · (b) permission gate · (c) happy FIELD undelete (definition + trailing shift +
  * create/restore rev) · (d) happy VIEW undelete · (e) definition-only (no values/links/auto-number) · (f)
  * id-collision/idempotency · (g) plan-drift · (h) token/response opacity · (i) no-oracle count · (j) typed-confirm ·
- * (k) single-txn atomicity · (l) audit revision · (m) sheet-scoping. Runs only with DATABASE_URL.
+ * (k) single-txn atomicity · (k2) recreate unique-race rollback · (l) audit revision · (m) sheet-scoping · (n)
+ * held-surface tripwire. Runs only with DATABASE_URL.
  *
  * NOTE on the flag: MULTITABLE_ENABLE_CONFIG_UNDELETE is read PER-REQUEST inside the handlers (not captured at router
  * build), so — exactly like the sibling multitable-uncreate-config golden — ONE app + a per-test env toggle + afterEach
@@ -332,6 +333,34 @@ describeIfDatabase('multitable config undelete — T9-W Tier 4 / U-4 (real DB)',
       expect(await rowCount(`SELECT 1 FROM meta_config_revisions WHERE sheet_id=$1 AND entity_id=$2 AND action='create' AND source='restore'`, [s, F])).toBe(0) // no create(restore) committed
     } finally {
       await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_config_revisions`, []).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${FN}()`, []).catch(() => {})
+    }
+  })
+
+  test('(k2) recreate unique-race backstop: 23505 during field insert returns 409 and rolls back trailing shift', async () => {
+    process.env[FLAG] = 'true'
+    const s = await freshSheet('k2')
+    const F = mkFieldId() // deleted field, before.order=2
+    const T = mkFieldId(); await insertField(s, T, 'K2Trailing', 'string', 3) // live trailing at order 3
+    const rev = await insertFieldDeleteRev(s, F, { name: 'K2Field', type: 'string', property: {}, order: 2 })
+    const p = await preview(s, rev); expect(p.status).toBe(200)
+    const token: string = p.body.data.previewToken
+    // Simulate the concurrency window after the explicit id-free guard but before INSERT: the insert sees a 23505.
+    // The route must map that to ID_COLLISION OUTSIDE the transaction so the preceding order shift is rolled back.
+    const FN = `ud_unique_race_${TS}`
+    const TRG = `ud_unique_race_trg_${TS}`
+    await q(`CREATE OR REPLACE FUNCTION ${FN}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'forced unique race' USING ERRCODE = '23505'; END; $fn$`, [])
+    await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_fields`, [])
+    await q(`CREATE TRIGGER ${TRG} BEFORE INSERT ON meta_fields FOR EACH ROW WHEN (NEW.id = '${F}') EXECUTE FUNCTION ${FN}()`, [])
+    try {
+      const x = await execute(s, { revisionId: rev, previewToken: token, confirm: 'undelete' })
+      expect(x.status).toBe(409)
+      expect(x.body?.error?.code).toBe('ID_COLLISION')
+      expect(await rowCount('SELECT 1 FROM meta_fields WHERE id=$1', [F])).toBe(0)
+      expect(((await q('SELECT "order" FROM meta_fields WHERE id=$1', [T])).rows[0] as { order: number }).order).toBe(3)
+      expect(await rowCount(`SELECT 1 FROM meta_config_revisions WHERE sheet_id=$1 AND entity_id=$2 AND action='update' AND changed_keys = ARRAY['order']::text[]`, [s, T])).toBe(0)
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_fields`, []).catch(() => {})
       await q(`DROP FUNCTION IF EXISTS ${FN}()`, []).catch(() => {})
     }
   })

@@ -8171,34 +8171,37 @@ export function univerMetaRouter(): Router {
         if (confirm.trim() !== 'undelete') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "undelete" to confirm recreating the deleted entity.' } })
         const before = (rev.before ?? {}) as Record<string, unknown>
         const undeleteSheetId = String(rev.sheet_id)
-        const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
-          // U4-L5 id-occupied check (FOR UPDATE) — also the idempotency guard: undelete when the entity already exists → reject.
-          const table = rev.entity_type === 'field' ? 'meta_fields' : 'meta_views'
-          const occ = (await query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE`, [rev.entity_id])) as any
-          if (occ.rows.length > 0) return { status: 409, code: 'ID_COLLISION', message: 'An entity with this id already exists; cannot undelete.' }
-          // recompute the recreate plan + verify the opaque undeleteHash → ONE generic PLAN_DRIFT on divergence.
-          const plan = await computeUndeletePlan(query, rev)
-          const verdict = verifyConfigUndeletePreviewIdentity(previewToken, {
-            sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
-            undeleteHash: hashUndeletePlan(plan), actorId: access.userId,
-          })
-          if (!verdict.valid) {
-            if (verdict.reason === 'plan_drift') return { status: 409, code: 'PLAN_DRIFT', message: 'The undelete plan changed since preview; re-preview before undeleting.' }
-            if (verdict.reason === 'expired') return { status: 410, code: 'PREVIEW_EXPIRED', message: 'The preview identity expired; re-preview before undeleting.' }
-            return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before undeleting.' }
-          }
-          try {
+        let failure: { status: number; code: string; message: string } | null = null
+        try {
+          failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+            // U4-L5 id-occupied check (FOR UPDATE) — also the idempotency guard: undelete when the entity already exists → reject.
+            const table = rev.entity_type === 'field' ? 'meta_fields' : 'meta_views'
+            const occ = (await query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE`, [rev.entity_id])) as any
+            if (occ.rows.length > 0) return { status: 409, code: 'ID_COLLISION', message: 'An entity with this id already exists; cannot undelete.' }
+            // recompute the recreate plan + verify the opaque undeleteHash → ONE generic PLAN_DRIFT on divergence.
+            const plan = await computeUndeletePlan(query, rev)
+            const verdict = verifyConfigUndeletePreviewIdentity(previewToken, {
+              sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+              undeleteHash: hashUndeletePlan(plan), actorId: access.userId,
+            })
+            if (!verdict.valid) {
+              if (verdict.reason === 'plan_drift') return { status: 409, code: 'PLAN_DRIFT', message: 'The undelete plan changed since preview; re-preview before undeleting.' }
+              if (verdict.reason === 'expired') return { status: 410, code: 'PREVIEW_EXPIRED', message: 'The preview identity expired; re-preview before undeleting.' }
+              return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before undeleting.' }
+            }
             if (rev.entity_type === 'field') {
               await recreateFieldFromConfig(query, { sheetId: undeleteSheetId, fieldId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
             } else {
               await recreateViewFromConfig(query, { sheetId: undeleteSheetId, viewId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
             }
-          } catch (e) {
-            if (e instanceof RecordServiceRestoreConflictError) return { status: 409, code: 'ID_COLLISION', message: 'An entity with this id already exists; cannot undelete.' }
-            throw e
+            return null
+          })
+        } catch (e) {
+          if (e instanceof RecordServiceRestoreConflictError) {
+            return res.status(409).json({ ok: false, error: { code: 'ID_COLLISION', message: 'An entity with this id already exists; cannot undelete.' } })
           }
-          return null
-        })
+          throw e
+        }
         if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
         if (rev.entity_type === 'field') invalidateFieldCache(undeleteSheetId)
         invalidateViewConfigCache()
