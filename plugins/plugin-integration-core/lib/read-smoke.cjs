@@ -74,6 +74,28 @@ function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
+const READ_SMOKE_LIST_SHAPE_PROBE_KEYS = Object.freeze([
+  'dataData',
+  'dataLowerData',
+  'dataRows',
+  'resultData',
+  'resultRows',
+  'rows',
+  'topLevelArray',
+])
+
+function readSmokeListShapeProbeEvidence(value) {
+  if (!isPlainObject(value)) return null
+  const evidence = {}
+  let hasEvidence = false
+  for (const key of READ_SMOKE_LIST_SHAPE_PROBE_KEYS) {
+    if (typeof value[key] !== 'boolean') continue
+    evidence[key] = value[key]
+    hasEvidence = true
+  }
+  return hasEvidence ? evidence : null
+}
+
 function mergeOperations(existing, required) {
   const values = []
   for (const source of [existing, required]) {
@@ -175,6 +197,8 @@ function readSmokeSuccessEvidence(preset, result, contract = {}) {
   if (result && result.metadata && typeof result.metadata.dataDataPresent === 'boolean') {
     evidence.dataDataPresent = result.metadata.dataDataPresent
   }
+  const listShapeProbe = readSmokeListShapeProbeEvidence(result && result.metadata && result.metadata.listShapeProbe)
+  if (listShapeProbe) evidence.listShapeProbe = listShapeProbe
   return evidence
 }
 
@@ -199,6 +223,8 @@ function readSmokeErrorEvidence(preset, error, contract = {}) {
   if (error && error.details && typeof error.details.dataDataPresent === 'boolean') {
     evidence.dataDataPresent = error.details.dataDataPresent
   }
+  const listShapeProbe = readSmokeListShapeProbeEvidence(error && error.details && error.details.listShapeProbe)
+  if (listShapeProbe) evidence.listShapeProbe = listShapeProbe
   return evidence
 }
 

@@ -963,6 +963,15 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.equal(read.metadata.requestedLimit, 2)
   assert.equal(read.metadata.returnedRecordCount, 2)
   assert.equal(read.metadata.dataDataPresent, true)
+  assert.deepEqual(read.metadata.listShapeProbe, {
+    dataData: true,
+    dataLowerData: false,
+    dataRows: false,
+    resultData: false,
+    resultRows: false,
+    rows: false,
+    topLevelArray: false,
+  })
   assert.equal(read.metadata.readPath, '/K3API/Material/GetList')
 
   const listCalls = calls.filter((call) => call.pathname === '/K3API/Material/GetList')
@@ -1046,6 +1055,59 @@ async function testK3WebApiMaterialListReadSmoke() {
   const missingRows = await missingRowsAdapter.read(buildMarkedListRequest({ object: 'material', mode: 'list' }, 2))
   assert.equal(missingRows.records.length, 0, 'LIST success envelope without Data.DATA remains an empty bounded page')
   assert.equal(missingRows.metadata.dataDataPresent, false, 'LIST success evidence carries a values-free rows-shape diagnostic')
+  assert.deepEqual(missingRows.metadata.listShapeProbe, {
+    dataData: false,
+    dataLowerData: false,
+    dataRows: false,
+    resultData: false,
+    resultRows: false,
+    rows: false,
+    topLevelArray: false,
+  })
+
+  const alternateRowsFetchImpl = async (url, options) => {
+    const parsed = new URL(url)
+    if (parsed.pathname === '/K3API/Material/GetList') {
+      return jsonResponse(200, {
+        StatusCode: 200,
+        Message: 'Material list succeeded',
+        Result: { Rows: [{ FNumber: 'SECRET-MAT' }] },
+      })
+    }
+    return fetchImpl(url, options)
+  }
+  const alternateRowsAdapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test',
+        objects: {
+          material: {
+            operations: ['read'],
+            readPath: '/K3API/Material/GetList',
+            readMethod: 'POST',
+            readMode: 'list',
+            readListBodyTemplate: { Data: { Top: 10, PageIndex: 1 } },
+            pageIndexField: 'PageIndex',
+            pageSizeField: 'PageSize',
+            maxListLimit: 3,
+          },
+        },
+      },
+    }),
+    fetchImpl: alternateRowsFetchImpl,
+  })
+  const alternateRows = await alternateRowsAdapter.read(buildMarkedListRequest({ object: 'material', mode: 'list' }, 2))
+  assert.equal(alternateRows.records.length, 0, 'shape probe does not silently widen the extractor')
+  assert.equal(alternateRows.metadata.dataDataPresent, false)
+  assert.deepEqual(alternateRows.metadata.listShapeProbe, {
+    dataData: false,
+    dataLowerData: false,
+    dataRows: false,
+    resultData: false,
+    resultRows: true,
+    rows: false,
+    topLevelArray: false,
+  }, 'LIST shape probe localizes rows under a fixed allowlisted alternate container')
 
   const rejectedFetchImpl = async (url, options) => {
     const parsed = new URL(url)
@@ -1082,6 +1144,15 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.ok(rejected instanceof K3WiseWebApiAdapterError, 'LIST explicit failure marker is rejected before row extraction')
   assert.equal(rejected.details.code, 'K3_WISE_READ_LIST_REJECTED')
   assert.equal(rejected.details.dataDataPresent, true)
+  assert.deepEqual(rejected.details.listShapeProbe, {
+    dataData: true,
+    dataLowerData: false,
+    dataRows: false,
+    resultData: false,
+    resultRows: false,
+    rows: false,
+    topLevelArray: false,
+  })
 
   const unrecognizedFetchImpl = async (url, options) => {
     const parsed = new URL(url)
@@ -1117,6 +1188,15 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.ok(unrecognized instanceof K3WiseWebApiAdapterError, 'LIST rows under Data.DATA with an unrecognized envelope gets a response-shape diagnostic')
   assert.equal(unrecognized.details.code, 'K3_WISE_READ_LIST_ENVELOPE_UNRECOGNIZED')
   assert.equal(unrecognized.details.dataDataPresent, true)
+  assert.deepEqual(unrecognized.details.listShapeProbe, {
+    dataData: true,
+    dataLowerData: false,
+    dataRows: false,
+    resultData: false,
+    resultRows: false,
+    rows: false,
+    topLevelArray: false,
+  })
 
   const modeMismatch = await adapter.read({
     object: 'material',
