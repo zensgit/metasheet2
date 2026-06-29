@@ -5542,7 +5542,19 @@ async function testReadSmokeRoute() {
             if (req.options && req.options.k3ReadMode === 'list') {
               return {
                 records: [{ FName: 'SECRET-LIST-NAME', FNumber: 'M-LIST-001' }, { FName: 'SECRET-LIST-NAME-2', FNumber: 'M-LIST-002' }],
-                metadata: { readPath: 'https://k3host/K3API/Material/GetList' },
+                metadata: {
+                  readPath: 'https://k3host/K3API/Material/GetList',
+                  listShapeProbe: {
+                    dataData: false,
+                    dataLowerData: false,
+                    dataRows: false,
+                    resultData: false,
+                    resultRows: true,
+                    rows: false,
+                    topLevelArray: false,
+                    materialNumber: 'M-LIST-001',
+                  },
+                },
               }
             }
             return {
@@ -5613,6 +5625,15 @@ async function testReadSmokeRoute() {
   assert.equal(okList.body.data.object, 'material')
   assert.equal(okList.body.data.mode, 'list')
   assert.equal(okList.body.data.recordCount, 2)
+  assert.deepEqual(okList.body.data.listShapeProbe, {
+    dataData: false,
+    dataLowerData: false,
+    dataRows: false,
+    resultData: false,
+    resultRows: true,
+    rows: false,
+    topLevelArray: false,
+  })
   const listReadArg = readArgs[readArgs.length - 1]
   assert.equal(listReadArg.object, 'material')
   assert.equal(listReadArg.limit, 10)
@@ -5637,7 +5658,7 @@ async function testReadSmokeRoute() {
     maxListLimit: 10,
   }, 'LIST applies the non-persisted Material/GetList overlay before adapter creation')
   const okListStr = JSON.stringify(okList.body.data)
-  for (const leak of ['M-LIST-001', 'SECRET-LIST-NAME', 'k3host', 'readPath']) {
+  for (const leak of ['M-LIST-001', 'SECRET-LIST-NAME', 'k3host', 'readPath', 'materialNumber']) {
     assert.ok(!okListStr.includes(leak), `LIST read-smoke response must not leak ${leak}`)
   }
 
@@ -5718,7 +5739,25 @@ async function testReadSmokeRoute() {
   const failSvc = createMockServices({
     externalSystemRegistry: { async getExternalSystemForAdapter(input) { return { id: input.id, kind: 'erp:k3-wise-webapi', credentials: {} } } },
     adapterRegistry: { createAdapter() { return {
-      async read() { const e = new Error('material M-001 secret 42'); e.name = 'K3WiseWebApiAdapterError'; e.details = { code: 'K3_WISE_READ_LIST_REJECTED', dataDataPresent: true }; throw e },
+      async read() {
+        const e = new Error('material M-001 secret 42')
+        e.name = 'K3WiseWebApiAdapterError'
+        e.details = {
+          code: 'K3_WISE_READ_LIST_REJECTED',
+          dataDataPresent: true,
+          listShapeProbe: {
+            dataData: true,
+            dataLowerData: false,
+            dataRows: false,
+            resultData: false,
+            resultRows: false,
+            rows: false,
+            topLevelArray: false,
+            materialNumber: 'M-001',
+          },
+        }
+        throw e
+      },
       async upsert(b) { failWrite.push(b); return {} },
     } } },
   })
@@ -5731,8 +5770,17 @@ async function testReadSmokeRoute() {
   assert.equal(fail.body.data.errorCode, 'K3_WISE_READ_LIST_REJECTED')
   assert.equal(fail.body.data.errorType, 'K3WiseWebApiAdapterError')
   assert.equal(fail.body.data.dataDataPresent, true)
+  assert.deepEqual(fail.body.data.listShapeProbe, {
+    dataData: true,
+    dataLowerData: false,
+    dataRows: false,
+    resultData: false,
+    resultRows: false,
+    rows: false,
+    topLevelArray: false,
+  })
   const failStr = JSON.stringify(fail.body.data)
-  assert.ok(!failStr.includes('M-001') && !failStr.includes('42'), 'read failure evidence is values-free')
+  assert.ok(!failStr.includes('M-001') && !failStr.includes('42') && !failStr.includes('materialNumber'), 'read failure evidence is values-free')
   assert.equal(failWrite.length, 0, 'no write attempted on read failure')
 
   console.log('  testReadSmokeRoute OK')

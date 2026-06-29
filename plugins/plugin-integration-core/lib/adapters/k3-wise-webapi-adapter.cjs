@@ -787,8 +787,21 @@ function materialListRowsCandidate(data) {
   return null
 }
 
+function materialListShapeProbe(data) {
+  return {
+    dataData: Array.isArray(getPath(data, 'Data.DATA')),
+    dataLowerData: Array.isArray(getPath(data, 'Data.data')),
+    dataRows: Array.isArray(getPath(data, 'Data.Rows')),
+    resultData: Array.isArray(getPath(data, 'Result.Data')),
+    resultRows: Array.isArray(getPath(data, 'Result.Rows')),
+    rows: Array.isArray(getPath(data, 'Rows')),
+    topLevelArray: Array.isArray(data),
+  }
+}
+
 function materialListDataDataPresent(data) {
-  return Array.isArray(getPath(data, 'Data.DATA')) || Array.isArray(getPath(data, 'Data.data'))
+  const probe = materialListShapeProbe(data)
+  return probe.dataData || probe.dataLowerData
 }
 
 function materialListBusinessSuccess(data, config) {
@@ -1312,7 +1325,8 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
         })
       }
 
-      const dataDataPresent = materialListDataDataPresent(readResponse.data)
+      const listShapeProbe = materialListShapeProbe(readResponse.data)
+      const dataDataPresent = listShapeProbe.dataData || listShapeProbe.dataLowerData
       if (!materialListBusinessSuccess(readResponse.data, config)) {
         const failureCode = materialListBusinessFailureCode(readResponse.data)
         throw new K3WiseWebApiAdapterError(String(responseMessage(readResponse.data, config, 'K3 WISE list read business response failed')), {
@@ -1320,6 +1334,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           object: request.object,
           responseCode: responseFailureCode(readResponse.data, config, failureCode),
           dataDataPresent,
+          listShapeProbe,
         })
       }
 
@@ -1333,6 +1348,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           requestedLimit: request.limit,
           returnedRecordCount: records.length,
           dataDataPresent,
+          listShapeProbe,
           readPath,
           readOnly: true,
         },
