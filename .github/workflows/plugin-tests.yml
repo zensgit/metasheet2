@@ -73,6 +73,7 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
         node-version: [18.x, 20.x]
 
@@ -222,6 +223,7 @@ jobs:
             tests/integration/multitable-sheet-config-revert-realdb.test.ts \
             tests/integration/multitable-field-retype-revert-realdb.test.ts \
             tests/integration/multitable-uncreate-config-realdb.test.ts \
+            tests/integration/multitable-undelete-config-realdb.test.ts \
             tests/integration/multitable-revert-pit-realdb.test.ts \
             tests/integration/multitable-undelete-pit-realdb.test.ts \
             tests/integration/multitable-reset-pit-realdb.test.ts \
