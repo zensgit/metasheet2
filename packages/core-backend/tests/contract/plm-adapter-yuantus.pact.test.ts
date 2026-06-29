@@ -116,10 +116,10 @@ const PLM_ADAPTER_PACT_PATHS = [
   // PLM-COLLAB V1.1: the two modern Path-A surfaces (advisory manifest + governed BOM context).
   { method: 'GET', path: '/api/v1/integrations/capabilities' },
   { method: 'GET', path: '/api/v1/bom/multitable/01H000000000000000000000P1/context' },
-  // PLM-COLLAB P3 (方案1) BOM multitable write-back: depublished from the main pact — the provider
-  // endpoint is Phase 7 (Yuantus #884), owner-gated/unbuilt, so a main pact for it false-fails the
-  // provider's blocking broker gate (consumer-ahead). Re-add this interaction only when the Yuantus
-  // provider build is ratified. PLMAdapter.ts keeps the client method (see endpointsToFind below).
+  // PLM-COLLAB P3 (方案1) BOM multitable write-back: RE-ADDED now that the Yuantus provider endpoint
+  // landed (#905, ratified design #901). Uses the provider's seeded W1/W3 fixture + the distinct
+  // write SKU providerState; the consumer sends an Idempotency-Key (provider 400s without it).
+  { method: 'PATCH', path: '/api/v1/bom/multitable/01H000000000000000000000W1/lines/01H000000000000000000000W3' },
 ] as const
 
 const PARENT_HOST_PACT_PATHS = [
@@ -233,12 +233,34 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
     expect(rules).toHaveProperty('$.expires_in')
   })
 
-  // PLM-COLLAB P3 (方案1) BOM multitable write-back contract: DEPUBLISHED from the main pact.
-  // Its provider endpoint (PATCH /bom/multitable/{part}/lines/{line}) is Phase 7 (Yuantus #884),
-  // owner-gated and unbuilt, so publishing it on the consumer main pact false-fails Yuantus's
-  // blocking broker provider-verify gate (consumer-ahead-of-provider). The interaction (and this
-  // `it` documenting it) is removed until the provider build is ratified; PLMAdapter.ts retains
-  // the client method, which `endpointsToFind` above still asserts.
+  // PLM-COLLAB P3 (方案1) BOM multitable write-back contract: RE-ADDED. The Yuantus provider
+  // endpoint landed (#905, ratified design #901), so the consumer pact re-publishes the governed
+  // PATCH interaction (it was temporarily depublished in #3337 while the provider was unbuilt).
+  it('documents the P3 governed BOM multitable line write-back contract (方案1, re-added post-#905)', () => {
+    const pact = loadPact()
+    const PATH = '/api/v1/bom/multitable/01H000000000000000000000W1/lines/01H000000000000000000000W3'
+    const matches = pact.interactions.filter(i => i.request.path === PATH)
+    // success-only: EXACTLY ONE interaction for this path, status 200, no 403/error twin
+    expect(matches).toHaveLength(1)
+    const interaction = matches[0]
+    expect(interaction.request.method).toBe('PATCH')
+    expect(interaction.response.status).toBe(200)
+
+    // provider state names the DISTINCT write SKU (not the read projection's plm.bom_multitable)
+    expect(interaction.providerStates).toBeDefined()
+    expect(interaction.providerStates![0].name).toContain('plm.bom_multitable_writeback')
+
+    // the provider REQUIRES a per-edit Idempotency-Key; the consumer declares + (PLMAdapter) sends it
+    expect(interaction.request.headers).toBeDefined()
+    expect(interaction.request.headers!['Idempotency-Key']).toBeTruthy()
+
+    // request body is whitelisted to the four editable cells; response is the thin {ok, bom_line_id}
+    const reqBody = interaction.request.body as Record<string, unknown>
+    expect(Object.keys(reqBody).sort()).toEqual(['find_num', 'quantity', 'refdes', 'uom'])
+    const resBody = interaction.response.body as Record<string, unknown>
+    expect(resBody.ok).toBe(true)
+    expect(resBody).toHaveProperty('bom_line_id')
+  })
 
   it('aml/apply request body documents the RPC envelope shape used by PLMAdapter', () => {
     const pact = loadPact()

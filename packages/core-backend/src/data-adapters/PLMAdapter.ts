@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { Optional } from '@wendellhu/redi'
 import { IConfigService, ILogger } from '../di/identifiers'
 import { HTTPAdapter } from './HTTPAdapter'
@@ -2236,6 +2237,12 @@ export class PLMAdapter extends HTTPAdapter {
     return this.select<BomMultitableLineUpdateResult>(`/api/v1/bom/multitable/${partId}/lines/${bomLineId}`, {
       method: 'PATCH',
       data: payload,
+      // The governed write-back endpoint REQUIRES a per-edit Idempotency-Key (the provider 400s
+      // without it; it is the single-use/replay-guard key — design #901 §2). A fresh key per call
+      // means a transport retry of the SAME edit is idempotent (provider returns the cached result),
+      // while a genuinely new edit is a distinct key. Merged on top of the connection's auth/tenant
+      // headers by HTTPAdapter.select.
+      headers: { 'Idempotency-Key': randomUUID() },
     })
   }
 
