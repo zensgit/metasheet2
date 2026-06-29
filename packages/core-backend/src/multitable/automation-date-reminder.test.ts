@@ -10,9 +10,12 @@ import {
   isDateReminderDue,
   dateReminderFloorMs,
   DATE_REMINDER_GRACE_WINDOW_MS,
+  DATE_REMINDER_LEDGER_RETENTION_DAYS,
+  DATE_REMINDER_LEDGER_RETENTION_MS,
   nextDateReminderTimerDelayMs,
   dateReminderTimeOfDayPassed,
   dateReminderCandidateDateRange,
+  dateReminderLedgerRetentionCutoffIso,
 } from './automation-date-reminder'
 
 const DAY = 24 * 60 * 60 * 1000
@@ -146,6 +149,18 @@ describe('DR-A/DR-B timeOfDay-aligned scheduling helpers (PURE)', () => {
     expect(dateReminderTimeOfDayPassed('09:00', noon)).toBe(true) // 12:00 > 09:00
     expect(dateReminderTimeOfDayPassed('18:00', noon)).toBe(false) // 12:00 < 18:00
     expect(dateReminderTimeOfDayPassed('12:00', noon)).toBe(true) // == now ⇒ passed
+  })
+})
+
+describe('date-reminder ledger retention helpers (PURE)', () => {
+  test('retention window is fixed at 365 days', () => {
+    expect(DATE_REMINDER_LEDGER_RETENTION_DAYS).toBe(365)
+    expect(DATE_REMINDER_LEDGER_RETENTION_MS).toBe(365 * DAY)
+  })
+
+  test('dateReminderLedgerRetentionCutoffIso: cutoff is based on fired_at age', () => {
+    const now = Date.parse('2026-06-29T12:00:00.000Z')
+    expect(dateReminderLedgerRetentionCutoffIso(now)).toBe('2025-06-29T12:00:00.000Z')
   })
 })
 

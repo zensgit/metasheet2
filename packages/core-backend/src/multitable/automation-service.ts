@@ -8,7 +8,9 @@ import {
   isDateReminderDue,
   dateReminderFloorMs,
   DATE_REMINDER_GRACE_WINDOW_MS,
+  DATE_REMINDER_LEDGER_SWEEP_INTERVAL_MS,
   dateReminderCandidateDateRange,
+  dateReminderLedgerRetentionCutoffIso,
   type ScheduleDateFieldConfig,
 } from './automation-date-reminder'
 import { ensureRecordNotLocked } from './record-lock'
@@ -653,6 +655,7 @@ export class AutomationService {
   private jobService: AutomationJobService
   private suspensionService: AutomationSuspensionService
   private approvalBridgeService: AutomationApprovalBridgeService
+  private lastDateReminderLedgerSweepMs = 0
   /** Kept for backward-compat with raw SQL in executor actions */
   private queryFn: AutomationQueryFn
 
@@ -1127,6 +1130,41 @@ export class AutomationService {
   }
 
   /**
+   * Delete old date-reminder claim rows. This is an ops/test seam and is intentionally keyed by `fired_at`
+   * (ledger age), not `occurrence_ts` (the record-relative reminder instant).
+   */
+  async sweepDateReminderLedger(nowMs = Date.now()): Promise<number> {
+    const cutoffIso = dateReminderLedgerRetentionCutoffIso(nowMs)
+    const deleted = await sql<{ count: number | string }>`
+      WITH deleted AS (
+        DELETE FROM meta_automation_date_reminder_fires
+         WHERE fired_at < ${cutoffIso}
+        RETURNING 1
+      )
+      SELECT count(*)::int AS count FROM deleted
+    `.execute(this.db)
+    return Number(deleted.rows[0]?.count ?? 0)
+  }
+
+  /**
+   * Opportunistic ledger aging: any active date-reminder scan sweeps at most once/day per process. This avoids
+   * a second scheduler while still bounding the long-lived dedupe ledger. Cleanup is best-effort; a retention
+   * failure must never block reminder delivery.
+   */
+  private async sweepDateReminderLedgerIfDue(nowMs: number): Promise<void> {
+    if (nowMs - this.lastDateReminderLedgerSweepMs < DATE_REMINDER_LEDGER_SWEEP_INTERVAL_MS) return
+    this.lastDateReminderLedgerSweepMs = nowMs
+    try {
+      const deleted = await this.sweepDateReminderLedger(nowMs)
+      if (deleted > 0) {
+        logger.info(`Date-reminder ledger retention swept ${deleted} old row(s)`)
+      }
+    } catch (err) {
+      logger.warn('Date-reminder ledger retention sweep failed; continuing reminder scan', err instanceof Error ? err : undefined)
+    }
+  }
+
+  /**
    * Date-reminder scan (`schedule.date_field`). For each record in the rule's sheet whose date field yields a
    * DUE occurrence, claim it in the idempotency ledger and fire the rule once with the record as context.
    *
@@ -1154,6 +1192,7 @@ export class AutomationService {
     }
 
     const nowMs = Date.now()
+    await this.sweepDateReminderLedgerIfDue(nowMs)
     // DR-D: fixed grace window (decoupled from any per-rule cadence) — bounds backfill + missed-tick catch-up.
     const scanWindowMs = DATE_REMINDER_GRACE_WINDOW_MS
     const createdAtMs = new Date(rule.createdAt).getTime()
