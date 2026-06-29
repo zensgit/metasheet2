@@ -16831,9 +16831,10 @@ function attendanceDistinctPeriodStarts(from, to, startFn) {
 // assignment covers (fixed-apply writes shift assignments too) and SKIPS default-rule fallback days
 // (no explicit assignment ref). Otherwise the org default (e.g. Mon–Fri 09:00–18:00) would consume the
 // whole cap and block every save — so caps must measure scheduled load the admin added, not the baseline.
-// Reuses the SAME resolver primitives as comprehensiveHours (buildWorkContextPrefetch +
-// resolveWorkContextFromPrefetch + calculateAttendanceComprehensiveShiftPlannedMinutes) — no hand-rolled
-// two-table union. Pass the transaction as `db` so it sees the uncommitted post-write state.
+// Reuses the same assignment/rotation prefetch primitives as comprehensiveHours, but deliberately
+// does NOT reuse resolveWorkContextFromPrefetch/calculateAttendancePlannedMinutesFromWorkContext:
+// those are effective-calendar primitives and may zero an explicit assignment on a holiday/policy
+// rest day. This cap measures the explicit load the admin is trying to save.
 async function projectExplicitScheduledMinutesByUser(db, orgId, userId, from, to) {
   const workDates = enumerateAttendanceCalendarDateRange(from, to)
   const defaultRule = await loadDefaultRule(db, orgId)
@@ -16841,12 +16842,33 @@ async function projectExplicitScheduledMinutesByUser(db, orgId, userId, from, to
   const items = []
   let total = 0
   for (const date of workDates) {
-    const context = resolveWorkContextFromPrefetch({ orgId, userId, workDate: date, defaultRule, prefetched })
-    // Only days an explicit shift OR rotation assignment covers count toward the cap (fixed-apply writes
-    // shift assignments too). Use the raw assignment refs — not `context.source` — so the calendarPolicy
-    // override layer (which runs after `source` is set) can't flip the classification.
-    if (!context || (!context.assignment && !context.rotationAssignment)) continue
-    const minutes = calculateAttendancePlannedMinutesFromWorkContext(context, defaultRule)
+    const rotationInfo = resolveRotationInfoFromPrefetch(
+      prefetched.rotationAssignmentsByUser?.get(userId),
+      date,
+      prefetched.rotationShiftsById,
+    )
+    let minutes = 0
+    let hasExplicitAssignment = false
+    if (rotationInfo?.assignment && rotationInfo.shift) {
+      hasExplicitAssignment = true
+      minutes = isAttendanceProfileWorkingOnDate(rotationInfo.shift, date)
+        ? calculateAttendanceComprehensiveShiftPlannedMinutes(rotationInfo.shift)
+        : 0
+    } else {
+      const assignmentSlots = resolveShiftAssignmentsFromPrefetch(
+        prefetched.shiftAssignmentsByUser?.get(userId),
+        date,
+        { multiShiftDay: prefetched.multiShiftDay },
+      )
+      if (assignmentSlots.length > 0) {
+        hasExplicitAssignment = true
+        minutes = assignmentSlots.reduce((sum, entry) => {
+          if (!isShiftAssignmentEntryWorkingOnDate(entry, date)) return sum
+          return sum + calculateAttendanceComprehensiveShiftPlannedMinutes(entry.shift)
+        }, 0)
+      }
+    }
+    if (!hasExplicitAssignment) continue
     items.push({ date, plannedMinutes: minutes })
     total += minutes
   }

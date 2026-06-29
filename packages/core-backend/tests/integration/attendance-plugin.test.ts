@@ -4537,6 +4537,14 @@ attendanceIntegrationDescribe(
     let smallShiftId: string | undefined
     let rotationRuleId: string | undefined
     let smallRotationRuleId: string | undefined
+    let complianceHolidayTouched = false
+    let complianceHolidayRows: Array<{
+      id: string
+      holiday_date: string
+      name: string | null
+      is_working_day: boolean
+      origin: string | null
+    }> = []
     try {
       // Compliance enforcement is orthogonal to RBAC (it runs after the dispatch check, inside the
       // txn). Bypass RBAC so each save path reaches the guard without per-route permission plumbing.
@@ -4555,6 +4563,30 @@ attendanceIntegrationDescribe(
       const rtCompliance = (rt.body as { data?: { shiftCompliance?: { dailyMaxMinutes?: number; enforcement?: string } } } | undefined)?.data?.shiftCompliance
       expect(rtCompliance?.dailyMaxMinutes).toBe(60)
       expect(rtCompliance?.enforcement).toBe('block')
+
+      // Regression fixture: shift-compliance caps count explicit assignment load, not effective
+      // calendar minutes. A rest holiday on the target date must not turn a 9h explicit assignment
+      // into a 0-minute projection and let the save through.
+      const priorHolidayRows = await pool.query<{
+        id: string
+        holiday_date: string
+        name: string | null
+        is_working_day: boolean
+        origin: string | null
+      }>(
+        `SELECT id, to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date, name, is_working_day, origin
+         FROM attendance_holidays
+         WHERE org_id = $1 AND holiday_date = $2::date`,
+        ['default', startA],
+      )
+      complianceHolidayRows = priorHolidayRows.rows
+      await pool.query('DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2::date', ['default', startA])
+      await pool.query(
+        `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
+         VALUES ($1, 'default', $2, $3, false, 'manual')`,
+        [randomUuidV4(), startA, `Compliance Rest ${runSuffix}`],
+      )
+      complianceHolidayTouched = true
 
       // A 9h shift (540 min planned every day, > 60) and a 30-min shift (< 60).
       const bigShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, { method: 'POST', headers, body: JSON.stringify({ name: `compliance-big-${runSuffix}`, timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00', workingDays: [0, 1, 2, 3, 4, 5, 6] }) })
@@ -4643,6 +4675,20 @@ attendanceIntegrationDescribe(
       }
       await pool.query('DELETE FROM attendance_shift_assignments WHERE user_id = ANY($1::text[])', [[targetUserId, memberUserId]]).catch(() => undefined)
       await pool.query('DELETE FROM attendance_rotation_assignments WHERE user_id = $1', [targetUserId]).catch(() => undefined)
+      if (complianceHolidayTouched) {
+        await pool.query('DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2::date', ['default', startA]).catch(() => undefined)
+        for (const row of complianceHolidayRows) {
+          await pool.query(
+            `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
+             VALUES ($1, 'default', $2, $3, $4, $5)
+             ON CONFLICT (org_id, holiday_date) DO UPDATE SET
+               name = EXCLUDED.name,
+               is_working_day = EXCLUDED.is_working_day,
+               origin = EXCLUDED.origin`,
+            [row.id, row.holiday_date, row.name, row.is_working_day, row.origin],
+          ).catch(() => undefined)
+        }
+      }
       if (rotationRuleId) await pool.query('DELETE FROM attendance_rotation_rules WHERE id = $1', [rotationRuleId]).catch(() => undefined)
       if (smallRotationRuleId) await pool.query('DELETE FROM attendance_rotation_rules WHERE id = $1', [smallRotationRuleId]).catch(() => undefined)
       if (groupId) {
