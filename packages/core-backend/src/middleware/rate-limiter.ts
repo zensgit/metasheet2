@@ -131,8 +131,9 @@ export class RedisRateLimitStore implements RateLimitStore {
 export interface RateLimiterOptions {
   /** Time window in milliseconds */
   windowMs: number
-  /** Maximum number of requests allowed within the window */
-  maxRequests: number
+  /** Maximum number of requests allowed within the window. A function is evaluated PER-REQUEST (runtime cap),
+   *  so an env-driven cap is honored regardless of when the limiter module was first imported. */
+  maxRequests: number | (() => number)
   /** Prefix used to namespace keys (e.g. 'public-form-submit') */
   keyPrefix: string
   /** Optional Redis client — enables distributed rate limiting.
@@ -181,7 +182,8 @@ export function createRateLimiter(options: RateLimiterOptions) {
     const key = `ratelimit:${keyPrefix}:${rawKey}`
 
     const handleResult = (result: { count: number; ttlMs: number }) => {
-      if (result.count > maxRequests) {
+      const max = typeof maxRequests === 'function' ? maxRequests() : maxRequests
+      if (result.count > max) {
         const retryAfterSeconds = Math.ceil(result.ttlMs / 1000)
         res.set('Retry-After', String(retryAfterSeconds))
         if (onLimited) {
@@ -276,7 +278,7 @@ const oapiTokenWriteLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   // Default 600/min/token (design-lock §7). Env-overridable so a low-cap golden can prove that even
   // wrong-scope write attempts are rate-limited (the limiter runs BEFORE requireScope on every route).
-  maxRequests: Number(process.env.OAPI_WRITE_RATE_LIMIT_MAX) || 600,
+  maxRequests: () => Number(process.env.OAPI_WRITE_RATE_LIMIT_MAX) || 600,
   keyPrefix: 'oapi-token-write',
   keyFn: (req: Request) => req.apiTokenId,
 })

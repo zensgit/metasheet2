@@ -6,9 +6,9 @@
  * beyond the cap it is 429 (rate_limited audit) — proving rate-limiting covers ALL token write attempts, not
  * only scope-correct ones.
  *
- * The 600/min cap is lowered via `OAPI_WRITE_RATE_LIMIT_MAX` (read when the rate-limiter module loads), set
- * BEFORE the dynamic `univerMetaRouter` import so the limiter constructs with the low cap. Runs only with
- * DATABASE_URL.
+ * The 600/min cap is lowered via `OAPI_WRITE_RATE_LIMIT_MAX`, which the limiter reads PER-REQUEST (runtime
+ * cap) — so it is honored regardless of when the rate-limiter module was first imported in this batched
+ * Vitest invocation (the module-load-time read was unreliable across files). Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -17,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { db } from '../../src/db/db'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
+import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -30,8 +31,7 @@ let tokReadId = ''
 
 describeIfDatabase('OAPI-2a wrong-scope writes are rate-limited (real DB)', () => {
   beforeAll(async () => {
-    process.env.OAPI_WRITE_RATE_LIMIT_MAX = '2' // low cap; read when the rate-limiter module loads below
-    const { univerMetaRouter } = await import('../../src/routes/univer-meta')
+    process.env.OAPI_WRITE_RATE_LIMIT_MAX = '2' // runtime cap (read per-request) — independent of import timing
     app = express()
     app.use(express.json())
     app.use('/api/multitable', univerMetaRouter())
