@@ -1,7 +1,8 @@
 /**
  * Automation Scheduler — V1
  * Manages cron and interval triggers.
- * V1 supports setInterval-based scheduling and simplified cron patterns.
+ * Cron triggers use UTC minute-resolution next-occurrence scheduling; interval
+ * and date-field scans use fixed setInterval cadences.
  */
 
 import { Logger } from '../core/logger'
@@ -59,15 +60,161 @@ export interface AutomationSchedulerRuntimeOptions {
   leaderStateGauge?: AutomationSchedulerLeaderGauge
 }
 
+type CronField = ReadonlySet<number>
+
+interface ParsedCronExpression {
+  minute: CronField
+  hour: CronField
+  dayOfMonth: CronField
+  month: CronField
+  dayOfWeek: CronField
+  dayOfMonthWildcard: boolean
+  dayOfWeekWildcard: boolean
+}
+
+function parseCronField(
+  raw: string,
+  min: number,
+  max: number,
+  options: { sundaySeven?: boolean } = {},
+): { values: Set<number>; wildcard: boolean } | null {
+  if (!raw) return null
+  const values = new Set<number>()
+  const wildcard = raw === '*'
+
+  for (const piece of raw.split(',')) {
+    if (!piece) return null
+    const [rangePart, stepPart] = piece.split('/')
+    if (piece.split('/').length > 2) return null
+    const step = stepPart === undefined ? 1 : Number(stepPart)
+    if (!Number.isInteger(step) || step < 1) return null
+
+    let start: number
+    let end: number
+    if (rangePart === '*') {
+      start = min
+      end = max
+    } else if (rangePart.includes('-')) {
+      const [a, b] = rangePart.split('-')
+      if (!a || !b || rangePart.split('-').length !== 2) return null
+      start = Number(a)
+      end = Number(b)
+    } else {
+      start = Number(rangePart)
+      end = start
+    }
+
+    if (!Number.isInteger(start) || !Number.isInteger(end)) return null
+    if (start < min || start > max || end < min || end > max) return null
+    if (start > end) return null
+    for (let v = start; v <= end; v += step) {
+      values.add(options.sundaySeven && v === 7 ? 0 : v)
+    }
+  }
+
+  if (values.size === 0) return null
+  return { values, wildcard }
+}
+
+export function parseCronExpression(expression: string): ParsedCronExpression | null {
+  const parts = expression.trim().split(/\s+/)
+  if (parts.length !== 5) return null
+  const [minuteRaw, hourRaw, domRaw, monthRaw, dowRaw] = parts
+  const minute = parseCronField(minuteRaw, 0, 59)
+  const hour = parseCronField(hourRaw, 0, 23)
+  const dayOfMonth = parseCronField(domRaw, 1, 31)
+  const month = parseCronField(monthRaw, 1, 12)
+  const dayOfWeek = parseCronField(dowRaw, 0, 7, { sundaySeven: true })
+  if (!minute || !hour || !dayOfMonth || !month || !dayOfWeek) return null
+  return {
+    minute: minute.values,
+    hour: hour.values,
+    dayOfMonth: dayOfMonth.values,
+    month: month.values,
+    dayOfWeek: dayOfWeek.values,
+    dayOfMonthWildcard: dayOfMonth.wildcard,
+    dayOfWeekWildcard: dayOfWeek.wildcard,
+  }
+}
+
+function cronMatches(parsed: ParsedCronExpression, date: Date): boolean {
+  if (!parsed.minute.has(date.getUTCMinutes())) return false
+  if (!parsed.hour.has(date.getUTCHours())) return false
+  if (!parsed.month.has(date.getUTCMonth() + 1)) return false
+
+  const domMatches = parsed.dayOfMonth.has(date.getUTCDate())
+  const dowMatches = parsed.dayOfWeek.has(date.getUTCDay())
+  if (parsed.dayOfMonthWildcard && parsed.dayOfWeekWildcard) return true
+  if (parsed.dayOfMonthWildcard) return dowMatches
+  if (parsed.dayOfWeekWildcard) return domMatches
+  // Standard cron semantics: when both DOM and DOW are restricted, either can match.
+  return domMatches || dowMatches
+}
+
+/** Leap-safe maximum day each month (1..12) can host (February = 29). */
+const MONTH_MAX_DAYS: Readonly<Record<number, number>> = {
+  1: 31, 2: 29, 3: 31, 4: 30, 5: 31, 6: 30,
+  7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31,
+}
+
 /**
- * Simplified cron parser for V1.
- * Supports common patterns:
- *   - * / N * * * *  (every N minutes)
- *   - 0 * * * *      (hourly at :00)
- *   - 0 0 * * *      (daily at midnight)
- *   - 0 0 * * 1      (weekly on Monday at midnight)
- *
- * Returns interval in milliseconds, or null if unsupported.
+ * True when a PARSED cron's day fields can never select a real calendar day.
+ * Provably safe — only reports "impossible" when day-of-week is a wildcard
+ * (otherwise the DOM/DOW OR-semantics could still match via a weekday, so the
+ * day is reachable), day-of-month is restricted, and the smallest requested
+ * day-of-month exceeds the largest day ANY restricted month can host.
+ */
+function dayUnreachable(parsed: ParsedCronExpression): boolean {
+  // DOW restricted → a matching weekday can occur regardless of DOM (OR-semantics).
+  if (!parsed.dayOfWeekWildcard) return false
+  // DOM wildcard → every day is allowed.
+  if (parsed.dayOfMonthWildcard) return false
+
+  let maxHostableDay = 0
+  for (const m of parsed.month) {
+    const d = MONTH_MAX_DAYS[m] ?? 31
+    if (d > maxHostableDay) maxHostableDay = d
+  }
+  let minRequestedDay = Infinity
+  for (const d of parsed.dayOfMonth) {
+    if (d < minRequestedDay) minRequestedDay = d
+  }
+  return minRequestedDay > maxHostableDay
+}
+
+/**
+ * Cheap pre-check exposing {@link dayUnreachable} for a raw cron string so
+ * `nextCronOccurrenceMs` (and tests) can prune day-impossible expressions —
+ * e.g. `0 0 30 2 *` (February 30th) — instead of scanning ~5 years of minutes.
+ * Returns `false` for unparseable input (that null path is handled by the
+ * caller's own parse). February uses 29 so `0 0 29 2 *` is NOT pruned.
+ */
+export function cronHasNoMatchingDay(expression: string): boolean {
+  const parsed = parseCronExpression(expression)
+  if (!parsed) return false
+  return dayUnreachable(parsed)
+}
+
+export function nextCronOccurrenceMs(expression: string, fromMs: number = Date.now()): number | null {
+  const parsed = parseCronExpression(expression)
+  if (!parsed) return null
+  // Fast path: a day-impossible cron (e.g. Feb 30) would otherwise scan the full
+  // ~5-year window before returning null. Short-circuit it up front.
+  if (dayUnreachable(parsed)) return null
+  const minuteMs = 60 * 1000
+  let candidate = Math.floor(fromMs / minuteMs) * minuteMs + minuteMs
+  const max = candidate + 5 * 366 * 24 * 60 * minuteMs
+  while (candidate <= max) {
+    if (cronMatches(parsed, new Date(candidate))) return candidate
+    candidate += minuteMs
+  }
+  return null
+}
+
+/**
+ * Legacy helper kept for callers/tests that need the old fixed-interval
+ * approximation. The scheduler itself uses `nextCronOccurrenceMs` so custom
+ * wall-clock expressions such as `15 9 * * *` fire at the requested time.
  */
 export function parseCronToIntervalMs(expression: string): number | null {
   const parts = expression.trim().split(/\s+/)
@@ -242,7 +389,7 @@ export class AutomationScheduler {
     this.isLeader = false
     this.setLeaderGauge('relinquished')
     for (const [ruleId, timer] of this.timers.entries()) {
-      clearInterval(timer)
+      this.clearTimer(timer)
       logger.info(`Cleared schedule for rule ${ruleId} after leader loss`)
     }
     this.timers.clear()
@@ -255,6 +402,52 @@ export class AutomationScheduler {
   /** Test / diagnostics hook. */
   get leader(): boolean {
     return this.isLeader
+  }
+
+  private runScheduledRule(rule: AutomationRule): void {
+    try {
+      const result = this.callback(rule)
+      if (result && typeof (result as Promise<void>).catch === 'function') {
+        (result as Promise<void>).catch((err) => {
+          logger.error(`Scheduled rule ${rule.id} execution failed`, err instanceof Error ? err : undefined)
+        })
+      }
+    } catch (err) {
+      logger.error(`Scheduled rule ${rule.id} execution failed`, err instanceof Error ? err : undefined)
+    }
+  }
+
+  /**
+   * Cancel a rule timer. The `timers` map mixes setTimeout handles (cron,
+   * which re-arm) and setInterval handles (interval / date_field scans).
+   * Node's `clearTimeout` cancels both kinds — they share one `Timeout`
+   * object — so routing every rule-timer teardown through this one helper
+   * keeps the call sites consistent without tracking each handle's kind. The
+   * renewal loop is cleared separately with `clearInterval`; it is not a rule
+   * timer and never enters this map.
+   */
+  private clearTimer(timer: NodeJS.Timeout): void {
+    clearTimeout(timer)
+  }
+
+  private registerCron(rule: AutomationRule, expression: string): void {
+    const nextMs = nextCronOccurrenceMs(expression)
+    if (!nextMs) {
+      logger.warn(`Rule ${rule.id}: unsupported cron expression: ${expression}`)
+      return
+    }
+    const delayMs = Math.max(1_000, nextMs - Date.now())
+    const timer = setTimeout(() => {
+      if (!this.timers.has(rule.id)) return
+      this.runScheduledRule(rule)
+      this.timers.delete(rule.id)
+      if (this.isLeader) this.registerCron(rule, expression)
+    }, delayMs)
+    if (typeof timer.unref === 'function') {
+      timer.unref()
+    }
+    this.timers.set(rule.id, timer)
+    logger.info(`Registered cron schedule for rule ${rule.id} (next: ${new Date(nextMs).toISOString()})`)
   }
 
   /**
@@ -272,6 +465,7 @@ export class AutomationScheduler {
 
     const trigger = rule.trigger
     let intervalMs: number | null = null
+    let cronExpression: string | null = null
 
     if (trigger.type === 'schedule.interval') {
       intervalMs = typeof trigger.config.intervalMs === 'number' ? trigger.config.intervalMs : null
@@ -280,10 +474,13 @@ export class AutomationScheduler {
         return
       }
     } else if (trigger.type === 'schedule.cron') {
-      const expression = typeof trigger.config.expression === 'string' ? trigger.config.expression : ''
-      intervalMs = parseCronToIntervalMs(expression)
-      if (!intervalMs) {
-        logger.warn(`Rule ${rule.id}: unsupported cron expression: ${expression}`)
+      cronExpression = typeof trigger.config.expression === 'string'
+        ? trigger.config.expression
+        : typeof trigger.config.cron === 'string'
+          ? trigger.config.cron
+          : ''
+      if (!nextCronOccurrenceMs(cronExpression)) {
+        logger.warn(`Rule ${rule.id}: unsupported cron expression: ${cronExpression}`)
         return
       }
     } else if (trigger.type === 'schedule.date_field') {
@@ -302,17 +499,13 @@ export class AutomationScheduler {
       return
     }
 
+    if (cronExpression) {
+      this.registerCron(rule, cronExpression)
+      return
+    }
+
     const timer = setInterval(() => {
-      try {
-        const result = this.callback(rule)
-        if (result && typeof (result as Promise<void>).catch === 'function') {
-          (result as Promise<void>).catch((err) => {
-            logger.error(`Scheduled rule ${rule.id} execution failed`, err instanceof Error ? err : undefined)
-          })
-        }
-      } catch (err) {
-        logger.error(`Scheduled rule ${rule.id} execution failed`, err instanceof Error ? err : undefined)
-      }
+      this.runScheduledRule(rule)
     }, intervalMs)
 
     // Prevent timer from keeping the process alive in tests
@@ -330,7 +523,7 @@ export class AutomationScheduler {
   unregister(ruleId: string): void {
     const timer = this.timers.get(ruleId)
     if (timer) {
-      clearInterval(timer)
+      this.clearTimer(timer)
       this.timers.delete(ruleId)
       logger.info(`Unregistered schedule for rule ${ruleId}`)
     }
@@ -355,7 +548,7 @@ export class AutomationScheduler {
    */
   destroy(): void {
     for (const [ruleId, timer] of this.timers.entries()) {
-      clearInterval(timer)
+      this.clearTimer(timer)
       logger.info(`Destroyed schedule for rule ${ruleId}`)
     }
     this.timers.clear()
