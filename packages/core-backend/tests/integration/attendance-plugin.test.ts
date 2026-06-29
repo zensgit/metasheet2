@@ -16,6 +16,8 @@ type AttendancePluginTestModule = {
     AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG: string
     runAttendanceAutoShiftAutoWriteOnce(db: unknown, options?: Record<string, unknown>): Promise<any>
   }
+  // Resets the plugin's module-level settings cache (60s TTL). Exposed by the plugin for test isolation.
+  resetAttendanceSettingsCacheForTests?: () => void
 }
 
 function getAttendancePluginForTest(): AttendancePluginTestModule {
@@ -391,6 +393,11 @@ attendanceIntegrationDescribe(
     if (!baseUrl) {
       throw new Error('Attendance integration server was not started; inspect beforeAll setup output.')
     }
+    // Isolate the plugin's module-level settings cache (60s TTL) between tests. Without this, a prior test's
+    // shiftCompliance settings leak through getSettings() for up to 60s and silently disable enforcement —
+    // the root cause of the flaky `shift-compliance cap` 201-vs-422 when this file runs in the shared 10-file
+    // attendance suite process. The plugin exposes resetAttendanceSettingsCacheForTests for exactly this.
+    getAttendancePluginForTest().resetAttendanceSettingsCacheForTests?.()
   })
 
   afterAll(async () => {
