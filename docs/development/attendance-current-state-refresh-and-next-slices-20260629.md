@@ -40,7 +40,7 @@ Verification inputs used for this snapshot:
 
 | PR | State | Recommendation |
 |---|---|---|
-| `#3303` — unconditional settings restore in v1-5b-iii must-pay e2e | OPEN, checks green at last run | **Review/merge first.** It is a one-file test hygiene fix: always restores `overtimeBankPolicy` after the must-pay e2e test so a global/org setting cannot leak into sibling attendance cases. Low risk and directly relevant to the overtime-bank test bed. |
+| `#3303` — unconditional settings restore in v1-5b-iii must-pay e2e | OPEN; prior checks green, but branch is BEHIND | **Review, rebase/update, then merge after a fresh required-checks pass.** It is a one-file test hygiene fix: always restores `overtimeBankPolicy` after the must-pay e2e test so a global/org setting cannot leak into sibling attendance cases. Low risk and directly relevant to the overtime-bank test bed. |
 | `#3013` — benchmark gap candidates | OPEN, stale docs branch from 2026-06-21 | **Supersede/close or reconcile manually.** Its purpose overlaps the newer tracker updates and this refresh. Do not merge as-is without rebase + drift review. |
 | `#3048` — remaining benchmark development plan | OPEN, stale docs branch from 2026-06-22 | **Supersede/close or reconcile manually.** It predates HMR/SR/RD/MP/AE and overtime-bank follow-through; merging it now risks resurrecting stale remainder language. |
 
@@ -56,7 +56,7 @@ Verification inputs used for this snapshot:
 
 ### A. Ready to do after review: test hygiene
 
-1. **Land `#3303` if re-review stays clean.**
+1. **Update and land `#3303` if re-review stays clean and the fresh required checks pass.**
    This is not a product slice, but it protects the overtime-bank integration suite from fixture pollution. It should precede new overtime-bank staging or payout work.
 
 ### B. Best next runtime slice: AE corrected-fact durability
@@ -151,7 +151,7 @@ The remaining useful humanization candidates should be re-ranked after AE durabi
 
 ## 6. Proposed queue
 
-1. **Re-review / land `#3303`** — test hygiene, tiny and green.
+1. **Re-review / update / fresh-green / land `#3303`** — test hygiene, tiny; the previous green run is stale while the branch is BEHIND.
 2. **Open AE-1b corrected-fact durability design-lock** — owner ratifies sticky/manual correction semantics.
 3. **Build AE-1b runtime** — real-DB matrix over recompute paths.
 4. **Build AE-2/AE-3/AE-4** — notification, UI, staging.
