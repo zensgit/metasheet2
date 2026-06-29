@@ -14,6 +14,8 @@ The date-reminder claim ledger now has bounded retention:
   count.
 - `evaluateDateReminders` calls a best-effort once-per-day guard before scanning candidates, so any active
   date-reminder rule keeps the ledger aged without adding another scheduler.
+- `zzzz20260628120200_add_date_reminder_fires_fired_at_index` adds an index on `fired_at`, so the retention
+  sweep's only predicate is indexed on existing deployments too.
 
 ## 2. Safety properties
 
@@ -21,6 +23,7 @@ The date-reminder claim ledger now has bounded retention:
 - At-most-once delivery is unchanged.
 - Rule deletion still cascades immediately through the existing FK.
 - Retention is based on `fired_at`, not occurrence time.
+- The retention predicate is indexed by a new migration, not by editing the already-shipped table migration.
 - Cleanup failure logs a warning and does not block reminder delivery.
 
 ## 3. Verification

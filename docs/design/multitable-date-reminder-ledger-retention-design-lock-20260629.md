@@ -19,6 +19,7 @@ rule can accumulate rows forever.
 - Retention is best-effort and must never block reminder delivery.
 - No new global scheduler. An active date-reminder scan opportunistically sweeps at most once per process per
   day; explicit `sweepDateReminderLedger()` remains available as an ops/test seam.
+- Add a dedicated `fired_at` index in a new migration so the daily sweep is not a growing full-table scan.
 - Rule deletion remains immediate through the existing FK cascade.
 
 ## 3. Non-goals
