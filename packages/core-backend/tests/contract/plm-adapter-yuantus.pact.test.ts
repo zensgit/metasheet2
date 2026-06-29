@@ -116,10 +116,12 @@ const PLM_ADAPTER_PACT_PATHS = [
   // PLM-COLLAB V1.1: the two modern Path-A surfaces (advisory manifest + governed BOM context).
   { method: 'GET', path: '/api/v1/integrations/capabilities' },
   { method: 'GET', path: '/api/v1/bom/multitable/01H000000000000000000000P1/context' },
-  // PLM-COLLAB P3 (方案1) BOM multitable write-back: depublished from the main pact — the provider
-  // endpoint is Phase 7 (Yuantus #884), owner-gated/unbuilt, so a main pact for it false-fails the
-  // provider's blocking broker gate (consumer-ahead). Re-add this interaction only when the Yuantus
-  // provider build is ratified. PLMAdapter.ts keeps the client method (see endpointsToFind below).
+  // PLM-COLLAB P3 (方案1) governed BOM multitable write-back: re-added in its AMENDED form now that
+  // the Yuantus provider (#905) honors a GOVERNED, Idempotency-Key-gated write-back (entitlement
+  // plm.bom_multitable_writeback). It MUST sit at the END of the adapter-owned list — immediately
+  // before the V1.2 parent-host embed-token — so the concatenated PACT_PATHS order matches the
+  // corresponding placement of the interaction in the pact JSON. PLMAdapter.ts owns the callsite.
+  { method: 'PATCH', path: '/api/v1/bom/multitable/01H000000000000000000000W1/lines/01H000000000000000000000W3' },
 ] as const
 
 const PARENT_HOST_PACT_PATHS = [
@@ -233,12 +235,44 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
     expect(rules).toHaveProperty('$.expires_in')
   })
 
-  // PLM-COLLAB P3 (方案1) BOM multitable write-back contract: DEPUBLISHED from the main pact.
-  // Its provider endpoint (PATCH /bom/multitable/{part}/lines/{line}) is Phase 7 (Yuantus #884),
-  // owner-gated and unbuilt, so publishing it on the consumer main pact false-fails Yuantus's
-  // blocking broker provider-verify gate (consumer-ahead-of-provider). The interaction (and this
-  // `it` documenting it) is removed until the provider build is ratified; PLMAdapter.ts retains
-  // the client method, which `endpointsToFind` above still asserts.
+  // PLM-COLLAB P3 (方案1) governed BOM multitable write-back contract: RE-ADDED in its AMENDED form
+  // now that the Yuantus provider (#905) honors the governed, Idempotency-Key-gated write-back. The
+  // W1/W3 ids and request/response shape mirror the Yuantus provider fixture exactly, so the broker
+  // provider-verify gate stays green. PLMAdapter.updateBomMultitableLine is the live consumer callsite.
+  it('governed BOM multitable write-back interaction locks the amended PATCH contract (Idempotency-Key + entitlement state, success-only)', () => {
+    const pact = loadPact()
+    const path = '/api/v1/bom/multitable/01H000000000000000000000W1/lines/01H000000000000000000000W3'
+    const matches = pact.interactions.filter(i => i.request.path === path)
+    // success-only: exactly ONE interaction for this line-addressed write-back path
+    expect(matches).toHaveLength(1)
+    const writeback = matches[0]
+
+    expect(writeback.request.method).toBe('PATCH')
+
+    // the governed provider state is present AND names the write entitlement it gates on
+    expect(writeback.providerStates).toBeDefined()
+    expect(writeback.providerStates!.length).toBeGreaterThan(0)
+    expect(writeback.providerStates![0].name).toContain('plm.bom_multitable_writeback')
+
+    // the request carries a per-edit Idempotency-Key header (the governed-write seam)
+    expect(writeback.request.headers).toBeDefined()
+    expect(writeback.request.headers).toHaveProperty('Idempotency-Key')
+
+    // request body is restricted to EXACTLY the four editable business cells
+    expect(Object.keys(writeback.request.body as Record<string, unknown>).sort()).toEqual([
+      'find_num',
+      'quantity',
+      'refdes',
+      'uom',
+    ])
+
+    // response is the minimal success envelope — no eco_id / source_version / applied leakage
+    expect(writeback.response.status).toBe(200)
+    expect(writeback.response.body).toEqual({
+      ok: true,
+      bom_line_id: '01H000000000000000000000W3',
+    })
+  })
 
   it('aml/apply request body documents the RPC envelope shape used by PLMAdapter', () => {
     const pact = loadPact()
