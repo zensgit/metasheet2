@@ -1,8 +1,8 @@
 <template>
   <section class="bom-review" data-testid="plm-bom-review-panel">
     <header class="bom-review__head">
-      <strong>BOM Review（只读）</strong>
-      <small>来自 PLM 的受治理只读快照；不可在此编辑/写回。</small>
+      <strong>BOM Review</strong>
+      <small>来自 PLM 的受治理快照；此工作台可写回已授权的 BOM 单元格。</small>
     </header>
 
     <div class="bom-review__query">
@@ -44,7 +44,14 @@
         未找到该 Part 的 BOM 数据。
       </p>
 
-      <PlmBomReviewTable v-else-if="reviewState === 'table' && context" :context="context" />
+      <PlmBomReviewTable
+        v-else-if="reviewState === 'table' && context"
+        :context="context"
+        editable
+        :submitting-line-id="submittingLineId"
+        :line-messages="lineMessages"
+        @submit-line="submitLinePatch"
+      />
     </div>
   </section>
 </template>
@@ -53,6 +60,9 @@
 import { computed, ref } from 'vue'
 import {
   getPlmBomMultitableContext,
+  updatePlmBomMultitableLine,
+  type PlmBomMultitableLine,
+  type PlmBomMultitableLinePatch,
   type PlmBomMultitableResult,
 } from '../../services/integration/workbench'
 import PlmBomReviewTable from './PlmBomReviewTable.vue'
@@ -62,6 +72,9 @@ const props = defineProps<{ dataSourceId: string }>()
 const partId = ref('')
 const loading = ref(false)
 const result = ref<PlmBomMultitableResult | null>(null)
+const submittingLineId = ref<string | null>(null)
+const lineMessages = ref<Record<string, string>>({})
+const retryKeys = ref<Record<string, string>>({})
 
 const context = computed(() =>
   result.value && result.value.available ? result.value.context : null,
@@ -89,12 +102,67 @@ async function load(): Promise<void> {
   const pid = partId.value.trim()
   if (!pid || loading.value) return
   loading.value = true
+  lineMessages.value = {}
+  retryKeys.value = {}
   try {
     result.value = await getPlmBomMultitableContext(props.dataSourceId, pid)
   } catch {
     result.value = { data_source_id: props.dataSourceId, available: false, reason: 'unavailable' }
   } finally {
     loading.value = false
+  }
+}
+
+function makeIdempotencyKey(): string {
+  const cryptoApi = globalThis.crypto as { randomUUID?: () => string } | undefined
+  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID()
+  return `bom-write-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function writebackMessage(status: number): string {
+  if (status === 403) return '无写回授权或权限不足。'
+  if (status === 404) return '该 BOM 行不存在或不属于当前 Part。'
+  if (status === 409) return '该 BOM 行当前不可写，或提交键已用于不同写入。'
+  if (status === 422 || status === 400) return '写回内容无效，请检查单元格。'
+  return '写回暂时失败，请稍后重试。'
+}
+
+function applyLinePatch(line: PlmBomMultitableLine, patch: PlmBomMultitableLinePatch): void {
+  if ('quantity' in patch) {
+    line.quantity = typeof patch.quantity === 'number' || patch.quantity === null ? patch.quantity : Number(patch.quantity)
+  }
+  if ('uom' in patch) line.uom = patch.uom ?? null
+  if ('find_num' in patch) line.find_num = patch.find_num ?? null
+  if ('refdes' in patch) line.refdes = patch.refdes ?? null
+}
+
+async function submitLinePatch(payload: { line: PlmBomMultitableLine; patch: PlmBomMultitableLinePatch }): Promise<void> {
+  const lineId = payload.line.bom_line_id
+  if (!context.value || submittingLineId.value) return
+  const key = retryKeys.value[lineId] || makeIdempotencyKey()
+  retryKeys.value = { ...retryKeys.value, [lineId]: key }
+  submittingLineId.value = lineId
+  lineMessages.value = { ...lineMessages.value, [lineId]: '正在写回…' }
+  try {
+    const outcome = await updatePlmBomMultitableLine(
+      props.dataSourceId,
+      context.value.part.part_id,
+      lineId,
+      payload.patch,
+      key,
+    )
+    if (outcome.ok) {
+      applyLinePatch(payload.line, payload.patch)
+      const { [lineId]: _doneKey, ...rest } = retryKeys.value
+      retryKeys.value = rest
+      lineMessages.value = { ...lineMessages.value, [lineId]: '写回成功。' }
+      return
+    }
+    lineMessages.value = { ...lineMessages.value, [lineId]: writebackMessage(outcome.status) }
+  } catch {
+    lineMessages.value = { ...lineMessages.value, [lineId]: '写回暂时失败，请稍后重试。' }
+  } finally {
+    submittingLineId.value = null
   }
 }
 </script>
