@@ -7,7 +7,7 @@ import { Logger } from '../core/logger'
 import { rbacGuard } from '../rbac/rbac'
 import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
 import { apiTokenWriteRateLimit } from '../middleware/rate-limiter'
-import { oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
+import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import {
   CommentAccessError,
   CommentConflictError,
@@ -334,6 +334,7 @@ export function commentsRouter(injector?: Injector): Router {
         parentId: parsed.data.parentId,
         mentions: parsed.data.mentions,
         authorId: getUserId(req),
+        oapiAudit: buildOapiAuditContext(req, 'create', 'comments:write'),
       })
       return res.status(201).json({ ok: true, data: { comment } })
     } catch (error) {
