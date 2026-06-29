@@ -73,7 +73,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -92,6 +92,11 @@ import {
   isSupportedFieldRetypeRevert,
   isSupportedUncreate,
   isSupportedUndelete,
+  isPermissionRevert,
+  permissionRevertDirection,
+  parsePermissionEntityId,
+  permissionTargetMatchesParts,
+  type PermissionScope,
   computeRevertPreview,
   loadEntityConfigSnapshot,
   applyConfigRevert,
@@ -6095,6 +6100,53 @@ async function recreateViewFromConfig(query: TxnQuery, opts: {
   })
 }
 
+// ── T9-W permission-revert (de-escalation-only) helpers ───────────────────────────────────────────────────────
+type PermGrant = Record<string, unknown> | null
+
+/** Read the subject's CURRENT live grant for a permission entity (field/view/sheet); null = no grant. */
+async function loadLivePermissionGrant(query: TxnQuery, scope: PermissionScope, parts: string[], sheetId: string): Promise<PermGrant> {
+  if (scope === 'field') {
+    const [fieldId, subjectType, subjectId] = parts
+    const r = (await query('SELECT visible, read_only FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_type = $3 AND subject_id = $4', [sheetId, fieldId, subjectType, subjectId])) as any
+    const row = r.rows[0] as { visible?: boolean; read_only?: boolean } | undefined
+    return row ? { fieldId, subjectType, subjectId, visible: row.visible !== false, readOnly: row.read_only === true } : null
+  }
+  if (scope === 'view') {
+    const [viewId, subjectType, subjectId] = parts
+    const r = (await query('SELECT permission FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3', [viewId, subjectType, subjectId])) as any
+    const row = r.rows[0] as { permission?: string } | undefined
+    return row && typeof row.permission === 'string' ? { viewId, subjectType, subjectId, permission: row.permission } : null
+  }
+  const [subjectType, subjectId] = parts
+  const r = (await query('SELECT perm_code FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = $2 AND subject_id = $3 AND perm_code = ANY($4::text[])', [sheetId, subjectType, subjectId, MANAGED_SHEET_PERMISSION_CODES])) as any
+  const accessLevel = deriveSheetAccessLevel((r.rows as Array<{ perm_code: string }>).map((x) => String(x.perm_code)))
+  return accessLevel ? { subjectType, subjectId, accessLevel } : null
+}
+
+/** Apply a de-escalation: set the grant to `target` (rev.before; null = revoke), mirroring the forward grant write,
+ * + record a source='restore' permission revision (live → target). Caller MUST have verified de-escalation vs live. */
+async function applyPermissionDeEscalation(query: TxnQuery, opts: { scope: PermissionScope; parts: string[]; sheetId: string; entityId: string; live: PermGrant; target: PermGrant; actorId: string | null; restoredFromId: string | null }): Promise<void> {
+  const { scope, parts, sheetId, entityId, live, target, actorId, restoredFromId } = opts
+  if (scope === 'field') {
+    const [fieldId, subjectType, subjectId] = parts
+    if (!target) await query('DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_type = $3 AND subject_id = $4', [sheetId, fieldId, subjectType, subjectId])
+    else await query('INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (sheet_id, field_id, subject_type, subject_id) DO UPDATE SET visible = EXCLUDED.visible, read_only = EXCLUDED.read_only', [sheetId, fieldId, subjectType, subjectId, target.visible !== false, target.readOnly === true])
+  } else if (scope === 'view') {
+    const [viewId, subjectType, subjectId] = parts
+    await query('DELETE FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3', [viewId, subjectType, subjectId])
+    if (target && typeof target.permission === 'string' && target.permission !== 'none') await query('INSERT INTO meta_view_permissions(view_id, subject_type, subject_id, permission) VALUES ($1,$2,$3,$4)', [viewId, subjectType, subjectId, target.permission])
+  } else {
+    const [subjectType, subjectId] = parts
+    await query('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = $2 AND subject_id = $3 AND perm_code = ANY($4::text[])', [sheetId, subjectType, subjectId, MANAGED_SHEET_PERMISSION_CODES])
+    const al = target && typeof target.accessLevel === 'string' ? target.accessLevel : null
+    const code = al && al !== 'none' ? (CANONICAL_SHEET_PERMISSION_CODE_BY_ACCESS_LEVEL as Record<string, string>)[al] : undefined
+    if (code) await query('INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code) VALUES ($1,$2,$3,$4,$5)', [sheetId, subjectType === 'user' ? subjectId : null, subjectType, subjectId, code])
+  }
+  const keys = (scope === 'field' ? FIELD_PERMISSION_HISTORY_KEYS : scope === 'view' ? VIEW_PERMISSION_HISTORY_KEYS : SHEET_PERMISSION_HISTORY_KEYS) as unknown as ReadonlyArray<string>
+  const diff = live && target ? configUpdateDiff(live, target, keys) : live ? configDeleteDiff(live, keys) : target ? configCreateDiff(target, keys) : null
+  if (diff) await recordConfigRevision(query, { sheetId, entityType: 'permission', entityId, action: live && target ? 'update' : live ? 'delete' : 'create', before: diff.before, after: diff.after, changedKeys: diff.changedKeys, batchId: randomUUID(), actorId, source: 'restore', restoredFromId })
+}
+
 export function univerMetaRouter(): Router {
   const router = Router()
 
@@ -7968,6 +8020,7 @@ export function univerMetaRouter(): Router {
       const cap = rev.entity_type === 'field' ? capabilities.canManageFields
         : rev.entity_type === 'view' ? capabilities.canManageViews
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
+        : rev.entity_type === 'permission' ? capabilities.canManageSheetAccess
         : (capabilities.canManageFields || capabilities.canManageViews || capabilities.canManageSheetAccess)
       if (!cap) return sendForbidden(res)
       // T9-W Tier 3 (U-3): un-create = revert a field/view `create` = DROP the created entity. Behind its own
@@ -8008,6 +8061,20 @@ export function univerMetaRouter(): Router {
           : 'Undeleting recreates this view with its saved configuration.'
         // U4-L5 no-oracle: name + losses note + an id-collision flag; NO counts, NO raw plan fields.
         return res.json({ ok: true, data: { undelete: { entityType: rev.entity_type, entityId: rev.entity_id, entityName, note, idCollision: !plan.idFree }, previewToken } })
+      }
+      // T9-W permission-revert (de-escalation-only). The cap block above already requires canManageSheetAccess for
+      // permission. Open ONLY when restoring `before` reduces access vs the LIVE grant; escalation/noop is surfaced
+      // unsupported (execute 422s it). No-oracle: report the subject's own direction, never other subjects' grants.
+      if (isPermissionRevert(rev)) {
+        if (process.env.MULTITABLE_ENABLE_PERMISSION_REVERT !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'PERMISSION_REVERT_DISABLED', message: 'permission revert is disabled (MULTITABLE_ENABLE_PERMISSION_REVERT off).' } })
+        }
+        const parsedPerm = parsePermissionEntityId(rev.entity_id)
+        if (!parsedPerm) return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'Malformed permission entity id.' } })
+        const live = await loadLivePermissionGrant(pool.query.bind(pool), parsedPerm.scope, parsedPerm.parts, sheetId)
+        const dir = permissionRevertDirection(parsedPerm.scope, rev.before as Record<string, unknown> | null, live)
+        const previewToken = mintConfigPermissionRevertPreviewIdentity({ sheetId, revisionId, entityId: rev.entity_id, currentGrantHash: hashPermissionGrant(live), actorId: access.userId })
+        return res.json({ ok: true, data: { permissionRevert: { scope: parsedPerm.scope, direction: dir, supported: dir === 'de-escalation', note: dir === 'de-escalation' ? "This revert REDUCES the subject's access to its earlier, lower state." : 'Refused: this revert would not reduce access (only de-escalation is permitted).' }, previewToken } })
       }
       // T9-W Tier 2 (U-2): field type/property revert is behind its OWN per-tier flag (default off). Schema-only +
       // scalar-safe (isSupportedFieldRetypeRevert); mirrors the forward PATCH (no value migration). A non-retype
@@ -8089,6 +8156,7 @@ export function univerMetaRouter(): Router {
       const cap = rev.entity_type === 'field' ? capabilities.canManageFields
         : rev.entity_type === 'view' ? capabilities.canManageViews
         : rev.entity_type === 'sheet_config' ? capabilities.canManageSheetAccess
+        : rev.entity_type === 'permission' ? capabilities.canManageSheetAccess
         : (capabilities.canManageFields || capabilities.canManageViews || capabilities.canManageSheetAccess)
       if (!cap) return sendForbidden(res)
       // T9-W Tier 2 (U-2): field type/property revert behind its OWN per-tier flag (default off); see preview route.
@@ -8206,6 +8274,45 @@ export function univerMetaRouter(): Router {
         if (rev.entity_type === 'field') invalidateFieldCache(undeleteSheetId)
         invalidateViewConfigCache()
         return res.json({ ok: true, data: { undeleted: { entityType: rev.entity_type, entityId: rev.entity_id } } })
+      }
+      // T9-W permission-revert (de-escalation-only). Flag + canManageSheetAccess floor (cap block above) + typed
+      // confirm. The LOAD-BEARING guard re-checks direction against the LIVE grant inside the txn — the route can
+      // NEVER increase access. Escalation/noop → 422; grant drift since preview → 409.
+      if (isPermissionRevert(rev)) {
+        if (process.env.MULTITABLE_ENABLE_PERMISSION_REVERT !== 'true') {
+          return res.status(403).json({ ok: false, error: { code: 'PERMISSION_REVERT_DISABLED', message: 'permission revert is disabled (MULTITABLE_ENABLE_PERMISSION_REVERT off).' } })
+        }
+        const parsedPerm = parsePermissionEntityId(rev.entity_id)
+        if (!parsedPerm) return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'Malformed permission entity id.' } })
+        const confirmPerm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
+        if (confirmPerm.trim() !== 'revert-permission') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "revert-permission" to confirm reducing access.' } })
+        const target = (rev.before ?? null) as Record<string, unknown> | null
+        // Fail-closed identity guard: the `before` snapshot must describe the SAME subject/entity as the entity_id the
+        // apply writes to (the apply keys off `parts`, so this can't laundry an escalation — but a mismatch = malformed).
+        if (!permissionTargetMatchesParts(parsedPerm.scope, target, parsedPerm.parts)) {
+          return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'Permission revision before-snapshot does not match its entity id.' } })
+        }
+        const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+          // Never-escalate-under-concurrency: lock the sheet row so the live-grant read → direction re-check → apply
+          // cannot interleave with another grant write on this sheet. (Enablement gate: the forward grant/revoke routes
+          // must take the same lock for full coverage — tracked in the dev-verification honest gaps.)
+          await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+          const live = await loadLivePermissionGrant(query, parsedPerm.scope, parsedPerm.parts, sheetId)
+          const verdict = verifyConfigPermissionRevertPreviewIdentity(previewToken, { sheetId, revisionId, entityId: rev.entity_id, currentGrantHash: hashPermissionGrant(live), actorId: access.userId })
+          if (!verdict.valid) {
+            if (verdict.reason === 'grant_drift') return { status: 409, code: 'GRANT_DRIFT', message: 'The grant changed since preview; re-preview before reverting.' }
+            if (verdict.reason === 'expired') return { status: 410, code: 'PREVIEW_EXPIRED', message: 'The preview identity expired; re-preview.' }
+            return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before reverting.' }
+          }
+          // LOAD-BEARING never-escalate guard — re-checked against the LIVE grant, not the recorded `after`.
+          if (permissionRevertDirection(parsedPerm.scope, target, live) !== 'de-escalation') {
+            return { status: 422, code: 'RESTORE_NOT_SUPPORTED', message: 'This permission revert is not a de-escalation (it would not reduce the subject\'s access); refused.' }
+          }
+          await applyPermissionDeEscalation(query, { scope: parsedPerm.scope, parts: parsedPerm.parts, sheetId, entityId: rev.entity_id, live, target, actorId: getRequestActorId(req), restoredFromId: rev.id })
+          return null
+        })
+        if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+        return res.json({ ok: true, data: { permissionReverted: { scope: parsedPerm.scope, entityId: rev.entity_id } } })
       }
       const classify = classifyRevert(rev)
       // classifyRevert stays PURE; the route SUPPORTS only the flag-opened supported subsets — Tier-1 sheet_config

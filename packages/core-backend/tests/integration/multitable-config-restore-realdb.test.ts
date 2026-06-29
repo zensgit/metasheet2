@@ -96,12 +96,14 @@ describeIfDatabase('multitable config-restore — T9-W (real DB)', () => {
     expect((await execute(READER, { revisionId: REV_FIELD, previewToken: 'x' })).status).toBe(403)
   })
 
-  test('a gated op (permission revert) is refused 422, not partially attempted (L6)', async () => {
+  test('a permission revert is refused (not partially attempted) when permission-revert is off (L6)', async () => {
     const before = await fieldName()
     const res = await execute(ADMIN, { revisionId: REV_GATED, previewToken: 'whatever' })
-    expect(res.status).toBe(422)
-    expect(res.body?.error?.code).toBe('RESTORE_NOT_SUPPORTED')
-    expect(await fieldName()).toBe(before) // untouched
+    // Permission revert is its own default-off slice now (MULTITABLE_ENABLE_PERMISSION_REVERT). With its flag off a
+    // permission revision is refused 403 (ADMIN clears the canManageSheetAccess floor → PERMISSION_REVERT_DISABLED) —
+    // refused, never partially applied (was 422 before this slice opened the permission surface).
+    expect(res.status).toBe(403)
+    expect(await fieldName()).toBe(before) // untouched — no partial write
   })
 
   test('execute REQUIRES a server-minted preview identity — a client-computed hash cannot skip preview (L4/D5)', async () => {
