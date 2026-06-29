@@ -1,4 +1,4 @@
-# T9-W Tier 4 (U-4) config-undelete — DESIGN-LOCK (PROPOSED)
+# T9-W Tier 4 (U-4) config-undelete — DESIGN-LOCK (RATIFIED · runtime shipped #3343)
 
 **Date:** 2026-06-28 · **Type:** T9-W unsafe-restore write-slice design-lock, narrowed v1. Docs-only; locks scope + per-decision bars **before any runtime code**. The inverse of Tier 3 (#3335): Tier 3 reverts a `create` (drop the entity); Tier 4 reverts a **`delete`** (recreate it).
 
