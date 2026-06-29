@@ -1,12 +1,26 @@
-# Multitable Open-API Token Auth — OAPI-2 Write Slice Design-Lock (PROPOSED)
+# Multitable Open-API Token Auth — OAPI-2 Write Slice Design-Lock (RATIFIED)
 
-> Status: **PROPOSED 2026-06-28.** Extends the **RATIFIED** canonical lock
+> Status: **RATIFIED 2026-06-28** (owner-signed; see **Ratification** below). The §10 decisions are settled;
+> this doc is read-only post-ratification. Extends the **RATIFIED** canonical lock
 > `multitable-openapi-token-auth-designlock-20260619.md` (do **not** reopen it). This is the **write slice
 > (OAPI-2)** of that lock: it does **not** re-decide the ratified §2.1 route matrix, §2.3 Option A, §2.4
 > token-wins + 600/min, or §3 invariants — it specifies **how** they are implemented for writes.
 > Grounding: `origin/main` @ `33fde1347`. Owner-gated: enables a **mutating** public API surface.
-> **Nothing is mounted, and no build starts, until the §10 decisions are ratified.** The build is a
-> separate opt-in *after* ratification (read-only-first phasing, canonical §4).
+> **Ratifying this lock does NOT start the build.** The OAPI-2a runtime is a **separate opt-in GO** after this
+> (read-only-first phasing, canonical §4); no `apiTokenAuth` is mounted on any write route until that GO.
+
+## Ratification (owner-signed 2026-06-28)
+The §10 decisions are ratified as the recommended defaults; the P2 §6 audit fix (two-layer + failure posture)
+landed before sign-off:
+1. **DELETE staged** — OAPI-2a = create / update / batch-upsert + comment-create first; **OAPI-2b = DELETE** after (DELETE stays in scope per the canonical matrix; this is sequencing).
+2. **Idempotency** — v1 ships **at-least-once create**; `Idempotency-Key` is a fast-follow (scoped to `POST /records`, + `/patch` iff blind-insert).
+3. **Denied writes are audited** too, via the §6 **two-layer** model (route-boundary captures every attempt; post-commit enriches committed only), value-scrubbed.
+4. **Provenance** = `createdBy: creator` (acts-as-creator); token-origin is distinguished **only** in the audit event.
+5. **Allowlist** generalizes to anchored method-bound `(method, path)` entries in **lockstep** with mounted `requireScope` + the §2 trap set.
+6. **Rate limit** keyed **per-token-id** (not per-creator); 600 req/min/token.
+7. **Audit-failure posture** — committed writes **fail-closed** (audit in the same DB txn → rollback on audit failure); denied / error / rate-limited attempts **best-effort + mandatory alert**.
+
+> The runtime build (OAPI-2a) remains a **separate GO** and is not authorized by this ratification.
 
 ## 0. Why a write slice needs its own lock
 The read slice's blast radius was bounded — a leak over-exposes data. A write slice can **mutate or destroy**
@@ -162,7 +176,7 @@ audit-insert failure on a **committed** write **rolls back** the mutation (fail-
 pairs; DENY every §2 trap (GET-on-write, write-method-on-read-path, `/lock`, `/restore`, comment edit/delete,
 `/views/:id/submit`, and — until 2b — `DELETE /records/:id`).
 
-## 10. Decisions for the owner (ratify before any build)
+## 10. Decisions — RATIFIED 2026-06-28 (all at the recommended default; see Ratification, top)
 1. **DELETE sequencing:** 2a (create/update/upsert + comment-create) first, **2b (DELETE)** after — *or* include DELETE in 2a now? *(Recommend 2a-first. DELETE stays in scope either way — ratified.)*
 2. **Idempotency:** ship v1 **at-least-once create** (`Idempotency-Key` as fast-follow), scoped to `POST /records`? Confirm `/patch` upsert-vs-blind-insert. *(Recommend defer.)*
 3. **Audit denied writes** too (not just success), value-scrubbed, via the **two-layer** model of §6 (route-boundary captures every attempt incl. denials; post-commit only enriches committed)? *(Recommend yes.)*
