@@ -8,13 +8,13 @@
 > **This document authorizes nothing.** Every item is a separate, demand-gated opt-in; items with
 > non-trivial semantics are **design-lock-first** (a design doc + this-style TODO must land and be
 > approved before any runtime/UI code). Status markers:
-> **🔒** gated — needs an explicit owner GO · **⬜** GO'd, not started · **🟡** in progress · **✅** shipped.
+> **🔒** gated — needs an explicit owner GO · **⬜** GO'd, not started · **🟡** in progress / partial · **✅** shipped.
 > Sizes: **S** ≈ ≤1–2 PRs contained · **M** ≈ a small arc · **L** ≈ a multi-PR arc with its own design-lock.
 
 ## Where we are (one line)
-Core is **done**: baseline 9/9, P1 3✅+1🔶, automation engine mature (8/9 triggers live, 12+2 actions,
+Core is **done**: baseline 9/9, P1 3✅+1🟡, automation engine mature (8/9 triggers live, 12+2 actions,
 full scheduler/jobs/suspend-resume/conditions/retry/depth/idempotency), W6 + W7 approved-path shipped.
-Frontier = P2 (0✅/3🔶/3⬜), P3 (1✅/2🔶/2⬜), the S-band, a short parity list, and a risk-triage track.
+Frontier = P2 (0✅/3🟡/3⬜), P3 (1✅/2🟡/2⬜), the S-band, a short parity list, and a risk-triage track.
 
 ---
 
@@ -29,9 +29,13 @@ These are not "build-next" features — they are exposures/decisions the audit s
   — not RCE.)* **Action:** gate the route behind an explicit permission or feature-flag it off; allowlist/
   constrain service-task fetch targets. Same action enforces the convergence fence. **Size M · design-lock
   (security) first.**
-- [ ] **🔒 R2 — Approval hidden-field redaction hardening.** `getApproval` returns the un-redacted
-  snapshot; `hidden` redaction lives in a separate read-layer module. **Action:** regression-test every
-  approval read path through the redaction layer (or push redaction into the snapshot getter). **Size S.**
+- [ ] **🔒 R2 — Approval hidden-field redaction hardening.** `ApprovalProductService.getApproval` and any
+  direct/internal read surface can **bypass** the read-layer redaction (its `toUnifiedApprovalDTO` returns
+  `form_snapshot` verbatim); the public `GET /api/approvals/:id` goes through `ApprovalBridgeService.getApproval`,
+  which **already** calls `redactHiddenFormFields`. So this is a **latent** gap (no confirmed public leak
+  today): a future/internal read path returning the product-service snapshot directly would skip redaction.
+  **Action:** regression-test every approval read path through the redaction layer (or push redaction into
+  the snapshot getter). **Size S.**
 - [ ] **🔒 R3 — `webhook.received` inert trigger.** Editor-selectable + validated + persisted but never
   fires (no event map / no ingestion route). **Action:** remove it from the selectable set now (**Size S**),
   or build the real inbound endpoint (= T1-2, **Size M**). Until then the UI advertises a trap.
@@ -43,9 +47,10 @@ These are not "build-next" features — they are exposures/decisions the audit s
 - [ ] **🔒 T0-1 — W6 deployed operator sign-off.** Owner decision on PR #3373: accept the in-process seam
   as ship evidence, or require the deployed staging smoke first. **No dev** — a governance close-out.
 - [ ] **🔒 T0-2 — W7 `resultWriteback` UI implementation.** The design-lock (#3375) is **merged**; implement
-  per it: three optional source-field pickers (status/approver/completedAt), omit-when-empty, **preserve the
-  current configured value in each picker** (P2 fix), explicit-carry in `buildActionPayload` (+ pass
-  `requester` through), two fail-first round-trip tests. **Size S–M · design-lock done → ready on GO.**
+  per it: three optional source-field pickers writing the backend config keys `statusField` /
+  `approverField` / `completedAtField` (UI labels are separate), omit-when-empty, **preserve the current
+  configured value in each picker** (P2 fix), explicit-carry in `buildActionPayload` (+ pass `requester`
+  through), two fail-first round-trip tests. **Size S–M · design-lock done → ready on GO.**
 - [ ] **🔒 T0-3 — Expose `delete_record` in the rule editor.** Full guarded executor support exists but it
   is backend-only. Add to the selectable set behind confirm + permission + anti-misdelete. **Size S.**
 
