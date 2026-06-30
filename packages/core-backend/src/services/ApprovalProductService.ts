@@ -1899,6 +1899,16 @@ function getApprovalNodeConfig(runtimeGraph: RuntimeGraph, nodeKey: string): App
 }
 
 /**
+ * T1-1: the node-level timeout (if any) declared on the approval node being activated. Read from the
+ * runtime graph in scope so the activation site can stamp the deadline. `undefined` for nodes without
+ * a timeout (or non-approval nodes) — the activation site then clears the deadline columns.
+ */
+function nodeTimeoutForKey(runtimeGraph: RuntimeGraph, nodeKey: string): NodeTimeoutConfig | undefined {
+  const config = getApprovalNodeConfig(runtimeGraph, nodeKey) as { timeout?: NodeTimeoutConfig } | null
+  return config?.timeout ?? undefined
+}
+
+/**
  * True when any approval node's assignee sources include a management-chain source
  * (`continuous_managers` or `manager_at_level`). Used at create time to decide
  * whether to walk the (more expensive) management chain into the requester snapshot
@@ -3534,7 +3544,7 @@ export class ApprovalProductService {
       }
 
       if (resolution.currentNodeKey) {
-        this.emitNodeActivationMetric(id, resolution.currentNodeKey)
+        this.emitNodeActivationMetric(id, resolution.currentNodeKey, nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
     } catch (error) {
       await rollbackQuietly(client)
@@ -3975,7 +3985,7 @@ export class ApprovalProductService {
         await client.query('COMMIT')
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
         if (resolution.currentNodeKey) {
-          this.emitNodeActivationMetric(id, resolution.currentNodeKey)
+          this.emitNodeActivationMetric(id, resolution.currentNodeKey, nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
         }
         return (await this.getApproval(id))!
       }
@@ -4305,7 +4315,7 @@ export class ApprovalProductService {
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'approved')
       } else if (resolution.currentNodeKey && resolution.currentNodeKey !== currentNodeKey) {
-        this.emitNodeActivationMetric(id, resolution.currentNodeKey)
+        this.emitNodeActivationMetric(id, resolution.currentNodeKey, nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
     } catch (error) {
       await rollbackQuietly(client)
@@ -4336,12 +4346,22 @@ export class ApprovalProductService {
     )
   }
 
-  private emitNodeActivationMetric(instanceId: string, nodeKey: string): void {
+  private emitNodeActivationMetric(instanceId: string, nodeKey: string, timeout?: NodeTimeoutConfig): void {
+    const activatedAt = new Date()
+    // T1-1: when the activating node declares a timeout, stamp its absolute deadline + effect so the
+    // SLA scanner can fire on it. No timeout → recordNodeActivation clears the columns (so the prior
+    // node's deadline can never linger). Still inside safeMetricsCall — a best-effort write.
     safeMetricsCall(`recordNodeActivation(${instanceId}/${nodeKey})`, () =>
       this.metrics.recordNodeActivation({
         instanceId,
         nodeKey,
-        activatedAt: new Date(),
+        activatedAt,
+        ...(timeout?.effect
+          ? {
+              timeoutDeadline: new Date(activatedAt.getTime() + timeout.afterMinutes * 60000),
+              timeoutEffect: timeout.effect,
+            }
+          : {}),
       }),
     )
   }
