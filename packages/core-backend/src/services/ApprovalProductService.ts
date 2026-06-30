@@ -3310,13 +3310,26 @@ export class ApprovalProductService {
     // Wave 2 WP5 slice 1 — metrics start row is written after commit and
     // guarded so a metrics failure cannot roll back the approval instance.
     safeMetricsCall(`recordInstanceStart(${instanceId})`, async () => {
+      // T1-1: the FIRST node is activated here (not via emitNodeActivationMetric), so its timeout
+      // deadline must be stamped at instance start — otherwise a `remind` on the initial node never
+      // fires. Mirror emitNodeActivationMetric: read the node's timeout off the runtime graph in scope.
+      const startedAt = new Date()
+      const initialTimeout = initial.currentNodeKey
+        ? nodeTimeoutForKey(runtimeGraph, initial.currentNodeKey)
+        : undefined
       await this.metrics.recordInstanceStart({
       instanceId,
       templateId: bundle.template.id,
       tenantId: actor.tenantId ?? null,
-      startedAt: new Date(),
+      startedAt,
       slaHours: bundle.template.sla_hours ?? null,
       initialNodeKey: initial.currentNodeKey,
+      ...(initialTimeout?.effect
+        ? {
+            timeoutDeadline: new Date(startedAt.getTime() + initialTimeout.afterMinutes * 60000),
+            timeoutEffect: initialTimeout.effect,
+          }
+        : {}),
       })
       if (initial.status === 'approved') {
         await this.metrics.recordTerminal({

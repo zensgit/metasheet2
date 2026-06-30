@@ -18,6 +18,8 @@ const TS = Date.now()
 const SHOT_INSTANCE = `node-sla-shot-${TS}`
 const SHOT_ASSIGNEE = `node-sla-approver-${TS}`
 const IDEM_INSTANCE = `node-sla-idem-${TS}`
+const FIRST_INSTANCE = `node-sla-first-${TS}`
+const FIRST_ASSIGNEE = `node-sla-first-approver-${TS}`
 
 function rawQuery<T extends Record<string, unknown> = Record<string, unknown>>(
   sql: string,
@@ -42,7 +44,7 @@ describeIfDatabase('approval node-level SLA remind (T1-1 slice 1) — real DB', 
 
   afterAll(async () => {
     // CASCADE from approval_instances clears approval_metrics + approval_assignments.
-    await rawQuery(`DELETE FROM approval_instances WHERE id = ANY($1)`, [[SHOT_INSTANCE, IDEM_INSTANCE]])
+    await rawQuery(`DELETE FROM approval_instances WHERE id = ANY($1)`, [[SHOT_INSTANCE, IDEM_INSTANCE, FIRST_INSTANCE]])
   })
 
   it('has DATABASE_URL configured (sentinel — never skip-green)', () => {
@@ -150,5 +152,57 @@ describeIfDatabase('approval node-level SLA remind (T1-1 slice 1) — real DB', 
     expect(stored).not.toBeNull()
     expect(new Date(stored as string | Date).getTime()).toBe(D1.getTime())
     expect(row.rows[0]?.current_node_timeout_effect).toBe('remind')
+  })
+
+  it('(c) first node: a `remind` timeout stamped at instance start (recordInstanceStart) fires once', async () => {
+    const metrics = new ApprovalMetricsService(rawQuery)
+
+    await seedInstance(FIRST_INSTANCE, 'approval_1')
+    // The FIRST node is activated through recordInstanceStart — NOT recordNodeActivation — so before
+    // T1-1 its deadline was never stamped and a first-node `remind` could never fire. Stamp it 1 min
+    // in the past via the changed method and prove the new instance-start columns are written + scanned.
+    await metrics.recordInstanceStart({
+      instanceId: FIRST_INSTANCE,
+      templateId: null,
+      startedAt: new Date(),
+      slaHours: null,
+      initialNodeKey: 'approval_1',
+      timeoutDeadline: new Date(Date.now() - 60_000),
+      timeoutEffect: 'remind',
+    })
+
+    // recordInstanceStart must persist the deadline columns at INSERT time (the fix).
+    const stamped = await rawQuery<{ current_node_deadline_at: unknown; current_node_timeout_effect: string | null }>(
+      `SELECT current_node_deadline_at, current_node_timeout_effect FROM approval_metrics WHERE instance_id = $1`,
+      [FIRST_INSTANCE],
+    )
+    expect(stamped.rows[0]?.current_node_deadline_at).not.toBeNull()
+    expect(stamped.rows[0]?.current_node_timeout_effect).toBe('remind')
+
+    await rawQuery(
+      `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, is_active)
+       VALUES ($1, 'user', $2, TRUE)`,
+      [FIRST_INSTANCE, FIRST_ASSIGNEE],
+    )
+
+    const reminders: ApprovalNodeTimeoutReminder[] = []
+    const scheduler = new ApprovalSlaScheduler({
+      metrics,
+      pool: { query: rawQuery },
+      onNodeReminder: async (reminder) => {
+        reminders.push(reminder)
+      },
+    })
+
+    await scheduler.tick(new Date())
+
+    const forThisInstance = reminders.filter((r) => r.instanceId === FIRST_INSTANCE)
+    expect(forThisInstance).toHaveLength(1)
+    expect(forThisInstance[0].effect).toBe('remind')
+    expect(forThisInstance[0].assigneeIds).toContain(FIRST_ASSIGNEE)
+
+    // Single-shot: markNodeTimeoutFired cleared the first-node deadline → a second tick fires nothing.
+    await scheduler.tick(new Date())
+    expect(reminders.filter((r) => r.instanceId === FIRST_INSTANCE)).toHaveLength(1)
   })
 })

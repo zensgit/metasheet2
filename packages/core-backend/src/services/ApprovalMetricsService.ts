@@ -184,6 +184,10 @@ export class ApprovalMetricsService {
     startedAt: Date
     slaHours?: number | null
     initialNodeKey?: string | null
+    // T1-1: when the FIRST (initial) node declares a timeout, stamp its deadline + effect right at
+    // instance start — this is the one activation path that does NOT flow through recordNodeActivation.
+    timeoutDeadline?: Date | null
+    timeoutEffect?: string | null
   }): Promise<void> {
     const tenantId = resolveTenantId(input.tenantId)
     const initialBreakdown: NodeBreakdownEntry[] = input.initialNodeKey
@@ -197,8 +201,9 @@ export class ApprovalMetricsService {
       : []
     await this.query(
       `INSERT INTO approval_metrics
-         (instance_id, template_id, tenant_id, started_at, sla_hours, node_breakdown)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+         (instance_id, template_id, tenant_id, started_at, sla_hours, node_breakdown,
+          current_node_deadline_at, current_node_timeout_effect)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
        ON CONFLICT (instance_id) DO NOTHING`,
       [
         input.instanceId,
@@ -207,6 +212,8 @@ export class ApprovalMetricsService {
         input.startedAt.toISOString(),
         input.slaHours ?? null,
         JSON.stringify(initialBreakdown),
+        input.timeoutDeadline ? input.timeoutDeadline.toISOString() : null,
+        input.timeoutEffect ?? null,
       ],
     )
   }
