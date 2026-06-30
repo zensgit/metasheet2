@@ -13,8 +13,8 @@
 |---|---|---|---|---|
 | **T2-3** person/team analytics | #3387 | **merged** | `/api/approvals/metrics/people`+`/teams` over the existing metrics JOIN; **Q4 gating: `/people` → new `approvals:analytics` permission, `/teams` → `approvals:admin`** | tsc 0 · router unit 9/9 (incl. per-code 403/200) · real-DB integration 3/3 (dept wire-drift catch) |
 | **T1-1** node-level SLA + `remind` | #3404 | **merged** | per-node timeout deadline on `approval_metrics` + leader-gated scanner → `remind` active assignees via dedicated `notifyNodeReminder`; publish-validation; covers first-node + transition-reached nodes | tsc 0 · metrics unit **16/16** (incl. P1a re-emit no-op lock) · real-DB integration **4/4** (single-shot, idempotency-P1a, first-node) |
-| **T2-4** N-of-M threshold | #3406 | auto-merging | `'threshold'` node mode (N = distinct approvers, first-N-wins cancel, single-reject still rejects, linear-only); **N>M fail-closed at resolution + runtime backstop** | tsc 0 · 4 validation unit tests · real-DB integration **3/3** (2-of-3 resolves on 2nd, single-reject, **N>M→422 fail-closed**) |
-| **T2-5** timezone scheduling | #3401 | reviewable (awaits owner timezone APPROVE) | cron + date-reminder tz-aware (DST fire-once/skip), fail-closed IANA validation, startup audit; UTC path byte-identical | tsc 0 · DST goldens green · automation-v1 211 · UTC-unchanged regression goldens |
+| **T2-4** N-of-M threshold | #3406 | **merged** (`26445a79a`) | `'threshold'` node mode (N = distinct approvers, first-N-wins cancel, single-reject still rejects, linear-only); **N>M fail-closed at resolution + runtime backstop** | tsc 0 · 4 validation unit tests · real-DB integration **3/3** (2-of-3 resolves on 2nd, single-reject, **N>M→422 fail-closed**) |
+| **T2-5** timezone scheduling | #3401 | **merged** (`3a8b377a4`) | cron + date-reminder tz-aware (DST fire-once/skip), fail-closed IANA validation, startup audit; UTC path byte-identical | tsc 0 · DST goldens green (incl. date_field gap→03:30 / overlap single-instant) · automation-v1 211 · UTC-unchanged regression goldens |
 
 **Verification discipline applied throughout:** every diff hand-reviewed (not subagent self-report); real-DB
 tests assert the real wire (not hand-built fixtures); fail-first tests confirmed RED-before/green-after
@@ -59,8 +59,10 @@ recommended defaults; the ratify-plan (#3396) holds the order.
 
 ## 5. Verdict
 
-**Ratified Tier-1 scope is complete and verified** (T2-3 + T1-1 merged; T2-4 auto-merging; T2-5 reviewable
-pending the owner's timezone APPROVE). Breadth is near-parity; this arc closed the contained depth (analytics,
+**Ratified Tier-1 scope is complete and verified** — all four rungs merged (T2-3 #3387, T1-1 #3404,
+T2-4 #3406, T2-5 #3401 `3a8b377a4`; the T2-5 APPROVE's two non-blocking nits — the date_field DST
+gap/overlap golden and the stale tz docstring — landed in the same PR). Breadth is near-parity; this arc
+closed the contained depth (analytics,
 node-SLA reminders, N-of-M voting, timezone scheduling) on top of the prior arc (W7 UI, risk fixes). **Full
 parity is not achieved** — it needs the owner-gated Tier-2/3 arcs, each ratified then built design-lock-first.
 The honest stopping point: the authorized work is done; the remainder is gated on owner decisions, not
