@@ -5572,6 +5572,36 @@ async function testReadSmokeRoute() {
                 },
               }
             }
+            if (req.options && req.options.k3ReadMode === 'bom') {
+              return {
+                records: [{ FNumber: 'M-BOM-CHILD-1' }, { FNumber: 'M-BOM-CHILD-2' }, { FNumber: 'M-BOM-CHILD-3' }],
+                metadata: {
+                  readPath: 'https://k3host/K3API/BOM/GetDetail',
+                  mode: 'material-bom-smoke',
+                  bomHeaderPresent: true,
+                  bomLinePresent: true,
+                  bomHeaderCount: 1,
+                  bomLineCount: 3,
+                  bomShapeProbe: {
+                    dataPage1: true,
+                    dataPage2: true,
+                    dataLowerPage1: false,
+                    dataLowerPage2: false,
+                    materialNumber: 'M-BOM-SECRET',
+                  },
+                  bomResponseShapeProbe: {
+                    dataObjectPresent: true,
+                    headerPresent: true,
+                    linePresent: true,
+                    fixedContainers: {
+                      dataPage1: { type: 'array', arrayLength: 1, materialNumber: 'M-BOM-HEADER-SECRET' },
+                      dataPage2: { type: 'array', arrayLength: 3, materialNumber: 'M-BOM-LINE-SECRET' },
+                      arbitraryContainer: { type: 'array', arrayLength: 9 },
+                    },
+                  },
+                },
+              }
+            }
             return {
               records: [{ _k3ReferenceObjects: { unit: {} }, FName: 'SECRET-NAME', FNumber: req.filters.FNumber }],
               metadata: { requestedNumber: req.filters.FNumber, readPath: 'https://k3host/x' },
@@ -5706,6 +5736,40 @@ async function testReadSmokeRoute() {
   assert.equal(keyedListReadArg.options[READ_SMOKE_LIST_REQUEST_MARKER], true, 'keyed LIST route supplies the internal route-only marker')
   assert.ok(!JSON.stringify(okListKey.body.data).includes('M-004'), 'LIST key is not echoed in values-free evidence')
 
+  // C4 BOM read (#1709): the route preserves values-free BOM evidence (header/line counts + Page1/Page2
+  // container types) end-to-end and drops leak-bait; the parent bill key is plumbed to the adapter as
+  // options.bomKey (bound value), never echoed in the evidence.
+  const okBom = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: WRITE_USER, params: { id: 'sys_1' }, query: { workspaceId: 'workspace_1' },
+    body: { presetId: 'k3wise.material-bom.v1', intent: { object: 'material-bom', mode: 'bom', key: 'BILL-001' } },
+  })
+  assertOkResponse(okBom, 200)
+  assert.equal(okBom.body.data.ok, true)
+  assert.equal(okBom.body.data.presetId, 'k3wise.material-bom.v1')
+  assert.equal(okBom.body.data.object, 'material-bom')
+  assert.equal(okBom.body.data.mode, 'bom')
+  assert.equal(okBom.body.data.recordCount, 3)
+  assert.equal(okBom.body.data.bomHeaderCount, 1)
+  assert.equal(okBom.body.data.bomLineCount, 3)
+  assert.deepEqual(okBom.body.data.bomShapeProbe, {
+    dataPage1: true,
+    dataPage2: true,
+    dataLowerPage1: false,
+    dataLowerPage2: false,
+  })
+  assert.deepEqual(okBom.body.data.bomResponseShapeProbe.fixedContainers, {
+    dataPage1: { type: 'array', arrayLength: 1 },
+    dataPage2: { type: 'array', arrayLength: 3 },
+  }, 'route preserves the BOM Page1/Page2 container types/counts and drops arbitrary containers + leak-bait')
+  const bomReadArg = readArgs[readArgs.length - 1]
+  assert.equal(bomReadArg.object, 'material-bom')
+  assert.equal(bomReadArg.options.k3ReadMode, 'bom')
+  assert.equal(bomReadArg.options.bomKey, 'BILL-001', 'route plumbs the parent bill key to the adapter as options.bomKey')
+  const okBomStr = JSON.stringify(okBom.body.data)
+  for (const leak of ['M-BOM-CHILD-1', 'M-BOM-SECRET', 'M-BOM-HEADER-SECRET', 'M-BOM-LINE-SECRET', 'BILL-001', 'materialNumber', 'arbitraryContainer', 'k3host', 'readPath']) {
+    assert.ok(!okBomStr.includes(leak), `BOM read-smoke response must not leak ${leak}`)
+  }
+
   // C2/C3: unauthorized LIST/BOM/raw fields fail closed before any system load.
   const systemLoadCountBeforeInvalid = findCalls(calls, 'getExternalSystemForAdapter').length
   const intentBom = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
@@ -5730,6 +5794,15 @@ async function testReadSmokeRoute() {
     body: { presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list', key: '   ' } },
   })
   assert.equal(listBlankKey.statusCode, 400, 'blank LIST key is fail-closed')
+  // C4: BOM key is REQUIRED (unlike LIST). A no-key BOM intent fails closed at the contract layer with a 400,
+  // before any system load or adapter creation — values-free, no BOM call.
+  const bomNoKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {
+    user: WRITE_USER, params: { id: 'sys_1' },
+    body: { presetId: 'k3wise.material-bom.v1', intent: { object: 'material-bom', mode: 'bom' } },
+  })
+  assert.equal(bomNoKey.statusCode, 400, 'BOM read without a parent bill key is fail-closed (key required)')
+  assert.equal(bomNoKey.body.error.code, 'READ_SMOKE_CONTRACT_INVALID', 'no-key BOM maps to the coarse contract-invalid code')
+  assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, systemLoadCountBeforeInvalid, 'no-key BOM fails before system load')
 
   // write-gated: a read-only integration user cannot trigger the credentialed probe (existence-oracle risk)
   const denied = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-smoke', {

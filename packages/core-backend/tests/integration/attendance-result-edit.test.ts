@@ -52,6 +52,20 @@ function ymd(daysAgo: number): string {
   return new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10)
 }
 
+// A deterministic recent WEEKDAY (Mon–Fri). The default attendance schedule treats Sat/Sun as rest
+// days, so a record seeded on a weekend has is_workday=true while a no-override recompute derives
+// is_workday=false — which AE-1b (correctly) flags as a material-fact change. The durability
+// conflict-detection tests pin to a weekday so the seed's is_workday matches the schedule recompute
+// and only the punch facts under test drive reviewConflict; otherwise ymd(N) landing on a weekend
+// (e.g. ymd(3) on a Tuesday) makes the suite date-fragile.
+function workdayYmd(daysAgo: number): string {
+  let d = new Date(Date.now() - daysAgo * 86400000)
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
+    d = new Date(d.getTime() - 86400000)
+  }
+  return d.toISOString().slice(0, 10)
+}
+
 type ErrBody = { ok?: boolean; error?: { code?: string; message?: string }; data?: unknown }
 const codeOf = (r: HttpResponse) => (r.body as ErrBody | undefined)?.error?.code
 const dataOf = (r: HttpResponse) => (r.body as { data?: any } | undefined)?.data
@@ -71,6 +85,12 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
 
   const postEdit = (body: Record<string, unknown>, token = adminToken) =>
     requestJson(`${baseUrl}/api/attendance/anomaly-result-edits`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify(body) })
+  const postImport = (body: Record<string, unknown>, token = adminToken) =>
+    requestJson(`${baseUrl}/api/attendance/import`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify(body) })
+  const postRequest = (body: Record<string, unknown>, token = adminToken) =>
+    requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify(body) })
+  const approveRequest = (requestId: string, token = adminToken) =>
+    requestJson(`${baseUrl}/api/attendance/requests/${requestId}/approve`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify({ comment: 'ok' }) })
   const getSettings = () =>
     requestJson(`${baseUrl}/api/attendance/settings`, { headers: authHeaders(adminToken) })
   const putSettings = (body: Record<string, unknown>) =>
@@ -264,6 +284,26 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(Number(rec.work_minutes)).toBe(480) // preserved (an edit re-classifies, it doesn't fabricate work time)
     expect(Number(rec.meta?.severe_late_count ?? -1)).toBe(0) // tier meta recomputed from final late=0
     expect(rec.meta?.warnings).toEqual(['late']) // unrelated meta preserved
+    expect(rec.meta?.manual_result_edit).toMatchObject({
+      version: 1,
+      idempotencyKey: key,
+      targetStatus: 'normal',
+      correctedMetrics: {
+        workMinutes: 480,
+        lateMinutes: 0,
+        earlyLeaveMinutes: 0,
+      },
+      correctedAgainst: {
+        workDate,
+        firstInAt: `${workDate}T01:35:00.000Z`,
+        lastOutAt: `${workDate}T10:00:00.000Z`,
+        isWorkday: true,
+      },
+      actorUserId: `ae1-admin-${RUN}`,
+      reviewConflict: null,
+    })
+    expect(rec.meta?.manual_result_edit.auditId).toEqual(expect.any(String))
+    expect(rec.meta?.manual_result_edit.editedAt).toEqual(expect.any(String))
 
     const audit = await auditRowsForRecord(recordId)
     expect(audit).toHaveLength(1)
@@ -277,6 +317,185 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(audit[0].actor_user_id).toBe(`ae1-admin-${RUN}`)
     expect(audit[0].notification_delivery_id).toBeNull()
     expect(audit[0].notification_skipped_reason).toBeNull()
+  })
+
+  it('AE-1b durability: same-facts import recompute preserves the corrected result without a review flag', async () => {
+    const userId = `u-durable-same-${RUN}`
+    const workDate = workdayYmd(3)
+    const recordId = await seedRecord({
+      userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 35, earlyLeaveMinutes: 0,
+      firstInAt: `${workDate}T01:35:00Z`, lastOutAt: `${workDate}T10:00:00Z`,
+    })
+    const edit = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: '核验后更正', idempotencyKey: `k-durable-same-${RUN}` })
+    expect(edit.status).toBe(200)
+
+    const importRes = await postImport({
+      orgId: ORG,
+      userId,
+      rows: [
+        {
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T01:35:00Z`,
+            lastOutAt: `${workDate}T10:00:00Z`,
+          },
+        },
+      ],
+      mode: 'override',
+    })
+    expect(importRes.status).toBe(200)
+
+    const rec = await recordById(recordId)
+    expect(rec.status).toBe('normal')
+    expect(Number(rec.work_minutes)).toBe(480)
+    expect(Number(rec.late_minutes)).toBe(0)
+    expect(Number(rec.early_leave_minutes)).toBe(0)
+    expect(rec.meta?.manual_result_edit?.reviewConflict).toBeNull()
+    expect(await auditRowsForRecord(recordId)).toHaveLength(1)
+  })
+
+  it('AE-1b durability: a no-status import recompute preserves the corrected result and flags changed facts', async () => {
+    const userId = `u-durable-${RUN}`
+    const workDate = workdayYmd(3)
+    const recordId = await seedRecord({
+      userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 35, earlyLeaveMinutes: 0,
+      firstInAt: `${workDate}T01:35:00Z`, lastOutAt: `${workDate}T10:00:00Z`,
+    })
+    const edit = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: '核验后更正', idempotencyKey: `k-durable-${RUN}` })
+    expect(edit.status).toBe(200)
+
+    const importRes = await postImport({
+      orgId: ORG,
+      userId,
+      rows: [
+        {
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T01:55:00Z`,
+            lastOutAt: `${workDate}T10:00:00Z`,
+          },
+        },
+      ],
+      mode: 'override',
+    })
+    expect(importRes.status).toBe(200)
+
+    const rec = await recordById(recordId)
+    expect(rec.first_in_at?.toISOString()).toBe(`${workDate}T01:55:00.000Z`)
+    expect(rec.status).toBe('normal')
+    expect(Number(rec.work_minutes)).toBe(480)
+    expect(Number(rec.late_minutes)).toBe(0)
+    expect(Number(rec.early_leave_minutes)).toBe(0)
+    expect(Number(rec.meta?.severe_late_count ?? -1)).toBe(0)
+    expect(Number(rec.meta?.severe_late_minutes ?? -1)).toBe(0)
+    expect(Number(rec.meta?.absence_late_count ?? -1)).toBe(0)
+    expect(rec.meta?.manual_result_edit?.reviewConflict).toMatchObject({
+      state: 'needs_review',
+      source: 'derived_recompute',
+      attemptedDerivedStatus: expect.any(String),
+      latestFacts: {
+        workDate,
+        firstInAt: `${workDate}T01:55:00.000Z`,
+        lastOutAt: `${workDate}T10:00:00.000Z`,
+        isWorkday: true,
+      },
+    })
+    expect(await auditRowsForRecord(recordId)).toHaveLength(1)
+  })
+
+  it('AE-1b durability: explicit import statusOverride intentionally supersedes a stale manual marker', async () => {
+    const userId = `u-durable-explicit-${RUN}`
+    const workDate = ymd(3)
+    const recordId = await seedRecord({
+      userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 35, earlyLeaveMinutes: 0,
+      firstInAt: `${workDate}T01:35:00Z`, lastOutAt: `${workDate}T10:00:00Z`,
+    })
+    const edit = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: '核验后更正', idempotencyKey: `k-durable-explicit-${RUN}` })
+    expect(edit.status).toBe(200)
+
+    const importRes = await postImport({
+      orgId: ORG,
+      userId,
+      rows: [
+        {
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T01:55:00Z`,
+            lastOutAt: `${workDate}T10:00:00Z`,
+            status: 'adjusted',
+          },
+        },
+      ],
+      mode: 'override',
+    })
+    expect(importRes.status).toBe(200)
+
+    const rec = await recordById(recordId)
+    expect(rec.status).toBe('adjusted')
+    expect(rec.meta?.manual_result_edit).toBeUndefined()
+    expect(await auditRowsForRecord(recordId)).toHaveLength(1)
+  })
+
+  it('AE-1b durability: approved request explicit override is intentional and clears a stale manual marker', async () => {
+    const userId = `ae1-admin-${RUN}`
+    const workDate = ymd(6)
+    const recordId = await seedRecord({
+      userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 40, earlyLeaveMinutes: 0,
+      firstInAt: `${workDate}T01:40:00Z`, lastOutAt: `${workDate}T10:00:00Z`,
+    })
+    const edit = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: '核验后更正', idempotencyKey: `k-durable-approve-${RUN}` })
+    expect(edit.status).toBe(200)
+
+    const reqRes = await postRequest({
+      orgId: ORG,
+      workDate,
+      requestType: 'time_correction',
+      requestedInAt: `${workDate}T01:25:00Z`,
+      requestedOutAt: `${workDate}T10:00:00Z`,
+      reason: '补卡审批',
+    })
+    expect(reqRes.status).toBe(201)
+    const requestId = dataOf(reqRes)?.request?.id
+    expect(requestId).toEqual(expect.any(String))
+
+    const approve = await approveRequest(requestId)
+    expect(approve.status).toBe(200)
+
+    const rec = await recordById(recordId)
+    expect(rec.status).toBe('adjusted')
+    expect(rec.first_in_at?.toISOString()).toBe(`${workDate}T01:25:00.000Z`)
+    expect(rec.meta?.manual_result_edit).toBeUndefined()
+    expect(await auditRowsForRecord(recordId)).toHaveLength(1)
+  })
+
+  it('AE-1b durability: unmarked records keep route-derived behavior and never gain a manual marker', async () => {
+    const userId = `u-durable-unmarked-${RUN}`
+    const workDate = ymd(3)
+    const recordId = await seedRecord({
+      userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 25, earlyLeaveMinutes: 0,
+      firstInAt: `${workDate}T01:25:00Z`, lastOutAt: `${workDate}T10:00:00Z`,
+    })
+
+    const importRes = await postImport({
+      orgId: ORG,
+      userId,
+      rows: [
+        {
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T01:55:00Z`,
+            lastOutAt: `${workDate}T10:00:00Z`,
+          },
+        },
+      ],
+      mode: 'override',
+    })
+    expect(importRes.status).toBe(200)
+
+    const rec = await recordById(recordId)
+    expect(rec.status).not.toBe('normal')
+    expect(rec.meta?.manual_result_edit).toBeUndefined()
+    expect(await auditRowsForRecord(recordId)).toHaveLength(0)
   })
 
   it('disabled policy: returns 403 ATTENDANCE_RESULT_EDIT_DISABLED before writing audit or record changes', async () => {
@@ -367,12 +586,23 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     const first = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: 'verified offline', idempotencyKey: key })
     expect(first.status).toBe(200)
     expect(dataOf(first).alreadyApplied).toBe(false)
+    const afterFirst = await recordById(recordId)
+    const firstMarker = afterFirst.meta?.manual_result_edit
+    expect(firstMarker?.idempotencyKey).toBe(key)
+    expect(firstMarker?.auditId).toEqual(expect.any(String))
 
     // exact replay → alreadyApplied, no 2nd row
     const replay = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: 'verified offline', idempotencyKey: key })
     expect(replay.status).toBe(200)
     expect(dataOf(replay).alreadyApplied).toBe(true)
     expect(await auditByKey(ORG, key)).toHaveLength(1)
+    const afterReplay = await recordById(recordId)
+    expect(afterReplay.meta?.manual_result_edit).toMatchObject({
+      idempotencyKey: key,
+      auditId: firstMarker.auditId,
+      targetStatus: 'normal',
+      reviewConflict: null,
+    })
 
     // v1 decision: overrideMetrics is intentionally not part of the idempotency identity.
     // A deliberate same-key replay with different metrics returns the first edit and does not mutate again.
@@ -391,6 +621,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(Number(recAfterReplay.work_minutes)).toBe(480)
     expect(Number(recAfterReplay.late_minutes)).toBe(0)
     expect(Number(recAfterReplay.early_leave_minutes)).toBe(0)
+    expect(recAfterReplay.meta?.manual_result_edit?.auditId).toBe(firstMarker.auditId)
 
     // same key, different payload (target) → 409
     const conflict = await postEdit({ orgId: ORG, recordId, targetStatus: 'absent', reason: 'verified offline', idempotencyKey: key })
