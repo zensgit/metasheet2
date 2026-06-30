@@ -4188,6 +4188,19 @@ export class ApprovalProductService {
         // Deactivate the actor's own assignment first (whether or not the threshold is met).
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
+        if (distinctApproverCount < threshold && remainingAssignments === 0) {
+          // Defensive fail-closed (should be unreachable — `assertThresholdReachable` rejects
+          // N > resolved-M at resolution time): the threshold is unmet but no pending siblings
+          // remain, so completing here would silently approve an N-of-M whose N exceeds the
+          // resolved M (a 3-of-2). NEVER silent-approve an unmet threshold — throw so the outer
+          // transaction handler rolls back the actor's just-deactivated assignment.
+          throw new ServiceError(
+            `Approval node ${currentNodeKey} threshold ${threshold} cannot be met — ${distinctApproverCount} distinct approval(s) recorded with no remaining approvers`,
+            422,
+            'APPROVAL_THRESHOLD_UNREACHABLE',
+            { instanceId: id, nodeKey: currentNodeKey, threshold, approvedCount: distinctApproverCount },
+          )
+        }
         if (distinctApproverCount < threshold && remainingAssignments > 0) {
           // Threshold not yet reached and still-pending siblings remain — record this partial
           // approval and keep the node pending (mirrors 'all' short-circuit; siblings stay active).

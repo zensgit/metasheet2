@@ -96,6 +96,34 @@ function buildThresholdGraph() {
   }
 }
 
+// T2-4 P1 semantic-hole regression: a ROLE source resolves only M=2 distinct approver slots
+// but the node config demands N=3. Publish-time validation only bounds N <= M for the fully-
+// static USER case, so this graph publishes; the N > M must be caught FAIL-CLOSED when the
+// assignments are RESOLVED at create — never silently approved once the 2 slots are exhausted
+// with the 3rd approval impossible.
+function buildUnreachableThresholdGraph() {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      {
+        key: 'approval_threshold',
+        type: 'approval',
+        config: {
+          assigneeType: 'role',
+          assigneeIds: ['role-reviewers', 'role-leads'], // M = 2 distinct role slots
+          approvalMode: 'threshold',
+          approvalThreshold: 3, // N = 3 > M = 2
+        },
+      },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-threshold', source: 'start', target: 'approval_threshold' },
+      { key: 'edge-threshold-end', source: 'approval_threshold', target: 'end' },
+    ],
+  }
+}
+
 describeIfDatabase('Approval T2-4 N-of-M threshold (门槛会签) API', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''
@@ -143,7 +171,7 @@ describeIfDatabase('Approval T2-4 N-of-M threshold (门槛会签) API', () => {
     }
   })
 
-  async function publishThresholdTemplate(adminToken: string): Promise<string> {
+  async function publishGraphTemplate(adminToken: string, approvalGraph: object): Promise<string> {
     const templateKey = `approval-t24-threshold-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
     const templateResponse = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
       method: 'POST',
@@ -152,7 +180,7 @@ describeIfDatabase('Approval T2-4 N-of-M threshold (门槛会签) API', () => {
         name: 'Threshold Mode Template',
         description: 'approvalMode=threshold (N-of-M) integration',
         formSchema: buildFormSchema(),
-        approvalGraph: buildThresholdGraph(),
+        approvalGraph,
       },
     })
     expect(templateResponse.status).toBe(201)
@@ -165,6 +193,10 @@ describeIfDatabase('Approval T2-4 N-of-M threshold (门槛会签) API', () => {
     })
     expect(publishResponse.status).toBe(200)
     return template.id
+  }
+
+  async function publishThresholdTemplate(adminToken: string): Promise<string> {
+    return publishGraphTemplate(adminToken, buildThresholdGraph())
   }
 
   it('resolves a threshold (2-of-3) node on the SECOND distinct approval and cancels the third assignee', async () => {
@@ -358,5 +390,42 @@ describeIfDatabase('Approval T2-4 N-of-M threshold (门槛会签) API', () => {
       [createdApproval.id],
     )
     expect(Number.parseInt(activeAfterReject.rows[0]?.count || '0', 10)).toBe(0)
+  })
+
+  it('FAILS CLOSED at resolution when threshold N exceeds the resolved approver count (N > M)', async () => {
+    const adminToken = await authToken(baseUrl, 'approval-admin-threshold-nm')
+    const requesterToken = await authToken(baseUrl, 'requester-threshold-nm')
+
+    // Publish SUCCEEDS: publish-time N <= M validation only covers fully-static USER lists, so a
+    // 2-role / threshold-3 node passes authoring. This is exactly the P1 semantic hole — a
+    // DYNAMIC/ROLE source whose resolved M is never re-checked against N.
+    const templateId = await publishGraphTemplate(adminToken, buildUnreachableThresholdGraph())
+
+    // createApproval resolves the role source to M=2 distinct slots < threshold N=3. It MUST fail
+    // closed at resolution rather than create a node that silently approves once its 2 assignments
+    // are exhausted (the 3rd distinct approval being impossible). Against the pre-fix code this
+    // returns 201 and creates a node that would silent-approve a 3-of-2 — the assertion goes RED.
+    const createResponse = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: {
+        templateId,
+        formData: { reason: 'unreachable threshold request' },
+      },
+    })
+    expect(createResponse.status).toBe(422)
+    const errorPayload = await createResponse.json() as { id?: string; error?: { code?: string } }
+    if (errorPayload.id) {
+      createdApprovalIds.add(errorPayload.id)
+    }
+    expect(errorPayload.error?.code).toBe('APPROVAL_THRESHOLD_UNREACHABLE')
+
+    // Fail-closed-at-resolution means no instance was ever inserted (the throw fires before the
+    // create transaction begins) — so the unmet threshold can never be silently approved later.
+    const pool = poolManager.get()
+    const leakedInstances = await pool.query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM approval_instances WHERE template_id = $1`,
+      [templateId],
+    )
+    expect(Number.parseInt(leakedInstances.rows[0]?.count || '0', 10)).toBe(0)
   })
 })
