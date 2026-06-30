@@ -10,7 +10,7 @@ export type ApprovalProductPermission = typeof APPROVAL_PRODUCT_PERMISSIONS[numb
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end'
 export type ApprovalAssigneeType = 'user' | 'role'
 export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level'
-export type ApprovalMode = 'single' | 'all' | 'any'
+export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
 export type ParallelJoinMode = 'all' | 'any'
 export type EmptyAssigneePolicy = 'error' | 'auto-approve'
 export type ApprovalActionType =
@@ -89,6 +89,15 @@ export interface ApprovalNodeConfig {
   assigneeIds?: string[]
   assigneeSources?: ApprovalAssigneeSource[]
   approvalMode?: ApprovalMode
+  /**
+   * T2-4 N-of-M threshold (门槛会签). Only meaningful when `approvalMode === 'threshold'`:
+   * the node resolves APPROVED once `approvalThreshold` DISTINCT approver identities have
+   * approved (M = the baked assignee count). Validated at publish as a positive integer and,
+   * when every approver is a static user id, bounded `1 <= approvalThreshold <= distinct(assigneeIds)`.
+   * Threshold mode is linear-only in v1 (rejected inside a parallel region). Lives in node-config
+   * JSON — no SQL migration.
+   */
+  approvalThreshold?: number
   emptyAssigneePolicy?: EmptyAssigneePolicy
   autoApprovalPolicy?: AutoApprovalPolicy
   // P1-C node-level field permissions. Default-absent === editable === current

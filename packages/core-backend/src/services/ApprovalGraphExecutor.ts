@@ -103,7 +103,7 @@ export interface ApprovalGraphResolution {
    * Any-mode resolution carries `'any'`; all-mode carries `'all'` only when aggregation is complete
    * (the route short-circuits incomplete all-mode before calling `resolveAfterApprove`).
    */
-  aggregateMode: 'single' | 'all' | 'any' | null
+  aggregateMode: 'single' | 'all' | 'any' | 'threshold' | null
   /**
    * Indicates that the previous node's aggregation requirement is satisfied and resolution advanced.
    * Always `true` when `resolveAfterApprove` returns (incomplete aggregation never reaches here).
@@ -283,7 +283,7 @@ export function pruneHiddenFormData(
 }
 
 function normalizeApprovalMode(value: unknown): ApprovalMode {
-  return value === 'all' || value === 'any' || value === 'single' ? value : 'single'
+  return value === 'all' || value === 'any' || value === 'single' || value === 'threshold' ? value : 'single'
 }
 
 function evaluateRule(rule: ConditionRule, formData: Record<string, unknown>): boolean {
@@ -690,6 +690,17 @@ export class ApprovalGraphExecutor {
     return normalizeApprovalMode(this.getApprovalNodeConfig(nodeKey).approvalMode)
   }
 
+  /**
+   * T2-4 N-of-M threshold for a `'threshold'`-mode node: the number of DISTINCT approver
+   * identities required to resolve the node APPROVED. Defaults to 1 if absent/invalid — a
+   * published threshold graph always carries a publish-validated positive integer, so the
+   * fallback only guards against a hand-malformed runtime graph (never resolves on zero).
+   */
+  getApprovalThreshold(nodeKey: string): number {
+    const threshold = this.getApprovalNodeConfig(nodeKey).approvalThreshold
+    return typeof threshold === 'number' && Number.isInteger(threshold) && threshold >= 1 ? threshold : 1
+  }
+
   getApprovalNodeAssigneeIds(nodeKey: string): string[] {
     return [...(this.getApprovalNodeConfig(nodeKey).assigneeIds ?? [])]
   }
@@ -817,7 +828,7 @@ export class ApprovalGraphExecutor {
 
   private resolveFromNode(
     nodeKey: string,
-    context: { aggregateMode: 'single' | 'all' | 'any' | null; aggregateComplete: boolean },
+    context: { aggregateMode: 'single' | 'all' | 'any' | 'threshold' | null; aggregateComplete: boolean },
   ): ApprovalGraphResolution {
     const ccEvents: ApprovalCcEvent[] = []
     const autoApprovalEvents: ApprovalGraphAutoApprovalEvent[] = []

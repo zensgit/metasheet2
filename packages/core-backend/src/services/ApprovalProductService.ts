@@ -300,7 +300,7 @@ const DETAIL_LEAF_FIELD_TYPES = new Set(
 
 const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end'])
 const CONDITION_OPERATORS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'isEmpty'])
-const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any'])
+const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any', 'threshold'])
 const PARALLEL_JOIN_MODES = new Set(['all', 'any'])
 const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-approve'])
 const AUTO_APPROVAL_ACTOR_MODES = new Set<AutoApprovalActorMode>(['system', 'original_approver'])
@@ -330,7 +330,7 @@ function isNonEmptyString(value: unknown): value is string {
 function normalizeApprovalMode(value: unknown, context: ValidationContext, path: string): ApprovalMode | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'string' || !APPROVAL_MODES.has(value as ApprovalMode)) {
-    failValidation(context, `${path} must be single, all, or any`)
+    failValidation(context, `${path} must be single, all, any, or threshold`)
   }
   return value as ApprovalMode
 }
