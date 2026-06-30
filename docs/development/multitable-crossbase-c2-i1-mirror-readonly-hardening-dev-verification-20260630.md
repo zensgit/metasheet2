@@ -13,7 +13,7 @@
 | Fix 2 | Yjs collab bridge `index.ts` (~:2370) | Replaced hand-rolled `readOnlyTypes.has(type)‖prop.readOnly` with `isReadOnly = isFieldAlwaysReadOnly(f)`; and set `guard.link` **only when `!isReadOnly`** (defense-in-depth). |
 | Fix 3a | `RecordService.restoreRecord` (record-service.ts:984) | `linkFieldIds = …filter(f.type==='link' && !isFieldAlwaysReadOnly(f))` — skip the mirror in the replay. |
 | Fix 3b | PIT undelete (univer-meta.ts:9430) | `…filter(f.type==='link' && fieldById.get(f.id)?.readOnly !== true)` (patchContext guard = canonical). |
-| Fix 3c | PIT reset-execute (univer-meta.ts:9652) | `if (field?.type !== 'link' || field.readOnly === true) continue` — the PIT-reset path had NO upstream readOnly gate, so this is its spine guard. |
+| Fix 3c | PIT reset-execute (univer-meta.ts:9652) | `if (field?.type !== 'link' || field.readOnly === true) continue` — skip the mirror in the reset replay. **Defense-in-depth:** the reset's pre-existing PREVIEW preflight (univer-meta.ts:9322) already refuses a mirror-diff reset (`409 RESET_BLOCKED`, `readOnly` via `isFieldAlwaysReadOnly`), so 9652 is unreachable while that preflight holds — a secondary spine assertion, not the primary guard (corrects the earlier "no upstream gate" read). |
 
 ## 2. Yjs downstream finding (Fix 2 — how it BLOCKS)
 The bridge builds `fieldById` (the guard map) and passes it to `RecordWriteService.patchRecords` (index.ts:2404).
@@ -23,7 +23,7 @@ the existing spine guard rejects it** — the same enforcement the bulk `/patch`
 `guard.link` for a read-only field makes the link-write path additionally unreachable for a mirror.
 
 ## 3. Verification (real DB `metasheet_oapi4a_test`)
-**New golden `multitable-mirror-readonly-enumeration-realdb.test.ts` → 6/6.** Each attempt asserts the spine
+**New golden `multitable-mirror-readonly-enumeration-realdb.test.ts` → 8/8.** Each attempt asserts the spine
 invariant `SELECT count(*) FROM meta_links WHERE field_id = <mirror> === 0`:
 - **SD-1a / SD-1b** — plugin-SDK `createRecord` / `patchRecord` with a mirror-field value → rejected (read-only), no edge.
 - **CONF** — bulk `POST /patch` on the mirror field → 403, no edge (conforming-baseline regression).
@@ -31,12 +31,20 @@ invariant `SELECT count(*) FROM meta_links WHERE field_id = <mirror> === 0`:
   OLD hand-rolled Yjs predicate judged it WRITABLE (false) — the convergence that closes the gap.
 - **SNAP** — restore (via route) of a record whose snapshot carries a (bogus) injected mirror value → the mirror is
   NOT replayed as an edge (Fix 3a).
+- **SNAP-undelete** — PIT resurrect (`revert-execute` confirm:`undelete`, flag-on) of a deleted record whose T-snapshot
+  carries a bogus mirror value → the mirror is NOT rebuilt as an outbound edge (Fix 3b, univer-meta.ts:9430).
+- **SNAP-reset** — PIT reset-to-T (`reset-preview`, flag-on) whose revert diff would write the mirror field → **refused
+  at the all-or-nothing PREFLIGHT** (`409 RESET_BLOCKED`), nothing written. **Finding:** the reset path's reachable
+  spine guard is the **pre-existing** preview preflight (univer-meta.ts:9322, `readOnly !== true` via
+  `isFieldAlwaysReadOnly` ⇒ `mirrorOf`) — so reset was NOT a true side-door; the Fix-3c replay-skip (9652) is
+  **defense-in-depth**, unreachable while that preflight holds (kept as a secondary spine assertion).
 
-**Fail-first proof (load-bearing):** neutralizing Fix 1 → **SD-1a/SD-1b RED** (a `meta_links` row appears for the
-mirror field — the spine break is real); neutralizing Fix 3a → **SNAP RED** (`expected 1 to be 0`). The SD-2 contrast
-is the in-test proof for Fix 2 (the full realtime loop isn't drivable in-test; the guard derivation is asserted
-directly). *(Method note: the fail-first reverts were `git checkout`-restored; since the fixes were uncommitted that
-also reverted Fix 1 / Fix 3a — both were re-applied and re-verified 6/6 before commit.)*
+**Fail-first proof (load-bearing):** neutralizing Fix 1 → **SD-1a/SD-1b RED** (a `meta_links` row appears — the spine
+break is real); neutralizing Fix 3a → **SNAP RED**; neutralizing **Fix 3b (the 9430 undelete filter) → SNAP-undelete
+RED** (`expected 1 to be 0` — a mirror outbound edge is rebuilt). SD-2 is the in-test proof for Fix 2 (the realtime
+loop isn't drivable in-test; the guard derivation is asserted directly). **SNAP-reset pins the pre-existing PREFLIGHT,
+not the defense-in-depth 9652 skip** — so it is honestly NOT fail-first against Fix 3c (the preflight blocks first). All
+8 verified green together; the fail-first reverts were `git checkout`-restored from the commit.
 
 **Regression:** plugin-SDK `multitable-records.test.ts` + `multitable-record-lock.test.ts` → **23/23** (a
 computed/mirror field write was never valid, so Fix 1 only tightens). **`tsc --noEmit`: exit 0.** Golden wired into
