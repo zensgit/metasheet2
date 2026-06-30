@@ -73,6 +73,84 @@ describe('computeDateReminderOccurrence — pure, day-bucketed', () => {
   })
 })
 
+describe('computeDateReminderOccurrence — timezone-aware (T2-5)', () => {
+  const NY = 'America/New_York'
+
+  test('UTC default path is unchanged when timezone is absent / "UTC"', () => {
+    const cfg = { offsetDays: 3, direction: 'before' as const, timeOfDay: '09:00' }
+    expect(computeDateReminderOccurrence('2026-06-28T14:30:00.000Z', cfg)).toBe('2026-06-25T09:00:00.000Z')
+    expect(computeDateReminderOccurrence('2026-06-28T14:30:00.000Z', { ...cfg, timezone: 'UTC' })).toBe(
+      '2026-06-25T09:00:00.000Z',
+    )
+  })
+
+  test('non-UTC zone: timeOfDay is LOCAL wall-clock, converted to UTC (EDT = UTC-4)', () => {
+    // 0 days before, fire 09:00 America/New_York on 2026-06-15 (EDT) = 13:00 UTC.
+    expect(
+      computeDateReminderOccurrence('2026-06-15T20:00:00.000Z', {
+        offsetDays: 0,
+        direction: 'before',
+        timeOfDay: '09:00',
+        timezone: NY,
+      }),
+    ).toBe('2026-06-15T13:00:00.000Z')
+  })
+
+  test('non-UTC zone: day-bucket uses the LOCAL calendar day of the source date', () => {
+    // 2026-06-16T02:00:00Z is still 2026-06-15 22:00 LOCAL (EDT). So the local day is the 15th, and a
+    // 0-offset 09:00 reminder fires 2026-06-15 09:00 EDT = 13:00 UTC (NOT the 16th).
+    expect(
+      computeDateReminderOccurrence('2026-06-16T02:00:00.000Z', {
+        offsetDays: 0,
+        direction: 'before',
+        timeOfDay: '09:00',
+        timezone: NY,
+      }),
+    ).toBe('2026-06-15T13:00:00.000Z')
+  })
+
+  test('runtime defense: an invalid IANA tz degrades to UTC bucketing (never throws, no null)', () => {
+    let occ: string | null = null
+    expect(() => {
+      occ = computeDateReminderOccurrence('2026-06-28T14:30:00.000Z', {
+        offsetDays: 3,
+        direction: 'before',
+        timeOfDay: '09:00',
+        timezone: 'Not/AZone',
+      })
+    }).not.toThrow()
+    // Identical to the UTC path.
+    expect(occ).toBe('2026-06-25T09:00:00.000Z')
+  })
+})
+
+describe('date-reminder timer boundary — timezone-aware (T2-5)', () => {
+  const NY = 'America/New_York'
+
+  test('UTC default path unchanged: delay lands on the UTC timeOfDay boundary', () => {
+    // 2026-06-15T06:00:00Z, timeOfDay 09:00 UTC → fire at 09:00 UTC, 3h out.
+    const now = Date.parse('2026-06-15T06:00:00.000Z')
+    expect(nextDateReminderTimerDelayMs('09:00', now)).toBe(3 * 60 * 60 * 1000)
+    expect(dateReminderTimeOfDayPassed('09:00', now)).toBe(false)
+  })
+
+  test('non-UTC zone: the timer fires at the LOCAL timeOfDay, not the UTC one', () => {
+    // 2026-06-15T06:00:00Z. 09:00 America/New_York (EDT) = 13:00 UTC → still ahead, delay = 7h.
+    const now = Date.parse('2026-06-15T06:00:00.000Z')
+    const delay = nextDateReminderTimerDelayMs('09:00', now, NY)
+    expect(now + delay).toBe(Date.parse('2026-06-15T13:00:00.000Z'))
+    expect(dateReminderTimeOfDayPassed('09:00', now, NY)).toBe(false)
+  })
+
+  test('non-UTC zone: when today’s local boundary has passed, advance to the next LOCAL day', () => {
+    // 2026-06-15T16:00:00Z = 12:00 EDT, past 09:00 local → next is 2026-06-16 09:00 EDT = 2026-06-16 13:00 UTC.
+    const now = Date.parse('2026-06-15T16:00:00.000Z')
+    const delay = nextDateReminderTimerDelayMs('09:00', now, NY)
+    expect(now + delay).toBe(Date.parse('2026-06-16T13:00:00.000Z'))
+    expect(dateReminderTimeOfDayPassed('09:00', now, NY)).toBe(true)
+  })
+})
+
 describe('isDateReminderDue — firing window (backfill bound)', () => {
   const now = Date.parse('2026-06-25T12:00:00.000Z')
   const window = DATE_REMINDER_GRACE_WINDOW_MS // 2 days

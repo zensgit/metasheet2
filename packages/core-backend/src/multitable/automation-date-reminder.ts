@@ -16,12 +16,30 @@
  *      time within the same reminder day does not change the occurrence → no re-spam. (Day-bucketing assumes
  *      offsetDays granularity; sub-day offsets are a future revisit — out of v1.)
  *
- * Timezone: v1 buckets in UTC (date fields are stored as `toISOString()` = UTC). A tz-aware day boundary
- * needs an IANA tz library and is deferred; `config.timezone` is accepted+persisted but only `'UTC'` is
- * honored in v1 (documented limitation).
+ * Timezone (T2-5): the day-bucket honors `config.timezone`. With timezone absent / 'UTC' / 'Etc/UTC' the
+ * occurrence is bucketed in UTC EXACTLY as before (no behaviour change). With a valid non-UTC IANA zone the
+ * source date's LOCAL calendar day is taken, shifted by ±offsetDays as civil days, then `timeOfDay` is the
+ * LOCAL wall-clock on the reminder day, converted back to a UTC instant. A persisted-junk tz never throws —
+ * it falls back to UTC bucketing. Editing a rule's timezone re-buckets `occurrence_ts`, so a bounded one-time
+ * re-fire is possible (Q5, accepted); historical ledger rows are never rewritten.
  */
 
+import { getZonedParts, isValidIanaTimeZone, zonedWallClockToUtcMs } from './automation-timezone'
+
 const DAY_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Resolve a date-reminder timezone: a valid non-UTC IANA zone → that zone; absent / 'UTC' / 'Etc/UTC' /
+ * invalid → `null` = the UTC path. PURE; never throws (invalid is filtered here, so the zoned helpers below
+ * only ever run with a known-good zone, and a junk persisted tz degrades to UTC instead of mis-firing).
+ */
+function resolveReminderTimeZone(raw: string | undefined): string | null {
+  if (typeof raw !== 'string') return null
+  const tz = raw.trim()
+  if (!tz || tz === 'UTC' || tz === 'Etc/UTC') return null
+  if (!isValidIanaTimeZone(tz)) return null
+  return tz
+}
 
 export interface ScheduleDateFieldConfig {
   /** The DATE/dateTime field whose value anchors the reminder. */
@@ -30,9 +48,9 @@ export interface ScheduleDateFieldConfig {
   offsetDays: number
   /** Fire this many days BEFORE the date, or AFTER it. */
   direction: 'before' | 'after'
-  /** When on the reminder day to fire, 'HH:mm' (UTC, v1). Default '09:00'. */
+  /** When on the reminder day to fire, 'HH:mm' in `timezone` (LOCAL wall-clock). Default '09:00'. */
   timeOfDay?: string
-  /** Persisted but v1 honors only 'UTC' (documented limitation). */
+  /** IANA timezone for the day-bucket + timeOfDay (T2-5). Absent/'UTC' = UTC bucketing. Invalid → UTC. */
   timezone?: string
   /**
    * SERVER-SET activation instant (ISO): when this rule BECAME a date-reminder (create-as-date_field or a
@@ -89,45 +107,134 @@ function utcTimeOfDayBoundaryMs(nowMs: number, timeOfDay: string | undefined): n
 }
 
 /**
- * DR-A: ms from `nowMs` until the NEXT UTC `timeOfDay` boundary (today's if still ahead, else tomorrow's).
- * The scheduler arms a `setTimeout` to this instant and re-arms each day, so the scan runs at ~the configured
- * time rather than anchored to server-boot time. PURE.
+ * The `timeOfDay` boundary (ms epoch) on the LOCAL calendar day containing `nowMs`, expressed as a UTC instant.
+ * tz must be a resolved, valid non-UTC zone. PURE; throws only on an invalid tz (caller guards/catches).
  */
-export function nextDateReminderTimerDelayMs(timeOfDay: string | undefined, nowMs: number): number {
-  const today = utcTimeOfDayBoundaryMs(nowMs, timeOfDay)
-  const target = today > nowMs ? today : today + DAY_MS
-  return target - nowMs
+function zonedTimeOfDayBoundaryMs(nowMs: number, timeOfDay: string | undefined, tz: string): number {
+  const p = getZonedParts(nowMs, tz)
+  const mins = parseTimeOfDayMinutes(timeOfDay)
+  return zonedWallClockToUtcMs(
+    { year: p.year, month: p.month, day: p.day, hour: Math.floor(mins / 60), minute: mins % 60, second: 0 },
+    tz,
+  )
 }
 
 /**
- * DR-B: has today's UTC `timeOfDay` boundary already passed at `nowMs`? When true at register/restart the
+ * DR-A: ms from `nowMs` until the NEXT `timeOfDay` boundary (today's if still ahead, else tomorrow's). The
+ * scheduler arms a `setTimeout` to this instant and re-arms each day, so the scan runs at ~the configured
+ * LOCAL time rather than anchored to server-boot time. With no/UTC tz the math is UTC (UNCHANGED). With a
+ * non-UTC zone "tomorrow" is the next LOCAL civil day (NOT today+24h — DST-safe), and a junk tz falls back to
+ * the UTC math (never throws). PURE.
+ */
+export function nextDateReminderTimerDelayMs(
+  timeOfDay: string | undefined,
+  nowMs: number,
+  timezone?: string,
+): number {
+  const tz = resolveReminderTimeZone(timezone)
+  if (!tz) {
+    const today = utcTimeOfDayBoundaryMs(nowMs, timeOfDay)
+    const target = today > nowMs ? today : today + DAY_MS
+    return target - nowMs
+  }
+  try {
+    const today = zonedTimeOfDayBoundaryMs(nowMs, timeOfDay, tz)
+    if (today > nowMs) return today - nowMs
+    // Next LOCAL civil day's boundary (handles month/DST rollover; +DAY_MS on the UTC instant could drift).
+    const p = getZonedParts(nowMs, tz)
+    const nextCivil = new Date(Date.UTC(p.year, p.month - 1, p.day + 1))
+    const mins = parseTimeOfDayMinutes(timeOfDay)
+    const target = zonedWallClockToUtcMs(
+      {
+        year: nextCivil.getUTCFullYear(),
+        month: nextCivil.getUTCMonth() + 1,
+        day: nextCivil.getUTCDate(),
+        hour: Math.floor(mins / 60),
+        minute: mins % 60,
+        second: 0,
+      },
+      tz,
+    )
+    return target - nowMs
+  } catch {
+    const today = utcTimeOfDayBoundaryMs(nowMs, timeOfDay)
+    const target = today > nowMs ? today : today + DAY_MS
+    return target - nowMs
+  }
+}
+
+/**
+ * DR-B: has today's `timeOfDay` boundary already passed at `nowMs`? When true at register/restart the
  * scheduler runs ONE immediate catch-up scan — still gated by the firing window + `ruleCreatedAt`, so it can
- * never backfill-blast — so a deploy after the configured time still delivers today's reminders. PURE.
+ * never backfill-blast — so a deploy after the configured time still delivers today's reminders. With no/UTC
+ * tz the boundary is UTC (UNCHANGED); a non-UTC zone uses the LOCAL boundary; a junk tz falls back to UTC
+ * (never throws). PURE.
  */
-export function dateReminderTimeOfDayPassed(timeOfDay: string | undefined, nowMs: number): boolean {
-  return utcTimeOfDayBoundaryMs(nowMs, timeOfDay) <= nowMs
+export function dateReminderTimeOfDayPassed(
+  timeOfDay: string | undefined,
+  nowMs: number,
+  timezone?: string,
+): boolean {
+  const tz = resolveReminderTimeZone(timezone)
+  if (!tz) return utcTimeOfDayBoundaryMs(nowMs, timeOfDay) <= nowMs
+  try {
+    return zonedTimeOfDayBoundaryMs(nowMs, timeOfDay, tz) <= nowMs
+  } catch {
+    return utcTimeOfDayBoundaryMs(nowMs, timeOfDay) <= nowMs
+  }
 }
 
 /**
- * PURE occurrence: the instant a record's reminder should fire, day-bucketed in UTC. Returns an ISO string,
- * or null if the date value is absent/unparseable. NEVER reads NOW.
+ * PURE occurrence: the instant a record's reminder should fire, day-bucketed in `config.timezone` (UTC when
+ * absent/'UTC'/invalid). Returns an ISO string, or null if the date value is absent/unparseable. NEVER reads
+ * NOW. The UTC path is byte-identical to pre-T2-5; the zoned path day-buckets in LOCAL time and converts back.
  */
 export function computeDateReminderOccurrence(
   dateValue: unknown,
-  config: { offsetDays?: number; direction?: 'before' | 'after'; timeOfDay?: string },
+  config: { offsetDays?: number; direction?: 'before' | 'after'; timeOfDay?: string; timezone?: string },
 ): string | null {
   if (dateValue === null || dateValue === undefined || dateValue === '') return null
   const d = dateValue instanceof Date ? dateValue : new Date(String(dateValue))
   const t = d.getTime()
   if (Number.isNaN(t)) return null
 
-  // Day-bucket: strip the source time-of-day to UTC midnight, then shift by whole days.
-  const dayUtcMidnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
   const offset = Number.isFinite(config.offsetDays) ? Math.trunc(config.offsetDays) : 0
   const signedDays = config.direction === 'after' ? offset : -offset
-  const reminderDay = dayUtcMidnight + signedDays * DAY_MS
-  const occurrenceMs = reminderDay + parseTimeOfDayMinutes(config.timeOfDay) * 60 * 1000
-  return new Date(occurrenceMs).toISOString()
+  const tz = resolveReminderTimeZone(config.timezone)
+
+  if (!tz) {
+    // Day-bucket: strip the source time-of-day to UTC midnight, then shift by whole days. (UNCHANGED.)
+    const dayUtcMidnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+    const reminderDay = dayUtcMidnight + signedDays * DAY_MS
+    const occurrenceMs = reminderDay + parseTimeOfDayMinutes(config.timeOfDay) * 60 * 1000
+    return new Date(occurrenceMs).toISOString()
+  }
+
+  try {
+    // Zoned day-bucket: take the source date's LOCAL calendar day, shift by whole CIVIL days, then set the
+    // LOCAL `timeOfDay` and convert that local wall-clock back to a UTC instant.
+    const p = getZonedParts(t, tz)
+    const shifted = new Date(Date.UTC(p.year, p.month - 1, p.day + signedDays))
+    const mins = parseTimeOfDayMinutes(config.timeOfDay)
+    const occurrenceMs = zonedWallClockToUtcMs(
+      {
+        year: shifted.getUTCFullYear(),
+        month: shifted.getUTCMonth() + 1,
+        day: shifted.getUTCDate(),
+        hour: Math.floor(mins / 60),
+        minute: mins % 60,
+        second: 0,
+      },
+      tz,
+    )
+    return new Date(occurrenceMs).toISOString()
+  } catch {
+    // Runtime defense (Q6): a persisted-junk tz must never throw — degrade to UTC bucketing.
+    const dayUtcMidnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+    const reminderDay = dayUtcMidnight + signedDays * DAY_MS
+    const occurrenceMs = reminderDay + parseTimeOfDayMinutes(config.timeOfDay) * 60 * 1000
+    return new Date(occurrenceMs).toISOString()
+  }
 }
 
 /**

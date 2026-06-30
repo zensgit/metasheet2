@@ -13,6 +13,7 @@ import {
   dateReminderLedgerRetentionCutoffIso,
   type ScheduleDateFieldConfig,
 } from './automation-date-reminder'
+import { isValidIanaTimeZone } from './automation-timezone'
 import { ensureRecordNotLocked } from './record-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { extractSelectOptions } from './field-codecs'
@@ -800,6 +801,9 @@ export class AutomationService {
     const dateTriggerError = await this.validateDateFieldTriggerAtSave(sheetId, input.triggerType, input.triggerConfig ?? null)
     if (dateTriggerError) throw new AutomationRuleValidationError(dateTriggerError)
 
+    const cronTriggerError = this.validateCronTriggerAtSave(input.triggerType, input.triggerConfig ?? null)
+    if (cronTriggerError) throw new AutomationRuleValidationError(cronTriggerError)
+
     // date_field rules carry a SERVER-SET activation `effectiveAt` (= now) so the firing floor is the rule's
     // activation, not its row createdAt. Spread-then-set overwrites any client-supplied effectiveAt (no backfill bypass).
     const persistedTriggerConfig: Record<string, unknown> =
@@ -982,6 +986,12 @@ export class AutomationService {
       )
       if (dateTriggerError) throw new AutomationRuleValidationError(dateTriggerError)
 
+      const cronTriggerError = this.validateCronTriggerAtSave(
+        nextTriggerType,
+        nextTriggerConfig as Record<string, unknown> | null,
+      )
+      if (cronTriggerError) throw new AutomationRuleValidationError(cronTriggerError)
+
       // SERVER-SET activation floor: when the RESULT is a date_field rule, persist `effectiveAt`. Converting
       // INTO date_field (prev type differs) activates NOW; staying date_field (config edit) PRESERVES the
       // existing activation (fall back to created_at for pre-fix rules) so an edit never re-opens backfill.
@@ -1105,13 +1115,34 @@ export class AutomationService {
       .where('trigger_type', 'in', ['schedule.cron', 'schedule.interval', 'schedule.date_field'])
       .execute()
 
+    // Q4 (T2-5 migration risk A): now that the persisted cron timezone is HONORED, a non-UTC rule that
+    // previously fired in UTC will shift its firing time. Collect those rules so operators get a one-time
+    // startup audit naming exactly which rules change (sheetId, ruleId, tz) — emitted after registration.
+    const nonUtcCronAudit: Array<{ sheetId: string; ruleId: string; timezone: string }> = []
+
     for (const row of rows) {
       const rule = this.mapRow(row)
       this.scheduler.register(toExecutorRule(rule))
+      if (rule.trigger_type === 'schedule.cron') {
+        const cfg = (rule.trigger_config ?? null) as Record<string, unknown> | null
+        const tzRaw = cfg && typeof cfg.timezone === 'string' ? cfg.timezone.trim() : ''
+        if (tzRaw && tzRaw !== 'UTC' && tzRaw !== 'Etc/UTC') {
+          nonUtcCronAudit.push({ sheetId: rule.sheet_id, ruleId: rule.id, timezone: tzRaw })
+        }
+      }
     }
 
     if (rows.length > 0) {
       logger.info(`Registered ${rows.length} scheduled automation rule(s) on startup`)
+    }
+
+    if (nonUtcCronAudit.length > 0) {
+      logger.warn(
+        `T2-5 timezone audit: ${nonUtcCronAudit.length} enabled non-UTC cron rule(s) now honor their persisted timezone (firing time shifts from UTC):`,
+      )
+      for (const a of nonUtcCronAudit) {
+        logger.warn(`  cron rule ${a.ruleId} (sheet ${a.sheetId}) timezone=${a.timezone}`)
+      }
     }
   }
 
@@ -1189,6 +1220,19 @@ export class AutomationService {
     ) {
       logger.warn(`Rule ${rule.id}: invalid schedule.date_field config — skipping scan`)
       return
+    }
+
+    // Q6 runtime defense: a persisted-junk timezone (e.g. a direct-DB write that bypassed the save validator)
+    // must NOT throw in the scan loop — the pure occurrence math degrades to UTC bucketing. Surface it once so
+    // operators notice the mis-config, then proceed (the rule still fires, just in UTC).
+    if (
+      typeof config.timezone === 'string' &&
+      config.timezone.trim() &&
+      config.timezone.trim() !== 'UTC' &&
+      config.timezone.trim() !== 'Etc/UTC' &&
+      !isValidIanaTimeZone(config.timezone.trim())
+    ) {
+      logger.warn(`Rule ${rule.id}: invalid date-reminder timezone '${config.timezone}' — falling back to UTC bucketing`)
     }
 
     const nowMs = Date.now()
@@ -1303,8 +1347,13 @@ export class AutomationService {
       }
     }
 
-    if (cfg.timezone !== undefined && cfg.timezone !== null && cfg.timezone !== '' && cfg.timezone !== 'UTC') {
-      return `schedule.date_field timezone v1 supports only 'UTC' (got ${String(cfg.timezone)})`
+    // T2-5: timezone is now honored (was UTC-only). Accept any VALID IANA zone; reject invalid (fail-closed,
+    // 400 at save) so a saved rule's behavior matches its config. Absent/empty/'UTC' = UTC bucketing.
+    if (cfg.timezone !== undefined && cfg.timezone !== null && cfg.timezone !== '') {
+      const tzStr = typeof cfg.timezone === 'string' ? cfg.timezone.trim() : ''
+      if (!tzStr || !isValidIanaTimeZone(tzStr)) {
+        return `schedule.date_field timezone must be a valid IANA timezone (got ${String(cfg.timezone)})`
+      }
     }
 
     const res = await this.queryFn('SELECT type FROM meta_fields WHERE sheet_id = $1 AND id = $2', [sheetId, dateFieldId])
@@ -1315,6 +1364,28 @@ export class AutomationService {
       return `schedule.date_field dateFieldId must be a date/dateTime field (got ${fieldType || 'unknown'})`
     }
 
+    return null
+  }
+
+  /**
+   * T2-5 cron SAVE-boundary validator. `schedule.cron` is now timezone-aware, so a junk timezone must be
+   * rejected at save (400, fail-closed — mirrors the date_field tz gate) rather than silently mis-firing or
+   * being caught-and-UTC'd only at runtime. Accepts absent / '' / 'UTC' / 'Etc/UTC' / any valid IANA zone;
+   * rejects only an invalid zone. No DB access (pure Intl validity check). No-op for any other trigger type.
+   */
+  private validateCronTriggerAtSave(
+    triggerType: string,
+    triggerConfig: Record<string, unknown> | null | undefined,
+  ): string | null {
+    if (triggerType !== 'schedule.cron') return null
+    const cfg = isRecord(triggerConfig) ? triggerConfig : {}
+    if (cfg.timezone !== undefined && cfg.timezone !== null && cfg.timezone !== '') {
+      const tzStr = typeof cfg.timezone === 'string' ? cfg.timezone.trim() : ''
+      if (!tzStr || tzStr === 'UTC' || tzStr === 'Etc/UTC') return null
+      if (!isValidIanaTimeZone(tzStr)) {
+        return `schedule.cron timezone must be a valid IANA timezone (got ${String(cfg.timezone)})`
+      }
+    }
     return null
   }
 

@@ -248,9 +248,15 @@ describeIfDatabase('multitable date-reminder trigger — scan/claim/fire (real D
       .rejects.toThrow(/offsetDays must be a non-negative integer/i)
   })
 
-  test('DR-VAL: rejects a non-UTC timezone at save (v1 honors only UTC — reject, not accept-and-ignore)', async () => {
-    await expect(svc.createRule(SHEET, mkDateRule({ dateFieldId: FLD_DATE, offsetDays: 3, direction: 'before', timezone: 'America/New_York' })))
-      .rejects.toThrow(/timezone v1 supports only 'UTC'/i)
+  test('DR-VAL (T2-5): accepts a valid non-UTC IANA timezone at save (now honored, not UTC-only)', async () => {
+    const ok = await svc.createRule(SHEET, mkDateRule({ dateFieldId: FLD_DATE, offsetDays: 3, direction: 'before', timezone: 'America/New_York' }))
+    expect(ok.id).toBeTruthy()
+    expect((ok.trigger_config as { timezone?: string }).timezone).toBe('America/New_York')
+  })
+
+  test('DR-VAL (T2-5): rejects an INVALID IANA timezone at save (400, fail-closed)', async () => {
+    await expect(svc.createRule(SHEET, mkDateRule({ dateFieldId: FLD_DATE, offsetDays: 3, direction: 'before', timezone: 'Not/AZone' })))
+      .rejects.toThrow(/timezone must be a valid IANA timezone/i)
   })
 
   test('DR-VAL: a valid date field + config saves successfully', async () => {

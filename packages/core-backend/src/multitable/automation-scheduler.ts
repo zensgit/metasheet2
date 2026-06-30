@@ -11,6 +11,12 @@ import {
   dateReminderTimeOfDayPassed,
   type ScheduleDateFieldConfig,
 } from './automation-date-reminder'
+import {
+  getZonedParts,
+  isValidIanaTimeZone,
+  zonedMinuteKey,
+  type ZonedParts,
+} from './automation-timezone'
 import type { AutomationRule } from './automation-executor'
 import type { RedisLeaderLock } from './redis-leader-lock'
 
@@ -155,6 +161,74 @@ function cronMatches(parsed: ParsedCronExpression, date: Date): boolean {
   return domMatches || dowMatches
 }
 
+/**
+ * T2-5: cron-field match against a candidate UTC instant's LOCAL wall-clock in a timezone. Identical
+ * OR-semantics to {@link cronMatches}, only the field source differs — `parts` are the zoned year/month/day/
+ * hour/minute (day-of-week is derived from the civil date so it is locale-independent and never reads a
+ * formatter weekday string).
+ */
+function cronMatchesZoned(parsed: ParsedCronExpression, parts: ZonedParts): boolean {
+  if (!parsed.minute.has(parts.minute)) return false
+  if (!parsed.hour.has(parts.hour)) return false
+  if (!parsed.month.has(parts.month)) return false
+
+  const dow = new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay()
+  const domMatches = parsed.dayOfMonth.has(parts.day)
+  const dowMatches = parsed.dayOfWeek.has(dow)
+  if (parsed.dayOfMonthWildcard && parsed.dayOfWeekWildcard) return true
+  if (parsed.dayOfMonthWildcard) return dowMatches
+  if (parsed.dayOfWeekWildcard) return domMatches
+  return domMatches || dowMatches
+}
+
+/**
+ * Look-back bound for DST fall-back dedup. A wall-clock minute repeats across at most the DST shift, which is
+ * ≤ 1h for every modern IANA zone; 3h gives comfortable margin. The cost (≤180 cheap zoned-minute lookups) is
+ * paid ONLY when a candidate already matched the cron — i.e. once per fired occurrence, not per scanned minute.
+ */
+const MAX_DST_FALLBACK_LOOKBACK_MS = 3 * 60 * 60 * 1000
+
+/**
+ * Resolve a cron schedule's timezone. Absent / 'UTC' / 'Etc/UTC' → `null` = the UTC fast path (behaviour
+ * UNCHANGED from pre-T2-5). A persisted-junk tz must NOT throw in the scan loop (Q6 runtime defense): warn and
+ * fall back to UTC.
+ */
+function resolveCronTimeZone(raw: string | undefined): string | null {
+  if (typeof raw !== 'string') return null
+  const tz = raw.trim()
+  if (!tz || tz === 'UTC' || tz === 'Etc/UTC') return null
+  if (!isValidIanaTimeZone(tz)) {
+    logger.warn(`Invalid IANA timezone '${tz}' on a cron schedule — falling back to UTC`)
+    return null
+  }
+  return tz
+}
+
+/**
+ * Q1 (DST fall-back): a wall-clock minute that occurs TWICE (clock-back day) must fire ONCE. We always emit
+ * the FIRST instant and suppress the SECOND. A candidate is the suppressed repeat iff some EARLIER UTC minute
+ * within {@link MAX_DST_FALLBACK_LOOKBACK_MS} maps to the SAME local Y-M-D-H-m. Identical local-date-hour-
+ * minute can only arise during a fall-back overlap, so this is false-positive-free for ordinary days/crons.
+ * Defensive: any zoned-formatter throw is treated as "not a repeat" (never throws in the scan).
+ */
+function isZonedFallbackRepeat(candidateMs: number, timeZone: string): boolean {
+  let key: string
+  try {
+    key = zonedMinuteKey(candidateMs, timeZone)
+  } catch {
+    return false
+  }
+  const minuteMs = 60 * 1000
+  for (let back = candidateMs - minuteMs; back >= candidateMs - MAX_DST_FALLBACK_LOOKBACK_MS; back -= minuteMs) {
+    try {
+      if (zonedMinuteKey(back, timeZone) === key) return true
+    } catch {
+      return false
+    }
+  }
+  return false
+}
+
 /** Leap-safe maximum day each month (1..12) can host (February = 29). */
 const MONTH_MAX_DAYS: Readonly<Record<number, number>> = {
   1: 31, 2: 29, 3: 31, 4: 30, 5: 31, 6: 30,
@@ -199,17 +273,38 @@ export function cronHasNoMatchingDay(expression: string): boolean {
   return dayUnreachable(parsed)
 }
 
-export function nextCronOccurrenceMs(expression: string, fromMs: number = Date.now()): number | null {
+export function nextCronOccurrenceMs(
+  expression: string,
+  fromMs: number = Date.now(),
+  timeZone?: string,
+): number | null {
   const parsed = parseCronExpression(expression)
   if (!parsed) return null
   // Fast path: a day-impossible cron (e.g. Feb 30) would otherwise scan the full
   // ~5-year window before returning null. Short-circuit it up front.
   if (dayUnreachable(parsed)) return null
+  // T2-5: resolve the schedule timezone. `null` = UTC fast path (UNCHANGED from pre-T2-5); a non-UTC IANA zone
+  // interprets each candidate minute's LOCAL wall-clock. Invalid/junk tz already fell back to UTC via the
+  // resolver. Spring-forward (Q2) is emergent: a non-existent local minute maps to NO UTC instant, so the
+  // minute-scan simply never matches it and that day is skipped — no special case needed.
+  const tz = resolveCronTimeZone(timeZone)
   const minuteMs = 60 * 1000
   let candidate = Math.floor(fromMs / minuteMs) * minuteMs + minuteMs
   const max = candidate + 5 * 366 * 24 * 60 * minuteMs
   while (candidate <= max) {
-    if (cronMatches(parsed, new Date(candidate))) return candidate
+    if (tz) {
+      let matched = false
+      try {
+        matched = cronMatchesZoned(parsed, getZonedParts(candidate, tz))
+      } catch {
+        // Defensive: a zoned-formatter failure mid-scan must never throw out of the loop (Q6).
+        matched = false
+      }
+      // Q1: emit the FIRST instant of a wall-clock minute; suppress the DST fall-back repeat.
+      if (matched && !isZonedFallbackRepeat(candidate, tz)) return candidate
+    } else if (cronMatches(parsed, new Date(candidate))) {
+      return candidate
+    }
     candidate += minuteMs
   }
   return null
@@ -434,8 +529,8 @@ export class AutomationScheduler {
     clearTimeout(timer)
   }
 
-  private registerCron(rule: AutomationRule, expression: string): void {
-    const nextMs = nextCronOccurrenceMs(expression)
+  private registerCron(rule: AutomationRule, expression: string, timeZone?: string): void {
+    const nextMs = nextCronOccurrenceMs(expression, Date.now(), timeZone)
     if (!nextMs) {
       logger.warn(`Rule ${rule.id}: unsupported cron expression: ${expression}`)
       return
@@ -445,13 +540,17 @@ export class AutomationScheduler {
       if (!this.timers.has(rule.id)) return
       this.runScheduledRule(rule)
       this.timers.delete(rule.id)
-      if (this.isLeader) this.registerCron(rule, expression)
+      // Re-arm from NOW (no catch-up — Q3 at-most-once). On a DST fall-back day the next-occurrence scan
+      // suppresses the repeated wall-clock minute, so the timer advances past the overlap (fire-once).
+      if (this.isLeader) this.registerCron(rule, expression, timeZone)
     }, delayMs)
     if (typeof timer.unref === 'function') {
       timer.unref()
     }
     this.timers.set(rule.id, timer)
-    logger.info(`Registered cron schedule for rule ${rule.id} (next: ${new Date(nextMs).toISOString()})`)
+    logger.info(
+      `Registered cron schedule for rule ${rule.id} (next: ${new Date(nextMs).toISOString()}${timeZone ? `, tz=${timeZone}` : ''})`,
+    )
   }
 
   /**
@@ -480,7 +579,7 @@ export class AutomationScheduler {
         return
       }
       const config = trigger.config as Partial<ScheduleDateFieldConfig>
-      if (dateReminderTimeOfDayPassed(config.timeOfDay, Date.now())) {
+      if (dateReminderTimeOfDayPassed(config.timeOfDay, Date.now(), config.timezone)) {
         this.runScheduledRule(rule)
       }
       this.armDateFieldTimer(rule, config)
@@ -489,6 +588,7 @@ export class AutomationScheduler {
 
     let intervalMs: number | null = null
     let cronExpression: string | null = null
+    let cronTimezone: string | undefined
     if (trigger.type === 'schedule.interval') {
       intervalMs = typeof trigger.config.intervalMs === 'number' ? trigger.config.intervalMs : null
       if (!intervalMs || intervalMs < 1000) {
@@ -501,7 +601,8 @@ export class AutomationScheduler {
         : typeof trigger.config.cron === 'string'
           ? trigger.config.cron
           : ''
-      if (!nextCronOccurrenceMs(cronExpression)) {
+      cronTimezone = typeof trigger.config.timezone === 'string' ? trigger.config.timezone : undefined
+      if (!nextCronOccurrenceMs(cronExpression, Date.now(), cronTimezone)) {
         logger.warn(`Rule ${rule.id}: unsupported cron expression: ${cronExpression}`)
         return
       }
@@ -517,7 +618,7 @@ export class AutomationScheduler {
     }
 
     if (cronExpression) {
-      this.registerCron(rule, cronExpression)
+      this.registerCron(rule, cronExpression, cronTimezone)
       return
     }
 
@@ -539,7 +640,7 @@ export class AutomationScheduler {
    * lives in `this.timers`, so `unregister`'s clear cancels a pending fire.
    */
   private armDateFieldTimer(rule: AutomationRule, config: Partial<ScheduleDateFieldConfig>): void {
-    const delay = nextDateReminderTimerDelayMs(config.timeOfDay, Date.now())
+    const delay = nextDateReminderTimerDelayMs(config.timeOfDay, Date.now(), config.timezone)
     const timer = setTimeout(() => {
       this.runScheduledRule(rule)
       if (this.timers.get(rule.id) === timer) {
@@ -550,7 +651,8 @@ export class AutomationScheduler {
       timer.unref()
     }
     this.timers.set(rule.id, timer)
-    logger.info(`Registered date-reminder schedule for rule ${rule.id} (next scan in ${delay}ms, timeOfDay=${config.timeOfDay ?? '09:00'} UTC)`)
+    const tzLabel = config.timezone && config.timezone !== 'UTC' ? config.timezone : 'UTC'
+    logger.info(`Registered date-reminder schedule for rule ${rule.id} (next scan in ${delay}ms, timeOfDay=${config.timeOfDay ?? '09:00'} ${tzLabel})`)
   }
 
   /**
