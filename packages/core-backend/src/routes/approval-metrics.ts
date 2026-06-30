@@ -97,6 +97,47 @@ export function approvalMetricsRouter(options?: ApprovalMetricsRouterOptions): R
     },
   )
 
+  // T2-3 person/team analytics — admin-only, read-only. Aggregates the same metrics rows by the
+  // requester (people) / the requester's frozen department (teams). Reuses approvals:admin (these
+  // endpoints surface no requester data an admin can't already see on each instance).
+  r.get('/api/approvals/metrics/people',
+    authenticate,
+    rbacGuard('approvals:admin'),
+    async (req: Request, res: Response) => {
+      try {
+        const data = await metricsService.getMetricsByRequester({
+          tenantId: resolveTenantId(req),
+          since: parseDate(req.query.since),
+          until: parseDate(req.query.until),
+          limit: parseLimit(req.query.limit),
+        })
+        return res.json({ ok: true, data })
+      } catch (error) {
+        logger.error(`metrics people failed: ${error instanceof Error ? error.message : String(error)}`)
+        return res.status(500).json({ ok: false, error: { code: 'METRICS_PEOPLE_FAILED', message: 'Failed to load approval metrics by person' } })
+      }
+    },
+  )
+
+  r.get('/api/approvals/metrics/teams',
+    authenticate,
+    rbacGuard('approvals:admin'),
+    async (req: Request, res: Response) => {
+      try {
+        const data = await metricsService.getMetricsByDepartment({
+          tenantId: resolveTenantId(req),
+          since: parseDate(req.query.since),
+          until: parseDate(req.query.until),
+          limit: parseLimit(req.query.limit),
+        })
+        return res.json({ ok: true, data })
+      } catch (error) {
+        logger.error(`metrics teams failed: ${error instanceof Error ? error.message : String(error)}`)
+        return res.status(500).json({ ok: false, error: { code: 'METRICS_TEAMS_FAILED', message: 'Failed to load approval metrics by team' } })
+      }
+    },
+  )
+
   r.get('/api/approvals/metrics/breaches',
     authenticate,
     rbacGuard('approvals:admin'),

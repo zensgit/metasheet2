@@ -39,6 +39,10 @@ export default defineConfig({
       // default no-DB job so it doesn't skip-green, and wired as a WHOLE FILE into the dedicated
       // `Run approval real-DB integration` step in plugin-tests.yml where it runs against real Postgres.
       'tests/integration/approval-bridge-redaction-regression.test.ts',
+      // T2-3 person/team analytics: DATABASE_URL-gated. Excluded from the no-DB default job so it
+      // doesn't skip-green, and wired as a WHOLE FILE into the `Run approval real-DB integration`
+      // step in plugin-tests.yml where it runs against real Postgres every PR.
+      'tests/integration/approval-metrics-people-teams.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

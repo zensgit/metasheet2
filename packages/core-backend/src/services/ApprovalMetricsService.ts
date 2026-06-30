@@ -57,6 +57,21 @@ export interface MetricsSummaryTemplateRow {
   slaBreachRate: number
 }
 
+// T2-3 person/team analytics: the per-template summary shape, regrouped by the requester
+// (person) or the requester's frozen department (team). `key` is the requester id or the
+// department string; `name` is a representative display name (requester) or the department
+// string itself (team). A null `key` is the "(unattributed)" bucket.
+export interface MetricsDimensionRow {
+  key: string | null
+  name: string | null
+  total: number
+  approved: number
+  rejected: number
+  revoked: number
+  avgDurationSeconds: number | null
+  slaBreachRate: number
+}
+
 export interface MetricsSummary {
   total: number
   approved: number
@@ -417,6 +432,96 @@ export class ApprovalMetricsService {
         }
       }),
     }
+  }
+
+  /**
+   * T2-3 person/team analytics. The per-template summary shape, regrouped by the approval
+   * REQUESTER (`dimension='requester'`) or the requester's frozen DEPARTMENT
+   * (`dimension='department'` — `directoryDepartment` with a `department` fallback). Read-only,
+   * admin-only (enforced at the route), Top-100 by volume; a null group key is the unattributed
+   * bucket. Extends the same `approval_metrics m LEFT JOIN approval_instances i` join +
+   * `requester_snapshot` JSONB read as `listBreachContextByIds`, with the GROUP key swapped.
+   */
+  async getMetricsByDimension(
+    dimension: 'requester' | 'department',
+    input: MetricsSummaryQuery = {},
+  ): Promise<MetricsDimensionRow[]> {
+    const tenantId = resolveTenantId(input.tenantId)
+    const since = normalizeDate(input.since)
+    const until = normalizeDate(input.until)
+
+    const conditions: string[] = ['m.tenant_id = $1']
+    const params: unknown[] = [tenantId]
+    if (since) {
+      params.push(since.toISOString())
+      conditions.push(`m.started_at >= $${params.length}`)
+    }
+    if (until) {
+      params.push(until.toISOString())
+      conditions.push(`m.started_at <= $${params.length}`)
+    }
+    const where = `WHERE ${conditions.join(' AND ')}`
+
+    // requester → group by id, pick a representative display name; department → the key IS the name.
+    const keyExpr = dimension === 'requester'
+      ? `i.requester_snapshot->>'id'`
+      : `COALESCE(i.requester_snapshot->>'directoryDepartment', i.requester_snapshot->>'department')`
+    const nameSelect = dimension === 'requester'
+      ? `MIN(i.requester_snapshot->>'name')`
+      : keyExpr
+
+    const result = await this.query<{
+      dim_key: string | null
+      dim_name: string | null
+      total: string
+      approved: string
+      rejected: string
+      revoked: string
+      avg_duration: string | null
+      sla_breach_count: string
+      sla_candidate_count: string
+    }>(
+      `SELECT
+         ${keyExpr} AS dim_key,
+         ${nameSelect} AS dim_name,
+         COUNT(*)::text AS total,
+         COUNT(*) FILTER (WHERE m.terminal_state = 'approved')::text AS approved,
+         COUNT(*) FILTER (WHERE m.terminal_state = 'rejected')::text AS rejected,
+         COUNT(*) FILTER (WHERE m.terminal_state = 'revoked')::text AS revoked,
+         AVG(m.duration_seconds) FILTER (WHERE m.duration_seconds IS NOT NULL)::text AS avg_duration,
+         COUNT(*) FILTER (WHERE m.sla_breached = TRUE)::text AS sla_breach_count,
+         COUNT(*) FILTER (WHERE m.sla_hours IS NOT NULL)::text AS sla_candidate_count
+       FROM approval_metrics m
+       LEFT JOIN approval_instances i ON i.id = m.instance_id
+       ${where}
+       GROUP BY ${keyExpr}
+       ORDER BY COUNT(*) DESC
+       LIMIT 100`,
+      params,
+    )
+
+    return result.rows.map((r) => {
+      const candidate = Number.parseInt(r.sla_candidate_count ?? '0', 10) || 0
+      const breach = Number.parseInt(r.sla_breach_count ?? '0', 10) || 0
+      return {
+        key: r.dim_key,
+        name: r.dim_name,
+        total: Number.parseInt(r.total ?? '0', 10) || 0,
+        approved: Number.parseInt(r.approved ?? '0', 10) || 0,
+        rejected: Number.parseInt(r.rejected ?? '0', 10) || 0,
+        revoked: Number.parseInt(r.revoked ?? '0', 10) || 0,
+        avgDurationSeconds: parseNullableNumber(r.avg_duration),
+        slaBreachRate: candidate > 0 ? breach / candidate : 0,
+      }
+    })
+  }
+
+  async getMetricsByRequester(input: MetricsSummaryQuery = {}): Promise<MetricsDimensionRow[]> {
+    return this.getMetricsByDimension('requester', input)
+  }
+
+  async getMetricsByDepartment(input: MetricsSummaryQuery = {}): Promise<MetricsDimensionRow[]> {
+    return this.getMetricsByDimension('department', input)
   }
 
   async getMetricsReport(input: MetricsSummaryQuery = {}): Promise<MetricsReport> {

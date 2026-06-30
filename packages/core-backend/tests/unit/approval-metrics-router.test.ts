@@ -56,6 +56,12 @@ function buildService() {
       slowestInstances: [],
       breachedTemplates: [],
     }),
+    getMetricsByRequester: vi.fn().mockResolvedValue([
+      { key: 'u-1', name: 'Alice', total: 1, approved: 1, rejected: 0, revoked: 0, avgDurationSeconds: 120, slaBreachRate: 0 },
+    ]),
+    getMetricsByDepartment: vi.fn().mockResolvedValue([
+      { key: 'Engineering', name: 'Engineering', total: 1, approved: 1, rejected: 0, revoked: 0, avgDurationSeconds: 120, slaBreachRate: 0 },
+    ]),
   }
 }
 
@@ -138,5 +144,62 @@ describe('approval metrics report route', () => {
         message: 'Failed to load approval metrics report',
       },
     })
+  })
+})
+
+describe('approval metrics person/team routes (T2-3)', () => {
+  let service: ReturnType<typeof buildService>
+  let app: express.Express
+
+  beforeEach(async () => {
+    vi.resetModules()
+    authState.user = { id: 'admin-1', tenantId: 'tenant-a', permissions: ['*:*'] }
+    authState.allowRbac = true
+    service = buildService()
+    const { approvalMetricsRouter } = await import('../../src/routes/approval-metrics')
+    app = express()
+    app.use(express.json())
+    app.use(approvalMetricsRouter({ metricsService: service as unknown as ApprovalMetricsServiceType }))
+  })
+
+  it('GET /people forwards parsed tenant/since/until/limit and returns the dimension array', async () => {
+    const response = await request(app)
+      .get('/api/approvals/metrics/people')
+      .query({ since: '2026-04-01T00:00:00Z', until: '2026-04-25T23:59:59Z', limit: '999' })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data[0]).toMatchObject({ key: 'u-1', name: 'Alice', total: 1 })
+    expect(service.getMetricsByRequester).toHaveBeenCalledWith({
+      tenantId: 'tenant-a',
+      since: new Date('2026-04-01T00:00:00Z'),
+      until: new Date('2026-04-25T23:59:59Z'),
+      limit: 50,
+    })
+  })
+
+  it('GET /teams forwards parsed params and returns the dimension array', async () => {
+    const response = await request(app).get('/api/approvals/metrics/teams').query({ limit: 'x' })
+    expect(response.status).toBe(200)
+    expect(response.body.data[0]).toMatchObject({ key: 'Engineering', total: 1 })
+    expect(service.getMetricsByDepartment).toHaveBeenCalledWith({
+      tenantId: 'tenant-a',
+      since: undefined,
+      until: undefined,
+      limit: 10,
+    })
+  })
+
+  it('enforces auth + approvals:admin on both endpoints', async () => {
+    authState.user = null
+    await request(app).get('/api/approvals/metrics/people').expect(401)
+    await request(app).get('/api/approvals/metrics/teams').expect(401)
+
+    authState.user = { id: 'viewer-1', tenantId: 'tenant-a' }
+    authState.allowRbac = false
+    await request(app).get('/api/approvals/metrics/people').expect(403)
+    await request(app).get('/api/approvals/metrics/teams').expect(403)
+
+    expect(service.getMetricsByRequester).not.toHaveBeenCalled()
+    expect(service.getMetricsByDepartment).not.toHaveBeenCalled()
   })
 })
