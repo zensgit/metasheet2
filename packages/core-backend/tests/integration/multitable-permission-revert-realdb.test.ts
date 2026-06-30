@@ -346,4 +346,67 @@ describeIfDatabase('multitable permission-revert — T9-W de-escalation-only (re
     // the OTHER subject's id (and thus its grant) never appears in the response (token is HMAC/base64 over subj only).
     expect(JSON.stringify(p.body)).not.toContain(other)
   })
+
+  // ── (m) double-writer concurrency (#3389 follow-up). The forward grant/revoke routes now take the SAME
+  // `meta_sheets … FOR UPDATE` lock the permission-revert execute path holds, so a forward grant write cannot
+  // commit BETWEEN a revert's live-grant re-check and its apply (which would turn a re-checked de-escalation
+  // into a net escalation). We prove the forward route takes that lock with an FK-aware discriminator:
+  //
+  //   spreadsheet_permissions.sheet_id REFERENCES meta_sheets(id), so a forward INSERT implicitly takes
+  //   `FOR KEY SHARE` on the parent meta_sheets row. We therefore HOLD `FOR KEY SHARE` (NOT `FOR UPDATE`) on
+  //   that row externally: it is COMPATIBLE with the FK key-share the *unfixed* route needs (the forward write
+  //   would sail through → test RED), but CONFLICTS with the `FOR UPDATE` the *fixed* route now requests (the
+  //   forward write BLOCKS until release → test GREEN). A `FOR UPDATE` holder could NOT discriminate this fix:
+  //   the FK key-share alone would block the unfixed INSERT and the test would pass with or without the lock.
+  // Timing: the grace window is >> a forward-write round-trip on the CI postgres; the assertion is two-sided
+  // (state unchanged while held AND applied after release), so a slow run cannot mask a missing lock.
+  test('(m) double-writer: a held FOR KEY SHARE on the sheet parks a forward grant write (proves the forward FOR UPDATE lock)', async () => {
+    process.env[FLAG] = 'true'
+    const s = await freshSheet('m')
+    const subj = mkSubject('m')
+    // the forward route checks subject existence (real user row) BEFORE its txn — seed it.
+    await q(`INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x') ON CONFLICT (id) DO NOTHING`, [subj, `${subj}@x.test`])
+    await seedSheetGrant(s, subj, 'read') // live = read; the concurrent forward write attempts an escalation to admin
+
+    let releaseHold: () => void = () => {}
+    const holdReleased = new Promise<void>((resolve) => { releaseHold = () => resolve() })
+    let acquired: () => void = () => {}
+    const lockAcquired = new Promise<void>((resolve) => { acquired = () => resolve() })
+
+    // external holder: grab FOR KEY SHARE on the sheet row and hold it open until we signal release.
+    const holder = poolManager.get().transaction(async ({ query }) => {
+      await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR KEY SHARE', [s])
+      acquired()
+      await holdReleased
+    })
+    try {
+      await lockAcquired // holder now owns FOR KEY SHARE on the sheet row
+
+      actor = ADMIN
+      let settled = false
+      const fwd = request(app)
+        .put(`/api/multitable/sheets/${s}/permissions/user/${subj}`)
+        .send({ accessLevel: 'admin' })
+        .then((r) => { settled = true; return r })
+
+      // With the fix the forward write is parked on `meta_sheets FOR UPDATE` (conflicts with the held FOR KEY
+      // SHARE): it has NOT settled and the grant is untouched. Without the fix it would have committed by now.
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(settled).toBe(false)
+      expect(await sheetCodes(s, subj)).toEqual(['spreadsheet:read'])
+
+      // release the lock → the parked forward write proceeds and commits the escalation.
+      releaseHold()
+      await holder
+      const res = await fwd
+      expect(res.status).toBe(200)
+      expect(settled).toBe(true)
+      expect(await sheetCodes(s, subj)).toEqual(['spreadsheet:admin'])
+    } finally {
+      releaseHold() // never leak the holding txn — afterAll deletes meta_sheets, which needs the row free
+      await holder.catch(() => {})
+      await q(`DELETE FROM spreadsheet_permissions WHERE sheet_id = $1`, [s]).catch(() => {})
+      await q(`DELETE FROM users WHERE id = $1`, [subj]).catch(() => {})
+    }
+  })
 })
