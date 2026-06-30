@@ -1,10 +1,10 @@
 # K3 read/list + external-system read onboarding — development & verification (2026-06-26)
 
-> Status: **buildable development COMPLETE + verified; remaining surfaces GATED (not unfinished)**. This MD records the full development + verification of the K3 read/list/BOM line and its read-onboarding standardization. Per the line's own plan (the C0–C5 ladder + GATEs), every authorized non-gated slice is shipped. C3 LIST-only and C4 single-level BOM read are now shipped after their customer/operator GATEs; C5 resolver, recursive BOM, and writes remain deliberately frozen behind their own customer/owner GATEs.
+> Status: **buildable development COMPLETE + verified; remaining surfaces GATED (not unfinished)**. This MD records the full development + verification of the K3 read/list/BOM line and its read-onboarding standardization. Per the line's own plan (the C0–C5 ladder + GATEs), every authorized non-gated slice is shipped. C3 LIST-only and C4 single-level BOM read are now shipped after their customer/operator GATEs; material→FBillNo resolver now has a GATE-front contract only, while resolver runtime/composition, recursive BOM, and writes remain deliberately frozen behind their own customer/owner GATEs.
 
 ## 0. Honest scope
 
-The line's plan gates the broader surfaces on purpose. So "complete the unfinished development" resolves to: **finish everything buildable without crossing a GATE (done), and document the gated remainder with its gate reasons.** No customer/owner GATE was crossed to manufacture "completion." C3 LIST-only was opened only after #1709 customer/operator evidence explicitly requested WebAPI LIST; C4 BOM single-level read was opened only after #3399's shape-first GATE-front and a separate owner runtime opt-in. C5 resolver, recursive BOM, and writes remain locked.
+The line's plan gates the broader surfaces on purpose. So "complete the unfinished development" resolves to: **finish everything buildable without crossing a GATE (done), and document the gated remainder with its gate reasons.** No customer/owner GATE was crossed to manufacture "completion." C3 LIST-only was opened only after #1709 customer/operator evidence explicitly requested WebAPI LIST; C4 BOM single-level read was opened only after #3399's shape-first GATE-front and a separate owner runtime opt-in. The material→FBillNo resolver is now opened only to GATE-front contract/shape intake; resolver runtime/composition, recursive BOM, and writes remain locked.
 
 ## 1. Development delivered (merged, with SHAs)
 
@@ -22,6 +22,7 @@ The line's plan gates the broader surfaces on purpose. So "complete the unfinish
 - `#3330` — **C3 LIST-only**: explicit `k3wise.material-list.v1` preset + bounded Material/GetList route/adapter wiring. Single page, preset-owned `Top/PageSize/PageIndex`, rows parsed from `response.Data.DATA`, optional key mapped only to the internal `FNumber` prefix filter, route-only internal marker required before adapter LIST execution, no request-supplied raw filters/cursor/watermark/limit/path/method/payload, values-free evidence, no BOM/resolver/write.
 - `#3399` (`c499abe83`) — **C4 BOM GATE-front**: docs-only, redacted live shape intake for BOM read; explicitly no runtime/no BOM call.
 - `#3405` (`efa832a08`) — **C4 BOM single-level read runtime**: explicit `k3wise.material-bom.v1` preset + `POST /K3API/BOM/GetDetail`; request body `Data.FBillNo` as a bound JSON value (not `k3_freeform` / not raw Filter); extracts `Data.Page1` header count + `Data.Page2` line rows; one call, no recursion, no material-to-FBillNo resolver, no Save/Submit/Audit/write.
+- `integration-core-k3wise-bom-material-resolver-gate-contract-design-20260630.md` — **material→FBillNo resolver GATE-front**: docs-only, redacted live shape intake for read-only material→BOM bill lookup; explicitly no runtime/no resolver call/no BOM call/no composition.
 
 **Standardization:**
 - `#3257` (`2f7f82323`) — K3 read/list **GATE v2** + reusable values-free evidence checklist.
@@ -58,7 +59,8 @@ A separate adversarial pass re-verified the C0–C2 baseline on fresh `origin/ma
 | C3 — WebAPI LIST | shipped (LIST-only) | opened by #1709 customer/operator GATE; bounded Material/GetList only, values-free |
 | C4 — BOM read | shipped (single-level read only) | opened by #3399 shape-first GATE-front + owner runtime opt-in; one `BOM/GetDetail` call only, values-free |
 | BOM recursive multi-level expansion | frozen (locked) | separate fan-out/request-amplification gate; single-level C4 PASS does not authorize recursion |
-| material→FBillNo resolver / server-side composition | frozen (locked) | explicit owner unlock + named demand; not inferred from BOM read-smoke |
+| material→FBillNo resolver | GATE-front contract only; runtime frozen | shape-first contract opened; runtime requires redacted live lookup shape + separate owner opt-in; not inferred from BOM read-smoke |
+| material→FBillNo -> BOM server-side composition | frozen (locked) | separate opt-in after resolver runtime; first resolver slice must not auto-call `BOM/GetDetail` |
 | C5 — resolver / server-side composition | frozen (locked) | explicit owner unlock + named demand |
 | Save / Submit / Audit / production / external write | frozen | separate owner authorization (FOS-P4-style write gate); a read GATE never authorizes a write |
 | Live K3 beyond the verified read-smokes | gated | customer GATE packet / owner opt-in for each new surface; C3 LIST and C4 single-level BOM read are the only live read-smokes recorded here |
