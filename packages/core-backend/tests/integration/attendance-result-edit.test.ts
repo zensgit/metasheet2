@@ -52,6 +52,20 @@ function ymd(daysAgo: number): string {
   return new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10)
 }
 
+// A deterministic recent WEEKDAY (Mon–Fri). The default attendance schedule treats Sat/Sun as rest
+// days, so a record seeded on a weekend has is_workday=true while a no-override recompute derives
+// is_workday=false — which AE-1b (correctly) flags as a material-fact change. The durability
+// conflict-detection tests pin to a weekday so the seed's is_workday matches the schedule recompute
+// and only the punch facts under test drive reviewConflict; otherwise ymd(N) landing on a weekend
+// (e.g. ymd(3) on a Tuesday) makes the suite date-fragile.
+function workdayYmd(daysAgo: number): string {
+  let d = new Date(Date.now() - daysAgo * 86400000)
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
+    d = new Date(d.getTime() - 86400000)
+  }
+  return d.toISOString().slice(0, 10)
+}
+
 type ErrBody = { ok?: boolean; error?: { code?: string; message?: string }; data?: unknown }
 const codeOf = (r: HttpResponse) => (r.body as ErrBody | undefined)?.error?.code
 const dataOf = (r: HttpResponse) => (r.body as { data?: any } | undefined)?.data
@@ -307,7 +321,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
 
   it('AE-1b durability: same-facts import recompute preserves the corrected result without a review flag', async () => {
     const userId = `u-durable-same-${RUN}`
-    const workDate = ymd(3)
+    const workDate = workdayYmd(3)
     const recordId = await seedRecord({
       userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 35, earlyLeaveMinutes: 0,
       firstInAt: `${workDate}T01:35:00Z`, lastOutAt: `${workDate}T10:00:00Z`,
@@ -342,7 +356,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
 
   it('AE-1b durability: a no-status import recompute preserves the corrected result and flags changed facts', async () => {
     const userId = `u-durable-${RUN}`
-    const workDate = ymd(3)
+    const workDate = workdayYmd(3)
     const recordId = await seedRecord({
       userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 35, earlyLeaveMinutes: 0,
       firstInAt: `${workDate}T01:35:00Z`, lastOutAt: `${workDate}T10:00:00Z`,
