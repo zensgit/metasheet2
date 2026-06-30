@@ -5216,4 +5216,135 @@ describe('ApprovalProductService', () => {
       statement.startsWith("UPDATE approval_templates SET status = 'published'"))).toBe(false)
     expect(pgState.client.release).toHaveBeenCalledTimes(1)
   })
+
+  describe('T2-4 threshold (N-of-M) mode publish validation', () => {
+    const createTemplate = async (request: unknown) => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      return new ApprovalProductService().createTemplate(request as never)
+    }
+
+    const thresholdGraph = (approvalConfig: Record<string, unknown>) => ({
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_threshold', type: 'approval', config: approvalConfig },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-threshold', source: 'start', target: 'approval_threshold' },
+        { key: 'edge-threshold-end', source: 'approval_threshold', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    })
+
+    const baseRequest = (graph: Record<string, unknown>) => ({
+      key: 'threshold-tpl',
+      name: 'Threshold Tpl',
+      visibilityScope: { type: 'all', ids: [] },
+      formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }] },
+      approvalGraph: graph,
+    })
+
+    it('rejects a threshold node whose N exceeds the distinct static approver count', async () => {
+      // N=4 against 3 distinct static users → out of range.
+      await expect(createTemplate(baseRequest(thresholdGraph({
+        assigneeType: 'user',
+        assigneeIds: ['u-a', 'u-b', 'u-c'],
+        approvalMode: 'threshold',
+        approvalThreshold: 4,
+      })))).rejects.toMatchObject({
+        code: 'APPROVAL_THRESHOLD_OUT_OF_RANGE',
+        statusCode: 400,
+      })
+    })
+
+    it('rejects a threshold node with a non-positive / non-integer threshold', async () => {
+      await expect(createTemplate(baseRequest(thresholdGraph({
+        assigneeType: 'user',
+        assigneeIds: ['u-a', 'u-b'],
+        approvalMode: 'threshold',
+        approvalThreshold: 0,
+      })))).rejects.toMatchObject({
+        code: 'APPROVAL_THRESHOLD_INVALID',
+        statusCode: 400,
+      })
+
+      await expect(createTemplate(baseRequest(thresholdGraph({
+        assigneeType: 'user',
+        assigneeIds: ['u-a', 'u-b'],
+        approvalMode: 'threshold',
+        approvalThreshold: 1.5,
+      })))).rejects.toMatchObject({
+        code: 'APPROVAL_THRESHOLD_INVALID',
+        statusCode: 400,
+      })
+
+      // 'threshold' mode with no approvalThreshold at all is also rejected.
+      await expect(createTemplate(baseRequest(thresholdGraph({
+        assigneeType: 'user',
+        assigneeIds: ['u-a', 'u-b'],
+        approvalMode: 'threshold',
+      })))).rejects.toMatchObject({
+        code: 'APPROVAL_THRESHOLD_INVALID',
+        statusCode: 400,
+      })
+    })
+
+    it('rejects a threshold node nested inside a parallel region (linear-only in v1)', async () => {
+      const parallelGraph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['edge-fork-a', 'edge-fork-b'], joinNodeKey: 'join', joinMode: 'all' } },
+          // A VALID threshold (2 of 2) so the per-node range check passes and the dedicated
+          // parallel-region guard is the failure that fires.
+          { key: 'branch_a', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['p-a1', 'p-a2'], approvalMode: 'threshold', approvalThreshold: 2 } },
+          { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['p-b1'] } },
+          { key: 'join', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-fork', source: 'start', target: 'fork' },
+          { key: 'edge-fork-a', source: 'fork', target: 'branch_a' },
+          { key: 'edge-fork-b', source: 'fork', target: 'branch_b' },
+          { key: 'edge-a-join', source: 'branch_a', target: 'join' },
+          { key: 'edge-b-join', source: 'branch_b', target: 'join' },
+        ],
+        policy: { allowRevoke: true },
+      }
+      await expect(createTemplate(baseRequest(parallelGraph))).rejects.toMatchObject({
+        code: 'APPROVAL_THRESHOLD_IN_PARALLEL',
+        statusCode: 400,
+      })
+    })
+
+    it('accepts a valid linear threshold (2-of-3) node and round-trips approvalThreshold', async () => {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('INSERT INTO approval_templates')) {
+          return { rows: [{ id: 'tpl-t', key: String(params?.[0]), name: String(params?.[1]), description: null, category: null, visibility_scope: JSON.parse(String(params?.[4])), sla_hours: null, status: 'draft', active_version_id: null, latest_version_id: null, created_at: new Date('2026-06-30T00:00:00.000Z'), updated_at: new Date('2026-06-30T00:00:00.000Z') }], rowCount: 1 }
+        }
+        if (s.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [{ id: 'ver-t', template_id: 'tpl-t', version: 1, status: 'draft', form_schema: JSON.parse(String(params?.[1])), approval_graph: JSON.parse(String(params?.[2])), created_at: new Date('2026-06-30T00:00:00.000Z'), updated_at: new Date('2026-06-30T00:00:00.000Z') }], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_templates')) {
+          return { rows: [{ id: 'tpl-t', key: 'threshold-tpl', name: 'Threshold Tpl', description: null, category: null, visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft', active_version_id: null, latest_version_id: 'ver-t', created_at: new Date('2026-06-30T00:00:00.000Z'), updated_at: new Date('2026-06-30T00:00:00.000Z') }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+
+      const result = await createTemplate(baseRequest(thresholdGraph({
+        assigneeType: 'user',
+        assigneeIds: ['u-a', 'u-b', 'u-c'],
+        approvalMode: 'threshold',
+        approvalThreshold: 2,
+      })))
+      const node = result.approvalGraph.nodes.find((n) => n.key === 'approval_threshold')
+      expect((node?.config as { approvalMode?: string }).approvalMode).toBe('threshold')
+      expect((node?.config as { approvalThreshold?: number }).approvalThreshold).toBe(2)
+
+      const insertVersionCall = pgState.client.query.mock.calls.find(([sql]) =>
+        normalize(sql as string).startsWith('INSERT INTO approval_template_versions'))
+      const persistedGraph = JSON.parse(String(insertVersionCall?.[1]?.[2]))
+      expect(persistedGraph.nodes[1].config.approvalThreshold).toBe(2)
+    })
+  })
 })

@@ -47,6 +47,10 @@ export default defineConfig({
       // no-DB default job so it doesn't skip-green, and wired as a WHOLE FILE into the `Run approval
       // real-DB integration` step in plugin-tests.yml where it runs against real Postgres every PR.
       'tests/integration/approval-node-sla-remind.test.ts',
+      // T2-4 N-of-M threshold (门槛会签): DATABASE_URL-gated (describeIfDatabase). Excluded from the
+      // no-DB default job so it doesn't skip-green, and wired as a WHOLE FILE into the
+      // `Run approval real-DB integration` step in plugin-tests.yml where it runs against real Postgres.
+      'tests/integration/approval-nofm-threshold.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

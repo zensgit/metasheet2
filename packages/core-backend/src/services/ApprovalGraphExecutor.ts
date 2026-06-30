@@ -103,7 +103,7 @@ export interface ApprovalGraphResolution {
    * Any-mode resolution carries `'any'`; all-mode carries `'all'` only when aggregation is complete
    * (the route short-circuits incomplete all-mode before calling `resolveAfterApprove`).
    */
-  aggregateMode: 'single' | 'all' | 'any' | null
+  aggregateMode: 'single' | 'all' | 'any' | 'threshold' | null
   /**
    * Indicates that the previous node's aggregation requirement is satisfied and resolution advanced.
    * Always `true` when `resolveAfterApprove` returns (incomplete aggregation never reaches here).
@@ -283,7 +283,7 @@ export function pruneHiddenFormData(
 }
 
 function normalizeApprovalMode(value: unknown): ApprovalMode {
-  return value === 'all' || value === 'any' || value === 'single' ? value : 'single'
+  return value === 'all' || value === 'any' || value === 'single' || value === 'threshold' ? value : 'single'
 }
 
 function evaluateRule(rule: ConditionRule, formData: Record<string, unknown>): boolean {
@@ -690,6 +690,17 @@ export class ApprovalGraphExecutor {
     return normalizeApprovalMode(this.getApprovalNodeConfig(nodeKey).approvalMode)
   }
 
+  /**
+   * T2-4 N-of-M threshold for a `'threshold'`-mode node: the number of DISTINCT approver
+   * identities required to resolve the node APPROVED. Defaults to 1 if absent/invalid — a
+   * published threshold graph always carries a publish-validated positive integer, so the
+   * fallback only guards against a hand-malformed runtime graph (never resolves on zero).
+   */
+  getApprovalThreshold(nodeKey: string): number {
+    const threshold = this.getApprovalNodeConfig(nodeKey).approvalThreshold
+    return typeof threshold === 'number' && Number.isInteger(threshold) && threshold >= 1 ? threshold : 1
+  }
+
   getApprovalNodeAssigneeIds(nodeKey: string): string[] {
     return [...(this.getApprovalNodeConfig(nodeKey).assigneeIds ?? [])]
   }
@@ -817,7 +828,7 @@ export class ApprovalGraphExecutor {
 
   private resolveFromNode(
     nodeKey: string,
-    context: { aggregateMode: 'single' | 'all' | 'any' | null; aggregateComplete: boolean },
+    context: { aggregateMode: 'single' | 'all' | 'any' | 'threshold' | null; aggregateComplete: boolean },
   ): ApprovalGraphResolution {
     const ccEvents: ApprovalCcEvent[] = []
     const autoApprovalEvents: ApprovalGraphAutoApprovalEvent[] = []
@@ -1220,14 +1231,51 @@ export class ApprovalGraphExecutor {
     approvalConfig: ApprovalNodeConfig,
     sourceStep: number,
   ): ApprovalGraphAssignment[] {
-    if (this.options.assignmentResolver) {
-      return this.options.assignmentResolver({ nodeKey, sourceStep, config: approvalConfig })
+    const assignments: ApprovalGraphAssignment[] = this.options.assignmentResolver
+      ? this.options.assignmentResolver({ nodeKey, sourceStep, config: approvalConfig })
+      : (approvalConfig.assigneeIds ?? []).map((assigneeId) => ({
+          assignmentType: approvalConfig.assigneeType === 'role' ? 'role' : 'user',
+          assigneeId,
+          nodeKey,
+          sourceStep,
+        }))
+    this.assertThresholdReachable(nodeKey, approvalConfig, assignments)
+    return assignments
+  }
+
+  /**
+   * T2-4 N-of-M (门槛会签) fail-closed reachability check, run at the SAME concrete-assignment
+   * point where the empty-assignee policy fails closed (see `resolveAssignmentsForApprovalNode`
+   * callers). Publish-time validation only bounds `N <= M` for fully-static USER lists, where the
+   * distinct count is author-known; DYNAMIC / ROLE / manager sources resolve M at runtime, so the
+   * resolved set is re-checked here.
+   *
+   * A threshold node resolves APPROVED once N DISTINCT approver identities approve. Each resolved
+   * assignment slot is consumed by at most one approval (`deactivateActorAssignmentsAtNode`), so
+   * the distinct resolvable slots are an upper bound on the reachable distinct-approver count. If
+   * `N > distinct slots` the node could NEVER reach APPROVED: it would exhaust its assignments with
+   * the threshold still unmet and silently fall through to the completion path (a 3-of-2). Fail
+   * closed at resolution instead. Empty sets are intentionally skipped — the caller's
+   * `emptyAssigneePolicy` (auto-approve / reject) owns that case.
+   */
+  private assertThresholdReachable(
+    nodeKey: string,
+    approvalConfig: ApprovalNodeConfig,
+    assignments: ApprovalGraphAssignment[],
+  ): void {
+    if (normalizeApprovalMode(approvalConfig.approvalMode) !== 'threshold') return
+    if (assignments.length === 0) return
+    const threshold = this.getApprovalThreshold(nodeKey)
+    const distinctSlots = new Set(
+      assignments.map((assignment) => `${assignment.assignmentType}:${assignment.assigneeId}`),
+    ).size
+    if (threshold > distinctSlots) {
+      throw new ServiceError(
+        `Approval node ${nodeKey} requires ${threshold} distinct approver(s) but only ${distinctSlots} resolvable approver slot(s) were produced`,
+        422,
+        'APPROVAL_THRESHOLD_UNREACHABLE',
+        { nodeKey, threshold, resolvedApproverCount: distinctSlots },
+      )
     }
-    return (approvalConfig.assigneeIds ?? []).map((assigneeId) => ({
-      assignmentType: approvalConfig.assigneeType === 'role' ? 'role' : 'user',
-      assigneeId,
-      nodeKey,
-      sourceStep,
-    }))
   }
 }

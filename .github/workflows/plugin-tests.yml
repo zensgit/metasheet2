@@ -338,6 +338,7 @@ jobs:
             tests/integration/approval-bridge-redaction-regression.test.ts \
             tests/integration/approval-metrics-people-teams.test.ts \
             tests/integration/approval-node-sla-remind.test.ts \
+            tests/integration/approval-nofm-threshold.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
