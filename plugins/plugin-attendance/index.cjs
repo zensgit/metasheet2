@@ -120,6 +120,7 @@ const ATTENDANCE_SCHEDULER_SCOPE_ACTIONS = new Set(ATTENDANCE_SCHEDULER_SCOPE_AC
 const ATTENDANCE_DINGTALK_WORK_NOTIFICATION_CHANNEL = 'dingtalk_work_notification'
 const ATTENDANCE_ROUTABLE_DEFAULT_DELIVERY_CHANNELS = new Set([ATTENDANCE_DINGTALK_WORK_NOTIFICATION_CHANNEL, 'email_smtp'])
 const MANUAL_MISSED_PUNCH_REMINDER_SOURCE_TYPE = 'manual_missed_punch_reminder'
+const ATTENDANCE_RESULT_EDIT_NOTIFICATION_SOURCE_TYPE = 'attendance_result_edit'
 // RD-3 attendance report-digest producer (design-lock attendance-report-digest-subscription-design-lock-20260626 §4).
 // source_type stamped on every C5 outbox row this producer writes.
 const ATTENDANCE_REPORT_DIGEST_SOURCE_TYPE = 'attendance_report_digest'
@@ -307,8 +308,8 @@ const DEFAULT_SETTINGS = {
   // attendance:admin POST /api/attendance/anomaly-result-edits write action. enabled = master switch (default
   // ON; the route 403s when explicitly false). editWindowDays bounds how far back a work_date may be corrected
   // (org-tz today − work_date), default 180, range 1..366. requireReason default true (a blank reason 400s).
-  // notifyAffectedEmployee default true (AE-2 honours it; a disabled value is still recorded as a skipped
-  // reason on the audit row).
+  // notifyAffectedEmployee remains reserved for a follow-up gate; AE-2 v1 always enqueues after a successful
+  // correction and leaves the audit row's notification_delivery_id / notification_skipped_reason columns NULL.
   attendanceResultEditPolicy: {
     enabled: true,
     editWindowDays: 180,
@@ -18307,6 +18308,65 @@ async function attachManualResultEditMarkerToRecord(trx, record, marker) {
   return rows[0] ?? { ...record, meta }
 }
 
+function buildAttendanceResultEditNotificationReasonSummary(reason) {
+  const text = typeof reason === 'string' ? reason.trim() : ''
+  if (!text) return ''
+  return text.length > 240 ? `${text.slice(0, 240)}...` : text
+}
+
+function buildAttendanceResultEditNotificationPayload({ record, beforeStatus, targetStatus, reason, channel }) {
+  const workDate = normalizeDateOnly(record?.work_date)
+    ?? (record?.work_date != null ? String(record.work_date).slice(0, 10) : null)
+  const reasonSummary = buildAttendanceResultEditNotificationReasonSummary(reason)
+  const title = 'Attendance result corrected'
+  const body = reasonSummary
+    ? `Your attendance result for ${workDate ?? 'this date'} was corrected from ${beforeStatus} to ${targetStatus}. Reason: ${reasonSummary}`
+    : `Your attendance result for ${workDate ?? 'this date'} was corrected from ${beforeStatus} to ${targetStatus}.`
+  return {
+    kind: ATTENDANCE_RESULT_EDIT_NOTIFICATION_SOURCE_TYPE,
+    title,
+    body,
+    sourceType: ATTENDANCE_RESULT_EDIT_NOTIFICATION_SOURCE_TYPE,
+    recipientUserId: record?.user_id ?? null,
+    recipientRole: 'subject',
+    channel,
+    workDate,
+    beforeStatus,
+    afterStatus: targetStatus,
+    reasonSummary,
+  }
+}
+
+async function enqueueAttendanceResultEditNotification(trx, { orgId, record, auditRow, beforeStatus, targetStatus, reason }) {
+  if (!record?.id || !record?.user_id || !auditRow?.id) return null
+  const channel = resolveAttendanceDefaultDeliveryChannelForProducer()
+  const payload = buildAttendanceResultEditNotificationPayload({
+    record,
+    beforeStatus,
+    targetStatus,
+    reason,
+    channel,
+  })
+  const sourceKey = `${ATTENDANCE_RESULT_EDIT_NOTIFICATION_SOURCE_TYPE}:${orgId}:${record.id}:${auditRow.id}:employee:${record.user_id}:channel:${channel}`
+  const inserted = await trx.query(
+    `INSERT INTO attendance_notification_deliveries
+       (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, status, payload)
+     VALUES ($1, $2, $3, $4, $5, 'subject', $6, 'pending', $7::jsonb)
+     ON CONFLICT (org_id, source_key) DO NOTHING
+     RETURNING *`,
+    [
+      orgId,
+      ATTENDANCE_RESULT_EDIT_NOTIFICATION_SOURCE_TYPE,
+      auditRow.id,
+      sourceKey,
+      record.user_id,
+      channel,
+      JSON.stringify(payload),
+    ]
+  )
+  return inserted[0] ?? null
+}
+
 // §4.1 idempotency compare: a replayed (org_id, idempotency_key) is "already applied" only when its key
 // PAYLOAD fields match the prior audit row — compared in STORED form (trimmed reason, normalized evidence)
 // so a byte-identical replay never spuriously conflicts on whitespace/key-ordering. Any divergence → 409.
@@ -18508,6 +18568,14 @@ async function applyAttendanceResultEdit(trx, options) {
   const marker = buildManualResultEditMarker(auditRow, updated)
   const markedRecord = await attachManualResultEditMarkerToRecord(trx, updated, marker)
   afterSnapshot = buildResultEditSnapshot(markedRecord)
+  await enqueueAttendanceResultEditNotification(trx, {
+    orgId,
+    record: markedRecord,
+    auditRow,
+    beforeStatus,
+    targetStatus,
+    reason,
+  })
 
   return {
     alreadyApplied: false,

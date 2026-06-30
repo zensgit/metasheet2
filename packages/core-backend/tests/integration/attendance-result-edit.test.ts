@@ -5,6 +5,11 @@ import net from 'net'
 import http from 'http'
 import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
+import {
+  AttendanceNotificationDeliveryWorker,
+  DeterministicFakeAttendanceDeliveryChannel,
+  type AttendanceNotificationDeliveryQuery,
+} from '../../src/services/AttendanceNotificationDeliveryWorker'
 
 // AE-1 — audited admin correction of a confirmed attendance anomaly result (design-lock
 // attendance-anomaly-result-edit-guard-design-lock-20260626, RATIFIED 2026-06-27). Route-level real-DB tests
@@ -75,6 +80,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   let baseUrl = ''
   let pool: Pool
   let adminToken = ''
+  let previousDefaultNotificationChannel: string | undefined
 
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
@@ -162,6 +168,16 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   async function auditByKey(orgId: string, key: string) {
     return (await pool.query(`SELECT * FROM attendance_record_result_edits WHERE org_id = $1 AND idempotency_key = $2`, [orgId, key])).rows as any[]
   }
+  async function deliveryRowsForRecord(recordId: string, orgId = ORG) {
+    return (await pool.query(
+      `SELECT * FROM attendance_notification_deliveries
+        WHERE org_id = $1
+          AND source_type = 'attendance_result_edit'
+          AND source_key LIKE $2
+        ORDER BY created_at ASC`,
+      [orgId, `attendance_result_edit:${orgId}:${recordId}:%`],
+    )).rows as any[]
+  }
   async function seedClosedCycle(workDate: string, status: 'closed' | 'archived', org = ORG): Promise<string> {
     const start = new Date(new Date(`${workDate}T00:00:00Z`).getTime() - 5 * 86400000).toISOString().slice(0, 10)
     const end = new Date(new Date(`${workDate}T00:00:00Z`).getTime() + 5 * 86400000).toISOString().slice(0, 10)
@@ -228,6 +244,8 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     process.env.DATABASE_URL = dbUrl
     process.env.RBAC_BYPASS = 'true'
     process.env.SKIP_PLUGINS = 'false'
+    previousDefaultNotificationChannel = process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL
+    delete process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL
     const repoRoot = path.join(__dirname, '../../../../')
     const { MetaSheetServer } = await import('../../src/index')
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [path.join(repoRoot, 'plugins', 'plugin-attendance')] })
@@ -250,16 +268,25 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     for (const c of ['org_id', 'record_id', 'before_status', 'after_status', 'before_snapshot', 'after_snapshot', 'reason', 'evidence', 'idempotency_key', 'notification_delivery_id', 'notification_skipped_reason']) {
       expect(names.has(c)).toBe(true)
     }
+    const deliveryCols = (await pool.query(
+      `SELECT column_name FROM information_schema.columns WHERE table_name = 'attendance_notification_deliveries'`,
+    )).rows as { column_name: string }[]
+    if (deliveryCols.length === 0) {
+      throw new Error('attendance_notification_deliveries is missing — the AE-2 delivery outbox migration was not applied (regression)')
+    }
   })
 
   afterAll(async () => {
     if (pool) {
+      await pool.query(`DELETE FROM attendance_notification_deliveries WHERE org_id = ANY($1)`, [[ORG, ORG_OTHER]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_record_result_edits WHERE org_id = ANY($1)`, [[ORG, ORG_OTHER]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_records WHERE org_id = ANY($1)`, [[ORG, ORG_OTHER]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_payroll_cycles WHERE org_id = ANY($1)`, [[ORG, ORG_OTHER]]).catch(() => undefined)
     }
     if (server && (server as unknown as { stop?: () => Promise<void> }).stop) await (server as unknown as { stop: () => Promise<void> }).stop()
     await pool?.end().catch(() => undefined)
+    if (previousDefaultNotificationChannel === undefined) delete process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL
+    else process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL = previousDefaultNotificationChannel
   })
 
   it('§3.5a late→normal: zeroes late/early, preserves work_minutes, recomputes meta tiers; writes audit before/after', async () => {
@@ -317,6 +344,32 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(audit[0].actor_user_id).toBe(`ae1-admin-${RUN}`)
     expect(audit[0].notification_delivery_id).toBeNull()
     expect(audit[0].notification_skipped_reason).toBeNull()
+
+    const deliveries = await deliveryRowsForRecord(recordId)
+    expect(deliveries).toHaveLength(1)
+    expect(deliveries[0]).toMatchObject({
+      source_type: 'attendance_result_edit',
+      source_id: audit[0].id,
+      recipient_user_id: userId,
+      recipient_role: 'subject',
+      channel: 'dingtalk_work_notification',
+      status: 'pending',
+    })
+    expect(deliveries[0].source_key).toBe(`attendance_result_edit:${ORG}:${recordId}:${audit[0].id}:employee:${userId}:channel:dingtalk_work_notification`)
+    expect(deliveries[0].payload).toMatchObject({
+      kind: 'attendance_result_edit',
+      sourceType: 'attendance_result_edit',
+      recipientUserId: userId,
+      recipientRole: 'subject',
+      channel: 'dingtalk_work_notification',
+      workDate,
+      beforeStatus: 'late',
+      afterStatus: 'normal',
+      reasonSummary: '员工提交线下签到凭证，核验后更正',
+    })
+    expect(deliveries[0].payload.overrideMetrics).toBeUndefined()
+    expect(deliveries[0].payload.evidence).toBeUndefined()
+    expect(deliveries.filter(row => row.recipient_user_id !== userId)).toHaveLength(0)
   })
 
   it('AE-1b durability: same-facts import recompute preserves the corrected result without a review flag', async () => {
@@ -352,6 +405,37 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(Number(rec.early_leave_minutes)).toBe(0)
     expect(rec.meta?.manual_result_edit?.reviewConflict).toBeNull()
     expect(await auditRowsForRecord(recordId)).toHaveLength(1)
+  })
+
+  it('AE-2 notification: channel-unavailable path still enqueues pending and never sends synchronously', async () => {
+    const previousChannel = process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL
+    process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL = 'email_smtp'
+    try {
+      const userId = `u-ae2-email-${RUN}`
+      const workDate = workdayYmd(3)
+      const recordId = await seedRecord({
+        userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 20, earlyLeaveMinutes: 0,
+        firstInAt: `${workDate}T01:20:00Z`, lastOutAt: `${workDate}T10:00:00Z`,
+      })
+      const res = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: 'email channel configured but worker not running', idempotencyKey: `k-ae2-email-${RUN}` })
+      expect(res.status).toBe(200)
+
+      const deliveries = await deliveryRowsForRecord(recordId)
+      expect(deliveries).toHaveLength(1)
+      expect(deliveries[0]).toMatchObject({
+        recipient_user_id: userId,
+        recipient_role: 'subject',
+        channel: 'email_smtp',
+        status: 'pending',
+        attempt_count: 0,
+        delivered_at: null,
+        last_error: null,
+      })
+      expect(deliveries[0].source_key).toContain(':channel:email_smtp')
+    } finally {
+      if (previousChannel === undefined) delete process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL
+      else process.env.ATTENDANCE_NOTIFICATION_DEFAULT_CHANNEL = previousChannel
+    }
   })
 
   it('AE-1b durability: a no-status import recompute preserves the corrected result and flags changed facts', async () => {
@@ -517,6 +601,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
       expect(res.status).toBe(403)
       expect(codeOf(res)).toBe('ATTENDANCE_RESULT_EDIT_DISABLED')
       expect(await auditRowsForRecord(recordId)).toHaveLength(0)
+      expect(await deliveryRowsForRecord(recordId)).toHaveLength(0)
 
       const rec = await recordById(recordId)
       expect(rec.status).toBe('late')
@@ -590,12 +675,15 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     const firstMarker = afterFirst.meta?.manual_result_edit
     expect(firstMarker?.idempotencyKey).toBe(key)
     expect(firstMarker?.auditId).toEqual(expect.any(String))
+    const afterFirstDeliveries = await deliveryRowsForRecord(recordId)
+    expect(afterFirstDeliveries).toHaveLength(1)
 
     // exact replay → alreadyApplied, no 2nd row
     const replay = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: 'verified offline', idempotencyKey: key })
     expect(replay.status).toBe(200)
     expect(dataOf(replay).alreadyApplied).toBe(true)
     expect(await auditByKey(ORG, key)).toHaveLength(1)
+    expect(await deliveryRowsForRecord(recordId)).toHaveLength(1)
     const afterReplay = await recordById(recordId)
     expect(afterReplay.meta?.manual_result_edit).toMatchObject({
       idempotencyKey: key,
@@ -628,6 +716,58 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(conflict.status).toBe(409)
     expect(codeOf(conflict)).toBe('ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT')
     expect(await auditByKey(ORG, key)).toHaveLength(1)
+    expect(await deliveryRowsForRecord(recordId)).toHaveLength(1)
+  })
+
+  it('AE-2 notification: worker failure is visible through the existing delivery status API', async () => {
+    await pool.query(
+      `UPDATE attendance_notification_deliveries
+          SET next_attempt_at = now() + interval '1 day'
+        WHERE org_id = $1 AND source_type = 'attendance_result_edit'`,
+      [ORG],
+    )
+    const userId = `u-ae2-worker-${RUN}`
+    const workDate = workdayYmd(3)
+    const recordId = await seedRecord({
+      userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 22, earlyLeaveMinutes: 0,
+      firstInAt: `${workDate}T01:22:00Z`, lastOutAt: `${workDate}T10:00:00Z`,
+    })
+    const res = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: 'worker failure probe', idempotencyKey: `k-ae2-worker-${RUN}` })
+    expect(res.status).toBe(200)
+    const [delivery] = await deliveryRowsForRecord(recordId)
+    expect(delivery).toBeTruthy()
+    await pool.query(
+      `UPDATE attendance_notification_deliveries
+          SET payload = payload || $2::jsonb, next_attempt_at = '2000-01-01T00:00:00Z'::timestamptz
+        WHERE id = $1`,
+      [delivery.id, JSON.stringify({ fakeDelivery: 'fail' })],
+    )
+
+    const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
+      const r = await pool.query(sqlText, params as unknown[])
+      return { rows: r.rows, rowCount: r.rowCount }
+    }
+    const worker = new AttendanceNotificationDeliveryWorker({
+      query,
+      channels: [new DeterministicFakeAttendanceDeliveryChannel()],
+      workerId: 'ae2-worker-test',
+      batchSize: 1,
+    })
+    await expect(worker.runBatch()).resolves.toMatchObject({ failed: 1 })
+
+    const failed = await requestJson(`${baseUrl}/api/attendance/notification-deliveries?orgId=${encodeURIComponent(ORG)}&status=failed&pageSize=50`, { headers: authHeaders(adminToken) })
+    expect(failed.status).toBe(200)
+    const items = dataOf(failed)?.items ?? []
+    const row = items.find((item: any) => item.id === delivery.id)
+    expect(row).toMatchObject({
+      sourceType: 'attendance_result_edit',
+      recipientUserId: userId,
+      recipientRole: 'subject',
+      channel: 'dingtalk_work_notification',
+      status: 'failed',
+      lastError: 'fake_non_retryable_failure',
+    })
+    expect(Number(dataOf(failed)?.counters?.failed ?? 0)).toBeGreaterThanOrEqual(1)
   })
 
   it('editable-source: off/adjusted → 422 SOURCE_NOT_EDITABLE; normal→abnormal → 422 NORMAL_TO_ABNORMAL_UNSUPPORTED; normal→normal → 422 SOURCE_NOT_EDITABLE', async () => {
@@ -654,6 +794,8 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     // none of the rejected edits wrote an audit row or changed status
     expect(await auditRowsForRecord(off)).toHaveLength(0)
     expect(await auditRowsForRecord(norm)).toHaveLength(0)
+    expect(await deliveryRowsForRecord(off)).toHaveLength(0)
+    expect(await deliveryRowsForRecord(norm)).toHaveLength(0)
     expect((await recordById(norm)).status).toBe('normal')
   })
 
@@ -666,6 +808,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
       expect(e1.status).toBe(409)
       expect(codeOf(e1)).toBe('ATTENDANCE_RESULT_EDIT_CYCLE_CLOSED')
       expect(await auditRowsForRecord(r1)).toHaveLength(0)
+      expect(await deliveryRowsForRecord(r1)).toHaveLength(0)
       expect((await recordById(r1)).status).toBe('late') // unchanged
 
       // overlapping open cycle present too → the closed one still wins and rejects
