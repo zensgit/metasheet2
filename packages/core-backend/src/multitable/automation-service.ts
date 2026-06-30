@@ -1212,7 +1212,10 @@ export class AutomationService {
    */
   private async evaluateDateReminders(rule: ExecutorRule): Promise<void> {
     const config = rule.trigger.config as Partial<ScheduleDateFieldConfig>
-    const dateFieldId = typeof config.dateFieldId === 'string' ? config.dateFieldId : ''
+    // TRIM to match validateDateFieldTriggerAtSave (which trims before its field lookup): otherwise a rule
+    // saved via direct API with a whitespace-padded dateFieldId passes save but silently no-ops at scan (the
+    // type read + the `data ->> dateFieldId` candidates key both miss). Parity keeps "saved ⇒ scans".
+    const dateFieldId = typeof config.dateFieldId === 'string' ? config.dateFieldId.trim() : ''
     if (
       !dateFieldId ||
       typeof config.offsetDays !== 'number' ||
@@ -1247,6 +1250,33 @@ export class AutomationService {
     const ruleFloorMs = dateReminderFloorMs(ruleCreatedAtMs, config.effectiveAt)
     const { loIso, hiIso } = dateReminderCandidateDateRange(nowMs, config, scanWindowMs)
 
+    // FLOATING-DAY semantics: a `date`-type field stores a bare 'YYYY-MM-DD' (date-only, no instant), so its
+    // calendar day must NOT be re-zoned (that fires a civil day early in a negative-offset tz). A `dateTime`
+    // field is a real instant and keeps instant→local-day semantics. Read the field's type ONCE per scan
+    // (mirrors validateDateFieldTriggerAtSave) — not per record.
+    //   • Field GONE (no row) or NO LONGER date/dateTime (retyped to string/etc.) → SKIP. The record JSONB can
+    //     retain the stale key after a field delete/retype, so `data ->> dateFieldId` may still match — we must
+    //     NOT rely on "candidates matches nothing" and fire reminders for what is no longer a date trigger.
+    //   • THROWN read (transient DB fault) → SKIP this tick too: degrading to instant would, for a date-type
+    //     field in a negative-offset tz, emit the day-EARLY occurrence as a spurious wrong-day reminder. The
+    //     fixed grace window + next tick re-scan recover it with no wrong-day fire.
+    let floating = false
+    try {
+      const ftRes = await this.queryFn('SELECT type FROM meta_fields WHERE sheet_id = $1 AND id = $2', [
+        rule.sheetId,
+        dateFieldId,
+      ])
+      const ft = (ftRes.rows as Array<{ type?: unknown }>)[0]?.type
+      if (ft !== 'date' && ft !== 'dateTime') {
+        logger.warn(`Rule ${rule.id}: date field ${dateFieldId} is missing or no longer date/dateTime — skipping scan`)
+        return
+      }
+      floating = ft === 'date'
+    } catch (err) {
+      logger.warn(`Rule ${rule.id}: date-field type read failed — skipping this scan tick (no wrong-day fire): ${String(err)}`)
+      return
+    }
+
     // Coarse SQL pre-filter: only records whose date field falls in the window can produce a due occurrence.
     const candidates = await sql<{ id: string; data: Record<string, unknown> | string | null }>`
       SELECT id, data
@@ -1260,7 +1290,7 @@ export class AutomationService {
     for (const rec of candidates.rows) {
       const data: Record<string, unknown> =
         typeof rec.data === 'string' ? (JSON.parse(rec.data) as Record<string, unknown>) : (rec.data ?? {})
-      const occurrence = computeDateReminderOccurrence(data[dateFieldId], config)
+      const occurrence = computeDateReminderOccurrence(data[dateFieldId], config, { floating })
       if (!occurrence) continue
       if (!isDateReminderDue(occurrence, nowMs, scanWindowMs, ruleFloorMs)) continue
 

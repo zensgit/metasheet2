@@ -24,6 +24,7 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import { AutomationService } from '../../src/multitable/automation-service'
 import { EventBus } from '../../src/integration/events/event-bus'
 import { db } from '../../src/db/db'
+import { getZonedParts, zonedWallClockToUtcMs } from '../../src/multitable/automation-timezone'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -278,5 +279,169 @@ describeIfDatabase('multitable date-reminder trigger — scan/claim/fire (real D
     await q('UPDATE automation_rules SET created_at = $1 WHERE id = $2', [iso(TS - 10 * DAY), disabled.id])
     await svc.runDateReminderScanNow(disabled.id)
     expect(await claimCount(disabled.id)).toBe(0)
+  })
+
+  // DR-FLOAT (Option 1): the date-picker writes a BARE 'YYYY-MM-DD' into a `date`-type field (the existing
+  // fixtures above store a full ISO instant, so they never exercised this path). A date-only value is a
+  // FLOATING calendar day: in a negative-offset tz it must fire on the literal day, NOT one civil day early.
+  // This drives the value through the REAL SQL pre-filter (date-only bounds) AND the floating occurrence math.
+  test('DR-FLOAT: a bare YYYY-MM-DD in a date-type field fires at the FLOATING day under a negative-offset tz', async () => {
+    const NY = 'America/New_York'
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const addCivilDays = (d: { year: number; month: number; day: number }, n: number) => {
+      const t = new Date(Date.UTC(d.year, d.month - 1, d.day + n))
+      return { year: t.getUTCFullYear(), month: t.getUTCMonth() + 1, day: t.getUTCDate() }
+    }
+    // Anchor on TODAY's NY-local civil day. Record date = today+2 (bare), 3-before ⇒ occurrence = YESTERDAY
+    // 12:00 NY — solidly in (now-48h, now], independent of the wall-clock time CI runs at.
+    const todayNY = getZonedParts(Date.now(), NY)
+    const recDay = addCivilDays(todayNY, 2)
+    const recDate = `${recDay.year}-${pad(recDay.month)}-${pad(recDay.day)}` // BARE 'YYYY-MM-DD', as a picker writes
+    const REC_FLOAT = `rec_dr_float_${TS}`
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
+      REC_FLOAT,
+      SHEET,
+      JSON.stringify({ [FLD_DATE]: recDate }),
+    ])
+
+    const rule = await svc.createRule(
+      SHEET,
+      mkDateRule({ dateFieldId: FLD_DATE, offsetDays: 3, direction: 'before', timeOfDay: '12:00', timezone: NY }),
+    )
+    // Backdate floor (created_at + effectiveAt) so the past occurrence is allowed to fire (mirrors RULE_BACKDATED).
+    await q(
+      `UPDATE automation_rules SET created_at = $1::timestamptz,
+         trigger_config = jsonb_set(trigger_config, '{effectiveAt}', to_jsonb($2::text)) WHERE id = $3`,
+      [iso(TS - 10 * DAY), iso(TS - 10 * DAY), rule.id],
+    )
+
+    await svc.runDateReminderScanNow(rule.id)
+
+    // REC_FLOAT fired exactly once → the real SQL pre-filter fetched the bare-date record (date-only bounds
+    // work). Scope to REC_FLOAT: the shared sheet holds other fixtures whose own occurrences also fire this rule.
+    const led = await q(
+      'SELECT occurrence_ts FROM meta_automation_date_reminder_fires WHERE rule_id = $1 AND record_id = $2',
+      [rule.id, REC_FLOAT],
+    )
+    expect(led.rows.length).toBe(1)
+    // …at the CORRECT floating day: YESTERDAY 12:00 NY. The pre-fix re-zoning would have produced a day earlier.
+    const yNY = addCivilDays(todayNY, -1)
+    const expectedOccMs = zonedWallClockToUtcMs(
+      { year: yNY.year, month: yNY.month, day: yNY.day, hour: 12, minute: 0, second: 0 },
+      NY,
+    )
+    const occTs = new Date((led.rows[0] as { occurrence_ts: string | Date }).occurrence_ts).getTime()
+    expect(occTs).toBe(expectedOccMs)
+  })
+
+  // DR-TRIM: validateDateFieldTriggerAtSave trims dateFieldId before its lookup, so a whitespace-padded id
+  // PASSES save (persisted raw); the scan must trim too or the type read + `data ->> dateFieldId` both miss and
+  // the rule silently no-ops forever. Locks the save↔scan parity.
+  test('DR-TRIM: a whitespace-padded dateFieldId still scans (scan trims to match the save validator)', async () => {
+    const padded = await svc.createRule(
+      SHEET,
+      mkDateRule({ dateFieldId: ` ${FLD_DATE} `, offsetDays: 3, direction: 'before', timeOfDay: '00:00' }),
+    )
+    // Persisted RAW (padded) — so it is the scan-side trim, not the saved value, that makes this fire.
+    expect((padded.trigger_config as { dateFieldId: string }).dateFieldId).toBe(` ${FLD_DATE} `)
+    await q(
+      `UPDATE automation_rules SET created_at = $1::timestamptz,
+         trigger_config = jsonb_set(trigger_config, '{effectiveAt}', to_jsonb($2::text)) WHERE id = $3`,
+      [iso(TS - 10 * DAY), iso(TS - 10 * DAY), padded.id],
+    )
+    await svc.runDateReminderScanNow(padded.id)
+    // REC_DUE (date = now+3) is due under 3-before/00:00 → the padded-id rule fires for it (trim parity).
+    // Without the scan-side trim the candidates key `data ->> ' fld '` matches nothing → zero fires.
+    const led = await q(
+      'SELECT 1 FROM meta_automation_date_reminder_fires WHERE rule_id = $1 AND record_id = $2',
+      [padded.id, REC_DUE],
+    )
+    expect(led.rows.length).toBe(1)
+  })
+
+  // DR-SKIP-ON-READ-FAIL: a TRANSIENT field-type read error must NOT degrade to instant bucketing (that would
+  // emit the day-EARLY occurrence as a spurious wrong-day reminder for a date-type field in a negative-offset
+  // tz). The scan skips this tick instead — recovered on the next tick, no wrong-day fire.
+  test('DR-SKIP-ON-READ-FAIL: a thrown meta_fields type read skips the scan tick (no fire), then recovers', async () => {
+    const REC_SKIP = `rec_dr_skip_${TS}`
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
+      REC_SKIP,
+      SHEET,
+      JSON.stringify({ [FLD_DATE]: iso(TS + 3 * DAY) }),
+    ])
+    const rule = await svc.createRule(
+      SHEET,
+      mkDateRule({ dateFieldId: FLD_DATE, offsetDays: 3, direction: 'before', timeOfDay: '00:00' }),
+    )
+    await q(
+      `UPDATE automation_rules SET created_at = $1::timestamptz,
+         trigger_config = jsonb_set(trigger_config, '{effectiveAt}', to_jsonb($2::text)) WHERE id = $3`,
+      [iso(TS - 10 * DAY), iso(TS - 10 * DAY), rule.id],
+    )
+    const cnt = async (rid: string) =>
+      ((await q('SELECT count(*)::int AS n FROM meta_automation_date_reminder_fires WHERE rule_id = $1 AND record_id = $2', [rid, REC_SKIP])).rows[0] as { n: number }).n
+
+    // A service whose ONLY failure is the meta_fields type read (everything else hits real PG).
+    const throwingQ = ((text: string, params?: unknown[]) =>
+      /SELECT type FROM meta_fields/i.test(text)
+        ? Promise.reject(new Error('transient meta_fields read'))
+        : q(text, params)) as never
+    const svc2 = new AutomationService(new EventBus(), db as never, throwingQ)
+    try {
+      await svc2.runDateReminderScanNow(rule.id) // type read throws → skip tick → no fire
+      expect(await cnt(rule.id)).toBe(0)
+      // Control: the SAME rule fires once under the healthy service → proves the SKIP (not another gate) blocked it.
+      await svc.runDateReminderScanNow(rule.id)
+      expect(await cnt(rule.id)).toBe(1)
+    } finally {
+      svc2.shutdown()
+    }
+  })
+
+  // DR-GONE: the trigger field is valid at save, then RETYPED away from date/dateTime (or DELETED). The record
+  // JSONB keeps the stale key, so `data ->> dateFieldId` still matches — the scan must SKIP on the type read,
+  // not fire a reminder for a field that is no longer a date trigger. (Fail-first: the pre-fix floating=false
+  // fall-through would fire for the stale key.)
+  test('DR-GONE: a retyped-away or DELETED trigger field skips the scan — stale record key never fires', async () => {
+    const FLD_TMP = `fld_dr_gone_${TS}`
+    const REC_TMP = `rec_dr_gone_${TS}`
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [
+      FLD_TMP,
+      SHEET,
+      'Tmp',
+      'date',
+      '{}',
+      9,
+    ])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
+      REC_TMP,
+      SHEET,
+      JSON.stringify({ [FLD_TMP]: iso(TS + 3 * DAY) }), // due under 3-before/00:00 if it WERE still scanned
+    ])
+    const rule = await svc.createRule(
+      SHEET,
+      mkDateRule({ dateFieldId: FLD_TMP, offsetDays: 3, direction: 'before', timeOfDay: '00:00' }),
+    )
+    await q(
+      `UPDATE automation_rules SET created_at = $1::timestamptz,
+         trigger_config = jsonb_set(trigger_config, '{effectiveAt}', to_jsonb($2::text)) WHERE id = $3`,
+      [iso(TS - 10 * DAY), iso(TS - 10 * DAY), rule.id],
+    )
+    const claims = async () =>
+      ((await q('SELECT count(*)::int AS n FROM meta_automation_date_reminder_fires WHERE rule_id = $1', [rule.id])).rows[0] as { n: number }).n
+    const execs = async () =>
+      ((await q('SELECT count(*)::int AS n FROM multitable_automation_executions WHERE rule_id = $1', [rule.id])).rows[0] as { n: number }).n
+
+    // (a) RETYPED date → string (row present, wrong type): the stale REC_TMP key remains in data.
+    await q('UPDATE meta_fields SET type = $1 WHERE id = $2', ['string', FLD_TMP])
+    await svc.runDateReminderScanNow(rule.id)
+    expect(await claims()).toBe(0)
+    expect(await execs()).toBe(0)
+
+    // (b) field row DELETED entirely (type read returns no row): still skip.
+    await q('DELETE FROM meta_fields WHERE id = $1', [FLD_TMP])
+    await svc.runDateReminderScanNow(rule.id)
+    expect(await claims()).toBe(0)
+    expect(await execs()).toBe(0)
   })
 })
