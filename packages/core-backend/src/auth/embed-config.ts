@@ -18,8 +18,31 @@ export function frameAncestorsValue(): string {
   return origins.length ? `frame-ancestors ${origins.join(' ')}` : "frame-ancestors 'none'"
 }
 
-/** kid -> base64 raw Ed25519 PUBLIC key (Yuantus distributes the public key by deploy config). */
+function parsePublicKeysMap(raw: string): Record<string, string> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return {}
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return {}
+  }
+
+  return Object.fromEntries(
+    Object.entries(parsed)
+      .map(([kid, pub]) => [kid.trim(), typeof pub === 'string' ? pub.trim() : ''] as const)
+      .filter(([kid, pub]) => kid && pub),
+  )
+}
+
+/** kid -> base64 raw Ed25519 PUBLIC key (Yuantus distributes public keys by deploy config). */
 export function embedPublicKeysByKid(): Record<string, string> {
+  const map = (process.env.YUANTUS_EMBED_PUBLIC_KEYS || '').trim()
+  if (map) {
+    return parsePublicKeysMap(map)
+  }
+
   const pub = (process.env.YUANTUS_EMBED_PUBLIC_KEY || '').trim()
   const kid = (process.env.YUANTUS_EMBED_KEY_ID || 'embed-1').trim()
   return pub ? { [kid]: pub } : {}

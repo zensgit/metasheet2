@@ -39,8 +39,8 @@ Set these in the MetaSheet2 deployment that hosts the embedded BOM review UI.
 | `PLM_EMBED_ALLOWED_ORIGINS` | Yes | Single source for allowed PLM parent origins, backend `embed_origin` check, frontend parent-origin allowlist, and edge CSP value. | Explicit origins only. Never use `*`. |
 | `PLM_EMBED_DATA_SOURCE_ID` | Yes | Server-bound PLM data source used by `/api/plm-embed/bom-review/context`. | Must identify the Yuantus PLM source for this deployment. Never accept source id from the iframe. |
 | `PLM_EMBED_AUDIENCE` | Yes | Expected JWT `aud`. | Must match Yuantus token minting. Default is `metasheet2.embed`. |
-| `YUANTUS_EMBED_PUBLIC_KEY` | Yes | Base64 raw Ed25519 public key for offline verification. | Public key only. Never configure a Yuantus private key in MetaSheet2. |
-| `YUANTUS_EMBED_KEY_ID` | Yes | Expected key id for the configured public key. | Must match Yuantus minting key id. Default is `embed-1`. |
+| `YUANTUS_EMBED_PUBLIC_KEYS` | Yes, preferred | JSON object of `kid -> base64 raw Ed25519 public key` for offline verification. | Public keys only. Keep both old and new `kid` entries during rotation windows; never configure a Yuantus private key in MetaSheet2. |
+| `YUANTUS_EMBED_PUBLIC_KEY` / `YUANTUS_EMBED_KEY_ID` | Compatibility fallback | Legacy single-key form used only when `YUANTUS_EMBED_PUBLIC_KEYS` is unset. | Public key only; `YUANTUS_EMBED_KEY_ID` must match Yuantus minting key id. Default is `embed-1`. |
 | `REDIS_URL` | Yes | Shared single-use `jti` consume store. | Required. No in-memory fallback is allowed. |
 
 Current tenant configuration caveat:
@@ -187,12 +187,12 @@ Run these before customer UAT.
 | Iframe shows `not-configured` | Allowlist is empty after fail-closed filtering. | Fix `PLM_EMBED_ALLOWED_ORIGINS`. |
 | Iframe shows transient error after token was accepted | The single-use token was already consumed before a provider degradation. | Reopen or reload from PLM so the parent mints and posts a new token. Do not retry the old token. |
 | API returns 401 `EMBED_TOKEN_REQUIRED` | Embed token header missing. | Ensure the parent posts a token and the iframe sends it on embed API calls. |
-| API returns 401 `INVALID_EMBED_TOKEN` | Malformed, expired, wrong audience, wrong type, missing `jti`, or bad signature. | Re-mint token. Check public key, key id, audience, clocks, and JWT claims. |
+| API returns 401 `INVALID_EMBED_TOKEN` | Malformed, expired, wrong audience, wrong type, missing `jti`, unknown `kid`, or bad signature. | Re-mint token. Check public-key map, key id, audience, clocks, and JWT claims. |
 | API returns 401 `EMBED_TOKEN_REPLAYED` | Same token reused. | Re-mint token from PLM. |
 | API returns 403 `EMBED_FEATURE_MISMATCH` | Token is for a different feature. | Mint with `feature_key = "bom_multitable"`. |
 | API returns 403 `EMBED_ORIGIN_NOT_ALLOWED` | Token `embed_origin` is not in `PLM_EMBED_ALLOWED_ORIGINS`. | Align Yuantus mint config and MetaSheet2 allowlist. |
 | API returns 403 `EMBED_TENANT_MISMATCH` | Token tenant differs from the tenant actually served by `PLM_EMBED_DATA_SOURCE_ID`. | Fix token tenant or data-source tenant. Do not bypass this check. |
-| API returns 503 `embed verification not configured` | `YUANTUS_EMBED_PUBLIC_KEY` missing or invalid. | Set the public key and matching `YUANTUS_EMBED_KEY_ID`, then redeploy. |
+| API returns 503 `embed verification not configured` | No usable `YUANTUS_EMBED_PUBLIC_KEYS` map, malformed JSON map, or no legacy `YUANTUS_EMBED_PUBLIC_KEY`. | Set a valid JSON public-key map, or the legacy public key plus matching `YUANTUS_EMBED_KEY_ID`, then redeploy. |
 | API returns 503 `embed replay store unavailable` | Redis unavailable or first Redis connection failed and was memoized null. | Restore Redis and restart MetaSheet2 if first connect failed. |
 | API returns 503 `embed data source not configured` | `PLM_EMBED_DATA_SOURCE_ID` missing. | Set data source id and redeploy. |
 | API returns 503 `embed data source unsupported` | `PLM_EMBED_DATA_SOURCE_ID` points at a source kind that cannot serve Yuantus PLM embed reads. | Point `PLM_EMBED_DATA_SOURCE_ID` at the Yuantus PLM source. |
@@ -222,7 +222,7 @@ Record the evidence before go-live:
 - [ ] `PLM_EMBED_DATA_SOURCE_ID` points to the intended Yuantus source.
 - [ ] Served tenant equals Yuantus token `tenant_id`.
 - [ ] `PLM_EMBED_AUDIENCE` matches Yuantus minting.
-- [ ] `YUANTUS_EMBED_PUBLIC_KEY` and `YUANTUS_EMBED_KEY_ID` match Yuantus signing config.
+- [ ] `YUANTUS_EMBED_PUBLIC_KEYS` contains the active Yuantus signing `kid` and, during rotation, the previous `kid`; or the legacy single-key env matches Yuantus signing config.
 - [ ] Redis `PING` succeeds from the runtime environment.
 - [ ] Valid first-use token renders a BOM review.
 - [ ] Reusing the same token returns 401 `EMBED_TOKEN_REPLAYED`.
