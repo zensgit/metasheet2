@@ -980,6 +980,25 @@ async function testK3WebApiMaterialListReadSmoke() {
     rows: false,
     topLevelArray: false,
   })
+  assert.deepEqual(read.metadata.responseShapeProbe, {
+    dataObjectPresent: true,
+    dataRowCountPresent: true,
+    dataPageSizePresent: true,
+    dataPageIndexPresent: true,
+    dataDataType: 'array',
+    dataDataArrayLength: 3,
+    fixedContainers: {
+      dataData: { type: 'array', arrayLength: 3 },
+      dataLowerData: { type: 'missing', arrayLength: null },
+      dataRows: { type: 'missing', arrayLength: null },
+      dataList: { type: 'missing', arrayLength: null },
+      dataItems: { type: 'missing', arrayLength: null },
+      resultData: { type: 'missing', arrayLength: null },
+      resultRows: { type: 'missing', arrayLength: null },
+      rows: { type: 'missing', arrayLength: null },
+      topLevel: { type: 'object', arrayLength: null },
+    },
+  }, 'LIST response-shape probe surfaces fixed container types/counts only')
   assert.equal(read.metadata.readPath, '/K3API/Material/GetList')
 
   const listCalls = calls.filter((call) => call.pathname === '/K3API/Material/GetList')
@@ -1070,6 +1089,25 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.equal(pagingEcho.metadata.dataPageIndex, 0, 'K3 echoes the page index it applied')
   assert.equal(pagingEcho.metadata.requestedLimit, 2, 'requested page size/Top surfaced for the requested-vs-echoed comparison')
   assert.equal(pagingEcho.metadata.requestedPageIndex, 1, 'requested page index surfaced for the comparison')
+  assert.deepEqual(pagingEcho.metadata.responseShapeProbe, {
+    dataObjectPresent: true,
+    dataRowCountPresent: true,
+    dataPageSizePresent: true,
+    dataPageIndexPresent: true,
+    dataDataType: 'null',
+    dataDataArrayLength: null,
+    fixedContainers: {
+      dataData: { type: 'null', arrayLength: null },
+      dataLowerData: { type: 'missing', arrayLength: null },
+      dataRows: { type: 'missing', arrayLength: null },
+      dataList: { type: 'missing', arrayLength: null },
+      dataItems: { type: 'missing', arrayLength: null },
+      resultData: { type: 'missing', arrayLength: null },
+      resultRows: { type: 'missing', arrayLength: null },
+      rows: { type: 'missing', arrayLength: null },
+      topLevel: { type: 'object', arrayLength: null },
+    },
+  }, 'paging-echo response-shape probe makes DATA=null explicit without changing extraction')
 
   const missingRowsFetchImpl = async (url, options) => {
     const parsed = new URL(url)
@@ -1115,6 +1153,9 @@ async function testK3WebApiMaterialListReadSmoke() {
     rows: false,
     topLevelArray: false,
   })
+  assert.equal(missingRows.metadata.responseShapeProbe.dataRowCountPresent, true)
+  assert.equal(missingRows.metadata.responseShapeProbe.dataDataType, 'null')
+  assert.deepEqual(missingRows.metadata.responseShapeProbe.fixedContainers.dataData, { type: 'null', arrayLength: null })
 
   const alternateRowsFetchImpl = async (url, options) => {
     const parsed = new URL(url)
@@ -1160,6 +1201,9 @@ async function testK3WebApiMaterialListReadSmoke() {
     rows: false,
     topLevelArray: false,
   }, 'LIST shape probe localizes rows under a fixed allowlisted alternate container')
+  assert.deepEqual(alternateRows.metadata.responseShapeProbe.fixedContainers.resultRows, { type: 'array', arrayLength: 1 })
+  assert.deepEqual(alternateRows.metadata.responseShapeProbe.fixedContainers.topLevel, { type: 'object', arrayLength: null })
+  assert.equal(alternateRows.metadata.responseShapeProbe.dataDataType, 'missing')
 
   const rejectedFetchImpl = async (url, options) => {
     const parsed = new URL(url)
@@ -1206,6 +1250,8 @@ async function testK3WebApiMaterialListReadSmoke() {
     rows: false,
     topLevelArray: false,
   })
+  assert.equal(rejected.details.responseShapeProbe.dataDataType, 'array')
+  assert.deepEqual(rejected.details.responseShapeProbe.fixedContainers.dataData, { type: 'array', arrayLength: 1 })
 
   const unrecognizedFetchImpl = async (url, options) => {
     const parsed = new URL(url)
@@ -1251,6 +1297,8 @@ async function testK3WebApiMaterialListReadSmoke() {
     rows: false,
     topLevelArray: false,
   })
+  assert.equal(unrecognized.details.responseShapeProbe.dataDataType, 'array')
+  assert.deepEqual(unrecognized.details.responseShapeProbe.fixedContainers.dataData, { type: 'array', arrayLength: 1 })
 
   const modeMismatch = await adapter.read({
     object: 'material',
