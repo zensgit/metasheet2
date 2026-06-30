@@ -2,7 +2,7 @@ import type { Request, Response} from 'express';
 import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
-import { pool } from '../db/pg'
+import { pool, transaction } from '../db/pg'
 
 // Use the global Express.Request type which already includes user property
 type AuthenticatedRequest = Request
@@ -47,12 +47,20 @@ export function spreadsheetPermissionsRouter(): Router {
     const perm = req.body?.permission
     if (!userId || !perm) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId and permission required' } })
     if (pool) {
-      await pool.query(
-        `INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code)
-         VALUES ($1, $2, 'user', $2, $3)
-         ON CONFLICT DO NOTHING`,
-        [req.params.id, userId, perm],
-      )
+      // Never-escalate-under-concurrency (#3389 / #3402 follow-up): take the SAME meta_sheets row lock the
+      // permission-revert execute path (and the multitable forward grant/revoke routes, #3402) hold, so this legacy
+      // grant write serializes against a concurrent revert under ONE lock model. A grant INSERT already blocks on the
+      // revert via the FK's implicit FOR KEY SHARE on meta_sheets vs the revert's FOR UPDATE; the explicit lock makes
+      // the legacy route UNIFORM with #3402 rather than relying on that implicit FK lock (it does not close a new hole).
+      await transaction(async ({ query }) => {
+        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [req.params.id])
+        await query(
+          `INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code)
+           VALUES ($1, $2, 'user', $2, $3)
+           ON CONFLICT DO NOTHING`,
+          [req.params.id, userId, perm],
+        )
+      })
     } else {
       const map = sheetPerms.get(req.params.id) || new Map<string, Set<string>>()
       const set = map.get(userId) || new Set<string>()
@@ -82,14 +90,22 @@ export function spreadsheetPermissionsRouter(): Router {
     const perm = req.body?.permission
     if (!userId || !perm) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId and permission required' } })
     if (pool) {
-      await pool.query(
-        `DELETE FROM spreadsheet_permissions
-         WHERE sheet_id = $1
-           AND subject_type = 'user'
-           AND user_id = $2
-           AND perm_code = $3`,
-        [req.params.id, userId, perm],
-      )
+      // Never-escalate-under-concurrency (#3389 / #3402 follow-up): the legacy revoke is the GENUINE residual
+      // un-serialized writer #3402 deferred — a child-row DELETE takes NO lock on the parent meta_sheets row, so
+      // (unlike a grant INSERT) it is NOT FK-serialized against a concurrent permission-revert and could interleave
+      // the revert's live-grant re-check and its apply. Take the SAME meta_sheets FOR UPDATE the revert holds so it
+      // cannot. (#3402-style: lock the sheet row first, then write.)
+      await transaction(async ({ query }) => {
+        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [req.params.id])
+        await query(
+          `DELETE FROM spreadsheet_permissions
+           WHERE sheet_id = $1
+             AND subject_type = 'user'
+             AND user_id = $2
+             AND perm_code = $3`,
+          [req.params.id, userId, perm],
+        )
+      })
     } else {
       const map = sheetPerms.get(req.params.id) || new Map<string, Set<string>>()
       const set = map.get(userId) || new Set<string>()
