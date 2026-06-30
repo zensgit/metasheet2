@@ -67,10 +67,13 @@ describe('ApprovalMetricsService', () => {
   })
 
   describe('recordNodeActivation', () => {
-    it('appends a new open entry and skips when one already exists', async () => {
-      // First call: select current breakdown, then update.
+    it('appends a new open entry (plus a separate deadline write) and re-emit is a no-op', async () => {
+      // A NEW activation now issues three calls: SELECT current breakdown, the
+      // breakdown UPDATE, then the T1-1 best-effort deadline UPDATE — the last
+      // ONLY because a brand-new entry was added.
       queryMock
         .mockResolvedValueOnce({ rows: [{ node_breakdown: [] }] as Row[] })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 1 })
 
       await service.recordNodeActivation({
@@ -79,11 +82,22 @@ describe('ApprovalMetricsService', () => {
         activatedAt: new Date('2026-04-25T11:00:00Z'),
       })
 
-      expect(queryMock).toHaveBeenCalledTimes(2)
+      expect(queryMock).toHaveBeenCalledTimes(3)
       const updatePayload = JSON.parse(queryMock.mock.calls[1][1][1])
       expect(updatePayload).toHaveLength(1)
       expect(updatePayload[0]).toMatchObject({ nodeKey: 'approval_2', decidedAt: null })
+      // The deadline UPDATE is a SEPARATE best-effort write (NOT folded into the
+      // breakdown transaction). With no timeout on this activation it CLEARS both
+      // columns so the prior node's deadline can never linger on the new node.
+      const [deadlineSql, deadlineParams] = queryMock.mock.calls[2]
+      expect(normalize(deadlineSql)).toContain('UPDATE approval_metrics')
+      expect(normalize(deadlineSql)).toContain('SET current_node_deadline_at = $2')
+      expect(normalize(deadlineSql)).toContain('current_node_timeout_effect = $3')
+      expect(deadlineParams).toEqual(['apr-1', null, null])
 
+      // Re-emit with an existing open entry → mutate returns null, `added` stays
+      // false → NO breakdown UPDATE and crucially NO deadline UPDATE (this is the
+      // foundation's P1a idempotency guard locked at the unit level).
       queryMock.mockClear()
       queryMock.mockResolvedValueOnce({
         rows: [{ node_breakdown: [{ nodeKey: 'approval_2', activatedAt: 'x', decidedAt: null, durationSeconds: null, approverIds: [] }] }] as Row[],
@@ -93,7 +107,33 @@ describe('ApprovalMetricsService', () => {
         nodeKey: 'approval_2',
         activatedAt: new Date('2026-04-25T11:05:00Z'),
       })
+      // Only the SELECT (FOR UPDATE) ran — no deadline write was emitted.
       expect(queryMock).toHaveBeenCalledTimes(1)
+      expect(normalize(queryMock.mock.calls[0][0])).toContain('FOR UPDATE')
+    })
+
+    it('stamps the new node deadline + effect when the activation carries a timeout (T1-1 lock)', async () => {
+      queryMock
+        .mockResolvedValueOnce({ rows: [{ node_breakdown: [] }] as Row[] })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+
+      const deadline = new Date('2026-04-25T15:00:00Z')
+      await service.recordNodeActivation({
+        instanceId: 'apr-1',
+        nodeKey: 'approval_2',
+        activatedAt: new Date('2026-04-25T11:00:00Z'),
+        timeoutDeadline: deadline,
+        timeoutEffect: 'auto_reject',
+      })
+
+      // SELECT + breakdown UPDATE + the separate deadline UPDATE.
+      expect(queryMock).toHaveBeenCalledTimes(3)
+      const [deadlineSql, deadlineParams] = queryMock.mock.calls[2]
+      expect(normalize(deadlineSql)).toContain('UPDATE approval_metrics')
+      expect(normalize(deadlineSql)).toContain('SET current_node_deadline_at = $2')
+      expect(normalize(deadlineSql)).toContain('current_node_timeout_effect = $3')
+      expect(deadlineParams).toEqual(['apr-1', '2026-04-25T15:00:00.000Z', 'auto_reject'])
     })
 
     it('returns silently when the instance has no metrics row', async () => {
@@ -119,6 +159,8 @@ describe('ApprovalMetricsService', () => {
             ],
           }] as Row[],
         })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+        // T1-1: the separate deadline-clear UPDATE that follows the breakdown write.
         .mockResolvedValueOnce({ rows: [], rowCount: 1 })
 
       await service.recordNodeDecision({
@@ -170,14 +212,24 @@ describe('ApprovalMetricsService', () => {
       })
 
       expect(transaction).toHaveBeenCalledTimes(1)
-      expect(queryMock).not.toHaveBeenCalled()
+      // The breakdown read-modify-write stays fully inside the transaction…
       expect(calls).toEqual(['begin', 'select', 'update', 'commit'])
       expect(normalize(String(txQuery.mock.calls[0][0]))).toContain('FOR UPDATE')
+      // …while the T1-1 deadline-clear is a SEPARATE best-effort write issued via
+      // the plain (non-transactional) query runner — and it clears BOTH columns.
+      expect(queryMock).toHaveBeenCalledTimes(1)
+      const [clearSql, clearParams] = queryMock.mock.calls[0]
+      expect(normalize(clearSql)).toContain('UPDATE approval_metrics')
+      expect(normalize(clearSql)).toContain('current_node_deadline_at = NULL')
+      expect(normalize(clearSql)).toContain('current_node_timeout_effect = NULL')
+      expect(clearParams).toEqual(['apr-1'])
     })
 
     it('synthesizes a zero-duration entry when no matching open entry exists', async () => {
       queryMock
         .mockResolvedValueOnce({ rows: [{ node_breakdown: [] }] as Row[] })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+        // T1-1: the separate deadline-clear UPDATE that follows the breakdown write.
         .mockResolvedValueOnce({ rows: [], rowCount: 1 })
 
       await service.recordNodeDecision({
@@ -206,6 +258,9 @@ describe('ApprovalMetricsService', () => {
       const [sql, params] = queryMock.mock.calls[0]
       expect(normalize(sql)).toContain('UPDATE approval_metrics')
       expect(normalize(sql)).toContain('EXTRACT(EPOCH FROM ($2::timestamptz - started_at))')
+      // T1-1: terminal also clears the node-timeout deadline columns in the SAME update.
+      expect(normalize(sql)).toContain('current_node_deadline_at = NULL')
+      expect(normalize(sql)).toContain('current_node_timeout_effect = NULL')
       expect(params[2]).toBe('approved')
     })
   })
