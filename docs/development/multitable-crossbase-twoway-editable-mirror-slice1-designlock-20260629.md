@@ -1,7 +1,20 @@
-# Cross-base relational completion — Slice 1: editable cross-base mirror (two-way write) — DESIGN-LOCK (proposed, awaiting ratification) — 2026-06-29
+# Cross-base relational completion — Slice 1: editable cross-base mirror (two-way write) — DESIGN-LOCK (RATIFIED) — 2026-06-29 (ratified 2026-06-30)
 
-> Status: **design-lock proposed — NOT ratified, NO runtime.** Grounding: `origin/main` @ `15038b6fc`
-> (re-verified directly on main; an earlier code-survey agent read a stale feature branch and is NOT relied on).
+> Status: **RATIFIED 2026-06-30 (owner-signed; the §7 decisions A–F are settled below — this doc is read-only
+> post-ratification).** Grounding: `origin/main` @ `57fd06962` (re-verified directly on current main: the cross-base
+> twoWay reject is absent — read-only mirror v1 shipped; the spine invariant `isFieldAlwaysReadOnly(mirrorOf)`
+> holds; the `evaluateCrossBaseWrite`/`resolveBaseWritable` authority primitive is present. An earlier code-survey
+> agent read a stale feature branch and is NOT relied on).
+>
+> **Ratified decisions (owner, 2026-06-30):** **A** canonical-edge write-through, no mirror row · **B**
+> **both-endpoints** write (base-A canonical-owner write AND base-B acting-side write — strict-first, so a
+> cross-base mirror can't become a single-sided permission bypass) · **C** no-oracle uniform fail-closed
+> (masked / missing / no-write indistinguishable) · **D** **cross-base-only** (same-base mirror stays read-only;
+> parity is a separate later slice) · **E** realtime push deferred (base-B read-recomputes) · **F** TOCTOU
+> **launch gate** (forward grant/revoke + link-edit must co-lock or use a conditional/versioned write before the
+> flag is enabled). Runtime order: **C1** extract the shared authority primitive (automation executor → thin
+> adapter, regression-locked) → **C2** the mirror write-through; default-off `MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE`;
+> NOT same-base / realtime / triggers / cascade.
 > Arc: **cross-base relational completion** — selected as the next build arc by the refresh audit
 > (`docs/research/multitable-feishu-refresh-audit-20260629.md`, #3372) and pre-teed by the cross-base deepen
 > closeout (`multitable-crossbase-deepen-arc-closeout-20260627.md` §2(a), the explicitly-deferred owner fork).
@@ -107,15 +120,22 @@ New target suite `multitable-crossbase-mirror-write-realdb.test.ts`:
   cross-base relation-agg, dangling-link sweep) stay green — write-through didn't perturb the read/mask/repair paths.
 Each security golden fail-first-proven (assertion RED with the guard disabled).
 
-## 7. Decisions for ratification (owner)
-- **A — Architecture:** write-through to the canonical forward edge (no mirror row). *Lean: lock as stated (forced by the spine invariant).*
-- **B — Authority direction:** base-A write required; **also require base-B write in v1?** *Lean: yes (both endpoints), relax later.*
-- **C — No-oracle:** uniform fail-closed response for not-found/masked/denied `rec_A`. *Lean: lock (hard requirement).*
-- **D — Same-base parity:** Slice 1 is **cross-base-only** (same-base mirror stays read-only, a noted parity gap →
-  optional later slice), honoring "不要一口气吃". *Lean: cross-base-only. (Alt: editable generally — barely more work,
-  but widens scope beyond the instruction.)*
-- **E — Realtime push:** **keep deferred** (read-recompute; base-A side fans out normally). *Lean: deferred.*
-- **F — Concurrency:** full forward-route co-lock is a **launch gate** if not closed in v1, not a ladder item. *Lean: lock as a gate.*
+## 7. Decisions — RATIFIED 2026-06-30 (owner-signed)
+- **A — Architecture: RATIFIED — canonical-edge write-through, no mirror row.** A mirror edit mutates the one
+  canonical forward edge; never a second materialized row (preserves the spine invariant, reuses all downstream
+  masking/repair).
+- **B — Authority direction: RATIFIED — both-endpoints write.** v1 requires **base-A canonical-owner write AND
+  base-B acting-side write** (via the §3 shared primitive). Strict-first by owner decision: a cross-base mirror must
+  not become a single-sided permission bypass. (Looser base-A-only is a future, evidence-gated relaxation — NOT v1.)
+- **C — No-oracle: RATIFIED — uniform fail-closed.** masked / missing / no-write `rec_A` are **indistinguishable**
+  (one `403 OUT_OF_SCOPE`-class response, identical body); enforced with §4 goldens, fail-first.
+- **D — Scope: RATIFIED — cross-base-only.** Same-base mirror stays read-only; same-base editable-mirror parity is a
+  **separate later slice**, not this one ("不要一口气吃").
+- **E — Realtime push: RATIFIED — deferred.** The base-A forward write fans out normally; the base-B mirror
+  read-recomputes on next fetch. Live cross-base push is a later slice.
+- **F — Concurrency: RATIFIED — TOCTOU launch gate.** The flag is NOT enabled until the forward grant/revoke routes
+  **and** the forward link-edit co-lock with the mirror write (same sheet lock) **or** use a conditional/versioned
+  write. Launch/hardening gate, not a ladder item.
 
 ## 8. Flag + enablement
 Default-off `MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE`. Enablement (post-merge, separate opt-in) requires: a flag-on
@@ -123,10 +143,14 @@ real-DB smoke of W1/W2/W5, and the Decision-F concurrency gate closed (forward g
 co-lock with the mirror write, or conditional/versioned write).
 
 ## 9. Pre-runtime gates (before any code)
-1. **Owner ratification** of §7 decisions A–F (this design-lock).
+1. **Owner ratification** of §7 decisions A–F — ✅ **DONE (RATIFIED 2026-06-30).**
 2. **Adversarial advisor pass** on the locked design (the advisor was overloaded at lock-drafting time; run before runtime) —
-   specifically the no-oracle (§4) and TOCTOU/locking (§5) surfaces.
-3. Only then: runtime, **contract-first** — the FIRST runtime step is extracting the §3 context-agnostic shared
-   authority primitive and refactoring the automation executor to consume it as a thin adapter (regression-locked by
-   its existing cross-base-write goldens, zero behavior change), BEFORE the mirror-write op is built on top of it.
+   specifically the no-oracle (§4), the **both-endpoints** authority (§3/Decision B), and TOCTOU/locking (§5) surfaces.
+3. Only then: runtime, **contract-first**, in two slices —
+   - **C1** — extract the §3 context-agnostic shared authority primitive and refactor the automation executor to consume
+     it as a thin adapter (regression-locked by its existing cross-base-write goldens, **zero behavior change**). No
+     mirror-write yet.
+   - **C2** — the mirror write-through op built on C1's primitive (both-endpoints authority, no-oracle, write-through to
+     the canonical edge), default-off `MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE`. **NOT** same-base parity / realtime
+     push / triggers / cascade — each a separate later slice.
    Then the write-through op, goldens fail-first, default-off.
