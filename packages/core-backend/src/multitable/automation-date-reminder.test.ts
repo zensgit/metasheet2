@@ -124,6 +124,82 @@ describe('computeDateReminderOccurrence — timezone-aware (T2-5)', () => {
   })
 })
 
+describe('computeDateReminderOccurrence — FLOATING date-only field (Option 1: date vs dateTime)', () => {
+  const NY = 'America/New_York' // EST = UTC-5 in March (before DST), EDT = UTC-4 in summer
+
+  // THE regression lock. A `date`-type field stores a bare 'YYYY-MM-DD' (the date-picker output). A date-only
+  // value has NO instant, so its calendar day must NOT move with timezone. "3 days before 2026-03-08, 09:00"
+  // in New York must be Mar 5 09:00 EST (= 14:00Z), NOT Mar 4. Before the fix the bare date was parsed to UTC
+  // midnight then re-zoned to the PREVIOUS NY day, firing a civil day early.
+  test('floating + negative-offset tz: the bare calendar day does NOT shift (Mar 8 → Mar 5 09:00 EST)', () => {
+    expect(
+      computeDateReminderOccurrence(
+        '2026-03-08',
+        { offsetDays: 3, direction: 'before', timeOfDay: '09:00', timezone: NY },
+        { floating: true },
+      ),
+    ).toBe('2026-03-05T14:00:00.000Z')
+  })
+
+  // The SAME shape WITHOUT floating (a real dateTime instant at UTC-midnight) keeps instant→local-day
+  // semantics: 2026-03-08T00:00Z is locally Mar 7 in NY, so 3-before lands Mar 4. This is CORRECT for an
+  // instant and documents exactly why the two field types must diverge — the floating fix must not touch it.
+  test('instant (dateTime) default is UNCHANGED: a UTC-midnight instant re-zones to the previous NY day', () => {
+    const cfg = { offsetDays: 3, direction: 'before' as const, timeOfDay: '09:00', timezone: NY }
+    expect(computeDateReminderOccurrence('2026-03-08T00:00:00.000Z', cfg)).toBe('2026-03-04T14:00:00.000Z')
+    // floating:false is identical to omitting opts.
+    expect(computeDateReminderOccurrence('2026-03-08T00:00:00.000Z', cfg, { floating: false })).toBe(
+      '2026-03-04T14:00:00.000Z',
+    )
+  })
+
+  test('floating + positive-offset tz (Asia/Shanghai +8): no shift either way (Mar 5 09:00 CST = Mar 5 01:00Z)', () => {
+    expect(
+      computeDateReminderOccurrence(
+        '2026-03-08',
+        { offsetDays: 3, direction: 'before', timeOfDay: '09:00', timezone: 'Asia/Shanghai' },
+        { floating: true },
+      ),
+    ).toBe('2026-03-05T01:00:00.000Z')
+  })
+
+  test('floating UTC path is byte-identical (no tz): the bare date buckets in UTC exactly as before', () => {
+    expect(
+      computeDateReminderOccurrence('2026-03-08', { offsetDays: 3, direction: 'before', timeOfDay: '09:00' }, { floating: true }),
+    ).toBe('2026-03-05T09:00:00.000Z')
+  })
+
+  test('floating + DST spring-forward gap: a non-existent local timeOfDay resolves FORWARD (not skipped)', () => {
+    // floating Mar 8, 0-before, 02:30 NY — 02:30 does not exist on the spring-forward day → 03:30 EDT = 07:30Z.
+    expect(
+      computeDateReminderOccurrence(
+        '2026-03-08',
+        { offsetDays: 0, direction: 'before', timeOfDay: '02:30', timezone: NY },
+        { floating: true },
+      ),
+    ).toBe('2026-03-08T07:30:00.000Z')
+  })
+
+  test('floating with a full-ISO-midnight value (legacy date stored as ISO): still the literal civil day', () => {
+    // A date-only field whose value was persisted as full-ISO-midnight must STILL take the literal day, so the
+    // floating fallback (UTC parts) gives Mar 8 → Mar 5 09:00 EST, not the re-zoned Mar 7.
+    expect(
+      computeDateReminderOccurrence(
+        '2026-03-08T00:00:00.000Z',
+        { offsetDays: 3, direction: 'before', timeOfDay: '09:00', timezone: NY },
+        { floating: true },
+      ),
+    ).toBe('2026-03-05T14:00:00.000Z')
+  })
+
+  test('floating null/empty/unparseable ⇒ null (unchanged)', () => {
+    const cfg = { offsetDays: 1, direction: 'before' as const, timezone: NY }
+    expect(computeDateReminderOccurrence(null, cfg, { floating: true })).toBeNull()
+    expect(computeDateReminderOccurrence('', cfg, { floating: true })).toBeNull()
+    expect(computeDateReminderOccurrence('not-a-date', cfg, { floating: true })).toBeNull()
+  })
+})
+
 describe('date-reminder timer boundary — timezone-aware (T2-5)', () => {
   const NY = 'America/New_York'
 
@@ -253,5 +329,24 @@ describe('dateReminderCandidateDateRange — SQL pre-filter brackets the product
     expect(dateValue >= loIso && dateValue <= hiIso).toBe(true)
     // a far-future date (occurrence well beyond now) is OUTSIDE the range.
     expect('2026-09-01T00:00:00.000Z' <= hiIso).toBe(false)
+  })
+
+  test('DATE-ONLY bounds: a bare YYYY-MM-DD on the boundary day is INCLUDED (full-ISO bounds would drop it)', () => {
+    const now = Date.parse('2026-06-25T12:00:00.000Z')
+    const window = DATE_REMINDER_GRACE_WINDOW_MS
+    const cfg = { offsetDays: 3, direction: 'before' as const }
+    const { loIso, hiIso } = dateReminderCandidateDateRange(now, cfg, window)
+    // Bounds are date-only ('YYYY-MM-DD') so the lexicographic SQL BETWEEN is exact for a bare date value.
+    expect(loIso).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(hiIso).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    // The productive bare date (occurrence ≈ now ⇒ dateDay ≈ 06-28) is inside the range.
+    expect('2026-06-28' >= loIso && '2026-06-28' <= hiIso).toBe(true)
+    // A bare date sitting exactly on the lo boundary day is INCLUDED now…
+    const bareOnLoDay = loIso // loIso is itself a bare date on the lo civil day
+    expect(bareOnLoDay >= loIso).toBe(true)
+    // …whereas the OLD full-ISO lower bound (a time-suffixed instant on the same day) would have EXCLUDED it,
+    // because the bare string is a prefix of the timestamp and sorts BEFORE it. This is the boundary-luck fix.
+    const oldFullIsoLo = `${loIso}T12:00:00.000Z`
+    expect(bareOnLoDay >= oldFullIsoLo).toBe(false)
   })
 })

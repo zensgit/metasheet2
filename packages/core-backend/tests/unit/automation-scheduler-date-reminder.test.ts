@@ -115,9 +115,12 @@ describe('AutomationScheduler — schedule.date_field timeOfDay alignment (DR-A/
 // it behaves like cron's skip.
 describe('date_field DST gap/overlap — lands on a representable instant (NOT cron-style skip)', () => {
   // US spring-forward 2026: Mar 8, 02:00 EST → 03:00 EDT. Local 02:30 does NOT exist.
-  // Note: the date VALUE is noon-UTC so its NY-LOCAL calendar day is genuinely Mar 8 (a bare 'YYYY-MM-DD'
-  // parses to UTC midnight, whose local day in a negative-offset zone is the PREVIOUS day — the day-bucket
-  // is keyed off the local day, not the UTC day).
+  // These cases exercise the INSTANT (dateTime) path: the date VALUE is a full-ISO noon-UTC instant whose
+  // NY-LOCAL day is Mar 8, so they pin the DST gap/overlap CLOCK behavior — NOT day-derivation. A date-ONLY
+  // ('date'-type) field is a FLOATING calendar day whose civil day does not move with timezone (see the
+  // floating goldens in automation-date-reminder.test.ts); that fix changes how the day is derived but leaves
+  // this gap/overlap resolution unchanged. (Do NOT read the noon-UTC choice as blessing the old bare-date
+  // day-shift — it is here only to make the LOCAL day land on the transition day for the instant path.)
   it('spring-forward GAP: a non-existent local timeOfDay resolves FORWARD to 03:30 (not skipped, unlike cron)', () => {
     const occ = computeDateReminderOccurrence('2026-03-08T12:00:00Z', { timeOfDay: '02:30', timezone: 'America/New_York' })
     expect(occ).not.toBeNull()

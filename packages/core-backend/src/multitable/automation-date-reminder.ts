@@ -185,13 +185,42 @@ export function dateReminderTimeOfDayPassed(
 }
 
 /**
+ * The literal calendar day of a FLOATING (date-only) value. A `date`-type field stores a bare 'YYYY-MM-DD'
+ * (the date-picker output — field-codecs passes `date` values through un-normalized, only `dateTime` is
+ * toISOString-normalized), so a date-only field has NO instant and its day must be read straight from the
+ * string, NOT re-derived by parsing to a UTC instant and re-zoning (which shifts back a civil day in a
+ * negative-offset zone). Falls back to the parsed instant's UTC parts for a Date object or a non-bare string
+ * (a date-only value persisted as full-ISO-midnight still yields the right civil day). Month is 1-based to
+ * match `getZonedParts`. PURE.
+ */
+function floatingCalendarDay(value: unknown, parsed: Date): { year: number; month: number; day: number } {
+  if (typeof value === 'string') {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(value.trim())
+    if (m) {
+      // Normalize through Date.UTC so any out-of-range component rolls over EXACTLY as the instant path would —
+      // floating and instant never diverge on junk input (and unparseable values were already rejected above).
+      const norm = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])))
+      return { year: norm.getUTCFullYear(), month: norm.getUTCMonth() + 1, day: norm.getUTCDate() }
+    }
+  }
+  return { year: parsed.getUTCFullYear(), month: parsed.getUTCMonth() + 1, day: parsed.getUTCDate() }
+}
+
+/**
  * PURE occurrence: the instant a record's reminder should fire, day-bucketed in `config.timezone` (UTC when
  * absent/'UTC'/invalid). Returns an ISO string, or null if the date value is absent/unparseable. NEVER reads
  * NOW. The UTC path is byte-identical to pre-T2-5; the zoned path day-buckets in LOCAL time and converts back.
+ *
+ * `opts.floating` (a `date`-type field): the value is a FLOATING calendar day with no instant, so the anchor
+ * day is the LITERAL 'YYYY-MM-DD' (it does NOT move with timezone); `timeOfDay` is still placed as the LOCAL
+ * wall-clock in `config.timezone`. Default (absent/false, a `dateTime` field) keeps the instant→local-day
+ * semantics → BYTE-IDENTICAL for every existing caller. The day-source is the only difference; the civil-day
+ * shift + timeOfDay conversion + junk-tz→UTC defense are shared.
  */
 export function computeDateReminderOccurrence(
   dateValue: unknown,
   config: { offsetDays?: number; direction?: 'before' | 'after'; timeOfDay?: string; timezone?: string },
+  opts: { floating?: boolean } = {},
 ): string | null {
   if (dateValue === null || dateValue === undefined || dateValue === '') return null
   const d = dateValue instanceof Date ? dateValue : new Date(String(dateValue))
@@ -202,18 +231,25 @@ export function computeDateReminderOccurrence(
   const signedDays = config.direction === 'after' ? offset : -offset
   const tz = resolveReminderTimeZone(config.timezone)
 
+  // FLOATING (date-only) → the literal calendar day; otherwise the day is derived from the instant per-path.
+  const floatingDay = opts.floating ? floatingCalendarDay(dateValue, d) : null
+  const utcDay = () =>
+    floatingDay ?? { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() }
+
   if (!tz) {
-    // Day-bucket: strip the source time-of-day to UTC midnight, then shift by whole days. (UNCHANGED.)
-    const dayUtcMidnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+    // Day-bucket: strip the source time-of-day to UTC midnight, then shift by whole days. (UNCHANGED for
+    // instant; for floating the literal day equals the UTC-midnight day, so this stays byte-identical too.)
+    const base = utcDay()
+    const dayUtcMidnight = Date.UTC(base.year, base.month - 1, base.day)
     const reminderDay = dayUtcMidnight + signedDays * DAY_MS
     const occurrenceMs = reminderDay + parseTimeOfDayMinutes(config.timeOfDay) * 60 * 1000
     return new Date(occurrenceMs).toISOString()
   }
 
   try {
-    // Zoned day-bucket: take the source date's LOCAL calendar day, shift by whole CIVIL days, then set the
-    // LOCAL `timeOfDay` and convert that local wall-clock back to a UTC instant.
-    const p = getZonedParts(t, tz)
+    // Zoned day-bucket: the anchor day is the FLOATING literal day (date-only) or the instant's LOCAL calendar
+    // day (dateTime); shift by whole CIVIL days, then set the LOCAL `timeOfDay` and convert back to a UTC instant.
+    const p = floatingDay ?? getZonedParts(t, tz)
     const shifted = new Date(Date.UTC(p.year, p.month - 1, p.day + signedDays))
     const mins = parseTimeOfDayMinutes(config.timeOfDay)
     const occurrenceMs = zonedWallClockToUtcMs(
@@ -229,8 +265,9 @@ export function computeDateReminderOccurrence(
     )
     return new Date(occurrenceMs).toISOString()
   } catch {
-    // Runtime defense (Q6): a persisted-junk tz must never throw — degrade to UTC bucketing.
-    const dayUtcMidnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+    // Runtime defense (Q6): a persisted-junk tz must never throw — degrade to UTC bucketing (floating-aware).
+    const base = utcDay()
+    const dayUtcMidnight = Date.UTC(base.year, base.month - 1, base.day)
     const reminderDay = dayUtcMidnight + signedDays * DAY_MS
     const occurrenceMs = reminderDay + parseTimeOfDayMinutes(config.timeOfDay) * 60 * 1000
     return new Date(occurrenceMs).toISOString()
@@ -280,10 +317,17 @@ export function dateReminderFloorMs(ruleCreatedAtMs: number, effectiveAt: string
 
 /**
  * PURE coarse date-VALUE range for the SQL pre-filter. Only records whose date field falls in this window
- * can possibly produce an occurrence in the firing window, so SQL fetches just those (ISO strings sort
+ * can possibly produce an occurrence in the firing window, so SQL fetches just those (ISO date strings sort
  * chronologically → a plain string BETWEEN works, no cast that could throw on legacy junk). Deliberately
  * GENEROUS (±2 day slack for day-bucketing + timeOfDay); the JS predicate (`isDateReminderDue`) is the exact
- * gate. Returns inclusive ISO bounds.
+ * gate. Returns inclusive bounds.
+ *
+ * Bounds are DATE-ONLY and widened a day on each end so the lexicographic `data->>field BETWEEN lo AND hi` is
+ * exact for BOTH a bare 'YYYY-MM-DD' (date-type, the date-picker output) AND a full-ISO
+ * 'YYYY-MM-DDTHH:mm:ss.sssZ' (dateTime). A bare date equal to a full-ISO bound's day sorts BEFORE it (the bare
+ * string is a prefix) and would be wrongly EXCLUDED at the exact boundary day; truncating lo to its civil day
+ * (start) and extending hi to the day AFTER makes the range a strict SUPERSET of the old window on both ends,
+ * so no record that should fire is ever dropped by the pre-filter, regardless of how its date value is stored.
  */
 export function dateReminderCandidateDateRange(
   nowMs: number,
@@ -299,5 +343,7 @@ export function dateReminderCandidateDateRange(
   const occHi = nowMs
   const lo = occLo - signedDays * DAY_MS - SLACK
   const hi = occHi - signedDays * DAY_MS + SLACK
-  return { loIso: new Date(lo).toISOString(), hiIso: new Date(hi).toISOString() }
+  const dateOnly = (ms: number) => new Date(ms).toISOString().slice(0, 10)
+  // lo → start of its civil day (≤ a bare date that day); hi → the day AFTER (≥ any time component that day).
+  return { loIso: dateOnly(lo), hiIso: dateOnly(hi + DAY_MS) }
 }
