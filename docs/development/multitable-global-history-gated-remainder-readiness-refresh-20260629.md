@@ -67,4 +67,4 @@
 6. **真·lossy retype / 值级 undelete**：仅当确需「向前」能力时，单项授权净新捕获 slice；已毁数据 impossible，记死即可。
 
 ## 5. 落地
-本文为 **送审 readiness/design+verification 评估**，**未提交、未改代码、未启用任何 flag**。要的话我可以把它作为一份 dated「gated-remainder readiness 刷新」**docs PR** 落到 Global History 线下（de-branded、引用现有 canonical docs，不另立权威）；或就留 /tmp。**等你回来逐项点单。**
+本文为 dated readiness refresh docs PR；仅新增文档，未改代码、未启用任何 flag、未做 Reset-UI 产品取舍、未 build 不可逆语义。它不另立权威，只记录本次核验结果；后续仍需 owner 逐项点单。
