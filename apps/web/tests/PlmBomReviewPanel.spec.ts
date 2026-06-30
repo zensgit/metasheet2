@@ -114,7 +114,10 @@ describe('PlmBomReviewPanel (P3-C BOM review + governed write-back)', () => {
   })
 
   it('keeps a failed submit actionable so the user can retry the same logical edit', async () => {
-    vi.stubGlobal('crypto', { randomUUID: () => 'submit-key-1' })
+    const randomUUID = vi.fn()
+      .mockReturnValueOnce('submit-key-1')
+      .mockReturnValueOnce('submit-key-2')
+    vi.stubGlobal('crypto', { randomUUID })
     getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
     updateLineMock
       .mockResolvedValueOnce({ ok: false, status: 409, reason: 'provider-rejected', message: 'locked' })
@@ -136,6 +139,7 @@ describe('PlmBomReviewPanel (P3-C BOM review + governed write-back)', () => {
 
     expect(updateLineMock).toHaveBeenNthCalledWith(1, 'plm-ds', 'P1', 'R1', { refdes: 'R9' }, 'submit-key-1')
     expect(updateLineMock).toHaveBeenNthCalledWith(2, 'plm-ds', 'P1', 'R1', { refdes: 'R9' }, 'submit-key-1')
+    expect(randomUUID).toHaveBeenCalledTimes(1)
     expect(container.textContent).toContain('写回成功。')
   })
 

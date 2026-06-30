@@ -674,6 +674,96 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '500':
           description: Internal server error
+  /api/approvals/metrics/people:
+    get:
+      operationId: getApprovalMetricsByPerson
+      tags: [Approvals]
+      summary: Get approval metrics aggregated by requester (person)
+      description: |
+        Requires the `approvals:analytics` permission (a person-level performance ranking is an
+        HR/ops-analytics lens, gated separately from approval administration). Aggregates approval
+        metrics by the requester (person), Top-100 by volume. A null key is the unattributed bucket.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: until
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string, nullable: true }
+                        name: { type: string, nullable: true }
+                        total: { type: integer }
+                        approved: { type: integer }
+                        rejected: { type: integer }
+                        revoked: { type: integer }
+                        avgDurationSeconds: { type: number, nullable: true }
+                        slaBreachRate: { type: number }
+                required: [ok, data]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500':
+          description: Internal server error
+  /api/approvals/metrics/teams:
+    get:
+      operationId: getApprovalMetricsByTeam
+      tags: [Approvals]
+      summary: Get approval metrics aggregated by requester department (team)
+      description: |
+        Admin-only. Aggregates approval metrics by the requester's frozen department
+        (directoryDepartment with a department fallback), Top-100 by volume. A null key is
+        the unattributed bucket.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: until
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string, nullable: true }
+                        name: { type: string, nullable: true }
+                        total: { type: integer }
+                        approved: { type: integer }
+                        rejected: { type: integer }
+                        revoked: { type: integer }
+                        avgDurationSeconds: { type: number, nullable: true }
+                        slaBreachRate: { type: number }
+                required: [ok, data]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500':
+          description: Internal server error
   /api/approval-templates:
     get:
       operationId: listApprovalTemplates

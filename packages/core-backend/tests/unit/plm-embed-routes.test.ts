@@ -96,7 +96,7 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     process.env.PLM_EMBED_DATA_SOURCE_ID = DS_ID
   })
   afterEach(() => {
-    for (const k of ['YUANTUS_EMBED_PUBLIC_KEY', 'YUANTUS_EMBED_KEY_ID', 'PLM_EMBED_AUDIENCE', 'PLM_EMBED_ALLOWED_ORIGINS', 'PLM_EMBED_DATA_SOURCE_ID']) delete process.env[k]
+    for (const k of ['YUANTUS_EMBED_PUBLIC_KEYS', 'YUANTUS_EMBED_PUBLIC_KEY', 'YUANTUS_EMBED_KEY_ID', 'PLM_EMBED_AUDIENCE', 'PLM_EMBED_ALLOWED_ORIGINS', 'PLM_EMBED_DATA_SOURCE_ID']) delete process.env[k]
   })
 
   it('the embed path is whitelisted from the global session gate (else it would 401 before embedTokenAuth)', () => {
@@ -117,6 +117,22 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
     expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
   })
 
+  it('REAL CHAIN: accepts a rotated kid from YUANTUS_EMBED_PUBLIC_KEYS', async () => {
+    process.env.YUANTUS_EMBED_PUBLIC_KEYS = JSON.stringify({
+      'embed-old': 'unused-old-public-key',
+      'embed-new': PUB_B64,
+    })
+    delete process.env.YUANTUS_EMBED_PUBLIC_KEY
+    delete process.env.YUANTUS_EMBED_KEY_ID
+    const getBomMultitableContext = vi.fn().mockResolvedValue({ feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT })
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ getBomMultitableContext }))
+
+    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint({}, 'embed-new'))
+
+    expect(res.status).toBe(200)
+    expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
+  })
+
   it('a non-whitelisted /api/* path with no session is 401 (proves the stand-in gate is real)', async () => {
     const res = await request(buildApp()).get('/api/other/thing')
     expect(res.status).toBe(401)
@@ -134,6 +150,12 @@ describe('PLM embed relay (PLM-COLLAB-P3-D2)', () => {
 
   it('no Yuantus public key configured -> 503 fail-closed (not 401)', async () => {
     delete process.env.YUANTUS_EMBED_PUBLIC_KEY
+    const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
+    expect(res.status).toBe(503)
+  })
+
+  it('malformed YUANTUS_EMBED_PUBLIC_KEYS -> 503 fail-closed (not a server error)', async () => {
+    process.env.YUANTUS_EMBED_PUBLIC_KEYS = '{not-json'
     const res = await request(buildApp()).get(URL).set('X-PLM-Embed-Token', mint())
     expect(res.status).toBe(503)
   })
