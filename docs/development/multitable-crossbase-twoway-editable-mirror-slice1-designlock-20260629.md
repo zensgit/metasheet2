@@ -144,8 +144,8 @@ co-lock with the mirror write, or conditional/versioned write).
 
 ## 9. Pre-runtime gates (before any code)
 1. **Owner ratification** of §7 decisions A–F — ✅ **DONE (RATIFIED 2026-06-30).**
-2. **Adversarial advisor pass** on the locked design (the advisor was overloaded at lock-drafting time; run before runtime) —
-   specifically the no-oracle (§4), the **both-endpoints** authority (§3/Decision B), and TOCTOU/locking (§5) surfaces.
+2. **Adversarial advisor pass** on the locked design — ✅ **DONE (2026-06-30; output = §10 implementation invariants).**
+   Covered the no-oracle (§4), the **both-endpoints** authority (§3/Decision B), and TOCTOU/locking (§5) surfaces.
 3. Only then: runtime, **contract-first**, in two slices —
    - **C1** — extract the §3 context-agnostic shared authority primitive and refactor the automation executor to consume
      it as a thin adapter (regression-locked by its existing cross-base-write goldens, **zero behavior change**). No
@@ -154,3 +154,33 @@ co-lock with the mirror write, or conditional/versioned write).
      the canonical edge), default-off `MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE`. **NOT** same-base parity / realtime
      push / triggers / cascade — each a separate later slice.
    Then the write-through op, goldens fail-first, default-off.
+
+## 10. Implementation invariants (advisor pass, 2026-06-30) — the C1/C2 build bar
+These REFINE how C1/C2 implement the ratified A–F; they do not relitigate any decision.
+
+**I-1 — One gated write-path + write-path enumeration (HARD gate before C2 merges).** Do **NOT** loosen
+`isFieldAlwaysReadOnly` globally — the mirror stays read-only on every existing path; editing opens **only** through
+the one deliberately-gated mirror-edit path. Then enumerate **every** path that can write a `meta_links` edge —
+single-record PATCH, bulk `/patch`, record-create-with-link-value, form-submit, import, automation link-writes — and
+prove each either routes through the gate or still **rejects** a cross-base mirror write. **One golden per path**
+asserting the un-gated path cannot mutate the canonical edge via the mirror. This is the C2 acceptance bar (it
+generalizes the OAPI-4a REST-mint side-door miss) and settles the open dedicated-op-vs-guarded-branch choice:
+whichever is chosen, the gate must dominate **every** edge-writing path.
+
+**I-2 — Decisions B and C are INDEPENDENT gates.** The C1 primitive provides **base-level** authority (B). The
+no-oracle (C) is a **per-record** property the primitive does NOT cover: an actor with base-A write authority but
+**no read on the specific `rec_A`** must still get the uniform deny — else they probe base-A record existence through
+the mirror edit. C2 adds a per-record read-mask on the named `rec_A` (parity with the read path's
+`resolveForeignFieldReadability`) **on top of** the primitive. The §6 W5 golden must exercise the
+**has-base-write-but-not-record-read** case specifically (not merely "no base access").
+
+**I-3 — Asymmetric both-endpoints authority; C1 quota keyed to base A.** "Both-endpoints" (B) is **not** symmetric:
+the shared primitive is called for the **base-A leg only** (claim==truth + per-target-base quota keyed to **base A**,
+the canonical-edge owner being written into); the **base-B leg is a plain `resolveBaseWritable`** — no claim, no
+separate quota (the actor edits their own base's record, not a cross-base target). Do not call the primitive
+symmetrically or double-charge quota. **C1 regression-lock:** the existing automation cross-base-write goldens MUST
+pass **byte-identical** (same quota keying, error strings, claim==truth) — the proof the extraction is
+behavior-preserving.
+
+**Process:** confirm `state=MERGED` on #3376 before starting C1 (don't infer from a watcher exit); lead the C2 fork
+spec with I-1 (write-path enumeration) as the explicit deliverable.
