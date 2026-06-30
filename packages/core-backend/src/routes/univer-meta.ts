@@ -6106,21 +6106,27 @@ async function recreateViewFromConfig(query: TxnQuery, opts: {
 type PermGrant = Record<string, unknown> | null
 
 /** Read the subject's CURRENT live grant for a permission entity (field/view/sheet); null = no grant. */
-async function loadLivePermissionGrant(query: TxnQuery, scope: PermissionScope, parts: string[], sheetId: string): Promise<PermGrant> {
+// `forUpdate` (execute path ONLY) appends `FOR UPDATE` so the live-grant read row-locks the permission row(s) for the
+// rest of the surrounding txn. Because a de-escalation always reads a non-null live grant (no-row ⇒ null ⇒ rank 0, and
+// de-escalation requires live rank ≥ 1), the locked row always exists; the drift re-check + apply then cannot interleave
+// with a concurrent forward grant write on the same subject (never-escalate-under-concurrency, READ COMMITTED re-read).
+// Preview path passes false — it is a read-only GET on the pool (no txn), where a row lock would be wrong.
+async function loadLivePermissionGrant(query: TxnQuery, scope: PermissionScope, parts: string[], sheetId: string, forUpdate = false): Promise<PermGrant> {
+  const lock = forUpdate ? ' FOR UPDATE' : ''
   if (scope === 'field') {
     const [fieldId, subjectType, subjectId] = parts
-    const r = (await query('SELECT visible, read_only FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_type = $3 AND subject_id = $4', [sheetId, fieldId, subjectType, subjectId])) as any
+    const r = (await query('SELECT visible, read_only FROM field_permissions WHERE sheet_id = $1 AND field_id = $2 AND subject_type = $3 AND subject_id = $4' + lock, [sheetId, fieldId, subjectType, subjectId])) as any
     const row = r.rows[0] as { visible?: boolean; read_only?: boolean } | undefined
     return row ? { fieldId, subjectType, subjectId, visible: row.visible !== false, readOnly: row.read_only === true } : null
   }
   if (scope === 'view') {
     const [viewId, subjectType, subjectId] = parts
-    const r = (await query('SELECT permission FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3', [viewId, subjectType, subjectId])) as any
+    const r = (await query('SELECT permission FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3' + lock, [viewId, subjectType, subjectId])) as any
     const row = r.rows[0] as { permission?: string } | undefined
     return row && typeof row.permission === 'string' ? { viewId, subjectType, subjectId, permission: row.permission } : null
   }
   const [subjectType, subjectId] = parts
-  const r = (await query('SELECT perm_code FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = $2 AND subject_id = $3 AND perm_code = ANY($4::text[])', [sheetId, subjectType, subjectId, MANAGED_SHEET_PERMISSION_CODES])) as any
+  const r = (await query('SELECT perm_code FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = $2 AND subject_id = $3 AND perm_code = ANY($4::text[])' + lock, [sheetId, subjectType, subjectId, MANAGED_SHEET_PERMISSION_CODES])) as any
   const accessLevel = deriveSheetAccessLevel((r.rows as Array<{ perm_code: string }>).map((x) => String(x.perm_code)))
   return accessLevel ? { subjectType, subjectId, accessLevel } : null
 }
@@ -8295,11 +8301,15 @@ export function univerMetaRouter(): Router {
           return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'Permission revision before-snapshot does not match its entity id.' } })
         }
         const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
-          // Never-escalate-under-concurrency: lock the sheet row so the live-grant read → direction re-check → apply
-          // cannot interleave with another grant write on this sheet. (Enablement gate: the forward grant/revoke routes
-          // must take the same lock for full coverage — tracked in the dev-verification honest gaps.)
+          // Never-escalate-under-concurrency: the live-grant load below takes `FOR UPDATE` (forUpdate=true), row-locking
+          // the actual permission row for this subject until commit — so the drift re-check → direction re-check → apply
+          // cannot interleave with a concurrent forward grant/revoke write on the SAME subject (which contends on that
+          // same row; no forward-route change needed). A de-escalation always reads an existing row (no-row ⇒ null ⇒
+          // rank 0, and de-escalation requires live rank ≥ 1), so the FOR UPDATE always locks a real row. The meta_sheets
+          // FOR UPDATE is kept as the coarse per-sheet mutex that also serializes concurrent reverts; lock order is
+          // always meta_sheets → permission-row, so concurrent reverts can't deadlock.
           await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
-          const live = await loadLivePermissionGrant(query, parsedPerm.scope, parsedPerm.parts, sheetId)
+          const live = await loadLivePermissionGrant(query, parsedPerm.scope, parsedPerm.parts, sheetId, /* forUpdate */ true)
           const verdict = verifyConfigPermissionRevertPreviewIdentity(previewToken, { sheetId, revisionId, entityId: rev.entity_id, currentGrantHash: hashPermissionGrant(live), actorId: access.userId })
           if (!verdict.valid) {
             if (verdict.reason === 'grant_drift') return { status: 409, code: 'GRANT_DRIFT', message: 'The grant changed since preview; re-preview before reverting.' }

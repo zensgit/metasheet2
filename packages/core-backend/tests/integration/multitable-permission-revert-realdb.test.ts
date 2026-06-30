@@ -13,11 +13,22 @@
  * BEFORE the direction re-check). Apply mirrors the forward grant write (target=null ⇒ revoke) and records a
  * source='restore' permission revision (live → target).
  *
- * Goldens (a)-(l): (a) flag-off 403 (preview+execute) · (b) canManageSheetAccess floor 403 · (c) happy SHEET
+ * Goldens (a)-(n): (a) flag-off 403 (preview+execute) · (b) canManageSheetAccess floor 403 · (c) happy SHEET
  * de-escalation (admin→read + restore revision) · (d) happy REVOKE (revert a `create`, before=null) · (e) escalation
  * refused 422 · (f) noop refused 422 · (g) LIVE re-check load-bearing 422 (uses live, not recorded after) · (h) grant
  * drift 409 · (i) FIELD de-escalation (read-write→read-only) · (j) VIEW de-escalation (admin→read) · (k) typed-confirm
- * 400/200 · (l) no-oracle preview shape. Runs only with DATABASE_URL.
+ * 400/200 · (l) no-oracle preview shape · (m)/(n) CONCURRENCY: a forward write that LOWERS the grant, committed WHILE
+ * the revert executes, must not let the revert escalate the subject above the committed-forward grant. Runs only with
+ * DATABASE_URL.
+ *
+ * NEVER-ESCALATE-UNDER-CONCURRENCY (cases m/n): the execute-path live-grant load takes `FOR UPDATE`, row-locking the
+ * subject's permission row for the rest of the txn. A concurrent forward grant write contends on that SAME row, so it
+ * cannot interleave between the revert's drift/direction re-check and its apply. Staged deterministically here by
+ * holding the forward write's row lock in a SEPARATE uncommitted txn while the revert executes: post-fix the execute
+ * BLOCKS on the lock, and once the forward write commits a LOWER grant, the load re-reads the new live value and the
+ * drift verdict fires (409) — instead of applying a now-escalating de-escalation. Pre-fix (plain SELECT, no FOR UPDATE)
+ * the load would read the stale pre-commit grant, pass drift, and raise the subject ABOVE the committed-forward grant
+ * (none→read / hidden→read-only). The serial drift case (h) does NOT exercise the lock — it never overlaps two txns.
  *
  * NOTE on case (g): the design's "lower the live grant after preview → 422" is UNREACHABLE in the runtime — lowering
  * live changes its derived grant ⇒ changes `hashPermissionGrant(live)` ⇒ the drift verdict (→409) fires BEFORE the
@@ -30,6 +41,7 @@
  * NOTE on the flag: MULTITABLE_ENABLE_PERMISSION_REVERT is read PER-REQUEST inside the handlers, so — exactly like the
  * sibling config-undelete golden — ONE app + a per-test env toggle + an afterEach delete is correct and sufficient.
  */
+import type { PoolClient } from 'pg'
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
@@ -345,5 +357,75 @@ describeIfDatabase('multitable permission-revert — T9-W de-escalation-only (re
     expect(String(pr.note)).not.toMatch(/\d/) // the consequence text names no count
     // the OTHER subject's id (and thus its grant) never appears in the response (token is HMAC/base64 over subj only).
     expect(JSON.stringify(p.body)).not.toContain(other)
+  })
+
+  // Stage a deterministic concurrent interleave: hold the forward (grant-lowering) write's row lock in a SEPARATE
+  // uncommitted txn, FIRE the revert execute (which — post-fix — blocks on that lock at its `FOR UPDATE` live-load),
+  // settle so the execute reaches the lock-wait, then COMMIT the forward write so the execute unblocks and re-reads the
+  // now-lower live grant. `forward` performs the uncommitted lowering write on the held client; `makeExec` builds the
+  // supertest execute call (fired immediately via Promise.resolve, NOT deferred until after the commit).
+  async function raceForwardLowerThenExecute(
+    forward: (client: PoolClient) => Promise<unknown>,
+    makeExec: () => PromiseLike<request.Response>,
+  ): Promise<request.Response> {
+    const pool = poolManager.get().getInternalPool()
+    expect(pool).toBeTruthy()
+    const client = await pool!.connect()
+    try {
+      await client.query('BEGIN')
+      await forward(client) // forward lowering write — uncommitted ⇒ holds the row lock
+      const pending = Promise.resolve(makeExec()) // fire the revert execute now (blocks on the held lock, post-fix)
+      await new Promise((r) => setTimeout(r, 200)) // let the execute reach its FOR UPDATE lock-wait
+      await client.query('COMMIT') // forward lowering commits ⇒ execute unblocks, re-reads the lower grant
+      return await pending
+    } finally {
+      await client.query('ROLLBACK').catch(() => {}) // no-op if already committed; releases on error paths
+      client.release()
+    }
+  }
+
+  test('(m) CONCURRENCY sheet: forward REVOKE (admin→none) commits while revert executes → revert re-reads & 409s (never escalates none→read)', async () => {
+    process.env[FLAG] = 'true'
+    const s = await freshSheet('m')
+    const subj = mkSubject('m')
+    await seedSheetGrant(s, subj, 'admin') // LIVE = admin at preview
+    const eid = sheetEntityId(subj)
+    const rev = await insertPermissionRev(s, eid, { action: 'update', before: sheetSnap(subj, 'read'), after: sheetSnap(subj, 'admin'), changedKeys: SHEET_KEYS })
+    const p = await preview(s, rev)
+    expect(p.status).toBe(200)
+    expect(p.body?.data?.permissionRevert).toMatchObject({ direction: 'de-escalation', supported: true }) // read < admin, by value
+    const token: string = p.body.data.previewToken
+    const x = await raceForwardLowerThenExecute(
+      // forward REVOKE: delete the subject's grant row(s) (admin → none), held uncommitted to lock the row.
+      (c) => c.query(`DELETE FROM spreadsheet_permissions WHERE sheet_id=$1 AND subject_type='user' AND subject_id=$2`, [s, subj]),
+      () => execute(s, { revisionId: rev, previewToken: token, confirm: 'revert-permission' }),
+    )
+    // the execute re-read the COMMITTED revoke (live=none) ⇒ grant-hash drift vs the admin-bound token ⇒ 409, no apply.
+    expect(x.status).toBe(409)
+    expect(x.body?.error?.code).toBe('GRANT_DRIFT')
+    expect(await sheetCodes(s, subj)).toEqual([]) // stays REVOKED — never raised back to read (the escalation this lock closes)
+  })
+
+  test('(n) CONCURRENCY field: forward HIDE (read-write→hidden) commits while revert executes → revert re-reads & 409s (never escalates hidden→read-only)', async () => {
+    process.env[FLAG] = 'true'
+    const s = await freshSheet('n')
+    const subj = mkSubject('n')
+    const fld = mkFieldId()
+    await seedFieldGrant(s, fld, subj, true, false) // LIVE = visible + read-write (rank 2) at preview
+    const eid = fieldEntityId(fld, subj)
+    const rev = await insertPermissionRev(s, eid, { action: 'update', before: fieldSnap(fld, subj, true, true), after: fieldSnap(fld, subj, true, false), changedKeys: FIELD_KEYS })
+    const p = await preview(s, rev)
+    expect(p.status).toBe(200)
+    expect(p.body?.data?.permissionRevert).toMatchObject({ scope: 'field', direction: 'de-escalation', supported: true }) // read-only(1) < read-write(2)
+    const token: string = p.body.data.previewToken
+    const x = await raceForwardLowerThenExecute(
+      // forward HIDE: lower the field grant to hidden (visible=false, rank 0), held uncommitted to lock the row.
+      (c) => c.query(`UPDATE field_permissions SET visible=false WHERE sheet_id=$1 AND field_id=$2 AND subject_type='user' AND subject_id=$3`, [s, fld, subj]),
+      () => execute(s, { revisionId: rev, previewToken: token, confirm: 'revert-permission' }),
+    )
+    // the execute re-read the COMMITTED hide (live rank 0) ⇒ drift vs the read-write-bound token ⇒ 409, no apply.
+    expect(x.status).toBe(409)
+    expect(x.body?.error?.code).toBe('GRANT_DRIFT')
+    expect(await fieldGrantRow(s, fld, subj)).toMatchObject({ visible: false }) // stays HIDDEN — never restored to read-only
   })
 })
