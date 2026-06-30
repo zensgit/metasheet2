@@ -2315,6 +2315,19 @@ export class ApprovalProductService {
           assignments: remainingAssignments,
         }
       }
+      // T2-4 threshold: dispatch-time auto-approvals count toward N (Q5). Hold the node pending
+      // with the still-manual assignees until the distinct auto-approver count reaches the
+      // threshold; only then fall through to resolveAfterApprove and advance past the node.
+      if (approvalMode === 'threshold' && remainingAssignments.length > 0) {
+        const threshold = executor.getApprovalThreshold(nodeKey)
+        const distinctAutoApprovers = new Set(evaluations.map((entry) => entry.assignment.assigneeId)).size
+        if (distinctAutoApprovers < threshold) {
+          return {
+            ...resolution,
+            assignments: remainingAssignments,
+          }
+        }
+      }
 
       const nextResolution = executor.resolveAfterApprove(nodeKey)
       autoSteps += nextResolution.autoApprovalEvents.length
@@ -4111,6 +4124,83 @@ export class ApprovalProductService {
             [id, currentNodeKey, actor.userId, siblingAssignments.map((assignment) => assignment.id)],
           )
         }
+      } else if (approvalMode === 'threshold') {
+        // T2-4 N-of-M (门槛会签): the node resolves APPROVED once `threshold` DISTINCT
+        // approver identities have approved. Count the approvers who have ALREADY recorded
+        // an approve at this node (excludes the current actor — their assignment is still
+        // active and no record exists yet), then add this one. DISTINCT actor_id dedupes
+        // across role rows / re-dispatch, and auto-approvals are included because they too
+        // write an action='approve' record carrying metadata.nodeKey (Q5).
+        const threshold = executor.getApprovalThreshold(currentNodeKey)
+        const priorApproversResult = await client.query<{ count: string }>(
+          `SELECT COUNT(DISTINCT actor_id) AS count
+             FROM approval_records
+             WHERE instance_id = $1
+               AND action = 'approve'
+               AND metadata->>'nodeKey' = $2`,
+          [id, currentNodeKey],
+        )
+        const priorDistinctApprovers = Number.parseInt(priorApproversResult.rows[0]?.count || '0', 10)
+        const distinctApproverCount = priorDistinctApprovers + 1
+        // Deactivate the actor's own assignment first (whether or not the threshold is met).
+        await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
+        const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
+        if (distinctApproverCount < threshold && remainingAssignments > 0) {
+          // Threshold not yet reached and still-pending siblings remain — record this partial
+          // approval and keep the node pending (mirrors 'all' short-circuit; siblings stay active).
+          await client.query(
+            `UPDATE approval_instances
+             SET version = $2,
+                 updated_at = now()
+             WHERE id = $1`,
+            [id, nextVersion],
+          )
+          await this.insertApprovalRecord(client, id, {
+            action: 'approve',
+            actorId: actor.userId,
+            actorName,
+            comment: request.comment || null,
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            metadata: {
+              nodeKey: currentNodeKey,
+              nextNodeKey: currentNodeKey,
+              approvalMode,
+              aggregateComplete: false,
+              approvalThreshold: threshold,
+              approvedCount: distinctApproverCount,
+              remainingAssignments,
+            },
+          }, actor)
+          await client.query('COMMIT')
+          return (await this.getApproval(id))!
+        }
+        // Threshold reached on THIS approval (first-N-wins) — cancel the remaining pending
+        // siblings, reusing the 'any' first-wins sibling-cancel path + audit metadata.
+        const siblingAssignments = currentNodeAssignments.filter((assignment) =>
+          !assignmentMatchesActor(assignment, actor.userId, actorRoles))
+        aggregateCancelledAssigneeIds = Array.from(
+          new Set(siblingAssignments.map((assignment) => assignment.assignee_id)),
+        )
+        if (siblingAssignments.length > 0) {
+          await client.query(
+            `UPDATE approval_assignments
+             SET is_active = FALSE,
+                 metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                   'aggregateCancelledBy', $3::text,
+                   'aggregateCancelledAt', now()::text,
+                   'aggregateMode', 'threshold'
+                 ),
+                 updated_at = now()
+             WHERE instance_id = $1
+               AND node_key = $2
+               AND is_active = TRUE
+               AND id = ANY($4::uuid[])`,
+            [id, currentNodeKey, actor.userId, siblingAssignments.map((assignment) => assignment.id)],
+          )
+        }
       } else {
         // Single-approver mode. In parallel state the blanket
         // `deactivateAllActiveAssignments` would cancel sibling branches'
@@ -4247,7 +4337,10 @@ export class ApprovalProductService {
           approveRecordMetadata.parallelCancelledAssignees = parallelCancelledAssigneeIds
         }
       }
-      if (approvalMode === 'any' && aggregateCancelledAssigneeIds.length > 0) {
+      if (approvalMode === 'threshold') {
+        approveRecordMetadata.approvalThreshold = executor.getApprovalThreshold(currentNodeKey)
+      }
+      if ((approvalMode === 'any' || approvalMode === 'threshold') && aggregateCancelledAssigneeIds.length > 0) {
         approveRecordMetadata.aggregateCancelled = aggregateCancelledAssigneeIds
       }
       await this.insertApprovalRecord(client, id, {
@@ -4261,7 +4354,7 @@ export class ApprovalProductService {
         toVersion: nextVersion,
         metadata: approveRecordMetadata,
       }, actor)
-      if (approvalMode === 'any' && aggregateCancelledAssigneeIds.length > 0) {
+      if ((approvalMode === 'any' || approvalMode === 'threshold') && aggregateCancelledAssigneeIds.length > 0) {
         // One 'sign' audit row describing the aggregation cancellation — lets the timeline UI
         // render a muted "已被 {approver} 的决定覆盖" line without mining assignment metadata.
         await this.insertApprovalRecord(client, id, {
@@ -4276,7 +4369,7 @@ export class ApprovalProductService {
           metadata: {
             nodeKey: currentNodeKey,
             autoCancelled: true,
-            aggregateMode: 'any',
+            aggregateMode: approvalMode,
             aggregateCancelledBy: actor.userId,
             cancelledAssignees: aggregateCancelledAssigneeIds,
           },
