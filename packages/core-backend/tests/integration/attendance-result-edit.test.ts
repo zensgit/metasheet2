@@ -123,6 +123,11 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     }
   }
 
+  function resultEditPolicyWithNotifyAffectedEmployee(policy: unknown, notifyAffectedEmployee: boolean) {
+    const base = resultEditPolicyWithEnabled(policy, true)
+    return { ...base, notifyAffectedEmployee }
+  }
+
   async function seedRecord(input: {
     userId: string
     workDate: string
@@ -342,11 +347,14 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(Number(audit[0].after_snapshot.lateMinutes)).toBe(0)
     expect(audit[0].reason).toContain('核验后更正')
     expect(audit[0].actor_user_id).toBe(`ae1-admin-${RUN}`)
-    expect(audit[0].notification_delivery_id).toBeNull()
+    expect(audit[0].notification_delivery_id).toEqual(expect.any(String))
     expect(audit[0].notification_skipped_reason).toBeNull()
 
     const deliveries = await deliveryRowsForRecord(recordId)
     expect(deliveries).toHaveLength(1)
+    expect(audit[0].notification_delivery_id).toBe(deliveries[0].id)
+    expect(dataOf(res).edit.notificationDeliveryId).toBe(deliveries[0].id)
+    expect(dataOf(res).edit.notificationSkippedReason).toBeNull()
     expect(deliveries[0]).toMatchObject({
       source_type: 'attendance_result_edit',
       source_id: audit[0].id,
@@ -370,6 +378,48 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     expect(deliveries[0].payload.overrideMetrics).toBeUndefined()
     expect(deliveries[0].payload.evidence).toBeUndefined()
     expect(deliveries.filter(row => row.recipient_user_id !== userId)).toHaveLength(0)
+  })
+
+  it('AE-2.1 notifyAffectedEmployee=false: correction succeeds but records a skipped notification and writes no outbox row', async () => {
+    const settings = await getSettings()
+    expect(settings.status).toBe(200)
+    const originalPolicy = dataOf(settings)?.attendanceResultEditPolicy
+    const disabledNotify = await putSettings({
+      attendanceResultEditPolicy: resultEditPolicyWithNotifyAffectedEmployee(originalPolicy, false),
+    })
+    expect(disabledNotify.status).toBe(200)
+
+    try {
+      const userId = `u-ae2-off-${RUN}`
+      const workDate = ymd(2)
+      const recordId = await seedRecord({
+        userId, workDate, status: 'late', workMinutes: 480, lateMinutes: 25, earlyLeaveMinutes: 0,
+        firstInAt: `${workDate}T01:25:00Z`, lastOutAt: `${workDate}T10:00:00Z`,
+      })
+      const res = await postEdit({ orgId: ORG, recordId, targetStatus: 'normal', reason: '通知关闭但仍允许更正', idempotencyKey: `k-ae2-off-${RUN}` })
+      expect(res.status).toBe(200)
+      expect(dataOf(res).alreadyApplied).toBe(false)
+      expect(dataOf(res).edit.notificationDeliveryId).toBeNull()
+      expect(dataOf(res).edit.notificationSkippedReason).toBe('policy_disabled')
+
+      const rec = await recordById(recordId)
+      expect(rec.status).toBe('normal')
+      expect(Number(rec.late_minutes)).toBe(0)
+      expect(rec.meta?.manual_result_edit?.auditId).toEqual(expect.any(String))
+
+      const audit = await auditRowsForRecord(recordId)
+      expect(audit).toHaveLength(1)
+      expect(audit[0].notification_delivery_id).toBeNull()
+      expect(audit[0].notification_skipped_reason).toBe('policy_disabled')
+      expect(await deliveryRowsForRecord(recordId)).toHaveLength(0)
+    } finally {
+      await putSettings({
+        attendanceResultEditPolicy: resultEditPolicyWithEnabled(
+          originalPolicy,
+          isResultEditPolicySetting(originalPolicy) ? originalPolicy.enabled !== false : true,
+        ),
+      }).catch(() => undefined)
+    }
   })
 
   it('AE-1b durability: same-facts import recompute preserves the corrected result without a review flag', async () => {
