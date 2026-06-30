@@ -1,14 +1,16 @@
 # 数据库及系统对接 — 交付线收口 (line close-out) — 2026-06-30
 
-> 状态：**线收口 (CLOSED at scoped deliverable)。** 只读数据库源 + K3 `Material/GetDetail` 单条读 + **SQL 批量物料读** + **C3 K3 WebAPI-LIST 列表页读（no-key + keyed）** + C6 **sandbox** 外部写均已交付并验证。production/batch 写、K3 C4 BOM、C5 resolver 仍为各自独立 gate，不在本次收口范围。
+> 状态：**线收口 (CLOSED at scoped deliverable)。** 只读数据库源 + K3 `Material/GetDetail` 单条读 + **SQL 批量物料读** + **C3 K3 WebAPI-LIST 列表页读（no-key + keyed）** + **C4 K3 WebAPI-BOM 单层读** + C6 **sandbox** 外部写均已交付并验证。production/batch 写、BOM 递归展开、material→FBillNo resolver、C5 resolver 仍为各自独立 gate，不在本次收口范围。
 >
 > 更新 2026-06-30：C3 K3 WebAPI-LIST 由 **deferred** 翻为 **done** —— 客户/operator 侧 redacted live 样本确认行容器为 `Data.Data`(PascalCase)，窄 preset-owned slice **#3390**（`e1766a629`）修复 response-side extractor，实体机 **no-key rerun PASS**；keyed `FNumber` Filter 经 **keyed rerun 亦 PASS**（**无需新代码** —— 能力已含于 #3390，preset 自带 filter shape `FNumber like '%<escaped>%'`，owner 直接以已部署包验证、`sampleKeyEchoed=false`）。
+>
+> 更新 2026-06-30：C4 K3 WebAPI-BOM **单层读** 由 GATE-front + runtime + 实体机 smoke 闭合 —— #3399 (`c499abe83`) 先锁 redacted live shape，#3405 (`efa832a08`) 实现 `k3wise.material-bom.v1`，on-prem release `multitable-onprem-k3-c4-bom-read-20260630-efa832a08` 实体机 rerun **PASS**（`recordCount=3`、`bomHeaderCount=1`、`bomLineCount=3`、`bomShapeProbe.dataPage1=true`、`bomShapeProbe.dataPage2=true`、`bomKeyEchoed=false`）。递归 BOM 展开、material→FBillNo resolver、Save/Submit/Audit/write 仍为独立 gate。
 >
 > 引用（非重复推导）：#1709（read/list 线 + 诊断 ledger）、`data-source-system-integration-delivery-todo-20260614.md`（子线状态）、`data-factory-k3-read-list-development-verification-20260626.md`（#3263）。
 
 ## 收口判据 (completion definition)
 
-所有**可构建且已授权**的开发内容已交付并验证。WebAPI-LIST C3 列表页读（no-key + keyed）经充分 values-free 诊断 + 客户侧 redacted live 样本确认行容器后，由窄 preset-owned slice (#3390) 修复 extractor 并经实体机 **no-key + keyed rerun** 验证 **PASS**（keyed 无需新代码，preset 自带 filter shape）。**未跨越任何写 gate**（read-smoke 为 operator write-gated 只读）；与本仓库 gated-opt-in / values-free / K3 红线纪律一致。
+所有**可构建且已授权**的开发内容已交付并验证。WebAPI-LIST C3 列表页读（no-key + keyed）经充分 values-free 诊断 + 客户侧 redacted live 样本确认行容器后，由窄 preset-owned slice (#3390) 修复 extractor 并经实体机 **no-key + keyed rerun** 验证 **PASS**（keyed 无需新代码，preset 自带 filter shape）。C4 BOM 单层读经 #3399 shape-first GATE-front + #3405 runtime + 实体机 C4 BOM read-smoke 验证 **PASS**。**未跨越任何写 gate**（read-smoke 为 operator write-gated 只读）；与本仓库 gated-opt-in / values-free / K3 红线纪律一致。
 
 ## 已交付 + 已验证（closeable scope）
 
@@ -18,6 +20,7 @@
 | K3 `Material/GetDetail` 单条读（dormant/fail-closed、operator write-gated、values-free） | done | #1868 + #3241 实体机 values-free PASS |
 | **K3 / SQL Server 批量物料读（C5 generic MSSQL seam）** | done | #2670 PASS/CLOSED；#2700 runbook（generic + K3 SQL Server smoke 均 PASS、无 K3 Save/Submit/Audit/BOM、无外部 DB 写、无 raw SQL） |
 | **K3 WebAPI-LIST C3 列表页读（no-key + keyed）**（preset-owned `k3wise.material-list.v1`、response-side `Data.Data` PascalCase extractor + preset 自带 `FNumber` filter shape、operator write-gated、values-free） | done (no-key + keyed page) | #3390（`e1766a629`）+ 实体机 no-key rerun PASS（`recordCount=10`、`dataRowCount=30134`、`dataDataPresent=true`、`listShapeProbe.dataPascalData=true`、`fixedContainers.dataPascalData.type=array`）+ keyed rerun PASS（`recordCount=1`、`dataRowCount=1`、`sampleKeyEchoed=false`、`presetOwnedFilterShapeWorks=true`）|
+| **K3 WebAPI-BOM C4 单层读**（preset-owned `k3wise.material-bom.v1`、`POST /K3API/BOM/GetDetail`、`Data.FBillNo` bound JSON value、`Data.Page1` header + `Data.Page2` lines、operator write-gated、values-free） | done (single-level BOM read) | #3399（`c499abe83`）GATE-front + #3405（`efa832a08`）runtime + on-prem release `multitable-onprem-k3-c4-bom-read-20260630-efa832a08` + 实体机 rerun PASS（`recordCount=3`、`bomHeaderCount=1`、`bomLineCount=3`、`bomShapeProbe.dataPage1=true`、`bomShapeProbe.dataPage2=true`、`bomResponseShapeProbe.fixedContainers.dataPage1.type=array length=1`、`bomResponseShapeProbe.fixedContainers.dataPage2.type=array length=3`、`bomKeyEchoed=false`） |
 | C6 **sandbox** 外部写（dry-run/apply/re-pull/rollback、per-row 失败隔离、dead-letter、values-free） | done (scoped) | #2769 scoped release evidence PASS（C6-0..5c controlled bad-row PASS） |
 | K3 WebAPI read/list C0/C1/C2（next-slice 合同 + normalizer + 路由）+ 诊断 instrumentation | done | #3242/#3245/#3246 + #3341/#3355/#3364/#3369/#3374/#3386 |
 
@@ -36,21 +39,35 @@
 
 **诊断链 de-risk 结论（values-free）**：诊断 instrumentation（error-code 拆分 #3341、envelope split + `dataDataPresent` #3355、shape probe #3364、filter dialect #3369、paging echo #3374、response shape probe #3386）全程 values-free（counts/flags/types only，无 arbitrary key / 行值 / payload），逐级 de-risk 至唯一未决（行容器），最终由客户 redacted live 样本 + #3390 解决。keyed 路径无新诊断 —— 既有 preset filter shape 一次 keyed rerun 即 PASS（"先看现有代码是否已具备"省掉一刀）。
 
-**C3 LIST 线闭合**：no-key + keyed 列表页读均 PASS，C3 K3 WebAPI-LIST 读能力整体闭合。其后续 = C4 BOM 读 / production write，为独立 gate（见下），**不**视作本线遗留。
+**C3 LIST 线闭合**：no-key + keyed 列表页读均 PASS，C3 K3 WebAPI-LIST 读能力整体闭合。其后的 C4 BOM 单层读已作为独立 gate 另行打开并在下节记录；production write 仍为独立 gate，**不**视作 C3 遗留。
+
+## C4 K3 WebAPI-BOM read (single-level) —— DONE
+
+**判定**：done（单层 BOM 读经实体机 rerun PASS）。这条线没有走 C3 LIST 那种盲探路径：#3399 先要求 operator/customer 提供 redacted live shape，确认 endpoint/request/container 后，#3405 才实现 runtime。
+
+**shape + 实现：**
+1. redacted live shape 确认：`bomReadPath=/K3API/BOM/GetDetail`、`httpMethod=POST`、`parentKeyField=FBillNo`、`parentKeyEncoding=structured_json_field`；响应 header = `Data.Page1`、sub-item lines = `Data.Page2`；`nesting=single_level_flat`。
+2. runtime = **#3405**（squash `efa832a08`）：新增 preset `k3wise.material-bom.v1`；请求体为 `Data.FBillNo` bound JSON value（不走 `k3_freeform`、不把 key 当 Filter expression）；只读 `material-bom` 对象；提取 `Data.Page1` header count + `Data.Page2` line rows；值证据只输出 counts/booleans/types。
+3. 自动化边界：`read-smoke.test.cjs` / `http-routes.test.cjs` / `k3-wise-adapters.test.cjs` 覆盖 no-key 400 before system load、route-only marker、`Data.FBillNo` body、`Data.Page1/Page2` extractor、BOM success/error evidence sanitizer、leak-bait scrub、no resolver / no recursion / no write。
+
+**实体机 C4 BOM read-smoke（values-free）PASS**：release `multitable-onprem-k3-c4-bom-read-20260630-efa832a08`（package provenance `gitCommit=efa832a08d560e3ddd983da0096ce89cf4c213ae`）部署后，operator 使用 owner-approved private `FBillNo` 运行 exactly one read-smoke：`httpStatus=200`、`responseOk=true`、`apiOk=true`、`presetId=k3wise.material-bom.v1`、`mode=bom`、`bomKeyEchoed=false`、`recordPresent=true`、`recordCount=3`、`bomHeaderPresent=true`、`bomLinePresent=true`、`bomHeaderCount=1`、`bomLineCount=3`、`bomShapeProbe.dataPage1=true`、`bomShapeProbe.dataPage2=true`、`bomResponseShapeProbe.fixedContainers.dataPage1.type=array length=1`、`bomResponseShapeProbe.fixedContainers.dataPage2.type=array length=3`、`errorCode=null`、`errorType=null`。边界守住：no raw payload / no row values / no material or BOM key echo / no messages / no credentials / no resolver / no Save / Submit / Audit / production write。
+
+**C4 BOM 单层读闭合**：能力仅为 one-call single-level BOM read。递归多层展开、material→FBillNo resolver、以及任何写路径均未打开，仍为独立 gate（见下）。
 
 ## 仍为独立 gate（不在本次收口范围、不计为本线开发量）
 
 | 面 | 状态 | 解锁条件 |
 | --- | --- | --- |
 | production / batch 外部写 | frozen | 独立 owner 授权（最大风险刀；sandbox 已验证、production 始终单独 gate）|
-| K3 C4 BOM 读 | frozen | 独立 customer GATE + BOM 专属请求/响应契约（前置：operator redacted BOM 请求+响应结构样本，避免盲探）|
+| K3 BOM 递归多层展开 | frozen | 单层 read-smoke PASS 不自动解锁；递归 fan-out / request amplification / values-free-at-scale 需独立设计与 owner opt-in |
+| material→FBillNo resolver / server-side composition | frozen | 显式 owner 解锁 + 具名 demand；不能从 BOM read-smoke 推导 |
 | C5 resolver / server-side composition | frozen | 显式 owner 解锁 + 具名 demand |
 | Windows 默认 temp path 部署 caveat | tracked | #2642（不阻塞 runtime gate）|
 
 ## 边界
 
-全程 values-free；无 BOM/resolver/Save/Submit/Audit/production write；无 request-supplied raw Filter；无 arbitrary response key / raw payload / 行值 / 凭据 / host / system id surface。C3 列表页读（no-key + keyed）经 operator write-gated read-smoke 于实体机（on-prem prerelease）验证，仅只读、未跨任何**写** gate；keyed 以 owner-approved private sample key 验证、key 未回显（`sampleKeyEchoed=false`）；其余子线本次关闭未部署、未跨任何 gate。
+全程 values-free；无 BOM 递归 / resolver / Save / Submit / Audit / production write；无 request-supplied raw Filter；无 arbitrary response key / raw payload / 行值 / 凭据 / host / system id surface。C3 列表页读（no-key + keyed）与 C4 BOM 单层读均经 operator write-gated read-smoke 于实体机（on-prem prerelease）验证，仅只读、未跨任何**写** gate；keyed C3 以 owner-approved private sample key 验证、key 未回显（`sampleKeyEchoed=false`）；C4 以 owner-approved private `FBillNo` 验证、`bomKeyEchoed=false`；其余 gated 子线本次关闭未部署、未跨任何 gate。
 
 ## 一句话
 
-数据库及系统对接能力在 **scoped 层面收口并验证**：只读 DB 源 + K3 单条读 + SQL 批量读 + **WebAPI-LIST C3 列表页读（no-key + keyed）** + sandbox 外部写。WebAPI-LIST C3 由客户 redacted live 样本确认行容器（`Data.Data` PascalCase）→ #3390 修复 → 实体机 no-key rerun PASS；keyed `FNumber` Filter 因 preset 自带 filter shape **无需新代码**、keyed rerun 亦 PASS；production 写 / BOM / resolver 为独立未来 gate。
+数据库及系统对接能力在 **scoped 层面收口并验证**：只读 DB 源 + K3 单条读 + SQL 批量读 + **WebAPI-LIST C3 列表页读（no-key + keyed）** + **WebAPI-BOM C4 单层读** + sandbox 外部写。WebAPI-LIST C3 由客户 redacted live 样本确认行容器（`Data.Data` PascalCase）→ #3390 修复 → 实体机 no-key rerun PASS；keyed `FNumber` Filter 因 preset 自带 filter shape **无需新代码**、keyed rerun 亦 PASS；C4 BOM 由 #3399 shape-first → #3405 runtime → 实体机 `Data.Page1/Page2` rerun PASS。production 写 / BOM 递归 / material→FBillNo resolver 为独立未来 gate。
