@@ -1311,8 +1311,10 @@ export class AutomationService {
    *
    * Enforces: dateFieldId EXISTS on this sheet AND is a `date`/`dateTime` field (not an arbitrary string
    * field that happens to parse); offsetDays is a finite non-negative integer; direction ∈ {before, after};
-   * timeOfDay (if given) is HH:mm; timezone is rejected unless 'UTC' (v1 honors only UTC — reject, don't
-   * accept-and-ignore, so the saved rule's behavior matches its config).
+   * timeOfDay (if given) is HH:mm; timezone (if given) must be a valid IANA zone — T2-5 made date_field
+   * timezone-aware, so a non-UTC tz is now HONORED (local-date bucketing), no longer rejected. Invalid
+   * IANA strings are rejected at save; a persisted-junk tz reaching the scanner falls back to UTC + warn
+   * (never throws), so the saved rule's behavior still matches its config.
    */
   private async validateDateFieldTriggerAtSave(
     sheetId: string,
