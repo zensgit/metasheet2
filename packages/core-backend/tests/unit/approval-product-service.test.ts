@@ -1869,6 +1869,189 @@ describe('ApprovalProductService', () => {
     })
   })
 
+  describe('T1-1 node-level SLA timeout (author / publish validation)', () => {
+    function timeoutRequest(timeout: unknown) {
+      return {
+        key: 'node-timeout-tpl',
+        name: 'Node Timeout Template',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            {
+              key: 'approval_1',
+              type: 'approval',
+              config: { assigneeType: 'user', assigneeIds: ['manager-1'], timeout },
+            },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+            { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+          ],
+        },
+      }
+    }
+
+    function parallelTimeoutRequest(timeout: unknown) {
+      return {
+        key: 'node-timeout-parallel-tpl',
+        name: 'Node Timeout Parallel Template',
+        formSchema: { fields: [] },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            {
+              key: 'parallel_fork',
+              type: 'parallel',
+              config: { branches: ['edge-fork-a', 'edge-fork-b'], joinMode: 'all', joinNodeKey: 'end' },
+            },
+            {
+              key: 'branch_a',
+              type: 'approval',
+              config: { assigneeType: 'user', assigneeIds: ['user-a'], timeout },
+            },
+            { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-b'] } },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'edge-start-fork', source: 'start', target: 'parallel_fork' },
+            { key: 'edge-fork-a', source: 'parallel_fork', target: 'branch_a' },
+            { key: 'edge-fork-b', source: 'parallel_fork', target: 'branch_b' },
+            { key: 'edge-a-end', source: 'branch_a', target: 'end' },
+            { key: 'edge-b-end', source: 'branch_b', target: 'end' },
+          ],
+        },
+      }
+    }
+
+    function mockTemplateInsert() {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('INSERT INTO approval_templates')) {
+          return {
+            rows: [{
+              id: 'tpl-node-timeout',
+              key: String(params?.[0]),
+              name: String(params?.[1]),
+              description: null,
+              category: null,
+              visibility_scope: JSON.parse(String(params?.[4])),
+              sla_hours: null,
+              status: 'draft',
+              active_version_id: null,
+              latest_version_id: null,
+              created_at: new Date('2026-06-29T00:00:00.000Z'),
+              updated_at: new Date('2026-06-29T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('INSERT INTO approval_template_versions')) {
+          return {
+            rows: [{
+              id: 'ver-node-timeout',
+              template_id: 'tpl-node-timeout',
+              version: 1,
+              status: 'draft',
+              form_schema: JSON.parse(String(params?.[1])),
+              approval_graph: JSON.parse(String(params?.[2])),
+              created_at: new Date('2026-06-29T00:00:00.000Z'),
+              updated_at: new Date('2026-06-29T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('UPDATE approval_templates')) {
+          return {
+            rows: [{
+              id: 'tpl-node-timeout',
+              key: 'node-timeout-tpl',
+              name: 'Node Timeout Template',
+              description: null,
+              category: null,
+              visibility_scope: { type: 'all', ids: [] },
+              sla_hours: null,
+              status: 'draft',
+              active_version_id: null,
+              latest_version_id: 'ver-node-timeout',
+              created_at: new Date('2026-06-29T00:00:00.000Z'),
+              updated_at: new Date('2026-06-29T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        throw new Error(`Unhandled query: ${statement}`)
+      })
+    }
+
+    it('rejects a non-integer afterMinutes before hitting the database', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        timeoutRequest({ afterMinutes: 1.5, effect: 'remind' }) as never,
+      )).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_NODE_TIMEOUT_INVALID' })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('rejects a zero / negative afterMinutes', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        timeoutRequest({ afterMinutes: 0, effect: 'remind' }) as never,
+      )).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_NODE_TIMEOUT_INVALID' })
+    })
+
+    it('rejects an afterMinutes above the cap', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        timeoutRequest({ afterMinutes: 100001, effect: 'remind' }) as never,
+      )).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_NODE_TIMEOUT_INVALID' })
+    })
+
+    it('rejects an off-enum effect', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        timeoutRequest({ afterMinutes: 30, effect: 'escalate' }) as never,
+      )).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_NODE_TIMEOUT_INVALID' })
+    })
+
+    it.each(['transfer', 'jump', 'auto_approve', 'auto_reject'])(
+      'rejects the unsupported (slice-1) effect %s',
+      async (effect) => {
+        const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+        const service = new ApprovalProductService()
+        await expect(service.createTemplate(
+          timeoutRequest({ afterMinutes: 30, effect }) as never,
+        )).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_NODE_TIMEOUT_EFFECT_UNSUPPORTED' })
+      },
+    )
+
+    it('rejects a timeout on a node inside a parallel region', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        parallelTimeoutRequest({ afterMinutes: 30, effect: 'remind' }) as never,
+      )).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_NODE_TIMEOUT_PARALLEL_UNSUPPORTED' })
+    })
+
+    it('accepts a valid remind timeout and preserves it through normalization', async () => {
+      mockTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const result = await service.createTemplate(
+        timeoutRequest({ afterMinutes: 30, effect: 'remind' }) as never,
+      )
+      const node = result.approvalGraph.nodes.find((n) => n.key === 'approval_1')
+      expect((node?.config as Record<string, unknown>).timeout).toEqual({ afterMinutes: 30, effect: 'remind' })
+    })
+  })
+
   it('rejects empty assigneeSources and invalid form field sources before hitting the database', async () => {
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
     const service = new ApprovalProductService()

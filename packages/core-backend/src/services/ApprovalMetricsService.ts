@@ -184,6 +184,10 @@ export class ApprovalMetricsService {
     startedAt: Date
     slaHours?: number | null
     initialNodeKey?: string | null
+    // T1-1: when the FIRST (initial) node declares a timeout, stamp its deadline + effect right at
+    // instance start — this is the one activation path that does NOT flow through recordNodeActivation.
+    timeoutDeadline?: Date | null
+    timeoutEffect?: string | null
   }): Promise<void> {
     const tenantId = resolveTenantId(input.tenantId)
     const initialBreakdown: NodeBreakdownEntry[] = input.initialNodeKey
@@ -197,8 +201,9 @@ export class ApprovalMetricsService {
       : []
     await this.query(
       `INSERT INTO approval_metrics
-         (instance_id, template_id, tenant_id, started_at, sla_hours, node_breakdown)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+         (instance_id, template_id, tenant_id, started_at, sla_hours, node_breakdown,
+          current_node_deadline_at, current_node_timeout_effect)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
        ON CONFLICT (instance_id) DO NOTHING`,
       [
         input.instanceId,
@@ -207,6 +212,8 @@ export class ApprovalMetricsService {
         input.startedAt.toISOString(),
         input.slaHours ?? null,
         JSON.stringify(initialBreakdown),
+        input.timeoutDeadline ? input.timeoutDeadline.toISOString() : null,
+        input.timeoutEffect ?? null,
       ],
     )
   }
@@ -220,12 +227,18 @@ export class ApprovalMetricsService {
     instanceId: string
     nodeKey: string
     activatedAt: Date
+    // T1-1: when the activating node has a timeout, stamp its deadline + effect; otherwise the
+    // columns are cleared so the previous node's deadline can never linger on the new node.
+    timeoutDeadline?: Date | null
+    timeoutEffect?: string | null
   }): Promise<void> {
+    let added = false
     await this.mutateBreakdown(input.instanceId, (breakdown) => {
       const hasOpen = breakdown.some(
         (entry) => entry.nodeKey === input.nodeKey && !entry.decidedAt,
       )
       if (hasOpen) return null
+      added = true
       breakdown.push({
         nodeKey: input.nodeKey,
         activatedAt: input.activatedAt.toISOString(),
@@ -235,6 +248,23 @@ export class ApprovalMetricsService {
       })
       return breakdown
     })
+    // T1-1 node-timeout: (re)set the deadline columns ONLY when a NEW node was actually activated —
+    // to the new node's deadline if it has a timeout, else NULL (clearing the prior node's). A
+    // retry / re-emit (an open entry already exists → `added` stays false) is a strict no-op, so it
+    // can never push out or clear an existing deadline. Best-effort, like every metrics write.
+    if (added) {
+      await this.query(
+        `UPDATE approval_metrics
+           SET current_node_deadline_at = $2,
+               current_node_timeout_effect = $3
+         WHERE instance_id = $1`,
+        [
+          input.instanceId,
+          input.timeoutDeadline ? input.timeoutDeadline.toISOString() : null,
+          input.timeoutEffect ?? null,
+        ],
+      )
+    }
   }
 
   /**
@@ -276,6 +306,13 @@ export class ApprovalMetricsService {
       }
       return breakdown
     })
+    // T1-1: the node is decided — clear its timeout deadline so the scanner won't fire for it.
+    await this.query(
+      `UPDATE approval_metrics
+         SET current_node_deadline_at = NULL, current_node_timeout_effect = NULL
+       WHERE instance_id = $1`,
+      [input.instanceId],
+    )
   }
 
   /**
@@ -294,9 +331,38 @@ export class ApprovalMetricsService {
       `UPDATE approval_metrics
          SET terminal_at = $2,
              terminal_state = $3,
-             duration_seconds = GREATEST(0, EXTRACT(EPOCH FROM ($2::timestamptz - started_at))::INTEGER)
+             duration_seconds = GREATEST(0, EXTRACT(EPOCH FROM ($2::timestamptz - started_at))::INTEGER),
+             current_node_deadline_at = NULL,
+             current_node_timeout_effect = NULL
        WHERE instance_id = $1`,
       [input.instanceId, input.terminalAt.toISOString(), input.terminalState],
+    )
+  }
+
+  /**
+   * T1-1 node-timeout scan: rows whose current node has passed its deadline and not yet fired
+   * (deadline NULL after firing/decision => excluded by the partial index). Single-shot is
+   * enforced by `markNodeTimeoutFired` clearing the deadline.
+   */
+  async scanNodeTimeouts(now: Date): Promise<Array<{ instanceId: string; effect: string }>> {
+    const result = await this.query<{ instance_id: string; current_node_timeout_effect: string | null }>(
+      `SELECT instance_id, current_node_timeout_effect
+         FROM approval_metrics
+        WHERE terminal_at IS NULL
+          AND current_node_deadline_at IS NOT NULL
+          AND current_node_deadline_at < $1`,
+      [now.toISOString()],
+    )
+    return result.rows.map((r) => ({ instanceId: r.instance_id, effect: r.current_node_timeout_effect ?? 'remind' }))
+  }
+
+  /** Mark a node-timeout as fired (clear deadline + effect) so it can never re-fire for this activation. */
+  async markNodeTimeoutFired(instanceId: string): Promise<void> {
+    await this.query(
+      `UPDATE approval_metrics
+         SET current_node_deadline_at = NULL, current_node_timeout_effect = NULL
+       WHERE instance_id = $1`,
+      [instanceId],
     )
   }
 

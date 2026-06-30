@@ -9,6 +9,7 @@
 
 import { randomBytes } from 'crypto'
 import { Logger } from '../core/logger'
+import { pool as defaultPool } from '../db/pg'
 import { getRedisClient } from '../db/redis'
 import { RedisLeaderLock, type RedisLeaderLockClient } from '../multitable/redis-leader-lock'
 import { getApprovalMetricsService, type ApprovalMetricsService } from './ApprovalMetricsService'
@@ -28,7 +29,33 @@ export interface ApprovalSlaSchedulerOptions {
    * (notifications only); audit-event emission on breach is not yet wired.
    */
   onBreach?: (instanceIds: string[]) => Promise<void> | void
+  /**
+   * T1-1 node-level SLA: DB handle used to resolve a metrics row's active assignees for node-timeout
+   * reminders. Defaults to the shared internal pool; inject a fake in tests. `null` disables the
+   * assignee lookup (reminders fire with an empty recipient set).
+   */
+  pool?: ApprovalSlaSchedulerPool | null
+  /**
+   * T1-1 node-level SLA: dispatch a node-overdue reminder to the resolved active assignees. Wired in
+   * index.ts to `ApprovalBreachNotifier.notifyNodeReminder`. Absent → reminders are skipped (the
+   * timeout is still single-shot via `markNodeTimeoutFired`).
+   */
+  onNodeReminder?: (reminder: ApprovalNodeTimeoutReminder) => Promise<void> | void
   logger?: Logger
+}
+
+/** Minimal DB surface the scheduler needs for node-timeout assignee resolution (pg Pool satisfies it). */
+export interface ApprovalSlaSchedulerPool {
+  query<T extends Record<string, unknown> = { assignee_id: string }>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[] }>
+}
+
+export interface ApprovalNodeTimeoutReminder {
+  instanceId: string
+  effect: string
+  assigneeIds: string[]
 }
 
 export interface ApprovalSlaSchedulerLeaderOptions {
@@ -61,6 +88,8 @@ export class ApprovalSlaScheduler {
   private readonly retryIntervalMs: number
   private readonly leaderStateGauge: ApprovalSlaSchedulerLeaderGauge | null
   private readonly onBreach: ApprovalSlaSchedulerOptions['onBreach']
+  private readonly pool: ApprovalSlaSchedulerPool | null
+  private readonly onNodeReminder: ApprovalSlaSchedulerOptions['onNodeReminder']
   private timer: NodeJS.Timeout | null = null
   private renewalTimer: NodeJS.Timeout | null = null
   private acquisitionTimer: NodeJS.Timeout | null = null
@@ -79,6 +108,9 @@ export class ApprovalSlaScheduler {
     this.retryIntervalMs = this.leaderOptions?.retryIntervalMs ?? Math.max(1_000, Math.floor(this.ttlMs / 3))
     this.leaderStateGauge = options.runtime?.leaderStateGauge ?? null
     this.onBreach = options.onBreach
+    // `undefined` (option omitted) → shared pool; explicit `null` → no assignee lookup.
+    this.pool = options.pool === undefined ? defaultPool : options.pool
+    this.onNodeReminder = options.onNodeReminder
     this.logger = options.logger ?? new Logger('ApprovalSlaScheduler')
     if (this.leaderOptions) {
       this.setLeaderGauge('follower')
@@ -157,6 +189,9 @@ export class ApprovalSlaScheduler {
           }
         }
       }
+      // T1-1 node-level SLA: fire per-node timeout effects (slice 1: `remind` only). Isolated from the
+      // breach scan above so a node-timeout failure can never break the breach pipeline or the tick.
+      await this.fireNodeTimeouts(now)
       return breached
     } catch (error) {
       this.logger.error(`SLA tick failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -164,6 +199,50 @@ export class ApprovalSlaScheduler {
     } finally {
       this.running = false
     }
+  }
+
+  /**
+   * T1-1 node-level SLA scan. For each metrics row whose current node has passed its deadline:
+   * resolve the node's active assignees and dispatch a node-overdue reminder (slice 1 wires `remind`
+   * only), then mark the timeout fired so it is strictly single-shot. Per-row isolation: a single
+   * failure (no assignees, dispatch error) leaves that row un-fired (retried next tick, at-least-once)
+   * and never breaks the rest of the batch or the tick.
+   */
+  private async fireNodeTimeouts(now: Date): Promise<void> {
+    let due: Array<{ instanceId: string; effect: string }> = []
+    try {
+      due = await this.metrics.scanNodeTimeouts(now)
+    } catch (error) {
+      this.logger.warn(`Node-timeout scan failed: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    for (const row of due) {
+      try {
+        // Slice 1 wires `remind` only. Other effects can't be published yet (publish gate), so leave
+        // an unexpected row un-fired rather than silently consuming an effect we don't handle.
+        if (row.effect !== 'remind') continue
+        const assigneeIds = await this.resolveActiveAssignees(row.instanceId)
+        if (this.onNodeReminder) {
+          await this.onNodeReminder({ instanceId: row.instanceId, effect: row.effect, assigneeIds })
+        }
+        await this.metrics.markNodeTimeoutFired(row.instanceId)
+      } catch (error) {
+        this.logger.warn(
+          `Node-timeout remind failed for ${row.instanceId}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    }
+  }
+
+  private async resolveActiveAssignees(instanceId: string): Promise<string[]> {
+    if (!this.pool) return []
+    const result = await this.pool.query<{ assignee_id: string }>(
+      `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1 AND is_active = true`,
+      [instanceId],
+    )
+    return result.rows
+      .map((row) => row.assignee_id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
   }
 
   get leader(): boolean {

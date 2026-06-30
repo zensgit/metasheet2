@@ -176,6 +176,48 @@ export class ApprovalBreachNotifier {
     }
   }
 
+  /**
+   * T1-1 node-level SLA: dispatch a single instance's node-overdue reminder to all channels. Unlike
+   * `notifyBreaches` this NEVER touches `breach_notified_at` — node timeouts are single-shot via
+   * `approval_metrics.current_node_deadline_at`, which the scheduler clears with `markNodeTimeoutFired`.
+   * Never throws — channel failures are isolated/logged exactly like `notifyBreaches`.
+   */
+  async notifyNodeReminder(instanceId: string, assigneeIds: string[] = []): Promise<NotifyResult> {
+    const empty: NotifyResult = { requested: 0, notified: 0, skipped: 0, sent: 0, failed: 0, perChannel: [] }
+    const id = typeof instanceId === 'string' ? instanceId.trim() : ''
+    if (!id) return empty
+    if (this.channels.length === 0) {
+      this.logger.warn('ApprovalBreachNotifier.notifyNodeReminder invoked with zero channels; skipping')
+      return { ...empty, requested: 1, skipped: 1 }
+    }
+
+    let ctx: ApprovalBreachContext | undefined
+    try {
+      const contexts = await this.metrics.listBreachContextByIds([id])
+      ctx = contexts[0]
+    } catch (error) {
+      this.logger.warn(`Node reminder context fetch failed for ${id}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+
+    const message = this.composeNodeReminderMessage(id, ctx, assigneeIds)
+    const perChannel: NotifyResultPerChannel[] = []
+    let sent = 0
+    let failed = 0
+    const settlements = await Promise.all(
+      this.channels.map(async (channel) => ({ channel, result: await this.dispatch(channel, message) })),
+    )
+    for (const { channel, result } of settlements) {
+      if (result.ok) {
+        sent += 1
+        perChannel.push({ channel: channel.name, sent: 1, failed: 0, errors: [] })
+      } else {
+        failed += 1
+        perChannel.push({ channel: channel.name, sent: 0, failed: 1, errors: result.error ? [result.error] : [] })
+      }
+    }
+    return { requested: 1, notified: sent > 0 ? 1 : 0, skipped: 0, sent, failed, perChannel }
+  }
+
   private async dispatch(
     channel: BreachNotificationChannel,
     message: BreachMessage,
@@ -208,6 +250,25 @@ export class ApprovalBreachNotifier {
       `- 启动时间：${startedAt}`,
       `- SLA 阈值：${slaHours}`,
       `- 超时时长：${overdue}`,
+      `- 当前节点：${node}`,
+      `- 详情链接：${link || '(未配置 PUBLIC_APP_URL)'}`,
+    ].join('\n')
+    return { instanceId, title, body, link, severity: 'warning' }
+  }
+
+  private composeNodeReminderMessage(
+    instanceId: string,
+    ctx: ApprovalBreachContext | undefined,
+    assigneeIds: string[],
+  ): BreachMessage {
+    const templateName = ctx?.templateName?.trim() || '未命名模板'
+    const node = ctx?.currentNodeKey?.trim() || '未知节点'
+    const approvers = Array.isArray(assigneeIds) && assigneeIds.length > 0 ? assigneeIds.join('、') : '当前审批人'
+    const shortId = abbreviateId(instanceId)
+    const link = this.buildLink(instanceId)
+    const title = `审批节点超时提醒 | ${templateName} | 实例 #${shortId}`
+    const body = [
+      `- 待处理审批人：${approvers}`,
       `- 当前节点：${node}`,
       `- 详情链接：${link || '(未配置 PUBLIC_APP_URL)'}`,
     ].join('\n')

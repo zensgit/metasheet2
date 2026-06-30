@@ -26,6 +26,8 @@ import type {
   FormFieldVisibilityRule,
   NodeFieldAccess,
   NodeFieldPermission,
+  NodeTimeoutConfig,
+  NodeTimeoutEffect,
   PublishApprovalTemplateRequest,
   RuntimeGraph,
   RuntimePolicy,
@@ -303,6 +305,12 @@ const PARALLEL_JOIN_MODES = new Set(['all', 'any'])
 const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-approve'])
 const AUTO_APPROVAL_ACTOR_MODES = new Set<AutoApprovalActorMode>(['system', 'original_approver'])
 const NODE_FIELD_ACCESS_VALUES = new Set<NodeFieldAccess>(['editable', 'readonly', 'hidden'])
+// T1-1 node-level SLA. The full effect enum is declared so an off-enum value is a hard reject; slice 1
+// only WIRES `remind` (a notification) — transfer/jump/auto_* are rejected at publish until their slice.
+const NODE_TIMEOUT_EFFECTS = new Set<NodeTimeoutEffect>(['remind', 'transfer', 'jump', 'auto_approve', 'auto_reject'])
+const NODE_TIMEOUT_SUPPORTED_EFFECTS = new Set<NodeTimeoutEffect>(['remind'])
+// Upper bound (~69.4 days) guards against an overflowing deadline; lower bound forbids 0/negative.
+const NODE_TIMEOUT_MAX_AFTER_MINUTES = 100000
 const APPROVAL_MAX_AUTO_STEPS = 50
 
 function toNullableRecord(value: unknown): Record<string, unknown> | null {
@@ -921,6 +929,28 @@ function normalizeNodeFieldPermissions(
   return normalized
 }
 
+/**
+ * T1-1: preserve a node's `timeout` config through normalization so it survives into the stored /
+ * runtime graph (the surrounding `normalizedNode.config` is a strict whitelist — an un-copied field is
+ * silently dropped). Shape-only here; the strict semantic gate (integer range, supported effect, no
+ * parallel region) runs in `validateNodeTimeoutConfigs` so it can raise the specific
+ * APPROVAL_NODE_TIMEOUT_* codes consistently at create / update / publish.
+ */
+function normalizeNodeTimeout(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): NodeTimeoutConfig | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) {
+    failValidation(context, `${path} must be an object`)
+  }
+  return {
+    afterMinutes: value.afterMinutes as number,
+    effect: value.effect as NodeTimeoutEffect,
+  }
+}
+
 function normalizeConditionFormulaPredicate(
   value: unknown,
   context: ValidationContext,
@@ -965,6 +995,99 @@ function validateNodeFieldPermissionsAgainstFormSchema(
       }
     }
   })
+}
+
+/**
+ * T1-1: every node key that lives INSIDE a parallel region — i.e. is reachable from a `parallel`
+ * node's branch edge target before the region's join node. Computed from the stored graph structure
+ * (not runtime instance state), mirroring `collectParallelBranchNodeKeys`. Used to reject node-level
+ * timeouts inside a parallel region (the scanner's single-cursor deadline model can't track a
+ * per-branch node, so it's deferred to a later slice).
+ */
+function collectParallelRegionNodeKeys(approvalGraph: ApprovalGraph): Set<string> {
+  const regionNodeKeys = new Set<string>()
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'parallel') continue
+    const config = node.config as { branches?: unknown; joinNodeKey?: unknown }
+    const joinNodeKey = typeof config.joinNodeKey === 'string' ? config.joinNodeKey : null
+    const branchEdgeKeys = Array.isArray(config.branches)
+      ? config.branches.filter((entry): entry is string => typeof entry === 'string')
+      : []
+    for (const branchEdgeKey of branchEdgeKeys) {
+      const edge = approvalGraph.edges.find((candidate) => candidate.key === branchEdgeKey)
+      if (!edge) continue
+      const queue = [edge.target]
+      const visited = new Set<string>()
+      while (queue.length > 0) {
+        const nodeKey = queue.shift()!
+        if (nodeKey === joinNodeKey || visited.has(nodeKey)) continue
+        visited.add(nodeKey)
+        regionNodeKeys.add(nodeKey)
+        for (const outgoing of approvalGraph.edges.filter((candidate) => candidate.source === nodeKey)) {
+          queue.push(outgoing.target)
+        }
+      }
+    }
+  }
+  return regionNodeKeys
+}
+
+/**
+ * T1-1 node-level SLA publish/author gate. For every node carrying a `config.timeout`:
+ *   - `afterMinutes` must be a whole integer in (0, NODE_TIMEOUT_MAX_AFTER_MINUTES].
+ *   - `effect` must be in the declared enum AND supported by slice 1 (`remind` only) — transfer / jump
+ *     / auto_* are reserved (APPROVAL_NODE_TIMEOUT_EFFECT_UNSUPPORTED).
+ *   - the node must NOT be inside a parallel region (APPROVAL_NODE_TIMEOUT_PARALLEL_UNSUPPORTED).
+ * Raises the specific codes directly (status 400) so create / update / publish surface the same error
+ * regardless of the surrounding validation context.
+ */
+function validateNodeTimeoutConfigs(approvalGraph: ApprovalGraph): void {
+  const parallelRegionNodeKeys = collectParallelRegionNodeKeys(approvalGraph)
+  for (const node of approvalGraph.nodes) {
+    const timeout = (node.config as { timeout?: unknown }).timeout
+    if (timeout === undefined || timeout === null) continue
+    if (!isRecord(timeout)) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} timeout must be an object`,
+        400,
+        'APPROVAL_NODE_TIMEOUT_INVALID',
+      )
+    }
+    const afterMinutes = (timeout as { afterMinutes?: unknown }).afterMinutes
+    if (
+      !Number.isInteger(afterMinutes)
+      || (afterMinutes as number) <= 0
+      || (afterMinutes as number) > NODE_TIMEOUT_MAX_AFTER_MINUTES
+    ) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} timeout.afterMinutes must be an integer in (0, ${NODE_TIMEOUT_MAX_AFTER_MINUTES}]`,
+        400,
+        'APPROVAL_NODE_TIMEOUT_INVALID',
+      )
+    }
+    const effect = (timeout as { effect?: unknown }).effect
+    if (typeof effect !== 'string' || !NODE_TIMEOUT_EFFECTS.has(effect as NodeTimeoutEffect)) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} timeout.effect is invalid`,
+        400,
+        'APPROVAL_NODE_TIMEOUT_INVALID',
+      )
+    }
+    if (!NODE_TIMEOUT_SUPPORTED_EFFECTS.has(effect as NodeTimeoutEffect)) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} timeout.effect '${effect}' is not supported yet`,
+        400,
+        'APPROVAL_NODE_TIMEOUT_EFFECT_UNSUPPORTED',
+      )
+    }
+    if (parallelRegionNodeKeys.has(node.key)) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} timeout is not supported inside a parallel region`,
+        400,
+        'APPROVAL_NODE_TIMEOUT_PARALLEL_UNSUPPORTED',
+      )
+    }
+  }
 }
 
 function normalizeApprovalGraph(
@@ -1034,6 +1157,11 @@ function normalizeApprovalGraph(
             context,
             `approvalGraph.nodes[${index}].config.fieldPermissions`,
           )
+          const timeout = normalizeNodeTimeout(
+            node.config.timeout,
+            context,
+            `approvalGraph.nodes[${index}].config.timeout`,
+          )
           normalizedNode.config = {
             ...(hasLegacyAssignees
               ? {
@@ -1046,6 +1174,7 @@ function normalizeApprovalGraph(
             ...(emptyAssigneePolicy ? { emptyAssigneePolicy } : {}),
             ...(autoApprovalPolicy ? { autoApprovalPolicy } : {}),
             ...(fieldPermissions ? { fieldPermissions } : {}),
+            ...(timeout ? { timeout } : {}),
           }
         }
         break
@@ -1770,6 +1899,16 @@ function getApprovalNodeConfig(runtimeGraph: RuntimeGraph, nodeKey: string): App
 }
 
 /**
+ * T1-1: the node-level timeout (if any) declared on the approval node being activated. Read from the
+ * runtime graph in scope so the activation site can stamp the deadline. `undefined` for nodes without
+ * a timeout (or non-approval nodes) — the activation site then clears the deadline columns.
+ */
+function nodeTimeoutForKey(runtimeGraph: RuntimeGraph, nodeKey: string): NodeTimeoutConfig | undefined {
+  const config = getApprovalNodeConfig(runtimeGraph, nodeKey) as { timeout?: NodeTimeoutConfig } | null
+  return config?.timeout ?? undefined
+}
+
+/**
  * True when any approval node's assignee sources include a management-chain source
  * (`continuous_managers` or `manager_at_level`). Used at create time to decide
  * whether to walk the (more expensive) management chain into the requester snapshot
@@ -2397,6 +2536,7 @@ export class ApprovalProductService {
     validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
     validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+    validateNodeTimeoutConfigs(approvalGraph)
 
     let client: ApprovalDbClient | null = null
     try {
@@ -2552,6 +2692,7 @@ export class ApprovalProductService {
         validateApprovalAssigneeSourcesAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateNodeFieldPermissionsAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
         validateApprovalConditionFormulasAgainstFormSchema(nextApprovalGraph, nextFormSchema, REQUEST_VALIDATION_CONTEXT)
+        validateNodeTimeoutConfigs(nextApprovalGraph)
 
         const versionResult = await client.query<TemplateVersionRow>(
           `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
@@ -2646,6 +2787,7 @@ export class ApprovalProductService {
         ? await fetchCuratedApprovalRoleIds(client.query.bind(client))
         : null
       validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, STORED_GRAPH_CONTEXT, curatedRoleIds)
+      validateNodeTimeoutConfigs(approvalGraph)
       // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
       // otherwise the high path stalls at runtime on an unclaimable role assignment (nobody holds the
       // placeholder role). See APPROVAL_ROLE_CONFIGURE_SENTINEL.
@@ -3168,13 +3310,26 @@ export class ApprovalProductService {
     // Wave 2 WP5 slice 1 — metrics start row is written after commit and
     // guarded so a metrics failure cannot roll back the approval instance.
     safeMetricsCall(`recordInstanceStart(${instanceId})`, async () => {
+      // T1-1: the FIRST node is activated here (not via emitNodeActivationMetric), so its timeout
+      // deadline must be stamped at instance start — otherwise a `remind` on the initial node never
+      // fires. Mirror emitNodeActivationMetric: read the node's timeout off the runtime graph in scope.
+      const startedAt = new Date()
+      const initialTimeout = initial.currentNodeKey
+        ? nodeTimeoutForKey(runtimeGraph, initial.currentNodeKey)
+        : undefined
       await this.metrics.recordInstanceStart({
       instanceId,
       templateId: bundle.template.id,
       tenantId: actor.tenantId ?? null,
-      startedAt: new Date(),
+      startedAt,
       slaHours: bundle.template.sla_hours ?? null,
       initialNodeKey: initial.currentNodeKey,
+      ...(initialTimeout?.effect
+        ? {
+            timeoutDeadline: new Date(startedAt.getTime() + initialTimeout.afterMinutes * 60000),
+            timeoutEffect: initialTimeout.effect,
+          }
+        : {}),
       })
       if (initial.status === 'approved') {
         await this.metrics.recordTerminal({
@@ -3402,7 +3557,7 @@ export class ApprovalProductService {
       }
 
       if (resolution.currentNodeKey) {
-        this.emitNodeActivationMetric(id, resolution.currentNodeKey)
+        this.emitNodeActivationMetric(id, resolution.currentNodeKey, nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
     } catch (error) {
       await rollbackQuietly(client)
@@ -3843,7 +3998,7 @@ export class ApprovalProductService {
         await client.query('COMMIT')
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
         if (resolution.currentNodeKey) {
-          this.emitNodeActivationMetric(id, resolution.currentNodeKey)
+          this.emitNodeActivationMetric(id, resolution.currentNodeKey, nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
         }
         return (await this.getApproval(id))!
       }
@@ -4173,7 +4328,7 @@ export class ApprovalProductService {
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'approved')
       } else if (resolution.currentNodeKey && resolution.currentNodeKey !== currentNodeKey) {
-        this.emitNodeActivationMetric(id, resolution.currentNodeKey)
+        this.emitNodeActivationMetric(id, resolution.currentNodeKey, nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
     } catch (error) {
       await rollbackQuietly(client)
@@ -4204,12 +4359,22 @@ export class ApprovalProductService {
     )
   }
 
-  private emitNodeActivationMetric(instanceId: string, nodeKey: string): void {
+  private emitNodeActivationMetric(instanceId: string, nodeKey: string, timeout?: NodeTimeoutConfig): void {
+    const activatedAt = new Date()
+    // T1-1: when the activating node declares a timeout, stamp its absolute deadline + effect so the
+    // SLA scanner can fire on it. No timeout → recordNodeActivation clears the columns (so the prior
+    // node's deadline can never linger). Still inside safeMetricsCall — a best-effort write.
     safeMetricsCall(`recordNodeActivation(${instanceId}/${nodeKey})`, () =>
       this.metrics.recordNodeActivation({
         instanceId,
         nodeKey,
-        activatedAt: new Date(),
+        activatedAt,
+        ...(timeout?.effect
+          ? {
+              timeoutDeadline: new Date(activatedAt.getTime() + timeout.afterMinutes * 60000),
+              timeoutEffect: timeout.effect,
+            }
+          : {}),
       }),
     )
   }
