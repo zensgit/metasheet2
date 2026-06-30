@@ -75,6 +75,15 @@ export interface ApprovalNode {
     | Record<string, never>
 }
 
+// T1-1 node-level SLA + timeout. The effect enum declares the full set; slice 1 wires `remind`
+// only (a notification, no state mutation) — transfer/jump/auto_* are rejected at publish until
+// their slice. `afterMinutes` = whole wall-clock minutes from the node's activation.
+export type NodeTimeoutEffect = 'remind' | 'transfer' | 'jump' | 'auto_approve' | 'auto_reject'
+export interface NodeTimeoutConfig {
+  afterMinutes: number
+  effect: NodeTimeoutEffect
+}
+
 export interface ApprovalNodeConfig {
   assigneeType?: ApprovalAssigneeType
   assigneeIds?: string[]
@@ -87,6 +96,8 @@ export interface ApprovalNodeConfig {
   // are inert (forward-stable contract only). Orthogonal to FormFieldVisibilityRule
   // (data-value-keyed); fieldPermissions is node-keyed.
   fieldPermissions?: NodeFieldPermission[]
+  // T1-1 node-level SLA: optional per-node timeout + effect (slice 1: remind only).
+  timeout?: NodeTimeoutConfig
 }
 
 export type ApprovalAssigneeSource =
