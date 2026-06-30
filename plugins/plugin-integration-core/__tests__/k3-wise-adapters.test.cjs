@@ -2041,10 +2041,105 @@ async function testK3WebApiAutoFlagCoercion() {
   }
 }
 
+async function testK3WebApiMaterialBomReadSmoke() {
+  const { calls, fetchImpl } = createK3FetchMock()
+  const bomPreset = getReadSmokePreset('k3wise.material-bom.v1')
+  // Operator-confirmed live BOM/GetDetail shape (#1709): Data is an object with a header array Data.Page1
+  // and a sub-item line array Data.Page2 (no paging). Rows carry leak-bait VALUES to prove the route layer
+  // (read-smoke.test / http-routes.test) scrubs them; the adapter surfaces only counts/types/flags.
+  const bomCalls = []
+  const bomFetchImpl = async (url, options) => {
+    const parsed = new URL(url)
+    if (parsed.pathname === '/K3API/BOM/GetDetail') {
+      bomCalls.push({ method: options.method, body: options.body ? JSON.parse(options.body) : undefined })
+      return jsonResponse(200, {
+        StatusCode: 200,
+        Message: 'BOM detail succeeded',
+        Data: {
+          Page1: [
+            { FBOMNumber: 'BOM-SECRET-001', FNumber: 'MAT-SECRET-PARENT', FVersion: 'V1' },
+          ],
+          Page2: [
+            { FNumber: 'MAT-SECRET-CHILD-1', FItemName: 'secret-name-1', FQty: 2 },
+            { FNumber: 'MAT-SECRET-CHILD-2', FItemName: 'secret-name-2', FQty: 5 },
+            { FNumber: 'MAT-SECRET-CHILD-3', FItemName: 'secret-name-3', FQty: 1 },
+          ],
+        },
+      })
+    }
+    return fetchImpl(url, options)
+  }
+  const adapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test',
+        objects: {
+          'material-bom': {
+            operations: ['read'],
+            readPath: '/K3API/BOM/GetDetail',
+            readMethod: 'POST',
+            readMode: 'bom',
+            readBomBodyTemplate: { Data: {} },
+            readBomBodyKey: 'Data',
+            readBomParentKeyField: 'FBillNo',
+          },
+        },
+      },
+    }),
+    fetchImpl: bomFetchImpl,
+  })
+
+  // Route-marker gating: a BOM read without the internal read-smoke marker is rejected before any K3 call.
+  const unmarked = await adapter.read({
+    object: 'material-bom',
+    options: { k3ReadMode: 'bom', bomKey: 'BOM-1' },
+  }).catch((error) => error)
+  assert.ok(unmarked instanceof AdapterValidationError, 'BOM read cannot be triggered outside the read-smoke route')
+  assert.equal(unmarked.details.code, 'K3_WISE_BOM_READ_ROUTE_UNSUPPORTED')
+  assert.equal(bomCalls.length, 0, 'unmarked BOM read fails before the K3 GetDetail call')
+
+  // O2 bound-value lock: feed a parent key containing a quote; it must reach the body verbatim, NOT escaped.
+  const read = await adapter.read(buildReadSmokeRequest(bomPreset, { object: 'material-bom', mode: 'bom', key: "BOM'1" }))
+
+  assert.equal(read.records.length, 3, 'BOM smoke returns the Data.Page2 line rows')
+  assert.equal(read.metadata.mode, 'material-bom-smoke')
+  assert.equal(read.metadata.readOnly, true)
+  assert.equal(read.metadata.returnedRecordCount, 3)
+  assert.equal(read.metadata.bomHeaderPresent, true)
+  assert.equal(read.metadata.bomLinePresent, true)
+  assert.equal(read.metadata.bomHeaderCount, 1, 'Data.Page1 header count surfaced (values-free)')
+  assert.equal(read.metadata.bomLineCount, 3, 'Data.Page2 line count surfaced (values-free)')
+  assert.equal(read.metadata.readPath, '/K3API/BOM/GetDetail')
+  assert.deepEqual(read.metadata.bomShapeProbe, {
+    dataPage1: true,
+    dataPage2: true,
+    dataLowerPage1: false,
+    dataLowerPage2: false,
+  })
+  assert.equal(read.metadata.bomResponseShapeProbe.dataObjectPresent, true)
+  assert.equal(read.metadata.bomResponseShapeProbe.headerPresent, true)
+  assert.equal(read.metadata.bomResponseShapeProbe.linePresent, true)
+  assert.deepEqual(read.metadata.bomResponseShapeProbe.fixedContainers, {
+    dataPage1: { type: 'array', arrayLength: 1 },
+    dataPage2: { type: 'array', arrayLength: 3 },
+    dataLowerPage1: { type: 'missing', arrayLength: null },
+    dataLowerPage2: { type: 'missing', arrayLength: null },
+    topLevel: { type: 'object', arrayLength: null },
+  }, 'BOM response-shape probe surfaces fixed container types/counts only')
+
+  assert.equal(bomCalls.length, 1, 'BOM smoke calls BOM/GetDetail exactly once (no recursion, no resolver fan-out)')
+  assert.equal(bomCalls[0].method, 'POST')
+  // THE O2 fix, locked: the parent bill key is a bound JSON value — quote preserved (not "BOM''1"), and the
+  // body carries nothing else (requiredFlags=[]; no Filter/Fields/escaping). A refactor that re-routes FBillNo
+  // through k3_freeform or adds flags fails here.
+  assert.deepEqual(bomCalls[0].body, { Data: { FBillNo: "BOM'1" } })
+}
+
 async function main() {
   await testK3WebApiAdapter()
   await testK3WebApiMaterialDetailReadSmoke()
   await testK3WebApiMaterialListReadSmoke()
+  await testK3WebApiMaterialBomReadSmoke()
   await testK3WebApiAuthorityCodeToken()
   await testK3WebApiSaveBusinessEvidence()
   await testK3WebApiNestedDataSaveParse()

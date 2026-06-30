@@ -26,7 +26,7 @@ const {
   normalizeTemplate,
 } = require('./k3-wise-document-templates.cjs')
 const crypto = require('node:crypto')
-const { READ_SMOKE_LIST_REQUEST_MARKER } = require('../read-smoke-marker.cjs')
+const { READ_SMOKE_LIST_REQUEST_MARKER, READ_SMOKE_BOM_REQUEST_MARKER } = require('../read-smoke-marker.cjs')
 const { scrubSecretStringValue } = require('../payload-redaction.cjs')
 // DF-T1-0: single source of truth for Save-body composition, shared with the no-write
 // preview (http-routes.cjs). Placeholder detection (findUnfilledPlaceholders) is shared; the
@@ -44,6 +44,9 @@ class K3WiseWebApiAdapterError extends Error {
 
 const DEFAULT_OBJECTS = getK3WiseDocumentObjectDefaults()
 const DEFAULT_MATERIAL_LIST_MAX_LIMIT = 10
+// C4 BOM read (#1709): GetDetail has no paging, so a large bill returns every line. Bound the records we
+// retain and the line count we report so a values-free read-smoke stays bounded regardless of bill size.
+const DEFAULT_MATERIAL_BOM_MAX_LINES = 1000
 
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
@@ -626,6 +629,21 @@ function resolveMaterialReadMode(request, objectConfig) {
     }
     return mode
   }
+  if (mode === 'bom') {
+    if (request.options[READ_SMOKE_BOM_REQUEST_MARKER] !== true) {
+      throw new AdapterValidationError('K3 WISE BOM read is only available through the read-smoke route', {
+        code: 'K3_WISE_BOM_READ_ROUTE_UNSUPPORTED',
+        object: request.object,
+      })
+    }
+    if (configMode !== 'bom') {
+      throw new AdapterValidationError('K3 WISE BOM read requires a bom-mode object config', {
+        code: 'K3_WISE_BOM_READ_NOT_CONFIGURED',
+        object: request.object,
+      })
+    }
+    return mode
+  }
   throw new AdapterValidationError('K3 WISE Material read mode is not supported', {
     code: 'K3_WISE_READ_MODE_UNSUPPORTED',
     object: request.object,
@@ -677,6 +695,57 @@ function assertMaterialListReadOnlyScope(request, objectConfig) {
       object: request.object,
       limit: request.limit,
       maxLimit,
+    })
+  }
+}
+
+// C4 BOM read (#1709): read-only, single GetDetail call, preset-mediated parent bill key only. No
+// request-supplied filters/cursor/watermark/options, no resolver (the caller names the bill directly),
+// no recursion (one call). Mirrors the LIST scope guard but for the material-bom object.
+function assertMaterialBomReadOnlyScope(request) {
+  if (request.object !== 'material-bom') {
+    throw new UnsupportedAdapterOperationError('K3 WISE WebAPI read-only BOM supports only material-bom reads', {
+      kind: 'erp:k3-wise-webapi',
+      object: request.object,
+      operation: 'read',
+    })
+  }
+  if (request.cursor) {
+    throw new AdapterValidationError('K3 WISE BOM read does not support cursor pagination', {
+      code: 'K3_WISE_BOM_READ_CURSOR_UNSUPPORTED',
+      object: request.object,
+      field: 'cursor',
+    })
+  }
+  if (Object.keys(request.watermark || {}).length > 0) {
+    throw new AdapterValidationError('K3 WISE BOM read does not support watermark reads', {
+      code: 'K3_WISE_BOM_READ_WATERMARK_UNSUPPORTED',
+      object: request.object,
+      field: 'watermark',
+    })
+  }
+  if (Object.keys(request.filters || {}).length > 0) {
+    throw new AdapterValidationError('K3 WISE BOM read does not accept request-supplied filters', {
+      code: 'K3_WISE_BOM_READ_FILTER_UNSUPPORTED',
+      object: request.object,
+      fields: Object.keys(request.filters),
+    })
+  }
+  const allowedOptionKeys = new Set(['k3ReadMode', 'bomKey'])
+  const unknownOptions = Object.keys(request.options || {}).filter((key) => !allowedOptionKeys.has(key))
+  if (unknownOptions.length > 0) {
+    throw new AdapterValidationError('K3 WISE BOM read does not accept request-supplied options', {
+      code: 'K3_WISE_BOM_READ_OPTION_UNSUPPORTED',
+      object: request.object,
+      fields: unknownOptions,
+    })
+  }
+  const bomKey = typeof request.options.bomKey === 'string' ? request.options.bomKey.trim() : ''
+  if (!bomKey) {
+    throw new AdapterValidationError('K3 WISE BOM read requires a parent bill key', {
+      code: 'K3_WISE_BOM_READ_PARENT_KEY_INVALID',
+      object: request.object,
+      field: 'bomKey',
     })
   }
 }
@@ -921,6 +990,97 @@ function materialListBusinessFailureCode(data) {
     return 'K3_WISE_READ_LIST_REJECTED'
   }
   return 'K3_WISE_READ_LIST_ENVELOPE_UNRECOGNIZED'
+}
+
+// --- C4 BOM read (#1709). Operator-confirmed live shape: BOM/GetDetail POST returns a single object `Data`
+// with a header array `Data.Page1` and a sub-item line array `Data.Page2` (no paging). Case-aware candidates
+// from day one (the Data.Data vs Data.DATA lesson): confirmed PascalCase Page1/Page2 first, lowercase variants
+// as defensive fallbacks. Line/row VALUES are never surfaced — only counts/types/presence flags.
+
+function buildBomReadBody(request, objectConfig) {
+  const template = isPlainObject(objectConfig.readBomBodyTemplate)
+    ? cloneJson(objectConfig.readBomBodyTemplate)
+    : {}
+  const bodyKey = typeof objectConfig.readBomBodyKey === 'string' && objectConfig.readBomBodyKey.trim()
+    ? objectConfig.readBomBodyKey.trim()
+    : 'Data'
+  const parentKeyField = typeof objectConfig.readBomParentKeyField === 'string' && objectConfig.readBomParentKeyField.trim()
+    ? objectConfig.readBomParentKeyField.trim()
+    : 'FBillNo'
+  const container = isPlainObject(template[bodyKey]) ? template[bodyKey] : {}
+  // O2 (operator-confirmed): the parent bill key is a STRUCTURED JSON FIELD — a bound value, NOT embedded in a
+  // filter-expression string. It is assigned directly with NO k3_freeform / LIKE escaping: escaping a value
+  // that is not inside an expression would corrupt it. This is the validated O2-contingent encoding (#3399).
+  template[bodyKey] = {
+    ...container,
+    [parentKeyField]: String(request.options.bomKey),
+  }
+  return template
+}
+
+function bomHeaderRowsCandidate(data) {
+  const candidates = [getPath(data, 'Data.Page1'), getPath(data, 'Data.page1')]
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate.filter(isPlainObject).map((row) => cloneJson(row))
+  }
+  return null
+}
+
+function bomLineRowsCandidate(data) {
+  const candidates = [getPath(data, 'Data.Page2'), getPath(data, 'Data.page2')]
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate.filter(isPlainObject).map((row) => cloneJson(row))
+  }
+  return null
+}
+
+function bomShapeProbe(data) {
+  return {
+    dataPage1: Array.isArray(getPath(data, 'Data.Page1')),
+    dataPage2: Array.isArray(getPath(data, 'Data.Page2')),
+    dataLowerPage1: Array.isArray(getPath(data, 'Data.page1')),
+    dataLowerPage2: Array.isArray(getPath(data, 'Data.page2')),
+  }
+}
+
+const MATERIAL_BOM_RESPONSE_SHAPE_CONTAINER_PATHS = Object.freeze([
+  ['dataPage1', 'Data.Page1'],
+  ['dataPage2', 'Data.Page2'],
+  ['dataLowerPage1', 'Data.page1'],
+  ['dataLowerPage2', 'Data.page2'],
+  ['topLevel', ''],
+])
+
+function bomResponseShapeProbe(data) {
+  const fixedContainers = {}
+  for (const [key, path] of MATERIAL_BOM_RESPONSE_SHAPE_CONTAINER_PATHS) {
+    fixedContainers[key] = materialListShapeValueEvidence(path ? getPath(data, path) : data)
+  }
+  return {
+    dataObjectPresent: isPlainObject(getPath(data, 'Data')),
+    headerPresent: Array.isArray(getPath(data, 'Data.Page1')) || Array.isArray(getPath(data, 'Data.page1')),
+    linePresent: Array.isArray(getPath(data, 'Data.Page2')) || Array.isArray(getPath(data, 'Data.page2')),
+    fixedContainers,
+  }
+}
+
+function bomHeaderCount(data) {
+  return materialListArrayLength(bomHeaderRowsCandidate(data) || undefined)
+}
+
+function bomLineCount(data) {
+  return materialListArrayLength(bomLineRowsCandidate(data) || undefined)
+}
+
+function bomBusinessFailureCode(data) {
+  const statusCode = getStatusCode(data)
+  if (
+    hasExplicitBusinessFailure(data) ||
+    (statusCode !== null && (statusCode < 200 || statusCode >= 300))
+  ) {
+    return 'K3_WISE_BOM_READ_REJECTED'
+  }
+  return 'K3_WISE_BOM_READ_ENVELOPE_UNRECOGNIZED'
 }
 
 function buildMaterialReadRecord(detail, request, objectConfig) {
@@ -1471,6 +1631,79 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           dataPageIndex,
           listShapeProbe,
           responseShapeProbe,
+          readPath,
+          readOnly: true,
+        },
+      })
+    }
+
+    if (readMode === 'bom') {
+      assertMaterialBomReadOnlyScope(request)
+      const readPath = objectConfig.readPath
+        ? assertRelativePath(objectConfig.readPath, 'object.readPath')
+        : null
+      if (!readPath) {
+        throw new K3WiseWebApiAdapterError('K3 WISE BOM read endpoint is not configured for material-bom', {
+          code: 'K3_WISE_BOM_READ_NOT_CONFIGURED',
+          object: request.object,
+        })
+      }
+
+      const authContext = await login()
+      let readResponse
+      try {
+        readResponse = await requestJson(readPath, {
+          method: objectConfig.readMethod || 'POST',
+          query: authContext.query,
+          headers: authContext.headers,
+          body: buildBomReadBody(request, objectConfig),
+        })
+      } catch (error) {
+        throw new K3WiseWebApiAdapterError(`K3 WISE WebAPI BOM read failed: ${error && error.message ? error.message : String(error)}`, {
+          code: 'K3_WISE_BOM_READ_FAILED',
+          object: request.object,
+          status: error && error.status,
+          path: readPath,
+        })
+      }
+
+      const bomShape = bomShapeProbe(readResponse.data)
+      const bomHeaderPresent = bomShape.dataPage1 || bomShape.dataLowerPage1
+      const bomLinePresent = bomShape.dataPage2 || bomShape.dataLowerPage2
+      const headerCount = bomHeaderCount(readResponse.data)
+      const lineCount = bomLineCount(readResponse.data)
+      const bomResponseShape = bomResponseShapeProbe(readResponse.data)
+      if (!businessSuccess(readResponse.data, config)) {
+        const failureCode = bomBusinessFailureCode(readResponse.data)
+        throw new K3WiseWebApiAdapterError(String(responseMessage(readResponse.data, config, 'K3 WISE BOM read business response failed')), {
+          code: failureCode,
+          object: request.object,
+          responseCode: responseFailureCode(readResponse.data, config, failureCode),
+          bomHeaderPresent,
+          bomLinePresent,
+          bomHeaderCount: headerCount,
+          bomLineCount: lineCount,
+          bomShapeProbe: bomShape,
+          bomResponseShapeProbe: bomResponseShape,
+        })
+      }
+
+      // LIST records style (cloneJson rows, NO buildMaterialReadRecord / reference resolution) — keeps the
+      // no-resolver red line. Single GetDetail call above — no recursion. Records bounded by the line cap.
+      const records = (bomLineRowsCandidate(readResponse.data) || []).slice(0, DEFAULT_MATERIAL_BOM_MAX_LINES)
+      return createReadResult({
+        records,
+        raw: readResponse.data,
+        metadata: {
+          object: request.object,
+          mode: 'material-bom-smoke',
+          returnedRecordCount: records.length,
+          bomHeaderPresent,
+          bomLinePresent,
+          bomHeaderCount: headerCount,
+          bomLineCount: lineCount,
+          bomShapeProbe: bomShape,
+          bomResponseShapeProbe: bomResponseShape,
           readPath,
           readOnly: true,
         },

@@ -18,6 +18,7 @@ const { READ_SMOKE_LIST_REQUEST_MARKER } = require(path.join(__dirname, '..', 'l
 
 const PRESET = getReadSmokePreset('k3wise.material-detail.v1')
 const LIST_PRESET = getReadSmokePreset('k3wise.material-list.v1')
+const BOM_PRESET = getReadSmokePreset('k3wise.material-bom.v1')
 
 // --- catalog (built-in only) ---
 assert.ok(PRESET, 'k3wise.material-detail.v1 is registered')
@@ -380,5 +381,132 @@ for (const leak of ['M-001', '42', 'failed with secret']) {
 const bare = readSmokeErrorEvidence(PRESET, {}, { object: 'material', mode: 'single_record_detail' })
 assert.equal(bare.errorCode, 'READ_SMOKE_READ_FAILED')
 assert.equal(bare.errorType, 'Error')
+
+// --- C4 BOM read (#1709): values-free BOM evidence sanitizer. Feed bomShapeProbe + bomResponseShapeProbe with
+// leak-bait values (material numbers, nested row payloads, arbitrary keys); the surfaced evidence must contain
+// ONLY allowlisted booleans/counts + per-container {type, arrayLength}, dropping every value.
+assert.ok(BOM_PRESET, 'k3wise.material-bom.v1 is registered')
+const bomEvidence = readSmokeSuccessEvidence(BOM_PRESET, {
+  records: [{ FNumber: 'SECRET-CHILD-1' }, { FNumber: 'SECRET-CHILD-2' }, { FNumber: 'SECRET-CHILD-3' }],
+  metadata: {
+    mode: 'material-bom-smoke',
+    bomHeaderPresent: true,
+    bomLinePresent: true,
+    bomHeaderCount: 1,
+    bomLineCount: 3,
+    bomShapeProbe: {
+      dataPage1: true,
+      dataPage2: true,
+      dataLowerPage1: false,
+      dataLowerPage2: false,
+      materialNumber: 'SECRET-BOM-001',
+    },
+    bomResponseShapeProbe: {
+      dataObjectPresent: true,
+      headerPresent: true,
+      linePresent: true,
+      arbitraryKeyName: 'SECRET-BOM-KEY',
+      fixedContainers: {
+        dataPage1: { type: 'array', arrayLength: 1, materialNumber: 'SECRET-BOM-002' },
+        dataPage2: { type: 'array', arrayLength: 3, rows: [{ materialNumber: 'SECRET-BOM-003' }] },
+        arbitraryContainer: { type: 'array', arrayLength: 99 },
+      },
+    },
+  },
+}, { object: 'material-bom', mode: 'bom' })
+assert.deepEqual(bomEvidence, {
+  ok: true,
+  presetId: 'k3wise.material-bom.v1',
+  object: 'material-bom',
+  mode: 'bom',
+  recordPresent: true,
+  recordCount: 3,
+  referenceObjectCount: 0,
+  bomHeaderPresent: true,
+  bomLinePresent: true,
+  bomHeaderCount: 1,
+  bomLineCount: 3,
+  bomShapeProbe: {
+    dataPage1: true,
+    dataPage2: true,
+    dataLowerPage1: false,
+    dataLowerPage2: false,
+  },
+  bomResponseShapeProbe: {
+    dataObjectPresent: true,
+    headerPresent: true,
+    linePresent: true,
+    fixedContainers: {
+      dataPage1: { type: 'array', arrayLength: 1 },
+      dataPage2: { type: 'array', arrayLength: 3 },
+    },
+  },
+})
+const bomEvidenceStr = JSON.stringify(bomEvidence)
+for (const leak of ['SECRET-CHILD-1', 'SECRET-CHILD-2', 'SECRET-CHILD-3', 'SECRET-BOM-001', 'SECRET-BOM-002', 'SECRET-BOM-003', 'SECRET-BOM-KEY', 'materialNumber', 'arbitraryKeyName', 'arbitraryContainer', 'rows']) {
+  assert.ok(!bomEvidenceStr.includes(leak), `BOM evidence must not leak ${leak}`)
+}
+
+// C4 BOM read (#1709): values-free BOM ERROR evidence — symmetric to the LIST error path. A failed BOM read
+// surfaces the coarse BOM code + presence/counts/shape from error.details, dropping every leak-bait value.
+const bomError = {
+  name: 'K3WiseWebApiAdapterError',
+  details: {
+    code: 'K3_WISE_BOM_READ_REJECTED',
+    bomHeaderPresent: true,
+    bomLinePresent: false,
+    bomHeaderCount: 1,
+    bomLineCount: 0,
+    bomShapeProbe: {
+      dataPage1: true,
+      dataPage2: false,
+      dataLowerPage1: false,
+      dataLowerPage2: false,
+      materialNumber: 'SECRET-BOM-ERR-001',
+    },
+    bomResponseShapeProbe: {
+      dataObjectPresent: true,
+      headerPresent: true,
+      linePresent: false,
+      arbitraryKeyName: 'SECRET-BOM-ERR-KEY',
+      fixedContainers: {
+        dataPage1: { type: 'array', arrayLength: 1, materialNumber: 'SECRET-BOM-ERR-002' },
+        dataPage2: { type: 'null', arrayLength: null },
+        arbitraryContainer: { type: 'array', arrayLength: 9 },
+      },
+    },
+  },
+}
+assert.deepEqual(readSmokeErrorEvidence(BOM_PRESET, bomError, { object: 'material-bom', mode: 'bom' }), {
+  ok: false,
+  presetId: 'k3wise.material-bom.v1',
+  object: 'material-bom',
+  mode: 'bom',
+  errorCode: 'K3_WISE_BOM_READ_REJECTED',
+  errorType: 'K3WiseWebApiAdapterError',
+  bomHeaderPresent: true,
+  bomLinePresent: false,
+  bomHeaderCount: 1,
+  bomLineCount: 0,
+  bomShapeProbe: {
+    dataPage1: true,
+    dataPage2: false,
+    dataLowerPage1: false,
+    dataLowerPage2: false,
+  },
+  bomResponseShapeProbe: {
+    dataObjectPresent: true,
+    headerPresent: true,
+    linePresent: false,
+    fixedContainers: {
+      dataPage1: { type: 'array', arrayLength: 1 },
+      dataPage2: { type: 'null', arrayLength: null },
+    },
+  },
+})
+const bomErrorStr = JSON.stringify(readSmokeErrorEvidence(BOM_PRESET, bomError, { object: 'material-bom', mode: 'bom' }))
+for (const leak of ['SECRET-BOM-ERR-001', 'SECRET-BOM-ERR-002', 'SECRET-BOM-ERR-KEY', 'materialNumber', 'arbitraryKeyName', 'arbitraryContainer']) {
+  assert.ok(!bomErrorStr.includes(leak), `BOM error evidence must not leak ${leak}`)
+}
 
 console.log('read-smoke.test.cjs OK')
