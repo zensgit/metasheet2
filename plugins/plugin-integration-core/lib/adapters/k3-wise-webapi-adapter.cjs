@@ -802,6 +802,9 @@ function materialListRowsCandidate(data) {
   const candidates = [
     getPath(data, 'Data.DATA'),
     getPath(data, 'Data.data'),
+    // PascalCase row container observed on the live K3 instance (#1709): rows are at Data.Data, while the
+    // doc sample used Data.DATA. Compat order keeps the prior all-caps/lowercase paths first.
+    getPath(data, 'Data.Data'),
   ]
   for (const candidate of candidates) {
     if (Array.isArray(candidate)) return candidate.filter(isPlainObject).map((row) => cloneJson(row))
@@ -813,6 +816,7 @@ function materialListShapeProbe(data) {
   return {
     dataData: Array.isArray(getPath(data, 'Data.DATA')),
     dataLowerData: Array.isArray(getPath(data, 'Data.data')),
+    dataPascalData: Array.isArray(getPath(data, 'Data.Data')),
     dataRows: Array.isArray(getPath(data, 'Data.Rows')),
     resultData: Array.isArray(getPath(data, 'Result.Data')),
     resultRows: Array.isArray(getPath(data, 'Result.Rows')),
@@ -824,6 +828,7 @@ function materialListShapeProbe(data) {
 const MATERIAL_LIST_RESPONSE_SHAPE_CONTAINER_PATHS = Object.freeze([
   ['dataData', 'Data.DATA'],
   ['dataLowerData', 'Data.data'],
+  ['dataPascalData', 'Data.Data'],
   ['dataRows', 'Data.Rows'],
   ['dataList', 'Data.List'],
   ['dataItems', 'Data.Items'],
@@ -1425,7 +1430,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       }
 
       const listShapeProbe = materialListShapeProbe(readResponse.data)
-      const dataDataPresent = listShapeProbe.dataData || listShapeProbe.dataLowerData
+      const dataDataPresent = listShapeProbe.dataData || listShapeProbe.dataLowerData || listShapeProbe.dataPascalData
       const dataRowCount = materialListRowCount(readResponse.data)
       // Paging echo: what K3 reports it applied, vs what we requested (Top=PageSize=request.limit, PageIndex=1).
       const dataPageSize = materialListPageSize(readResponse.data)

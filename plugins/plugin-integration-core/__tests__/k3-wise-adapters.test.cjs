@@ -974,6 +974,7 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.deepEqual(read.metadata.listShapeProbe, {
     dataData: true,
     dataLowerData: false,
+    dataPascalData: false,
     dataRows: false,
     resultData: false,
     resultRows: false,
@@ -990,6 +991,7 @@ async function testK3WebApiMaterialListReadSmoke() {
     fixedContainers: {
       dataData: { type: 'array', arrayLength: 3 },
       dataLowerData: { type: 'missing', arrayLength: null },
+      dataPascalData: { type: 'missing', arrayLength: null },
       dataRows: { type: 'missing', arrayLength: null },
       dataList: { type: 'missing', arrayLength: null },
       dataItems: { type: 'missing', arrayLength: null },
@@ -1099,6 +1101,7 @@ async function testK3WebApiMaterialListReadSmoke() {
     fixedContainers: {
       dataData: { type: 'null', arrayLength: null },
       dataLowerData: { type: 'missing', arrayLength: null },
+      dataPascalData: { type: 'missing', arrayLength: null },
       dataRows: { type: 'missing', arrayLength: null },
       dataList: { type: 'missing', arrayLength: null },
       dataItems: { type: 'missing', arrayLength: null },
@@ -1108,6 +1111,61 @@ async function testK3WebApiMaterialListReadSmoke() {
       topLevel: { type: 'object', arrayLength: null },
     },
   }, 'paging-echo response-shape probe makes DATA=null explicit without changing extraction')
+
+  // C3 LIST PascalCase row container (#1709): the live K3 instance returns rows at Data.Data (PascalCase) with
+  // PascalCase RowCount/PageSize/PageIndex. Confirm extraction + that dataDataPresent reflects Data.Data (no
+  // recordPresent=true with dataDataPresent=false), without removing the Data.DATA / Data.data compat paths.
+  const pascalFetchImpl = async (url, options) => {
+    const parsed = new URL(url)
+    if (parsed.pathname === '/K3API/Material/GetList') {
+      return jsonResponse(200, {
+        StatusCode: 200,
+        Message: 'Material list succeeded',
+        Data: {
+          RowCount: 30134,
+          PageSize: 10,
+          PageIndex: 1,
+          Top: 10,
+          Data: [
+            { FNumber: 'MAT-PASCAL-001', FName: 'P1' },
+            { FNumber: 'MAT-PASCAL-002', FName: 'P2' },
+          ],
+        },
+      })
+    }
+    return fetchImpl(url, options)
+  }
+  const pascalAdapter = createK3WiseWebApiAdapter({
+    system: createK3WebApiSystem({
+      config: {
+        baseUrl: 'https://k3.example.test',
+        objects: {
+          material: {
+            operations: ['read'],
+            readPath: '/K3API/Material/GetList',
+            readMethod: 'POST',
+            readMode: 'list',
+            readListBodyTemplate: { Data: { Top: 10, PageIndex: 1 } },
+            pageIndexField: 'PageIndex',
+            pageSizeField: 'PageSize',
+            maxListLimit: 3,
+          },
+        },
+      },
+    }),
+    fetchImpl: pascalFetchImpl,
+  })
+  const pascal = await pascalAdapter.read(buildMarkedListRequest({ object: 'material', mode: 'list' }, 2))
+  assert.equal(pascal.records.length, 2, 'rows extracted from the PascalCase Data.Data container (bounded to limit)')
+  assert.equal(pascal.records[0].FNumber, 'MAT-PASCAL-001', 'PascalCase Data.Data rows are returned')
+  assert.equal(pascal.metadata.dataDataPresent, true, 'dataDataPresent reflects Data.Data (no recordPresent-true / dataDataPresent-false split)')
+  assert.equal(pascal.metadata.dataRowCount, 30134, 'PascalCase Data.RowCount surfaced')
+  assert.equal(pascal.metadata.dataPageSize, 10, 'PascalCase Data.PageSize surfaced')
+  assert.equal(pascal.metadata.dataPageIndex, 1, 'PascalCase Data.PageIndex surfaced')
+  assert.equal(pascal.metadata.listShapeProbe.dataPascalData, true, 'shape probe flags the PascalCase container')
+  assert.equal(pascal.metadata.listShapeProbe.dataData, false, 'all-caps Data.DATA absent in the PascalCase response')
+  assert.equal(pascal.metadata.responseShapeProbe.fixedContainers.dataPascalData.type, 'array', 'response-shape probe localizes Data.Data as an array')
+  assert.equal(pascal.metadata.responseShapeProbe.fixedContainers.dataPascalData.arrayLength, 2)
 
   const missingRowsFetchImpl = async (url, options) => {
     const parsed = new URL(url)
@@ -1147,6 +1205,7 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.deepEqual(missingRows.metadata.listShapeProbe, {
     dataData: false,
     dataLowerData: false,
+    dataPascalData: false,
     dataRows: false,
     resultData: false,
     resultRows: false,
@@ -1195,6 +1254,7 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.deepEqual(alternateRows.metadata.listShapeProbe, {
     dataData: false,
     dataLowerData: false,
+    dataPascalData: false,
     dataRows: false,
     resultData: false,
     resultRows: true,
@@ -1244,6 +1304,7 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.deepEqual(rejected.details.listShapeProbe, {
     dataData: true,
     dataLowerData: false,
+    dataPascalData: false,
     dataRows: false,
     resultData: false,
     resultRows: false,
@@ -1291,6 +1352,7 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.deepEqual(unrecognized.details.listShapeProbe, {
     dataData: true,
     dataLowerData: false,
+    dataPascalData: false,
     dataRows: false,
     resultData: false,
     resultRows: false,

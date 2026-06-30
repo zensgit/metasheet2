@@ -79,6 +79,7 @@ function isPlainObject(value) {
 const READ_SMOKE_LIST_SHAPE_PROBE_KEYS = Object.freeze([
   'dataData',
   'dataLowerData',
+  'dataPascalData',
   'dataRows',
   'resultData',
   'resultRows',
@@ -101,6 +102,7 @@ function readSmokeListShapeProbeEvidence(value) {
 const READ_SMOKE_RESPONSE_SHAPE_CONTAINER_KEYS = Object.freeze([
   'dataData',
   'dataLowerData',
+  'dataPascalData',
   'dataRows',
   'dataList',
   'dataItems',
