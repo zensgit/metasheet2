@@ -26,12 +26,22 @@ vi.mock('../../src/middleware/auth', () => ({
 }))
 
 vi.mock('../../src/rbac/rbac', () => ({
-  rbacGuard: () => (_req: Request, res: Response, next: NextFunction) => {
+  // Per-code guard: `allowRbac=false` is a hard gate (existing tests); otherwise the user must hold
+  // the specific permission code (or `*:*`). This lets the person/team tests assert that `/people`
+  // requires `approvals:analytics` while `/teams` requires `approvals:admin`.
+  rbacGuard: (code: string) => (_req: Request, res: Response, next: NextFunction) => {
     if (!authState.allowRbac) {
       res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Forbidden' } })
       return
     }
-    next()
+    const perms = Array.isArray(authState.user?.permissions)
+      ? (authState.user!.permissions as unknown[]).filter((p): p is string => typeof p === 'string')
+      : []
+    if (perms.includes('*:*') || perms.includes(code)) {
+      next()
+      return
+    }
+    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Forbidden' } })
   },
 }))
 
@@ -189,17 +199,30 @@ describe('approval metrics person/team routes (T2-3)', () => {
     })
   })
 
-  it('enforces auth + approvals:admin on both endpoints', async () => {
+  it('enforces auth on both endpoints (401 when unauthenticated)', async () => {
     authState.user = null
     await request(app).get('/api/approvals/metrics/people').expect(401)
     await request(app).get('/api/approvals/metrics/teams').expect(401)
-
-    authState.user = { id: 'viewer-1', tenantId: 'tenant-a' }
-    authState.allowRbac = false
-    await request(app).get('/api/approvals/metrics/people').expect(403)
-    await request(app).get('/api/approvals/metrics/teams').expect(403)
-
     expect(service.getMetricsByRequester).not.toHaveBeenCalled()
     expect(service.getMetricsByDepartment).not.toHaveBeenCalled()
+  })
+
+  it('Q4: /people requires approvals:analytics — approvals:admin alone is 403, analytics is 200', async () => {
+    authState.user = { id: 'admin-1', tenantId: 'tenant-a', permissions: ['approvals:admin'] }
+    await request(app).get('/api/approvals/metrics/people').expect(403)
+    expect(service.getMetricsByRequester).not.toHaveBeenCalled()
+
+    authState.user = { id: 'analyst-1', tenantId: 'tenant-a', permissions: ['approvals:analytics'] }
+    await request(app).get('/api/approvals/metrics/people').expect(200)
+    expect(service.getMetricsByRequester).toHaveBeenCalledTimes(1)
+  })
+
+  it('Q4: /teams stays on approvals:admin — admin is 200, analytics-only is 403', async () => {
+    authState.user = { id: 'admin-1', tenantId: 'tenant-a', permissions: ['approvals:admin'] }
+    await request(app).get('/api/approvals/metrics/teams').expect(200)
+    expect(service.getMetricsByDepartment).toHaveBeenCalledTimes(1)
+
+    authState.user = { id: 'analyst-1', tenantId: 'tenant-a', permissions: ['approvals:analytics'] }
+    await request(app).get('/api/approvals/metrics/teams').expect(403)
   })
 })

@@ -7645,7 +7645,7 @@
           "Approvals"
         ],
         "summary": "Get approval metrics aggregated by requester (person)",
-        "description": "Admin-only. Aggregates approval metrics by the requester (person), Top-100 by volume.\nA null key is the unattributed bucket. Surfaces no requester data an admin cannot\nalready see on each instance.\n",
+        "description": "Requires the `approvals:analytics` permission (a person-level performance ranking is an\nHR/ops-analytics lens, gated separately from approval administration). Aggregates approval\nmetrics by the requester (person), Top-100 by volume. A null key is the unattributed bucket.\n",
         "security": [
           {
             "bearerAuth": []

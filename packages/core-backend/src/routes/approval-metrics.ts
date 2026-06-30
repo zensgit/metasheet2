@@ -97,12 +97,14 @@ export function approvalMetricsRouter(options?: ApprovalMetricsRouterOptions): R
     },
   )
 
-  // T2-3 person/team analytics — admin-only, read-only. Aggregates the same metrics rows by the
-  // requester (people) / the requester's frozen department (teams). Reuses approvals:admin (these
-  // endpoints surface no requester data an admin can't already see on each instance).
+  // T2-3 person/team analytics — read-only. Aggregates the same metrics rows by the requester
+  // (people) / the requester's frozen department (teams). PERSON-level analytics is a who-is-slowest
+  // performance ranking, so it is gated behind a SEPARATE `approvals:analytics` permission (Q4 review)
+  // — an HR/ops-analytics lens, NOT default approval-administration. Team aggregation (/teams below)
+  // stays on `approvals:admin` (lower sensitivity).
   r.get('/api/approvals/metrics/people',
     authenticate,
-    rbacGuard('approvals:admin'),
+    rbacGuard('approvals:analytics'),
     async (req: Request, res: Response) => {
       try {
         const data = await metricsService.getMetricsByRequester({
