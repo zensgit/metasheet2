@@ -34,6 +34,15 @@ describe('resolveCrossBaseWriteAuthority (C1 shared primitive)', () => {
     expect(mockWritable).not.toHaveBeenCalled()
   })
 
+  it('null target base → claim_mismatch up front, authority NOT consulted (a null base is never writable)', async () => {
+    // Even with a claim that "matches" a null target, a null base admits no valid opt-in and is not writable.
+    const rClaimNull = await resolveCrossBaseWriteAuthority({ actorId: 'u1', targetBaseId: null, declaredBaseClaim: null, queryFn: qf })
+    const rClaimStr = await resolveCrossBaseWriteAuthority({ actorId: 'u1', targetBaseId: null, declaredBaseClaim: 'baseA', queryFn: qf })
+    expect(rClaimNull).toEqual({ ok: false, reason: 'claim_mismatch' })
+    expect(rClaimStr).toEqual({ ok: false, reason: 'claim_mismatch' })
+    expect(mockWritable).not.toHaveBeenCalled()
+  })
+
   it('not_writable when claim==target but base-write is denied', async () => {
     mockWritable.mockResolvedValue(false)
     const r = await resolveCrossBaseWriteAuthority({ actorId: 'u1', targetBaseId: 'baseA', declaredBaseClaim: 'baseA', queryFn: qf })

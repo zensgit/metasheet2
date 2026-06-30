@@ -34,16 +34,28 @@ export type CrossBaseWriteAuthorityResult =
  * Order is load-bearing (claim before authority) and matches the extracted source exactly.
  *
  * @param actorId           the acting user id (null/empty → fail-closed via `resolveBaseWritable`)
- * @param targetBaseId      the resolved canonical-owner base being written into (caller resolves + same-base-short-circuits first)
+ * @param targetBaseId      the resolved canonical-owner base being written into. **`string | null` ON PURPOSE:** a
+ *                          sheet's `base_id` can be null at runtime (legacy/unresolved) even where the call site's
+ *                          type narrows to `string`, so this primitive does NOT assume a non-null target. A null
+ *                          base is not a writable cross-base target and admits no valid claim==truth opt-in → it is
+ *                          rejected up front. (Callers should still resolve + reject a null base themselves; this
+ *                          defends regardless, so no caller can treat the target as guaranteed-non-null.)
  * @param declaredBaseClaim the caller's explicit target-base opt-in (null when absent)
  * @param queryFn           DB access for `resolveBaseWritable`
  */
 export async function resolveCrossBaseWriteAuthority(input: {
   actorId: string | null
-  targetBaseId: string
+  targetBaseId: string | null
   declaredBaseClaim: string | null
   queryFn: QueryFn
 }): Promise<CrossBaseWriteAuthorityResult> {
+  // (0) A null/legacy/unresolved target base can NEITHER be claimed NOR written — reject up front. Behaviour-identical
+  // to the extracted source (a null target made `claimed !== targetBaseId` fire → claim_mismatch), now made EXPLICIT
+  // so a `string`-typed call site can't slip a runtime-null through as a writable target. Also narrows the operand of
+  // the claim check + `resolveBaseWritable` below to a non-null base.
+  if (input.targetBaseId === null) {
+    return { ok: false, reason: 'claim_mismatch' }
+  }
   // (1) claim == truth — an explicit, consistent opt-in. Absent or mismatched → reject.
   if (input.declaredBaseClaim === null || input.declaredBaseClaim !== input.targetBaseId) {
     return { ok: false, reason: 'claim_mismatch' }
