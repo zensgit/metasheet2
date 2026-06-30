@@ -17,6 +17,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { AutomationScheduler } from '../../src/multitable/automation-scheduler'
 import type { AutomationRule } from '../../src/multitable/automation-executor'
+import { computeDateReminderOccurrence } from '../../src/multitable/automation-date-reminder'
+import { getZonedParts } from '../../src/multitable/automation-timezone'
 
 const H = 60 * 60 * 1000
 
@@ -104,5 +106,30 @@ describe('AutomationScheduler — schedule.date_field timeOfDay alignment (DR-A/
     vi.advanceTimersByTime(24 * H)
     expect(cb).not.toHaveBeenCalled() // no armed timer
     s.destroy()
+  })
+})
+
+// Review note (T2-5): date_field DST semantics differ DELIBERATELY from cron. cron skips a non-existent
+// local minute (no UTC instant maps to it). date_field is a single point-in-time occurrence, so it lands
+// on the nearest REPRESENTABLE instant instead of skipping — documented + locked here so nobody assumes
+// it behaves like cron's skip.
+describe('date_field DST gap/overlap — lands on a representable instant (NOT cron-style skip)', () => {
+  // US spring-forward 2026: Mar 8, 02:00 EST → 03:00 EDT. Local 02:30 does NOT exist.
+  // Note: the date VALUE is noon-UTC so its NY-LOCAL calendar day is genuinely Mar 8 (a bare 'YYYY-MM-DD'
+  // parses to UTC midnight, whose local day in a negative-offset zone is the PREVIOUS day — the day-bucket
+  // is keyed off the local day, not the UTC day).
+  it('spring-forward GAP: a non-existent local timeOfDay resolves FORWARD to 03:30 (not skipped, unlike cron)', () => {
+    const occ = computeDateReminderOccurrence('2026-03-08T12:00:00Z', { timeOfDay: '02:30', timezone: 'America/New_York' })
+    expect(occ).not.toBeNull()
+    const p = getZonedParts(Date.parse(occ!), 'America/New_York')
+    expect({ day: p.day, hour: p.hour, minute: p.minute }).toEqual({ day: 8, hour: 3, minute: 30 }) // pushed past the gap, NOT dropped
+  })
+
+  // US fall-back 2026: Nov 1, 02:00 EDT → 01:00 EST. Local 01:30 occurs TWICE.
+  it('fall-back OVERLAP: a repeated local timeOfDay resolves to a single deterministic instant', () => {
+    const occ = computeDateReminderOccurrence('2026-11-01T12:00:00Z', { timeOfDay: '01:30', timezone: 'America/New_York' })
+    expect(occ).not.toBeNull()
+    const p = getZonedParts(Date.parse(occ!), 'America/New_York')
+    expect({ day: p.day, hour: p.hour, minute: p.minute }).toEqual({ day: 1, hour: 1, minute: 30 }) // one ISO instant — no double-fire
   })
 })

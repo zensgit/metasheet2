@@ -2109,6 +2109,67 @@ describe('nextCronOccurrenceMs', () => {
   })
 })
 
+describe('nextCronOccurrenceMs — timezone (T2-5)', () => {
+  const NY = 'America/New_York'
+
+  it('UTC default path is unchanged when no timezone / "UTC" is supplied', () => {
+    const from = Date.parse('2026-06-28T09:14:30.000Z')
+    // Identical to the UTC golden above — proves the tz param does not perturb the default path.
+    expect(new Date(nextCronOccurrenceMs('15 9 * * *', from)!).toISOString()).toBe('2026-06-28T09:15:00.000Z')
+    expect(new Date(nextCronOccurrenceMs('15 9 * * *', from, 'UTC')!).toISOString()).toBe('2026-06-28T09:15:00.000Z')
+    expect(new Date(nextCronOccurrenceMs('15 9 * * *', from, 'Etc/UTC')!).toISOString()).toBe('2026-06-28T09:15:00.000Z')
+  })
+
+  it('maps a wall-clock cron to the correct UTC instant on a normal day (EDT = UTC-4)', () => {
+    // 09:30 America/New_York on 2026-06-15 (EDT) = 13:30 UTC.
+    const from = Date.parse('2026-06-15T00:00:00.000Z')
+    expect(new Date(nextCronOccurrenceMs('30 9 * * *', from, NY)!).toISOString()).toBe('2026-06-15T13:30:00.000Z')
+  })
+
+  it('handles a midnight tz cron (guards the hour-"24" formatter gotcha)', () => {
+    // 00:00 America/New_York on 2026-06-15 (EDT, UTC-4) = 04:00 UTC. A naive formatter rendering midnight as
+    // hour "24" would never match the 0-hour set → this pins the 24→0 normalize.
+    const from = Date.parse('2026-06-14T12:00:00.000Z')
+    expect(new Date(nextCronOccurrenceMs('0 0 * * *', from, NY)!).toISOString()).toBe('2026-06-15T04:00:00.000Z')
+  })
+
+  it('DST fall-back: a wall-clock time occurring twice fires ONCE (first instant, then skips the repeat)', () => {
+    // 2026-11-01 America/New_York clocks go 02:00 EDT → 01:00 EST, so local 01:30 happens twice:
+    //   first  = 01:30 EDT = 05:30 UTC
+    //   second = 01:30 EST = 06:30 UTC   ← must be SUPPRESSED
+    const before = Date.parse('2026-10-31T12:00:00.000Z')
+    const firstFire = nextCronOccurrenceMs('30 1 * * *', before, NY)!
+    expect(new Date(firstFire).toISOString()).toBe('2026-11-01T05:30:00.000Z')
+
+    // Re-arm from the first fire: the next occurrence must NOT be the repeated 01:30 EST (06:30 UTC) —
+    // it must advance past the overlap to the NEXT day's 01:30 EST (2026-11-02 06:30 UTC).
+    const nextFire = nextCronOccurrenceMs('30 1 * * *', firstFire, NY)!
+    expect(nextFire).not.toBe(Date.parse('2026-11-01T06:30:00.000Z')) // the suppressed duplicate
+    expect(new Date(nextFire).toISOString()).toBe('2026-11-02T06:30:00.000Z')
+  })
+
+  it('DST spring-forward: a wall-clock time that does not exist skips that day', () => {
+    // 2026-03-08 America/New_York clocks go 02:00 EST → 03:00 EDT, so local 02:30 NEVER occurs that day.
+    // The minute-scan finds no UTC instant mapping to 02:30 on Mar 8 → it skips to 2026-03-09 02:30 EDT
+    // (= 06:30 UTC).
+    const from = Date.parse('2026-03-08T00:00:00.000Z')
+    const fire = nextCronOccurrenceMs('30 2 * * *', from, NY)!
+    expect(new Date(fire).toISOString()).not.toBe('2026-03-08T07:30:00.000Z')
+    expect(new Date(fire).getUTCDate()).not.toBe(8) // skipped the spring-forward day entirely
+    expect(new Date(fire).toISOString()).toBe('2026-03-09T06:30:00.000Z')
+  })
+
+  it('runtime defense: an invalid IANA tz is CAUGHT (not thrown) and falls back to UTC', () => {
+    const from = Date.parse('2026-06-15T00:00:00.000Z')
+    let result: number | null = null
+    expect(() => {
+      result = nextCronOccurrenceMs('30 1 * * *', from, 'Not/AZone')
+    }).not.toThrow()
+    // UTC fallback: 01:30 UTC, not 01:30 in some zone.
+    expect(new Date(result!).toISOString()).toBe('2026-06-15T01:30:00.000Z')
+  })
+})
+
 describe('cronHasNoMatchingDay', () => {
   it('flags day-of-month values no restricted month can host', () => {
     expect(cronHasNoMatchingDay('0 0 30 2 *')).toBe(true) // February tops out at 29
@@ -2423,6 +2484,44 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rule.name).toBe('My Rule')
     expect(rule.trigger_type).toBe('record.created')
     expect(rule.enabled).toBe(true)
+  })
+
+  it('T2-5: createRule REJECTS an invalid IANA timezone on a cron trigger (400 at save)', async () => {
+    await expect(
+      service.createRule('sheet_1', {
+        name: 'cron bad tz',
+        triggerType: 'schedule.cron',
+        triggerConfig: { expression: '30 1 * * *', timezone: 'Not/AZone' },
+        actionType: 'update_record',
+        actionConfig: { fields: { status: 'x' } },
+      }),
+    ).rejects.toThrow(/cron timezone must be a valid IANA timezone/i)
+  })
+
+  it('T2-5: createRule ACCEPTS a valid non-UTC IANA timezone on a cron trigger', async () => {
+    dbExecuteResults.push([]) // insertInto().execute()
+    const rule = await service.createRule('sheet_1', {
+      name: 'cron good tz',
+      triggerType: 'schedule.cron',
+      triggerConfig: { expression: '30 1 * * *', timezone: 'America/New_York' },
+      actionType: 'update_record',
+      actionConfig: { fields: { status: 'x' } },
+    })
+    expect(rule.trigger_type).toBe('schedule.cron')
+    expect((rule.trigger_config as { timezone?: string }).timezone).toBe('America/New_York')
+  })
+
+  it('T2-5: createRule REJECTS an invalid IANA timezone on a date_field trigger (400, tz gate before DB lookup)', async () => {
+    // The tz gate fires before the meta_fields lookup, so an invalid tz rejects even with the empty-rows mock.
+    await expect(
+      service.createRule('sheet_1', {
+        name: 'date_field bad tz',
+        triggerType: 'schedule.date_field',
+        triggerConfig: { dateFieldId: 'fld_d', offsetDays: 3, direction: 'before', timezone: 'Bogus/Zone' },
+        actionType: 'update_record',
+        actionConfig: { fields: { status: 'x' } },
+      }),
+    ).rejects.toThrow(/date_field timezone must be a valid IANA timezone/i)
   })
 
   it('A6-2: createRule accepts wait_for_callback with workflow_job_v1', async () => {
