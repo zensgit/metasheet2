@@ -351,17 +351,24 @@ describe('dateReminderCandidateDateRange — SQL pre-filter brackets the product
     expect(bareOnLoDay >= oldFullIsoLo).toBe(false)
   })
 
-  test('offsetDays at the cap does NOT overflow toISOString; far above the cap WOULD (why the save cap exists)', () => {
+  test('offsetDays defense-in-depth: bounded at the cap, and a PERSISTED out-of-range value DEGRADES (no throw)', () => {
     const now = Date.parse('2026-06-25T12:00:00.000Z')
     const window = DATE_REMINDER_GRACE_WINDOW_MS
-    // At the sanity cap the range math stays inside the JS Date range — no throw, valid date-only bounds.
+    // At the sanity cap the range math stays inside the JS Date range — valid date-only bounds.
+    const atCap = dateReminderCandidateDateRange(now, { offsetDays: MAX_DATE_REMINDER_OFFSET_DAYS, direction: 'after' }, window)
+    expect(atCap.loIso).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(atCap.hiIso).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    // The save cap (validateDateFieldTriggerAtSave) rejects new out-of-range rules; for a PERSISTED junk value
+    // (direct-DB / pre-cap) the runtime clamp degrades to bounded output instead of throwing a RangeError that
+    // would abort the whole scan. The clamped 1e12 produces the SAME bounds as the cap (magnitude clamp).
+    let degraded: { loIso: string; hiIso: string } | null = null
     expect(() => {
-      const r = dateReminderCandidateDateRange(now, { offsetDays: MAX_DATE_REMINDER_OFFSET_DAYS, direction: 'after' }, window)
-      expect(r.loIso).toMatch(/^\d{4}-\d{2}-\d{2}$/)
-      expect(r.hiIso).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+      degraded = dateReminderCandidateDateRange(now, { offsetDays: 1e12, direction: 'after' }, window)
     }).not.toThrow()
-    // An uncapped absurd value overflows new Date(ms).toISOString() with a RangeError — exactly what the
-    // save-time cap (validateDateFieldTriggerAtSave) fail-closes so the scan never aborts on it.
-    expect(() => dateReminderCandidateDateRange(now, { offsetDays: 1e12, direction: 'after' }, window)).toThrow(RangeError)
+    expect(degraded!).toEqual(atCap)
+    // The occurrence path degrades too (no throw) for a persisted huge offset.
+    expect(() =>
+      computeDateReminderOccurrence('2026-06-28', { offsetDays: 1e12, direction: 'after', timeOfDay: '09:00' }),
+    ).not.toThrow()
   })
 })

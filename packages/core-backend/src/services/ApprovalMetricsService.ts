@@ -466,7 +466,7 @@ export class ApprovalMetricsService {
        FROM approval_metrics
        ${where}
        GROUP BY template_id
-       ORDER BY COUNT(*) DESC
+       ORDER BY COUNT(*) DESC, template_id ASC
        LIMIT 100`,
       params,
     )
@@ -561,7 +561,7 @@ export class ApprovalMetricsService {
        LEFT JOIN approval_instances i ON i.id = m.instance_id
        ${where}
        GROUP BY ${keyExpr}
-       ORDER BY COUNT(*) DESC
+       ORDER BY COUNT(*) DESC, ${keyExpr} ASC
        LIMIT 100`,
       params,
     )
