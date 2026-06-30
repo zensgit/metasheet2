@@ -5553,6 +5553,7 @@ async function testReadSmokeRoute() {
                     dataDataType: 'missing',
                     dataDataArrayLength: null,
                     fixedContainers: {
+                      dataPascalData: { type: 'array', arrayLength: 2, materialNumber: 'M-LIST-002' },
                       resultRows: { type: 'array', arrayLength: 2, materialNumber: 'M-LIST-001' },
                       topLevel: { type: 'object', arrayLength: null },
                       arbitraryContainer: { type: 'array', arrayLength: 1 },
@@ -5657,6 +5658,7 @@ async function testReadSmokeRoute() {
     dataDataType: 'missing',
     dataDataArrayLength: null,
     fixedContainers: {
+      dataPascalData: { type: 'array', arrayLength: 2 },
       resultRows: { type: 'array', arrayLength: 2 },
       topLevel: { type: 'object', arrayLength: null },
     },
@@ -5687,7 +5689,7 @@ async function testReadSmokeRoute() {
     maxListLimit: 10,
   }, 'LIST applies the non-persisted Material/GetList overlay before adapter creation')
   const okListStr = JSON.stringify(okList.body.data)
-  for (const leak of ['M-LIST-001', 'SECRET-LIST-NAME', 'k3host', 'readPath', 'materialNumber']) {
+  for (const leak of ['M-LIST-001', 'M-LIST-002', 'SECRET-LIST-NAME', 'k3host', 'readPath', 'materialNumber']) {
     assert.ok(!okListStr.includes(leak), `LIST read-smoke response must not leak ${leak}`)
   }
 
