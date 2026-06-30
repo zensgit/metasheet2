@@ -2090,6 +2090,16 @@ export class MetaSheetServer {
             )
           }
         },
+        // T1-1 node-level SLA: dispatch per-node overdue reminders to the node's active assignees.
+        onNodeReminder: async ({ instanceId, assigneeIds }) => {
+          try {
+            await breachNotifier.notifyNodeReminder(instanceId, assigneeIds)
+          } catch (notifyError) {
+            this.logger.warn(
+              `ApprovalBreachNotifier node-reminder dispatch failed: ${notifyError instanceof Error ? notifyError.message : String(notifyError)}`,
+            )
+          }
+        },
       })
       this.logger.info('Approval SLA scheduler initialized')
     } catch (e) {
