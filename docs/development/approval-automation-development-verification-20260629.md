@@ -26,13 +26,14 @@ broken/unreviewed code. It was not done, by design.
 
 | Item | PR | What | Verification |
 |---|---|---|---|
-| **T0-2 W7 resultWriteback UI** | **#3384** (reviewable) | exposes the shipped approved-path backwrite config in the `start_approval` editor — 3 pickers (`statusField`/`approverField`/`completedAtField`), preserve-current-value, omit-when-empty, explicit-carry + `requester` pass-through | `vue-tsc -b` clean · 116 specs (5 new) · **3 fail-first claims verified by revert** |
-| **R3 inert-trigger removal** | **#3382** (reviewable) | drop `webhook.received` from the editor selectable set (runtime-inert → silently never fired); backend enum left intact | editor spec 100/100 (asserts not-selectable) |
+| **T0-2 W7 resultWriteback UI** | **#3384** (merged `bbce6cfa8`) | exposes the shipped approved-path backwrite config in the `start_approval` editor — 3 pickers (`statusField`/`approverField`/`completedAtField`), preserve-current-value, omit-when-empty, explicit-carry + `requester` pass-through | `vue-tsc -b` clean · 116 specs (5 new) · **3 fail-first claims verified by revert** |
+| **R3 inert-trigger removal** | **#3382** (merged `f2242d363`) | drop `webhook.received` from the editor selectable set (runtime-inert → silently never fired); backend enum left intact | editor spec 100/100 (asserts not-selectable) |
 | **R2 redaction regression** | **#3382** | DB-backed guard: `ApprovalBridgeService.getApproval` strips a `hidden` field, stored snapshot untouched; sentinel guards silent skip | real-DB 2/2 locally, and **wired into the approval real-DB CI lane** (`plugin-tests.yml` whole-file list + `vitest.config.ts` no-DB exclude) per review P1 — so it runs against real Postgres every PR, not skip-green |
 
 **Verification discipline:** every diff was reviewed by hand (not subagent self-report); tests assert the
 real wire, not hand-built fixtures; fail-first tests were confirmed RED by reverting the change they
-target. Both PRs are held **reviewable** (CI running) — not auto-merged.
+target. Both PRs have since **merged** to `main` (#3384 `bbce6cfa8`, #3382 `f2242d363`), carrying
+the review-P1 CI-wiring and the review-P2 report correction.
 
 **One honest deviation on T0-2 (needs your nod, in #3384):** the merged design-lock §5 framed the P2 test
 as fail-first at *save*. Empirically, Vue `<select v-model>` retains the bound value when it leaves the
