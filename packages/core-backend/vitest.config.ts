@@ -35,6 +35,10 @@ export default defineConfig({
       'tests/integration/approval-detail-subform.db.test.ts',
       'tests/integration/approval-pack1a-lifecycle.api.test.ts',
       'tests/integration/approval-common-template-presets.api.test.ts',
+      // R2 hidden-field redaction guard: DATABASE_URL-gated (describeIfDatabase). Excluded from the
+      // default no-DB job so it doesn't skip-green, and wired as a WHOLE FILE into the dedicated
+      // `Run approval real-DB integration` step in plugin-tests.yml where it runs against real Postgres.
+      'tests/integration/approval-bridge-redaction-regression.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
