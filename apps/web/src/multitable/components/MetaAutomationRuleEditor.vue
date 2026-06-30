@@ -38,7 +38,13 @@
             <option value="schedule.cron">{{ automationTriggerTypeLabel('schedule.cron', isZh) }}</option>
             <option value="schedule.interval">{{ automationTriggerTypeLabel('schedule.interval', isZh) }}</option>
             <option value="schedule.date_field">{{ automationTriggerTypeLabel('schedule.date_field', isZh) }}</option>
-            <option value="webhook.received">{{ automationTriggerTypeLabel('webhook.received', isZh) }}</option>
+            <!--
+              `webhook.received` is intentionally NOT offered here: it is runtime-inert today
+              (no inbound ingestion route exists, the scheduler skips it, and it has no
+              TRIGGER_TYPE_BY_EVENT entry), so a saved rule would silently never fire. This is a
+              UI-only removal — the backend trigger-type enum is deliberately left intact pending a
+              real inbound webhook endpoint, at which point this option can be re-exposed.
+            -->
           </select>
 
           <!-- field.value_changed config -->
@@ -336,6 +342,26 @@
                 <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeApprovalMapping(action, pidx)">&times;</button>
               </div>
               <button class="meta-rule-editor__btn" type="button" @click="addApprovalMapping(action)">{{ automationLabel('editor.addField', isZh) }}</button>
+
+              <!-- W7 approval-result writeback (optional): three source-field pickers. Type compat is a hint; the
+                   currently-configured value is always preserved as a marked option (see resultWritebackFieldOptions). -->
+              <label class="meta-rule-editor__label">{{ automationLabel('resultWriteback.title', isZh) }}</label>
+              <div class="meta-rule-editor__hint">{{ automationLabel('resultWriteback.hint', isZh) }}</div>
+              <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.statusField', isZh) }}</label>
+              <select v-model="action.config.resultWritebackStatusField" class="meta-rule-editor__select" data-field="resultWritebackStatusField">
+                <option value="">{{ automationLabel('resultWriteback.none', isZh) }}</option>
+                <option v-for="opt in resultWritebackFieldOptions('status', action.config.resultWritebackStatusField)" :key="opt.id" :value="opt.id" :data-marked="opt.marked || undefined">{{ opt.label }}</option>
+              </select>
+              <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.approverField', isZh) }}</label>
+              <select v-model="action.config.resultWritebackApproverField" class="meta-rule-editor__select" data-field="resultWritebackApproverField">
+                <option value="">{{ automationLabel('resultWriteback.none', isZh) }}</option>
+                <option v-for="opt in resultWritebackFieldOptions('approver', action.config.resultWritebackApproverField)" :key="opt.id" :value="opt.id" :data-marked="opt.marked || undefined">{{ opt.label }}</option>
+              </select>
+              <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.completedAtField', isZh) }}</label>
+              <select v-model="action.config.resultWritebackCompletedAtField" class="meta-rule-editor__select" data-field="resultWritebackCompletedAtField">
+                <option value="">{{ automationLabel('resultWriteback.none', isZh) }}</option>
+                <option v-for="opt in resultWritebackFieldOptions('completedAt', action.config.resultWritebackCompletedAtField)" :key="opt.id" :value="opt.id" :data-marked="opt.marked || undefined">{{ opt.label }}</option>
+              </select>
             </div>
 
             <!-- send_email config -->
@@ -1226,6 +1252,10 @@ type DraftActionConfig = Record<string, unknown> & {
   bodyTemplate?: string
   publicFormViewId?: string
   internalViewId?: string
+  // W7 start_approval result-writeback pickers (UI-only bindings; assembled into config.resultWriteback on save).
+  resultWritebackStatusField?: string
+  resultWritebackApproverField?: string
+  resultWritebackCompletedAtField?: string
   locked?: boolean
   // A6-3-2a condition_branch authoring (supported → editable draft; unsupported → read-only + original preserved)
   branches?: BranchDraft[]
@@ -1816,10 +1846,15 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
     const formDataMappingPairs = Array.isArray(config.formDataMappingPairs)
       ? config.formDataMappingPairs
       : Object.entries(mapping).map(([fieldId, value]) => ({ fieldId, value: String(value ?? '') }))
+    // W7: backfill the optional result-writeback pickers from config.resultWriteback (empty string when absent).
+    const writeback = isPlainRecord(config.resultWriteback) ? config.resultWriteback : {}
     return {
       ...config,
       templateId: typeof config.templateId === 'string' ? config.templateId : '',
       formDataMappingPairs,
+      resultWritebackStatusField: typeof writeback.statusField === 'string' ? writeback.statusField : '',
+      resultWritebackApproverField: typeof writeback.approverField === 'string' ? writeback.approverField : '',
+      resultWritebackCompletedAtField: typeof writeback.completedAtField === 'string' ? writeback.completedAtField : '',
     }
   }
   if (type === 'send_dingtalk_group_message') {
@@ -2822,6 +2857,42 @@ function removeApprovalMapping(action: DraftAction, idx: number) {
   ;(action.config.formDataMappingPairs as FieldPair[]).splice(idx, 1)
 }
 
+// W7 result-writeback picker options. Type compatibility is a HINT, never a GATE: the option set is the
+// type-compatible source fields PLUS the currently-configured field id, which is ALWAYS present (and thus
+// selectable + selected) even when it has been deleted, retyped, or is otherwise absent from `fields`.
+// Preserving the current value is what makes the omit-when-empty save rule safe — an empty picker then means
+// "the author cleared it," never "a configured value couldn't be displayed" (design-lock §3 P2 / §4). The
+// backend's assertResultWritebackFields remains the authority; the marker is a visible hint, not a rejection.
+type ResultWritebackFieldKind = 'status' | 'approver' | 'completedAt'
+const RESULT_WRITEBACK_COMPAT: Record<ResultWritebackFieldKind, readonly string[]> = {
+  status: ['string', 'longText', 'select'],
+  approver: ['string', 'longText'],
+  completedAt: ['string', 'longText', 'dateTime'],
+}
+
+function resultWritebackFieldOptions(
+  kind: ResultWritebackFieldKind,
+  currentValue: unknown,
+): Array<{ id: string; label: string; marked: boolean }> {
+  const compat = RESULT_WRITEBACK_COMPAT[kind]
+  const options = props.fields
+    .filter((field) => compat.includes(field.type))
+    .map((field) => ({ id: field.id, label: field.name, marked: false }))
+  const current = typeof currentValue === 'string' ? currentValue.trim() : ''
+  if (current && !options.some((option) => option.id === current)) {
+    // P2 must-fix: the stale/incompatible/missing configured value is appended as a marked option so the
+    // <select> never silently renders empty and an unedited save carries it back verbatim for the backend.
+    const existing = props.fields.find((field) => field.id === current)
+    const marker = existing
+      ? automationLabel('resultWriteback.markIncompatible', isZh.value)
+      : automationLabel('resultWriteback.markUnknown', isZh.value)
+    const baseName = existing ? existing.name : current
+    const label = isZh.value ? `${baseName}（${marker}）` : `${baseName} (${marker})`
+    options.push({ id: current, label, marked: true })
+  }
+  return options
+}
+
 function addCreateFieldValue(action: DraftAction) {
   if (!Array.isArray(action.config.fieldValues)) action.config.fieldValues = []
   ;(action.config.fieldValues as FieldPair[]).push({ fieldId: '', value: '' })
@@ -2869,13 +2940,28 @@ function buildPayload(): Partial<AutomationRule> {
       // Assemble the {key: value} formDataMapping the backend requires from the editable rows. templateId +
       // mapping non-emptiness are enforced server-side (validateStartApprovalConfig) — the UI is authoring,
       // not the validation gate.
-      return {
-        type: action.type,
-        config: {
-          templateId: typeof action.config.templateId === 'string' ? action.config.templateId.trim() : '',
-          formDataMapping: fieldPairsToRecord(action.config.formDataMappingPairs),
-        },
+      //
+      // W7: this branch rebuilds config from scratch (NOT a `...action.config` spread — that would leak the
+      // UI-only formDataMappingPairs draft rows). So result-writeback must be carried EXPLICITLY or an unedited
+      // load→save silently drops it (the lossy round-trip the W7 lock exists to fix). Assemble resultWriteback
+      // from the three pickers, emit only non-empty trimmed fields, and OMIT the key entirely when all three are
+      // empty — the backend rejects an empty `{}` mapping, so "nothing configured" must round-trip to ABSENCE.
+      const resultWriteback: Record<string, string> = {}
+      const statusField = typeof action.config.resultWritebackStatusField === 'string' ? action.config.resultWritebackStatusField.trim() : ''
+      const approverField = typeof action.config.resultWritebackApproverField === 'string' ? action.config.resultWritebackApproverField.trim() : ''
+      const completedAtField = typeof action.config.resultWritebackCompletedAtField === 'string' ? action.config.resultWritebackCompletedAtField.trim() : ''
+      if (statusField) resultWriteback.statusField = statusField
+      if (approverField) resultWriteback.approverField = approverField
+      if (completedAtField) resultWriteback.completedAtField = completedAtField
+      const config: Record<string, unknown> = {
+        templateId: typeof action.config.templateId === 'string' ? action.config.templateId.trim() : '',
+        formDataMapping: fieldPairsToRecord(action.config.formDataMappingPairs),
       }
+      if (Object.keys(resultWriteback).length > 0) config.resultWriteback = resultWriteback
+      // W7 §6: no `requester` UI in this slice, but carry a backend-valid hand-authored `requester` through so
+      // the from-scratch rebuild stays lossless for any valid config (not just the keys this slice surfaces).
+      if (action.config.requester !== undefined) config.requester = action.config.requester
+      return { type: action.type, config }
     }
     if (action.type === 'parallel_branch') {
       if (action.config.parallelBranchUnsupportedReason && action.config.parallelBranchOriginal) {

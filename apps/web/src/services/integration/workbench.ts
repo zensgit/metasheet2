@@ -128,6 +128,25 @@ export type PlmBomMultitableResult =
     reason?: string
   }
 
+export interface PlmBomMultitableLinePatch {
+  quantity?: number | string | null
+  uom?: string | null
+  find_num?: string | null
+  refdes?: string | null
+}
+
+export type PlmBomMultitableLineUpdateResult =
+  | {
+    ok: true
+    bom_line_id: string
+  }
+  | {
+    ok: false
+    status: number
+    reason: string
+    message: string
+  }
+
 export interface WorkbenchExternalSystemUpsertRequest extends IntegrationScope {
   id?: string
   projectId?: string | null
@@ -796,6 +815,59 @@ export async function getPlmBomMultitableContext(
     return { data_source_id: dsId, available: false, reason: 'unavailable' }
   }
   return normalizePlmBomMultitableResult(dsId, payload)
+}
+
+export async function updatePlmBomMultitableLine(
+  dataSourceId: string,
+  partId: string,
+  bomLineId: string,
+  patch: PlmBomMultitableLinePatch,
+  idempotencyKey: string,
+): Promise<PlmBomMultitableLineUpdateResult> {
+  const dsId = dataSourceId.trim()
+  const pid = partId.trim()
+  const lineId = bomLineId.trim()
+  const idem = idempotencyKey.trim()
+  if (!dsId || !pid || !lineId || !idem) {
+    return { ok: false, status: 400, reason: 'invalid-request', message: 'BOM write-back request is incomplete' }
+  }
+
+  const payload: PlmBomMultitableLinePatch = {}
+  if (patch.quantity !== undefined) payload.quantity = patch.quantity
+  if (patch.uom !== undefined) payload.uom = patch.uom
+  if (patch.find_num !== undefined) payload.find_num = patch.find_num
+  if (patch.refdes !== undefined) payload.refdes = patch.refdes
+  if (Object.keys(payload).length === 0) {
+    return { ok: false, status: 400, reason: 'empty-patch', message: 'No changed BOM cells to submit' }
+  }
+
+  const response = await apiFetch(
+    `/api/plm-workbench/data-sources/${encodeURIComponent(dsId)}/bom-multitable/${encodeURIComponent(pid)}/lines/${encodeURIComponent(lineId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Idempotency-Key': idem },
+      body: JSON.stringify(payload),
+      suppressUnauthorizedRedirect: true,
+    },
+  )
+  const body = await response.json().catch(() => null) as Record<string, unknown> | null
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      reason: typeof body?.reason === 'string' && body.reason.trim() ? body.reason.trim() : 'writeback-failed',
+      message: typeof body?.error === 'string' && body.error.trim() ? body.error.trim() : `BOM write-back failed (${response.status})`,
+    }
+  }
+  if (body?.ok === true && typeof body.bom_line_id === 'string' && body.bom_line_id.trim()) {
+    return { ok: true, bom_line_id: body.bom_line_id.trim() }
+  }
+  return {
+    ok: false,
+    status: 502,
+    reason: 'malformed-response',
+    message: 'BOM write-back returned a malformed response',
+  }
 }
 
 export async function upsertWorkbenchExternalSystem(

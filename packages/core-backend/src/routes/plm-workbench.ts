@@ -27,7 +27,12 @@ import {
 import { loadValidators } from '../types/validator'
 import { parsePagination } from '../util/response'
 import { getDataSourceManager } from './data-sources'
-import type { IntegrationCapabilitiesResult, BomMultitableContextResult } from '../data-adapters/PLMAdapter'
+import type {
+  IntegrationCapabilitiesResult,
+  BomMultitableContextResult,
+  BomMultitableLinePatch,
+  BomMultitableLineUpdateResult,
+} from '../data-adapters/PLMAdapter'
 
 // Typed wrapper for temporary tables not yet in main Database interface
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -792,12 +797,81 @@ interface PlmBomReviewAdapter {
   getBomMultitableContext(partId: string): Promise<BomMultitableContextResult>
 }
 
+interface PlmBomWritebackAdapter extends PlmBomReviewAdapter {
+  updateBomMultitableLine(
+    partId: string,
+    bomLineId: string,
+    patch: BomMultitableLinePatch,
+    options?: { idempotencyKey?: string },
+  ): Promise<{ data?: BomMultitableLineUpdateResult[]; error?: Error }>
+}
+
 function isPlmBomReviewAdapter(adapter: unknown): adapter is PlmBomReviewAdapter {
   const candidate = adapter as PlmBomReviewAdapter | null
   return (
     typeof candidate?.getIntegrationCapabilities === 'function'
     && typeof candidate?.getBomMultitableContext === 'function'
   )
+}
+
+function isPlmBomWritebackAdapter(adapter: unknown): adapter is PlmBomWritebackAdapter {
+  const candidate = adapter as PlmBomWritebackAdapter | null
+  return (
+    isPlmBomReviewAdapter(adapter)
+    && typeof candidate?.updateBomMultitableLine === 'function'
+  )
+}
+
+function normalizeBomLineWritebackPatch(value: unknown): BomMultitableLinePatch | null {
+  const record = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+  const patch: BomMultitableLinePatch = {}
+  if ('quantity' in record) {
+    const quantity = record.quantity
+    if (
+      quantity !== null
+      && typeof quantity !== 'number'
+      && typeof quantity !== 'string'
+    ) {
+      return null
+    }
+    patch.quantity = quantity as number | string | null
+  }
+  if ('uom' in record) {
+    const uom = record.uom
+    if (uom !== null && typeof uom !== 'string') return null
+    patch.uom = uom as string | null
+  }
+  if ('find_num' in record) {
+    const findNum = record.find_num
+    if (findNum !== null && typeof findNum !== 'string') return null
+    patch.find_num = findNum as string | null
+  }
+  if ('refdes' in record) {
+    const refdes = record.refdes
+    if (refdes !== null && typeof refdes !== 'string') return null
+    patch.refdes = refdes as string | null
+  }
+  return Object.keys(patch).length > 0 ? patch : null
+}
+
+function providerErrorStatus(error: unknown): number | null {
+  const candidate = error as {
+    response?: { status?: unknown }
+    status?: unknown
+    statusCode?: unknown
+  } | null
+  const status = candidate?.response?.status ?? candidate?.status ?? candidate?.statusCode
+  return typeof status === 'number' ? status : null
+}
+
+function relayProviderWritebackError(error: unknown): { status: number; reason: string } {
+  const status = providerErrorStatus(error)
+  if (status && [400, 403, 404, 409, 422].includes(status)) {
+    return { status, reason: 'provider-rejected' }
+  }
+  return { status: 502, reason: 'provider-unavailable' }
 }
 
 router.get(
@@ -857,6 +931,97 @@ router.get(
       entitled,
       context: entitled ? result.context : null,
     })
+  },
+)
+
+router.patch(
+  '/api/plm-workbench/data-sources/:id/bom-multitable/:partId/lines/:bomLineId',
+  authenticate,
+  param('id').isString(),
+  param('partId').isString(),
+  param('bomLineId').isString(),
+  validate,
+  async (req: Request, res: Response) => {
+    const dataSourceId = req.params.id
+    const partId = req.params.partId
+    const bomLineId = req.params.bomLineId
+    let adapter: unknown
+    try {
+      adapter = getDataSourceManager().getDataSource(dataSourceId)
+    } catch {
+      return res
+        .status(404)
+        .json({ error: 'Data source not found', data_source_id: dataSourceId })
+    }
+    if (!isPlmBomWritebackAdapter(adapter)) {
+      return res.status(404).json({
+        error: 'BOM write-back is not supported for this data source',
+        data_source_id: dataSourceId,
+      })
+    }
+
+    let capabilities: IntegrationCapabilitiesResult
+    try {
+      capabilities = await adapter.getIntegrationCapabilities()
+    } catch {
+      return res.status(503).json({
+        error: 'PLM capabilities unavailable',
+        data_source_id: dataSourceId,
+        reason: 'unavailable',
+      })
+    }
+    const feature = capabilities.available ? capabilities.manifest.features.bom_multitable_writeback : undefined
+    if (!feature || feature.supported !== true) {
+      return res.status(404).json({
+        error: 'BOM write-back is not supported',
+        data_source_id: dataSourceId,
+        reason: 'unsupported',
+      })
+    }
+    if (feature.entitled !== true) {
+      return res.status(403).json({
+        error: 'BOM write-back is not entitled',
+        data_source_id: dataSourceId,
+        reason: 'not-entitled',
+      })
+    }
+
+    const idempotencyKey = (req.header('Idempotency-Key') || '').trim()
+    if (!idempotencyKey) {
+      return res.status(400).json({
+        error: 'Idempotency-Key header is required',
+        data_source_id: dataSourceId,
+        reason: 'missing-idempotency-key',
+      })
+    }
+
+    const patch = normalizeBomLineWritebackPatch(req.body)
+    if (!patch) {
+      return res.status(400).json({
+        error: 'BOM write-back patch must include quantity, uom, find_num, or refdes',
+        data_source_id: dataSourceId,
+        reason: 'invalid-patch',
+      })
+    }
+
+    const result = await adapter.updateBomMultitableLine(partId, bomLineId, patch, { idempotencyKey })
+    if (result.error) {
+      const relayed = relayProviderWritebackError(result.error)
+      return res.status(relayed.status).json({
+        error: result.error.message || 'BOM write-back failed',
+        data_source_id: dataSourceId,
+        reason: relayed.reason,
+      })
+    }
+    const payload = result.data?.[0]
+    if (!payload || payload.ok !== true || typeof payload.bom_line_id !== 'string') {
+      return res.status(502).json({
+        error: 'BOM write-back returned a malformed response',
+        data_source_id: dataSourceId,
+        reason: 'malformed-response',
+      })
+    }
+    return res.json(payload)
   },
 )
 

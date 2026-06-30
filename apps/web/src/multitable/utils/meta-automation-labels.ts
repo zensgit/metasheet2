@@ -294,6 +294,15 @@ export type AutomationLabelKey =
   | 'runs.resumeError.ruleMissingOrDisabled'
   | 'runs.resumeError.recordGone'
   | 'runs.resumeError.generic'
+  // W7 start_approval approval-result writeback pickers.
+  | 'resultWriteback.title'
+  | 'resultWriteback.hint'
+  | 'resultWriteback.statusField'
+  | 'resultWriteback.approverField'
+  | 'resultWriteback.completedAtField'
+  | 'resultWriteback.none'
+  | 'resultWriteback.markUnknown'
+  | 'resultWriteback.markIncompatible'
 
 export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'log.title',
@@ -538,6 +547,14 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.resumeError.ruleMissingOrDisabled',
   'runs.resumeError.recordGone',
   'runs.resumeError.generic',
+  'resultWriteback.title',
+  'resultWriteback.hint',
+  'resultWriteback.statusField',
+  'resultWriteback.approverField',
+  'resultWriteback.completedAtField',
+  'resultWriteback.none',
+  'resultWriteback.markUnknown',
+  'resultWriteback.markIncompatible',
 ]
 
 const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
@@ -810,6 +827,17 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'runs.resumeError.ruleMissingOrDisabled': { en: 'The rule is missing or disabled; cannot resume.', zh: '规则缺失或已停用，无法恢复。' },
   'runs.resumeError.recordGone': { en: 'The record no longer exists; cannot resume.', zh: '记录已不存在，无法恢复。' },
   'runs.resumeError.generic': { en: 'Resume failed.', zh: '恢复失败。' },
+  'resultWriteback.title': { en: 'Approval-result writeback (optional)', zh: '审批结果写回（可选）' },
+  'resultWriteback.hint': {
+    en: 'On approval, write the outcome back onto the source record. Each field is optional.',
+    zh: '审批通过后，将审批结果写回到来源记录。每个字段均为可选。',
+  },
+  'resultWriteback.statusField': { en: 'Status field', zh: '状态字段' },
+  'resultWriteback.approverField': { en: 'Approver field', zh: '审批人字段' },
+  'resultWriteback.completedAtField': { en: 'Completed-at field', zh: '完成时间字段' },
+  'resultWriteback.none': { en: '(not written)', zh: '（不写回）' },
+  'resultWriteback.markUnknown': { en: 'unknown field', zh: '未知字段' },
+  'resultWriteback.markIncompatible': { en: 'incompatible', zh: '不兼容' },
 }
 
 type UnknownAutomationString = string & Record<never, never>

@@ -802,6 +802,9 @@ function materialListRowsCandidate(data) {
   const candidates = [
     getPath(data, 'Data.DATA'),
     getPath(data, 'Data.data'),
+    // PascalCase row container observed on the live K3 instance (#1709): rows are at Data.Data, while the
+    // doc sample used Data.DATA. Compat order keeps the prior all-caps/lowercase paths first.
+    getPath(data, 'Data.Data'),
   ]
   for (const candidate of candidates) {
     if (Array.isArray(candidate)) return candidate.filter(isPlainObject).map((row) => cloneJson(row))
@@ -813,11 +816,63 @@ function materialListShapeProbe(data) {
   return {
     dataData: Array.isArray(getPath(data, 'Data.DATA')),
     dataLowerData: Array.isArray(getPath(data, 'Data.data')),
+    dataPascalData: Array.isArray(getPath(data, 'Data.Data')),
     dataRows: Array.isArray(getPath(data, 'Data.Rows')),
     resultData: Array.isArray(getPath(data, 'Result.Data')),
     resultRows: Array.isArray(getPath(data, 'Result.Rows')),
     rows: Array.isArray(getPath(data, 'Rows')),
     topLevelArray: Array.isArray(data),
+  }
+}
+
+const MATERIAL_LIST_RESPONSE_SHAPE_CONTAINER_PATHS = Object.freeze([
+  ['dataData', 'Data.DATA'],
+  ['dataLowerData', 'Data.data'],
+  ['dataPascalData', 'Data.Data'],
+  ['dataRows', 'Data.Rows'],
+  ['dataList', 'Data.List'],
+  ['dataItems', 'Data.Items'],
+  ['resultData', 'Result.Data'],
+  ['resultRows', 'Result.Rows'],
+  ['rows', 'Rows'],
+  ['topLevel', ''],
+])
+
+function materialListShapeType(value) {
+  if (value === undefined) return 'missing'
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'array'
+  if (isPlainObject(value)) return 'object'
+  if (['string', 'number', 'boolean'].includes(typeof value)) return typeof value
+  return 'other'
+}
+
+function materialListArrayLength(value) {
+  if (!Array.isArray(value)) return null
+  return Math.min(value.length, 1000)
+}
+
+function materialListShapeValueEvidence(value) {
+  return {
+    type: materialListShapeType(value),
+    arrayLength: materialListArrayLength(value),
+  }
+}
+
+function materialListResponseShapeProbe(data) {
+  const fixedContainers = {}
+  for (const [key, path] of MATERIAL_LIST_RESPONSE_SHAPE_CONTAINER_PATHS) {
+    fixedContainers[key] = materialListShapeValueEvidence(path ? getPath(data, path) : data)
+  }
+  const dataData = getPath(data, 'Data.DATA')
+  return {
+    dataObjectPresent: isPlainObject(getPath(data, 'Data')),
+    dataRowCountPresent: materialListRowCount(data) !== null,
+    dataPageSizePresent: materialListPageSize(data) !== null,
+    dataPageIndexPresent: materialListPageIndex(data) !== null,
+    dataDataType: materialListShapeType(dataData),
+    dataDataArrayLength: materialListArrayLength(dataData),
+    fixedContainers,
   }
 }
 
@@ -1375,13 +1430,14 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       }
 
       const listShapeProbe = materialListShapeProbe(readResponse.data)
-      const dataDataPresent = listShapeProbe.dataData || listShapeProbe.dataLowerData
+      const dataDataPresent = listShapeProbe.dataData || listShapeProbe.dataLowerData || listShapeProbe.dataPascalData
       const dataRowCount = materialListRowCount(readResponse.data)
       // Paging echo: what K3 reports it applied, vs what we requested (Top=PageSize=request.limit, PageIndex=1).
       const dataPageSize = materialListPageSize(readResponse.data)
       const dataPageIndex = materialListPageIndex(readResponse.data)
       const requestedLimit = request.limit
       const requestedPageIndex = 1
+      const responseShapeProbe = materialListResponseShapeProbe(readResponse.data)
       if (!materialListBusinessSuccess(readResponse.data, config)) {
         const failureCode = materialListBusinessFailureCode(readResponse.data)
         throw new K3WiseWebApiAdapterError(String(responseMessage(readResponse.data, config, 'K3 WISE list read business response failed')), {
@@ -1395,6 +1451,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           requestedLimit,
           requestedPageIndex,
           listShapeProbe,
+          responseShapeProbe,
         })
       }
 
@@ -1413,6 +1470,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           dataPageSize,
           dataPageIndex,
           listShapeProbe,
+          responseShapeProbe,
           readPath,
           readOnly: true,
         },

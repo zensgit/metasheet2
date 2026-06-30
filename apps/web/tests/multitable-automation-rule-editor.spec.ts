@@ -218,8 +218,11 @@ describe('MetaAutomationRuleEditor', () => {
     const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
     expect(triggerSelect).toBeTruthy()
     // record.created/updated/deleted + field.value_changed + form.submitted + schedule.cron/interval/date_field
-    // + webhook.received
-    expect(triggerSelect.options.length).toBe(9)
+    // `webhook.received` is intentionally NOT selectable: it is runtime-inert (no inbound ingestion
+    // route, scheduler skips it, no TRIGGER_TYPE_BY_EVENT entry) so a saved rule would never fire.
+    expect(triggerSelect.options.length).toBe(8)
+    const triggerValues = Array.from(triggerSelect.options).map((option) => option.value)
+    expect(triggerValues).not.toContain('webhook.received')
   })
 
   it('localizes core rule editor chrome in zh-CN while keeping raw select values', async () => {
@@ -602,6 +605,130 @@ describe('MetaAutomationRuleEditor', () => {
     // The backend fail-closes a legacy start_approval rule; the editor force-corrects on save — parity with
     // wait_for_callback's A6-2b golden. (buildPayload enforces job-mode regardless of the loaded null.)
     expect(saved.mock.calls[0][0].executionMode).toBe('workflow_job_v1')
+  })
+
+  async function selectStartApproval(container: HTMLElement) {
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'start approval'; nameInput.dispatchEvent(new Event('input'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'start_approval'; actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+    const tmpl = container.querySelector('[data-field="approvalTemplateId"]') as HTMLInputElement
+    tmpl.value = 'tmpl_1'; tmpl.dispatchEvent(new Event('input'))
+    await flushPromises()
+  }
+
+  it('W7: renders the optional approval-result writeback pickers over type-compatible source fields', async () => {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+    await selectStartApproval(container)
+
+    const statusSel = container.querySelector('[data-field="resultWritebackStatusField"]') as HTMLSelectElement
+    const approverSel = container.querySelector('[data-field="resultWritebackApproverField"]') as HTMLSelectElement
+    const completedSel = container.querySelector('[data-field="resultWritebackCompletedAtField"]') as HTMLSelectElement
+    expect(statusSel).not.toBeNull()
+    expect(approverSel).not.toBeNull()
+    expect(completedSel).not.toBeNull()
+
+    // status hint = string / longText / select → Status(select), Name(string), Priority(select); plus "(not written)".
+    const statusVals = Array.from(statusSel.options).map((o) => o.value)
+    expect(statusVals).toContain('')
+    expect(statusVals).toEqual(expect.arrayContaining(['fld_1', 'fld_2', 'fld_priority']))
+    expect(statusVals).not.toContain('fld_score') // number is not a status-compatible hint
+    // approver hint = string / longText → only Name(string).
+    expect(Array.from(approverSel.options).map((o) => o.value)).toEqual(expect.arrayContaining(['', 'fld_2']))
+    expect(Array.from(approverSel.options).map((o) => o.value)).not.toContain('fld_1')
+  })
+
+  it('W7: OMITS config.resultWriteback when no writeback picker is set (omit-when-empty, not an invalid {})', async () => {
+    // The backend rejects an empty `{}` mapping, so "nothing configured" must round-trip to ABSENCE.
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+    await selectStartApproval(container)
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config).not.toHaveProperty('resultWriteback')
+  })
+
+  it('W7: saves config.resultWriteback with exactly the chosen pickers (an untouched completedAt stays out)', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+    await selectStartApproval(container)
+    const statusSel = container.querySelector('[data-field="resultWritebackStatusField"]') as HTMLSelectElement
+    const approverSel = container.querySelector('[data-field="resultWritebackApproverField"]') as HTMLSelectElement
+    statusSel.value = 'fld_1'; statusSel.dispatchEvent(new Event('change'))
+    approverSel.value = 'fld_2'; approverSel.dispatchEvent(new Event('change'))
+    await flushPromises()
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual({ statusField: 'fld_1', approverField: 'fld_2' })
+  })
+
+  it('W7: round-trips a loaded resultWriteback unchanged on an unedited save (lossy-drop FAIL-FIRST vs buildPayload)', async () => {
+    const saved = vi.fn()
+    const rule = {
+      id: 'atr_w7', sheetId: 'sheet_1', name: 'w7', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        resultWriteback: { statusField: 'fld_1', approverField: 'fld_2', completedAtField: 'fld_2' },
+        // §6: `requester` has no UI in this slice but rides the SAME from-scratch rebuild — it must survive too.
+        requester: { mode: 'form_field_user', fieldId: 'reviewerUserId' },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+    // draftConfigFromAction backfilled the pickers from the loaded config.
+    expect((container.querySelector('[data-field="resultWritebackStatusField"]') as HTMLSelectElement).value).toBe('fld_1')
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    const cfg = saved.mock.calls[0][0].actions[0].config
+    // FAIL-FIRST: buildPayload rebuilds start_approval config from scratch; without the explicit-carry it drops
+    // resultWriteback entirely → this deep-equals goes RED (the latent lossy round-trip the W7 lock fixes).
+    expect(cfg.resultWriteback).toEqual({ statusField: 'fld_1', approverField: 'fld_2', completedAtField: 'fld_2' })
+    // Same bug-class: the whitelist rebuild must carry a hand-authored `requester` through, not silently drop it.
+    expect(cfg.requester).toEqual({ mode: 'form_field_user', fieldId: 'reviewerUserId' })
+  })
+
+  it('W7: preserves a stale / incompatible / missing resultWriteback target across an unedited save (P2 FAIL-FIRST)', async () => {
+    const saved = vi.fn()
+    const rule = {
+      id: 'atr_w7_stale', sheetId: 'sheet_1', name: 'w7 stale', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: {
+        templateId: 'tmpl_9',
+        formDataMapping: { amount: 'fld_2' },
+        // fld_score is type=number → INCOMPATIBLE for statusField; fld_gone is ABSENT from `fields` → missing.
+        resultWriteback: { statusField: 'fld_score', approverField: 'fld_gone' },
+      },
+      enabled: true,
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+
+    // P2 FAIL-FIRST LEVER (DOM): the picker must keep the stale/missing value as a present + selected <option>.
+    // Without resultWritebackFieldOptions appending the current value, the type filter drops it → no matching
+    // option → select.value falls back to '' → these go RED. (The save assertion below passes via Vue v-model
+    // binding-persistence regardless of P2 — Vue never clears a bound value just because it left the options —
+    // so the DOM is the genuine P2 regression lever; see the design-lock §3 P2 / §4 reconciliation.)
+    const statusSel = container.querySelector('[data-field="resultWritebackStatusField"]') as HTMLSelectElement
+    const approverSel = container.querySelector('[data-field="resultWritebackApproverField"]') as HTMLSelectElement
+    expect(statusSel.value).toBe('fld_score')
+    const statusOpt = Array.from(statusSel.options).find((o) => o.value === 'fld_score')
+    expect(statusOpt).toBeTruthy()
+    expect(statusOpt?.getAttribute('data-marked')).toBe('true') // appended as the marked current-value option
+    expect(approverSel.value).toBe('fld_gone')
+    expect(Array.from(approverSel.options).some((o) => o.value === 'fld_gone')).toBe(true)
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    // §4 Guarantee: the original (stale) ids reach the backend verbatim for assertResultWritebackFields fail-fast
+    // — never silently UI-dropped/omitted.
+    expect(saved.mock.calls[0][0].actions[0].config.resultWriteback).toEqual({ statusField: 'fld_score', approverField: 'fld_gone' })
   })
 
   it('can add and remove conditions', async () => {

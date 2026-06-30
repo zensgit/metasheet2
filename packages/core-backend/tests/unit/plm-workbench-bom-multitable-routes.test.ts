@@ -53,17 +53,22 @@ const CONTEXT = {
   template_key: 'bom_review',
 }
 
-const manifest = (bom: Record<string, unknown> | undefined) => ({
+const manifest = (
+  bom: Record<string, unknown> | undefined,
+  extraFeatures: Record<string, Record<string, unknown>> = {},
+) => ({
   schema_version: 'v1',
   provider: 'yuantus-plm',
   advisory: true,
   features: {
     approval_automation: { supported: true, api_version: 'v1', entitled: true },
     ...(bom ? { bom_multitable: bom } : {}),
+    ...extraFeatures,
   },
 })
 
 const URL = '/api/plm-workbench/data-sources/ds-1/bom-multitable/P1/context'
+const WRITE_URL = '/api/plm-workbench/data-sources/ds-1/bom-multitable/P1/lines/R1'
 
 describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
   const app = express()
@@ -177,5 +182,111 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
     const res = await request(app).get(URL)
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data_source_id: 'ds-1', available: true, entitled: true, context: null, reason: 'unavailable' })
+  })
+
+  it('write route requires a write-capable adapter', async () => {
+    dsMocks.getDataSource.mockReturnValue({
+      getIntegrationCapabilities: vi.fn(),
+      getBomMultitableContext: vi.fn(),
+    })
+    const res = await request(app)
+      .patch(WRITE_URL)
+      .set('Idempotency-Key', 'submit-1')
+      .send({ quantity: 5 })
+    expect(res.status).toBe(404)
+    expect(res.body.reason).toBeUndefined()
+  })
+
+  it('write route pre-checks bom_multitable_writeback entitlement and does not call the provider when unentitled', async () => {
+    const updateBomMultitableLine = vi.fn()
+    dsMocks.getDataSource.mockReturnValue({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest(
+          { supported: true, api_version: 'v1', entitled: true },
+          { bom_multitable_writeback: { supported: true, api_version: 'v1', entitled: false } },
+        ),
+      }),
+      getBomMultitableContext: vi.fn(),
+      updateBomMultitableLine,
+    })
+    const res = await request(app)
+      .patch(WRITE_URL)
+      .set('Idempotency-Key', 'submit-1')
+      .send({ quantity: 5 })
+    expect(res.status).toBe(403)
+    expect(res.body.reason).toBe('not-entitled')
+    expect(updateBomMultitableLine).not.toHaveBeenCalled()
+  })
+
+  it('write route rejects a missing Idempotency-Key before calling the provider', async () => {
+    const updateBomMultitableLine = vi.fn()
+    dsMocks.getDataSource.mockReturnValue({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest(
+          { supported: true, api_version: 'v1', entitled: true },
+          { bom_multitable_writeback: { supported: true, api_version: 'v1', entitled: true } },
+        ),
+      }),
+      getBomMultitableContext: vi.fn(),
+      updateBomMultitableLine,
+    })
+    const res = await request(app)
+      .patch(WRITE_URL)
+      .send({ quantity: 5 })
+    expect(res.status).toBe(400)
+    expect(res.body.reason).toBe('missing-idempotency-key')
+    expect(updateBomMultitableLine).not.toHaveBeenCalled()
+  })
+
+  it('write route forwards whitelisted patch cells with the caller-owned Idempotency-Key', async () => {
+    const updateBomMultitableLine = vi.fn().mockResolvedValue({
+      data: [{ ok: true, bom_line_id: 'R1' }],
+    })
+    dsMocks.getDataSource.mockReturnValue({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest(
+          { supported: true, api_version: 'v1', entitled: true },
+          { bom_multitable_writeback: { supported: true, api_version: 'v1', entitled: true } },
+        ),
+      }),
+      getBomMultitableContext: vi.fn(),
+      updateBomMultitableLine,
+    })
+    const res = await request(app)
+      .patch(WRITE_URL)
+      .set('Idempotency-Key', 'submit-1')
+      .send({ quantity: 5, refdes: null, applied: true })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, bom_line_id: 'R1' })
+    expect(updateBomMultitableLine).toHaveBeenCalledWith(
+      'P1',
+      'R1',
+      { quantity: 5, refdes: null },
+      { idempotencyKey: 'submit-1' },
+    )
+  })
+
+  it('write route relays provider 409 conflicts as actionable failures', async () => {
+    const conflict = Object.assign(new Error('locked'), { response: { status: 409 } })
+    dsMocks.getDataSource.mockReturnValue({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest(
+          { supported: true, api_version: 'v1', entitled: true },
+          { bom_multitable_writeback: { supported: true, api_version: 'v1', entitled: true } },
+        ),
+      }),
+      getBomMultitableContext: vi.fn(),
+      updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: conflict }),
+    })
+    const res = await request(app)
+      .patch(WRITE_URL)
+      .set('Idempotency-Key', 'submit-1')
+      .send({ quantity: 5 })
+    expect(res.status).toBe(409)
+    expect(res.body.reason).toBe('provider-rejected')
   })
 })

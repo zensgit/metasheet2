@@ -248,6 +248,18 @@ describe('PLMAdapter.updateBomMultitableLine (PLM-COLLAB P3 — thin success-onl
     expect(firstKey).not.toBe(secondKey)
   })
 
+  it('uses the caller-owned Idempotency-Key when the workbench retries the same logical submit', async () => {
+    const adapter = createAdapter('yuantus')
+    const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })
+    ;(adapter as never as { select: unknown }).select = select
+
+    await adapter.updateBomMultitableLine('P4', 'R8', { quantity: 6 }, { idempotencyKey: 'workbench-submit-1' })
+
+    expect(select).toHaveBeenCalledTimes(1)
+    const [, options] = select.mock.calls[0]
+    expect(options.headers['Idempotency-Key']).toBe('workbench-submit-1')
+  })
+
   it('null cell is a real "clear" edit, not empty: kept in payload, request issued', async () => {
     const adapter = createAdapter('yuantus')
     const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })

@@ -5545,6 +5545,20 @@ async function testReadSmokeRoute() {
                 metadata: {
                   readPath: 'https://k3host/K3API/Material/GetList',
                   dataRowCount: 2,
+                  responseShapeProbe: {
+                    dataObjectPresent: true,
+                    dataRowCountPresent: true,
+                    dataPageSizePresent: false,
+                    dataPageIndexPresent: false,
+                    dataDataType: 'missing',
+                    dataDataArrayLength: null,
+                    fixedContainers: {
+                      dataPascalData: { type: 'array', arrayLength: 2, materialNumber: 'M-LIST-002' },
+                      resultRows: { type: 'array', arrayLength: 2, materialNumber: 'M-LIST-001' },
+                      topLevel: { type: 'object', arrayLength: null },
+                      arbitraryContainer: { type: 'array', arrayLength: 1 },
+                    },
+                  },
                   listShapeProbe: {
                     dataData: false,
                     dataLowerData: false,
@@ -5636,6 +5650,19 @@ async function testReadSmokeRoute() {
     rows: false,
     topLevelArray: false,
   })
+  assert.deepEqual(okList.body.data.responseShapeProbe, {
+    dataObjectPresent: true,
+    dataRowCountPresent: true,
+    dataPageSizePresent: false,
+    dataPageIndexPresent: false,
+    dataDataType: 'missing',
+    dataDataArrayLength: null,
+    fixedContainers: {
+      dataPascalData: { type: 'array', arrayLength: 2 },
+      resultRows: { type: 'array', arrayLength: 2 },
+      topLevel: { type: 'object', arrayLength: null },
+    },
+  })
   const listReadArg = readArgs[readArgs.length - 1]
   assert.equal(listReadArg.object, 'material')
   assert.equal(listReadArg.limit, 10)
@@ -5662,7 +5689,7 @@ async function testReadSmokeRoute() {
     maxListLimit: 10,
   }, 'LIST applies the non-persisted Material/GetList overlay before adapter creation')
   const okListStr = JSON.stringify(okList.body.data)
-  for (const leak of ['M-LIST-001', 'SECRET-LIST-NAME', 'k3host', 'readPath', 'materialNumber']) {
+  for (const leak of ['M-LIST-001', 'M-LIST-002', 'SECRET-LIST-NAME', 'k3host', 'readPath', 'materialNumber']) {
     assert.ok(!okListStr.includes(leak), `LIST read-smoke response must not leak ${leak}`)
   }
 
@@ -5750,6 +5777,19 @@ async function testReadSmokeRoute() {
           code: 'K3_WISE_READ_LIST_REJECTED',
           dataDataPresent: true,
           dataRowCount: 1,
+          responseShapeProbe: {
+            dataObjectPresent: true,
+            dataRowCountPresent: true,
+            dataPageSizePresent: false,
+            dataPageIndexPresent: false,
+            dataDataType: 'array',
+            dataDataArrayLength: 1,
+            fixedContainers: {
+              dataData: { type: 'array', arrayLength: 1, materialNumber: 'M-001' },
+              topLevel: { type: 'object', arrayLength: null },
+              arbitraryContainer: { type: 'array', arrayLength: 1 },
+            },
+          },
           listShapeProbe: {
             dataData: true,
             dataLowerData: false,
@@ -5785,8 +5825,20 @@ async function testReadSmokeRoute() {
     rows: false,
     topLevelArray: false,
   })
+  assert.deepEqual(fail.body.data.responseShapeProbe, {
+    dataObjectPresent: true,
+    dataRowCountPresent: true,
+    dataPageSizePresent: false,
+    dataPageIndexPresent: false,
+    dataDataType: 'array',
+    dataDataArrayLength: 1,
+    fixedContainers: {
+      dataData: { type: 'array', arrayLength: 1 },
+      topLevel: { type: 'object', arrayLength: null },
+    },
+  })
   const failStr = JSON.stringify(fail.body.data)
-  assert.ok(!failStr.includes('M-001') && !failStr.includes('42') && !failStr.includes('materialNumber'), 'read failure evidence is values-free')
+	  assert.ok(!failStr.includes('M-001') && !failStr.includes('42') && !failStr.includes('materialNumber') && !failStr.includes('arbitraryContainer'), 'read failure evidence is values-free')
   assert.equal(failWrite.length, 0, 'no write attempted on read failure')
 
   console.log('  testReadSmokeRoute OK')

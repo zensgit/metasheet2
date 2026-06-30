@@ -41,6 +41,11 @@ const CreateTokenSchema = z.object({
   name: z.string().min(1).max(100),
   scopes: z.array(z.enum(ALL_API_TOKEN_SCOPES as [string, ...string[]])).min(1),
   expiresAt: z.string().datetime().optional(),
+  // OAPI-4a per-base/sheet least-privilege scope (opt-in). Omitted/empty → unscoped (creator-wide).
+  // Scoping only TIGHTENS (the guard ANDs it with capability scope + creator RBAC), so accepting
+  // arbitrary ids cannot widen access beyond what the creator's RBAC already allows.
+  baseIds: z.array(z.string().min(1)).optional(),
+  sheetIds: z.array(z.string().min(1)).optional(),
 })
 
 const CreateDingTalkGroupSchema = z.object({
@@ -238,6 +243,8 @@ export function apiTokensRouter(): Router {
         name: input.name,
         scopes: input.scopes as import('../multitable/api-tokens').ApiTokenScope[],
         expiresAt: input.expiresAt,
+        baseIds: input.baseIds,
+        sheetIds: input.sheetIds,
       })
       res.status(201).json({
         ok: true,

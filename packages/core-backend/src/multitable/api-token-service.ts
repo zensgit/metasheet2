@@ -32,6 +32,21 @@ function hashToken(plainText: string): string {
   return createHash('sha256').update(plainText).digest('hex')
 }
 
+/**
+ * OAPI-4a — normalize an optional per-base/sheet scope list for PERSISTENCE: trim, drop empties, dedupe;
+ * an empty/absent list → `null` so "unscoped" (creator-wide) is unambiguous in the column (never `[]`).
+ */
+function normalizeScopeArray(v: readonly string[] | undefined | null): string[] | null {
+  if (!v || v.length === 0) return null
+  const cleaned = [...new Set(v.map((s) => s.trim()).filter((s) => s.length > 0))]
+  return cleaned.length > 0 ? cleaned : null
+}
+
+/** Read a Postgres `text[]` scope column back to the optional domain shape (NULL/empty → undefined). */
+function readScopeArray(v: string[] | null | undefined): string[] | undefined {
+  return v && v.length > 0 ? v : undefined
+}
+
 /** Map a DB row to the domain ApiToken. */
 function rowToToken(row: {
   id: string
@@ -45,6 +60,8 @@ function rowToToken(row: {
   expires_at?: string | Date | null
   revoked: boolean
   revoked_at?: string | Date | null
+  base_ids?: string[] | null
+  sheet_ids?: string[] | null
 }): ApiToken {
   const scopes =
     typeof row.scopes === 'string'
@@ -56,6 +73,8 @@ function rowToToken(row: {
     tokenHash: row.token_hash,
     tokenPrefix: row.token_prefix,
     scopes,
+    baseIds: readScopeArray(row.base_ids),
+    sheetIds: readScopeArray(row.sheet_ids),
     createdBy: row.created_by,
     createdAt:
       row.created_at instanceof Date
@@ -107,6 +126,9 @@ export class ApiTokenService {
     const id = generateTokenId()
     const now = new Date().toISOString()
 
+    const baseIds = normalizeScopeArray(input.baseIds)
+    const sheetIds = normalizeScopeArray(input.sheetIds)
+
     await this.db
       .insertInto('multitable_api_tokens')
       .values({
@@ -119,6 +141,8 @@ export class ApiTokenService {
         created_at: now,
         expires_at: input.expiresAt ?? undefined,
         revoked: false,
+        base_ids: baseIds,
+        sheet_ids: sheetIds,
       })
       .execute()
 
@@ -128,6 +152,8 @@ export class ApiTokenService {
       tokenHash: tokenHashValue,
       tokenPrefix,
       scopes: [...input.scopes],
+      baseIds: baseIds ?? undefined,
+      sheetIds: sheetIds ?? undefined,
       createdBy: userId,
       createdAt: now,
       expiresAt: input.expiresAt,
@@ -269,6 +295,10 @@ export class ApiTokenService {
       const id = generateTokenId()
       const now = new Date().toISOString()
 
+      // A rotated token KEEPS its per-base/sheet scope — never silently widen to creator-wide.
+      const baseIds = normalizeScopeArray(token.baseIds)
+      const sheetIds = normalizeScopeArray(token.sheetIds)
+
       await trx
         .insertInto('multitable_api_tokens')
         .values({
@@ -281,6 +311,8 @@ export class ApiTokenService {
           created_at: now,
           expires_at: token.expiresAt ?? undefined,
           revoked: false,
+          base_ids: baseIds,
+          sheet_ids: sheetIds,
         })
         .execute()
 
@@ -290,6 +322,8 @@ export class ApiTokenService {
         tokenHash: tokenHashValue,
         tokenPrefix,
         scopes: [...token.scopes],
+        baseIds: baseIds ?? undefined,
+        sheetIds: sheetIds ?? undefined,
         createdBy: userId,
         createdAt: now,
         expiresAt: token.expiresAt,
