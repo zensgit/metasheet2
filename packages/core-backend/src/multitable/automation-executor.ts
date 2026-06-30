@@ -10,7 +10,7 @@ import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
-import { resolveBaseWritable } from './permission-service'
+import { resolveCrossBaseWriteAuthority } from './cross-base-write-authority'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { MemoryRateLimitStore, type RateLimitStore } from '../middleware/rate-limiter'
 import {
@@ -1855,21 +1855,27 @@ export class AutomationExecutor {
     // same-set are same-base; a null/legacy base vs a set base is cross-base.
     if (triggerBaseId === targetBaseId) return { crossBase: false }
 
-    // Cross-base: require an explicit, consistent opt-in (claim == truth). A non-null `targetBaseId`
-    // claim that equals the target sheet's ACTUAL base passes; absent or mismatched (incl. a claim vs a
-    // null actual base) rejects. (`declaredBaseClaim` computed at the top, reused here.)
+    // Cross-base AUTHORITY decision — claim==truth then base-write — via the shared, context-agnostic primitive
+    // (C1: `resolveCrossBaseWriteAuthority`, the SAME primitive the cross-base mirror write-through consumes; see
+    // the design-lock §3/§10). The primitive returns a structured reason; this adapter maps it back to the EXACT,
+    // unchanged `CrossBaseWriteGate` error strings (order preserved: claim before writable). (`declaredBaseClaim`
+    // computed at the top, reused here.)
     const claimed = declaredBaseClaim
-    if (claimed === null || claimed !== targetBaseId) {
-      return {
-        crossBase: true,
-        ok: false,
-        error: `Cross-base write requires an explicit targetBaseId equal to the target sheet's base: target sheet ${targetSheetId} base=${targetBaseId ?? 'null'}, declared=${claimed ?? 'null'}`,
+    const authority = await resolveCrossBaseWriteAuthority({
+      actorId: context.actorId ?? null,
+      targetBaseId,
+      declaredBaseClaim: claimed,
+      queryFn: this.deps.queryFn,
+    })
+    if ('reason' in authority) {
+      if (authority.reason === 'claim_mismatch') {
+        return {
+          crossBase: true,
+          ok: false,
+          error: `Cross-base write requires an explicit targetBaseId equal to the target sheet's base: target sheet ${targetSheetId} base=${targetBaseId ?? 'null'}, declared=${claimed ?? 'null'}`,
+        }
       }
-    }
-
-    // Trigger-actor base-write authority (fail-closed: null actor → false).
-    const writable = await resolveBaseWritable(context.actorId ?? null, this.deps.queryFn, targetBaseId)
-    if (!writable) {
+      // reason === 'not_writable' — trigger-actor lacks base-write (fail-closed: null actor → false).
       return {
         crossBase: true,
         ok: false,
