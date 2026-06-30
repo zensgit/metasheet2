@@ -252,8 +252,11 @@ function assertRelativeEndpoint(value, field) {
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
 }
 
-function normalizeSchema(schema, field) {
+function normalizeSchema(schema, field, allowEmpty = false) {
   if (!Array.isArray(schema) || schema.length === 0) {
+    // A write-capable object needs a schema to compose the Save body. A read-only object (C4 BOM read #1709)
+    // does not project to a schema (it returns raw rows), so an empty/missing schema is allowed for it.
+    if (allowEmpty) return []
     throw new Error(`${field}.schema must be a non-empty array`)
   }
   return schema.map((item, index) => {
@@ -267,18 +270,26 @@ function normalizeSchema(schema, field) {
 
 function normalizeTemplate(template, field) {
   if (!isPlainObject(template)) throw new Error(`${field} must be an object`)
-  const savePath = assertRelativeEndpoint(template.savePath || template.path, `${field}.savePath`)
+  const operations = Array.isArray(template.operations) && template.operations.length > 0
+    ? [...template.operations]
+    : ['upsert']
+  // A write-capable object (upsert) requires a Save endpoint. A read-only object (e.g. the C4 BOM read
+  // overlay #1709, operations:['read']) legitimately has none — and must NOT be given one, so it can never
+  // reach the Save path. Any savePath that IS supplied is still validated.
+  const rawSavePath = template.savePath || template.path
+  const savePath = operations.includes('upsert')
+    ? assertRelativeEndpoint(rawSavePath, `${field}.savePath`)
+    : (rawSavePath ? assertRelativeEndpoint(rawSavePath, `${field}.savePath`) : null)
   const normalized = {
     ...cloneJson(template),
-    savePath,
     bodyKey: typeof template.bodyKey === 'string' && template.bodyKey.trim()
       ? template.bodyKey.trim()
       : 'Data',
-    schema: normalizeSchema(template.schema, field),
-    operations: Array.isArray(template.operations) && template.operations.length > 0
-      ? [...template.operations]
-      : ['upsert'],
+    schema: normalizeSchema(template.schema, field, !operations.includes('upsert')),
+    operations,
   }
+  if (savePath !== null) normalized.savePath = savePath
+  else delete normalized.savePath
   if (template.submitPath) normalized.submitPath = assertRelativeEndpoint(template.submitPath, `${field}.submitPath`)
   if (template.auditPath) normalized.auditPath = assertRelativeEndpoint(template.auditPath, `${field}.auditPath`)
   if (template.readPath) normalized.readPath = assertRelativeEndpoint(template.readPath, `${field}.readPath`)

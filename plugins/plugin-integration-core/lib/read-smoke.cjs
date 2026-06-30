@@ -1,6 +1,6 @@
 'use strict'
 
-const { READ_SMOKE_LIST_REQUEST_MARKER } = require('./read-smoke-marker.cjs')
+const { READ_SMOKE_LIST_REQUEST_MARKER, READ_SMOKE_BOM_REQUEST_MARKER } = require('./read-smoke-marker.cjs')
 
 // #1709 follow-up: generic read-smoke preset catalog + values-free evidence helpers.
 // Registers ONLY built-in presets — there is no user/request-supplied preset path. The preset
@@ -66,6 +66,34 @@ const READ_SMOKE_PRESETS = Object.freeze({
           pageIndexField: 'PageIndex',
           pageSizeField: 'PageSize',
           maxListLimit: 10,
+        }),
+      }),
+    }),
+  }),
+  'k3wise.material-bom.v1': Object.freeze({
+    presetId: 'k3wise.material-bom.v1',
+    requiredKind: 'erp:k3-wise-webapi',
+    object: 'material-bom',
+    // C4 BOM read (#1709): explicit preset + explicit intent shape only. The parent bill key is the ONLY
+    // caller-supplied datum — a bound JSON value, never a filter expression (operator-confirmed O2). No
+    // recursion, no resolver, no write: the overlay creates a clean read-only `material-bom` object so
+    // ensureOperation gates it to read and it can never reach the existing write-only `bom` Save object.
+    allowedObjects: Object.freeze(['material-bom']),
+    allowedModes: Object.freeze(['bom']),
+    defaultObject: 'material-bom',
+    defaultMode: 'bom',
+    readConfigOverlay: Object.freeze({
+      objects: Object.freeze({
+        'material-bom': Object.freeze({
+          operations: Object.freeze(['read']),
+          readPath: '/K3API/BOM/GetDetail',
+          readMethod: 'POST',
+          readMode: 'bom',
+          readBomBodyTemplate: Object.freeze({
+            Data: Object.freeze({}),
+          }),
+          readBomBodyKey: 'Data',
+          readBomParentKeyField: 'FBillNo',
         }),
       }),
     }),
@@ -172,6 +200,59 @@ function readSmokeResponseShapeProbeEvidence(value) {
   return hasEvidence ? evidence : null
 }
 
+// C4 BOM read (#1709): values-free BOM shape evidence under DISTINCT keys (dataPage1/dataPage2 header+line
+// containers), so LIST/detail sanitization is untouched. Like LIST, surfaces only allowlisted booleans and
+// per-container {type, arrayLength} — never Page1/Page2 field keys or row values.
+const READ_SMOKE_BOM_SHAPE_PROBE_KEYS = Object.freeze([
+  'dataPage1',
+  'dataPage2',
+  'dataLowerPage1',
+  'dataLowerPage2',
+])
+
+function readSmokeBomShapeProbeEvidence(value) {
+  if (!isPlainObject(value)) return null
+  const evidence = {}
+  let hasEvidence = false
+  for (const key of READ_SMOKE_BOM_SHAPE_PROBE_KEYS) {
+    if (typeof value[key] !== 'boolean') continue
+    evidence[key] = value[key]
+    hasEvidence = true
+  }
+  return hasEvidence ? evidence : null
+}
+
+const READ_SMOKE_BOM_RESPONSE_SHAPE_CONTAINER_KEYS = Object.freeze([
+  'dataPage1',
+  'dataPage2',
+  'dataLowerPage1',
+  'dataLowerPage2',
+  'topLevel',
+])
+
+function readSmokeBomResponseShapeProbeEvidence(value) {
+  if (!isPlainObject(value)) return null
+  const evidence = {}
+  let hasEvidence = false
+  for (const key of ['dataObjectPresent', 'headerPresent', 'linePresent']) {
+    if (typeof value[key] !== 'boolean') continue
+    evidence[key] = value[key]
+    hasEvidence = true
+  }
+  if (isPlainObject(value.fixedContainers)) {
+    const fixedContainers = {}
+    for (const key of READ_SMOKE_BOM_RESPONSE_SHAPE_CONTAINER_KEYS) {
+      const container = readSmokeResponseShapeContainerEvidence(value.fixedContainers[key])
+      if (container) fixedContainers[key] = container
+    }
+    if (Object.keys(fixedContainers).length > 0) {
+      evidence.fixedContainers = fixedContainers
+      hasEvidence = true
+    }
+  }
+  return hasEvidence ? evidence : null
+}
+
 // C3 LIST paging echo (#1709): copy ONLY the allowlisted values-free count fields (K3-echoed page size/index +
 // our requested paging) from a metadata/details source onto the evidence. Non-negative integers only.
 const READ_SMOKE_LIST_PAGING_COUNT_KEYS = Object.freeze(['dataPageSize', 'dataPageIndex', 'requestedLimit', 'requestedPageIndex'])
@@ -225,6 +306,22 @@ function buildReadSmokeRequest(preset, contractOrKey) {
       enumerable: true,
     })
     if (contract.key !== undefined) request.options.listKey = contract.key
+    return request
+  }
+  if (mode === 'bom') {
+    // BOM read REQUIRES a parent bill key (you must name the bill). It is a bound value carried via the
+    // internal route marker + options.bomKey; the adapter assigns it to Data.FBillNo with no escaping.
+    if (contract.key === undefined || contract.key === null || String(contract.key).trim() === '') {
+      throw new ReadSmokeContractError('bom_key_required', 'BOM read requires a parent bill key')
+    }
+    const request = {
+      object,
+      options: { k3ReadMode: 'bom', bomKey: contract.key },
+    }
+    Object.defineProperty(request.options, READ_SMOKE_BOM_REQUEST_MARKER, {
+      value: true,
+      enumerable: true,
+    })
     return request
   }
   throw new ReadSmokeContractError('mode_not_allowed', 'mode is not allowlisted for this preset')
@@ -291,6 +388,18 @@ function readSmokeSuccessEvidence(preset, result, contract = {}) {
   if (listShapeProbe) evidence.listShapeProbe = listShapeProbe
   const responseShapeProbe = readSmokeResponseShapeProbeEvidence(result && result.metadata && result.metadata.responseShapeProbe)
   if (responseShapeProbe) evidence.responseShapeProbe = responseShapeProbe
+  // C4 BOM read (#1709): values-free BOM evidence, guarded by presence so LIST/detail results are unchanged.
+  const metadata = result && result.metadata
+  if (metadata && typeof metadata.bomHeaderPresent === 'boolean') evidence.bomHeaderPresent = metadata.bomHeaderPresent
+  if (metadata && typeof metadata.bomLinePresent === 'boolean') evidence.bomLinePresent = metadata.bomLinePresent
+  const bomHeaderCount = readSmokeSafeCount(metadata && metadata.bomHeaderCount)
+  if (bomHeaderCount !== null) evidence.bomHeaderCount = bomHeaderCount
+  const bomLineCount = readSmokeSafeCount(metadata && metadata.bomLineCount)
+  if (bomLineCount !== null) evidence.bomLineCount = bomLineCount
+  const bomShapeProbe = readSmokeBomShapeProbeEvidence(metadata && metadata.bomShapeProbe)
+  if (bomShapeProbe) evidence.bomShapeProbe = bomShapeProbe
+  const bomResponseShapeProbe = readSmokeBomResponseShapeProbeEvidence(metadata && metadata.bomResponseShapeProbe)
+  if (bomResponseShapeProbe) evidence.bomResponseShapeProbe = bomResponseShapeProbe
   return evidence
 }
 
@@ -322,6 +431,20 @@ function readSmokeErrorEvidence(preset, error, contract = {}) {
   if (listShapeProbe) evidence.listShapeProbe = listShapeProbe
   const responseShapeProbe = readSmokeResponseShapeProbeEvidence(error && error.details && error.details.responseShapeProbe)
   if (responseShapeProbe) evidence.responseShapeProbe = responseShapeProbe
+  // C4 BOM read (#1709): surface values-free BOM presence/counts/shape from the error details too (symmetric
+  // to the LIST error path), so a failed keyed BOM rerun still shows where the read got to. Guarded by
+  // presence → LIST/detail error evidence is unchanged.
+  const details = error && error.details
+  if (details && typeof details.bomHeaderPresent === 'boolean') evidence.bomHeaderPresent = details.bomHeaderPresent
+  if (details && typeof details.bomLinePresent === 'boolean') evidence.bomLinePresent = details.bomLinePresent
+  const bomHeaderCount = readSmokeSafeCount(details && details.bomHeaderCount)
+  if (bomHeaderCount !== null) evidence.bomHeaderCount = bomHeaderCount
+  const bomLineCount = readSmokeSafeCount(details && details.bomLineCount)
+  if (bomLineCount !== null) evidence.bomLineCount = bomLineCount
+  const bomShapeProbe = readSmokeBomShapeProbeEvidence(details && details.bomShapeProbe)
+  if (bomShapeProbe) evidence.bomShapeProbe = bomShapeProbe
+  const bomResponseShapeProbe = readSmokeBomResponseShapeProbeEvidence(details && details.bomResponseShapeProbe)
+  if (bomResponseShapeProbe) evidence.bomResponseShapeProbe = bomResponseShapeProbe
   return evidence
 }
 
