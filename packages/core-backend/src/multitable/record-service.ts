@@ -981,7 +981,10 @@ export class RecordService {
     // link-field arrays (createRecord writes them into data). Rebuild meta_links on restore so link values
     // aren't silently empty on read (loadLinkValuesByRecord reads from meta_links, not data).
     const sheetFields = await loadFieldsForSheet(this.pool.query.bind(this.pool), sheetId)
-    const linkFieldIds = sheetFields.filter((f) => f.type === 'link').map((f) => f.id)
+    // Mirror-read-only hardening (C2/I-1): replay only WRITABLE (forward) links — never the mirror side of a
+    // twoWay link (`isFieldAlwaysReadOnly` ⇒ `mirrorOf`). The spine invariant (mirror never owns a meta_links row)
+    // must not depend on snapshot hygiene; an explicit skip makes it structural.
+    const linkFieldIds = sheetFields.filter((f) => f.type === 'link' && !isFieldAlwaysReadOnly(f)).map((f) => f.id)
 
     await this.pool.transaction(async ({ query }) => {
       const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])

@@ -9,6 +9,7 @@ import { fieldTypeRegistry } from './field-type-registry'
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
 import { MultitableRecordLockedError, MultitableRecordNotFoundError, MultitableRecordValidationError } from './record-errors'
 import { ensureRecordNotLocked, mapRecordLockState } from './record-lock'
+import { isFieldAlwaysReadOnly } from './permission-derivation'
 import {
   listRecords as listRecordsViaQueryService,
   queryRecords as queryRecordsViaQueryService,
@@ -324,6 +325,14 @@ async function buildNormalizedPatch(
     const field = fieldById.get(fieldId)
     if (!field) {
       throw new MultitableRecordValidationError(`Unknown fieldId: ${fieldId}`)
+    }
+    // Mirror-read-only hardening (C2/I-1): reject a write to an always-read-only field — the mirror side of a
+    // twoWay link (`property.mirrorOf`), plus formula/lookup/rollup/system/readOnly — via the CANONICAL guard,
+    // parity with record-service.ts:532. Without this the link branch below would write a `meta_links` row keyed
+    // by a mirror field id = a second canonical edge (spine-invariant break). A computed/mirror field write was
+    // never valid through the SDK, so this only TIGHTENS.
+    if (isFieldAlwaysReadOnly(field)) {
+      throw new MultitableRecordValidationError(`Field is read-only and cannot be written: ${fieldId}`)
     }
     if (field.type === 'link') {
       const config = readLinkFieldConfig(field)
