@@ -28,7 +28,7 @@ broken/unreviewed code. It was not done, by design.
 |---|---|---|---|
 | **T0-2 W7 resultWriteback UI** | **#3384** (reviewable) | exposes the shipped approved-path backwrite config in the `start_approval` editor — 3 pickers (`statusField`/`approverField`/`completedAtField`), preserve-current-value, omit-when-empty, explicit-carry + `requester` pass-through | `vue-tsc -b` clean · 116 specs (5 new) · **3 fail-first claims verified by revert** |
 | **R3 inert-trigger removal** | **#3382** (reviewable) | drop `webhook.received` from the editor selectable set (runtime-inert → silently never fired); backend enum left intact | editor spec 100/100 (asserts not-selectable) |
-| **R2 redaction regression** | **#3382** | DB-backed guard: `ApprovalBridgeService.getApproval` strips a `hidden` field, stored snapshot untouched; sentinel guards silent skip | real-DB 2/2, exercises the real redaction chain |
+| **R2 redaction regression** | **#3382** | DB-backed guard: `ApprovalBridgeService.getApproval` strips a `hidden` field, stored snapshot untouched; sentinel guards silent skip | real-DB 2/2 locally, and **wired into the approval real-DB CI lane** (`plugin-tests.yml` whole-file list + `vitest.config.ts` no-DB exclude) per review P1 — so it runs against real Postgres every PR, not skip-green |
 
 **Verification discipline:** every diff was reviewed by hand (not subagent self-report); tests assert the
 real wire, not hand-built fixtures; fail-first tests were confirmed RED by reverting the change they
