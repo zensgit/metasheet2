@@ -1,8 +1,8 @@
-# Attendance AE-2 — notify the corrected employee — design lock (PROPOSED)
+# Attendance AE-2 — notify the corrected employee — design lock (RATIFIED)
 
 > Date: 2026-06-30
 > Baseline: `origin/main@c499abe83` (`#3377` merged — AE-1b corrected-fact durability is live)
-> Status: 🟡 **PROPOSED**. This document locks the contract for AE-2 only — telling the corrected employee that their attendance result was changed. It does **not** authorize runtime code, an admin UI (that is AE-3), notifying anyone other than the affected employee, a new delivery system, or staging. Those remain separate, owner-gated PRs.
+> Status: ✅ **RATIFIED（owner review 2026-06-30）**. This document locks the contract for AE-2 only — telling the corrected employee that their attendance result was changed. It does **not** authorize runtime code, an admin UI (that is AE-3), notifying anyone other than the affected employee, a new delivery system, or staging. Those remain separate, owner-gated PRs.
 
 ## 1. Why this slice exists
 
@@ -44,7 +44,7 @@ The single row targets `recipient_user_id = record.user_id` (the corrected emplo
 
 Two independent backstops: (a) the AE-1 replay short-circuit means a re-used `idempotencyKey` never reaches the enqueue; (b) `UNIQUE(org_id, source_key)` + `ON CONFLICT DO NOTHING` makes a same-key insert a no-op even if the enqueue path were ever reached twice. The `{auditId}` segment carries the dedup grain: one correction = one audit row = one notification; a genuinely new correction mints a new `auditId` and correctly produces a new notification.
 
-> **Deviation flagged for ratification (D1):** the owner's literal spec is `attendance_result_edit:{org}:{recordId}:{auditId}:employee:{userId}`. The design appends `:channel:{channel}` to match **both** existing producers (which stamp the resolved channel into the key). Since `{auditId}` already fixes the dedup grain, the channel suffix is **consistency-only** — it future-proofs against a later multi-channel fan-out without changing today's one-row-per-correction behavior. Ratify the suffix or drop it.
+> **Ratified decision (D1, owner 2026-06-30):** the owner's literal spec is `attendance_result_edit:{org}:{recordId}:{auditId}:employee:{userId}`. The design appends `:channel:{channel}` to match **both** existing producers (which stamp the resolved channel into the key). Since `{auditId}` already fixes the dedup grain, the channel suffix is **consistency-only** — it future-proofs against a later multi-channel fan-out without changing today's one-row-per-correction behavior. **Ratified: adopt the `:channel:{channel}` suffix.**
 
 ### 3.4 Content boundary — redacted payload
 The `payload` JSON carries only what the employee needs to understand the change:
@@ -57,7 +57,7 @@ The `payload` JSON carries only what the employee needs to understand the change
 - **Send failure never rolls back the correction.** Delivery happens post-commit in the worker; a failed send moves the row to `retrying` / `failed` under the existing retry machinery and is visible via the admin read API. The committed correction is untouched.
 - **Channel unavailable / disabled is not an enqueue failure.** When the configured channel is unroutable, the row still enqueues `'pending'`; the worker marks it `skipped` / `failed`. AE-2 itself performs no synchronous send and is never blocked by channel state — `不影响 AE-1`.
 
-> **Deviation flagged for ratification (D2):** strict in-txn means a *missing / drifted* `attendance_notification_deliveries` table would fail the correction closed (a `503`-class outcome), exactly as AE-1 already fails closed when the payroll-cycle table is missing (`DB_NOT_READY`). This couples the correction to the deliveries table's presence. Recommended: accept it (consistent with the payroll-cycle precedent; best-effort enqueue is a deliberate non-goal for v1). Owner may instead request best-effort enqueue as a follow-up.
+> **Ratified decision (D2, owner 2026-06-30):** strict in-txn means a *missing / drifted* `attendance_notification_deliveries` table would fail the correction closed (a `503`-class outcome), exactly as AE-1 already fails closed when the payroll-cycle table is missing (`DB_NOT_READY`). This couples the correction to the deliveries table's presence. **Ratified: accept strict in-txn / fail-closed** (consistent with the payroll-cycle precedent; best-effort enqueue is a deliberate non-goal for v1, available as a later follow-up if ever needed).
 
 ### 3.6 Switch / gate — reuse, don't rebuild
 AE-2 introduces **no new env, no new policy surface, and no new send code**. Channel selection reuses `resolveAttendanceDefaultDeliveryChannelForProducer()`; delivery, retry, and channel-availability handling reuse the existing worker; visibility reuses `GET /api/attendance/notification-deliveries`. If a future per-org "result-edit notifications off" toggle is wanted, that is a separate slice.
@@ -90,7 +90,7 @@ AE-2 introduces **no new env, no new policy surface, and no new send code**. Cha
 - **No staging smoke** — that is AE-4 (last).
 - **No change to AE-1 / AE-1b semantics** — correction, audit, marker, survive-but-flag are untouched.
 
-## 7. Owner-stated locks (ratified by the owner) + items needing explicit sign-off
+## 7. Owner-ratified decisions (2026-06-30)
 
 Owner-stated and encoded as above:
 1. Trigger: same-txn outbox enqueue after audit + marker; real send via the existing worker. (§3.1)
@@ -101,8 +101,8 @@ Owner-stated and encoded as above:
 6. Switch: reuse the existing attendance notification policy/channel gate; channel unavailable → `pending`/`failed`, AE-1 unaffected; no new send system. (§3.6)
 7. Verification: the six-row matrix above. (§5)
 
-Needs an explicit owner call before the runtime PR:
-- **D1 — `source_key` `:channel:{channel}` suffix** (§3.3): adopt for cross-producer consistency, or keep the literal `…:employee:{userId}` grain.
-- **D2 — strict in-txn vs best-effort enqueue** (§3.5): accept fail-closed on a missing deliveries table (recommended, matches the payroll-cycle precedent), or request best-effort enqueue.
+Ratified 2026-06-30:
+- **D1 — `source_key` `:channel:{channel}` suffix** (§3.3): **adopt** the suffix for cross-producer consistency (the `{auditId}` grain already fixes dedup; the suffix is consistency-only).
+- **D2 — strict in-txn vs best-effort enqueue** (§3.5): **strict in-txn / fail-closed** on a missing deliveries table, consistent with the payroll-cycle `DB_NOT_READY` precedent. Best-effort enqueue is a deliberate non-goal for v1.
 
-Only the design-lock ships in this PR. The AE-2 runtime is a separate cut after this lock is ratified.
+Only the design-lock ships in this PR. The AE-2 runtime is a separate cut after this lock lands.
