@@ -3,6 +3,7 @@ import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
 import { pool } from '../db/pg'
+import { poolManager } from '../integration/db/connection-pool'
 
 // Use the global Express.Request type which already includes user property
 type AuthenticatedRequest = Request
@@ -47,12 +48,19 @@ export function spreadsheetPermissionsRouter(): Router {
     const perm = req.body?.permission
     if (!userId || !perm) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId and permission required' } })
     if (pool) {
-      await pool.query(
-        `INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code)
-         VALUES ($1, $2, 'user', $2, $3)
-         ON CONFLICT DO NOTHING`,
-        [req.params.id, userId, perm],
-      )
+      // Writer-set serialization: take the SAME `meta_sheets` row lock the permission-revert execute path
+      // and the univer-meta grant routes hold, so this legacy grant write cannot interleave between a
+      // revert's live-grant re-check and its apply (net-escalation race). Lock + write only — auditLog and
+      // the response read stay OUTSIDE the txn to keep the parked window scoped to the lock.
+      await poolManager.get().transaction(async ({ query }) => {
+        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [req.params.id])
+        await query(
+          `INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code)
+           VALUES ($1, $2, 'user', $2, $3)
+           ON CONFLICT DO NOTHING`,
+          [req.params.id, userId, perm],
+        )
+      })
     } else {
       const map = sheetPerms.get(req.params.id) || new Map<string, Set<string>>()
       const set = map.get(userId) || new Set<string>()
@@ -82,14 +90,19 @@ export function spreadsheetPermissionsRouter(): Router {
     const perm = req.body?.permission
     if (!userId || !perm) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId and permission required' } })
     if (pool) {
-      await pool.query(
-        `DELETE FROM spreadsheet_permissions
-         WHERE sheet_id = $1
-           AND subject_type = 'user'
-           AND user_id = $2
-           AND perm_code = $3`,
-        [req.params.id, userId, perm],
-      )
+      // Writer-set serialization: same `meta_sheets FOR UPDATE` lock as the grant path above (a bare DELETE
+      // takes no parent key-share, so locking here is what serializes a revoke against a concurrent revert).
+      await poolManager.get().transaction(async ({ query }) => {
+        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [req.params.id])
+        await query(
+          `DELETE FROM spreadsheet_permissions
+           WHERE sheet_id = $1
+             AND subject_type = 'user'
+             AND user_id = $2
+             AND perm_code = $3`,
+          [req.params.id, userId, perm],
+        )
+      })
     } else {
       const map = sheetPerms.get(req.params.id) || new Map<string, Set<string>>()
       const set = map.get(userId) || new Set<string>()

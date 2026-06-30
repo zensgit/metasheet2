@@ -8309,10 +8309,10 @@ export function univerMetaRouter(): Router {
         }
         const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
           // Never-escalate-under-concurrency: lock the sheet row so the live-grant read → direction re-check → apply
-          // cannot interleave with another grant write on this sheet. The forward grant/revoke routes (sheet/view/
-          // field permissions) now take this SAME lock (#3389 follow-up), so the serialization is two-sided.
-          // (One remaining un-serialized writer: the legacy /api/spreadsheets/:id/permissions grant|revoke route —
-          // see the dev-verification honest gaps for the retire-or-lock follow-up.)
+          // cannot interleave with another grant write on this sheet. EVERY writer to spreadsheet_permissions /
+          // meta_view_permissions / field_permissions now takes this SAME lock — the univer-meta grant routes
+          // (#3402) and the legacy /api/spreadsheets/:id/permissions grant|revoke route — so the writer set is
+          // fully serialized on the meta_sheets row (the never-escalate guarantee holds against any concurrent grant).
           await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
           const live = await loadLivePermissionGrant(query, parsedPerm.scope, parsedPerm.parts, sheetId)
           const verdict = verifyConfigPermissionRevertPreviewIdentity(previewToken, { sheetId, revisionId, entityId: rev.entity_id, currentGrantHash: hashPermissionGrant(live), actorId: access.userId })

@@ -36,6 +36,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { spreadsheetPermissionsRouter } from '../../src/routes/spreadsheet-permissions'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -407,6 +408,66 @@ describeIfDatabase('multitable permission-revert — T9-W de-escalation-only (re
       await holder.catch(() => {})
       await q(`DELETE FROM spreadsheet_permissions WHERE sheet_id = $1`, [s]).catch(() => {})
       await q(`DELETE FROM users WHERE id = $1`, [subj]).catch(() => {})
+    }
+  })
+
+  // ── (n) writer-set CLOSURE: the LEGACY /api/spreadsheets/:id/permissions grant route now takes the same
+  // `meta_sheets FOR UPDATE` lock, so it too serializes against a permission-revert — closing the last
+  // un-serialized writer to spreadsheet_permissions. Same FK-aware discriminator as (m): a held `FOR KEY
+  // SHARE` parks the legacy grant iff it requests `FOR UPDATE`.
+  //   - with the fix: the route's txn requests `FOR UPDATE` → conflicts with the held key-share → parks
+  //     (not settled, grant absent) until release, then applies.
+  //   - without the fix: the bare autocommit INSERT needs only the FK's `FOR KEY SHARE` on meta_sheets →
+  //     compatible → it commits during the hold → these assertions go RED.
+  // PROBE is a perm_code NOT pre-seeded for the subject, so the route's `ON CONFLICT DO NOTHING` INSERT is a
+  // real observable write (absent→present), not a silent no-op. Shared pool max=20, so the holder + the
+  // parked request + the readbacks don't starve connections (which would block on acquisition, not the lock).
+  test('(n) writer-set closure: held FOR KEY SHARE parks the LEGACY spreadsheet-permissions grant write', async () => {
+    const s = await freshSheet('n')
+    const subj = mkSubject('n')
+    const PROBE = 'legacy:lock-probe' // not pre-seeded for subj → the INSERT is observable, not an ON-CONFLICT no-op
+
+    // mount the legacy router with an admin req.user (rbacGuard short-circuits on roles:['admin'] — no DB).
+    const legacyApp = express()
+    legacyApp.use(express.json())
+    legacyApp.use((req, _res, next) => { (req as unknown as { user?: unknown }).user = { id: `u_admin_${TS}`, roles: ['admin'] }; next() })
+    legacyApp.use(spreadsheetPermissionsRouter())
+
+    let releaseHold: () => void = () => {}
+    const holdReleased = new Promise<void>((resolve) => { releaseHold = () => resolve() })
+    let acquired: () => void = () => {}
+    const lockAcquired = new Promise<void>((resolve) => { acquired = () => resolve() })
+    const holder = poolManager.get().transaction(async ({ query }) => {
+      await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR KEY SHARE', [s])
+      acquired()
+      await holdReleased
+    })
+    try {
+      await lockAcquired
+
+      let settled = false
+      const fwd = request(legacyApp)
+        .post(`/api/spreadsheets/${s}/permissions/grant`)
+        .send({ userId: subj, permission: PROBE })
+        .then((r) => { settled = true; return r })
+
+      // with the fix the legacy grant is parked on `meta_sheets FOR UPDATE` (conflicts with the held key-share):
+      // not settled, nothing written. Without the fix the bare INSERT would have committed by now.
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(settled).toBe(false)
+      expect(await sheetCodes(s, subj)).toEqual([])
+
+      // release → the parked legacy grant proceeds and commits the probe code.
+      releaseHold()
+      await holder
+      const res = await fwd
+      expect(res.status).toBe(200)
+      expect(settled).toBe(true)
+      expect(await sheetCodes(s, subj)).toEqual([PROBE])
+    } finally {
+      releaseHold()
+      await holder.catch(() => {})
+      await q(`DELETE FROM spreadsheet_permissions WHERE sheet_id = $1`, [s]).catch(() => {})
     }
   })
 })
