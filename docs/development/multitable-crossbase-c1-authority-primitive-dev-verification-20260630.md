@@ -8,11 +8,16 @@
 ## 1. What was extracted
 A new context-agnostic module **`packages/core-backend/src/multitable/cross-base-write-authority.ts`** owns the
 two-part cross-base write-authority decision on a write into a canonical-owner base:
+0. **null target base** — a sheet's `base_id` can be null at runtime (legacy/unresolved) even where the call site
+   narrows to `string`, so `targetBaseId` is typed `string | null` and a null base — which can neither be claimed nor
+   written — is rejected **up front** as `{ ok:false, reason:'claim_mismatch' }`, before `resolveBaseWritable` is
+   consulted. Behaviour-identical to the extracted source (there a null target made `claimed !== targetBaseId` fire →
+   same reason); now explicit so no caller can treat the target as guaranteed-non-null.
 1. **claim == truth** — `declaredBaseClaim === targetBaseId` (explicit opt-in), else `{ ok:false, reason:'claim_mismatch' }`.
 2. **base-write authority** — `resolveBaseWritable(actorId, queryFn, targetBaseId)`, else `{ ok:false, reason:'not_writable' }`.
 
-Signature: `resolveCrossBaseWriteAuthority({ actorId, targetBaseId, declaredBaseClaim, queryFn }) → { ok:true } | { ok:false, reason }`.
-Order is load-bearing (claim before authority) — identical to the extracted source.
+Signature: `resolveCrossBaseWriteAuthority({ actorId, targetBaseId: string | null, declaredBaseClaim, queryFn }) → { ok:true } | { ok:false, reason }`.
+Order is load-bearing (null-target → claim → authority) — identical to the extracted source.
 
 `AutomationExecutor.evaluateCrossBaseWrite` is now a **thin adapter**: it keeps its automation-flavoured parts
 (ExecutionContext unpack, same-sheet/no-claim fast-path, `resolveSheetBaseId` soft-deleted-target check, same-base
@@ -36,11 +41,12 @@ The same-base / fast-path / soft-deleted-target / quota returns are untouched. N
   `…-delete-lock`, `…-write-quota`. Includes the claim/authority-path assertions (XW-2e, LK-1f "claim==truth → step
   failed") and the quota cap. **46/46.** That the unedited tests still pass — same error strings, same quota keying,
   same claim==truth semantics — is the behavior-preserving proof.
-- **New primitive unit test** `tests/unit/cross-base-write-authority.test.ts` — **5/5**: claim_mismatch (null claim
-  AND claim≠target, each proving authority is NOT consulted — claim checked first), not_writable, ok, null-actor
-  pass-through. `resolveBaseWritable` mocked directly (cleaner isolation than a mock queryFn; lets the test assert
-  the claim-before-authority order).
-- **Combined run: 51/51.** **`tsc --noEmit`: exit 0, clean.**
+- **New primitive unit test** `tests/unit/cross-base-write-authority.test.ts` — **6/6**: claim_mismatch (null claim
+  AND claim≠target, each proving authority is NOT consulted — claim checked first), **null target base (claim null AND
+  claim string → claim_mismatch, authority NOT consulted)**, not_writable, ok, null-actor pass-through.
+  `resolveBaseWritable` mocked directly (cleaner isolation than a mock queryFn; lets the test assert the
+  claim-before-authority order).
+- **Combined run: 52/52** (46 automation goldens unchanged + 6 primitive unit). **`tsc --noEmit`: exit 0, clean.**
 - **Context-agnostic proof:** the new module's only `import` is `from './permission-service'` (`resolveBaseWritable`
   + the `QueryFn` type). It imports NO automation-executor / `ExecutionContext` / quota store / automation type — so
   C2's mirror-write can consume it without dragging automation semantics.
