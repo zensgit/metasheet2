@@ -120,10 +120,12 @@ export async function recordOapiWriteAttempt(
   ctx: OapiWriteAuditContext,
   outcome: Exclude<OapiWriteOutcome, 'committed'>,
   statusCode: number,
-  detailText?: string,
+  reason?: string,
 ): Promise<void> {
   try {
-    const detail = detailText ? JSON.stringify({ message: redactString(detailText) }) : null
+    // OAPI-4a: a 403-issuing guard (oapiScopeGuard / requireScope) sets a fixed, enum-like reason
+    // (`out_of_base_sheet_scope` / `insufficient_scope`); persist it value-scrubbed as `detail.reason`.
+    const detail = reason ? JSON.stringify({ reason: redactString(reason) }) : null
     await sql`
       INSERT INTO oapi_write_audit
         (token_id, actor_id, operation, scope, sheet_id, record_ids, batch_count, outcome, status_code, request_id, detail)
@@ -157,7 +159,9 @@ export function oapiWriteAuditBoundary(operation: OapiWriteOperation, scope: str
       if (sc >= 200 && sc < 300) return // committed — audited in-txn
       const outcome: Exclude<OapiWriteOutcome, 'committed'> =
         sc === 429 ? 'rate_limited' : sc === 403 ? 'denied' : 'error'
-      void recordOapiWriteAttempt(ctx, outcome, sc)
+      // `req.oapiAuditReason` is set synchronously by the guard before the 403 is sent, so it is
+      // observable here at finish-time (undefined for rate_limited/error — bare outcome row, as before).
+      void recordOapiWriteAttempt(ctx, outcome, sc, req.oapiAuditReason)
     })
     next()
   }

@@ -158,6 +158,7 @@ import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value,
 import { apiTokenWriteRateLimit, conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
+import { oapiScopeGuard } from '../middleware/oapi-scope-guard'
 import {
   AutomationRuleValidationError,
   getAutomationServiceInstance,
@@ -10041,7 +10042,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/fields', apiTokenAuth, requireScope('fields:read'), async (req: Request, res: Response) => {
+  router.get('/fields', apiTokenAuth, oapiScopeGuard, requireScope('fields:read'), async (req: Request, res: Response) => {
     const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
@@ -12040,7 +12041,7 @@ export function univerMetaRouter(): Router {
   // Aggregation footer (benchmark v2 #4-3b-1): aggregate the full (unpaginated) PERSISTED-view-filtered
   // record set. view-config-driven (view.config.aggregations), no ad-hoc params. Field visibility uses
   // the D3c export composite (hidden fields' aggregates OMITTED — leak guard). Max-rows hard-fails (413).
-  router.get('/sheets/:sheetId/view-aggregate', apiTokenAuth, requireScope('records:read'), async (req: Request, res: Response) => {
+  router.get('/sheets/:sheetId/view-aggregate', apiTokenAuth, oapiScopeGuard, requireScope('records:read'), async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const viewId = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : ''
     const search = normalizeSearchTerm(req.query.search) // same normalization as /view (trim+lowercase) → search parity
@@ -12394,7 +12395,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/view', apiTokenAuth, requireScope('records:read'), async (req: Request, res: Response) => {
+  router.get('/view', apiTokenAuth, oapiScopeGuard, requireScope('records:read'), async (req: Request, res: Response) => {
     const sheetIdParam = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : undefined
     const viewIdParam = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : undefined
     const seed = req.query.seed === 'true'
@@ -13611,7 +13612,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.patch('/records/:recordId', apiTokenAuth, oapiWriteAuditBoundary('update', 'records:write'), apiTokenWriteRateLimit, requireScope('records:write'), async (req: Request, res: Response) => {
+  router.patch('/records/:recordId', apiTokenAuth, oapiWriteAuditBoundary('update', 'records:write'), apiTokenWriteRateLimit, oapiScopeGuard, requireScope('records:write'), async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     if (!recordId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
@@ -13807,7 +13808,7 @@ export function univerMetaRouter(): Router {
    * When `cursor` is absent the first page is returned.
    * When `cursor` is present, offset-based params are ignored.
    */
-  router.get('/records', apiTokenAuth, requireScope('records:read'), async (req: Request, res: Response) => {
+  router.get('/records', apiTokenAuth, oapiScopeGuard, requireScope('records:read'), async (req: Request, res: Response) => {
     const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
@@ -13936,7 +13937,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.get('/records/:recordId', apiTokenAuth, requireScope('records:read'), async (req: Request, res: Response) => {
+  router.get('/records/:recordId', apiTokenAuth, oapiScopeGuard, requireScope('records:read'), async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     const sheetIdParam = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : undefined
     const viewIdParam = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : undefined
@@ -14124,7 +14125,7 @@ export function univerMetaRouter(): Router {
    *
    * Returns: { ok: true, data: { records: [{id, display}], page: {offset, limit, total, hasMore} } }
    */
-  router.get('/records-summary', apiTokenAuth, requireScope('records:read'), async (req: Request, res: Response) => {
+  router.get('/records-summary', apiTokenAuth, oapiScopeGuard, requireScope('records:read'), async (req: Request, res: Response) => {
     const sheetId = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : ''
     const displayFieldId = typeof req.query.displayFieldId === 'string' ? req.query.displayFieldId.trim() : null
     const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
@@ -14624,7 +14625,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/records', apiTokenAuth, oapiWriteAuditBoundary('create', 'records:write'), apiTokenWriteRateLimit, requireScope('records:write'), async (req: Request, res: Response) => {
+  router.post('/records', apiTokenAuth, oapiWriteAuditBoundary('create', 'records:write'), apiTokenWriteRateLimit, oapiScopeGuard, requireScope('records:write'), async (req: Request, res: Response) => {
     const schema = z.object({
       viewId: z.string().min(1).optional(),
       sheetId: z.string().min(1).optional(),
@@ -14886,7 +14887,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.delete('/records/:recordId', apiTokenAuth, oapiWriteAuditBoundary('delete', 'records:write'), apiTokenWriteRateLimit, requireScope('records:write'), async (req: Request, res: Response) => {
+  router.delete('/records/:recordId', apiTokenAuth, oapiWriteAuditBoundary('delete', 'records:write'), apiTokenWriteRateLimit, oapiScopeGuard, requireScope('records:write'), async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId : ''
     if (!recordId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
@@ -15167,7 +15168,7 @@ export function univerMetaRouter(): Router {
     }
   })
 
-  router.post('/patch', apiTokenAuth, oapiWriteAuditBoundary('upsert', 'records:write'), apiTokenWriteRateLimit, requireScope('records:write'), async (req: Request, res: Response) => {
+  router.post('/patch', apiTokenAuth, oapiWriteAuditBoundary('upsert', 'records:write'), apiTokenWriteRateLimit, oapiScopeGuard, requireScope('records:write'), async (req: Request, res: Response) => {
     const schema = z.object({
       viewId: z.string().min(1).optional(),
       sheetId: z.string().min(1).optional(),

@@ -1464,6 +1464,9 @@ export interface MultitableApiTokensTable {
   expires_at: NullableTimestamp
   revoked: boolean
   revoked_at: NullableTimestamp
+  // OAPI-4a per-base/sheet scope whitelists (nullable text[]; NULL/empty = unscoped = creator-wide).
+  base_ids: string[] | null
+  sheet_ids: string[] | null
 }
 
 export interface MultitableWebhooksTable {
