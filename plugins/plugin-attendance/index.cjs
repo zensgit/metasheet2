@@ -17998,6 +17998,9 @@ function computeAttendanceRecordUpsertValues(options) {
   let lastOutAt = existingRow?.last_out_at ?? null
   const existingSourceBatchId = existingRow?.source_batch_id ?? null
   const existingMeta = normalizeMetadata(existingRow?.meta)
+  const incomingMetaHasManualResultEdit = meta
+    && typeof meta === 'object'
+    && Object.prototype.hasOwnProperty.call(meta, 'manual_result_edit')
   const finalMeta = meta && typeof meta === 'object'
     ? { ...existingMeta, ...meta }
     : existingMeta
@@ -18042,6 +18045,37 @@ function computeAttendanceRecordUpsertValues(options) {
       finalMetrics.status = overrideMetrics.status.trim()
     }
   }
+
+  let status = statusOverride ?? finalMetrics.status
+  const manualResultEditMarker = getManualResultEditMarker(finalMeta)
+  if (manualResultEditMarker && statusOverride == null) {
+    const latestFacts = buildManualResultEditFactFingerprint({
+      workDate,
+      firstInAt,
+      lastOutAt,
+      isWorkday: isWorkday !== false,
+    })
+    const nextMarker = { ...manualResultEditMarker }
+    if (
+      nextMarker.correctedAgainst
+      && typeof nextMarker.correctedAgainst === 'object'
+      && !manualResultEditFingerprintsEqual(nextMarker.correctedAgainst, latestFacts)
+    ) {
+      nextMarker.reviewConflict = buildManualResultEditConflict({
+        attemptedDerivedStatus: status,
+        latestFacts,
+      })
+    }
+    finalMetrics.workMinutes = Math.max(0, Math.floor(Number(existingRow?.work_minutes) || 0))
+    finalMetrics.lateMinutes = Math.max(0, Math.floor(Number(existingRow?.late_minutes) || 0))
+    finalMetrics.earlyLeaveMinutes = Math.max(0, Math.floor(Number(existingRow?.early_leave_minutes) || 0))
+    status = typeof existingRow?.status === 'string' && existingRow.status.trim()
+      ? existingRow.status.trim()
+      : status
+    finalMeta.manual_result_edit = nextMarker
+  } else if (manualResultEditMarker && statusOverride != null && !incomingMetaHasManualResultEdit) {
+    delete finalMeta.manual_result_edit
+  }
   // #5 report tiering (design-lock #3055): write the (post-override) lateness tiers into the record meta
   // the report fields already read (severe_late_count / severe_late_minutes / absence_late_count). Computed
   // from the EFFECTIVE lateMinutes (so a manual lateMinutes override re-tiers) + the per-group rule
@@ -18051,8 +18085,6 @@ function computeAttendanceRecordUpsertValues(options) {
   finalMeta.severe_late_count = lateTiers.severeLateCount
   finalMeta.severe_late_minutes = lateTiers.severeLateMinutes
   finalMeta.absence_late_count = lateTiers.absenceLateCount
-
-  const status = statusOverride ?? finalMetrics.status
 
   return {
     firstInAt,
@@ -18177,6 +18209,13 @@ function applyResultEditMetricNormalization(targetStatus, beforeRecord, override
   return { workMinutes: work, lateMinutes: late, earlyLeaveMinutes: early }
 }
 
+function resultEditIso(value) {
+  if (value == null) return null
+  const date = value instanceof Date ? value : new Date(value)
+  const time = date.getTime()
+  return Number.isFinite(time) ? date.toISOString() : null
+}
+
 function coerceResultEditJson(value) {
   if (typeof value === 'string') {
     try { return JSON.parse(value) } catch { return value }
@@ -18187,12 +18226,6 @@ function coerceResultEditJson(value) {
 // §4.1 before/after snapshot — the full record fact persisted on the audit row, independent of policy.
 function buildResultEditSnapshot(record) {
   if (!record || typeof record !== 'object') return {}
-  const iso = (value) => {
-    if (value == null) return null
-    const date = value instanceof Date ? value : new Date(value)
-    const time = date.getTime()
-    return Number.isFinite(time) ? date.toISOString() : null
-  }
   return {
     id: record.id ?? null,
     userId: record.user_id ?? null,
@@ -18201,13 +18234,77 @@ function buildResultEditSnapshot(record) {
     status: record.status ?? null,
     isWorkday: record.is_workday !== false,
     timezone: record.timezone ?? null,
-    firstInAt: iso(record.first_in_at),
-    lastOutAt: iso(record.last_out_at),
+    firstInAt: resultEditIso(record.first_in_at),
+    lastOutAt: resultEditIso(record.last_out_at),
     workMinutes: Number(record.work_minutes ?? 0),
     lateMinutes: Number(record.late_minutes ?? 0),
     earlyLeaveMinutes: Number(record.early_leave_minutes ?? 0),
     meta: normalizeMetadata(record.meta),
   }
+}
+
+function getManualResultEditMarker(meta) {
+  const normalized = normalizeMetadata(meta)
+  const marker = normalized.manual_result_edit
+  return marker && typeof marker === 'object' && !Array.isArray(marker) ? marker : null
+}
+
+function buildManualResultEditFactFingerprint(value) {
+  const workDateInput = value?.workDate ?? value?.work_date
+  return {
+    workDate: normalizeDateOnly(workDateInput) ?? (workDateInput != null ? String(workDateInput).slice(0, 10) : null),
+    firstInAt: resultEditIso(value?.firstInAt ?? value?.first_in_at),
+    lastOutAt: resultEditIso(value?.lastOutAt ?? value?.last_out_at),
+    isWorkday: (value?.isWorkday ?? value?.is_workday) !== false,
+  }
+}
+
+function manualResultEditFingerprintsEqual(left, right) {
+  return stableJsonString(buildManualResultEditFactFingerprint(left ?? {})) === stableJsonString(buildManualResultEditFactFingerprint(right ?? {}))
+}
+
+function buildManualResultEditConflict({ attemptedDerivedStatus, latestFacts, source = 'derived_recompute' }) {
+  return {
+    state: 'needs_review',
+    detectedAt: new Date().toISOString(),
+    source,
+    attemptedDerivedStatus: typeof attemptedDerivedStatus === 'string' ? attemptedDerivedStatus : null,
+    latestFacts: buildManualResultEditFactFingerprint(latestFacts ?? {}),
+  }
+}
+
+function buildManualResultEditMarker(editRow, record) {
+  return {
+    version: 1,
+    auditId: editRow?.id ?? null,
+    idempotencyKey: editRow?.idempotency_key ?? null,
+    targetStatus: editRow?.after_status ?? record?.status ?? null,
+    correctedMetrics: {
+      workMinutes: Math.max(0, Math.floor(Number(record?.work_minutes) || 0)),
+      lateMinutes: Math.max(0, Math.floor(Number(record?.late_minutes) || 0)),
+      earlyLeaveMinutes: Math.max(0, Math.floor(Number(record?.early_leave_minutes) || 0)),
+    },
+    correctedAgainst: buildManualResultEditFactFingerprint(record ?? {}),
+    editedAt: resultEditIso(editRow?.created_at) ?? new Date().toISOString(),
+    actorUserId: editRow?.actor_user_id ?? null,
+    reviewConflict: null,
+  }
+}
+
+async function attachManualResultEditMarkerToRecord(trx, record, marker) {
+  if (!record?.id) return record
+  const meta = {
+    ...normalizeMetadata(record.meta),
+    manual_result_edit: marker,
+  }
+  const rows = await trx.query(
+    `UPDATE attendance_records
+        SET meta = $3::jsonb, updated_at = now()
+      WHERE id = $1 AND org_id = $2
+      RETURNING *`,
+    [record.id, record.org_id, JSON.stringify(meta)]
+  )
+  return rows[0] ?? { ...record, meta }
 }
 
 // §4.1 idempotency compare: a replayed (org_id, idempotency_key) is "already applied" only when its key
@@ -18365,7 +18462,7 @@ async function applyAttendanceResultEdit(trx, options) {
   })
 
   const beforeSnapshot = buildResultEditSnapshot(record)
-  const afterSnapshot = buildResultEditSnapshot(updated)
+  let afterSnapshot = buildResultEditSnapshot(updated)
 
   // (7) Write the immutable audit row. The UNIQUE(org_id, idempotency_key) is the concurrency backstop: a
   // racing same-key insert from another txn surfaces as 23505 → re-run the same compare-then-{ok|409}.
@@ -18408,10 +18505,14 @@ async function applyAttendanceResultEdit(trx, options) {
     throw error
   }
 
+  const marker = buildManualResultEditMarker(auditRow, updated)
+  const markedRecord = await attachManualResultEditMarkerToRecord(trx, updated, marker)
+  afterSnapshot = buildResultEditSnapshot(markedRecord)
+
   return {
     alreadyApplied: false,
     edit: mapResultEditRow(auditRow),
-    record: updated,
+    record: markedRecord,
     beforeSnapshot,
     afterSnapshot,
   }
@@ -20164,6 +20265,10 @@ module.exports = {
     normalizeAttendanceResultEditPolicySetting,
     applyAttendanceResultEdit,
     applyResultEditMetricNormalization,
+    buildManualResultEditFactFingerprint,
+    buildManualResultEditMarker,
+    buildManualResultEditConflict,
+    getManualResultEditMarker,
     validateAttendanceResultEditEvidence,
     buildResultEditSnapshot,
     resultEditPayloadMatches,
