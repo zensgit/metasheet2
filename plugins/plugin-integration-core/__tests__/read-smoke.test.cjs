@@ -197,6 +197,52 @@ assert.deepEqual(pagingEcho, {
 })
 assert.ok(!JSON.stringify(pagingEcho).includes('SECRET-MAT-001'), 'paging-echo evidence does not leak a material value')
 assert.ok(!JSON.stringify(pagingEcho).includes('materialNumber'), 'paging-echo evidence drops non-allowlisted metadata keys')
+const responseShapeEvidence = readSmokeSuccessEvidence(LIST_PRESET, {
+  records: [],
+  metadata: {
+    responseShapeProbe: {
+      dataObjectPresent: true,
+      dataRowCountPresent: true,
+      dataPageSizePresent: true,
+      dataPageIndexPresent: false,
+      dataDataType: 'null',
+      dataDataArrayLength: null,
+      materialNumber: 'SECRET-MAT-002',
+      arbitraryKeyName: 'SECRET-KEY',
+      fixedContainers: {
+        dataData: { type: 'null', arrayLength: null, materialNumber: 'SECRET-MAT-002' },
+        dataList: { type: 'array', arrayLength: 2, rows: [{ materialNumber: 'SECRET-MAT-003' }] },
+        resultRows: { type: 'invalid-type', arrayLength: 1 },
+        arbitraryContainer: { type: 'array', arrayLength: 99 },
+      },
+    },
+  },
+}, { object: 'material', mode: 'list' })
+assert.deepEqual(responseShapeEvidence, {
+  ok: true,
+  presetId: 'k3wise.material-list.v1',
+  object: 'material',
+  mode: 'list',
+  recordPresent: false,
+  recordCount: 0,
+  referenceObjectCount: 0,
+  responseShapeProbe: {
+    dataObjectPresent: true,
+    dataRowCountPresent: true,
+    dataPageSizePresent: true,
+    dataPageIndexPresent: false,
+    dataDataType: 'null',
+    dataDataArrayLength: null,
+    fixedContainers: {
+      dataData: { type: 'null', arrayLength: null },
+      dataList: { type: 'array', arrayLength: 2 },
+    },
+  },
+})
+const responseShapeEvidenceStr = JSON.stringify(responseShapeEvidence)
+for (const leak of ['SECRET-MAT-002', 'SECRET-MAT-003', 'SECRET-KEY', 'materialNumber', 'arbitraryKeyName', 'arbitraryContainer']) {
+  assert.ok(!responseShapeEvidenceStr.includes(leak), `response-shape evidence must not leak ${leak}`)
+}
 
 assert.deepEqual(readSmokeSuccessEvidence(LIST_PRESET, { records: [{ FNumber: 'M-001' }, { FNumber: 'M-002' }] }, { object: 'material', mode: 'list' }), {
   ok: true, presetId: 'k3wise.material-list.v1', object: 'material', mode: 'list', recordPresent: true, recordCount: 2, referenceObjectCount: 0,
@@ -263,6 +309,19 @@ listError.details = {
   code: 'K3_WISE_READ_LIST_ENVELOPE_UNRECOGNIZED',
   dataDataPresent: true,
   dataRowCount: 1,
+  responseShapeProbe: {
+    dataObjectPresent: true,
+    dataRowCountPresent: true,
+    dataPageSizePresent: false,
+    dataPageIndexPresent: false,
+    dataDataType: 'array',
+    dataDataArrayLength: 1,
+    fixedContainers: {
+      dataData: { type: 'array', arrayLength: 1, materialNumber: 'M-001' },
+      topLevel: { type: 'object', arrayLength: null },
+      arbitraryContainer: { type: 'array', arrayLength: 1 },
+    },
+  },
   listShapeProbe: {
     dataData: true,
     dataLowerData: false,
@@ -289,9 +348,21 @@ assert.deepEqual(readSmokeErrorEvidence(LIST_PRESET, listError, { object: 'mater
     rows: false,
     topLevelArray: false,
   },
+  responseShapeProbe: {
+    dataObjectPresent: true,
+    dataRowCountPresent: true,
+    dataPageSizePresent: false,
+    dataPageIndexPresent: false,
+    dataDataType: 'array',
+    dataDataArrayLength: 1,
+    fixedContainers: {
+      dataData: { type: 'array', arrayLength: 1 },
+      topLevel: { type: 'object', arrayLength: null },
+    },
+  },
 })
 const listErrorStr = JSON.stringify(readSmokeErrorEvidence(LIST_PRESET, listError, { object: 'material', mode: 'list' }))
-for (const leak of ['M-001', '42', 'materialNumber']) {
+for (const leak of ['M-001', '42', 'materialNumber', 'arbitraryContainer']) {
   assert.ok(!listErrorStr.includes(leak), `LIST error evidence must not leak ${leak}`)
 }
 const unsafeDetails = new Error('material M-001 failed with secret value 42')

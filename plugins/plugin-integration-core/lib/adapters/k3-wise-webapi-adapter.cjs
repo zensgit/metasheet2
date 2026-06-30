@@ -821,6 +821,56 @@ function materialListShapeProbe(data) {
   }
 }
 
+const MATERIAL_LIST_RESPONSE_SHAPE_CONTAINER_PATHS = Object.freeze([
+  ['dataData', 'Data.DATA'],
+  ['dataLowerData', 'Data.data'],
+  ['dataRows', 'Data.Rows'],
+  ['dataList', 'Data.List'],
+  ['dataItems', 'Data.Items'],
+  ['resultData', 'Result.Data'],
+  ['resultRows', 'Result.Rows'],
+  ['rows', 'Rows'],
+  ['topLevel', ''],
+])
+
+function materialListShapeType(value) {
+  if (value === undefined) return 'missing'
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'array'
+  if (isPlainObject(value)) return 'object'
+  if (['string', 'number', 'boolean'].includes(typeof value)) return typeof value
+  return 'other'
+}
+
+function materialListArrayLength(value) {
+  if (!Array.isArray(value)) return null
+  return Math.min(value.length, 1000)
+}
+
+function materialListShapeValueEvidence(value) {
+  return {
+    type: materialListShapeType(value),
+    arrayLength: materialListArrayLength(value),
+  }
+}
+
+function materialListResponseShapeProbe(data) {
+  const fixedContainers = {}
+  for (const [key, path] of MATERIAL_LIST_RESPONSE_SHAPE_CONTAINER_PATHS) {
+    fixedContainers[key] = materialListShapeValueEvidence(path ? getPath(data, path) : data)
+  }
+  const dataData = getPath(data, 'Data.DATA')
+  return {
+    dataObjectPresent: isPlainObject(getPath(data, 'Data')),
+    dataRowCountPresent: materialListRowCount(data) !== null,
+    dataPageSizePresent: materialListPageSize(data) !== null,
+    dataPageIndexPresent: materialListPageIndex(data) !== null,
+    dataDataType: materialListShapeType(dataData),
+    dataDataArrayLength: materialListArrayLength(dataData),
+    fixedContainers,
+  }
+}
+
 function materialListDataDataPresent(data) {
   const probe = materialListShapeProbe(data)
   return probe.dataData || probe.dataLowerData
@@ -1382,6 +1432,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       const dataPageIndex = materialListPageIndex(readResponse.data)
       const requestedLimit = request.limit
       const requestedPageIndex = 1
+      const responseShapeProbe = materialListResponseShapeProbe(readResponse.data)
       if (!materialListBusinessSuccess(readResponse.data, config)) {
         const failureCode = materialListBusinessFailureCode(readResponse.data)
         throw new K3WiseWebApiAdapterError(String(responseMessage(readResponse.data, config, 'K3 WISE list read business response failed')), {
@@ -1395,6 +1446,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           requestedLimit,
           requestedPageIndex,
           listShapeProbe,
+          responseShapeProbe,
         })
       }
 
@@ -1413,6 +1465,7 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           dataPageSize,
           dataPageIndex,
           listShapeProbe,
+          responseShapeProbe,
           readPath,
           readOnly: true,
         },

@@ -98,9 +98,76 @@ function readSmokeListShapeProbeEvidence(value) {
   return hasEvidence ? evidence : null
 }
 
+const READ_SMOKE_RESPONSE_SHAPE_CONTAINER_KEYS = Object.freeze([
+  'dataData',
+  'dataLowerData',
+  'dataRows',
+  'dataList',
+  'dataItems',
+  'resultData',
+  'resultRows',
+  'rows',
+  'topLevel',
+])
+const READ_SMOKE_RESPONSE_SHAPE_TYPES = new Set(['array', 'null', 'object', 'string', 'number', 'boolean', 'missing', 'other'])
+
 function readSmokeSafeCount(value) {
   if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value
   return null
+}
+
+function readSmokeSafeOptionalCount(value) {
+  if (value === null) return null
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value
+  return undefined
+}
+
+function readSmokeSafeShapeType(value) {
+  if (typeof value !== 'string') return null
+  return READ_SMOKE_RESPONSE_SHAPE_TYPES.has(value) ? value : null
+}
+
+function readSmokeResponseShapeContainerEvidence(value) {
+  if (!isPlainObject(value)) return null
+  const type = readSmokeSafeShapeType(value.type)
+  if (!type) return null
+  const evidence = { type }
+  const arrayLength = readSmokeSafeOptionalCount(value.arrayLength)
+  if (arrayLength !== undefined) evidence.arrayLength = arrayLength
+  return evidence
+}
+
+function readSmokeResponseShapeProbeEvidence(value) {
+  if (!isPlainObject(value)) return null
+  const evidence = {}
+  let hasEvidence = false
+  for (const key of ['dataObjectPresent', 'dataRowCountPresent', 'dataPageSizePresent', 'dataPageIndexPresent']) {
+    if (typeof value[key] !== 'boolean') continue
+    evidence[key] = value[key]
+    hasEvidence = true
+  }
+  const dataDataType = readSmokeSafeShapeType(value.dataDataType)
+  if (dataDataType) {
+    evidence.dataDataType = dataDataType
+    hasEvidence = true
+  }
+  const dataDataArrayLength = readSmokeSafeOptionalCount(value.dataDataArrayLength)
+  if (dataDataArrayLength !== undefined) {
+    evidence.dataDataArrayLength = dataDataArrayLength
+    hasEvidence = true
+  }
+  if (isPlainObject(value.fixedContainers)) {
+    const fixedContainers = {}
+    for (const key of READ_SMOKE_RESPONSE_SHAPE_CONTAINER_KEYS) {
+      const container = readSmokeResponseShapeContainerEvidence(value.fixedContainers[key])
+      if (container) fixedContainers[key] = container
+    }
+    if (Object.keys(fixedContainers).length > 0) {
+      evidence.fixedContainers = fixedContainers
+      hasEvidence = true
+    }
+  }
+  return hasEvidence ? evidence : null
 }
 
 // C3 LIST paging echo (#1709): copy ONLY the allowlisted values-free count fields (K3-echoed page size/index +
@@ -220,6 +287,8 @@ function readSmokeSuccessEvidence(preset, result, contract = {}) {
   applyReadSmokePagingCounts(evidence, result && result.metadata)
   const listShapeProbe = readSmokeListShapeProbeEvidence(result && result.metadata && result.metadata.listShapeProbe)
   if (listShapeProbe) evidence.listShapeProbe = listShapeProbe
+  const responseShapeProbe = readSmokeResponseShapeProbeEvidence(result && result.metadata && result.metadata.responseShapeProbe)
+  if (responseShapeProbe) evidence.responseShapeProbe = responseShapeProbe
   return evidence
 }
 
@@ -249,6 +318,8 @@ function readSmokeErrorEvidence(preset, error, contract = {}) {
   applyReadSmokePagingCounts(evidence, error && error.details)
   const listShapeProbe = readSmokeListShapeProbeEvidence(error && error.details && error.details.listShapeProbe)
   if (listShapeProbe) evidence.listShapeProbe = listShapeProbe
+  const responseShapeProbe = readSmokeResponseShapeProbeEvidence(error && error.details && error.details.responseShapeProbe)
+  if (responseShapeProbe) evidence.responseShapeProbe = responseShapeProbe
   return evidence
 }
 
