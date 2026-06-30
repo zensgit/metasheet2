@@ -19,8 +19,9 @@ creator RBAC)` — enforced by one shared guard on every records route (read + w
 | **Guard** | `middleware/oapi-scope-guard.ts` (NEW) | the shared `oapiScopeGuard` (§2–§4). |
 | Audit | `multitable/oapi-write-audit.ts` | the `res.on('finish')` boundary threads `req.oapiAuditReason` → `recordOapiWriteAttempt` → value-scrubbed `detail.reason`. |
 | Routes | `routes/univer-meta.ts` | `oapiScopeGuard` mounted on all **10** reachable records routes at the locked positions (§2). |
-| Golden | `tests/integration/multitable-oapi-scope-guard-realdb.test.ts` (NEW, 14 tests) | §5. |
-| CI | `.github/workflows/plugin-tests.yml` | golden added to the real-DB file list + step name (§5). |
+| **REST mint** | `routes/api-tokens.ts` | `CreateTokenSchema` + the create route now accept/persist `baseIds`/`sheetIds` (review fix — Zod's unknown-key strip previously dropped them, so the supported minting API could only produce unscoped creator-wide tokens). |
+| Golden | `multitable-oapi-scope-guard-realdb.test.ts` (NEW, 15 tests) + `multitable-oapi-token-create-scope.api.test.ts` (NEW, 6 tests) | §5. |
+| CI | `.github/workflows/plugin-tests.yml` | both goldens added to the real-DB file list + step name (§5). |
 
 ## 2. Enforcement seam + route wiring (locked order)
 `oapiScopeGuard` is a strict no-op unless `req.apiTokenId` is set, and a no-op (allow) for an unscoped token.
@@ -52,12 +53,17 @@ client-supplied baseId.
   (T-f NO-ORACLE: `missing.body` deep-equals `outOfScope.body`).
 
 ## 5. Verification (real DB) — `metasheet_oapi4a_test`, all migrations applied
-**`multitable-oapi-scope-guard-realdb.test.ts` → 14/14 passed.** Coverage: in-scope allow (base / sheet / both
+**`multitable-oapi-scope-guard-realdb.test.ts` → 15/15 passed.** Coverage: in-scope allow (base / sheet / both
 narrowest / read) · out-of-base 403 + **denied audit row with `detail.reason='out_of_base_sheet_scope'`** + no
-mutation · out-of-sheet 403 · legacy-unscoped unchanged (writes any base, reads any sheet) · session no-op
-(writes a sheet no scoped token could reach) · record-addressed allow/deny + **no-oracle byte-identical 403** ·
-DELETE out-of-scope 403 + record present · **3-way min** (in-base but no write capability → 403
-`INSUFFICIENT_SCOPE`) · **rotateToken preserves scope** · **/patch defense-in-depth** (below).
+mutation · out-of-sheet 403 · **out-of-scope READ 403** (uniform read+write, review add) · legacy-unscoped
+unchanged (writes any base, reads any sheet) · session no-op (writes a sheet no scoped token could reach) ·
+record-addressed allow/deny + **no-oracle byte-identical 403** · DELETE out-of-scope 403 + record present ·
+**3-way min** (in-base but no write capability → 403 `INSUFFICIENT_SCOPE`) · **rotateToken preserves scope** ·
+**/patch defense-in-depth** (below).
+**`multitable-oapi-token-create-scope.api.test.ts` → 6/6 passed (review fix).** Proves the supported REST
+minting surface: create with `baseIds`/`sheetIds` → persisted (DB row asserted) + returned + listed · the
+REST-minted token is **enforced** (denied out-of-scope 403 `OUT_OF_SCOPE`) and allowed in-scope · `sheetIds`
+accepted. Regression for the Zod-strip footgun (a "scoped" create silently minting an unscoped token).
 **Adjacent OAPI suites (regression):** oapi1-token-read + oapi2a-token-write + oapi2a-ratelimit → all green
 (**36/36 across the 4 suites**). **Typecheck:** `tsc --noEmit` exit 0, clean.
 
