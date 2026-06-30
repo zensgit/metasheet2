@@ -335,6 +335,7 @@ jobs:
             tests/integration/approval-common-template-presets.api.test.ts \
             tests/integration/approval-amount-total-check.api.test.ts \
             tests/integration/approval-wp1-parallel-gateway.api.test.ts \
+            tests/integration/approval-bridge-redaction-regression.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
