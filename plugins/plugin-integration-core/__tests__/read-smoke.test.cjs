@@ -211,6 +211,7 @@ const responseShapeEvidence = readSmokeSuccessEvidence(LIST_PRESET, {
       arbitraryKeyName: 'SECRET-KEY',
       fixedContainers: {
         dataData: { type: 'null', arrayLength: null, materialNumber: 'SECRET-MAT-002' },
+        dataPascalData: { type: 'array', arrayLength: 2, materialNumber: 'SECRET-MAT-004' },
         dataList: { type: 'array', arrayLength: 2, rows: [{ materialNumber: 'SECRET-MAT-003' }] },
         resultRows: { type: 'invalid-type', arrayLength: 1 },
         arbitraryContainer: { type: 'array', arrayLength: 99 },
@@ -235,12 +236,13 @@ assert.deepEqual(responseShapeEvidence, {
     dataDataArrayLength: null,
     fixedContainers: {
       dataData: { type: 'null', arrayLength: null },
+      dataPascalData: { type: 'array', arrayLength: 2 },
       dataList: { type: 'array', arrayLength: 2 },
     },
   },
 })
 const responseShapeEvidenceStr = JSON.stringify(responseShapeEvidence)
-for (const leak of ['SECRET-MAT-002', 'SECRET-MAT-003', 'SECRET-KEY', 'materialNumber', 'arbitraryKeyName', 'arbitraryContainer']) {
+for (const leak of ['SECRET-MAT-002', 'SECRET-MAT-003', 'SECRET-MAT-004', 'SECRET-KEY', 'materialNumber', 'arbitraryKeyName', 'arbitraryContainer']) {
   assert.ok(!responseShapeEvidenceStr.includes(leak), `response-shape evidence must not leak ${leak}`)
 }
 
