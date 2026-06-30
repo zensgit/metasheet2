@@ -77,6 +77,14 @@ export interface ScheduleDateFieldConfig {
 export const DATE_REMINDER_GRACE_WINDOW_MS = 2 * DAY_MS
 
 /**
+ * Sanity cap for `offsetDays` (whole days before/after the date value). 100 years is far beyond any real
+ * reminder and keeps the candidate-range math (`nowMs ± signedDays*DAY ± slack`) safely inside the JS Date
+ * range — an uncapped value (e.g. 1e12) overflows `new Date(ms).toISOString()` with a RangeError and aborts
+ * the whole scan for that rule. Enforced fail-closed at save (validateDateFieldTriggerAtSave).
+ */
+export const MAX_DATE_REMINDER_OFFSET_DAYS = 36500
+
+/**
  * Retain the date-reminder idempotency ledger for one year. The ledger is a dedupe/audit record, not user
  * content; rule deletion still cascades immediately, while long-lived active rules age by actual `fired_at`.
  */

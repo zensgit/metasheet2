@@ -16,6 +16,7 @@ import {
   dateReminderTimeOfDayPassed,
   dateReminderCandidateDateRange,
   dateReminderLedgerRetentionCutoffIso,
+  MAX_DATE_REMINDER_OFFSET_DAYS,
 } from './automation-date-reminder'
 
 const DAY = 24 * 60 * 60 * 1000
@@ -348,5 +349,19 @@ describe('dateReminderCandidateDateRange — SQL pre-filter brackets the product
     // because the bare string is a prefix of the timestamp and sorts BEFORE it. This is the boundary-luck fix.
     const oldFullIsoLo = `${loIso}T12:00:00.000Z`
     expect(bareOnLoDay >= oldFullIsoLo).toBe(false)
+  })
+
+  test('offsetDays at the cap does NOT overflow toISOString; far above the cap WOULD (why the save cap exists)', () => {
+    const now = Date.parse('2026-06-25T12:00:00.000Z')
+    const window = DATE_REMINDER_GRACE_WINDOW_MS
+    // At the sanity cap the range math stays inside the JS Date range — no throw, valid date-only bounds.
+    expect(() => {
+      const r = dateReminderCandidateDateRange(now, { offsetDays: MAX_DATE_REMINDER_OFFSET_DAYS, direction: 'after' }, window)
+      expect(r.loIso).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+      expect(r.hiIso).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    }).not.toThrow()
+    // An uncapped absurd value overflows new Date(ms).toISOString() with a RangeError — exactly what the
+    // save-time cap (validateDateFieldTriggerAtSave) fail-closes so the scan never aborts on it.
+    expect(() => dateReminderCandidateDateRange(now, { offsetDays: 1e12, direction: 'after' }, window)).toThrow(RangeError)
   })
 })

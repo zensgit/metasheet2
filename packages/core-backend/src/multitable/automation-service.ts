@@ -9,6 +9,7 @@ import {
   dateReminderFloorMs,
   DATE_REMINDER_GRACE_WINDOW_MS,
   DATE_REMINDER_LEDGER_SWEEP_INTERVAL_MS,
+  MAX_DATE_REMINDER_OFFSET_DAYS,
   dateReminderCandidateDateRange,
   dateReminderLedgerRetentionCutoffIso,
   type ScheduleDateFieldConfig,
@@ -1369,6 +1370,11 @@ export class AutomationService {
       offsetDays < 0
     ) {
       return 'schedule.date_field offsetDays must be a non-negative integer'
+    }
+    // Magnitude cap (fail-closed): an absurd offset (e.g. 1e12) overflows the candidate-range math's
+    // `new Date(ms).toISOString()` with a RangeError and aborts the whole scan for the rule. Bound it at save.
+    if (offsetDays > MAX_DATE_REMINDER_OFFSET_DAYS) {
+      return `schedule.date_field offsetDays must be at most ${MAX_DATE_REMINDER_OFFSET_DAYS} days`
     }
 
     if (cfg.timeOfDay !== undefined && cfg.timeOfDay !== null && cfg.timeOfDay !== '') {
