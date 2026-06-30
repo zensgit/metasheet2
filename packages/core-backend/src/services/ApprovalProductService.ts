@@ -1142,6 +1142,35 @@ function normalizeApprovalGraph(
             context,
             `approvalGraph.nodes[${index}].config.approvalMode`,
           )
+          // T2-4 N-of-M threshold (门槛会签). A 'threshold'-mode node requires a positive-integer
+          // approvalThreshold; when every approver is a static user id the distinct count M is known
+          // at author time, so bound 1 <= N <= M. Distinct ServiceError codes (not failValidation,
+          // which collapses to the shared graph-invalid code) so callers can branch on the cause.
+          let approvalThreshold: number | undefined
+          if (approvalMode === 'threshold') {
+            const rawThreshold = node.config.approvalThreshold
+            if (typeof rawThreshold !== 'number' || !Number.isInteger(rawThreshold) || rawThreshold < 1) {
+              throw new ServiceError(
+                `approvalGraph.nodes[${index}].config.approvalThreshold must be an integer >= 1 when approvalMode is 'threshold'`,
+                400,
+                'APPROVAL_THRESHOLD_INVALID',
+              )
+            }
+            approvalThreshold = rawThreshold
+            const staticUsersOnly = !assigneeSources && hasLegacyAssignees && node.config.assigneeType === 'user'
+            if (staticUsersOnly) {
+              const distinctAssignees = new Set(
+                (node.config.assigneeIds as string[]).map((entry) => entry.trim()),
+              ).size
+              if (approvalThreshold > distinctAssignees) {
+                throw new ServiceError(
+                  `approvalGraph.nodes[${index}].config.approvalThreshold (${approvalThreshold}) must not exceed the ${distinctAssignees} distinct static approver(s)`,
+                  400,
+                  'APPROVAL_THRESHOLD_OUT_OF_RANGE',
+                )
+              }
+            }
+          }
           const emptyAssigneePolicy = normalizeEmptyAssigneePolicy(
             node.config.emptyAssigneePolicy,
             context,
@@ -1171,6 +1200,7 @@ function normalizeApprovalGraph(
               : {}),
             ...(assigneeSources ? { assigneeSources } : {}),
             ...(approvalMode ? { approvalMode } : {}),
+            ...(approvalThreshold !== undefined ? { approvalThreshold } : {}),
             ...(emptyAssigneePolicy ? { emptyAssigneePolicy } : {}),
             ...(autoApprovalPolicy ? { autoApprovalPolicy } : {}),
             ...(fieldPermissions ? { fieldPermissions } : {}),
@@ -1393,7 +1423,20 @@ function collectBranchAssignees(
       )
     }
     if (node.type === 'approval') {
-      const approvalConfig = node.config as { assigneeIds?: string[]; assigneeSources?: ApprovalAssigneeSource[] }
+      const approvalConfig = node.config as {
+        assigneeIds?: string[]
+        assigneeSources?: ApprovalAssigneeSource[]
+        approvalMode?: ApprovalMode
+      }
+      // T2-4: threshold mode is linear-only in v1 — reject a 'threshold' approval node nested
+      // inside a parallel region (distinct ServiceError code, mirrors the nested-parallel guard).
+      if (approvalConfig.approvalMode === 'threshold') {
+        throw new ServiceError(
+          `approvalGraph node ${node.key} uses approvalMode 'threshold' inside a parallel region — threshold mode is linear-only in v1`,
+          400,
+          'APPROVAL_THRESHOLD_IN_PARALLEL',
+        )
+      }
       for (const assignee of approvalConfig.assigneeIds ?? []) {
         assignees.add(assignee)
       }
