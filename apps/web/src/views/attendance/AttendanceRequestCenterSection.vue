@@ -200,6 +200,31 @@
               >
                 {{ item.state === 'pending' ? tr('Pending request', '申请处理中') : tr('Create request', '创建申请') }}
               </button>
+              <button
+                v-if="resultEditCapabilityUnknown"
+                class="attendance__btn"
+                data-attendance-result-edit-probe
+                @click="openResultEditModal(item)"
+              >
+                {{ tr('Check edit access', '检查更正权限') }}
+              </button>
+              <button
+                v-else
+                class="attendance__btn"
+                :disabled="Boolean(resultEditDisabledReason(item))"
+                :title="resultEditDisabledReason(item) || undefined"
+                data-attendance-result-edit-open
+                @click="openResultEditModal(item)"
+              >
+                {{ tr('Edit result', '修改结果') }}
+              </button>
+              <small
+                v-if="resultEditCapabilityUnknown || resultEditDisabledReason(item)"
+                class="attendance__field-hint"
+                data-attendance-result-edit-disabled-reason
+              >
+                {{ resultEditCapabilityUnknown ? tr('Check admin permission before editing.', '更正前需先检查管理员权限。') : resultEditDisabledReason(item) }}
+              </small>
             </td>
           </tr>
         </tbody>
@@ -348,6 +373,9 @@ interface RequestCenterBindings {
   resolveRequest: (id: string, action: RequestResolutionAction) => MaybePromise<void>
   loadAnomalies: () => MaybePromise<void>
   prefillRequestFromAnomaly: (item: AttendanceAnomalyItem) => MaybePromise<void>
+  resultEditCapabilityUnknown: Ref<boolean>
+  openResultEditModal: (item: AttendanceAnomalyItem) => MaybePromise<void>
+  resultEditDisabledReason: (item: AttendanceAnomalyItem) => string
   loadRequestReport: () => MaybePromise<void>
   focusCalendarMonth: (value: string | null | undefined) => MaybePromise<void>
   shiftMonth: (delta: number) => MaybePromise<void>
@@ -392,6 +420,9 @@ const cancelRequest = (id: string) => props.requestCenter.cancelRequest(id)
 const resolveRequest = (id: string, action: RequestResolutionAction) => props.requestCenter.resolveRequest(id, action)
 const loadAnomalies = () => props.requestCenter.loadAnomalies()
 const prefillRequestFromAnomaly = (item: AttendanceAnomalyItem) => props.requestCenter.prefillRequestFromAnomaly(item)
+const resultEditCapabilityUnknown = props.requestCenter.resultEditCapabilityUnknown
+const openResultEditModal = (item: AttendanceAnomalyItem) => props.requestCenter.openResultEditModal(item)
+const resultEditDisabledReason = (item: AttendanceAnomalyItem) => props.requestCenter.resultEditDisabledReason(item)
 const loadRequestReport = () => props.requestCenter.loadRequestReport()
 const focusCalendarMonth = (value: string | null | undefined) => props.requestCenter.focusCalendarMonth(value)
 const shiftMonth = (delta: number) => props.requestCenter.shiftMonth(delta)
@@ -557,7 +588,15 @@ function formatLeaveTypeLabel(item: { name?: string | null; paid?: boolean | nul
 }
 
 .attendance__table-actions {
-  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.attendance__field-hint {
+  color: #777;
+  font-size: 11px;
 }
 
 .attendance__empty {
