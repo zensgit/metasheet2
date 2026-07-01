@@ -4175,14 +4175,52 @@ export class ApprovalProductService {
         // across role rows / re-dispatch, and auto-approvals are included because they too
         // write an action='approve' record carrying metadata.nodeKey (Q5).
         const threshold = executor.getApprovalThreshold(currentNodeKey)
-        const priorApproversResult = await client.query<{ count: string }>(
-          `SELECT COUNT(DISTINCT actor_id) AS count
+        // T2-4 RE-ENTRY quorum fix: scope the DISTINCT-approver tally to the CURRENT node-entry round. A
+        // `threshold` node can be RETURNED/JUMPED back to after it already resolved (the 退回/return path admits
+        // any previously-visited approval node), and `approval_records` are append-only — so without scoping,
+        // approve records from a PRIOR entry still count toward N and re-satisfy the node on stale votes (a
+        // quorum bypass: a 2-of-3 that A+B already approved would resolve on a single fresh vote). The current
+        // round begins at the `to_version` of the most recent return/jump that re-entered THIS node; approve
+        // records are stamped `to_version = <bumped version>`, so those recorded AT-OR-AFTER the re-entry
+        // (`to_version >= cutoff`) belong to the current round. `>=` (not `>`) is deliberate: a return/jump can
+        // trigger an auto-approval cascade AT the re-entered node in the SAME transaction (insertAutoApprovalEvents
+        // writes those approve records at `to_version = <re-entry version> = cutoff`) — legitimate current-round
+        // votes that must count. Prior-round approves are strictly `< cutoff` (they predate the version bump), so
+        // `>=` admits the cascade without re-admitting stale votes. With NO re-entry (cutoff null) the tally is
+        // the whole-node count — byte-identical to the pre-fix behaviour (zero regression). The graph is validated
+        // ACYCLIC (executor cycle guards), so a threshold node is only re-enterable via a return/jump — this
+        // marker is complete (no forward-loop re-entry path).
+        const reentryCutoffResult = await client.query<{ cutoff: number | string | null }>(
+          `SELECT MAX(to_version) AS cutoff
              FROM approval_records
              WHERE instance_id = $1
-               AND action = 'approve'
-               AND metadata->>'nodeKey' = $2`,
+               AND action IN ('return', 'jump')
+               AND ( metadata->>'nextNodeKey' = $2
+                  OR metadata->>'targetNodeKey' = $2
+                  OR metadata->>'toNodeKey' = $2 )`,
           [id, currentNodeKey],
         )
+        const rawCutoff = reentryCutoffResult.rows[0]?.cutoff
+        const reentryCutoff = rawCutoff === null || rawCutoff === undefined ? null : Number(rawCutoff)
+        const priorApproversResult =
+          reentryCutoff === null
+            ? await client.query<{ count: string }>(
+                `SELECT COUNT(DISTINCT actor_id) AS count
+                   FROM approval_records
+                   WHERE instance_id = $1
+                     AND action = 'approve'
+                     AND metadata->>'nodeKey' = $2`,
+                [id, currentNodeKey],
+              )
+            : await client.query<{ count: string }>(
+                `SELECT COUNT(DISTINCT actor_id) AS count
+                   FROM approval_records
+                   WHERE instance_id = $1
+                     AND action = 'approve'
+                     AND metadata->>'nodeKey' = $2
+                     AND to_version >= $3`,
+                [id, currentNodeKey, reentryCutoff],
+              )
         const priorDistinctApprovers = Number.parseInt(priorApproversResult.rows[0]?.count || '0', 10)
         const distinctApproverCount = priorDistinctApprovers + 1
         // Deactivate the actor's own assignment first (whether or not the threshold is met).
