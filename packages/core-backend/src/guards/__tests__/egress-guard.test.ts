@@ -145,3 +145,28 @@ describe('R1-A egress guard — URL policy', () => {
     })
   })
 })
+
+describe('R1-A egress guard — NAT64 Network-Specific Prefix (configurable)', () => {
+  test('well-known 64:ff9b::/96 embedding an internal v4 is blocked by default', () => {
+    expect(isBlockedEgressIp('64:ff9b::a00:1')).toBe(true) // 10.0.0.1
+  })
+  test('a configured NSP NAT64 embedding an internal v4 is blocked', () => {
+    expect(isBlockedEgressIp('2a00:1098:2c::a00:1', ['2a00:1098:2c::/96'])).toBe(true) // 10.0.0.1
+  })
+  test('a configured NSP NAT64 embedding cloud metadata is blocked', () => {
+    expect(isBlockedEgressIp('2a00:1098:2c::a9fe:a9fe', ['2a00:1098:2c::/96'])).toBe(true) // 169.254.169.254
+  })
+  test('a configured NSP NAT64 embedding a public v4 decodes and is not blocked', () => {
+    expect(isBlockedEgressIp('2a00:1098:2c::808:808', ['2a00:1098:2c::/96'])).toBe(false) // 8.8.8.8
+  })
+  test('RESIDUAL: an unconfigured NSP NAT64 is not decoded (L3 allowlist is the backstop)', () => {
+    expect(isBlockedEgressIp('2a00:1098:2c::a00:1')).toBe(false)
+  })
+  test('end-to-end: a configured NSP NAT64 pointing at an internal v4 is IP_BLOCKED', () => {
+    const p: EgressPolicy = { allowedHosts: [], nat64Prefixes: ['2a00:1098:2c::/96'] }
+    expect(validateEgressUrl('https://[2a00:1098:2c::a00:1]/', p)).toEqual({
+      allowed: false,
+      reason: 'IP_BLOCKED',
+    })
+  })
+})
