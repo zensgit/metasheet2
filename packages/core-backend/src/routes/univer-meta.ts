@@ -9439,7 +9439,10 @@ export function univerMetaRouter(): Router {
       // appends a 'restore' create-revision (the Time Machine source, NOT a plain 'rest' create). Realtime post-commit.
       const resurrectedIds: string[] = []
       if (resurrects.length > 0) {
-        const linkFieldIds = fields.filter((f) => f.type === 'link').map((f) => f.id)
+        // Mirror-read-only hardening (C2/I-1): resurrect only WRITABLE (forward) links, never the mirror side of a
+        // twoWay link (the patchContext guard's `readOnly` = `isFieldAlwaysReadOnly` ⇒ `mirrorOf`). Explicit skip so
+        // the spine invariant (mirror never owns a meta_links row) is structural, not snapshot-hygiene-reliant.
+        const linkFieldIds = fields.filter((f) => f.type === 'link' && fieldById.get(f.id)?.readOnly !== true).map((f) => f.id)
         const undeleteActorId = getRequestActorId(req)
         try {
           await pool.transaction(async ({ query }) => {
@@ -9658,7 +9661,11 @@ export function univerMetaRouter(): Router {
             })
             for (const change of candidate.diff) {
               const field = fieldById.get(change.fieldId)
-              if (field?.type !== 'link') continue
+              // Mirror-read-only hardening (C2/I-1): never reset/replay the mirror side of a twoWay link
+              // (`readOnly` = `isFieldAlwaysReadOnly` ⇒ `mirrorOf`). DEFENSE-IN-DEPTH: the reset-preview PREFLIGHT
+              // (RESET_BLOCKED, ~:9322) is the reachable PRIMARY guard — it refuses a mirror-diff reset before this
+              // replay runs; this skip is the second door, reached only if that preflight were ever bypassed.
+              if (field?.type !== 'link' || field.readOnly === true) continue
               const ids = change.op === 'unset' ? [] : normalizeLinkIds(change.value)
               const cfg = field.link
               if (ids.length > 0 && !cfg?.foreignSheetId) {
