@@ -16,6 +16,7 @@ import {
   dateReminderTimeOfDayPassed,
   dateReminderCandidateDateRange,
   dateReminderLedgerRetentionCutoffIso,
+  MAX_DATE_REMINDER_OFFSET_DAYS,
 } from './automation-date-reminder'
 
 const DAY = 24 * 60 * 60 * 1000
@@ -348,5 +349,26 @@ describe('dateReminderCandidateDateRange — SQL pre-filter brackets the product
     // because the bare string is a prefix of the timestamp and sorts BEFORE it. This is the boundary-luck fix.
     const oldFullIsoLo = `${loIso}T12:00:00.000Z`
     expect(bareOnLoDay >= oldFullIsoLo).toBe(false)
+  })
+
+  test('offsetDays defense-in-depth: bounded at the cap, and a PERSISTED out-of-range value DEGRADES (no throw)', () => {
+    const now = Date.parse('2026-06-25T12:00:00.000Z')
+    const window = DATE_REMINDER_GRACE_WINDOW_MS
+    // At the sanity cap the range math stays inside the JS Date range — valid date-only bounds.
+    const atCap = dateReminderCandidateDateRange(now, { offsetDays: MAX_DATE_REMINDER_OFFSET_DAYS, direction: 'after' }, window)
+    expect(atCap.loIso).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(atCap.hiIso).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    // The save cap (validateDateFieldTriggerAtSave) rejects new out-of-range rules; for a PERSISTED junk value
+    // (direct-DB / pre-cap) the runtime clamp degrades to bounded output instead of throwing a RangeError that
+    // would abort the whole scan. The clamped 1e12 produces the SAME bounds as the cap (magnitude clamp).
+    let degraded: { loIso: string; hiIso: string } | null = null
+    expect(() => {
+      degraded = dateReminderCandidateDateRange(now, { offsetDays: 1e12, direction: 'after' }, window)
+    }).not.toThrow()
+    expect(degraded!).toEqual(atCap)
+    // The occurrence path degrades too (no throw) for a persisted huge offset.
+    expect(() =>
+      computeDateReminderOccurrence('2026-06-28', { offsetDays: 1e12, direction: 'after', timeOfDay: '09:00' }),
+    ).not.toThrow()
   })
 })

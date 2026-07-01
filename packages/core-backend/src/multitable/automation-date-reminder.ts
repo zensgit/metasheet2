@@ -77,6 +77,27 @@ export interface ScheduleDateFieldConfig {
 export const DATE_REMINDER_GRACE_WINDOW_MS = 2 * DAY_MS
 
 /**
+ * Sanity cap for `offsetDays` (whole days before/after the date value). 100 years is far beyond any real
+ * reminder and keeps the candidate-range math (`nowMs ± signedDays*DAY ± slack`) safely inside the JS Date
+ * range — an uncapped value (e.g. 1e12) overflows `new Date(ms).toISOString()` with a RangeError and aborts
+ * the whole scan for that rule. Enforced fail-closed at save (validateDateFieldTriggerAtSave).
+ */
+export const MAX_DATE_REMINDER_OFFSET_DAYS = 36500
+
+/**
+ * Runtime defense (mirrors the junk-tz "degrade, never throw" posture): the save cap only guards the API
+ * path, so a PERSISTED out-of-range `offsetDays` (direct-DB write, or a rule saved before the cap existed)
+ * would still overflow the occurrence/range math's `new Date(ms).toISOString()` and abort the WHOLE scan
+ * for the rule. Clamp the magnitude here so a junk value degrades to a bounded (if meaningless) occurrence
+ * instead of throwing. Junk/non-finite → 0.
+ */
+function clampOffsetDays(raw: unknown): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return 0
+  const t = Math.trunc(raw)
+  return Math.max(-MAX_DATE_REMINDER_OFFSET_DAYS, Math.min(MAX_DATE_REMINDER_OFFSET_DAYS, t))
+}
+
+/**
  * Retain the date-reminder idempotency ledger for one year. The ledger is a dedupe/audit record, not user
  * content; rule deletion still cascades immediately, while long-lived active rules age by actual `fired_at`.
  */
@@ -227,7 +248,7 @@ export function computeDateReminderOccurrence(
   const t = d.getTime()
   if (Number.isNaN(t)) return null
 
-  const offset = Number.isFinite(config.offsetDays) ? Math.trunc(config.offsetDays) : 0
+  const offset = clampOffsetDays(config.offsetDays)
   const signedDays = config.direction === 'after' ? offset : -offset
   const tz = resolveReminderTimeZone(config.timezone)
 
@@ -334,7 +355,7 @@ export function dateReminderCandidateDateRange(
   config: { offsetDays?: number; direction?: 'before' | 'after' },
   scanWindowMs: number,
 ): { loIso: string; hiIso: string } {
-  const offset = Number.isFinite(config.offsetDays) ? Math.trunc(config.offsetDays) : 0
+  const offset = clampOffsetDays(config.offsetDays)
   const signedDays = config.direction === 'after' ? offset : -offset
   // occurrence = dateDay + signedDays*DAY (+timeOfDay). Inverting: dateDay = occurrence - signedDays*DAY.
   // occurrence ∈ (now - window, now]  ⇒  dateDay ∈ (now - window, now] - signedDays*DAY. Add ±2d slack.

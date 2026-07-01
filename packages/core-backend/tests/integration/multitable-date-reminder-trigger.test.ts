@@ -249,6 +249,13 @@ describeIfDatabase('multitable date-reminder trigger — scan/claim/fire (real D
       .rejects.toThrow(/offsetDays must be a non-negative integer/i)
   })
 
+  test('DR-VAL: rejects an offsetDays above the sanity cap at save (no scan-aborting RangeError)', async () => {
+    // 1e12 is a valid non-negative integer, so it passes the old check; the magnitude cap fail-closes it at
+    // save, otherwise the candidate-range math would throw a RangeError and abort the whole scan for the rule.
+    await expect(svc.createRule(SHEET, mkDateRule({ dateFieldId: FLD_DATE, offsetDays: 1e12, direction: 'before' })))
+      .rejects.toThrow(/offsetDays must be at most/i)
+  })
+
   test('DR-VAL (T2-5): accepts a valid non-UTC IANA timezone at save (now honored, not UTC-only)', async () => {
     const ok = await svc.createRule(SHEET, mkDateRule({ dateFieldId: FLD_DATE, offsetDays: 3, direction: 'before', timezone: 'America/New_York' }))
     expect(ok.id).toBeTruthy()

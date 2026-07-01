@@ -360,6 +360,31 @@ describe('ApprovalMetricsService', () => {
     })
   })
 
+  // Top-N determinism: without a tie-break, `ORDER BY COUNT(*) DESC LIMIT 100` returns ties in unspecified
+  // order, so which buckets survive the cut is nondeterministic across executions. Each dimension query must
+  // carry the group key as a secondary ASC sort. (SQL-string asserts on the mocked query — cheap + exact.)
+  describe('Top-N truncation is deterministic (tie-break on the group key)', () => {
+    const emptySummary = { rows: [{ total: '0', approved: '0', rejected: '0', revoked: '0', returned: '0', running: '0', avg_duration: null, p50_duration: null, p95_duration: null, sla_breach_count: '0', sla_candidate_count: '0' }] }
+
+    it('byTemplate breaks COUNT ties on template_id', async () => {
+      queryMock.mockResolvedValueOnce(emptySummary).mockResolvedValueOnce({ rows: [] })
+      await service.getMetricsSummary({ tenantId: 't' })
+      expect(normalize(queryMock.mock.calls[1][0])).toMatch(/ORDER BY COUNT\(\*\) DESC,\s*template_id ASC/)
+    })
+
+    it('getMetricsByRequester breaks COUNT ties on the group key', async () => {
+      queryMock.mockResolvedValueOnce({ rows: [] })
+      await service.getMetricsByRequester({ tenantId: 't' })
+      expect(normalize(queryMock.mock.calls[0][0])).toMatch(/ORDER BY COUNT\(\*\) DESC,\s*.+ ASC/)
+    })
+
+    it('getMetricsByDepartment breaks COUNT ties on the group key', async () => {
+      queryMock.mockResolvedValueOnce({ rows: [] })
+      await service.getMetricsByDepartment({ tenantId: 't' })
+      expect(normalize(queryMock.mock.calls[0][0])).toMatch(/ORDER BY COUNT\(\*\) DESC,\s*.+ ASC/)
+    })
+  })
+
   describe('getMetricsReport', () => {
     it('returns summary plus slowest instances and riskiest SLA templates', async () => {
       queryMock
