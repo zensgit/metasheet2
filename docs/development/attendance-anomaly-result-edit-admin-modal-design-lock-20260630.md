@@ -1,8 +1,8 @@
-# Attendance AE-3 — admin anomaly-correction modal — design lock (PROPOSED)
+# Attendance AE-3 — admin anomaly-correction modal — design lock (RATIFIED)
 
-> Date: 2026-06-30
-> Baseline: `origin/main@a07e6be07` (`#3416` merged). AE-1 route, AE-1b durability, and AE-2 employee notification are on main; AE-2.1 notification-toggle honoring is open as `#3419` and must land, or be replaced by an equivalent fix, before the AE-3 runtime merges.
-> Status: **PROPOSED**. This document locks the UI contract for AE-3 only. It does not authorize runtime code, staging, new backend mutation semantics, manager fan-out, or a new admin-rail section. Runtime remains a separate owner-reviewed PR after this lock is ratified.
+> Date: 2026-06-30 (ratified / rebased 2026-07-01)
+> Baseline: rebased onto current `origin/main` (post-AE-2.1). AE-1 route, AE-1b durability (`#3377`), AE-2 employee notification (`#3413`), and AE-2.1 notification-toggle honoring (`#3419` runtime `871fcc24` + `#3423` lock `77c9e16a`) are all on main.
+> Status: ✅ **RATIFIED（owner call 2026-07-01）**. This document locks the UI contract for AE-3 only. It does not authorize runtime code, staging, new backend mutation semantics, manager fan-out, or a new admin-rail section. Runtime remains a separate owner-reviewed PR opened after this lock lands.
 
 ## 1. Why this slice exists
 
@@ -199,10 +199,10 @@ AE-3 runtime must not merge until:
 
 1. AE-1b is on main. Already true via `#3377`.
 2. AE-2 employee notification runtime is on main. Already true via `#3413`.
-3. AE-2.1 notification-toggle honoring is on main, or an equivalent fix exists. As of this lock's baseline, `#3419` is open/clean but not merged.
-4. This AE-3 design-lock is ratified.
+3. AE-2.1 notification-toggle honoring is on main. Satisfied via `#3419` (runtime, `871fcc24`) + `#3423` (lock, `77c9e16a`).
+4. This AE-3 design-lock is ratified. Satisfied (owner call 2026-07-01).
 
-If the owner decides to proceed before #3, the runtime PR must explicitly re-state that `notifyAffectedEmployee` may be ignored. The recommended path is to wait for #3419.
+All four conditions are now met, so the AE-3 runtime is cleared to open as a separate slice. The earlier "proceed before #3 / re-state that `notifyAffectedEmployee` may be ignored" caveat no longer applies — the toggle is honored on main.
 
 ## 5. Implementation shape for AE-3 runtime
 
@@ -260,6 +260,6 @@ Recommended defaults:
 2. Capability: admin-only UI affordance; backend remains final authority.
 3. Submit: no metric overrides in AE-3 v1.
 4. Snapshot: modal-open snapshot is authoritative for submit.
-5. Dependency: wait for #3419/equivalent before runtime merge.
+5. Dependency: AE-2.1 (`#3419` + `#3423`) is on main — satisfied.
 
-On owner ratification, flip this document to **RATIFIED** and open the AE-3 runtime PR as a separate slice.
+Ratified by the owner (2026-07-01). The AE-3 runtime is a separate slice, opened after this lock lands.
