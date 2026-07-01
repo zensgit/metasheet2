@@ -33,8 +33,12 @@ describe('R1-A egress guard — IP deny-list', () => {
     '2001:db8::1',
     '::ffff:127.0.0.1',
     '::ffff:10.1.2.3',
+    '::7f00:1',
+    '::a00:1',
     '64:ff9b::7f00:1',
     '2002:7f00:1::',
+    '2000::5efe:169.254.169.254',
+    '2000::200:5efe:a9fe:a9fe',
     '2001:0:4136:e378:8000:63bf:3fff:fdd2',
   ])('blocks unsafe IP literal %s', (ip) => {
     expect(isBlockedEgressIp(ip)).toBe(true)
@@ -111,7 +115,10 @@ describe('R1-A egress guard — URL policy', () => {
       'https://0x7f000001/',
       'https://127.1/',
       'https://[::ffff:127.0.0.1]/',
+      'https://[::7f00:1]/',
       'https://[64:ff9b::7f00:1]/',
+      'https://[2000::5efe:169.254.169.254]/',
+      'https://[2000::200:5efe:a9fe:a9fe]/',
     ]) {
       expect(validateEgressUrl(url, defaultEgressPolicy())).toEqual({
         allowed: false,

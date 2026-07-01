@@ -85,6 +85,14 @@ function ipv4FromBytes(bytes: readonly number[]): ipaddr.IPv4 {
   return ipaddr.parse(bytes.join('.')) as ipaddr.IPv4
 }
 
+function lastFourBytesAsBlockedIpv4(bytes: readonly number[]): boolean {
+  return isBlockedIpv4(ipv4FromBytes(bytes.slice(12, 16)))
+}
+
+function isIsatapAddress(bytes: readonly number[]): boolean {
+  return (bytes[8] & 0xfd) === 0x00 && bytes[9] === 0x00 && bytes[10] === 0x5e && bytes[11] === 0xfe
+}
+
 function isBlockedIpv4(address: ipaddr.IPv4): boolean {
   return address.range() !== 'unicast'
 }
@@ -95,6 +103,12 @@ function isBlockedIpv6(address: ipaddr.IPv6, nat64Prefixes: readonly string[]): 
   }
 
   const bytes = address.toByteArray()
+  if (address.match(ipaddr.parseCIDR('::/96'))) {
+    return lastFourBytesAsBlockedIpv4(bytes)
+  }
+  if (isIsatapAddress(bytes)) {
+    return lastFourBytesAsBlockedIpv4(bytes)
+  }
   // NAT64 (well-known + any operator-configured /96 prefix) -> classify the embedded v4.
   for (const prefix of nat64Prefixes) {
     let cidr: [ipaddr.IPv4 | ipaddr.IPv6, number]
@@ -105,7 +119,7 @@ function isBlockedIpv6(address: ipaddr.IPv6, nat64Prefixes: readonly string[]): 
     }
     if (cidr[0].kind() !== 'ipv6' || cidr[1] !== 96) continue
     if (address.match(cidr)) {
-      return isBlockedIpv4(ipv4FromBytes(bytes.slice(12, 16)))
+      return lastFourBytesAsBlockedIpv4(bytes)
     }
   }
   if (address.match(ipaddr.parseCIDR('2002::/16'))) {
