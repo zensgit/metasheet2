@@ -96,6 +96,39 @@ function buildThresholdGraph() {
   }
 }
 
+// T2-4 RE-ENTRY: a threshold (2-of-3) node followed by a SECOND approval node, so after the threshold
+// resolves the instance sits at the second node — from which an approver can RETURN (退回) to the already-
+// resolved threshold node, re-activating it while its prior-round approve records remain (append-only). Used
+// to prove the quorum tally is scoped to the current node-entry round (stale votes must NOT re-satisfy N).
+function buildThresholdReentryGraph() {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      {
+        key: 'approval_threshold',
+        type: 'approval',
+        config: {
+          assigneeType: 'user',
+          assigneeIds: ['approver-a', 'approver-b', 'approver-c'],
+          approvalMode: 'threshold',
+          approvalThreshold: 2,
+        },
+      },
+      {
+        key: 'approval_second',
+        type: 'approval',
+        config: { assigneeType: 'user', assigneeIds: ['approver-a'], approvalMode: 'single' },
+      },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-threshold', source: 'start', target: 'approval_threshold' },
+      { key: 'edge-threshold-second', source: 'approval_threshold', target: 'approval_second' },
+      { key: 'edge-second-end', source: 'approval_second', target: 'end' },
+    ],
+  }
+}
+
 // T2-4 P1 semantic-hole regression: a ROLE source resolves only M=2 distinct approver slots
 // but the node config demands N=3. Publish-time validation only bounds N <= M for the fully-
 // static USER case, so this graph publishes; the N > M must be caught FAIL-CLOSED when the
@@ -427,5 +460,55 @@ describeIfDatabase('Approval T2-4 N-of-M threshold (门槛会签) API', () => {
       [templateId],
     )
     expect(Number.parseInt(leakedInstances.rows[0]?.count || '0', 10)).toBe(0)
+  })
+
+  it('does NOT re-satisfy a RETURNED-to threshold node on stale prior-round votes (re-entry quorum scope)', async () => {
+    const adminToken = await authToken(baseUrl, 'approval-admin-threshold')
+    const requesterToken = await authToken(baseUrl, 'requester-threshold')
+    const aTok = await authToken(baseUrl, 'approver-a')
+    const bTok = await authToken(baseUrl, 'approver-b')
+
+    const templateId = await publishGraphTemplate(adminToken, buildThresholdReentryGraph())
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 're-entry quorum' } },
+    })
+    expect(create.status).toBe(201)
+    const inst = (await create.json()) as { id: string; currentNodeKey: string | null }
+    createdApprovalIds.add(inst.id)
+    expect(inst.currentNodeKey).toBe('approval_threshold')
+
+    const act = async (token: string, body: object) =>
+      (await jsonRequest(baseUrl, `/api/approvals/${inst.id}/actions`, token, { method: 'POST', body })).json() as Promise<{
+        status: string
+        currentNodeKey: string | null
+        assignments: Array<{ assigneeId: string; isActive: boolean }>
+      }>
+
+    // Round 1: A + B approve the 2-of-3 → node resolves → instance advances to approval_second.
+    await act(aTok, { action: 'approve', comment: 'A r1' })
+    const afterB = await act(bTok, { action: 'approve', comment: 'B r1' })
+    expect(afterB.status).toBe('pending')
+    expect(afterB.currentNodeKey).toBe('approval_second')
+
+    // approver-a (the second node's approver) RETURNS to the already-resolved threshold node.
+    const afterReturn = await act(aTok, { action: 'return', targetNodeKey: 'approval_threshold', comment: 'send back' })
+    expect(afterReturn.currentNodeKey).toBe('approval_threshold')
+    expect(afterReturn.assignments.filter((x) => x.isActive).map((x) => x.assigneeId).sort()).toEqual([
+      'approver-a',
+      'approver-b',
+      'approver-c',
+    ])
+
+    // Round 2, ONE fresh approval. THE FIX: the stale round-1 A+B votes must NOT count → node stays pending on
+    // 1-of-2. (Pre-fix bug: prior-round A+B still count → 2+1=3 ≥ 2 → the node re-resolves on a single vote and
+    // the instance would already be at approval_second here.)
+    const afterFresh = await act(aTok, { action: 'approve', comment: 'A r2 (1 of 2)' })
+    expect(afterFresh.status).toBe('pending')
+    expect(afterFresh.currentNodeKey).toBe('approval_threshold')
+
+    // A SECOND fresh distinct approval resolves the current round → advances again (fresh quorum still works).
+    const afterFresh2 = await act(bTok, { action: 'approve', comment: 'B r2 (2 of 2)' })
+    expect(afterFresh2.currentNodeKey).toBe('approval_second')
   })
 })
