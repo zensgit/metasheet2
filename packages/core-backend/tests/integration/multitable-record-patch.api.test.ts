@@ -180,6 +180,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
       recordId: 'rec_1',
       data: { fld_title: 'Updated title' },
       actorId: 'user_patch_1',
+      _eventId: expect.any(String),
     })
   })
 

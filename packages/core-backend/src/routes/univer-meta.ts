@@ -170,6 +170,7 @@ import {
   preflightDingTalkAutomationUpdate,
   serializeAutomationRule,
 } from '../multitable/automation-service'
+import { withAutomationEventId } from '../multitable/automation-event-dedup'
 import { listAutomationDingTalkGroupDeliveries } from '../multitable/dingtalk-group-delivery-service'
 import { listAutomationDingTalkPersonDeliveries } from '../multitable/dingtalk-person-delivery-service'
 import {
@@ -1969,7 +1970,7 @@ function isUndefinedTableError(err: unknown, tableName: string): boolean {
   const code = typeof (err as any)?.code === 'string' ? (err as any).code : null
   const msg = typeof (err as any)?.message === 'string' ? (err as any).message : ''
   if (code === '42P01') return msg.includes(tableName)
-  return msg.includes(`relation \"${tableName}\" does not exist`)
+  return msg.includes(`relation "${tableName}" does not exist`)
 }
 
 function mapFieldType(type: string): UniverMetaField['type'] {
@@ -3538,7 +3539,7 @@ async function computeDependentLookupRollupRecords(
   if (sheetIds.length === 0) return []
 
   const fieldRes = await query(
-    'SELECT id, sheet_id, name, type, property, \"order\" FROM meta_fields WHERE sheet_id = ANY($1::text[]) ORDER BY \"order\" ASC',
+    'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = ANY($1::text[]) ORDER BY "order" ASC',
     [sheetIds],
   )
 
@@ -9472,7 +9473,7 @@ export function univerMetaRouter(): Router {
         }
         for (const recordId of resurrectedIds) { // post-commit realtime, mirrors restoreRecord
           publishMultitableSheetRealtime({ spreadsheetId: sheetId, actorId: undeleteActorId, source: 'multitable', kind: 'record-created', recordId, recordIds: [recordId] })
-          eventBus.emit('multitable.record.created', { sheetId, recordId, actorId: undeleteActorId })
+          eventBus.emit('multitable.record.created', withAutomationEventId({ sheetId, recordId, actorId: undeleteActorId }))
         }
       }
       const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
@@ -9760,7 +9761,7 @@ export function univerMetaRouter(): Router {
           recordPatches: updatedRows.map((r) => ({ recordId: r.recordId, version: r.version, patch: r.patch })),
         })
         for (const row of updatedRows) {
-          eventBus.emit('multitable.record.updated', { sheetId, recordId: row.recordId, changes: row.patch, actorId })
+          eventBus.emit('multitable.record.updated', withAutomationEventId({ sheetId, recordId: row.recordId, changes: row.patch, actorId }))
         }
       }
       if (deletedRecordIds.length > 0) {
@@ -9772,7 +9773,7 @@ export function univerMetaRouter(): Router {
           recordIds: deletedRecordIds,
         })
         for (const recordId of deletedRecordIds) {
-          eventBus.emit('multitable.record.deleted', { sheetId, recordId, actorId })
+          eventBus.emit('multitable.record.deleted', withAutomationEventId({ sheetId, recordId, actorId }))
         }
       }
       return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'reset', revertedCount: updatedRows.length, deletedCount: deletedRecordIds.length, deletedRecordIds } })
@@ -13582,12 +13583,12 @@ export function univerMetaRouter(): Router {
       // unchanged.) Payload is sheetId/recordId only (matchesTrigger + handleEvent key off those, and
       // actions re-read the record) — no raw record.data egress. `mode` distinguishes a new submission
       // ('create') from a form-link edit ('update').
-      eventBus.emit('multitable.form.submitted', {
+      eventBus.emit('multitable.form.submitted', withAutomationEventId({
         sheetId: view.sheetId,
         recordId: record.id,
         actorId: getRequestActorId(req),
         mode: recordId ? 'update' : 'create',
-      })
+      }))
 
       return res.json({
         ok: true,

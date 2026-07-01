@@ -16,6 +16,7 @@
 
 import { randomUUID } from 'crypto'
 import type { EventBus } from '../integration/events/event-bus'
+import { withAutomationEventId } from './automation-event-dedup'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import {
   createYjsInvalidationPostCommitHook,
@@ -1335,12 +1336,12 @@ export class RecordWriteService {
         const changes = Object.fromEntries(
           (changesByRecord.get(update.recordId) ?? []).map((change) => [change.fieldId, change.value]),
         )
-        this.eventBus.emit('multitable.record.updated', {
+        this.eventBus.emit('multitable.record.updated', withAutomationEventId({
           sheetId,
           recordId: update.recordId,
           changes,
           actorId,
-        })
+        }))
       }
     }
 

@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'crypto'
 import { Logger } from '../core/logger'
+import { withAutomationEventId } from './automation-event-dedup'
 import { redactString } from './automation-log-redact'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
@@ -2084,13 +2085,13 @@ export class AutomationExecutor {
       )
 
       // Emit event for chaining
-      this.deps.eventBus.emit('multitable.record.updated', {
+      this.deps.eventBus.emit('multitable.record.updated', withAutomationEventId({
         sheetId: effectiveSheetId,
         recordId: effectiveRecordId,
         changes: fields,
         actorId: context.actorId,
         _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
-      })
+      }))
 
       // C1 real-time fan-out: invalidate the EFFECTIVE sheet's room (target for cross-base, trigger for
       // same-base) so its gated subscribers see the change live — automation writes were previously
@@ -2190,12 +2191,12 @@ export class AutomationExecutor {
       // Emit event for chaining (mirrors the updated/created emits + the same-base delete sink's
       // `multitable.record.deleted` shape). C1 real-time invalidation fan-out to the target base's room
       // is OUT of this lock — this only emits the domain event; no cross-room publish is wired here.
-      this.deps.eventBus.emit('multitable.record.deleted', {
+      this.deps.eventBus.emit('multitable.record.deleted', withAutomationEventId({
         sheetId: effectiveSheetId,
         recordId: effectiveRecordId,
         actorId: context.actorId,
         _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
-      })
+      }))
 
       // C1 real-time fan-out (see executeUpdateRecord) — invalidate the effective sheet's room.
       this.publishRecordRealtime('record-deleted', effectiveSheetId, effectiveRecordId, gate.crossBase, context)
@@ -2239,13 +2240,13 @@ export class AutomationExecutor {
         [recordId, targetSheetId, JSON.stringify(data)],
       )
 
-      this.deps.eventBus.emit('multitable.record.created', {
+      this.deps.eventBus.emit('multitable.record.created', withAutomationEventId({
         sheetId: targetSheetId,
         recordId,
         data,
         actorId: context.actorId,
         _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
-      })
+      }))
 
       // C1 real-time fan-out (see executeUpdateRecord) — invalidate the target sheet's room.
       this.publishRecordRealtime('record-created', targetSheetId, recordId, gate.crossBase, context)
