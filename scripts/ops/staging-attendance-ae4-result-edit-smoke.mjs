@@ -187,8 +187,11 @@ async function preflightDatabase() {
        to_regclass('public.attendance_notification_deliveries') IS NOT NULL AS deliveries_ok,
        to_regclass('public.attendance_payroll_cycles') IS NOT NULL AS cycles_ok,
        to_regclass('public.attendance_payroll_cycle_settlements') IS NOT NULL AS settlements_ok,
+       to_regclass('public.attendance_requests') IS NOT NULL AS requests_ok,
+       to_regclass('public.attendance_events') IS NOT NULL AS events_ok,
        to_regclass('public.attendance_import_batches') IS NOT NULL AS import_batches_ok,
        to_regclass('public.attendance_import_items') IS NOT NULL AS import_items_ok,
+       to_regclass('public.attendance_import_jobs') IS NOT NULL AS import_jobs_ok,
        to_regclass('public.system_configs') IS NOT NULL AS settings_ok`,
   ))[0] || {}
   hasSettlementTable = row.settlements_ok === true
@@ -216,9 +219,20 @@ async function preflightNoExistingResidue() {
        (SELECT count(*)::int FROM attendance_payroll_cycles
          WHERE org_id = $1
            AND metadata->>'smokeStamp' = $2) AS cycles,
+       (SELECT count(*)::int FROM attendance_requests
+         WHERE org_id = $1
+           AND metadata->>'smokeStamp' = $2) AS requests,
+       (SELECT count(*)::int FROM attendance_events
+         WHERE org_id = $1
+           AND meta->>'smokeStamp' = $2) AS events,
        (SELECT count(*)::int FROM attendance_import_batches
          WHERE org_id = $1
            AND meta->>'smokeStamp' = $2) AS import_batches,
+       (SELECT count(*)::int FROM attendance_import_jobs
+         WHERE org_id = $1
+           AND batch_id IN (
+             SELECT id FROM attendance_import_batches WHERE org_id = $1 AND meta->>'smokeStamp' = $2
+           )) AS import_jobs,
        (SELECT count(*)::int FROM user_orgs WHERE org_id = $1 AND left(user_id, $5) = $6) AS user_orgs,
        (SELECT count(*)::int FROM users WHERE left(id, $5) = $6) AS users`,
     [ORG_ID, STAMP, keyPrefix.length, keyPrefix, prefixLen, USER_PREFIX],
@@ -513,12 +527,21 @@ async function residueCounts() {
        (SELECT count(*)::int FROM attendance_payroll_cycles
          WHERE org_id = $1
            AND (id = ANY($6::uuid[]) OR metadata->>'smokeStamp' = $2)) AS cycles,
+       (SELECT count(*)::int FROM attendance_requests
+         WHERE org_id = $1
+           AND metadata->>'smokeStamp' = $2) AS requests,
+       (SELECT count(*)::int FROM attendance_events
+         WHERE org_id = $1
+           AND meta->>'smokeStamp' = $2) AS events,
        (SELECT count(*)::int FROM attendance_import_batches
          WHERE org_id = $1
            AND (id = ANY($9::uuid[]) OR meta->>'smokeStamp' = $2)) AS import_batches,
        (SELECT count(*)::int FROM attendance_import_items
          WHERE org_id = $1
            AND batch_id = ANY($9::uuid[])) AS import_items,
+       (SELECT count(*)::int FROM attendance_import_jobs
+         WHERE org_id = $1
+           AND batch_id = ANY($9::uuid[])) AS import_jobs,
        (SELECT count(*)::int FROM user_orgs WHERE org_id = $1 AND left(user_id, $7) = $8) AS user_orgs,
        (SELECT count(*)::int FROM users WHERE left(id, $7) = $8) AS users`,
     [
@@ -582,7 +605,10 @@ async function cleanup({ strictSettingsRestore = false } = {}) {
   await pool.query('DELETE FROM attendance_notification_deliveries WHERE org_id = $1 AND source_type = $2 AND source_key LIKE ANY($3::text[])', [ORG_ID, 'attendance_result_edit', deliveryPatterns]).catch(() => undefined)
   await pool.query('DELETE FROM attendance_record_result_edits WHERE org_id = $1 AND (record_id = ANY($2::uuid[]) OR idempotency_key = ANY($3::text[]))', [ORG_ID, ids, editKeys]).catch(() => undefined)
   await pool.query('DELETE FROM attendance_records WHERE org_id = $1 AND (id = ANY($2::uuid[]) OR meta->>$3 = $4)', [ORG_ID, ids, 'smokeStamp', STAMP]).catch(() => undefined)
+  await pool.query('DELETE FROM attendance_events WHERE org_id = $1 AND meta->>$2 = $3', [ORG_ID, 'smokeStamp', STAMP]).catch(() => undefined)
+  await pool.query('DELETE FROM attendance_requests WHERE org_id = $1 AND metadata->>$2 = $3', [ORG_ID, 'smokeStamp', STAMP]).catch(() => undefined)
   if (batchIds.length) {
+    await pool.query('DELETE FROM attendance_import_jobs WHERE org_id = $1 AND batch_id = ANY($2::uuid[])', [ORG_ID, batchIds]).catch(() => undefined)
     await pool.query('DELETE FROM attendance_import_items WHERE org_id = $1 AND batch_id = ANY($2::uuid[])', [ORG_ID, batchIds]).catch(() => undefined)
     await pool.query('DELETE FROM attendance_import_batches WHERE org_id = $1 AND id = ANY($2::uuid[])', [ORG_ID, batchIds]).catch(() => undefined)
   }

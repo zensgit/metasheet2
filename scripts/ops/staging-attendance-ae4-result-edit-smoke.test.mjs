@@ -24,6 +24,20 @@ test('AE-4 helper cleanup is scoped to this smoke record set', () => {
   assert.doesNotMatch(runbook, /stamp_like/)
 })
 
+test('AE-4 helper residue categories match the runbook broad cleanup surface', () => {
+  for (const table of [
+    'attendance_requests',
+    'attendance_events',
+    'attendance_import_batches',
+    'attendance_import_items',
+    'attendance_import_jobs',
+  ]) {
+    assert.match(script, new RegExp(`to_regclass\\('public\\.${table}'\\)`), `${table} is preflighted`)
+    assert.match(script, new RegExp(`FROM ${table}`), `${table} is counted`)
+    assert.match(script, new RegExp(`DELETE FROM ${table}`), `${table} is cleaned`)
+  }
+})
+
 test('AE-4 helper fails the run when an assertion failed before printing PASS', () => {
   assert.match(script, /if \(failures\.length\)/)
   assert.match(script, /failed assertion\(s\)/)
