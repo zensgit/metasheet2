@@ -10,3 +10,4 @@ export * from './audit-integration';
 export * from './idempotency';
 export * from './egress-guard';
 export * from './egress-dispatcher';
+export * from './egress-policy-normalizer';
