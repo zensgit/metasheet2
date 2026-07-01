@@ -111,6 +111,31 @@ describe('BPMN HTTP task egress wiring', () => {
     expect(instance.variables.httpResult).toBeUndefined()
   })
 
+  test('does not treat workflow variables as egress policy configuration', async () => {
+    const { engine, resolved, transported } = makeEngine()
+    const instance = testInstance()
+    instance.variables = {
+      allowedHosts: ['api.example.com'],
+      nat64Prefixes: ['2a00:1098:2c::/96'],
+      httpTaskEgress: {
+        policy: {
+          allowedHosts: ['api.example.com'],
+          nat64Prefixes: ['2a00:1098:2c::/96'],
+        },
+      },
+    }
+    installInstance(engine, instance)
+
+    await expect(executeHttpTask(engine, instance.id, {
+      url: 'https://api.example.com/hook',
+      responseVariable: 'httpResult',
+    })).rejects.toThrow('BPMN_HTTP_EGRESS_DENIED: ALLOWLIST_REQUIRED')
+
+    expect(resolved()).toBe(false)
+    expect(transported()).toBe(false)
+    expect(instance.variables.httpResult).toBeUndefined()
+  })
+
   test('blocks private DNS answers before transport', async () => {
     const { engine, transported } = makeEngine({
       policy: { allowedHosts: ['api.example.com'] },
