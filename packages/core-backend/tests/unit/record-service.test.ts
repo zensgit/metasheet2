@@ -183,6 +183,7 @@ describe('RecordService', () => {
       recordId: result.recordId,
       data: { fld_title: 'Alpha' },
       actorId: 'user_1',
+      _eventId: expect.any(String),
     })
     expect(mockPublish).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -470,6 +471,7 @@ describe('RecordService', () => {
       sheetId: 'sheet_ops',
       recordId: 'rec_existing',
       actorId: 'user_1',
+      _eventId: expect.any(String),
     })
     expect(mockPublish).toHaveBeenCalledWith(
       expect.objectContaining({

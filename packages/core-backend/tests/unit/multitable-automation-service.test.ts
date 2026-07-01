@@ -299,6 +299,42 @@ describe('AutomationService', () => {
     })
   })
 
+  describe('event dedup ledger', () => {
+    it('does not block event execution on the opportunistic retention sweep', async () => {
+      const rule = createMockRule({ action_type: 'send_notification' })
+      const query = createMockQuery([rule])
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
+      const emitSpy = vi.spyOn(bus, 'emit')
+      const sweep = vi.fn(() => new Promise<number>(() => {}))
+      const claim = vi.fn(async () => true)
+      const testHooks = service as unknown as {
+        sweepEventDedupLedger: (nowMs?: number) => Promise<number>
+        claimEventDelivery: (ruleId: string, dedupKey: string) => Promise<boolean>
+      }
+      testHooks.sweepEventDedupLedger = sweep
+      testHooks.claimEventDelivery = claim
+
+      const outcome = await Promise.race([
+        service.handleEvent('multitable.record.created', {
+          sheetId: 'sheet1',
+          recordId: 'rec1',
+          data: {},
+          actorId: 'user1',
+          _eventId: 'evt_nonblocking_sweep',
+        }).then(() => 'done'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 25)),
+      ])
+
+      expect(outcome).toBe('done')
+      expect(sweep).toHaveBeenCalledTimes(1)
+      expect(claim).toHaveBeenCalledWith(rule.id, 'multitable.record.created:evt_nonblocking_sweep')
+      expect(emitSpy).toHaveBeenCalledWith('automation.notification', expect.objectContaining({
+        recordId: 'rec1',
+        userIds: ['user_notify'],
+      }))
+    })
+  })
+
   describe('disabled rules', () => {
     it('skips disabled rules (query returns only enabled)', async () => {
       // The query only returns enabled rules, so we simulate empty result

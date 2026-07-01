@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto'
 
 import type { EventBus } from '../integration/events/event-bus'
+import { withAutomationEventId } from './automation-event-dedup'
 import type { MultitableCapabilities } from './access'
 import {
   ensureAttachmentIdsExist as ensureAttachmentIdsExistShared,
@@ -238,7 +239,7 @@ function isUndefinedTableError(err: unknown, tableName: string): boolean {
   const code = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : null
   const message = typeof (err as { message?: unknown })?.message === 'string' ? (err as { message: string }).message : ''
   if (code === '42P01') return message.includes(tableName)
-  return message.includes(`relation \"${tableName}\" does not exist`)
+  return message.includes(`relation "${tableName}" does not exist`)
 }
 
 // Postgres unique_violation (e.g. a primary-key collision from a TOCTOU race on restore).
@@ -740,12 +741,12 @@ export class RecordService {
         patch,
       }],
     })
-    this.eventBus.emit('multitable.record.created', {
+    this.eventBus.emit('multitable.record.created', withAutomationEventId({
       sheetId,
       recordId,
       data: patch,
       actorId,
-    })
+    }))
 
     return {
       recordId,
@@ -858,11 +859,11 @@ export class RecordService {
       recordId,
       recordIds: [recordId],
     })
-    this.eventBus.emit('multitable.record.deleted', {
+    this.eventBus.emit('multitable.record.deleted', withAutomationEventId({
       sheetId,
       recordId,
       actorId,
-    })
+    }))
 
     return {
       recordId,
@@ -1040,7 +1041,7 @@ export class RecordService {
       recordId,
       recordIds: [recordId],
     })
-    this.eventBus.emit('multitable.record.created', { sheetId, recordId, actorId })
+    this.eventBus.emit('multitable.record.created', withAutomationEventId({ sheetId, recordId, actorId }))
 
     return { recordId, sheetId }
   }
@@ -1389,12 +1390,12 @@ export class RecordService {
         patch,
       }],
     })
-    this.eventBus.emit('multitable.record.updated', {
+    this.eventBus.emit('multitable.record.updated', withAutomationEventId({
       sheetId,
       recordId,
       data: patch,
       actorId,
-    })
+    }))
 
     return {
       recordId,

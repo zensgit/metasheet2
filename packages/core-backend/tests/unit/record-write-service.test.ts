@@ -206,6 +206,7 @@ describe('RecordWriteService', () => {
       recordId: 'rec1',
       changes: { fld_name: 'Alice' },
       actorId: 'user1',
+      _eventId: expect.any(String),
     })
   })
 

@@ -14,6 +14,12 @@ import {
   dateReminderLedgerRetentionCutoffIso,
   type ScheduleDateFieldConfig,
 } from './automation-date-reminder'
+import {
+  buildAutomationEventDedupKey,
+  eventDedupRetentionCutoffIso,
+  EVENT_DEDUP_LEDGER_SWEEP_INTERVAL_MS,
+  withAutomationEventId,
+} from './automation-event-dedup'
 import { isValidIanaTimeZone } from './automation-timezone'
 import { ensureRecordNotLocked } from './record-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
@@ -525,6 +531,7 @@ export type AutomationEventPayload = {
   data?: Record<string, unknown>
   changes?: Record<string, unknown>
   actorId?: string | null
+  _eventId?: string
   _automationDepth?: number
   _triggeredBy?: string
 }
@@ -658,6 +665,7 @@ export class AutomationService {
   private suspensionService: AutomationSuspensionService
   private approvalBridgeService: AutomationApprovalBridgeService
   private lastDateReminderLedgerSweepMs = 0
+  private lastEventDedupLedgerSweepMs = 0
   /** Kept for backward-compat with raw SQL in executor actions */
   private queryFn: AutomationQueryFn
 
@@ -1197,6 +1205,47 @@ export class AutomationService {
   }
 
   /**
+   * Delete old event-driven claim rows. These rows are not audit records; they only need to outlive the
+   * maximum expected redelivery window, so T2-6 keeps a short seven-day retention.
+   */
+  async sweepEventDedupLedger(nowMs = Date.now()): Promise<number> {
+    const cutoffIso = eventDedupRetentionCutoffIso(nowMs)
+    const deleted = await sql<{ count: number | string }>`
+      WITH deleted AS (
+        DELETE FROM meta_automation_event_fires
+         WHERE fired_at < ${cutoffIso}
+        RETURNING 1
+      )
+      SELECT count(*)::int AS count FROM deleted
+    `.execute(this.db)
+    return Number(deleted.rows[0]?.count ?? 0)
+  }
+
+  private kickEventDedupLedgerSweepIfDue(nowMs: number): void {
+    if (nowMs - this.lastEventDedupLedgerSweepMs < EVENT_DEDUP_LEDGER_SWEEP_INTERVAL_MS) return
+    this.lastEventDedupLedgerSweepMs = nowMs
+    void this.sweepEventDedupLedger(nowMs)
+      .then((deleted) => {
+        if (deleted > 0) {
+          logger.info(`Automation event dedup ledger retention swept ${deleted} old row(s)`)
+        }
+      })
+      .catch((err) => {
+        logger.warn('Automation event dedup ledger retention sweep failed; continuing event handling', err instanceof Error ? err : undefined)
+      })
+  }
+
+  private async claimEventDelivery(ruleId: string, dedupKey: string): Promise<boolean> {
+    const claim = await sql<{ dedup_key: string }>`
+      INSERT INTO meta_automation_event_fires (rule_id, dedup_key)
+      VALUES (${ruleId}, ${dedupKey})
+      ON CONFLICT DO NOTHING
+      RETURNING dedup_key
+    `.execute(this.db)
+    return claim.rows.length > 0
+  }
+
+  /**
    * Date-reminder scan (`schedule.date_field`). For each record in the rule's sheet whose date field yields a
    * DUE occurrence, claim it in the idempotency ledger and fire the rule once with the record as context.
    *
@@ -1459,12 +1508,21 @@ export class AutomationService {
     const triggerType = TRIGGER_TYPE_BY_EVENT[eventType]
     if (!triggerType) return
 
+    const dedupKey = buildAutomationEventDedupKey(eventType, payload)
+    if (dedupKey) {
+      this.kickEventDedupLedgerSweepIfDue(Date.now())
+    }
+
     for (const rule of rules) {
       const execRule = toExecutorRule(rule)
 
       if (!matchesTrigger(execRule.trigger, triggerType, payload)) continue
 
       try {
+        if (dedupKey) {
+          const claimed = await this.claimEventDelivery(rule.id, dedupKey)
+          if (!claimed) continue
+        }
         await this.executeRule(execRule, payload)
       } catch (err) {
         logger.error(
@@ -1928,13 +1986,13 @@ export class AutomationService {
     // (inherits the trigger's _automationDepth + 1) so a backwrite-driven cascade can't run away.
     const actorId = event.actor?.id ?? null
     const automationDepth = (((bridge.triggerEvent as Record<string, unknown> | null)?._automationDepth as number) ?? 0) + 1
-    this.eventBus.emit('multitable.record.updated', {
+    this.eventBus.emit('multitable.record.updated', withAutomationEventId({
       sheetId: bridge.sheetId,
       recordId: bridge.recordId,
       changes: patch,
       actorId,
       _automationDepth: automationDepth,
-    })
+    }))
     try {
       publishMultitableSheetRealtime({
         spreadsheetId: bridge.sheetId,
