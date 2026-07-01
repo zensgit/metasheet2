@@ -46,23 +46,21 @@ Both endpoints must pass; the two legs are **not** symmetric:
   = **claim==truth** (the op's declared base-A opt-in must equal `F_A`'s actual base) **+** `resolveBaseWritable(actor,
   baseA)` **+** the per-target-base **quota keyed to base A** (the same quota discipline as automation cross-base
   writes; composed by this caller, base-A-keyed, exactly as C1/§10-I-3 specifies — NOT inside the primitive).
-- **base-B leg (where the edit originates — `M_B`'s base):** a **plain `resolveBaseWritable(actor, baseB)`** — **no
-  claim, no quota** (the actor is acting on their own base's record `rec_B`, not a cross-base *target*; base-B is not
-  a canonical-edge owner and must not be double-charged or claim-gated).
-- The primitive is called for the **base-A leg only**; base-B is a bare write-authority check. Any single-leg failure
-  → deny. (Locks the §10/I-3 asymmetry so a future impl can't collapse it into a symmetric double-primitive call or
-  double quota.)
-- **⚠ Ratification question (owner) — base-B granularity.** You specified base-B = plain `resolveBaseWritable(actor,
-  baseB)`, which is **base-level**: it authorizes *any* record in base B, so a **row-level-deny or record-edit
-  restriction on the specific `rec_B`** would be bypassed — an asymmetry vs Lock C's *per-record* guard on `rec_A`.
-  This may be exactly what you want (base-B is the actor's own base; the mutation of record is `rec_A`, and `rec_B`
-  only re-projects). **Two options — your call:** **(B-level)** keep plain `resolveBaseWritable(baseB)` as ratified;
-  or **(rec-level)** additionally honor `rec_B`'s record-level permissions (row-deny / field). Not silently upgraded,
-  not silently shipped as a gap.
+- **base-B leg (where the edit originates — `M_B`'s base): RECORD-level (owner-ratified 2026-07-01).** **No claim, no
+  quota, NO C1 primitive** (base-B is not a cross-base *target* / canonical-edge owner — never claim-gated or
+  double-charged), **but** the op requires the actor's **local edit eligibility on the specific `rec_B`** —
+  record-edit / row-level-deny / the relevant mirror-op field policy on `rec_B`. Editing `rec_B.M_B` is semantically a
+  record edit of `rec_B` even though the physical mutation lands on `rec_A.F_A`, so a **row-denied / record-edit-denied
+  base-B actor must NOT be able to use the mirror op as a bypass**. (A plain base-*level* `resolveBaseWritable(baseB)`
+  was considered and **rejected** as too coarse — it would authorize *any* record in base B.)
+- The C1 primitive is called for the **base-A leg only**; base-B is a **local `rec_B` record-edit check** (no
+  primitive / no claim / no quota). Any single-leg failure → deny. (Locks the §10/I-3 asymmetry — a future impl can't
+  collapse it into a symmetric double-primitive / double-quota call, and can't drop base-B to a coarse base-level
+  check.)
 
 ### Lock C — I-2 per-record no-oracle mask on `rec_A`
-Authority (Lock B) is **base-level**; it does NOT cover per-record visibility. The op names a specific base-A record
-`rec_A`, so:
+Lock B's **base-A** authority is base-level (it authorizes writing base A, not *reading a specific record*); it does
+NOT cover per-record visibility of the named base-A record `rec_A`, so:
 - The op enforces the **same per-record foreign read+write mask the read path uses** — parity with
   `resolveForeignFieldReadability` / `shouldMaskForeignField` (univer-meta.ts:~1411) — on the named `rec_A`.
 - **No-oracle on ADD (hard):** adding `rec_A` that is **masked** (actor lacks read) / **missing** / **not writable**
@@ -81,9 +79,11 @@ Authority (Lock B) is **base-level**; it does NOT cover per-record visibility. T
 ## 3. Architecture (write-through, single-DB, atomic)
 Bases share one Postgres; `meta_links` is one global edge table. The op resolves `F_A` (the forward field paired to
 `M_B` via `mirrorOf`/`mirrorFieldId`) and its base A, then in **one `pool.transaction`**: Lock B (base-A primitive +
-base-B writable) → Lock C (rec_A read+write mask, uniform-deny) → `INSERT/DELETE` the canonical forward edge. The
-mirror side (`M_B` on `rec_B`) is **not** written — it re-projects on next read (Decision E: no live cross-base push;
-base-A's forward field fans out normally on its own sheet). All-or-nothing.
+base-B **local `rec_B` record-edit check**) → Lock C (`rec_A` read+write mask, uniform-deny) → **invoke the
+transaction-aware forward link-write helper for `rec_A.F_A`** (per Lock A — the helper supplies `ON CONFLICT`/dedup,
+link-target-exists, revision recording, and mirror-invalidation; the op **never** hand-rolls a `meta_links`
+INSERT/DELETE). The mirror side (`M_B` on `rec_B`) is **not** written — it re-projects on next read (Decision E: no
+live cross-base push; base-A's forward field fans out normally on its own sheet). All-or-nothing.
 
 ## 4. Consistency / TOCTOU (Decision F launch gate)
 Resolve-then-write is one txn; the txn takes `FOR UPDATE` on the gating row(s) so base/permission can't drift between
@@ -103,9 +103,12 @@ New `multitable-crossbase-mirror-writethrough-realdb.test.ts`:
   edge deleted. **Fail-first:** a variant that wrote an `M_B` row **or a duplicate `(F_A,…)` row** is RED.
 - **W-A floor regression:** a mirror write through the general PATCH / bulk `/patch` is **still rejected** (C2/I-1
   intact — the op didn't loosen the floor).
-- **W-B authority:** base-A-writable but not base-B-writable → deny; base-B-writable but not base-A-writable → deny;
-  wrong/absent base-A claim → deny; quota N+1 on base A → deny; **and** a base-B leg golden asserting base-B is a
-  plain writable check (no claim/quota consumed on base B — quota counter untouched for base B).
+- **W-B authority (asymmetric, record-level base-B):** happy path (base-A primitive passes **and** actor can edit
+  `rec_B`) ⇒ the one forward edge. Denials, each with **no edge**: base-A NOT base-writable; wrong/absent base-A
+  claim; base-A quota N+1; **base-B `rec_B` record-edit-denied or row-denied** (the record-level upgrade — a base-B
+  actor who cannot edit `rec_B` cannot use the mirror op as a bypass). **base-B asymmetry assertions:** base-B is a
+  *local record-edit* check only — it consumes **no claim and no quota** (the base-A quota counter is unchanged after
+  a base-B-only denial, and there is **no base-B quota counter**), and the C1 primitive is invoked for base-A only.
 - **W-C no-oracle (ADD + REMOVE):** ADD — has-base-A-write-but-no-`rec_A`-read → uniform deny **byte-identical** to
   missing-`rec_A`, no edge. REMOVE — removing a **masked/unreadable-but-actually-linked** `rec_A` → **byte-identical**
   to remove-nonexistent-`rec_A`, no edge removed and no success/noop linkage signal. Fail-first: disable the
