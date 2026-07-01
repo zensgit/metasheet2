@@ -46,6 +46,9 @@ export type EgressPolicyNormalizationResult =
     }
 
 const ALLOWED_CONFIG_KEYS = new Set(['allowedHosts', 'nat64Prefixes'])
+// The guard always decodes RFC 6052's well-known NAT64 prefix; server policy
+// config only carries extra deployment-specific prefixes.
+const BUILT_IN_NAT64_PREFIXES = new Set(['64:ff9b:0:0:0:0:0:0/96'])
 
 function disabledMetadata(): Readonly<EgressPolicyMetadata> {
   return Object.freeze({
@@ -171,6 +174,7 @@ export function normalizeBpmnHttpTaskEgressPolicyConfig(rawConfig: unknown): Egr
   for (const entry of rawNat64Prefixes) {
     const prefix = normalizeNat64Prefix(entry)
     if (!prefix) return fail('EGRESS_POLICY_INVALID_NAT64_PREFIX', 'nat64Prefixes[]')
+    if (BUILT_IN_NAT64_PREFIXES.has(prefix)) return fail('EGRESS_POLICY_DUPLICATE_NAT64_PREFIX', 'nat64Prefixes[]')
     if (seenPrefixes.has(prefix)) return fail('EGRESS_POLICY_DUPLICATE_NAT64_PREFIX', 'nat64Prefixes[]')
     seenPrefixes.add(prefix)
     nat64Prefixes.push(prefix)

@@ -142,6 +142,16 @@ describe('R1-A3-a BPMN HTTP-task egress policy normalizer', () => {
     })
   })
 
+  test('rejects the built-in well-known NAT64 prefix as redundant policy config', () => {
+    expect(normalizeBpmnHttpTaskEgressPolicyConfig({
+      allowedHosts: ['api.example.com'],
+      nat64Prefixes: ['64:ff9b::/96'],
+    })).toMatchObject({
+      ok: false,
+      error: { code: 'EGRESS_POLICY_DUPLICATE_NAT64_PREFIX', field: 'nat64Prefixes[]' },
+    })
+  })
+
   test('sorts normalized sets so policy fingerprint is order-independent', () => {
     const first = normalizeBpmnHttpTaskEgressPolicyConfig({
       allowedHosts: ['z.example.com', 'a.example.com'],
