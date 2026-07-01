@@ -8,3 +8,4 @@ export * from './safety-metrics';
 export * from './middleware';
 export * from './audit-integration';
 export * from './idempotency';
+export * from './egress-guard';

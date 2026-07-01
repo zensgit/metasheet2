@@ -1,0 +1,147 @@
+import { describe, expect, test } from 'vitest'
+
+import {
+  defaultEgressPolicy,
+  isBlockedEgressIp,
+  validateEgressUrl,
+  type EgressPolicy,
+} from '../egress-guard'
+
+const policy = (hosts: readonly string[]): EgressPolicy => ({ allowedHosts: hosts })
+
+describe('R1-A egress guard — IP deny-list', () => {
+  test.each([
+    '127.0.0.1',
+    '0.0.0.0',
+    '255.255.255.255',
+    '10.0.0.1',
+    '172.16.0.1',
+    '172.31.255.255',
+    '192.168.1.10',
+    '169.254.169.254',
+    '100.64.0.1',
+    '198.18.0.1',
+    '224.0.0.1',
+    '240.0.0.1',
+    '192.0.2.1',
+    '::1',
+    '::',
+    'fe80::1',
+    'fc00::1',
+    'fd00::1',
+    'ff02::1',
+    '2001:db8::1',
+    '::ffff:127.0.0.1',
+    '::ffff:10.1.2.3',
+    '64:ff9b::7f00:1',
+    '2002:7f00:1::',
+    '2001:0:4136:e378:8000:63bf:3fff:fdd2',
+  ])('blocks unsafe IP literal %s', (ip) => {
+    expect(isBlockedEgressIp(ip)).toBe(true)
+  })
+
+  test.each(['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111', '::ffff:8.8.8.8'])(
+    'allows globally-routable IP literal %s at the deny-list layer',
+    (ip) => {
+      expect(isBlockedEgressIp(ip)).toBe(false)
+    },
+  )
+})
+
+describe('R1-A egress guard — URL policy', () => {
+  test('fails closed when no allowlist is configured', () => {
+    expect(validateEgressUrl('https://api.example.com/hook', defaultEgressPolicy())).toEqual({
+      allowed: false,
+      reason: 'ALLOWLIST_REQUIRED',
+    })
+  })
+
+  test('allows an exact allowlisted https host and normalizes host case', () => {
+    expect(validateEgressUrl('https://API.Example.com/hook?a=1', policy(['api.example.com']))).toMatchObject({
+      allowed: true,
+      protocol: 'https:',
+      hostname: 'api.example.com',
+    })
+  })
+
+  test('rejects non-https schemes, including otherwise-allowlisted http', () => {
+    expect(validateEgressUrl('http://api.example.com/hook', policy(['api.example.com']))).toEqual({
+      allowed: false,
+      reason: 'SCHEME_NOT_ALLOWED',
+    })
+    for (const scheme of ['file', 'ftp', 'gopher', 'data', 'ws', 'wss', 'mailto']) {
+      expect(validateEgressUrl(`${scheme}:example`, policy(['api.example.com']))).toMatchObject({
+        allowed: false,
+        reason: 'SCHEME_NOT_ALLOWED',
+      })
+    }
+  })
+
+  test('rejects credentials in URL even for an allowlisted host', () => {
+    expect(validateEgressUrl('https://user:pass@api.example.com/hook', policy(['api.example.com']))).toEqual({
+      allowed: false,
+      reason: 'URL_CREDENTIALS_NOT_ALLOWED',
+    })
+  })
+
+  test('requires exact host allowlisting; suffixes and wildcards do not match', () => {
+    expect(validateEgressUrl('https://evil.api.example.com/hook', policy(['api.example.com']))).toEqual({
+      allowed: false,
+      reason: 'HOST_NOT_ALLOWLISTED',
+    })
+    expect(validateEgressUrl('https://api.example.com/hook', policy(['*.example.com', 'example.com/24']))).toEqual({
+      allowed: false,
+      reason: 'ALLOWLIST_REQUIRED',
+    })
+  })
+
+  test('rejects local/internal hostnames even if accidentally allowlisted', () => {
+    for (const host of ['localhost', 'service.localhost', 'service.local', 'service.internal']) {
+      expect(validateEgressUrl(`https://${host}/`, policy([host]))).toEqual({
+        allowed: false,
+        reason: 'HOST_INTERNAL_NAME',
+      })
+    }
+  })
+
+  test('checks IP literals after URL canonicalization, including decimal/hex/short IPv4 forms', () => {
+    for (const url of [
+      'https://127.0.0.1/',
+      'https://2130706433/',
+      'https://0x7f000001/',
+      'https://127.1/',
+      'https://[::ffff:127.0.0.1]/',
+      'https://[64:ff9b::7f00:1]/',
+    ]) {
+      expect(validateEgressUrl(url, defaultEgressPolicy())).toEqual({
+        allowed: false,
+        reason: 'IP_BLOCKED',
+      })
+    }
+  })
+
+  test('allows a public IP literal only when the exact IP host is allowlisted', () => {
+    expect(validateEgressUrl('https://8.8.8.8/dns-query', policy(['8.8.8.8']))).toMatchObject({
+      allowed: true,
+      hostname: '8.8.8.8',
+    })
+    expect(validateEgressUrl('https://8.8.8.8/dns-query', policy(['dns.google']))).toEqual({
+      allowed: false,
+      reason: 'HOST_NOT_ALLOWLISTED',
+    })
+  })
+
+  test('allows a public IPv6 literal only when the exact IP host is allowlisted', () => {
+    expect(validateEgressUrl('https://[2606:4700:4700::1111]/', policy(['2606:4700:4700::1111']))).toMatchObject({
+      allowed: true,
+      hostname: '2606:4700:4700::1111',
+    })
+  })
+
+  test('treats CIDR-like allowlist entries as invalid in v1, never as a widened allow', () => {
+    expect(validateEgressUrl('https://8.8.8.8/dns-query', policy(['8.8.8.0/24']))).toEqual({
+      allowed: false,
+      reason: 'ALLOWLIST_REQUIRED',
+    })
+  })
+})
