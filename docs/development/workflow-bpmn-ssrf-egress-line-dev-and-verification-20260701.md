@@ -58,28 +58,27 @@ caps can be built concurrently); the slices themselves are 2 → 3 → 4.
 - Landed guard: `packages/core-backend/src/guards/__tests__/egress-guard.test.ts` — scheme/creds/
   allowlist/internal-name/IP-class matrix (incl. IPv4-mapped, NAT64 well-known + NSP, 6to4, Teredo,
   and decimal/hex/short-form normalization) passes on `main`; `tsc --noEmit` clean.
-- Adversarial probe (run against the **closed** slice-1 build `#3434`, **not** current `main`): the
-  **URL-parsing** corpus found no bypass; the **IP-representation** corpus found exactly one — NAT64
-  NSP — now fixed (`#3438`). The IPv4-compatible / ISATAP forms were **not** in that probe's scope,
-  and `#3437`'s handling of them is **unverified** here.
+- Adversarial probes, two: (a) the slice-1 build's probe (against the *closed* `#3434`) — URL corpus
+  clean, IP corpus found only NAT64 NSP, now fixed (`#3438`); (b) a follow-up probe against
+  **`#3437`'s** ISATAP / IPv4-compatible extraction (13 cases) — prefix-agnostic ISATAP + IPv4-compat
+  with an internal inner v4 **all blocked**, incl. the NSP-analog global-prefix ISATAP case
+  (`2606:4700:4700::5efe:10.0.0.1`); public inner correctly allowed. **No leak** (posted as a review
+  comment on `#3437`).
 
 ## 7. Outcome
 
 - Current `main`'s IP-literal classification covers IPv4-mapped, NAT64 (well-known + NSP), 6to4, and
-  Teredo. It **still has the IPv4-compatible / ISATAP gap** — `#3437` intends to close it but is
-  **unlanded, DIRTY, and its embedded-v4 extraction is not adversarially verified** here (ISATAP
-  decode is exactly the fiddly path that leaked as NSP-NAT64 did). The surface is not "complete"
-  until `#3437` is verified + landed. The one prior probe ran against the *closed* slice-1 build,
-  not current `main`.
+  Teredo, but **still lacks IPv4-compatible / ISATAP** — which `#3437` closes. `#3437`'s extraction is
+  now **adversarially verified** (prefix-agnostic ISATAP, no embedded-v4 leak — see §6), so the only
+  thing between it and a complete IP-literal surface is a **rebase onto post-`#3438` main + land** (it
+  is DIRTY, and a parallel branch, not mine).
 - The **substantive remaining development is slices 2–4**, which are **gated (opt-in)** and
   **dependency-ordered**, with slice 4 carrying the **D3 rollout governance** decision. There is no
   unowned, buildable-now, ungated slice that can be built without colliding on the actively-iterated
   guard file.
-- **Next motion:** (a) rebase + land `#3437` (coordinate — it is a parallel branch, not mine); the one
-  non-colliding value-add available now is an **adversarial review of `#3437`'s ISATAP/compat
-  extraction** (does it block the embedded *internal* v4, or leak like NSP-NAT64 did?) as a review
-  comment on that PR, reusing the probe harness. Then (b) owner opt-in for **slice 2** (the IP-pinned
-  dispatcher, the real next build).
+- **Next motion:** (a) rebase + land `#3437` (parallel branch, not mine) — its extraction is verified
+  (§6), so it needs only the rebase onto post-`#3438` main; then (b) owner opt-in for **slice 2** (the
+  IP-pinned dispatcher, the real next build). The `#3437` adversarial review is **done** (comment posted).
 
 ## Invariants held
 
