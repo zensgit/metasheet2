@@ -87,11 +87,13 @@ function tableWriteSites(src: string, tablePattern: string): string[] {
  *                    product dependencies (doctrine §5).
  *   PREVIEW        — Workflow Designer compile-preview / gap-report. Read-only,
  *                    no live execution (doctrine §3.3).
+ *   TEST           — structural/security regression tests only. Not a runtime
+ *                    consumer and not a reason to expand product dependencies.
  *
  * Adding a file here is a deliberate, reviewable act. Approval and automation
  * runtime code must NEVER appear in this list (see the dedicated test below).
  */
-const BPMN_IMPORT_ALLOWLIST: Array<{ file: string; disposition: 'LEGACY-RUNTIME' | 'PREVIEW'; reason: string }> = [
+const BPMN_IMPORT_ALLOWLIST: Array<{ file: string; disposition: 'LEGACY-RUNTIME' | 'PREVIEW' | 'TEST'; reason: string }> = [
   {
     file: 'routes/workflow.ts',
     disposition: 'LEGACY-RUNTIME',
@@ -101,6 +103,11 @@ const BPMN_IMPORT_ALLOWLIST: Array<{ file: string; disposition: 'LEGACY-RUNTIME'
     file: 'routes/workflow-designer.ts',
     disposition: 'PREVIEW',
     reason: 'Workflow Designer compile-preview / gap-report only — no live execution (doctrine §3.3).',
+  },
+  {
+    file: 'workflow/__tests__/BPMNWorkflowEngine.egress.test.ts',
+    disposition: 'TEST',
+    reason: 'R1 BPMN HTTP-task SSRF closure regression tests only — not a product runtime consumer.',
   },
 ]
 

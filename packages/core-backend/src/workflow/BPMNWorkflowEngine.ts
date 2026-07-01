@@ -4,11 +4,19 @@
  */
 
 import { EventEmitter } from 'events'
+import { lookup } from 'node:dns/promises'
 import { db } from '../db/db'
 import { sql } from 'kysely'
 import { Logger } from '../core/logger'
 import { v4 as uuidv4 } from 'uuid'
 import { metrics } from '../metrics/metrics'
+import {
+  dispatchPinnedEgressRequest,
+  type EgressAddressResolver,
+  type PinnedEgressTransport,
+} from '../guards/egress-dispatcher'
+import { defaultEgressPolicy, type EgressPolicy } from '../guards/egress-guard'
+import { createPinnedHttpsJsonTransport } from '../guards/egress-pinned-transport'
 
 // Types for optional dependencies
 type ScheduledTaskType = { start: () => void; stop: () => void }
@@ -60,6 +68,72 @@ interface BPMNTimerJob {
   activity_id: string
   retries: number
   [key: string]: unknown
+}
+
+export interface BPMNHttpTaskEgressOptions {
+  policy?: EgressPolicy
+  resolveAddresses?: EgressAddressResolver
+  transport?: PinnedEgressTransport
+  maxRedirects?: number
+}
+
+export interface BPMNWorkflowEngineOptions {
+  httpTaskEgress?: BPMNHttpTaskEgressOptions
+}
+
+type HttpTaskHeaderDecision =
+  | { allowed: true; headers: Record<string, string> }
+  | { allowed: false; reason: 'HEADER_NOT_ALLOWED' }
+
+const HTTP_TASK_ALLOWED_METHODS = new Set(['GET', 'POST'])
+const HTTP_TASK_FORBIDDEN_HEADERS = new Set([
+  'authorization',
+  'cookie',
+  'forwarded',
+  'host',
+  'proxy-authenticate',
+  'proxy-authorization',
+])
+const HTTP_TASK_MAX_HEADER_COUNT = 32
+const HTTP_TASK_MAX_HEADER_BYTES = 8 * 1024
+const DEFAULT_HTTP_TASK_MAX_REDIRECTS = 3
+
+const resolveDnsAddresses: EgressAddressResolver = async (hostname) => {
+  const records = await lookup(hostname, { all: true, verbatim: true })
+  return records.map((record) => ({
+    address: record.address,
+    family: record.family === 6 ? 6 : 4,
+  }))
+}
+
+function isForbiddenHttpTaskHeader(name: string): boolean {
+  const lower = name.trim().toLowerCase()
+  return HTTP_TASK_FORBIDDEN_HEADERS.has(lower)
+    || lower.startsWith('proxy-')
+    || lower.startsWith('x-forwarded-')
+}
+
+function normalizeHttpTaskHeaders(raw: unknown): HttpTaskHeaderDecision {
+  if (raw === undefined || raw === null) return { allowed: true, headers: {} }
+  if (typeof raw !== 'object' || Array.isArray(raw)) return { allowed: false, reason: 'HEADER_NOT_ALLOWED' }
+
+  const headers: Record<string, string> = {}
+  let totalBytes = 0
+  const entries = Object.entries(raw as Record<string, unknown>)
+  if (entries.length > HTTP_TASK_MAX_HEADER_COUNT) return { allowed: false, reason: 'HEADER_NOT_ALLOWED' }
+  for (const [key, value] of entries) {
+    if (!key || isForbiddenHttpTaskHeader(key) || typeof value !== 'string') {
+      return { allowed: false, reason: 'HEADER_NOT_ALLOWED' }
+    }
+    totalBytes += Buffer.byteLength(key, 'utf8') + Buffer.byteLength(value, 'utf8')
+    if (totalBytes > HTTP_TASK_MAX_HEADER_BYTES) return { allowed: false, reason: 'HEADER_NOT_ALLOWED' }
+    headers[key] = value
+  }
+  return { allowed: true, headers }
+}
+
+function httpTaskError(reason: string): Error {
+  return new Error(`BPMN_HTTP_EGRESS_DENIED: ${reason}`)
 }
 
 // Dynamic imports for optional dependencies
@@ -143,8 +217,12 @@ export class BPMNWorkflowEngine extends EventEmitter {
   private timerJobs: Map<string, ScheduledTaskType>
   private messageSubscriptions: Map<string, Set<string>>
   private signalSubscriptions: Map<string, Set<string>>
+  private httpTaskEgressPolicy: EgressPolicy
+  private httpTaskResolveAddresses: EgressAddressResolver
+  private httpTaskTransport: PinnedEgressTransport
+  private httpTaskMaxRedirects: number
 
-  constructor() {
+  constructor(options: BPMNWorkflowEngineOptions = {}) {
     super()
     this.logger = new Logger('BPMNWorkflowEngine')
     this.processDefinitions = new Map()
@@ -152,6 +230,11 @@ export class BPMNWorkflowEngine extends EventEmitter {
     this.timerJobs = new Map()
     this.messageSubscriptions = new Map()
     this.signalSubscriptions = new Map()
+    const httpTaskEgress = options.httpTaskEgress ?? {}
+    this.httpTaskEgressPolicy = httpTaskEgress.policy ?? defaultEgressPolicy()
+    this.httpTaskResolveAddresses = httpTaskEgress.resolveAddresses ?? resolveDnsAddresses
+    this.httpTaskTransport = httpTaskEgress.transport ?? createPinnedHttpsJsonTransport()
+    this.httpTaskMaxRedirects = httpTaskEgress.maxRedirects ?? DEFAULT_HTTP_TASK_MAX_REDIRECTS
   }
 
   /**
@@ -542,30 +625,51 @@ export class BPMNWorkflowEngine extends EventEmitter {
   ): Promise<void> {
     const instance = this.runningInstances.get(instanceId)
     const url = this.resolveExpression(props.url, instance?.variables) as string
-    const method = (props.method as string | undefined) || 'GET'
-    const headers = (this.resolveExpression(props.headers, instance?.variables) as Record<string, string> | undefined) || {}
+    const method = typeof props.method === 'string' && props.method.trim()
+      ? props.method.trim().toUpperCase()
+      : 'GET'
+    if (!HTTP_TASK_ALLOWED_METHODS.has(method)) {
+      throw httpTaskError('METHOD_NOT_ALLOWED')
+    }
+
+    const headerDecision = normalizeHttpTaskHeaders(this.resolveExpression(props.headers, instance?.variables))
+    if (headerDecision.allowed === false) {
+      throw httpTaskError(headerDecision.reason)
+    }
+    const headers = { ...headerDecision.headers }
     const body = this.resolveExpression(props.body, instance?.variables)
+    const requestBody = method === 'GET' || body === undefined ? undefined : JSON.stringify(body)
+    if (requestBody !== undefined && !Object.keys(headers).some((key) => key.toLowerCase() === 'content-type')) {
+      headers['Content-Type'] = 'application/json'
+    }
 
     try {
-      const response = await fetch(url, {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          ...headers
+      const decision = await dispatchPinnedEgressRequest(
+        {
+          url,
+          method,
+          headers,
+          body: requestBody,
         },
-        body: body ? JSON.stringify(body) : undefined
-      })
-
-      const responseData = await response.json() as unknown
+        {
+          policy: this.httpTaskEgressPolicy,
+          resolveAddresses: this.httpTaskResolveAddresses,
+          transport: this.httpTaskTransport,
+          maxRedirects: this.httpTaskMaxRedirects,
+        },
+      )
+      if (decision.allowed === false) {
+        throw httpTaskError(decision.reason)
+      }
 
       // Store response if variable specified
       if (props.responseVariable) {
         await this.updateProcessVariables(instanceId, {
-          [props.responseVariable as string]: responseData
+          [props.responseVariable as string]: decision.response.body
         })
       }
 
-      this.logger.info(`HTTP task completed: ${method} ${url}`)
+      this.logger.info(`HTTP task completed: ${method} ${new URL(decision.finalUrl).hostname}`)
     } catch (error: unknown) {
       this.logger.error(`HTTP task failed: ${error}`)
       throw error
