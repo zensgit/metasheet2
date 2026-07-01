@@ -542,6 +542,7 @@ module.exports = {
   applyReadSmokePresetOverlay,
   readSmokeSuccessEvidence,
   readSmokeErrorEvidence,
+  readSmokeResponseShapeContainerEvidence,
   ReadSmokeContractError,
   normalizeReadSmokeContract,
 }
