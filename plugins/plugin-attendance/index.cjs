@@ -308,8 +308,8 @@ const DEFAULT_SETTINGS = {
   // attendance:admin POST /api/attendance/anomaly-result-edits write action. enabled = master switch (default
   // ON; the route 403s when explicitly false). editWindowDays bounds how far back a work_date may be corrected
   // (org-tz today − work_date), default 180, range 1..366. requireReason default true (a blank reason 400s).
-  // notifyAffectedEmployee remains reserved for a follow-up gate; AE-2 v1 always enqueues after a successful
-  // correction and leaves the audit row's notification_delivery_id / notification_skipped_reason columns NULL.
+  // notifyAffectedEmployee controls the AE-2 employee notification producer: true enqueues one employee-only
+  // delivery and back-links notification_delivery_id; false writes no outbox row and records the skipped reason.
   attendanceResultEditPolicy: {
     enabled: true,
     editWindowDays: 180,
@@ -18364,7 +18364,27 @@ async function enqueueAttendanceResultEditNotification(trx, { orgId, record, aud
       JSON.stringify(payload),
     ]
   )
-  return inserted[0] ?? null
+  if (inserted[0]) return inserted[0]
+  const existing = await trx.query(
+    `SELECT * FROM attendance_notification_deliveries
+      WHERE org_id = $1 AND source_key = $2
+      LIMIT 1`,
+    [orgId, sourceKey]
+  )
+  return existing[0] ?? null
+}
+
+async function markAttendanceResultEditNotificationStatus(trx, { orgId, auditRow, deliveryId = null, skippedReason = null }) {
+  if (!auditRow?.id) return auditRow
+  const rows = await trx.query(
+    `UPDATE attendance_record_result_edits
+      SET notification_delivery_id = $3,
+          notification_skipped_reason = $4
+      WHERE id = $1 AND org_id = $2
+      RETURNING *`,
+    [auditRow.id, orgId, deliveryId, skippedReason]
+  )
+  return rows[0] ?? auditRow
 }
 
 // §4.1 idempotency compare: a replayed (org_id, idempotency_key) is "already applied" only when its key
@@ -18419,6 +18439,7 @@ async function applyAttendanceResultEdit(trx, options) {
     actorUserId,
     idempotencyKey,
     editWindowDays,
+    notifyAffectedEmployee = true,
   } = options
 
   const normalizedEvidence = Array.isArray(evidence) ? evidence : []
@@ -18568,18 +18589,33 @@ async function applyAttendanceResultEdit(trx, options) {
   const marker = buildManualResultEditMarker(auditRow, updated)
   const markedRecord = await attachManualResultEditMarkerToRecord(trx, updated, marker)
   afterSnapshot = buildResultEditSnapshot(markedRecord)
-  await enqueueAttendanceResultEditNotification(trx, {
-    orgId,
-    record: markedRecord,
-    auditRow,
-    beforeStatus,
-    targetStatus,
-    reason,
-  })
+  let finalAuditRow = auditRow
+  if (notifyAffectedEmployee === false) {
+    finalAuditRow = await markAttendanceResultEditNotificationStatus(trx, {
+      orgId,
+      auditRow,
+      skippedReason: 'policy_disabled',
+    })
+  } else {
+    const delivery = await enqueueAttendanceResultEditNotification(trx, {
+      orgId,
+      record: markedRecord,
+      auditRow,
+      beforeStatus,
+      targetStatus,
+      reason,
+    })
+    finalAuditRow = await markAttendanceResultEditNotificationStatus(trx, {
+      orgId,
+      auditRow,
+      deliveryId: delivery?.id ?? null,
+      skippedReason: null,
+    })
+  }
 
   return {
     alreadyApplied: false,
-    edit: mapResultEditRow(auditRow),
+    edit: mapResultEditRow(finalAuditRow),
     record: markedRecord,
     beforeSnapshot,
     afterSnapshot,
@@ -25241,6 +25277,7 @@ module.exports = {
 	            actorUserId,
 	            idempotencyKey,
 	            editWindowDays: policy.editWindowDays,
+	            notifyAffectedEmployee: policy.notifyAffectedEmployee !== false,
 	          }))
 	          res.json({
 	            ok: true,
