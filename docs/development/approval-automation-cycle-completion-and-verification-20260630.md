@@ -1,6 +1,7 @@
 # Approval & Process-Automation — cycle audit, completion & verification (2026-06-30)
 
-> A code-grounded re-audit of the line against current `main` (HEAD `f14be042e`), the decision-clean work
+> A code-grounded re-audit of the line against the approval-line baseline `f14be042e` (origin/main may have
+> advanced with unrelated commits since — that does not affect these conclusions), the decision-clean work
 > completed this cycle (with verification), one newly-found latent defect surfaced for a decision, and the
 > remaining backlog with a recommended GO order. **Honest headline:** the *ratified-buildable* feature set is
 > exhausted — every remaining rung is owner-gated by an open security/permission/destructive/product/migration
