@@ -119,6 +119,8 @@ describe('Attendance admin regressions', () => {
   let scheduleGroupsData: unknown[] | null = null
   let scheduleDispatchRequestsData: Record<string, unknown> | null = null
   let attendanceRequestsData: unknown[] | null = null
+  let attendanceAnomaliesData: unknown[] | null = null
+  let attendanceResultEditPosts: Array<Record<string, unknown>> = []
   let autoShiftPreviewStatus = 200
   let autoShiftPreviewData: Record<string, unknown> | null = null
   let autoShiftApplyStatus = 200
@@ -136,6 +138,8 @@ describe('Attendance admin regressions', () => {
     scheduleGroupsData = null
     scheduleDispatchRequestsData = null
     attendanceRequestsData = null
+    attendanceAnomaliesData = null
+    attendanceResultEditPosts = []
     autoShiftPreviewStatus = 200
     autoShiftPreviewData = null
     autoShiftApplyStatus = 200
@@ -685,6 +689,35 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
+      if (url.includes('/api/attendance/anomalies')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: attendanceAnomaliesData ?? [],
+            total: attendanceAnomaliesData?.length ?? 0,
+            page: 1,
+            pageSize: 50,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/anomaly-result-edits')) {
+        const body = JSON.parse(String((init as { body?: string } | undefined)?.body || '{}')) as Record<string, unknown>
+        attendanceResultEditPosts.push(body)
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            alreadyApplied: false,
+            edit: {
+              id: 'edit-1',
+              beforeStatus: 'late',
+              afterStatus: body.targetStatus,
+              notificationDeliveryId: 'delivery-1',
+              notificationSkippedReason: null,
+            },
+            record: { id: body.recordId, status: body.targetStatus },
+          },
+        })
+      }
       if (url.includes('/api/attendance/auto-shift-matching/apply')) {
         if (autoShiftApplyStatus >= 400) {
           return jsonResponse(autoShiftApplyStatus, {
@@ -833,6 +866,188 @@ describe('Attendance admin regressions', () => {
     ).toEqual([])
     expect(container!.querySelector('[data-missed-punch-reminder-admin]')).toBeNull()
     expect(container!.querySelector('[data-missed-punch-reminder-toolbar]')).toBeNull()
+  })
+
+  it('overview result-edit rows stay probe-only until admin capability is checked', async () => {
+    attendanceAnomaliesData = [
+      {
+        recordId: 'record-a',
+        workDate: '2026-05-13',
+        status: 'late',
+        firstInAt: '2026-05-13T09:12:00.000Z',
+        lastOutAt: '2026-05-13T18:00:00.000Z',
+        workMinutes: 480,
+        lateMinutes: 12,
+        earlyLeaveMinutes: 0,
+        warnings: ['late'],
+        state: 'open',
+        request: null,
+        suggestedRequestType: 'time_correction',
+      },
+    ]
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(12)
+
+    expect(container!.querySelector('[data-attendance-result-edit-open]')).toBeNull()
+    const probe = container!.querySelector<HTMLButtonElement>('[data-attendance-result-edit-probe]')
+    expect(probe).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-result-edit-disabled-reason]')?.textContent).toContain('Check admin permission')
+    expect(
+      vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes('/api/attendance/settings')),
+    ).toBe(false)
+
+    probe!.click()
+    await flushUi(12)
+
+    expect(
+      vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes('/api/attendance/settings')),
+    ).toBe(true)
+    expect(container!.querySelector('[data-attendance-result-edit-modal]')).toBeTruthy()
+  })
+
+  it('overview result-edit probe fails closed when admin capability cannot be verified', async () => {
+    attendanceSettingsFail = true
+    attendanceAnomaliesData = [
+      {
+        recordId: 'record-a',
+        workDate: '2026-05-13',
+        status: 'late',
+        firstInAt: '2026-05-13T09:12:00.000Z',
+        lastOutAt: '2026-05-13T18:00:00.000Z',
+        workMinutes: 480,
+        lateMinutes: 12,
+        earlyLeaveMinutes: 0,
+        warnings: ['late'],
+        state: 'open',
+        request: null,
+        suggestedRequestType: 'time_correction',
+      },
+    ]
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(12)
+
+    const probe = container!.querySelector<HTMLButtonElement>('[data-attendance-result-edit-probe]')
+    expect(probe).toBeTruthy()
+    probe!.click()
+    await flushUi(12)
+
+    expect(
+      vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes('/api/attendance/settings')),
+    ).toBe(true)
+    expect(container!.querySelector('[data-attendance-result-edit-modal]')).toBeNull()
+    expect(attendanceResultEditPosts).toHaveLength(0)
+  })
+
+  it('overview result-edit submit uses the modal snapshot and does not refresh admin deliveries', async () => {
+    attendanceSettingsData = {
+      attendanceResultEditPolicy: {
+        enabled: true,
+        requireReason: true,
+        notifyAffectedEmployee: true,
+      },
+    }
+    attendanceAnomaliesData = [
+      {
+        recordId: 'record-a',
+        workDate: '2026-05-13',
+        status: 'late',
+        firstInAt: '2026-05-13T09:12:00.000Z',
+        lastOutAt: '2026-05-13T18:00:00.000Z',
+        workMinutes: 480,
+        lateMinutes: 12,
+        earlyLeaveMinutes: 0,
+        warnings: ['late'],
+        state: 'open',
+        request: null,
+        suggestedRequestType: 'time_correction',
+      },
+    ]
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(12)
+
+    container!.querySelector<HTMLButtonElement>('[data-attendance-result-edit-probe]')!.click()
+    await flushUi(12)
+    expect(container!.querySelector('[data-attendance-result-edit-modal]')).toBeTruthy()
+
+    attendanceAnomaliesData = [
+      {
+        recordId: 'record-b',
+        workDate: '2026-05-14',
+        status: 'absent',
+        firstInAt: null,
+        lastOutAt: null,
+        workMinutes: 0,
+        lateMinutes: 0,
+        earlyLeaveMinutes: 0,
+        warnings: ['absent'],
+        state: 'open',
+        request: null,
+        suggestedRequestType: 'time_correction',
+      },
+    ]
+    setInput(container!, '[data-attendance-result-edit-reason]', 'corrected from manager review')
+    await flushUi(2)
+    container!.querySelector<HTMLButtonElement>('[data-attendance-result-edit-submit]')!.click()
+    await flushUi(16)
+
+    expect(attendanceResultEditPosts).toHaveLength(1)
+    expect(attendanceResultEditPosts[0]).toMatchObject({
+      recordId: 'record-a',
+      targetStatus: 'normal',
+      reason: 'corrected from manager review',
+      idempotencyKey: expect.any(String),
+    })
+    expect(attendanceResultEditPosts[0]).not.toHaveProperty('overrideMetrics')
+    expect(
+      vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes('/api/attendance/notification-deliveries')),
+    ).toBe(false)
+  })
+
+  it('overview result-edit modal clears when anomalies reload starts', async () => {
+    attendanceSettingsData = {
+      attendanceResultEditPolicy: {
+        enabled: true,
+        requireReason: false,
+      },
+    }
+    attendanceAnomaliesData = [
+      {
+        recordId: 'record-a',
+        workDate: '2026-05-13',
+        status: 'late',
+        firstInAt: '2026-05-13T09:12:00.000Z',
+        lastOutAt: '2026-05-13T18:00:00.000Z',
+        workMinutes: 480,
+        lateMinutes: 12,
+        earlyLeaveMinutes: 0,
+        warnings: ['late'],
+        state: 'open',
+        request: null,
+        suggestedRequestType: 'time_correction',
+      },
+    ]
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(12)
+
+    container!.querySelector<HTMLButtonElement>('[data-attendance-result-edit-probe]')!.click()
+    await flushUi(12)
+    expect(container!.querySelector('[data-attendance-result-edit-modal]')).toBeTruthy()
+
+    const reloadButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Reload anomalies'))
+    expect(reloadButton).toBeTruthy()
+    reloadButton!.click()
+    await flushUi(2)
+
+    expect(container!.querySelector('[data-attendance-result-edit-modal]')).toBeNull()
   })
 
   it('overview self-service — the annual leave card reads the token-locked /me balance (no userId param)', async () => {

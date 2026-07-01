@@ -1100,6 +1100,31 @@
                     >
                       {{ item.state === 'pending' ? tr('Pending request', '申请处理中') : tr('Create request', '创建申请') }}
                     </button>
+                    <button
+                      v-if="attendanceResultEditCapabilityUnknown"
+                      class="attendance__btn"
+                      data-attendance-result-edit-probe
+                      @click="openResultEditModal(item)"
+                    >
+                      {{ tr('Check edit access', '检查更正权限') }}
+                    </button>
+                    <button
+                      v-else
+                      class="attendance__btn"
+                      :disabled="Boolean(attendanceResultEditDisabledReason(item))"
+                      :title="attendanceResultEditDisabledReason(item) || undefined"
+                      data-attendance-result-edit-open
+                      @click="openResultEditModal(item)"
+                    >
+                      {{ tr('Edit result', '修改结果') }}
+                    </button>
+                    <small
+                      v-if="attendanceResultEditCapabilityUnknown || attendanceResultEditDisabledReason(item)"
+                      class="attendance__field-hint"
+                      data-attendance-result-edit-disabled-reason
+                    >
+                      {{ attendanceResultEditCapabilityUnknown ? tr('Check admin permission before editing.', '更正前需先检查管理员权限。') : attendanceResultEditDisabledReason(item) }}
+                    </small>
                   </td>
                 </tr>
               </tbody>
@@ -8729,6 +8754,125 @@
         </div>
       </section>
     </template>
+
+    <div
+      v-if="attendanceResultEditModal.open && attendanceResultEditModal.snapshot"
+      class="attendance__modal"
+      role="dialog"
+      aria-modal="true"
+      data-attendance-result-edit-modal
+    >
+      <div class="attendance__modal-body attendance__result-edit-modal">
+        <div class="attendance__admin-section-header">
+          <div>
+            <h4>{{ tr('Edit attendance result', '更正考勤结果') }}</h4>
+            <small class="attendance__field-hint">
+              {{ attendanceResultEditModal.snapshot.workDate }}
+              <template v-if="attendanceResultEditModal.snapshot.userId">
+                · {{ attendanceResultEditModal.snapshot.userId }}
+              </template>
+            </small>
+          </div>
+          <button class="attendance__btn" type="button" @click="closeResultEditModal">
+            {{ tr('Close', '关闭') }}
+          </button>
+        </div>
+
+        <div class="attendance__result-edit-summary">
+          <span>
+            {{ tr('Current status', '当前状态') }}:
+            <strong>{{ formatStatus(attendanceResultEditModal.snapshot.sourceStatus) }}</strong>
+          </span>
+          <span v-if="attendanceResultEditModal.snapshot.request">
+            {{ tr('Linked request', '关联申请') }}:
+            {{ formatRequestType(attendanceResultEditModal.snapshot.request.requestType) }}
+            · {{ formatStatus(attendanceResultEditModal.snapshot.request.status) }}
+          </span>
+          <span v-if="attendanceResultEditModal.snapshot.warnings.length">
+            {{ tr('Warnings', '警告') }}: {{ formatWarningsShort(attendanceResultEditModal.snapshot.warnings) }}
+          </span>
+        </div>
+
+        <div class="attendance__request-form attendance__result-edit-form">
+          <label class="attendance__field" for="attendance-result-edit-target">
+            <span>{{ tr('Target status', '目标状态') }}</span>
+            <select
+              id="attendance-result-edit-target"
+              v-model="attendanceResultEditModal.targetStatus"
+              name="resultEditTargetStatus"
+              data-attendance-result-edit-target
+            >
+              <option
+                v-for="status in ATTENDANCE_RESULT_EDIT_TARGET_STATUSES"
+                :key="status"
+                :value="status"
+              >
+                {{ attendanceResultEditTargetLabel(status) }}
+              </option>
+            </select>
+          </label>
+          <label class="attendance__field attendance__field--full" for="attendance-result-edit-reason">
+            <span>{{ tr('Reason', '原因') }}</span>
+            <textarea
+              id="attendance-result-edit-reason"
+              v-model="attendanceResultEditModal.reason"
+              maxlength="500"
+              name="resultEditReason"
+              rows="3"
+              data-attendance-result-edit-reason
+            />
+            <small class="attendance__field-hint">
+              {{
+                attendanceResultEditReasonRequired
+                  ? tr('Required by policy.', '策略要求填写。')
+                  : tr('Optional by policy.', '策略未强制要求。')
+              }}
+            </small>
+          </label>
+          <label class="attendance__field" for="attendance-result-edit-evidence-label">
+            <span>{{ tr('Evidence label', '证据标签') }}</span>
+            <input
+              id="attendance-result-edit-evidence-label"
+              v-model="attendanceResultEditModal.evidenceLabel"
+              maxlength="240"
+              name="resultEditEvidenceLabel"
+              type="text"
+              data-attendance-result-edit-evidence-label
+            />
+          </label>
+          <label class="attendance__field" for="attendance-result-edit-evidence-url">
+            <span>{{ tr('Evidence URL', '证据链接') }}</span>
+            <input
+              id="attendance-result-edit-evidence-url"
+              v-model="attendanceResultEditModal.evidenceUrl"
+              name="resultEditEvidenceUrl"
+              placeholder="https://"
+              type="url"
+              data-attendance-result-edit-evidence-url
+            />
+          </label>
+        </div>
+
+        <p v-if="attendanceResultEditModal.error" class="attendance__error" data-attendance-result-edit-error>
+          {{ attendanceResultEditModal.error }}
+        </p>
+
+        <div class="attendance__admin-actions">
+          <button class="attendance__btn" type="button" @click="closeResultEditModal">
+            {{ tr('Cancel', '取消') }}
+          </button>
+          <button
+            class="attendance__btn attendance__btn--primary"
+            :disabled="attendanceResultEditSubmitDisabled"
+            type="button"
+            data-attendance-result-edit-submit
+            @click="submitResultEditModal"
+          >
+            {{ attendanceResultEditModal.submitting ? tr('Submitting...', '提交中...') : tr('Submit edit', '提交更正') }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -9061,6 +9205,30 @@ interface AttendanceAnomaly {
   suggestedRequestType: string | null
 }
 
+const ATTENDANCE_RESULT_EDIT_SOURCE_STATUSES = new Set(['late', 'early_leave', 'late_early', 'partial', 'absent'])
+const ATTENDANCE_RESULT_EDIT_TARGET_STATUSES = ['normal', 'late', 'early_leave', 'late_early', 'partial', 'absent', 'adjusted'] as const
+type AttendanceResultEditTargetStatus = typeof ATTENDANCE_RESULT_EDIT_TARGET_STATUSES[number]
+type AttendanceResultEditAdminCapability = 'unknown' | 'checking' | 'allowed' | 'forbidden'
+
+interface AttendanceResultEditSnapshot {
+  recordId: string
+  userId: string
+  workDate: string
+  sourceStatus: string
+  warnings: string[]
+  request: AttendanceAnomaly['request']
+  idempotencyKey: string
+}
+
+interface AttendanceResultEditResult {
+  id: string
+  beforeStatus: string
+  afterStatus: string
+  notificationDeliveryId: string | null
+  notificationSkippedReason: string | null
+  alreadyApplied: boolean
+}
+
 interface MissedPunchReminderResult {
   channel: string
   created: number
@@ -9341,6 +9509,12 @@ interface AttendanceSettings {
       weekly?: { enabled?: boolean; weekday?: number; sendAt?: string; recipients?: string[] }
       monthly?: { enabled?: boolean; dayOfMonth?: number; sendAt?: string; recipients?: string[] }
     }
+  }
+  attendanceResultEditPolicy?: {
+    enabled?: boolean
+    editWindowDays?: number
+    requireReason?: boolean
+    notifyAffectedEmployee?: boolean
   }
   autoShiftMatching?: {
     enabled?: boolean
@@ -10276,6 +10450,18 @@ const scheduleDispatchSaving = ref(false)
 const focusedAttendanceRequestId = computed(() => props.initialRequestId.trim())
 const anomalies = ref<AttendanceAnomaly[]>([])
 const anomaliesLoading = ref(false)
+const attendanceResultEditAdminCapability = ref<AttendanceResultEditAdminCapability>('unknown')
+const attendanceResultEditModal = reactive({
+  open: false,
+  snapshot: null as AttendanceResultEditSnapshot | null,
+  targetStatus: 'normal' as AttendanceResultEditTargetStatus,
+  reason: '',
+  evidenceLabel: '',
+  evidenceUrl: '',
+  submitting: false,
+  error: '',
+  result: null as AttendanceResultEditResult | null,
+})
 const missedPunchReminderCandidates = ref<MissedPunchReminderCandidate[]>([])
 const missedPunchReminderLoading = ref(false)
 const missedPunchReminderDefaultTo = new Date()
@@ -14618,6 +14804,234 @@ function normalizedUserId(): string | undefined {
   return value.length > 0 ? value : undefined
 }
 
+const attendanceResultEditPolicy = computed(() => attendanceSettings.value?.attendanceResultEditPolicy ?? {})
+const attendanceResultEditPolicyEnabled = computed(() => attendanceResultEditPolicy.value.enabled !== false)
+const attendanceResultEditReasonRequired = computed(() => attendanceResultEditPolicy.value.requireReason !== false)
+const attendanceResultEditCapabilityUnknown = computed(() => attendanceResultEditAdminCapability.value === 'unknown')
+const canEditAttendanceAnomalyResult = computed(() =>
+  attendancePluginActive.value && attendanceResultEditAdminCapability.value === 'allowed',
+)
+const attendanceResultEditSubmitDisabled = computed(() =>
+  attendanceResultEditModal.submitting
+  || !attendanceResultEditModal.snapshot
+  || !attendanceResultEditPolicyEnabled.value
+  || (attendanceResultEditReasonRequired.value && attendanceResultEditModal.reason.trim().length === 0),
+)
+
+function resetAttendanceResultEditCapability(): void {
+  attendanceResultEditAdminCapability.value = 'unknown'
+}
+
+async function ensureAttendanceResultEditCapability(): Promise<boolean> {
+  if (attendanceResultEditAdminCapability.value === 'allowed') return true
+  if (attendanceResultEditAdminCapability.value === 'forbidden') return false
+  if (attendanceResultEditAdminCapability.value === 'checking') return false
+
+  attendanceResultEditAdminCapability.value = 'checking'
+  await loadSettings()
+  if (adminForbidden.value) {
+    attendanceResultEditAdminCapability.value = 'forbidden'
+    return false
+  }
+  if (attendanceSettings.value) {
+    attendanceResultEditAdminCapability.value = 'allowed'
+    return true
+  }
+  attendanceResultEditAdminCapability.value = 'unknown'
+  return false
+}
+
+function attendanceResultEditIdempotencyKey(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  } catch { /* fall through */ }
+  return `attendance-result-edit-${Date.now()}-${Math.floor(Math.random() * 1e9)}`
+}
+
+function normalizeAttendanceResultStatus(value: unknown): string {
+  return String(value ?? '').trim().toLowerCase()
+}
+
+function isAttendanceResultEditSourceEditable(item: AttendanceAnomaly): boolean {
+  return ATTENDANCE_RESULT_EDIT_SOURCE_STATUSES.has(normalizeAttendanceResultStatus(item.status))
+}
+
+function computeAttendanceResultEditDisabledReason(item: AttendanceAnomaly): string {
+  if (attendanceResultEditAdminCapability.value === 'checking') {
+    return tr('Checking admin permission...', '正在检查管理员权限...')
+  }
+  if (attendanceResultEditAdminCapability.value === 'forbidden') {
+    return tr('Admin permission required.', '需要管理员权限。')
+  }
+  if (attendanceResultEditAdminCapability.value === 'allowed' && !canEditAttendanceAnomalyResult.value) {
+    return tr('Admin permission required.', '需要管理员权限。')
+  }
+  if (attendanceResultEditAdminCapability.value === 'allowed' && attendanceResultEditPolicyEnabled.value === false) {
+    return tr('Result editing is disabled by policy.', '考勤结果更正已被策略关闭。')
+  }
+  if (item.state === 'pending') {
+    return tr('Pending request exists.', '已有待处理申请。')
+  }
+  if (!isAttendanceResultEditSourceEditable(item)) {
+    return tr('This result is not editable.', '该结果不可更正。')
+  }
+  return ''
+}
+
+const attendanceResultEditDisabledReasons = computed(() => {
+  const reasons = new Map<string, string>()
+  for (const item of anomalies.value) {
+    reasons.set(item.recordId, computeAttendanceResultEditDisabledReason(item))
+  }
+  return reasons
+})
+
+function attendanceResultEditDisabledReason(item: AttendanceAnomaly): string {
+  return attendanceResultEditDisabledReasons.value.get(item.recordId)
+    ?? computeAttendanceResultEditDisabledReason(item)
+}
+
+function attendanceResultEditTargetLabel(status: AttendanceResultEditTargetStatus | string): string {
+  return formatStatus(status)
+}
+
+function attendanceResultEditErrorMessage(error: unknown, fallback = tr('Result edit failed', '考勤结果更正失败')): string {
+  const code = normalizeErrorCode((error as AttendanceApiError)?.code ?? '')
+  if (code === 'ATTENDANCE_RESULT_EDIT_DISABLED') return tr('Result editing is disabled by policy.', '考勤结果更正已被策略关闭。')
+  if (code === 'ATTENDANCE_RECORD_NOT_FOUND') return tr('The anomaly row is stale; reload anomalies.', '该异常记录已过期，请重载异常。')
+  if (code === 'ATTENDANCE_RESULT_EDIT_SOURCE_NOT_EDITABLE') return tr('The current source status is no longer editable.', '当前来源状态已不可更正。')
+  if (code === 'ATTENDANCE_RESULT_EDIT_NORMAL_TO_ABNORMAL_UNSUPPORTED') return tr('Normal results cannot be changed into abnormal results in this version.', '当前版本不支持将正常结果改为异常。')
+  if (code === 'ATTENDANCE_RESULT_EDIT_WINDOW_EXPIRED') return tr('The edit window has expired.', '更正窗口已过期。')
+  if (code === 'ATTENDANCE_RESULT_EDIT_CYCLE_CLOSED') return tr('The payroll cycle is closed or archived.', '该周期已关闭或归档。')
+  if (code === 'ATTENDANCE_RESULT_EDIT_IDEMPOTENCY_CONFLICT') return tr('This modal retry key was already used for a different edit. Close and reopen the modal.', '该弹窗重试键已用于另一笔更正，请关闭后重新打开。')
+  if (code === 'DB_NOT_READY') return tr('Attendance tables are not ready; the edit was not applied.', '考勤表尚未就绪，更正未应用。')
+  if (code === 'VALIDATION_ERROR') return (error as Error)?.message || tr('Check the required fields.', '请检查必填字段。')
+  return (error as Error)?.message || fallback
+}
+
+function resetAttendanceResultEditModal(): void {
+  attendanceResultEditModal.open = false
+  attendanceResultEditModal.snapshot = null
+  attendanceResultEditModal.targetStatus = 'normal'
+  attendanceResultEditModal.reason = ''
+  attendanceResultEditModal.evidenceLabel = ''
+  attendanceResultEditModal.evidenceUrl = ''
+  attendanceResultEditModal.submitting = false
+  attendanceResultEditModal.error = ''
+  attendanceResultEditModal.result = null
+}
+
+function clearAttendanceResultEditTransientState(): void {
+  resetAttendanceResultEditModal()
+}
+
+async function openResultEditModal(item: AttendanceAnomaly): Promise<void> {
+  const capabilityVerified = await ensureAttendanceResultEditCapability()
+  if (!capabilityVerified) {
+    const message = attendanceResultEditAdminCapability.value === 'forbidden'
+      ? tr('Admin permission required.', '需要管理员权限。')
+      : tr('Unable to verify admin permission.', '无法确认管理员权限。')
+    setStatus(appendStatusContext(message, anomaliesTimezoneContextHint.value), 'error')
+    return
+  }
+  const disabledReason = attendanceResultEditDisabledReason(item)
+  if (disabledReason) {
+    setStatus(appendStatusContext(disabledReason, anomaliesTimezoneContextHint.value), 'error')
+    return
+  }
+  attendanceResultEditModal.open = true
+  attendanceResultEditModal.snapshot = {
+    recordId: item.recordId,
+    userId: normalizedUserId() ?? currentUserId.value ?? '',
+    workDate: item.workDate,
+    sourceStatus: normalizeAttendanceResultStatus(item.status),
+    warnings: [...(Array.isArray(item.warnings) ? item.warnings : [])],
+    request: item.request ? { ...item.request } : null,
+    idempotencyKey: attendanceResultEditIdempotencyKey(),
+  }
+  attendanceResultEditModal.targetStatus = 'normal'
+  attendanceResultEditModal.reason = ''
+  attendanceResultEditModal.evidenceLabel = ''
+  attendanceResultEditModal.evidenceUrl = ''
+  attendanceResultEditModal.submitting = false
+  attendanceResultEditModal.error = ''
+  attendanceResultEditModal.result = null
+}
+
+function closeResultEditModal(): void {
+  resetAttendanceResultEditModal()
+}
+
+function buildAttendanceResultEditEvidence(): Array<Record<string, string>> {
+  const label = attendanceResultEditModal.evidenceLabel.trim()
+  const url = attendanceResultEditModal.evidenceUrl.trim()
+  if (!label && !url) return []
+  const item: Record<string, string> = {}
+  if (label) item.label = label
+  if (url) item.url = url
+  return [item]
+}
+
+function normalizeAttendanceResultEditResult(data: any): AttendanceResultEditResult {
+  const edit = data?.edit ?? {}
+  return {
+    id: String(edit.id ?? ''),
+    beforeStatus: String(edit.beforeStatus ?? ''),
+    afterStatus: String(edit.afterStatus ?? ''),
+    notificationDeliveryId: edit.notificationDeliveryId ? String(edit.notificationDeliveryId) : null,
+    notificationSkippedReason: edit.notificationSkippedReason ? String(edit.notificationSkippedReason) : null,
+    alreadyApplied: data?.alreadyApplied === true,
+  }
+}
+
+async function submitResultEditModal(): Promise<void> {
+  const snapshot = attendanceResultEditModal.snapshot
+  if (!snapshot) return
+  if (attendanceResultEditSubmitDisabled.value) return
+
+  attendanceResultEditModal.submitting = true
+  attendanceResultEditModal.error = ''
+  attendanceResultEditModal.result = null
+  try {
+    const body = {
+      orgId: normalizedOrgId(),
+      recordId: snapshot.recordId,
+      targetStatus: attendanceResultEditModal.targetStatus,
+      reason: attendanceResultEditModal.reason.trim() || undefined,
+      evidence: buildAttendanceResultEditEvidence(),
+      idempotencyKey: snapshot.idempotencyKey,
+    }
+    const response = await apiFetch('/api/attendance/anomaly-result-edits', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw createApiError(response, data, tr('Result edit failed', '考勤结果更正失败'))
+    }
+    const result = normalizeAttendanceResultEditResult(data.data)
+    attendanceResultEditModal.result = result
+    attendanceResultEditModal.open = false
+    const notifyLine = result.notificationDeliveryId
+      ? tr('Employee notification enqueued.', '员工通知已入队。')
+      : result.notificationSkippedReason
+        ? tr(`Notification skipped: ${result.notificationSkippedReason}.`, `通知已跳过：${result.notificationSkippedReason}。`)
+        : tr('Notification outcome not returned.', '未返回通知结果。')
+    const statusLine = result.id
+      ? tr(`Result edit ${result.id}: ${formatStatus(result.beforeStatus)} → ${formatStatus(result.afterStatus)}.`, `结果更正 ${result.id}：${formatStatus(result.beforeStatus)} → ${formatStatus(result.afterStatus)}。`)
+      : tr(`Result edit applied: ${formatStatus(result.beforeStatus)} → ${formatStatus(result.afterStatus)}.`, `结果更正已应用：${formatStatus(result.beforeStatus)} → ${formatStatus(result.afterStatus)}。`)
+    setStatus(appendStatusContext(`${statusLine} ${notifyLine}`, anomaliesTimezoneContextHint.value))
+    await Promise.all([loadAnomalies(), loadRecords(), loadSummary()])
+    if (showAdmin.value && adminActiveSectionId.value === ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries) {
+      void loadAttendanceNotificationDeliveries()
+    }
+  } catch (error) {
+    attendanceResultEditModal.error = attendanceResultEditErrorMessage(error)
+  } finally {
+    attendanceResultEditModal.submitting = false
+  }
+}
+
 function parseWorkingDaysInput(value: string): number[] {
   const days = value
     .split(',')
@@ -18772,6 +19186,7 @@ async function confirmMissedPunchReminder(): Promise<void> {
 }
 
 async function loadAnomalies() {
+  clearAttendanceResultEditTransientState()
   anomaliesLoading.value = true
   try {
     const query = buildQuery({
@@ -19487,6 +19902,7 @@ async function loadSettings() {
     const response = await apiFetchWithTimeout('/api/attendance/settings', {}, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
     if (response.status === 403) {
       adminForbidden.value = true
+      attendanceResultEditAdminCapability.value = 'forbidden'
       attendanceSettings.value = null
       return
     }
@@ -19495,6 +19911,7 @@ async function loadSettings() {
       throw new Error(readErrorMessage(data, tr('Failed to load settings', '加载设置失败')))
     }
     adminForbidden.value = false
+    attendanceResultEditAdminCapability.value = 'allowed'
     attendanceSettings.value = (data.data as AttendanceSettings | null) ?? null
     applySettingsToForm(data.data || {})
     applyShiftComplianceToForm(data.data || {})
@@ -19510,6 +19927,7 @@ async function loadSettings() {
     applyAnnualPolicyToForm(data.data || {})
   } catch (error: any) {
     attendanceSettings.value = null
+    attendanceResultEditAdminCapability.value = 'unknown'
     setStatusFromError(error, tr('Failed to load settings', '加载设置失败'), 'admin')
   } finally {
     settingsLoading.value = false
@@ -25038,12 +25456,18 @@ onMounted(() => {
 })
 
 watch(orgId, () => {
+  resetAttendanceResultEditCapability()
+  clearAttendanceResultEditTransientState()
   if (attendancePluginActive.value) {
     refreshAll()
     if (showAdmin.value) {
       loadAdminData()
     }
   }
+})
+
+watch([fromDate, toDate, targetUserId], () => {
+  clearAttendanceResultEditTransientState()
 })
 
 watch(requestReportStatusBreakdown, (items) => {
@@ -27776,6 +28200,21 @@ const holidaySectionBindings = {
   max-height: calc(100% - 32px);
   overflow: auto;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+.attendance__result-edit-modal {
+  max-width: 640px;
+}
+.attendance__result-edit-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0;
+  font-size: 13px;
+  color: #4b5563;
+}
+.attendance__result-edit-form textarea {
+  min-height: 72px;
+  resize: vertical;
 }
 .attendance__admin-subsection {
   border-top: 1px solid var(--border, #e5e7eb);
