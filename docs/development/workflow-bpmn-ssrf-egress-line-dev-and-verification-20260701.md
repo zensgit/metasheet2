@@ -1,8 +1,8 @@
 # R1 BPMN SSRF egress line — development & verification (2026-07-01)
 
-Survey of the BPMN HTTP-task SSRF boundary line (design-lock `#3428`): what is
-landed, what is verified, and what remains gated. Grounded against
-`origin/main` at `5193432a8` after `#3451`.
+Survey of the BPMN HTTP-task SSRF boundary line (design-lock `#3428` plus A3
+rollout lock `#3452`): what is landed, what is verified, and what remains
+gated. Grounded against `origin/main` after `#3452` / `#3454`.
 
 ## 1. Baseline
 
@@ -26,6 +26,7 @@ landed, what is verified, and what remains gated. Grounded against
 | Helper API hardening | `#3443` / `925932837` | `isBlockedEgressIp()` always folds in the well-known NAT64 prefix even for direct helper callers passing custom prefixes, preventing future default-prefix drift. |
 | A1 IP-pinned dispatcher | `#3447` / `be35eec6` | Adds `dispatchPinnedEgressRequest`: resolve-all DNS, deny if any resolved IP is unsafe, pin the chosen validated IP, revalidate redirects, cap redirects, and require manual redirect handling. No engine wiring in that slice. |
 | A2 engine wiring | `#3451` / `5193432a8` | Replaces the raw `fetch` path in `executeHttpTask` with the pinned dispatcher plus HTTPS JSON transport; preserves Host/SNI while connecting to the pinned IP; enforces GET/POST only; rejects `Authorization`, `Cookie`, `Host`, `Proxy-*`, `Forwarded`, and `X-Forwarded-*`; caps headers, redirects, timeout, and response size; default policy remains fail-closed. |
+| A3 rollout policy design-lock | `#3452` / `771871e05` | Locks the next governance gate: server-owned policy source only, exact DNS host policy entries, NAT64 prefixes as classifier metadata only, fail-closed malformed/absent config, both engine construction sites sharing one loader path, route provenance negative controls, and values-free evidence. No runtime/config loader or live destination enablement. |
 
 ## 3. Current Runtime State
 
@@ -60,17 +61,20 @@ by a future rollout/configuration slice.
   after-sales, and the contract gates.
 - Focused local verification recorded on `#3451`: 75/75 focused tests,
   backend type-check, backend build, focused ESLint, and `git diff --check`.
+- `#3452` fresh CI passed `test (18.x)`, `test (20.x)`, coverage, K3 WISE,
+  after-sales, and the contract gates; the A3 design-lock is docs-only and
+  does not enable a destination.
 
 ## 5. Remaining Gate
 
-The R1 code path is closed by default, but the rollout/configuration surface is
-still a separate gate. This is intentional: the design-lock treated fail-closed
-rollout as a behavior change and required the policy-enablement path to be its
-own step.
+The R1 code path is closed by default, and `#3452` now locks the rollout policy
+shape. The rollout/configuration runtime is still a separate gate. This is
+intentional: the design-lock treated fail-closed rollout as a behavior change
+and required the policy-enablement path to be its own step.
 
 | Remaining item | State | Why it remains separate |
 |---|---|---|
-| A3 rollout / configured policy enablement | **GATED** | A2 added a constructor-injected policy and default fail-closed runtime, but no product/admin configuration surface, no route-level provenance/governance audit for who may enable destinations, and no live allowlist rollout has been opened. Enabling real destinations remains an owner/governance decision, not an automatic continuation. |
+| A3 rollout / configured policy enablement | **DESIGN-LOCK SHIPPED; RUNTIME GATED** | `#3452` defines the server-owned policy model and route-provenance/values-free evidence gates. No product/admin configuration surface, config loader, route injection, or live allowlist rollout has been opened. Enabling real destinations remains an owner/governance decision, not an automatic continuation. |
 
 ## 6. Outcome
 
@@ -79,9 +83,9 @@ own step.
 - The original live SSRF hole is closed by default: no configured allowlist means
   no outbound HTTP-task request is dispatched.
 - The remaining work is not another blind SSRF patch; it is the explicit A3
-  policy/rollout gate. That slice should define who can configure allowed
-  destinations, where the policy is sourced from, how route-level provenance is
-  audited, and what evidence proves the rollout did not reopen free-form egress.
+  policy/rollout runtime. `#3452` already defines the server-owned policy source,
+  route-level provenance controls, and evidence boundaries; implementation still
+  requires per-slice owner opt-in.
 
 ## Invariants Held
 
