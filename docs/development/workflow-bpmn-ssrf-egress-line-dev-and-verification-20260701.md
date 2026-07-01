@@ -1,87 +1,91 @@
 # R1 BPMN SSRF egress line — development & verification (2026-07-01)
 
-Survey of the BPMN HTTP-task SSRF boundary line (design-lock `#3428`): what is landed, what is
-in-flight, and the remaining gated slices — grounded against current `main`. Guard work is
-**not wired** to `executeHttpTask`; nothing here changes runtime behaviour of live workflows.
+Survey of the BPMN HTTP-task SSRF boundary line (design-lock `#3428`): what is
+landed, what is verified, and what remains gated. Grounded against
+`origin/main` at `5193432a8` after `#3451`.
 
 ## 1. Baseline
 
-- MetaSheet2 `origin/main` at `032e063af`.
-- The egress guard lives at `packages/core-backend/src/guards/egress-guard.ts` (+ its test); it is
-  a pure policy/IP primitive with no BPMN engine wiring.
+- The live target is `BPMNWorkflowEngine.executeHttpTask` in
+  `packages/core-backend/src/workflow/BPMNWorkflowEngine.ts`.
+- Before R1, the HTTP task used raw outbound `fetch(url, ...)` after templating
+  `url`, `headers`, and `body`, then stored the response body into a workflow
+  variable. That was full-read SSRF, not blind egress.
+- The R1 design-lock (`#3428`) ratified hard fail-closed rollout (`D3`),
+  `https:`-only, exact-host allowlists, forbidden hop-sensitive headers, and an
+  in-process IP-pinned dispatcher.
 
-## 2. Landed (verified on `main`)
+## 2. Landed And Verified
 
 | Item | PR / commit | Covers |
 |---|---|---|
-| SSRF boundary design-lock | `#3428` | The boundary spec — L1 scheme, L2 IP deny-list, L3 allowlist, L4 redirect, L5 rebinding/TOCTOU, L6 caps, L7 fail-closed, L8 header/method — and the D0–D5 decisions. |
-| R1-A egress guard | `3915c1ca4` | `validateEgressUrl` + `isBlockedEgressIp`: https-only scheme, creds rejection, exact-host allowlist (fail-closed), internal-DNS-name block (`localhost`/`.local`/`.internal`), IPv4/IPv6 class deny-list, IPv4-mapped + NAT64 (well-known) + 6to4 + Teredo decomposition, WHATWG canonicalization of decimal/hex/short IPv4. Guard-only. |
-| NAT64 NSP hardening | `#3438` | Configurable `EgressPolicy.nat64Prefixes` — closes the NAT64 **Network-Specific-Prefix** embedded-v4 bypass an adversarial probe surfaced (main previously decoded only the well-known `64:ff9b::/96`). |
+| SSRF boundary design-lock | `#3428` / `0a794a118` | Boundary spec: L1 scheme, L2 IP deny-list, L3 positive allowlist, L4 redirect validation, L5 rebinding/TOCTOU defeat, L6 caps, L7 fail-closed, L8 header/method hardening, and D0-D5 decisions. |
+| R1-A egress URL/IP guard | `#3432` / `3915c1ca4` | `validateEgressUrl` + `isBlockedEgressIp`: `https:`-only, credentials rejected, exact-host allowlist, fail-closed empty allowlist, internal DNS names rejected, public/private IP classification, and WHATWG canonicalization of decimal/hex/short IPv4 forms. |
+| NAT64 NSP hardening | `#3438` / `032e063af` | Adds configurable `/96` NAT64 prefixes so network-specific-prefix NAT64 cannot hide an embedded unsafe IPv4. |
+| IPv4-compatible / ISATAP hardening | `#3437` / `dabd5217b` | Blocks deprecated IPv4-compatible and ISATAP-wrapped embedded IPv4 literals. The adversarial ISATAP/compat probe blocked internal embedded IPv4 and allowed public embedded IPv4. |
+| Helper API hardening | `#3443` / `925932837` | `isBlockedEgressIp()` always folds in the well-known NAT64 prefix even for direct helper callers passing custom prefixes, preventing future default-prefix drift. |
+| A1 IP-pinned dispatcher | `#3447` / `be35eec6` | Adds `dispatchPinnedEgressRequest`: resolve-all DNS, deny if any resolved IP is unsafe, pin the chosen validated IP, revalidate redirects, cap redirects, and require manual redirect handling. No engine wiring in that slice. |
+| A2 engine wiring | `#3451` / `5193432a8` | Replaces the raw `fetch` path in `executeHttpTask` with the pinned dispatcher plus HTTPS JSON transport; preserves Host/SNI while connecting to the pinned IP; enforces GET/POST only; rejects `Authorization`, `Cookie`, `Host`, `Proxy-*`, `Forwarded`, and `X-Forwarded-*`; caps headers, redirects, timeout, and response size; default policy remains fail-closed. |
 
-## 3. In-flight (implemented, awaiting merge)
+## 3. Current Runtime State
 
-| Item | PR | State | What it adds |
-|---|---|---|---|
-| Embedded IPv4-compatible / ISATAP literals | `#3437` (`codex/r1a-egress-ip-compat-followup`) | OPEN, **DIRTY** (+26/−1) | Blocks deprecated IPv4-compatible (`::a.b.c.d`, `::/96`) and ISATAP-wrapped (`…:5efe:a.b.c.d`) embedded literals — a real remaining IP-class gap (current `main` handles neither). |
+`executeHttpTask` is no longer a naked outbound fetch site. It now calls
+`dispatchPinnedEgressRequest` with:
 
-`#3437` is the only open buildable item on this line. It is DIRTY because `#3438` changed the
-`isBlockedIpv6` base after it was branched; it needs a **rebase onto post-`#3438` main**, after
-which it completes the IP-literal classification surface. It is a **parallel codex branch**, not
-mine — landing it is a coordinate-and-rebase, not new build.
+- `defaultEgressPolicy()` when no explicit policy is injected, which means a
+  missing allowlist denies all HTTP-task egress;
+- a DNS resolver that returns all A/AAAA answers and validates every answer;
+- `createPinnedHttpsJsonTransport()`, which connects to the pinned IP and keeps
+  the original hostname for Host/SNI;
+- method/header filtering before the dispatcher sees the request.
 
-## 4. Coordination note — this file is under active parallel iteration
+That closes the live full-read SSRF path by default. Existing workflows that
+depended on unconstrained HTTP tasks now fail closed unless a policy is injected
+by a future rollout/configuration slice.
 
-`egress-guard.ts` took R1-A, `#3438`, and `#3437` within a single day, all touching
-`isBlockedIpv6`. One duplicate collision already occurred (a from-scratch slice-1 rewrite, PR
-`#3434`, was closed as a duplicate of R1-A; only its NAT64 fix was salvaged as `#3438`). The
-classifier is now near-complete, so **further IP-class additions must be small deltas on the
-current base and rebased promptly**, not parallel rewrites — otherwise they DIRTY-churn against
-each other.
+## 4. Verification
 
-## 5. Remaining slices — gated, and **dependency-ordered (not parallel)**
+- Guard tests cover scheme, credentials, allowlist, internal hostnames, unsafe
+  IPv4/IPv6 classes, IPv4-mapped, IPv4-compatible, NAT64 well-known + NSP,
+  ISATAP, 6to4, Teredo, and decimal/hex/short-form IPv4 canonicalization.
+- Dispatcher tests cover default fail-closed policy, Host-header rejection,
+  DNS uncertainty, mixed public/private DNS answers, NAT64, IP literals,
+  redirect re-validation, redirect caps, and pinned-target handoff.
+- Pinned transport tests cover IP pinning, Host/SNI preservation, caller Host
+  stripping, timeout, response-size cap, and JSON response parsing.
+- Engine egress tests cover denied URL/DNS/header/method paths before
+  transport, allowed dispatcher-normalized URL usage, response-variable
+  persistence, and default fail-closed behavior.
+- `#3451` fresh CI passed `test (18.x)`, `test (20.x)`, coverage, K3 WISE,
+  after-sales, and the contract gates.
+- Focused local verification recorded on `#3451`: 75/75 focused tests,
+  backend type-check, backend build, focused ESLint, and `git diff --check`.
 
-The user's usual "order for parallel execution" does not apply cleanly here: unlike the PLM line's
-independent groups, the remaining R1 slices are a **sequential chain** (each is the prerequisite
-for the next) and each takes its **own explicit opt-in** before code.
+## 5. Remaining Gate
 
-| Order | Slice | Gate | Depends on |
-|---|---|---|---|
-| 2 | **IP-pinned egress dispatcher** — DNS resolve-all + `isBlockedEgressIp` on every resolved IP + **atomic IP pinning** (L5 anti-rebinding) + redirect re-validation (L4) + timeout/response-size caps (L6). | opt-in + **D5** (in-process pinned dispatcher vs central egress proxy) | the landed guard |
-| 3 | **Engine wiring + header/method hardening** — route `executeHttpTask` through the dispatcher; forbid caller-set `Authorization`/`Cookie`/`Host`; method allowlist (L8, **D4**). | opt-in + D4 | slice 2 |
-| 4 | **Rollout** — fail-closed (L7) is a behaviour change for existing http-tasks; owner ratifies hard-fail-closed vs warn-then-enforce vs per-tenant (**D3**), then enable behind policy. | **owner D3 governance** | slice 3 |
+The R1 code path is closed by default, but the rollout/configuration surface is
+still a separate gate. This is intentional: the design-lock treated fail-closed
+rollout as a behavior change and required the policy-enablement path to be its
+own step.
 
-Parallelism exists only *within* slice 2 (resolver, pinned-connection agent, redirect validator,
-caps can be built concurrently); the slices themselves are 2 → 3 → 4.
+| Remaining item | State | Why it remains separate |
+|---|---|---|
+| A3 rollout / configured policy enablement | **GATED** | A2 added a constructor-injected policy and default fail-closed runtime, but no product/admin configuration surface, no route-level provenance/governance audit for who may enable destinations, and no live allowlist rollout has been opened. Enabling real destinations remains an owner/governance decision, not an automatic continuation. |
 
-## 6. Verification (current)
+## 6. Outcome
 
-- Landed guard: `packages/core-backend/src/guards/__tests__/egress-guard.test.ts` — scheme/creds/
-  allowlist/internal-name/IP-class matrix (incl. IPv4-mapped, NAT64 well-known + NSP, 6to4, Teredo,
-  and decimal/hex/short-form normalization) passes on `main`; `tsc --noEmit` clean.
-- Adversarial probes, two: (a) the slice-1 build's probe (against the *closed* `#3434`) — URL corpus
-  clean, IP corpus found only NAT64 NSP, now fixed (`#3438`); (b) a follow-up probe against
-  **`#3437`'s** ISATAP / IPv4-compatible extraction (13 cases) — prefix-agnostic ISATAP + IPv4-compat
-  with an internal inner v4 **all blocked**, incl. the NSP-analog global-prefix ISATAP case
-  (`2606:4700:4700::5efe:10.0.0.1`); public inner correctly allowed. **No leak** (posted as a review
-  comment on `#3437`).
+- R1 design-lock, guard, IP classifier hardening, dispatcher, and engine wiring
+  are all merged on `main`.
+- The original live SSRF hole is closed by default: no configured allowlist means
+  no outbound HTTP-task request is dispatched.
+- The remaining work is not another blind SSRF patch; it is the explicit A3
+  policy/rollout gate. That slice should define who can configure allowed
+  destinations, where the policy is sourced from, how route-level provenance is
+  audited, and what evidence proves the rollout did not reopen free-form egress.
 
-## 7. Outcome
+## Invariants Held
 
-- Current `main`'s IP-literal classification covers IPv4-mapped, NAT64 (well-known + NSP), 6to4, and
-  Teredo, but **still lacks IPv4-compatible / ISATAP** — which `#3437` closes. `#3437`'s extraction is
-  now **adversarially verified** (prefix-agnostic ISATAP, no embedded-v4 leak — see §6), so the only
-  thing between it and a complete IP-literal surface is a **rebase onto post-`#3438` main + land** (it
-  is DIRTY, and a parallel branch, not mine).
-- The **substantive remaining development is slices 2–4**, which are **gated (opt-in)** and
-  **dependency-ordered**, with slice 4 carrying the **D3 rollout governance** decision. There is no
-  unowned, buildable-now, ungated slice that can be built without colliding on the actively-iterated
-  guard file.
-- **Next motion:** (a) rebase + land `#3437` (parallel branch, not mine) — its extraction is verified
-  (§6), so it needs only the rebase onto post-`#3438` main; then (b) owner opt-in for **slice 2** (the
-  IP-pinned dispatcher, the real next build). The `#3437` adversarial review is **done** (comment posted).
-
-## Invariants held
-
-- Guard-only; no wiring into `executeHttpTask`.
-- The embed §0 read-only invariant is untouched; this line concerns outbound http-task egress only.
-- No owner/ops/governance gate (D3 rollout especially) was converted to code.
+- No `HTTPAdapter`, connector-action runtime, script-task expression boundary,
+  or non-BPMN outbound surface is claimed as fixed by R1.
+- No temporary allowlist or warn-only mode was introduced.
+- No owner/governance gate was converted into an implicit runtime enablement.
