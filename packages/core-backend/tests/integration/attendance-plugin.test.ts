@@ -6264,9 +6264,21 @@ attendanceIntegrationDescribe(
     let overtimeRuleId: string | undefined
     // UTC ISO for a local wall-clock in tz (DST-safe here because the dates avoid transitions).
     const zonedUtcIso = (dateStr: string, timeStr: string, tz: string): string => {
-      const guess = new Date(`${dateStr}T${timeStr}:00.000Z`)
-      const local = new Date(guess.toLocaleString('en-US', { timeZone: tz }))
-      return new Date(guess.getTime() + (guess.getTime() - local.getTime())).toISOString()
+      // The UTC instant whose wall-clock time in `tz` equals dateStr+timeStr. Uses Intl.formatToParts with an
+      // explicit timeZone so the result is INDEPENDENT of the server's default timezone. (The previous
+      // toLocaleString → `new Date(str)` round-trip parsed the tz wall-clock string back in the SERVER's tz, so a
+      // non-UTC runner — e.g. TZ unset → America/Los_Angeles — mis-shifted the instant and collapsed the intended
+      // 23:00→01:00 cross-midnight window into a same-day 16:00→18:00 window, dropping crossesMidnight, making NS-3
+      // fail on non-UTC hosts (e.g. local dev on a non-UTC machine). This is a host-tz determinism fix — NOT the
+      // intermittent CI attendance red, which is a different test ("multi-shift slot conflicts …").)
+      const naive = new Date(`${dateStr}T${timeStr}:00.000Z`).getTime()
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      }).formatToParts(new Date(naive))
+      const p = (t: string) => Number(parts.find((x) => x.type === t)!.value)
+      const shownAsUtc = Date.UTC(p('year'), p('month') - 1, p('day'), p('hour') % 24, p('minute'), p('second'))
+      return new Date(naive - (shownAsUtc - naive)).toISOString()
     }
     try {
       process.env.RBAC_BYPASS = 'true'
