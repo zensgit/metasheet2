@@ -28,7 +28,8 @@ inferred target.
 
 `executeHttpTask` (verbatim behavior today):
 
-- resolves `url`, `method`, `headers`, `body` via `resolveExpression(props.*, instance.variables)`;
+- resolves `url`, `headers`, `body` via `resolveExpression(props.*, instance.variables)`, and reads
+  `method` directly as `props.method || 'GET'` (BPMN-definition-controlled, **not** variable-templated);
 - calls `fetch(url, { method, headers, body })` with **no scheme/host/IP validation**;
 - stores the response JSON into `props.responseVariable` when set.
 
@@ -36,9 +37,11 @@ Two properties make this severe:
 1. **Full-read SSRF, not blind** — the fetched body is written back into a readable workflow
    variable, so an attacker reads the response (e.g. a cloud-metadata credential document), not
    just triggers a request.
-2. **Multi-field, templated attack surface** — not only `props.url`. `headers`, `body`, and
-   `method` are **all** `resolveExpression`-templated from the BPMN definition and workflow
-   variables, so lower-trust runtime inputs can influence every part of the outbound request.
+2. **Multi-field attack surface** — not only `props.url`. `url`, `headers`, and `body` are
+   field-level `resolveExpression` inputs (BPMN definition + workflow variables), so lower-trust
+   runtime inputs can influence the outbound target, headers, and payload. `method` is
+   BPMN-definition-controlled (`props.method`), **not** workflow-variable-templated today — still
+   attacker-selectable via the definition, which is why L8 constrains it.
 
 ## 3. Threat / input model
 
@@ -54,7 +57,7 @@ regardless.)
 |---|---|
 | `url` | primary target selection — cloud metadata (`169.254.169.254`), loopback/internal services, port/host scan |
 | `headers` | inject `Authorization`/`Cookie` into internal services; `Host` override for vhost/routing confusion |
-| `method` | choose read (`GET`) vs **side-effecting** (`POST`/`PUT`/`DELETE`) against internal endpoints |
+| `method` | choose read (`GET`) vs **side-effecting** (`POST`/`PUT`/`DELETE`) against internal endpoints (set in the BPMN definition, not variable-templated) |
 | `body` | payload to internal side-effecting APIs |
 
 **Assets at risk:** cloud instance-metadata credentials, internal-only HTTP admin/data APIs,
