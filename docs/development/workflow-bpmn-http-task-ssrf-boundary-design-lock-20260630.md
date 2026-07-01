@@ -1,10 +1,27 @@
 # R1 — BPMN HTTP service-task SSRF egress boundary (design-lock, 2026-06-30)
 
-**This is a design-lock. It authorizes no runtime.** It adds no HTTP-egress code, no config
-scaffold, no stub, and no "temporary allow," and it does **not** modify `executeHttpTask`. It
-locks the threat model, the egress policy, the test matrix, and the fail-closed behavior for the
-BPMN HTTP service-task SSRF boundary, and enumerates the implementation slices to be carved
-**only after ratification**. The R1 first cut is this document + TODO — nothing else.
+**Status: RATIFIED — RUNTIME NOT BUILT.** The design-lock landed in #3428 and the owner
+ratified the decisions below on 2026-07-01 with `R1 GO`. This document still authorizes no runtime
+by itself: it adds no HTTP-egress code, no config scaffold, no stub, and no "temporary allow," and
+it does **not** modify `executeHttpTask`. It locks the threat model, the egress policy, the test
+matrix, and the fail-closed behavior for the BPMN HTTP service-task SSRF boundary, and enumerates
+the implementation slices to be carved after this ratification.
+
+## 0. Ratified owner decisions (2026-07-01)
+
+`R1 GO` ratifies the following defaults for the runtime implementation slices:
+
+| # | Decision | Ratified value |
+|---|---|---|
+| D0 | Deploy-time provenance/authz of BPMN definitions + who can set http-task variables. | Treat raw `/api/workflow/*` and designer deploy as security-sensitive workflow surfaces. Runtime slices must add/verify route-level governance before or alongside enabling HTTP task egress. The egress boundary must not rely on authors being trusted. |
+| D1 | `http` allowed at all, or `https`-only? | `https`-only for v1. Plain `http` is denied, including otherwise-allowlisted hosts. A named internal-HTTP exception requires a future owner decision. |
+| D2 | Allowlist granularity. | Exact host allowlist only for v1, case-normalized. No suffix wildcard, no bare domain wildcard, and no tenant-authored CIDR allowlist in the first runtime slice. IP deny-list still applies after DNS resolution. |
+| D3 | Rollout for existing deployed http-tasks. | Hard fail-closed. A missing allowlist or a destination not on it fails the HTTP task; no warn-only window and no temporary allow. This is intentional because the current bug is full-read SSRF. |
+| D4 | Header/method policy. | Methods: `GET` and `POST` only in v1. Caller-set `Authorization`, `Cookie`, `Host`, `Proxy-*`, `Forwarded`, and `X-Forwarded-*` headers are rejected. `Content-Type`, `Accept`, and benign custom headers are allowed within size limits. |
+| D5 | In-process IP-pinned dispatcher vs central egress proxy. | In-process IP-pinned dispatcher for v1 because no existing central egress proxy/SSRF primitive was found in this codebase. If a central proxy is introduced later, it can replace the dispatcher behind the same policy contract. |
+
+These values are the authority for the implementation PRs. Anything wider than this table is a
+new decision, not an implementation detail.
 
 ## 1. Scope (owner-locked) + grounding assumption
 
@@ -77,7 +94,7 @@ loopback services, internal network reconnaissance, and exfiltration of any of t
 | L7 | **Fail-closed.** Unresolvable host, resolution error, validation uncertainty, or missing/empty allowlist → **deny** the task (no fetch). The http-task capability is OFF unless the egress policy is explicitly configured. | ✔ |
 | L8 | **Header/method hardening** (shape per D4) — the design locks that caller-set hop-sensitive headers (`Authorization`, `Cookie`, `Host`) and the method set are constrained, not free-form. | ✔ |
 
-## 5. Decisions required to ratify (OPEN — owner's call, not decided here)
+## 5. Decisions resolved by `R1 GO`
 
 | # | Decision | Recommendation |
 |---|---|---|
@@ -87,6 +104,9 @@ loopback services, internal network reconnaissance, and exfiltration of any of t
 | D3 | **Rollout for existing deployed http-tasks.** L7 fail-closed is a **behavior change** — live workflows fetching non-allowlisted targets will break. | A ratification/rollout call, **not** a silent default: (a) hard fail-closed, (b) warn-then-enforce window, (c) per-tenant migration. |
 | D4 | Outbound header/method policy (L8 shape). | Forbid caller-set `Authorization`/`Cookie`/`Host`; allow a configured method set. |
 | D5 | In-process IP-pinned dispatcher vs a vetted central egress proxy (§6). | Prefer a central egress proxy if one exists (easier to audit); else an in-process pinned-IP agent. |
+
+The table above is the pre-ratification decision register. The ratified values are in §0 and
+govern implementation. Where the old recommendation text is broader than §0, §0 wins.
 
 ## 6. Why the current call site cannot be patched in place (TOCTOU)
 
@@ -119,7 +139,7 @@ A grep of `core-backend` found **no dedicated SSRF/egress-guard primitive** to r
 slice introduces one. (`multitable/automation-executor.ts` is worth checking during impl for any
 reusable URL/allowlist handling before inventing.)
 
-## 10. Implementation slices — NOT started (carve only after D0–D5 are ratified)
+## 10. Implementation slices — NOT started (carve after this ratification)
 
 1. **Egress-guard module** — `validateEgressUrl(url, policy)` (L1–L3) + fail-closed policy config
    (L7), unit-tested against the §7 scheme/IP/allowlist matrix. No engine wiring.
@@ -133,4 +153,5 @@ Each slice takes its own opt-in.
 ---
 
 **This document authorizes no runtime.** `executeHttpTask` is unchanged; no egress code, config
-scaffold, or temporary allow is introduced. Implementation begins only after D0–D5 are ratified.
+scaffold, or temporary allow is introduced. Implementation begins in follow-up PRs against the
+ratified §0 decisions.
