@@ -128,6 +128,7 @@ function normalizeNat64Prefix(value: unknown): string | null {
   try {
     const cidr = ipaddr.parseCIDR(raw)
     if (cidr[0].kind() !== 'ipv6' || cidr[1] !== 96) return null
+    if (cidr[0].toByteArray().slice(12).some((byte) => byte !== 0)) return null
     return `${cidr[0].toNormalizedString()}/96`
   } catch {
     return null

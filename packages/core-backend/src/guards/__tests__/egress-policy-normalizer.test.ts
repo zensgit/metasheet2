@@ -113,6 +113,8 @@ describe('R1-A3-a BPMN HTTP-task egress policy normalizer', () => {
 
   test.each([
     '2a00:1098:2c::/64',
+    '2a00:1098:2c::1/96',
+    '64:ff9b::c000:0201/96',
     '8.8.8.0/24',
     'not-a-prefix',
     '2a00:1098:2c::',
