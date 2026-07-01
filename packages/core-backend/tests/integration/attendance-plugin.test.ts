@@ -2579,6 +2579,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const adminUserId = `attendance-multishift-admin-${runSuffix}`
     const workDate = '2026-07-08'
+    const saturdayDate = '2026-07-11'
     const tokenRes = await requestJson(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
@@ -2592,6 +2593,7 @@ attendanceIntegrationDescribe(
     }
     const pool = new Pool({ connectionString: dbUrl })
     let originalSettings: Record<string, unknown> = {}
+    let originalHolidayRows: Array<Record<string, unknown>> = []
 
     async function saveSettings(patch: Record<string, unknown>) {
       const res = await requestJson(`${baseUrl}/api/attendance/settings`, {
@@ -2651,6 +2653,20 @@ attendanceIntegrationDescribe(
       })
       expect(settingsRes.status).toBe(200)
       originalSettings = ((settingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+      const holidaySnapshot = await pool.query(
+        `SELECT id, org_id, holiday_date, name, is_working_day, origin
+           FROM attendance_holidays
+          WHERE org_id = $1
+            AND holiday_date = ANY($2::date[])`,
+        ['default', [workDate, saturdayDate]]
+      )
+      originalHolidayRows = holidaySnapshot.rows
+      await pool.query(
+        `DELETE FROM attendance_holidays
+          WHERE org_id = $1
+            AND holiday_date = ANY($2::date[])`,
+        ['default', [workDate, saturdayDate]]
+      )
 
       const morningShiftId = await createShift(`Multi Shift Morning ${runSuffix}`, '08:00', '12:00')
       const eveningShiftId = await createShift(`Multi Shift Evening ${runSuffix}`, '13:00', '17:00')
@@ -2660,6 +2676,7 @@ attendanceIntegrationDescribe(
         shiftEditPolicy: { mode: 'unrestricted', windowDays: 0 },
         shiftCompliance: { enforcement: 'warn', dailyMaxMinutes: null, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
         multiShiftDay: { enabled: false, maxSlots: 3 },
+        calendarPolicy: { overrides: [] },
       })
 
       const defaultOffUserId = `${adminUserId}-default-off`
@@ -2740,7 +2757,6 @@ attendanceIntegrationDescribe(
       expect(comprehensiveRows[0]?.minutes).toBe(480)
       expect(comprehensiveRows[0]?.plannedMinutes).toBe(480)
 
-      const saturdayDate = '2026-07-11'
       const weekdayOnlyShiftId = await createShift(`Multi Shift Weekday Only ${runSuffix}`, '08:00', '12:00', [1, 2, 3, 4, 5])
       const saturdayOnlyShiftId = await createShift(`Multi Shift Saturday Only ${runSuffix}`, '13:00', '17:00', [6])
       const mixedWorkingDaysUserId = `${adminUserId}-mixed-days`
@@ -2970,8 +2986,26 @@ attendanceIntegrationDescribe(
               monthlyMaxMinutes: null,
             },
             multiShiftDay: originalSettings.multiShiftDay ?? { enabled: false, maxSlots: 3 },
+            calendarPolicy: originalSettings.calendarPolicy ?? { overrides: [] },
           }),
         }).catch(() => undefined)
+      }
+      await pool.query(
+        `DELETE FROM attendance_holidays
+          WHERE org_id = $1
+            AND holiday_date = ANY($2::date[])`,
+        ['default', [workDate, saturdayDate]]
+      ).catch(() => undefined)
+      for (const row of originalHolidayRows) {
+        await pool.query(
+          `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (org_id, holiday_date) DO UPDATE SET
+             name = EXCLUDED.name,
+             is_working_day = EXCLUDED.is_working_day,
+             origin = EXCLUDED.origin`,
+          [row.id, row.org_id, row.holiday_date, row.name, row.is_working_day, row.origin]
+        ).catch(() => undefined)
       }
       await pool.end().catch(() => undefined)
     }
