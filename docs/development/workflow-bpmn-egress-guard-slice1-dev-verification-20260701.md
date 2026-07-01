@@ -22,6 +22,9 @@ workflow behavior.
 - The existing `send_webhook` SSRF guard was reviewed and left untouched. It is a product-specific
   resolve-and-pin path; this slice adds the BPMN policy primitive under `src/guards` and keeps
   dispatcher reuse/wiring for later slices.
+- Callers must use the returned `decision.normalizedUrl` when a URL is allowed. It is the WHATWG
+  canonicalized URL that this guard evaluated; a later caller that fetches the raw input string could
+  reintroduce parser-split ambiguity outside this module.
 
 ## Explicitly not shipped
 
@@ -42,4 +45,5 @@ Those are the next R1 slices.
   - wildcard/CIDR non-support;
   - local/internal hostname rejection;
   - unsafe IPv4/IPv6 classes, IPv4-mapped IPv6, NAT64, 6to4, and Teredo;
+  - deprecated IPv4-compatible IPv6 and ISATAP-wrapped IPv4;
   - URL canonicalization of decimal/hex/short IPv4 forms before IP blocking.
