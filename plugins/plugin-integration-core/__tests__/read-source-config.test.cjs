@@ -50,6 +50,10 @@ const mustReject = [
   '\\\\evil', '/\\evil', 'foo\\bar',
   '/../../etc/passwd', '/a/b/../../../c', '..',
   '/%2f%2fevil.com', '/%2F%2Fevil', '/%5cevil', '/x%5Cy',
+  // Encoded-dot traversal (P1): Node's URL layer normalizes these post-guard — `/%2e%2e/admin`→`/admin`,
+  // `/a/%2e%2e/b`→`/b`, `/%2E%2E/%2E%2E/etc`→`/etc` — so the guard must reject them (S1 rejects ALL `%`).
+  '/%2e%2e/admin', '/a/%2e%2e/b', '/%2E%2E/%2E%2E/etc', '/%2e/admin',
+  '/foo%20bar', '/x%00y',                                 // any other percent-encoding is rejected too
   '', '   ', '/foo bar', '/foo\tbar',
 ]
 for (const p of mustReject) {
@@ -76,6 +80,24 @@ assert.ok(codes(validateReadSourceConfig({ ...baseValid('list_page'), containerP
 assert.ok(codes(validateReadSourceConfig({ ...baseValid('list_page'), containerPaths: ['Data[0].x'] })).includes('READ_SOURCE_CONTAINER_PATH_INVALID'))
 assert.ok(codes(validateReadSourceConfig({ ...baseValid('single_record'), keyEncoding: 'raw_sql' })).includes('READ_SOURCE_KEY_ENCODING_INVALID'))
 assert.ok(codes(validateReadSourceConfig({ ...baseValid('list_page'), fieldMap: [{ source: 'a', target: 'b', value: 'SECRET' }] })).includes('READ_SOURCE_FIELD_MAP_INVALID'))
+// fieldMap is config metadata (P2): source = field/container path, target = bounded id — NOT values / free text.
+assert.equal(validateReadSourceConfig({ ...baseValid('list_page'), fieldMap: [{ source: 'FNumber', target: 'material_no' }, { source: 'Data.FQty', target: 'qty' }] }).valid, true, 'a well-shaped fieldMap must pass')
+for (const bad of [
+  [{ source: 'MAT-001', target: 'material_no' }],   // source is a VALUE (hyphen), not a field path
+  [{ source: '../../x', target: 'material_no' }],    // source path-traversal shaped
+  [{ source: 'Data[0].x', target: 'material_no' }],  // source has brackets/wildcard
+  [{ source: 'FNumber', target: 'foo bar' }],        // target has whitespace
+  [{ source: 'FNumber', target: '../evil' }],        // target path-shaped
+  [{ source: '', target: 'x' }],                     // empty source
+]) {
+  assert.ok(codes(validateReadSourceConfig({ ...baseValid('list_page'), fieldMap: bad })).includes('READ_SOURCE_FIELD_MAP_INVALID'), `fieldMap must REJECT ${JSON.stringify(bad)}`)
+}
+// fieldMap leak-bait: a value-shaped source is rejected AND never echoed in the (values-free) errors
+{
+  const res = validateReadSourceConfig({ ...baseValid('list_page'), fieldMap: [{ source: 'FIELDMAP-VALUE-LEAK-001', target: 'x' }] })
+  assert.equal(res.valid, false)
+  assert.ok(!JSON.stringify(res.errors).includes('FIELDMAP-VALUE-LEAK'), 'fieldMap errors must not echo the offending value')
+}
 assert.ok(codes(validateReadSourceConfig({ ...baseValid('list_page'), version: 0 })).includes('READ_SOURCE_VERSION_INVALID'))
 assert.ok(codes(validateReadSourceConfig({ ...baseValid('list_page'), systemId: 'has space' })).includes('READ_SOURCE_SYSTEM_REF_INVALID'))
 assert.ok(codes(validateReadSourceConfig({ ...baseValid('list_page'), nefariousKey: 'x' })).includes('READ_SOURCE_UNEXPECTED_FIELD'))

@@ -60,9 +60,9 @@ function isValidContainerPath(value) {
 }
 
 // THE crown-jewel guard. The consultant supplies the endpoint, so this is the sole barrier between config and
-// SSRF. Stricter than the adapter's assertRelativePath: also rejects path traversal and percent-encoded
-// slashes/backslashes (which can decode to a host). S1 is relative-only; a per-system host-allowlist branch
-// is a deferred, separate slice.
+// SSRF. Stricter than the adapter's assertRelativePath: also rejects path traversal and ALL percent-encoding
+// (any %xx can decode — post-guard, at URL-assembly time — to a boundary escape: %2e%2e→.., %2f→/, %5c→\,
+// %00→NUL). S1 is relative-only; a per-system host-allowlist branch is a deferred, separate slice.
 function isSafeRelativeReadPath(value) {
   if (typeof value !== 'string') return false
   const raw = value.trim()
@@ -71,20 +71,28 @@ function isSafeRelativeReadPath(value) {
   if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw)) return false      // any scheme: http: https: javascript: file: ...
   if (raw.startsWith('//')) return false                       // protocol-relative → resolves to a host
   if (raw.includes('\\')) return false                         // backslash: \\host  /\host
-  if (/%2f|%5c/i.test(raw)) return false                       // encoded slash/backslash → decoded host
+  // Reject ALL percent-encoding. A config endpoint never needs it, and each encoded form decodes to a
+  // path-boundary escape our checks run BEFORE decoding and therefore miss: %2e%2e→.. (traversal, e.g.
+  // Node normalizes `/%2e%2e/admin`→`/admin`), %2f→/ (host injection), %5c→\, %00→NUL. One blanket
+  // reject kills the whole class rather than chasing each encoding.
+  if (raw.includes('%')) return false
   const path = raw.startsWith('/') ? raw : `/${raw}`
-  if (path.split('/').some((seg) => seg === '..')) return false // path traversal
+  if (path.split('/').some((seg) => seg === '..')) return false // literal (already-decoded) path traversal
   // Positive allowlist: only safe URL-path characters (rejects spaces, quotes, angle brackets, query
-  // chars, etc.). Kept IN ADDITION to the explicit rejects above — the allowlist alone would pass `//`,
-  // `%2f`, and `..` (all their chars are "safe"), so both layers are required.
-  if (!/^\/[A-Za-z0-9\-._~/%]*$/.test(path)) return false
+  // chars, percent, etc.). Kept IN ADDITION to the explicit rejects above — the allowlist alone would
+  // pass `//` and `..` (all their chars are "safe"), so both layers are required.
+  if (!/^\/[A-Za-z0-9\-._~/]*$/.test(path)) return false
   return true
 }
 
+// A fieldMap entry is config metadata, not free text: `source` names a field/container path IN the response
+// (same dotted-identifier shape as containerPaths — so `FNumber`, `Data.FQty`, never a value like `MAT-001`
+// or a traversal like `../../x`), and `target` names a bounded cleansing-zone column id. Validating the shape
+// here keeps values (and value-shaped injection) out of a config that is only supposed to describe structure.
 function isValidFieldMapEntry(entry) {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false
-  if (!isNonEmptyString(entry.source) || !isNonEmptyString(entry.target)) return false
-  return Object.keys(entry).every((k) => k === 'source' || k === 'target')
+  if (!Object.keys(entry).every((k) => k === 'source' || k === 'target')) return false
+  return isValidContainerPath(entry.source) && isBoundedIdentifier(entry.target)
 }
 
 // Shallow scan: does any string value in the config look like a raw secret (Bearer/JWT/conn-string/…)? Uses the
