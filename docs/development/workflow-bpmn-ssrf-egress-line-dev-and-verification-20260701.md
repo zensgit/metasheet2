@@ -2,7 +2,7 @@
 
 Survey of the BPMN HTTP-task SSRF boundary line (design-lock `#3428` plus A3
 rollout lock `#3452`): what is landed, what is verified, and what remains
-gated. Grounded against `origin/main` after `#3452` / `#3454`.
+gated. Grounded against `origin/main` after `#3457`.
 
 ## 1. Baseline
 
@@ -27,6 +27,8 @@ gated. Grounded against `origin/main` after `#3452` / `#3454`.
 | A1 IP-pinned dispatcher | `#3447` / `be35eec6` | Adds `dispatchPinnedEgressRequest`: resolve-all DNS, deny if any resolved IP is unsafe, pin the chosen validated IP, revalidate redirects, cap redirects, and require manual redirect handling. No engine wiring in that slice. |
 | A2 engine wiring | `#3451` / `5193432a8` | Replaces the raw `fetch` path in `executeHttpTask` with the pinned dispatcher plus HTTPS JSON transport; preserves Host/SNI while connecting to the pinned IP; enforces GET/POST only; rejects `Authorization`, `Cookie`, `Host`, `Proxy-*`, `Forwarded`, and `X-Forwarded-*`; caps headers, redirects, timeout, and response size; default policy remains fail-closed. |
 | A3 rollout policy design-lock | `#3452` / `771871e05` | Locks the next governance gate: server-owned policy source only, exact DNS host policy entries, NAT64 prefixes as classifier metadata only, fail-closed malformed/absent config, both engine construction sites sharing one loader path, route provenance negative controls, and values-free evidence. No runtime/config loader or live destination enablement. |
+| A3-a policy normalizer | `#3455` / `cead5a84d` | Adds the pure server-owned egress policy normalizer: missing/empty/malformed config fails closed; exact ASCII DNS hosts only; wildcard/suffix/path/scheme/port/IP literal/CIDR/internal-name entries rejected; NAT64 classifier prefixes normalized; evidence metadata stays values-free. No route, engine, DNS, transport, or outbound behavior is enabled. |
+| A3-b route provenance negative controls | `#3457` / `4bd15aca3` | Locks workflow deploy/start and workflow-designer deploy routes against policy smuggling: auth gates run before engine calls; policy-like request fields, start variables, and BPMN XML extension elements do not become engine policy; engine variables cannot satisfy the egress allowlist. No live destination enablement. |
 
 ## 3. Current Runtime State
 
@@ -64,28 +66,42 @@ by a future rollout/configuration slice.
 - `#3452` fresh CI passed `test (18.x)`, `test (20.x)`, coverage, K3 WISE,
   after-sales, and the contract gates; the A3 design-lock is docs-only and
   does not enable a destination.
+- `#3455` fresh CI passed the broad MetaSheet gates. Local verification
+  recorded by that slice covered the A3-a policy-normalizer matrix, backend
+  type-check, R1 egress guard/dispatcher/transport/policy-normalizer/engine
+  suite, and `git diff --check`.
+- `#3457` fresh CI passed `test (18.x)`, `test (20.x)`, coverage, K3 WISE,
+  after-sales, e2e, migration replay, and contract gates. Local verification
+  recorded by that slice covered the focused route + engine provenance tests
+  (2 files / 10 tests), backend build, the R1 egress guard/dispatcher/transport
+  /policy-normalizer/engine/route-provenance suite (6 files / 112 tests), and
+  `git diff --check`.
 
 ## 5. Remaining Gate
 
-The R1 code path is closed by default, and `#3452` now locks the rollout policy
-shape. The rollout/configuration runtime is still a separate gate. This is
+The R1 code path is closed by default. `#3452` locks the rollout policy shape,
+`#3455` supplies the pure server-owned policy normalizer, and `#3457` locks the
+route provenance / policy-smuggling negative controls. The runtime policy
+injection / configured enablement step is still a separate gate. This is
 intentional: the design-lock treated fail-closed rollout as a behavior change
-and required the policy-enablement path to be its own step.
+and required live policy enablement to be its own owner/governance-approved
+step.
 
 | Remaining item | State | Why it remains separate |
 |---|---|---|
-| A3 rollout / configured policy enablement | **DESIGN-LOCK SHIPPED; RUNTIME GATED** | `#3452` defines the server-owned policy model and route-provenance/values-free evidence gates. No product/admin configuration surface, config loader, route injection, or live allowlist rollout has been opened. Enabling real destinations remains an owner/governance decision, not an automatic continuation. |
+| A3-c runtime policy injection / configured enablement | **A3-a/A3-b SHIPPED; RUNTIME GATED** | `#3452` defines the server-owned policy model, `#3455` implements the pure normalizer, and `#3457` locks route provenance. No product/admin configuration surface, route-to-engine policy injection, or live allowlist rollout has been opened. Enabling real destinations remains an owner/governance decision, not an automatic continuation. |
 
 ## 6. Outcome
 
-- R1 design-lock, guard, IP classifier hardening, dispatcher, and engine wiring
-  are all merged on `main`.
+- R1 design-lock, guard, IP classifier hardening, dispatcher, engine wiring,
+  A3-a policy normalization, and A3-b route provenance controls are all merged
+  on `main`.
 - The original live SSRF hole is closed by default: no configured allowlist means
   no outbound HTTP-task request is dispatched.
-- The remaining work is not another blind SSRF patch; it is the explicit A3
-  policy/rollout runtime. `#3452` already defines the server-owned policy source,
-  route-level provenance controls, and evidence boundaries; implementation still
-  requires per-slice owner opt-in.
+- The remaining work is not another blind SSRF patch; it is the explicit A3-c
+  policy/rollout runtime. The server-owned policy source shape, pure
+  normalization, route-level provenance controls, and evidence boundaries are
+  already pinned; runtime policy injection still requires per-slice owner opt-in.
 
 ## Invariants Held
 
