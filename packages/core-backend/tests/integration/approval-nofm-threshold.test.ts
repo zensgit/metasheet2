@@ -129,6 +129,40 @@ function buildThresholdReentryGraph() {
   }
 }
 
+// Same re-entry shape as above, but the threshold node includes the requester and enables
+// merge-with-requester auto approval. On RETURN, the auto-approval audit row is inserted
+// at the SAME to_version as the return record. That legitimate current-round vote must
+// count toward the re-entered threshold (the service query intentionally uses >= cutoff).
+function buildThresholdReentryRequesterCascadeGraph(requesterId: string) {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      {
+        key: 'approval_threshold',
+        type: 'approval',
+        config: {
+          assigneeType: 'user',
+          assigneeIds: [requesterId, 'approver-b', 'approver-c'],
+          approvalMode: 'threshold',
+          approvalThreshold: 2,
+          autoApprovalPolicy: { mergeWithRequester: true },
+        },
+      },
+      {
+        key: 'approval_second',
+        type: 'approval',
+        config: { assigneeType: 'user', assigneeIds: ['approver-a'], approvalMode: 'single' },
+      },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-threshold', source: 'start', target: 'approval_threshold' },
+      { key: 'edge-threshold-second', source: 'approval_threshold', target: 'approval_second' },
+      { key: 'edge-second-end', source: 'approval_second', target: 'end' },
+    ],
+  }
+}
+
 // T2-4 P1 semantic-hole regression: a ROLE source resolves only M=2 distinct approver slots
 // but the node config demands N=3. Publish-time validation only bounds N <= M for the fully-
 // static USER case, so this graph publishes; the N > M must be caught FAIL-CLOSED when the
@@ -510,5 +544,91 @@ describeIfDatabase('Approval T2-4 N-of-M threshold (门槛会签) API', () => {
     // A SECOND fresh distinct approval resolves the current round → advances again (fresh quorum still works).
     const afterFresh2 = await act(bTok, { action: 'approve', comment: 'B r2 (2 of 2)' })
     expect(afterFresh2.currentNodeKey).toBe('approval_second')
+  })
+
+  it('counts same-version requester auto-approval at a re-entered threshold node (>= cutoff regression)', async () => {
+    const adminToken = await authToken(baseUrl, 'approval-admin-threshold-cascade')
+    const requesterId = 'requester-threshold-cascade'
+    const requesterToken = await authToken(baseUrl, requesterId)
+    const aTok = await authToken(baseUrl, 'approver-a')
+    const bTok = await authToken(baseUrl, 'approver-b')
+
+    const templateId = await publishGraphTemplate(
+      adminToken,
+      buildThresholdReentryRequesterCascadeGraph(requesterId),
+    )
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'same-version cascade' } },
+    })
+    expect(create.status).toBe(201)
+    const inst = (await create.json()) as {
+      id: string
+      currentNodeKey: string | null
+      assignments: Array<{ assigneeId: string; isActive: boolean }>
+    }
+    createdApprovalIds.add(inst.id)
+    expect(inst.currentNodeKey).toBe('approval_threshold')
+    // Initial entry: requester auto-approval is one current-round vote; manual approvers remain active.
+    expect(inst.assignments.filter((x) => x.isActive).map((x) => x.assigneeId).sort()).toEqual([
+      'approver-b',
+      'approver-c',
+    ])
+
+    const act = async (token: string, body: object) =>
+      (await jsonRequest(baseUrl, `/api/approvals/${inst.id}/actions`, token, { method: 'POST', body })).json() as Promise<{
+        status: string
+        currentNodeKey: string | null
+        assignments: Array<{ assigneeId: string; isActive: boolean }>
+      }>
+
+    // Round 1 resolves on requester(auto) + B(manual), then advances to the second approval node.
+    const afterB1 = await act(bTok, { action: 'approve', comment: 'B r1 with requester auto' })
+    expect(afterB1.status).toBe('pending')
+    expect(afterB1.currentNodeKey).toBe('approval_second')
+
+    // RETURN to the threshold node. The requester auto-approval fires during the same transaction as
+    // the return, so its approve record is stamped at the return version (the re-entry cutoff).
+    const afterReturn = await act(aTok, {
+      action: 'return',
+      targetNodeKey: 'approval_threshold',
+      comment: 'send back to requester-auto threshold',
+    })
+    expect(afterReturn.currentNodeKey).toBe('approval_threshold')
+    expect(afterReturn.assignments.filter((x) => x.isActive).map((x) => x.assigneeId).sort()).toEqual([
+      'approver-b',
+      'approver-c',
+    ])
+
+    const pool = poolManager.get()
+    const versionRows = await pool.query<{
+      action: string
+      actor_id: string | null
+      to_version: number
+      metadata: JsonRecord
+    }>(
+      `SELECT action, actor_id, to_version, metadata
+       FROM approval_records
+       WHERE instance_id = $1
+       ORDER BY to_version ASC, created_at ASC`,
+      [inst.id],
+    )
+    const returnRow = versionRows.rows.find((row) =>
+      row.action === 'return' && row.metadata?.targetNodeKey === 'approval_threshold')
+    expect(returnRow).toBeTruthy()
+    const sameVersionRequesterAuto = versionRows.rows.find((row) =>
+      row.action === 'approve'
+      && row.actor_id === 'system:auto-approval'
+      && row.to_version === returnRow?.to_version
+      && row.metadata?.nodeKey === 'approval_threshold'
+      && row.metadata?.reason === 'auto-merge-requester')
+    expect(sameVersionRequesterAuto).toBeTruthy()
+
+    // This is the regression lock for the service query's `to_version >= cutoff`.
+    // If it becomes `> cutoff`, the requester auto-vote above is ignored and this
+    // single fresh manual vote leaves the node pending instead of reaching 2-of-3.
+    const afterB2 = await act(bTok, { action: 'approve', comment: 'B r2 with same-version requester auto' })
+    expect(afterB2.status).toBe('pending')
+    expect(afterB2.currentNodeKey).toBe('approval_second')
   })
 })
