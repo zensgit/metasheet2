@@ -24,9 +24,11 @@ destination becomes reachable.
 - Added `packages/core-backend/src/workflow/bpmnHttpTaskEgressPolicy.ts`.
 - The loader reads only `BPMN_HTTP_TASK_EGRESS_POLICY` from a server-owned env
   map and calls `normalizeBpmnHttpTaskEgressPolicyConfig`.
-- The factory returns `BPMNWorkflowEngineOptions` with the normalized policy. On
-  any non-ok normalizer result, the normalizer already returns the default empty
-  allowlist policy, so the route wiring stays fail-closed.
+- The factory returns a small structural options object with the normalized
+  policy. It intentionally does not import `BPMNWorkflowEngine`, preserving the
+  convergence guard's legacy import fence. On any non-ok normalizer result, the
+  normalizer already returns the default empty allowlist policy, so the route
+  wiring stays fail-closed.
 - `workflow.ts` and `workflow-designer.ts` both instantiate
   `BPMNWorkflowEngine(buildBpmnWorkflowEngineOptionsFromServerConfig())`, giving
   both route families the same policy source.
@@ -59,6 +61,7 @@ pnpm --filter @metasheet/core-backend exec vitest run \
   src/workflow/__tests__/bpmnHttpTaskEgressPolicy.test.ts \
   src/workflow/__tests__/BPMNWorkflowEngine.egress.test.ts \
   tests/unit/workflow-egress-route-provenance.test.ts \
+  tests/unit/workflow-approval-automation-convergence.guard.test.ts \
   --reporter=dot
 
 pnpm --filter @metasheet/core-backend build
@@ -66,9 +69,9 @@ pnpm --filter @metasheet/core-backend build
 
 Local results:
 
-- R1 focused suite: 119/119 passed across egress guard, dispatcher, pinned
-  transport, policy normalizer, engine wiring, route provenance, and the new A3-c
-  loader tests.
+- R1 focused suite: 123/123 passed across egress guard, dispatcher, pinned
+  transport, policy normalizer, engine wiring, route provenance, convergence
+  guard, and the new A3-c loader tests.
 - Backend build: `tsc` passed.
 - Stale-state grep: no remaining pre-A3-c status claims in the updated R1/A3
   docs.
