@@ -6,6 +6,10 @@ import {
 } from '../BPMNWorkflowEngine'
 import type { PinnedEgressRequest, PinnedEgressTransport } from '../../guards/egress-dispatcher'
 import type { EgressPolicy } from '../../guards/egress-guard'
+import {
+  BPMN_HTTP_TASK_EGRESS_POLICY_ENV,
+  buildBpmnWorkflowEngineOptionsFromServerConfig,
+} from '../bpmnHttpTaskEgressPolicy'
 
 function testInstance(id = 'inst_1'): ProcessInstance {
   return {
@@ -94,6 +98,92 @@ describe('BPMN HTTP task egress wiring', () => {
       redirect: 'manual',
     })
     expect(instance.variables.httpResult).toEqual({ ok: true })
+  })
+
+  test('server-owned A3 policy enables an allowlisted host through mocked DNS and transport', async () => {
+    const calls: PinnedEgressRequest[] = []
+    const engineOptions = buildBpmnWorkflowEngineOptionsFromServerConfig({
+      [BPMN_HTTP_TASK_EGRESS_POLICY_ENV]: JSON.stringify({
+        allowedHosts: ['api.example.com'],
+      }),
+    })
+    const engine = new BPMNWorkflowEngine({
+      httpTaskEgress: {
+        ...engineOptions.httpTaskEgress,
+        resolveAddresses: async () => [{ address: '8.8.8.8', family: 4 }],
+        transport: async (request) => {
+          calls.push(request)
+          return { status: 200, body: { ok: true } }
+        },
+      },
+    })
+    const instance = testInstance()
+    installInstance(engine, instance)
+
+    await executeHttpTask(engine, instance.id, {
+      url: 'https://api.example.com/hook',
+      responseVariable: 'httpResult',
+    })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({
+      normalizedUrl: 'https://api.example.com/hook',
+      hostname: 'api.example.com',
+      pinnedAddress: '8.8.8.8',
+    })
+    expect(instance.variables.httpResult).toEqual({ ok: true })
+  })
+
+  test('server-owned A3 policy denies off-allowlist hosts before DNS or transport', async () => {
+    const engineOptions = buildBpmnWorkflowEngineOptionsFromServerConfig({
+      [BPMN_HTTP_TASK_EGRESS_POLICY_ENV]: JSON.stringify({
+        allowedHosts: ['api.example.com'],
+      }),
+    })
+    const engine = new BPMNWorkflowEngine({
+      httpTaskEgress: {
+        ...engineOptions.httpTaskEgress,
+        resolveAddresses: async () => {
+          throw new Error('DNS should not run')
+        },
+        transport: async () => {
+          throw new Error('transport should not run')
+        },
+      },
+    })
+    const instance = testInstance()
+    installInstance(engine, instance)
+
+    await expect(executeHttpTask(engine, instance.id, {
+      url: 'https://evil.example.com/hook',
+      responseVariable: 'httpResult',
+    })).rejects.toThrow('BPMN_HTTP_EGRESS_DENIED: HOST_NOT_ALLOWLISTED')
+    expect(instance.variables.httpResult).toBeUndefined()
+  })
+
+  test('malformed server-owned A3 policy remains fail-closed before DNS or transport', async () => {
+    const engineOptions = buildBpmnWorkflowEngineOptionsFromServerConfig({
+      [BPMN_HTTP_TASK_EGRESS_POLICY_ENV]: '{not json',
+    })
+    const engine = new BPMNWorkflowEngine({
+      httpTaskEgress: {
+        ...engineOptions.httpTaskEgress,
+        resolveAddresses: async () => {
+          throw new Error('DNS should not run')
+        },
+        transport: async () => {
+          throw new Error('transport should not run')
+        },
+      },
+    })
+    const instance = testInstance()
+    installInstance(engine, instance)
+
+    await expect(executeHttpTask(engine, instance.id, {
+      url: 'https://api.example.com/hook',
+      responseVariable: 'httpResult',
+    })).rejects.toThrow('BPMN_HTTP_EGRESS_DENIED: ALLOWLIST_REQUIRED')
+    expect(instance.variables.httpResult).toBeUndefined()
   })
 
   test('fails closed by default before DNS or transport when no allowlist policy is configured', async () => {

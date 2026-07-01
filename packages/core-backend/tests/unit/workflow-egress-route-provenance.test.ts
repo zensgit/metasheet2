@@ -1,6 +1,6 @@
 import express from 'express'
 import request from 'supertest'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 const routeState = vi.hoisted(() => ({
   user: { id: 'owner-1', tenantId: 'tenant-1' } as Record<string, unknown> | null,
@@ -151,14 +151,23 @@ function expectNoPolicyLeak(responseBody: unknown) {
   expect(serialized).not.toContain('nat64Prefixes')
 }
 
-function expectNoInjectedEnginePolicy() {
+function expectServerPolicyOnly(expectedPolicy: Record<string, unknown>) {
   expect(routeState.engineOptions.length).toBeGreaterThan(0)
-  expect(routeState.engineOptions).toEqual(routeState.engineOptions.map(() => undefined))
+  for (const options of routeState.engineOptions) {
+    expect(options).toEqual({
+      httpTaskEgress: {
+        policy: expectedPolicy,
+      },
+    })
+  }
 }
 
 describe('R1-A3-b BPMN HTTP-task route provenance', () => {
   beforeEach(() => {
+    vi.resetModules()
+    delete process.env.BPMN_HTTP_TASK_EGRESS_POLICY
     routeState.user = { id: 'owner-1', tenantId: 'tenant-1' }
+    routeState.engineOptions.length = 0
     routeState.initialize.mockClear()
     routeState.shutdown.mockClear()
     routeState.deployProcess.mockClear()
@@ -166,6 +175,10 @@ describe('R1-A3-b BPMN HTTP-task route provenance', () => {
     routeState.loadWorkflowDraft.mockReset()
     routeState.deployWorkflow.mockClear()
     routeState.dbExecute.mockClear()
+  })
+
+  afterEach(() => {
+    delete process.env.BPMN_HTTP_TASK_EGRESS_POLICY
   })
 
   test('workflow deploy/start and designer deploy remain authenticated route surfaces', async () => {
@@ -197,7 +210,7 @@ describe('R1-A3-b BPMN HTTP-task route provenance', () => {
 
     expect(response.status).toBe(201)
     expectNoPolicyLeak(response.body)
-    expectNoInjectedEnginePolicy()
+    expectServerPolicyOnly({ allowedHosts: [], nat64Prefixes: [] })
     expect(routeState.deployProcess).toHaveBeenCalledTimes(1)
     const [definition] = routeState.deployProcess.mock.calls[0]
     expect(definition).toMatchObject({
@@ -221,7 +234,7 @@ describe('R1-A3-b BPMN HTTP-task route provenance', () => {
 
     expect(response.status).toBe(201)
     expectNoPolicyLeak(response.body)
-    expectNoInjectedEnginePolicy()
+    expectServerPolicyOnly({ allowedHosts: [], nat64Prefixes: [] })
     expect(routeState.startProcess).toHaveBeenCalledTimes(1)
     expect(routeState.startProcess).toHaveBeenCalledWith(
       'policy_smuggle',
@@ -244,7 +257,7 @@ describe('R1-A3-b BPMN HTTP-task route provenance', () => {
 
     expect(response.status).toBe(200)
     expectNoPolicyLeak(response.body)
-    expectNoInjectedEnginePolicy()
+    expectServerPolicyOnly({ allowedHosts: [], nat64Prefixes: [] })
     expect(routeState.deployProcess).toHaveBeenCalledTimes(1)
     const [definition] = routeState.deployProcess.mock.calls[0]
     expect(definition).toMatchObject({
@@ -255,5 +268,33 @@ describe('R1-A3-b BPMN HTTP-task route provenance', () => {
     })
     expectNoInjectedEgressPolicy(definition)
     expect(routeState.deployWorkflow).not.toHaveBeenCalled()
+  })
+
+  test('workflow and designer routes share the same server-owned egress policy source', async () => {
+    process.env.BPMN_HTTP_TASK_EGRESS_POLICY = JSON.stringify({
+      allowedHosts: ['API.Example.com.'],
+      nat64Prefixes: ['2A00:1098:2C::/96'],
+    })
+    routeState.loadWorkflowDraft.mockResolvedValue(draft())
+
+    const workflowApp = await buildWorkflowApp()
+    const workflowDeploy = await request(workflowApp).post('/api/workflow/deploy').send({
+      name: 'Server policy deploy',
+      bpmnXml: suspiciousBpmnXml(),
+    })
+    expect(workflowDeploy.status).toBe(201)
+
+    const designerApp = await buildWorkflowDesignerApp()
+    const designerDeploy = await request(designerApp)
+      .post('/api/workflow-designer/workflows/wf_1/deploy')
+      .send(POLICY_LIKE_PAYLOAD)
+    expect(designerDeploy.status).toBe(200)
+
+    expectServerPolicyOnly({
+      allowedHosts: ['api.example.com'],
+      nat64Prefixes: ['2a00:1098:2c:0:0:0:0:0/96'],
+    })
+    expectNoPolicyLeak(workflowDeploy.body)
+    expectNoPolicyLeak(designerDeploy.body)
   })
 })

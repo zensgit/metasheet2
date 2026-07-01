@@ -8,6 +8,7 @@ import { Router } from 'express'
 import { WorkflowDesigner, type WorkflowDefinition } from '../workflow/WorkflowDesigner'
 import { BPMNWorkflowEngine } from '../workflow/BPMNWorkflowEngine'
 import { compileBpmnPreview } from '../workflow/bpmnCompilePreview'
+import { buildBpmnWorkflowEngineOptionsFromServerConfig } from '../workflow/bpmnHttpTaskEgressPolicy'
 import {
   appendWorkflowDraftExecution,
   canDeployWorkflowDraft,
@@ -50,7 +51,7 @@ const { body, param, query } = loadValidators()
 const router = Router()
 const logger = new Logger('WorkflowDesignerAPI')
 const designer = new WorkflowDesigner()
-const workflowEngine = new BPMNWorkflowEngine()
+const workflowEngine = new BPMNWorkflowEngine(buildBpmnWorkflowEngineOptionsFromServerConfig())
 let workflowEngineReady: Promise<void> | null = null
 
 interface WorkflowHubTeamViewConflictBuilder {

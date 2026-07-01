@@ -1,14 +1,17 @@
 # R1-A3 BPMN HTTP-task egress policy rollout design-lock (2026-07-01)
 
-**Status: DESIGN-LOCK ONLY — A3 RUNTIME NOT BUILT.** This document opens no
-HTTP-task destination, adds no server configuration loader, changes no workflow
-route, and does not modify `BPMNWorkflowEngine`. It locks the rollout and policy
-enablement contract for the already-merged R1 HTTP-task egress line:
+**Status: RATIFIED — A3-a/A3-b SHIPPED; A3-c IMPLEMENTED IN THIS PR.** This
+document first locked the rollout and policy enablement contract for the
+already-merged R1 HTTP-task egress line. The as-built A3 runtime now adds a
+server-owned env policy loader and wires both BPMN route construction sites to
+it. The repository still commits no concrete production or staging destination;
+missing or malformed config remains fail-closed.
 
 - A1 guard/dispatcher and A2 engine wiring are merged and default fail-closed.
 - The original raw `fetch(url)` full-read SSRF path is closed by default.
 - A missing configured allowlist still denies all BPMN HTTP-task egress.
-- Enabling any real destination remains a separate owner/governance gate.
+- Configuring any real production/staging destination remains a separate
+  owner/governance gate.
 
 ## 1. Scope
 
@@ -34,7 +37,7 @@ Out of scope:
 - product/admin UI for managing egress policies;
 - tenant/user-authored allowlists;
 - write/side-effect expansion beyond the R1 method/header policy;
-- live destination enablement in this PR.
+- committing or enabling any concrete production/staging destination in this PR.
 
 ## 2. Baseline
 
@@ -50,9 +53,12 @@ R1 has already landed the dangerous runtime closure:
   outbound `fetch` path.
 - `#3442` refreshed the development/verification ledger after A2.
 
-The current runtime is intentionally dormant by default. `new BPMNWorkflowEngine()`
-uses `defaultEgressPolicy()`, whose `allowedHosts` is empty, so all HTTP-task
-egress fails closed unless a future A3 slice injects a validated policy.
+The runtime is intentionally dormant by default. The as-built A3 route wiring
+uses `buildBpmnWorkflowEngineOptionsFromServerConfig()`, which reads
+`BPMN_HTTP_TASK_EGRESS_POLICY`, normalizes it through the A3-a normalizer, and
+injects the normalized policy into `BPMNWorkflowEngine`. Missing, malformed, or
+invalid config returns the default empty allowlist, so all HTTP-task egress
+still fails closed unless an operator explicitly supplies valid server config.
 
 ## 3. Locked A3 policy model
 
@@ -165,10 +171,14 @@ stable hash/fingerprint instead of the literal host.
 
 ## 4. Implementation slices
 
-Each slice needs its own owner opt-in. No slice may combine this design-lock with
-live destination enablement.
+Each slice needed its own owner opt-in. A3-c is the first runtime slice that can
+make an allowlisted destination reachable when, and only when, deployment-owned
+server config supplies a valid allowlist. This repository change does not commit
+any such destination value.
 
 ### A3-a. Policy loader and normalizer, pure
+
+**As-built:** shipped in `#3455`.
 
 Build a pure module that reads a server-owned config input and returns either:
 
@@ -193,6 +203,8 @@ Required tests:
 
 ### A3-b. Route provenance and policy-smuggling negative controls
 
+**As-built:** shipped in `#3457`.
+
 Add or verify route-level tests around workflow deploy/start and designer deploy
 showing:
 
@@ -204,6 +216,17 @@ showing:
 This slice still does not need to enable a live destination.
 
 ### A3-c. Runtime policy injection, configured enablement
+
+**As-built:** implemented in this PR with
+`packages/core-backend/src/workflow/bpmnHttpTaskEgressPolicy.ts` and the two
+route construction sites:
+
+- `packages/core-backend/src/routes/workflow.ts`;
+- `packages/core-backend/src/routes/workflow-designer.ts`.
+
+The server-owned config vehicle is the backend environment variable
+`BPMN_HTTP_TASK_EGRESS_POLICY`, whose value must be a JSON object accepted by
+`normalizeBpmnHttpTaskEgressPolicyConfig`.
 
 Wire the normalized server-owned policy into both `BPMNWorkflowEngine`
 construction sites. This is the first slice that can make an allowlisted
@@ -239,7 +262,7 @@ Required tests:
 
 ## 6. Explicit non-authorization
 
-Merging this design-lock does not authorize:
+Merging this design-lock and its A3 implementation slices does not authorize:
 
 - configuring any production or staging destination;
 - enabling any tenant/customer workflow to call an external host;
