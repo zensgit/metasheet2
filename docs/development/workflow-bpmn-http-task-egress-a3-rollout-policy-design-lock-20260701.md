@@ -1,6 +1,6 @@
 # R1-A3 BPMN HTTP-task egress policy rollout design-lock (2026-07-01)
 
-**Status: RATIFIED — A3-a/A3-b SHIPPED; A3-c IMPLEMENTED IN THIS PR.** This
+**Status: RATIFIED — A3-a/A3-b SHIPPED; A3-c IMPLEMENTED BY `#3460`.** This
 document first locked the rollout and policy enablement contract for the
 already-merged R1 HTTP-task egress line. The as-built A3 runtime now adds a
 server-owned env policy loader and wires both BPMN route construction sites to
@@ -37,7 +37,8 @@ Out of scope:
 - product/admin UI for managing egress policies;
 - tenant/user-authored allowlists;
 - write/side-effect expansion beyond the R1 method/header policy;
-- committing or enabling any concrete production/staging destination in this PR.
+- committing or enabling any concrete production/staging destination in this
+  A3-c slice.
 
 ## 2. Baseline
 
@@ -217,7 +218,7 @@ This slice still does not need to enable a live destination.
 
 ### A3-c. Runtime policy injection, configured enablement
 
-**As-built:** implemented in this PR with
+**As-built:** implemented by `#3460` with
 `packages/core-backend/src/workflow/bpmnHttpTaskEgressPolicy.ts` and the two
 route construction sites:
 

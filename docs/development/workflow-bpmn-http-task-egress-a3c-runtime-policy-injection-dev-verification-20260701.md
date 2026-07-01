@@ -15,9 +15,9 @@ It is intentionally narrow:
 - preserve hard fail-closed behavior for missing/malformed/invalid config;
 - keep request bodies, BPMN XML, and workflow variables unable to supply policy.
 
-No concrete production or staging destination is committed by this PR. Operators
-must still provide deployment-owned server config before any allowlisted
-destination becomes reachable.
+No concrete production or staging destination is committed by this A3-c slice.
+Operators must still provide deployment-owned server config before any
+allowlisted destination becomes reachable.
 
 ## Implementation
 
