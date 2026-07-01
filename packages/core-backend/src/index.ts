@@ -76,6 +76,7 @@ import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
 import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
+import { isFieldAlwaysReadOnly } from './multitable/permission-derivation'
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
@@ -2372,18 +2373,24 @@ export class MetaSheetServer {
                 return { id: String(f.id), name: String(f.name), type: f.type, property: prop, options: prop.options, order: Number(f.order ?? 0) }
               })
 
-              // Build real field mutation guards from DB (same logic as buildFieldMutationGuardMap)
-              const readOnlyTypes = new Set(['lookup', 'rollup'])
+              // Build real field mutation guards from DB via the CANONICAL `isFieldAlwaysReadOnly` (C2/I-1
+              // mirror-read-only hardening). The previous hand-rolled `lookup/rollup || prop.readOnly` MISSED the
+              // mirror side of a twoWay link (`property.mirrorOf`) whenever the persisted property lacked
+              // `readOnly:true` — the exact gap `isFieldAlwaysReadOnly` (permission-derivation.ts) closes — letting a
+              // realtime grid edit write a `meta_links` row for a mirror field. Converge onto the single source of
+              // truth, delivering this block's own "same logic as buildFieldMutationGuardMap" intent.
               const fieldById = new Map(
                 fields.map((f: any) => {
                   const prop = f.property || {}
-                  const isReadOnly = readOnlyTypes.has(f.type) || prop.readOnly === true
+                  const isReadOnly = isFieldAlwaysReadOnly(f)
                   const isHidden = prop.hidden === true || prop.permissionHidden === true
                   const guard: any = { type: f.type, readOnly: isReadOnly, hidden: isHidden }
                   if ((f.type === 'select' || f.type === 'multiSelect') && Array.isArray(prop.options)) {
                     guard.options = prop.options.map((o: any) => typeof o === 'string' ? o : o?.value ?? '')
                   }
-                  if (f.type === 'link' && prop.foreignSheetId) {
+                  // Set the link guard ONLY for a WRITABLE link — never a read-only mirror (defense-in-depth: the
+                  // link-write path is unreachable for a mirror even if the readOnly check were ever bypassed).
+                  if (f.type === 'link' && prop.foreignSheetId && !isReadOnly) {
                     guard.link = { foreignSheetId: prop.foreignSheetId, limitSingleRecord: !!prop.limitSingleRecord }
                   }
                   return [f.id, guard] as const
