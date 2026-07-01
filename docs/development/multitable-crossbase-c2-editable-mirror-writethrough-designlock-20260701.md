@@ -1,10 +1,11 @@
-# Cross-base Slice 1 — C2: editable-mirror write-through — DESIGN-LOCK (proposed) — 2026-07-01
+# Cross-base Slice 1 — C2: editable-mirror write-through — DESIGN-LOCK (RATIFIED) — 2026-07-01
 
 > The runtime that opens **one** gated cross-base mirror-edit path onto the floor guarded by C1
 > (`resolveCrossBaseWriteAuthority`) + C2/I-1 (mirror read-only on every `meta_links`-writing path). Builds on the
 > RATIFIED Slice-1 lock (`multitable-crossbase-twoway-editable-mirror-slice1-designlock-20260629.md`, §7 A–F, §10
-> I-1/I-2/I-3). Grounding: `origin/main` @ `032e063af` (C1 `e10c80dc5` + C2/I-1 `c452eb403` landed). **Proposed —
-> NOT ratified, NO code.** Owner-directed to lock three things sharply (§2). Default-off
+> I-1/I-2/I-3). Grounding: `origin/main` @ `032e063af` (C1 `e10c80dc5` + C2/I-1 `c452eb403` landed). **RATIFIED
+> 2026-07-01 (owner-signed; Locks A/B/C + the §6 golden matrix settled — base-B = record-level). NO code until the
+> separate contract-first runtime PR.** Owner-directed to lock three things sharply (§2). Default-off
 > `MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE`.
 
 ## 1. Scope — one path, nothing else
@@ -118,10 +119,11 @@ New `multitable-crossbase-mirror-writethrough-realdb.test.ts`:
 Each security golden fail-first-proven; the spine assertion runs after every case; wired into `plugin-tests.yml`.
 
 ## 7. Pre-runtime gates (before any code)
-1. **Owner ratification** of §2 Locks A/B/C (+ §3/§4).
+1. **Owner ratification** of §2 Locks A/B/C (+ §3/§4) — ✅ **DONE (RATIFIED 2026-07-01).** The base-B granularity
+   decision is **resolved = record-level** (§2 Lock B); no open ratification items remain.
 2. **Adversarial advisor pass** — ✅ run on this draft (2026-07-01); folded in: Lock A → route through the forward
    link-write service (dedup/validation/revision/mirror-invalidation inherited, no duplicate `(F_A,…)` row), Lock C →
-   the REMOVE-side linkage-oracle (mask before edge-existence branch). Open item = the base-B granularity ratification
-   question (Lock B ⚠). A final pass on the ratified design before runtime is still advisable.
+   the REMOVE-side linkage-oracle (mask before edge-existence branch). A final pass on the ratified design before
+   runtime is still advisable.
 3. Only then: runtime, contract-first — the dedicated op + the three locks, goldens fail-first, default-off; the
    Decision-F co-lock is the enablement gate, not part of the runtime PR.
