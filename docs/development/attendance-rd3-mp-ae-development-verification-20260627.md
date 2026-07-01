@@ -1,8 +1,8 @@
 # Attendance benchmark line — RD-3 / MP / AE development & verification
 
-**Date:** 2026-06-27 · **Author:** Claude (Fable, ultracode) · **Status:** ✅ RD-3 + MP + AE-1 all built, adversarially reviewed, and landed on main.
+**Date:** 2026-06-27 · **Author:** Claude (Fable, ultracode) · **Status:** ✅ RD-3 + MP + AE runtime line through AE-3 all built, adversarially reviewed, and landed on main; AE-4 staging smoke remains prepared/pending.
 
-This documents the three remaining attendance developments the owner asked to complete — the report-digest producer (RD-3), the makeup-punch runtime (MP-2/MP-3), and the anomaly-result-edit route (AE-1) — plus the ratification decisions made along the way (for owner confirmation) and how each was verified.
+This documents the three remaining attendance developments the owner asked to complete — the report-digest producer (RD-3), the makeup-punch runtime (MP-2/MP-3), and the anomaly-result-edit route/UI line (AE-1 through AE-3) — plus the ratification decisions made along the way and how each was verified. Update 2026-07-01: AE-1b durability, AE-2 employee notification, AE-2.1 notification toggle honoring, and AE-3 admin modal runtime are now all on `main`; only AE-4 staging smoke remains open.
 
 ---
 
@@ -13,10 +13,14 @@ This documents the three remaining attendance developments the owner asked to co
 | **RD-3** | Scheduler producer that writes per-subject report-digest rows to the C5 outbox (no direct send) | ✅ on main (#3313) | adversarial review (10/10 locks) + 12 real-DB tests in `test (20.x)` |
 | **MP-2/MP-3** | Makeup-punch quota/window/type/reason/attachment enforcement + per-write snapshot + approval audit on the request write path | ✅ on main (#3314) | adversarial review (disabled=byte-identical holds, all locks PASS) + 14 real-DB tests |
 | **AE-1** | Audited admin route to correct anomaly results + immutable audit table + idempotency + closed-cycle 409 guard | ✅ on main (#3316) | adversarial review (9/9 locks, no P1) + 9 real-DB tests in `test (20.x)` |
+| **AE-1b** | Sticky `meta.manual_result_edit` durability across no-override recompute, with soft `reviewConflict.state='needs_review'` on material fact divergence | ✅ on main (#3377) | writer-inventory gate + real-DB matrix; closes the former corrected-fact durability gap |
+| **AE-2 / AE-2.1** | Corrected-employee notification and `notifyAffectedEmployee` toggle honoring | ✅ on main (#3413, #3419, #3423, #3425) | affected-employee-only outbox row, back-link, `policy_disabled` skip path, and test-isolation fix |
+| **AE-3** | Admin anomaly-correction modal on anomaly rows, using explicit capability probe and modal-open snapshot | ✅ on main (#3422, #3461) | frontend required checks green; no backend route/migration changes; `test (18.x)` / `test (20.x)` / `attendance-web-guard` green |
+| **AE-4** | Staging smoke for the full AE correction loop | ⬜ prepared, not PASS (#3462) | runbook is on `main`; closure still requires deploy SHA, PASS stamp, and residue=0 |
 
 **Every runtime is dormant / gated — but the gates differ.** RD-3 is **default-OFF** (`ATTENDANCE_REPORT_DIGEST_ENABLED` env + policy + cadence); MP is **default-OFF** (enforces only when `makeupPunchPolicy.enabled`); **AE-1 is gated, NOT default-OFF** — `attendanceResultEditPolicy.enabled` defaults `true`, but the route is `attendance:admin`-only and a pure no-op until an admin explicitly invokes it (nothing auto-runs). None sends/mutates for an existing customer without explicit admin action.
 
-**Prerequisite ratifications landed first** (design-lock-first): RD §11 (#3275), MP §9 (#3276) + config (#3280), AE §9 + §3.5a (#3274).
+**Prerequisite ratifications landed first** (design-lock-first): RD §11 (#3275), MP §9 (#3276) + config (#3280), AE §9 + §3.5a (#3274), AE-1b (#3371), AE-2 (#3407), AE-2.1 (#3423), and AE-3 (#3422).
 
 ---
 
@@ -44,19 +48,19 @@ This documents the three remaining attendance developments the owner asked to co
 
 **Verification.** Adversarial review: APPROVE-WITH-NITS, disabled=byte-identical genuinely holds, no P1. 14 real-DB tests; the build agent caught that the new file wasn't in `plugin-tests.yml`'s explicit list (a false-green risk) and registered it. Merged green.
 
-**Owner-aware notes / deferred (tracked in #3315):** quota TOCTOU is ratified accepted-slack (per-`(org,user,workDate,requestType)` lock vs cycle-spanning count — bounded over-count of a soft quota); the no-record fact path (the primary "forgot to punch entirely" case) is code-correct but untested (non-deterministic without controlling the default rule); `missing_check_out`/`late_early` and severe/absence tier facts untested. All fail-closed-leaning, off-by-default.
+**Owner-aware notes from the original review:** quota TOCTOU is ratified accepted-slack (per-`(org,user,workDate,requestType)` lock vs cycle-spanning count — bounded over-count of a soft quota). The follow-up coverage issue for the no-record fact path, `missing_check_out` / `late_early`, and severe/absence tier facts was tracked in #3315 and is now closed; it is not an open remainder of this line.
 
 ---
 
 ## 3. AE-1 — anomaly-result-edit route (#3274 design + AE-1 #3316)
 
-**Scope.** `POST /api/attendance/anomaly-result-edits` (`attendance:admin`): correct one confirmed anomaly record to an explainable status with a required reason + optional evidence, an immutable before/after audit row keyed by a client idempotencyKey, an edit window, and a fail-closed closed-payroll-cycle guard. AE-2 (notify) / AE-3 (UI) / AE-4 (staging) are separate later slices.
+**Scope.** `POST /api/attendance/anomaly-result-edits` (`attendance:admin`): correct one confirmed anomaly record to an explainable status with a required reason + optional evidence, an immutable before/after audit row keyed by a client idempotencyKey, an edit window, and a fail-closed closed-payroll-cycle guard. AE-1b / AE-2 / AE-2.1 / AE-3 have since landed; AE-4 staging smoke remains the only open AE slice.
 
 **The load-bearing design decision — §3.5a metric table (ratified, see §4).** The design said "apply a normalization table" but didn't specify it. Locked: anomaly metrics normalized per target status; `work_minutes` preserved by default (no fabricated hours; admin `overrideMetrics` wins per-field); meta tiers always recomputed via `computeAttendanceRecordUpsertValues` (never a naked status UPDATE); `absent→normal` keeps `work_minutes=0` unless the admin supplies `overrideMetrics.workMinutes`.
 
 **Verification.** Adversarial review: **APPROVE-WITH-NITS**, all 9 ratified locks hold, **no P1**. (The reviewer self-retracted a first-pass P1 it had read off a stale working tree — the same 508-behind trap — then re-verified against `git show origin/branch`.) Confirmed: §3.5a applied exactly — **no naked status UPDATE** (routes through `computeAttendanceRecordUpsertValues`); `statusOverride` shadows `computeMetrics` so a no-punch `absent→normal` can't re-derive 'absent'; meta tiers recomputed. Idempotency (key required→400, `UNIQUE(org,key)` NOT NULL, same-payload→alreadyApplied, diff→409, 23505 backstop); closed-cycle 409 fail-closed (schema-error→503, not bypassable); editable-source guard; org boundary→404; evidence HTTPS-only; edit-window tz fail-closed; audit immutable (no FK cascade, written in the same txn). Migration auto-registers + runs before the suite in CI; 9 real-DB tests, CI-registered, fail-loud.
 
-**Resolved decisions + remaining items → issue #3317.** Resolved 2026-06-27: §3.5a confirmed; the `403 disabled` route gate **kept** as a kill-switch; `overrideMetrics` **excluded** from the idempotency fingerprint (the UI uses a fresh key per open). Remaining: the **tenancy decision** that gates cross-org RBAC (§7); **[P2-a] corrected-fact durability** — a later recompute (re-import / auto-absence / approved-request) without `statusOverride` re-derives the original status from the preserved punches and silently clobbers the correction (spec-accepted; AE-1's closed-cycle freeze is the *first* such guard — a future slice should generalize it); and the test gaps (503, 403, overrideMetrics-same-key, absent-tiers, edit-window-tz).
+**Resolved decisions + remaining items → issue #3317.** Resolved 2026-06-27: §3.5a confirmed; the `403 disabled` route gate **kept** as a kill-switch; `overrideMetrics` **excluded** from the idempotency fingerprint (the UI uses a fresh key per open). Update 2026-07-01: the former **[P2-a] corrected-fact durability** gap is closed by AE-1b #3377; 503 / 403 / overrideMetrics-same-key / absent-tier / edit-window-tz coverage landed through the AE follow-up sequence; AE-2 / AE-2.1 notification behavior and AE-3 UI are on main. The remaining AE item is AE-4 staging smoke. The cross-org RBAC conclusion is retained in §7 as a product-tenancy boundary rather than an AE-specific blocker.
 
 ---
 
@@ -88,6 +92,6 @@ Each runtime followed the same pipeline: **detailed spec** (parallel design-read
 
 - **🔐 cross-org RBAC — owner tenancy decision (verified on main; recorded in #3317).** `attendance:admin` is a **global** permission: `getOrgId` trusts the body `orgId` (`index.cjs:5822`) and `withPermission` (`index.cjs:19606`) checks the grant with **no org context**; the RBAC tables (`user_roles`/`user_permissions`/`role_permissions`) have no org column. So an `attendance:admin` holder can mutate **any** org's records by setting `orgId` in the body — the `WHERE org_id=$2` is a **partition filter, not an auth boundary**. **Repo-wide and pre-existing** (every attendance:admin route + `admin-users.ts`): **AE-1 added a new admin route (`POST /anomaly-result-edits`) but introduced no new *auth-model* weakness — the route inherits the existing global posture.** Decision = **tenancy model**: single-tenant / global-admin → document `orgId` as a partition key + fix the misleadingly-named cross-org test; multi-tenant / per-org → a **platform-level** cross-org write hole needing org-scoped authorization (org dimension in RBAC, or `user_namespace_admissions`) — a **separate security initiative**, not this attendance work. *Until decided, no attendance:admin write should be enabled under a multi-tenant assumption.*
 - **Runtimes stay dormant (gates differ)** — RD-3 env/policy stays off unless enabled; MP enforcement stays policy-off by default; AE-1 remains admin-only + explicit invocation, with the route kill-switch retained. RD-3's outbox path and any production enablement are separate owner go-aheads.
-- **MP test gaps** → issue #3315 (no-record path, fact tiers).
-- **AE-1 decisions — resolved (#3317):** §3.5a confirmed; the `403 disabled` gate kept as a kill-switch; `overrideMetrics` excluded from the idempotency fingerprint. **Remaining follow-up:** the **consistency gap** — AE-1's closed-cycle freeze is the *first* such guard; punch/import/auto-absence paths still write into closed cycles (a future generalization slice) — plus the test gaps in #3317.
-- **AE-2 / AE-3 / AE-4** (notify / UI / staging), **MP-4/5/6** (UI / UX / staging), **RD-4 / RD-5** (UI / staging) — all separate later slices, each owner-gated.
+- **MP test gaps** → issue #3315 is closed (2026-06-28); it is retained here only as historical review context, not an open attendance remainder.
+- **AE decisions — resolved (#3317):** §3.5a confirmed; the `403 disabled` gate kept as a kill-switch; `overrideMetrics` excluded from the idempotency fingerprint; AE-1b durability, AE-2 notify, AE-2.1 toggle honoring, and AE-3 UI are all shipped. **Remaining AE follow-up:** AE-4 staging smoke only, using `docs/development/attendance-ae4-anomaly-result-edit-staging-smoke-runbook-20260701.md`.
+- **MP-4/5/6** (UI / UX / staging), **RD-4 / RD-5** (UI / staging) — all separate later slices, each owner-gated.
