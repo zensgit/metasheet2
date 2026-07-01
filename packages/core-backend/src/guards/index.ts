@@ -9,3 +9,4 @@ export * from './middleware';
 export * from './audit-integration';
 export * from './idempotency';
 export * from './egress-guard';
+export * from './egress-dispatcher';
