@@ -613,7 +613,13 @@ attendanceIntegrationDescribe(
     const assignmentId = (assignmentRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
     expect(assignmentId).toBeTruthy()
 
-    const holidayDate = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString().slice(0, 10)
+    // Fixed far-future date, NOT `Date.now() + 7 days`. Holidays here live in the shared 'default' org and
+    // are not cleaned up, so a near-term relative date can collide with another test's fixed workDate: on
+    // 2026-07-01, `today + 7` == the multi-shift test's fixed `2026-07-08`, and that stray holiday made the
+    // day non-working → `plannedMinutes` read [0,0] instead of [240,240]. A far-future fixed date (matching
+    // the other throwaway-holiday tests in this file, e.g. 2036/3000/2029) can never collide with a
+    // near-term test date.
+    const holidayDate = '2099-07-08'
     const holidayRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
       method: 'POST',
       headers: {
