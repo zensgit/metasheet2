@@ -131,14 +131,19 @@ function isBlockedIpv6(address: ipaddr.IPv6, nat64Prefixes: readonly string[]): 
 
 export function isBlockedEgressIp(
   hostname: string,
-  nat64Prefixes: readonly string[] = WELL_KNOWN_NAT64_PREFIXES,
+  nat64Prefixes: readonly string[] = [],
 ): boolean {
   const address = parseIp(hostname)
   if (!address) return false
   if (address.kind() === 'ipv4') {
     return isBlockedIpv4(address as ipaddr.IPv4)
   }
-  return isBlockedIpv6(address as ipaddr.IPv6, nat64Prefixes)
+  // Always fold in the well-known NAT64 NSP (64:ff9b::/96) rather than letting a caller's prefixes
+  // REPLACE it. A direct caller passing only its own operator prefix must never silently drop the
+  // default, or the well-known NSP's inner v4 stops being decoded. De-duped so validateEgressUrl's
+  // existing explicit [...WELL_KNOWN, ...policy] merge stays byte-for-byte equivalent (zero-drift).
+  const mergedNat64Prefixes = [...new Set([...WELL_KNOWN_NAT64_PREFIXES, ...nat64Prefixes])]
+  return isBlockedIpv6(address as ipaddr.IPv6, mergedNat64Prefixes)
 }
 
 export function validateEgressUrl(rawUrl: unknown, policy: EgressPolicy = defaultEgressPolicy()): EgressUrlDecision {

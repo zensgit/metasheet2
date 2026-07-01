@@ -177,3 +177,35 @@ describe('R1-A egress guard — NAT64 Network-Specific Prefix (configurable)', (
     })
   })
 })
+
+describe('R1-A egress guard — isBlockedEgressIp always folds in well-known NAT64 (P3 API hardening)', () => {
+  // REGRESSION-CATCHER (red before the fix, green after). A direct caller passing ONLY a custom
+  // prefix must still decode the well-known 64:ff9b::/96. Pre-fix the custom prefix REPLACED the
+  // default, so 64:ff9b:: skipped the decode loop and fell through to ipaddr.js's rfc6052 range
+  // → range() !== 'unicast' → conservatively (and here wrongly) blocked. Post-fix well-known is
+  // always merged, so the inner PUBLIC v4 (8.8.8.8) is decoded and correctly allowed. This is the
+  // single assertion whose result differs between old and new code.
+  test('REGRESSION: well-known NAT64 embedding a PUBLIC v4 is decoded even when only a custom prefix is passed', () => {
+    expect(isBlockedEgressIp('64:ff9b::808:808', ['2a00:1098:2c::/96'])).toBe(false) // 8.8.8.8
+  })
+
+  // GUARDS: true on both old and new code (the rfc6052 fallback already blocks these). They assert
+  // the security direction is never weakened by the change — not that they catch the P3 regression.
+  test('GUARD: well-known NAT64 embedding cloud metadata stays blocked with a custom-only prefix', () => {
+    expect(isBlockedEgressIp('64:ff9b::a9fe:a9fe', ['2a00:1098:2c::/96'])).toBe(true) // 169.254.169.254
+  })
+  test('GUARD: a single custom-prefix call keeps BOTH the custom NSP and well-known active', () => {
+    expect(isBlockedEgressIp('2a00:1098:2c::a00:1', ['2a00:1098:2c::/96'])).toBe(true) // custom NSP → 10.0.0.1
+    expect(isBlockedEgressIp('64:ff9b::a00:1', ['2a00:1098:2c::/96'])).toBe(true) // well-known → 10.0.0.1
+  })
+
+  // ZERO-DRIFT: validateEgressUrl source is untouched; its existing explicit [...WELL_KNOWN, ...policy]
+  // merge is byte-identical after the helper's Set-dedup, so the main path is unchanged.
+  test('ZERO-DRIFT: validateEgressUrl still blocks well-known NAT64 metadata under a configured-NSP policy', () => {
+    const p: EgressPolicy = { allowedHosts: [], nat64Prefixes: ['2a00:1098:2c::/96'] }
+    expect(validateEgressUrl('https://[64:ff9b::a9fe:a9fe]/', p)).toEqual({
+      allowed: false,
+      reason: 'IP_BLOCKED',
+    })
+  })
+})
