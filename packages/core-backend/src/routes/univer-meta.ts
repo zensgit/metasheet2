@@ -9662,8 +9662,9 @@ export function univerMetaRouter(): Router {
             for (const change of candidate.diff) {
               const field = fieldById.get(change.fieldId)
               // Mirror-read-only hardening (C2/I-1): never reset/replay the mirror side of a twoWay link
-              // (`readOnly` = `isFieldAlwaysReadOnly` ⇒ `mirrorOf`). Unlike revert/restore, reset-execute had NO
-              // upstream readOnly gate, so this explicit skip is the spine guard for the PIT-reset path.
+              // (`readOnly` = `isFieldAlwaysReadOnly` ⇒ `mirrorOf`). DEFENSE-IN-DEPTH: the reset-preview PREFLIGHT
+              // (RESET_BLOCKED, ~:9322) is the reachable PRIMARY guard — it refuses a mirror-diff reset before this
+              // replay runs; this skip is the second door, reached only if that preflight were ever bypassed.
               if (field?.type !== 'link' || field.readOnly === true) continue
               const ids = change.op === 'unset' ? [] : normalizeLinkIds(change.value)
               const cfg = field.link
