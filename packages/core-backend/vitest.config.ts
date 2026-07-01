@@ -71,6 +71,10 @@ export default defineConfig({
       // ephemeral port against real Postgres, so it is excluded from the default run and wired
       // into the dedicated `Run multitable real-DB integration` job in plugin-tests.yml.
       'tests/integration/multitable-automation-start-approval-http.test.ts',
+      // W6 form-submit -> start_approval operator-smoke seam: DATABASE_URL-gated and
+      // wired as a WHOLE FILE into the `Run multitable real-DB integration` job in
+      // plugin-tests.yml, so it runs against real Postgres instead of skip-greening here.
+      'tests/integration/multitable-form-submit-start-approval-smoke.test.ts',
       // T2-6 event-driven dedup ledger: DATABASE_URL-gated. Excluded from the no-DB default job so it
       // does not skip-green, and wired as a WHOLE FILE into the `Run multitable real-DB integration`
       // job in plugin-tests.yml where it runs against real Postgres every PR.
