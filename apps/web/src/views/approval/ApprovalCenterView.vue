@@ -92,6 +92,33 @@
              reports at least one unread row for the current filter so clicking
              never issues a no-op round-trip. -->
         <div class="approval-center__tab-toolbar">
+          <!-- 操作台: batch approve/reject over the current selection. Each row still runs the
+               authoritative single-instance server transition (frontend fan-out, not a bulk endpoint). -->
+          <span
+            v-if="selectedPending.length > 0"
+            class="approval-center__selection-count"
+            data-testid="approval-selection-count"
+          >已选 {{ selectedPending.length }} 项</span>
+          <el-button
+            type="success"
+            plain
+            :disabled="selectedPending.length === 0 || batchRunning"
+            :loading="batchRunning && batchAction === 'approve'"
+            data-testid="approval-batch-approve"
+            @click="handleBatchApprove"
+          >
+            批量通过
+          </el-button>
+          <el-button
+            type="danger"
+            plain
+            :disabled="selectedPending.length === 0 || batchRunning"
+            :loading="batchRunning && batchAction === 'reject'"
+            data-testid="approval-batch-reject"
+            @click="openBatchReject"
+          >
+            批量驳回
+          </el-button>
           <el-button
             type="primary"
             plain
@@ -118,14 +145,22 @@
           </el-button>
         </div>
         <el-table
+          ref="pendingTableRef"
           v-loading="store.loading"
           :data="store.pendingApprovals"
           style="width: 100%"
           max-height="560"
           stripe
           highlight-current-row
+          :row-key="rowKey"
           @row-click="handleRowClick"
+          @selection-change="handlePendingSelectionChange"
         >
+          <el-table-column
+            type="selection"
+            width="44"
+            :selectable="isRowBatchSelectable"
+          />
           <el-table-column prop="requestNo" label="审批编号" width="180" />
           <el-table-column prop="title" label="标题" min-width="200" />
           <el-table-column label="发起人" width="120">
@@ -190,6 +225,23 @@
           <el-table-column label="发起时间" width="180">
             <template #default="{ row }">
               {{ formatDate(row.createdAt) }}
+            </template>
+          </el-table-column>
+          <!-- 催办: a requester nudge to the current approver, only meaningful while the instance is
+               still pending. Server-side rate-limited (1/instance/user/hour); 429 surfaces gracefully. -->
+          <el-table-column label="操作" width="100" fixed="right">
+            <template #default="{ row }">
+              <el-button
+                v-if="row.status === 'pending'"
+                type="primary"
+                link
+                :loading="remindingId === row.id"
+                :disabled="remindingId !== null"
+                :data-testid="`approval-urge-${row.id}`"
+                @click.stop="handleUrge(row)"
+              >
+                催办
+              </el-button>
             </template>
           </el-table-column>
           <template #empty>
@@ -304,6 +356,37 @@
         />
       </el-tab-pane>
     </el-tabs>
+
+    <!-- Batch reject: a comment is offered (some templates require one; a per-row failure is captured
+         in the manifest rather than aborting the batch). -->
+    <el-dialog
+      v-model="batchRejectDialogVisible"
+      title="批量驳回"
+      width="440px"
+      data-testid="approval-batch-reject-dialog"
+    >
+      <p class="approval-center__batch-reject-summary">
+        将驳回所选的 {{ selectedPending.length }} 项审批。
+      </p>
+      <el-input
+        v-model="batchRejectComment"
+        type="textarea"
+        :rows="3"
+        placeholder="驳回意见（部分审批模板要求必填）"
+        data-testid="approval-batch-reject-comment"
+      />
+      <template #footer>
+        <el-button data-testid="approval-batch-reject-cancel" @click="batchRejectDialogVisible = false">取消</el-button>
+        <el-button
+          type="danger"
+          :loading="batchRunning"
+          data-testid="approval-batch-reject-confirm"
+          @click="handleBatchReject"
+        >
+          确认驳回
+        </el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
@@ -315,12 +398,108 @@ import { ElMessage } from 'element-plus'
 import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { getPendingCount, markAllApprovalsRead } from '../../approvals/api'
+import { dispatchAction, getPendingCount, markAllApprovalsRead, remindApproval } from '../../approvals/api'
+import { runApprovalBatchAction } from '../../approvals/useApprovalBatchActions'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 
 const router = useRouter()
 const store = useApprovalStore()
 const { canWrite } = useApprovalPermissions()
+
+// ── 操作台: batch approve/reject over the pending selection ────────────────
+const pendingTableRef = ref<{ clearSelection: () => void } | null>(null)
+const selectedPending = ref<UnifiedApprovalDTO[]>([])
+const batchRunning = ref(false)
+const batchAction = ref<'approve' | 'reject' | null>(null)
+const batchRejectDialogVisible = ref(false)
+const batchRejectComment = ref('')
+const remindingId = ref<string | null>(null)
+
+function rowKey(row: UnifiedApprovalDTO): string {
+  return row.id
+}
+
+// Only platform-native pending rows are batch-actionable here; attendance-backed approvals live in the
+// attendance module (their row-click routes away), so excluding them keeps the batch honest.
+function isRowBatchSelectable(row: UnifiedApprovalDTO): boolean {
+  return row.status === 'pending' && !isAttendanceApproval(row)
+}
+
+function handlePendingSelectionChange(rows: UnifiedApprovalDTO[]): void {
+  selectedPending.value = rows.filter(isRowBatchSelectable)
+}
+
+function clearPendingSelection(): void {
+  selectedPending.value = []
+  // Guard the child API: the ref may be null (tab not rendered) or, under test stubs, a component
+  // without ElTable's imperative methods — never let a missing clearSelection abort navigation.
+  if (typeof pendingTableRef.value?.clearSelection === 'function') {
+    pendingTableRef.value.clearSelection()
+  }
+}
+
+async function runBatch(action: 'approve' | 'reject', comment: string): Promise<void> {
+  const ids = selectedPending.value.map((row) => row.id)
+  if (ids.length === 0 || batchRunning.value) return
+  batchRunning.value = true
+  batchAction.value = action
+  try {
+    const trimmed = comment.trim()
+    const result = await runApprovalBatchAction(
+      ids,
+      () => (trimmed ? { action, comment: trimmed } : { action }),
+      (id, req) => dispatchAction(id, req),
+    )
+    if (result.failed.length === 0) {
+      ElMessage.success(`已${action === 'approve' ? '通过' : '驳回'} ${result.succeeded.length} 项`)
+    } else if (result.succeeded.length === 0) {
+      ElMessage.error(`全部 ${result.failed.length} 项处理失败：${result.failed[0]?.message ?? ''}`)
+    } else {
+      ElMessage.warning(`成功 ${result.succeeded.length} 项，失败 ${result.failed.length} 项（失败项仍在列表中）`)
+    }
+    clearPendingSelection()
+    loadCurrentTab()
+    void refreshPendingBadgeCount()
+  } finally {
+    batchRunning.value = false
+    batchAction.value = null
+  }
+}
+
+async function handleBatchApprove(): Promise<void> {
+  await runBatch('approve', '')
+}
+
+function openBatchReject(): void {
+  if (selectedPending.value.length === 0) return
+  batchRejectComment.value = ''
+  batchRejectDialogVisible.value = true
+}
+
+async function handleBatchReject(): Promise<void> {
+  await runBatch('reject', batchRejectComment.value)
+  batchRejectDialogVisible.value = false
+}
+
+async function handleUrge(row: UnifiedApprovalDTO): Promise<void> {
+  if (remindingId.value) return
+  remindingId.value = row.id
+  try {
+    const result = await remindApproval(row.id)
+    if (result.ok) {
+      ElMessage.success('已发送催办提醒')
+    } else if (result.status === 429) {
+      const retry = result.error.retryAfterSeconds
+      ElMessage.warning(retry ? `催办过于频繁，请 ${Math.ceil(retry / 60)} 分钟后再试` : '催办过于频繁，请稍后再试')
+    } else {
+      ElMessage.error(result.error.message || '催办失败，请重试')
+    }
+  } catch {
+    ElMessage.error('催办失败，请重试')
+  } finally {
+    remindingId.value = null
+  }
+}
 
 // Wave 2 WP3 slice 1/2: server-owned pending badge. Slice 1 drove the count
 // off active assignments; slice 2 flips the primary semantic to `unreadCount`
@@ -434,6 +613,7 @@ function loadCurrentTab() {
 
 function handleTabChange() {
   currentPage.value = 1
+  clearPendingSelection()
   loadCurrentTab()
   // Refresh badge whenever the user re-enters the 待办 tab so recent actions
   // reflect immediately.
@@ -442,17 +622,20 @@ function handleTabChange() {
 
 function handleSearch() {
   currentPage.value = 1
+  clearPendingSelection()
   loadCurrentTab()
 }
 
 function handleSourceSystemChange() {
   currentPage.value = 1
+  clearPendingSelection()
   loadCurrentTab()
   void refreshPendingBadgeCount()
 }
 
 function handlePageChange(page: number) {
   currentPage.value = page
+  clearPendingSelection()
   loadCurrentTab()
 }
 
@@ -555,7 +738,21 @@ onMounted(() => {
 .approval-center__tab-toolbar {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 12px;
+}
+
+.approval-center__selection-count {
+  margin-right: auto;
+  color: #4b5563;
+  font-size: 13px;
+}
+
+.approval-center__batch-reject-summary {
+  margin: 0 0 12px;
+  color: #4b5563;
+  font-size: 14px;
 }
 
 .approval-center__attendance-entry {

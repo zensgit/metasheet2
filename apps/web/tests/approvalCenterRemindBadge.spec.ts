@@ -109,6 +109,7 @@ vi.mock('../src/approvals/templateStore', () => ({
 }))
 
 vi.mock('../src/approvals/api', () => ({
+  dispatchAction: vi.fn().mockResolvedValue({}),
   getPendingCount: (sourceSystem?: 'all' | 'platform' | 'plm') => getPendingCountSpy(sourceSystem),
   remindApproval: (...args: unknown[]) => remindApprovalSpy(...args),
   markApprovalRead: (...args: unknown[]) => markApprovalReadSpy(...args),

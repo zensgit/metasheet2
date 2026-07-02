@@ -4065,6 +4065,31 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saved.mock.calls[0][0].triggerConfig).toEqual({ secret: 's3cret-1' })
   })
 
+  it('approval.completed: an existing rule carrying conditions disables save with the no-conditions reason', async () => {
+    // Deferred from the #3495 review: the block-reason mirror must specifically catch a conditions-bearing
+    // approval.completed rule (record-less v1 has no record context to evaluate conditions against).
+    const saved = vi.fn()
+    const rule = fakeRule({
+      id: 'rule_ac',
+      name: 'Approval done + condition',
+      triggerType: 'approval.completed',
+      triggerConfig: { templateId: 'tpl-1' },
+      actionType: 'send_notification',
+      actionConfig: { userId: 'user_1', message: 'done' },
+      actions: [{ type: 'send_notification', config: { userId: 'user_1', message: 'done' } }],
+      conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_score', operator: 'equals', value: 1 }] },
+    })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+    expect(container.querySelector('[data-field="approvalCompletedBlockReason"]')?.textContent)
+      .toContain('does not support conditions')
+    saveBtn.click()
+    expect(saved).not.toHaveBeenCalled()
+  })
+
   it('webhook.received: an existing rule with a redacted secret keeps the stored secret by omitting triggerConfig', async () => {
     const saved = vi.fn()
     const rule = fakeRule({
