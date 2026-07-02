@@ -11,8 +11,8 @@ import { Logger } from '../core/logger'
 
 const logger = new Logger('MultitableFormulaEngine')
 
-/** Regex matching multitable field references like {fld_abc123} */
-const FIELD_REF_PATTERN = /\{(fld_[a-zA-Z0-9_]+)\}/g
+/** Regex matching multitable field references like {fld_abc123} or API-generated {fld_<uuid-with-dashes>}. */
+const FIELD_REF_PATTERN = /\{(fld_[a-zA-Z0-9_-]+)\}/g
 
 /** Dry-run (#5a / design #1860): diagnostics + result for an UNSAVED formula expression. */
 export type DryRunDiagnosticKind = 'unknown_field' | 'unsupported' | 'runtime' | 'type_mismatch' | 'missing_sample'
