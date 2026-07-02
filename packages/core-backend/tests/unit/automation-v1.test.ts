@@ -3183,6 +3183,9 @@ describe('AutomationService — Rule CRUD', () => {
 
   it('updateRule returns updated rule', async () => {
     const updatedRow = makeRuleRow({ name: 'Updated' })
+    // T1-2 webhook save gate reads the existing trigger even for name-only edits so a legacy/direct-DB
+    // secret-less webhook.received rule cannot be edited forward.
+    dbExecuteTakeFirstResults.push(makeRuleRow())
     dbExecuteResults.push([updatedRow])
     const rule = await service.updateRule('atr_1', 'sheet_1', { name: 'Updated' })
     expect(rule).not.toBeNull()
