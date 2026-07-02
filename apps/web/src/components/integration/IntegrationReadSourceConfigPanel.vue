@@ -314,7 +314,10 @@ const keyFieldRequired = computed(() => draft.mode === 'single_record' || draft.
 // The S2-b runtime requires inputs.key exactly when the config declares a keyField.
 const probeNeedsKey = computed(() => showKeyField.value && draft.keyField.trim().length > 0)
 
-watch(() => draft.mode, () => {
+// Probe evidence / save result describe the config that was probed/saved — ANY draft change
+// (system switch, mode, path, containers, fieldMap, …) makes them stale, so clear both. watch on a
+// reactive object is implicitly deep.
+watch(draft, () => {
   probeEvidence.value = null
   saveResult.value = null
 })

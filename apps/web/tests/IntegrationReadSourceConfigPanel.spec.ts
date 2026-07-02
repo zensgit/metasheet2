@@ -199,6 +199,7 @@ describe('readSourceConfigs pure helpers', () => {
     })
     expect(failed).toMatchObject({ ok: false, errorCode: 'READ_SOURCE_PROBE_TIMEOUT', errorType: 'TimeoutError', timeoutReached: true })
 
+    // value-carrying strings fall back to the coarse defaults
     const hostile = normalizeReadSourceProbeEvidence({
       ok: false,
       object: 'material',
@@ -207,8 +208,36 @@ describe('readSourceConfigs pure helpers', () => {
       errorCode: 'FAILED M-001 https://k3host',
       errorType: 'Error<script>',
     })
-    expect(hostile?.errorCode).toBeUndefined()
-    expect(hostile?.errorType).toBeUndefined()
+    expect(hostile?.errorCode).toBe('READ_SOURCE_PROBE_FAILED')
+    expect(hostile?.errorType).toBe('Error')
+
+    // enum-SHAPED but outside the frozen S2-a vocabularies → fallback, never rendered verbatim
+    for (const [errorCode, errorType] of [
+      ['MATERIAL_2024_SECRET', 'AdapterValidationError'],
+      ['READ_SOURCE_PROBE_BOGUS', 'SecretLeakError'],
+    ]) {
+      const nonVocabulary = normalizeReadSourceProbeEvidence({
+        ok: false,
+        object: 'material',
+        mode: 'list_page',
+        boundedSmoke: false,
+        errorCode,
+        errorType,
+      })
+      expect(nonVocabulary?.errorCode).toBe('READ_SOURCE_PROBE_FAILED')
+      expect(nonVocabulary?.errorType).toBe('Error')
+      const text = JSON.stringify(nonVocabulary)
+      expect(text.includes(errorCode)).toBe(false)
+      expect(text.includes(errorType)).toBe(false)
+    }
+  })
+
+  it('payload assembly normalizes readPath to carry the leading slash (server byte-normalization mirror)', () => {
+    const draft = validDraft('list_page')
+    draft.readPath = 'K3API/Material/GetList'
+    expect(buildReadSourceConfigPayload(draft).readPath).toBe('/K3API/Material/GetList')
+    draft.readPath = '/K3API/Material/GetList'
+    expect(buildReadSourceConfigPayload(draft).readPath).toBe('/K3API/Material/GetList')
   })
 })
 
@@ -284,7 +313,7 @@ describe('IntegrationReadSourceConfigPanel', () => {
     setSelect(root, 'rsc-system', 'sys_1')
     await flushUi()
     setInput(root, 'rsc-object', 'material')
-    setInput(root, 'rsc-read-path', '/K3API/Material/GetDetail')
+    setInput(root, 'rsc-read-path', 'K3API/Material/GetDetail')
     setInput(root, 'rsc-key-field', 'FNumber')
     setInput(root, 'rsc-container-paths', 'Data')
     await flushUi()
@@ -534,6 +563,98 @@ describe('IntegrationReadSourceConfigPanel', () => {
     await flushUi()
     expect(approveCalls).toHaveLength(1)
     expect(approveCalls[0]).toContain('/api/integration/read-source-configs/cfg_draft/approve')
+  })
+
+  it('switching the external system clears stale probe evidence and save state', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/integration/read-source-configs')) return jsonResponse([])
+      if (url.includes('/read-source-probe')) {
+        return jsonResponse({
+          ok: true,
+          object: 'material',
+          mode: 'single_record',
+          boundedSmoke: false,
+          containers: { primary: { type: 'object', arrayLength: null } },
+          containerLocated: true,
+        })
+      }
+      return jsonResponse(null)
+    })
+    const root = mountPanel()
+    await flushUi()
+    await fillValidSingleRecordDraft(root)
+    setInput(root, 'rsc-probe-key', 'M-001')
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'rsc-probe').click()
+    await waitUntil(() => root.querySelector('[data-testid="rsc-probe-evidence"]') !== null, 'probe evidence appears')
+
+    setSelect(root, 'rsc-system', 'sys_http')
+    await flushUi()
+    expect(root.querySelector('[data-testid="rsc-probe-evidence"]')).toBeNull()
+    expect(root.querySelector('[data-testid="rsc-save-result"]')).toBeNull()
+  })
+
+  it('clamps hostile top-level error code/reason before they can reach the DOM', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/integration/read-source-configs')) return jsonResponse([])
+      if (url.includes('/read-source-probe')) {
+        return errorResponse(400, 'FAILED M-001 https://k3host', 'Value M-001 leaked')
+      }
+      return jsonResponse(null)
+    })
+    const root = mountPanel()
+    await flushUi()
+    await fillValidSingleRecordDraft(root)
+    setInput(root, 'rsc-probe-key', 'M-001')
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'rsc-probe').click()
+    await waitUntil(() => root.querySelector('[data-testid="rsc-error"]') !== null, 'error appears')
+
+    const message = q(root, 'rsc-error').textContent ?? ''
+    expect(message).toContain('READ_SOURCE_REQUEST_FAILED')
+    for (const leak of ['M-001', 'k3host', 'leaked']) {
+      expect(root.innerHTML.includes(leak), leak).toBe(false)
+    }
+  })
+
+  it('save 400 renders a coarse per-field list and drops hostile tuples', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.startsWith('/api/integration/read-source-configs') && init?.method === 'POST') {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: {
+            code: 'READ_SOURCE_CONFIG_INVALID',
+            message: 'coarse',
+            details: {
+              errors: [
+                { code: 'READ_SOURCE_ENDPOINT_NOT_RELATIVE', field: 'readPath', reason: 'not_safe_relative_path' },
+                { code: 'READ_SOURCE_KEY_FIELD_INVALID', field: 'keyField', reason: 'invalid_identifier' },
+                { code: 'READ_SOURCE_X', field: '<img src=x> M-001', reason: 'bad reason with spaces' },
+                { code: 'lower_case_code M-001', field: 'object', reason: 'ok_reason' },
+              ],
+            },
+          },
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.startsWith('/api/integration/read-source-configs')) return jsonResponse([])
+      return jsonResponse(null)
+    })
+    const root = mountPanel()
+    await flushUi()
+    await fillValidSingleRecordDraft(root)
+
+    q<HTMLButtonElement>(root, 'rsc-save').click()
+    await waitUntil(() => root.querySelector('[data-testid="rsc-error"]') !== null, 'save error appears')
+
+    const message = q(root, 'rsc-error').textContent ?? ''
+    expect(message).toContain('READ_SOURCE_CONFIG_INVALID')
+    expect(message).toContain('readPath: not_safe_relative_path')
+    expect(message).toContain('keyField: invalid_identifier')
+    for (const leak of ['<img', 'M-001', 'bad reason with spaces', 'lower_case_code']) {
+      expect(root.innerHTML.includes(leak), leak).toBe(false)
+    }
   })
 
   it('audit toggle loads values-free audit rows', async () => {

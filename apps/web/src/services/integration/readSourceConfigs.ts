@@ -112,23 +112,54 @@ export interface ReadSourceProbeEvidence {
   errorType?: string
 }
 
-// Coarse, values-free API error: code + reason enums only — submitted values never enter error text.
+export interface ReadSourceFieldError {
+  code: string
+  field: string
+  reason: string
+}
+
+// Everything lifted from a response body into error text is CLAMPED to enum-shaped patterns first —
+// a value-carrying string under code/reason/field can never reach the DOM through Error.message.
+const ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/
+const ERROR_REASON_PATTERN = /^[a-z0-9_:-]{1,80}$/
+const ERROR_FIELD_PATTERN = /^[A-Za-z0-9_.()-]{1,64}$/
+
+// Coarse, values-free API error: clamped code + reason enums only — submitted values never enter error text.
 export class ReadSourceApiError extends Error {
   code: string
   reason: string
   status: number
+  fieldErrors: ReadSourceFieldError[]
 
-  constructor(status: number, code: string, reason: string) {
-    super(`读取源接口请求失败(${code}${reason ? `/${reason}` : ''})`)
+  constructor(status: number, code: string, reason: string, fieldErrors: ReadSourceFieldError[] = []) {
+    const fieldSummary = fieldErrors.length > 0
+      ? `:${fieldErrors.map((entry) => ` ${entry.field}: ${entry.reason}`).join(';')}`
+      : ''
+    super(`读取源接口请求失败(${code}${reason ? `/${reason}` : ''})${fieldSummary}`)
     this.name = 'ReadSourceApiError'
     this.status = status
     this.code = code
     this.reason = reason
+    this.fieldErrors = fieldErrors
   }
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+// Save-time validator errors ride as details.errors = [{code, field, reason}]; keep only tuples where
+// every part matches its enum-shaped pattern (a hostile/value-carrying part drops the whole tuple).
+function clampFieldErrors(value: unknown): ReadSourceFieldError[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((entry) => {
+    if (!isPlainObject(entry)) return []
+    const { code, field, reason } = entry
+    if (typeof code !== 'string' || !ERROR_CODE_PATTERN.test(code)) return []
+    if (typeof field !== 'string' || !ERROR_FIELD_PATTERN.test(field)) return []
+    if (typeof reason !== 'string' || !ERROR_REASON_PATTERN.test(reason)) return []
+    return [{ code, field, reason }]
+  })
 }
 
 async function parseReadSourceResponse<T>(response: Response): Promise<T> {
@@ -141,9 +172,13 @@ async function parseReadSourceResponse<T>(response: Response): Promise<T> {
   if (!response.ok || payload?.ok === false) {
     const error = isPlainObject(payload?.error) ? payload.error : {}
     const details = isPlainObject(error.details) ? error.details : {}
-    const code = typeof error.code === 'string' && error.code ? error.code : 'READ_SOURCE_REQUEST_FAILED'
-    const reason = typeof details.reason === 'string' ? details.reason : ''
-    throw new ReadSourceApiError(response.status, code, reason)
+    const code = typeof error.code === 'string' && ERROR_CODE_PATTERN.test(error.code)
+      ? error.code
+      : 'READ_SOURCE_REQUEST_FAILED'
+    const reason = typeof details.reason === 'string' && ERROR_REASON_PATTERN.test(details.reason)
+      ? details.reason
+      : ''
+    throw new ReadSourceApiError(response.status, code, reason, clampFieldErrors(details.errors))
   }
   return payload?.data as T
 }
@@ -248,13 +283,16 @@ export function validateReadSourceDraft(draft: ReadSourceConfigDraft): string[] 
 // Assemble the exact S1 payload: operations pinned to ['read']; only mode-relevant optional
 // fields ride along; empty optionals are dropped, never sent as ''.
 export function buildReadSourceConfigPayload(draft: ReadSourceConfigDraft): ReadSourceConfigPayload {
+  // Mirror the server's normalizeReadSourceConfig leading-slash rule so the probe route (which
+  // requires a byte-normalized config) accepts the same payload the save route would normalize.
+  const trimmedReadPath = draft.readPath.trim()
   const payload: ReadSourceConfigPayload = {
     version: draft.version,
     systemId: draft.systemId.trim(),
     requiredKind: draft.requiredKind.trim(),
     object: draft.object.trim(),
     mode: draft.mode,
-    readPath: draft.readPath.trim(),
+    readPath: trimmedReadPath.startsWith('/') || trimmedReadPath === '' ? trimmedReadPath : `/${trimmedReadPath}`,
     readMethod: draft.readMethod,
     operations: ['read'],
   }
@@ -284,6 +322,34 @@ const EVIDENCE_CONTAINER_ALIASES = ['primary', 'header', 'lines'] as const
 const EVIDENCE_SHAPE_TYPES = new Set(['array', 'null', 'object', 'string', 'number', 'boolean', 'missing', 'other'])
 const EVIDENCE_BOOLEAN_KEYS = ['containerLocated', 'boundedSmokeExecuted', 'timeoutReached', 'capReached'] as const
 const EVIDENCE_COUNT_KEYS = ['recordCount', 'rowCount', 'sampleCount'] as const
+
+// Client-side mirrors of the FROZEN S2-a vocabularies — source of truth:
+// plugins/plugin-integration-core/lib/read-source-probe-contract.cjs
+// (READ_SOURCE_PROBE_ERROR_CODES / READ_SOURCE_PROBE_ERROR_TYPES). Anything outside these closed
+// sets — even an enum-SHAPED string — is replaced by the coarse fallback, never rendered verbatim.
+const READ_SOURCE_PROBE_ERROR_CODES = new Set([
+  'READ_SOURCE_PROBE_CONTRACT_INVALID',
+  'READ_SOURCE_PROBE_FAILED',
+  'READ_SOURCE_PROBE_AUTH_FAILED',
+  'READ_SOURCE_PROBE_CAP_REACHED',
+  'READ_SOURCE_PROBE_CONFIG_INVALID',
+  'READ_SOURCE_PROBE_CONTAINER_NOT_FOUND',
+  'READ_SOURCE_PROBE_NETWORK_FAILED',
+  'READ_SOURCE_PROBE_REJECTED',
+  'READ_SOURCE_PROBE_RESPONSE_UNRECOGNIZED',
+  'READ_SOURCE_PROBE_SHAPE_MISMATCH',
+  'READ_SOURCE_PROBE_TIMEOUT',
+])
+const READ_SOURCE_PROBE_ERROR_TYPES = new Set([
+  'Error',
+  'AbortError',
+  'FetchError',
+  'K3WiseWebApiAdapterError',
+  'ReadSourceProbeContractError',
+  'ReadSourceProbeRuntimeError',
+  'TimeoutError',
+  'TypeError',
+])
 
 function safeCount(value: unknown): number | null {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null
@@ -331,12 +397,12 @@ export function normalizeReadSourceProbeEvidence(value: unknown): ReadSourceProb
     if (count !== null) evidence[key] = count
   }
   if (!evidence.ok) {
-    if (typeof value.errorCode === 'string' && /^[A-Z0-9_]{1,80}$/.test(value.errorCode)) {
-      evidence.errorCode = value.errorCode
-    }
-    if (typeof value.errorType === 'string' && /^[A-Za-z]{1,64}$/.test(value.errorType)) {
-      evidence.errorType = value.errorType
-    }
+    evidence.errorCode = typeof value.errorCode === 'string' && READ_SOURCE_PROBE_ERROR_CODES.has(value.errorCode)
+      ? value.errorCode
+      : 'READ_SOURCE_PROBE_FAILED'
+    evidence.errorType = typeof value.errorType === 'string' && READ_SOURCE_PROBE_ERROR_TYPES.has(value.errorType)
+      ? value.errorType
+      : 'Error'
   }
   return evidence
 }
