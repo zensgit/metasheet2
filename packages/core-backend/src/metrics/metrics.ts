@@ -42,6 +42,12 @@ const approvalConflict = new client.Counter({
   labelNames: ['action'] as const
 })
 
+const automationWebhookRejectedTotal = new client.Counter({
+  name: 'automation_webhook_rejected_total',
+  help: 'Inbound automation webhook attempts rejected before execution',
+  labelNames: ['reason'] as const
+})
+
 const rbacPermCacheHits = new client.Counter({
   name: 'rbac_perm_cache_hits_total',
   help: 'RBAC permission cache hits',
@@ -462,6 +468,7 @@ registry.registerMetric(httpRequestsTotal)
 registry.registerMetric(jwtAuthFail)
 registry.registerMetric(approvalActions)
 registry.registerMetric(approvalConflict)
+registry.registerMetric(automationWebhookRejectedTotal)
 registry.registerMetric(rbacPermCacheHits)
 registry.registerMetric(rbacPermCacheMiss)
 registry.registerMetric(rbacPermCacheMisses)
@@ -604,6 +611,7 @@ export const metrics = {
   jwtAuthFail,
   approvalActions,
   approvalConflict,
+  automationWebhookRejectedTotal,
   rbacPermCacheHits,
   rbacPermCacheMiss,
   rbacPermCacheMisses,

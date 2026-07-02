@@ -17,12 +17,18 @@
  *   stats → AutomationStats (flat object)
  */
 
-import { Router, type Request, type Response } from 'express'
+import express, { Router, type Request, type Response } from 'express'
 import type { AutomationService } from '../multitable/automation-service'
 import { redactAutomationExecutionForResponse } from '../multitable/automation-log-service'
 import type { AutomationExecution, AutomationStepResult } from '../multitable/automation-executor'
 import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-contract'
 import { requireAdminRole } from '../guards/audit-integration'
+import { createRateLimiter } from '../middleware/rate-limiter'
+import {
+  INBOUND_WEBHOOK_BODY_LIMIT,
+  INBOUND_WEBHOOK_RATE_LIMIT_PER_MINUTE,
+  INBOUND_WEBHOOK_RATE_LIMIT_WINDOW_MS,
+} from '../multitable/automation-inbound-webhook'
 
 // ── A2 run-governance read mappers (boundary only — no storage change) ───────
 
@@ -36,6 +42,26 @@ const C1_TO_LEGACY: Record<string, string> = {
 }
 // C1 future states no stored row can match yet → legal filter, empty result (no contract churn at A6).
 const C1_FUTURE_STATUSES = new Set(['queued', 'suspended', 'rejected', 'errored'])
+
+type RawBodyRequest = Request & { rawBody?: Buffer }
+
+export const automationWebhookJsonParser = express.json({
+  limit: INBOUND_WEBHOOK_BODY_LIMIT,
+  strict: false,
+  verify: (req, _res, buf) => {
+    (req as RawBodyRequest).rawBody = Buffer.from(buf)
+  },
+})
+
+const inboundWebhookRateLimiter = createRateLimiter({
+  windowMs: INBOUND_WEBHOOK_RATE_LIMIT_WINDOW_MS,
+  maxRequests: INBOUND_WEBHOOK_RATE_LIMIT_PER_MINUTE,
+  keyPrefix: 'automation-inbound-webhook',
+  keyFn: (req) => (typeof req.params.ruleId === 'string' && req.params.ruleId ? req.params.ruleId : undefined),
+  onLimited: (_req, res, retryAfterSeconds) => {
+    res.status(429).json({ ok: false, error: { code: 'RATE_LIMITED', retryAfter: retryAfterSeconds } })
+  },
+})
 
 type StatusFilter =
   | { kind: 'none' }
@@ -164,6 +190,26 @@ export function createAutomationRoutes(
     }
     return svc
   }
+
+  // ── T1-2 inbound webhook trigger ───────────────────────────────────────
+
+  router.post(
+    '/automation/webhooks/:ruleId',
+    inboundWebhookRateLimiter,
+    automationWebhookJsonParser,
+    async (req: Request, res: Response) => {
+      const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
+      const svc = getService(res)
+      if (!svc) return undefined
+
+      const rawBody = (req as RawBodyRequest).rawBody
+      const result = await svc.handleInboundWebhook(ruleId, rawBody ?? Buffer.alloc(0), req.body, req.headers as Record<string, unknown>)
+      if (!result.accepted) {
+        return res.status(401).json({ ok: false })
+      }
+      return res.status(202).json({ ok: true, executionId: result.execution.id, status: result.execution.status })
+    },
+  )
 
   // ── Test run ────────────────────────────────────────────────────────────
 
