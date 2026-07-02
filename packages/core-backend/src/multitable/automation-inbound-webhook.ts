@@ -8,6 +8,7 @@ export const INBOUND_WEBHOOK_REPLAY_WINDOW_SECONDS = 300
 export const INBOUND_WEBHOOK_BODY_LIMIT = '1mb'
 export const INBOUND_WEBHOOK_RATE_LIMIT_PER_MINUTE = 60
 export const INBOUND_WEBHOOK_RATE_LIMIT_WINDOW_MS = 60_000
+export const INBOUND_WEBHOOK_REDACTED_SECRET = '<redacted>'
 
 export type InboundWebhookRejectReason =
   | 'unknown_rule'
@@ -97,8 +98,6 @@ export function verifyInboundWebhookSignature(input: {
 export function isTopLevelWebhookJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
-
-export const INBOUND_WEBHOOK_REDACTED_SECRET = '<redacted>'
 
 export function redactInboundWebhookTriggerConfig(config: Record<string, unknown>): Record<string, unknown> {
   if (!Object.prototype.hasOwnProperty.call(config, 'secret')) return config
