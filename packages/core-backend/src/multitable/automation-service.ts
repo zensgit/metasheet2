@@ -45,7 +45,12 @@ import { randomBytes } from 'crypto'
 import { AutomationLogService } from './automation-log-service'
 import { AutomationJobService } from './automation-job-service'
 import { AutomationSuspensionService, computeActionFingerprint } from './automation-suspension-service'
-import { AutomationApprovalBridgeService, type AutomationApprovalBridgeRow } from './automation-approval-bridge-service'
+import {
+  AutomationApprovalBridgeService,
+  hasPermissionCode,
+  listRbacPermissionCodes,
+  type AutomationApprovalBridgeRow,
+} from './automation-approval-bridge-service'
 import type { ApprovalCompletionEventV1 } from '../services/ApprovalCompletionEvent'
 import {
   normalizeDingTalkAutomationActionInputs,
@@ -78,7 +83,37 @@ const VALID_TRIGGER_TYPES = new Set([
   'schedule.date_field',
   'webhook.received',
   'form.submitted',
+  'approval.completed',
 ])
+
+// ── T1-3 approval.completed trigger (first-batch ballot 2026-07-01) ────────
+// Routed by REQUIRED trigger_config.templateId (cross-sheet — completion events carry no sheet/record).
+// Record-less v1: only non-record-targeting side effects may run (Q3), which also structurally breaks the
+// start_approval → approval.completed → start_approval loop (Q4a).
+const APPROVAL_COMPLETED_TRIGGER = 'approval.completed'
+const APPROVAL_COMPLETED_OUTCOMES: ReadonlySet<string> = new Set(['approved', 'rejected', 'revoked', 'cancelled'])
+const APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES: ReadonlySet<string> = new Set([
+  'send_notification',
+  'send_webhook',
+  'send_email',
+  'send_dingtalk_group_message',
+  'send_dingtalk_person_message',
+])
+const APPROVAL_COMPLETION_TRIGGER_EVENT_TYPES: readonly string[] = [
+  'approval.approved',
+  'approval.rejected',
+  'approval.revoked',
+  'approval.cancelled',
+]
+const APPROVAL_TEMPLATE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Q6: outcomes filter — omitted/invalid persisted config degrades to approved-only (fail-closed default). */
+function approvalCompletedConfiguredOutcomes(triggerConfig: Record<string, unknown>): Set<string> {
+  const raw = triggerConfig?.outcomes
+  if (!Array.isArray(raw)) return new Set(['approved'])
+  const valid = raw.filter((entry): entry is string => typeof entry === 'string' && APPROVAL_COMPLETED_OUTCOMES.has(entry))
+  return valid.length > 0 ? new Set(valid) : new Set(['approved'])
+}
 
 const LEGACY_ACTION_TYPES = [
   'notify',
@@ -748,6 +783,11 @@ export class AutomationService {
           this.handleApprovalCompletionEvent(payload).catch((err) => {
             logger.error(`Automation approval bridge handler error for ${eventType}`, err instanceof Error ? err : undefined)
           })
+          // T1-3 (Q7): fresh approval.completed rules fire for EVERY completion, independently of the
+          // bridge resume above — the two consumers share no state (a bridged approval also fires rules).
+          this.handleApprovalCompletionTrigger(payload).catch((err) => {
+            logger.error(`Automation approval.completed trigger error for ${eventType}`, err instanceof Error ? err : undefined)
+          })
         },
       )
       this.subscriptionIds.push(id)
@@ -812,6 +852,17 @@ export class AutomationService {
 
     const cronTriggerError = this.validateCronTriggerAtSave(input.triggerType, input.triggerConfig ?? null)
     if (cronTriggerError) throw new AutomationRuleValidationError(cronTriggerError)
+
+    // T1-3: approval.completed rules validate templateId/outcomes/actions/conditions + creator permission.
+    const approvalCompletedError = await this.validateApprovalCompletedRuleAtSave(
+      input.triggerType,
+      (input.triggerConfig ?? null) as Record<string, unknown> | null,
+      input.actionType,
+      actionsForValidation,
+      input.conditions ?? null,
+      input.createdBy ?? null,
+    )
+    if (approvalCompletedError) throw new AutomationRuleValidationError(approvalCompletedError)
 
     // date_field rules carry a SERVER-SET activation `effectiveAt` (= now) so the firing floor is the rule's
     // activation, not its row createdAt. Spread-then-set overwrites any client-supplied effectiveAt (no backfill bypass).
@@ -1020,6 +1071,45 @@ export class AutomationService {
         }
         updates.trigger_config = JSON.stringify(baseConfig)
         if (updates.trigger_type === undefined) updates.trigger_type = nextTriggerType
+      }
+    }
+
+    // T1-3: when the RESULTING rule is approval.completed, validate the full resulting shape (trigger config
+    // + actions + conditions + creator permission) whatever subset of fields is edited — an action-only or
+    // conditions-only edit must not smuggle a disallowed shape past the save gate.
+    if (
+      input.triggerType !== undefined
+      || input.triggerConfig !== undefined
+      || input.actionType !== undefined
+      || input.actionConfig !== undefined
+      || input.actions !== undefined
+      || input.executionMode !== undefined
+      || input.conditions !== undefined
+    ) {
+      const existingForApproval = await this.getRule(ruleId)
+      if (!existingForApproval || existingForApproval.sheet_id !== sheetId) return null
+      const nextTriggerType = input.triggerType ?? existingForApproval.trigger_type
+      if (nextTriggerType === APPROVAL_COMPLETED_TRIGGER) {
+        const nextTriggerConfig = (
+          input.triggerConfig !== undefined ? input.triggerConfig : existingForApproval.trigger_config
+        ) as Record<string, unknown> | null
+        const nextActionType = input.actionType ?? existingForApproval.action_type
+        const nextActionConfig = (input.actionConfig ?? existingForApproval.action_config) as Record<string, unknown>
+        const nextActions = input.actions !== undefined ? input.actions : existingForApproval.actions ?? null
+        const nextExecutionMode = input.executionMode !== undefined
+          ? normalizeExecutionMode(input.executionMode)
+          : existingForApproval.execution_mode ?? null
+        const nextConditions = input.conditions !== undefined ? input.conditions : existingForApproval.conditions ?? null
+        const approvalActions = collectNestedAutomationActions(nextActionType, nextActionConfig, nextActions, nextExecutionMode)
+        const approvalCompletedError = await this.validateApprovalCompletedRuleAtSave(
+          nextTriggerType,
+          nextTriggerConfig,
+          nextActionType,
+          approvalActions,
+          nextConditions,
+          existingForApproval.created_by,
+        )
+        if (approvalCompletedError) throw new AutomationRuleValidationError(approvalCompletedError)
       }
     }
 
@@ -1492,6 +1582,75 @@ export class AutomationService {
     logger.info('AutomationService shut down')
   }
 
+  /**
+   * T1-3 save-time validation for `approval.completed` rules. Returns an error string or null.
+   * Ballot decisions: Q1 templateId REQUIRED + must reference an existing approval template (null-template
+   * completions are v1 out-of-contract); Q2 the creator must hold `approvals:read` (re-checked at fire time);
+   * Q3 record-less v1 — every action (top-level AND nested) must be a non-record-targeting side effect;
+   * Q6 optional outcomes filter; Q8 conditions evaluate record data this trigger lacks — reject non-empty.
+   */
+  private async validateApprovalCompletedRuleAtSave(
+    triggerType: string,
+    triggerConfig: Record<string, unknown> | null,
+    actionType: string,
+    nestedActions: AutomationAction[],
+    conditions: ConditionGroup | null | undefined,
+    createdBy: string | null,
+  ): Promise<string | null> {
+    if (triggerType !== APPROVAL_COMPLETED_TRIGGER) return null
+    const config = triggerConfig ?? {}
+    const templateIdRaw = config.templateId
+    const templateId = typeof templateIdRaw === 'string' ? templateIdRaw.trim() : ''
+    if (!templateId) return 'trigger_config.templateId is required for approval.completed rules'
+    if (!APPROVAL_TEMPLATE_UUID_RE.test(templateId)) {
+      return 'trigger_config.templateId must reference an existing approval template'
+    }
+    const template = await this.queryFn('SELECT id FROM approval_templates WHERE id = $1', [templateId])
+    if (template.rows.length === 0) {
+      return 'trigger_config.templateId must reference an existing approval template'
+    }
+    const outcomesRaw = config.outcomes
+    if (outcomesRaw !== undefined) {
+      if (!Array.isArray(outcomesRaw) || outcomesRaw.length === 0) {
+        return 'trigger_config.outcomes must be a non-empty array when present'
+      }
+      for (const outcome of outcomesRaw) {
+        if (typeof outcome !== 'string' || !APPROVAL_COMPLETED_OUTCOMES.has(outcome)) {
+          return `trigger_config.outcomes contains an invalid outcome: ${String(outcome)}`
+        }
+      }
+    }
+    if (conditions) {
+      const nodes = Array.isArray(conditions.conditions) ? conditions.conditions : null
+      if (!nodes || nodes.length > 0) {
+        return 'approval.completed rules cannot carry conditions (no record context in v1)'
+      }
+    }
+    const actionTypes = new Set<string>([actionType, ...nestedActions.map((action) => action.type)])
+    for (const type of actionTypes) {
+      if (!APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES.has(type)) {
+        return `action ${type} is not allowed on approval.completed rules (record-less v1 allows: ${[...APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES].join(', ')})`
+      }
+    }
+    if (!createdBy) return 'approval.completed rules require an authenticated creator'
+    if (!(await this.approvalCompletedCreatorAuthorized(createdBy))) {
+      return 'approval.completed rules require the creator to hold approvals:read for the configured template'
+    }
+    return null
+  }
+
+  /** T1-3 Q2: the creator must hold `approvals:read` — checked at save AND re-checked at fire (fail-closed). */
+  private async approvalCompletedCreatorAuthorized(createdBy: string | null): Promise<boolean> {
+    if (!createdBy) return false
+    try {
+      const codes = await listRbacPermissionCodes(createdBy)
+      return hasPermissionCode(codes, 'approvals:read')
+    } catch (err) {
+      logger.warn('approval.completed creator permission check failed; denying (fail-closed)', err instanceof Error ? err : undefined)
+      return false
+    }
+  }
+
   async handleEvent(eventType: string, payload: AutomationEventPayload): Promise<void> {
     const depth = typeof payload._automationDepth === 'number' ? payload._automationDepth : 0
     if (depth >= MAX_AUTOMATION_DEPTH) {
@@ -1939,6 +2098,94 @@ export class AutomationService {
   }
 
   /**
+   * T1-3: fresh `approval.completed` rule dispatch — independent of the W6/W7 bridge resume (Q7: a bridged
+   * approval ALSO fires fresh rules; the two consumers share no state). Routed by the event's templateId
+   * (Q1 — a templateId-null completion is v1 out-of-contract: it can never match a rule; log + return).
+   * Idempotent via the T2-6 event-fire ledger keyed `approval.completed:{event.eventId}` (Q5 — eventId is
+   * already unique per instance+version+type, so no transport _eventId stamping is needed).
+   */
+  async handleApprovalCompletionTrigger(event: ApprovalCompletionEventV1): Promise<void> {
+    if (event.version !== 1 || event.source !== 'approval-product') return
+    if (!APPROVAL_COMPLETION_TRIGGER_EVENT_TYPES.includes(event.eventType)) return
+    const templateId = event.approval.templateId
+    if (!templateId) {
+      logger.debug(`approval completion ${event.eventId} carries no templateId; approval.completed rules cannot match (v1 out-of-contract)`)
+      return
+    }
+    const rules = await this.loadEnabledApprovalCompletedRules(templateId)
+    if (rules.length === 0) return
+
+    // Q4(b): thread the automation chain depth — a bridge-originated approval (started by start_approval)
+    // continues its parent chain at depth+1; a human-started approval begins a fresh chain at depth 0.
+    // (Loops are ALSO structurally broken: Q3 save-rejects start_approval and every record-writing action
+    // on approval.completed rules, so this guard is defense-in-depth, not the only stop.)
+    const parentDepth = await this.approvalBridgeAutomationDepth(event.approval.instanceId)
+    const depth = parentDepth === null ? 0 : parentDepth + 1
+    if (depth >= MAX_AUTOMATION_DEPTH) {
+      logger.warn(`Automation recursion guard triggered (depth=${depth}) for approval.completed on template ${templateId}`)
+      return
+    }
+
+    this.kickEventDedupLedgerSweepIfDue(Date.now())
+    const outcome = event.transition.toStatus
+    for (const rule of rules) {
+      if (!approvalCompletedConfiguredOutcomes(rule.trigger_config).has(outcome)) continue
+      // Q2 fire-time re-check: deny + skip when the creator no longer holds approvals:read.
+      if (!(await this.approvalCompletedCreatorAuthorized(rule.created_by))) {
+        logger.warn(`approval.completed rule ${rule.id} skipped: creator lacks approvals:read at fire time`)
+        continue
+      }
+      try {
+        const claimed = await this.claimEventDelivery(rule.id, `approval.completed:${event.eventId}`)
+        if (!claimed) continue
+        // Q3 record-less payload: the approval event rides along as the trigger event; actions are
+        // save-restricted to non-record-targeting side effects, so the empty record context is never read.
+        const payload: AutomationEventPayload & Record<string, unknown> = {
+          sheetId: rule.sheet_id,
+          recordId: '',
+          data: {},
+          actorId: event.actor?.id ?? null,
+          _automationDepth: depth,
+          eventId: event.eventId,
+          eventType: event.eventType,
+          occurredAt: event.occurredAt,
+          approval: event.approval,
+          transition: event.transition,
+          requester: event.requester,
+        }
+        await this.executeRule(toExecutorRule(rule), payload)
+      } catch (err) {
+        logger.error(`approval.completed rule ${rule.id} failed`, err instanceof Error ? err : undefined)
+      }
+    }
+  }
+
+  /**
+   * Q4(b) helper: the parent automation depth for a bridge-originated approval instance, or null when no
+   * bridge exists (human/API-started approval — a fresh chain). A bridge whose trigger_event carries no
+   * depth counts as depth 0 (chain start). Lookup errors degrade to null — safe because approval.completed
+   * rules structurally cannot start approvals or write records (Q3), so no loop can form either way.
+   */
+  private async approvalBridgeAutomationDepth(instanceId: string): Promise<number | null> {
+    try {
+      const result = await this.queryFn(
+        `SELECT trigger_event FROM multitable_automation_approval_bridges
+          WHERE approval_instance_id = $1
+          ORDER BY created_at DESC LIMIT 1`,
+        [instanceId],
+      )
+      if (result.rows.length === 0) return null
+      const triggerEvent = (result.rows[0] as { trigger_event?: unknown }).trigger_event
+      if (!triggerEvent || typeof triggerEvent !== 'object' || Array.isArray(triggerEvent)) return 0
+      const rawDepth = (triggerEvent as Record<string, unknown>)._automationDepth
+      return typeof rawDepth === 'number' && Number.isFinite(rawDepth) ? rawDepth : 0
+    } catch (err) {
+      logger.warn('approval.completed bridge depth lookup failed; treating as a fresh chain', err instanceof Error ? err : undefined)
+      return null
+    }
+  }
+
+  /**
    * W7-1 approval-result backwrite: write the DECLARED fixed outcome→field mapping (from the
    * start_approval action's `resultWriteback`) onto the SOURCE record, using values from the completion
    * event ONLY (never user-templated strings — that keeps the write path values-constrained, the whole
@@ -2150,6 +2397,22 @@ export class AutomationService {
       .orderBy('created_at', 'asc')
       .execute()
 
+    return rows.map((r) => this.mapRow(r))
+  }
+
+  /**
+   * T1-3 Q1: cross-sheet routing for approval.completed rules by REQUIRED trigger_config.templateId.
+   * JSONB expression filter with no index in v1 by design (small table); revisit only on a perf signal.
+   */
+  async loadEnabledApprovalCompletedRules(templateId: string): Promise<AutomationRule[]> {
+    const rows = await this.db
+      .selectFrom('automation_rules')
+      .selectAll()
+      .where('trigger_type', '=', APPROVAL_COMPLETED_TRIGGER)
+      .where('enabled', '=', true)
+      .where(sql<string>`trigger_config->>'templateId'`, '=', templateId)
+      .orderBy('created_at', 'asc')
+      .execute()
     return rows.map((r) => this.mapRow(r))
   }
 
