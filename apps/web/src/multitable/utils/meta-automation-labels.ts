@@ -128,6 +128,9 @@ export type AutomationLabelKey =
   | 'actionConfig.emailSubjectPlaceholder'
   | 'actionConfig.bodyTemplate'
   | 'actionConfig.emailBodyPlaceholder'
+  | 'actionConfig.deleteRecordWarning'
+  | 'actionConfig.deleteRecordAck'
+  | 'actionConfig.deleteRecordTestRunHint'
   | 'actionConfig.lockRecord'
   | 'actionConfig.waitForCallbackHint'
   | 'conditionBranch.readOnly'
@@ -666,6 +669,18 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'conditionBranch.addBranch': { en: '+ Branch', zh: '+ 分支' },
   'conditionBranch.default': { en: 'Default branch (no condition)', zh: '默认分支（无条件）' },
   'conditionBranch.addDefault': { en: '+ Default branch', zh: '+ 默认分支' },
+  'actionConfig.deleteRecordWarning': {
+    en: 'Deletes the trigger record in this table. This is permanent and cannot be undone.',
+    zh: '将删除本表中的触发记录。该操作是永久性的，无法撤销。',
+  },
+  'actionConfig.deleteRecordAck': {
+    en: 'I understand this permanently deletes the trigger record.',
+    zh: '我确认此动作会永久删除触发记录。',
+  },
+  'actionConfig.deleteRecordTestRunHint': {
+    en: 'Test Run uses a synthetic record and will not delete a real record.',
+    zh: '测试运行使用合成记录，不会删除真实记录。',
+  },
   'parallelBranch.readOnly': {
     en: 'This parallel branch rule uses constructs not editable in this version — read-only (save is disabled to avoid flattening it).',
     zh: '该并行分支规则包含本版本不可编辑的结构 —— 只读（已禁用保存以避免压扁丢失）。',
@@ -879,6 +894,8 @@ export function automationActionTypeLabel(type: AutomationActionType | UnknownAu
       return isZh ? '发送钉钉群消息' : 'Send DingTalk group message'
     case 'send_dingtalk_person_message':
       return isZh ? '发送钉钉个人消息' : 'Send DingTalk person message'
+    case 'delete_record':
+      return isZh ? '删除记录' : 'Delete record'
     case 'lock_record':
       return isZh ? '锁定记录' : 'Lock record'
     case 'wait_for_callback':

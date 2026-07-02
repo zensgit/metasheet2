@@ -1864,6 +1864,7 @@ function describeActionType(actionType: AutomationActionType, actionConfig: Reco
     case 'update_record':
     case 'create_record':
     case 'send_webhook':
+    case 'delete_record':
     case 'lock_record':
       return automationCardActionSummary(actionType, '', isZh.value)
     case 'send_dingtalk_group_message':

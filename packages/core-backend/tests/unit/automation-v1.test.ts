@@ -2636,6 +2636,26 @@ describe('AutomationService — Rule CRUD', () => {
     })).rejects.toThrow(/resultWriteback\.onNonApproved must be a boolean/)
   })
 
+  it('T0-3: createRule rejects malformed cross-base delete_record and lock_record target triples', async () => {
+    await expect(service.createRule('sheet_1', {
+      name: 'Half-addressed delete', triggerType: 'record.created', triggerConfig: {},
+      actionType: 'delete_record',
+      actionConfig: { targetBaseId: 'base_b', targetSheetId: 'sheet_b' },
+      actions: [{ type: 'delete_record', config: { targetBaseId: 'base_b', targetSheetId: 'sheet_b' } }],
+      createdBy: 'user_1',
+    })).rejects.toThrow(/actionConfig: cross-base delete_record requires targetSheetId and targetRecordId/)
+
+    await expect(service.createRule('sheet_1', {
+      name: 'Half-addressed lock', triggerType: 'record.created', triggerConfig: {},
+      actionType: 'update_record',
+      actionConfig: { fields: { status: 'ok' } },
+      actions: [{ type: 'lock_record', config: { locked: true, targetBaseId: 'base_b', targetRecordId: 'rec_b' } }],
+      createdBy: 'user_1',
+    })).rejects.toThrow(/actions\[0\]\.config: cross-base lock_record requires targetSheetId and targetRecordId/)
+
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
   it('A6-3-1: createRule accepts condition_branch only with workflow_job_v1', async () => {
     const action = {
       type: 'condition_branch',
@@ -3245,6 +3265,23 @@ describe('AutomationService — Rule CRUD', () => {
     const promise = service.updateRule('atr_1', 'sheet_1', { executionMode: null })
 
     await expect(promise).rejects.toThrow('condition_branch/start_approval/parallel_branch requires execution_mode workflow_job_v1')
+    expect(dbExecuteResults).toHaveLength(0)
+  })
+
+  it('T0-3: updateRule rejects merged malformed cross-base delete_record config before update', async () => {
+    dbExecuteTakeFirstResults.push(makeRuleRow({
+      action_type: 'update_record',
+      action_config: { fields: { status: 'before' } },
+      actions: [{ type: 'update_record', config: { fields: { status: 'before' } } }],
+    }))
+
+    const promise = service.updateRule('atr_1', 'sheet_1', {
+      actionType: 'delete_record',
+      actionConfig: { targetBaseId: 'base_b', targetSheetId: 'sheet_b' },
+      actions: [{ type: 'delete_record', config: { targetBaseId: 'base_b', targetSheetId: 'sheet_b' } }],
+    })
+
+    await expect(promise).rejects.toThrow(/actionConfig: cross-base delete_record requires targetSheetId and targetRecordId/)
     expect(dbExecuteResults).toHaveLength(0)
   })
 

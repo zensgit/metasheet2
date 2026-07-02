@@ -1012,6 +1012,7 @@ export type AutomationActionType =
   | 'send_email'
   | 'send_dingtalk_group_message'
   | 'send_dingtalk_person_message'
+  | 'delete_record'
   | 'lock_record'
   | 'wait_for_callback'
   | 'condition_branch'

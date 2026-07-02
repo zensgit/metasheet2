@@ -256,7 +256,7 @@
           <div class="meta-rule-editor__section-title">{{ automationLabel('editor.actions', isZh) }} <span class="meta-rule-editor__hint">{{ automationLabel('editor.actionStepHint', isZh) }}</span></div>
           <div
             v-for="(action, idx) in draft.actions"
-            :key="idx"
+            :key="action.draftId"
             class="meta-rule-editor__action-row"
             :data-action-index="idx"
           >
@@ -958,6 +958,22 @@
               </label>
             </div>
 
+            <!-- delete_record config (T0-3): same-base trigger-record only; acknowledgement is UI-only. -->
+            <div v-if="action.type === 'delete_record'" class="meta-rule-editor__action-config" data-action-config="delete_record">
+              <div class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="deleteRecordWarning">
+                {{ automationLabel('actionConfig.deleteRecordWarning', isZh) }}
+              </div>
+              <label class="meta-rule-editor__toggle-label">
+                <input
+                  type="checkbox"
+                  data-field="deleteRecordAck"
+                  :checked="isDeleteRecordAcknowledged(action)"
+                  @change="setDeleteRecordAcknowledged(action, ($event.target as HTMLInputElement).checked)"
+                />
+                {{ automationLabel('actionConfig.deleteRecordAck', isZh) }}
+              </label>
+            </div>
+
             <!-- wait_for_callback config (A6-2: info-only, ZERO params — the suspend point; no
                  webhook-URL / timer / manual-task fields. An admin resumes from the runs detail.) -->
             <div v-if="action.type === 'wait_for_callback'" class="meta-rule-editor__action-config" data-action-config="wait_for_callback">
@@ -1117,6 +1133,9 @@
           <div v-if="savedRuleHasDingTalkActions" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="dingtalkTestRunWarning">
             {{ automationLabel('testRun.warning', isZh) }}
           </div>
+          <div v-if="hasDeleteRecordAction" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="deleteRecordTestRunHint">
+            {{ automationLabel('actionConfig.deleteRecordTestRunHint', isZh) }}
+          </div>
           <div v-if="!props.rule?.id" class="meta-rule-editor__hint" data-field="testRunUnsavedHint">
             {{ automationLabel('testRun.unsavedHint', isZh) }}
           </div>
@@ -1269,8 +1288,10 @@ type DraftActionConfig = Record<string, unknown> & {
 }
 
 interface DraftAction {
+  draftId: string
   type: AutomationActionType
   config: DraftActionConfig
+  persisted?: boolean
 }
 
 interface Draft {
@@ -1345,6 +1366,9 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   'send_email',
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
+  // T0-3: expose only the safe authoring shape — same-base trigger-record delete, config: {}.
+  // Cross-base delete remains backend/runtime-only and is not surfaced in this editor.
+  'delete_record',
   'wait_for_callback',
   'condition_branch',
   'parallel_branch',
@@ -1778,9 +1802,19 @@ function emptyDraft(): Draft {
     triggerType: 'record.created',
     triggerConfig: {},
     conditions: { conjunction: 'AND', conditions: [] },
-    actions: [{ type: 'update_record', config: defaultConfigForActionType('update_record') }],
+    actions: [createDraftAction('update_record')],
     executionMode: null,
   }
+}
+
+let draftActionIdSequence = 0
+function createDraftAction(
+  type: AutomationActionType,
+  config: DraftActionConfig = defaultConfigForActionType(type),
+  persisted = false,
+): DraftAction {
+  draftActionIdSequence += 1
+  return { draftId: `draft-action-${draftActionIdSequence}`, type, config, persisted }
 }
 
 function draftConfigFromAction(type: AutomationActionType, config: Record<string, unknown>): DraftActionConfig {
@@ -1909,13 +1943,14 @@ function draftFromRule(rule: AutomationRule): Draft {
     triggerConfig: { ...rule.triggerConfig, ...(rule.trigger?.config ?? {}) },
     conditions: conditionGroupFromRule(rule.conditions),
     actions: rule.actions && rule.actions.length
-      ? rule.actions.map((a) => ({ type: a.type, config: draftConfigFromAction(a.type, a.config) }))
-      : [{ type: rule.actionType, config: draftConfigFromAction(rule.actionType, rule.actionConfig) }],
+      ? rule.actions.map((a) => createDraftAction(a.type, draftConfigFromAction(a.type, a.config), true))
+      : [createDraftAction(rule.actionType, draftConfigFromAction(rule.actionType, rule.actionConfig), true)],
     executionMode: rule.executionMode ?? null,
   }
 }
 
 const draft = ref<Draft>(emptyDraft())
+const deleteRecordAcknowledgements = ref<Record<string, boolean>>({})
 const conditionEditorEntries = computed(() => collectConditionEditorEntries(draft.value.conditions.conditions))
 
 // A6-2b/A6-3-2a/A6-3-4 + start_approval (W6-1): wait_for_callback, condition_branch, parallel_branch, AND
@@ -1928,6 +1963,7 @@ const JOB_MODE_REQUIRING_ACTION_TYPES: AutomationActionType[] = ['wait_for_callb
 const requiresJobMode = computed(() =>
   draft.value.actions.some((a) => JOB_MODE_REQUIRING_ACTION_TYPES.includes(a.type)),
 )
+const hasDeleteRecordAction = computed(() => draft.value.actions.some((a) => a.type === 'delete_record'))
 
 // A6-3-2a: empty drafts for a fresh condition_branch action.
 function createEmptyBranchActionDraft(): BranchActionDraft {
@@ -2137,6 +2173,7 @@ watch(
   async (v) => {
     if (v) {
       draft.value = props.rule ? draftFromRule(props.rule) : emptyDraft()
+      resetDeleteRecordAcknowledgements()
       error.value = ''
       saving.value = false
       dingTalkDestinationsError.value = ''
@@ -2165,6 +2202,25 @@ watch(
   },
   { immediate: true },
 )
+
+function resetDeleteRecordAcknowledgements(): void {
+  const next: Record<string, boolean> = {}
+  for (const action of draft.value.actions) {
+    if (action.type === 'delete_record') next[action.draftId] = action.persisted === true
+  }
+  deleteRecordAcknowledgements.value = next
+}
+
+function isDeleteRecordAcknowledged(action: DraftAction): boolean {
+  return deleteRecordAcknowledgements.value[action.draftId] === true
+}
+
+function setDeleteRecordAcknowledged(action: DraftAction, checked: boolean): void {
+  deleteRecordAcknowledgements.value = {
+    ...deleteRecordAcknowledgements.value,
+    [action.draftId]: checked,
+  }
+}
 
 const canSave = computed(() => {
   if (!draft.value.name.trim()) return false
@@ -2202,6 +2258,7 @@ const canSave = computed(() => {
       const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
       if (!recipients.length || !subjectTemplate || !bodyTemplate) return false
     }
+    if (action.type === 'delete_record' && !isDeleteRecordAcknowledged(action)) return false
   }
   return true
 })
@@ -2231,7 +2288,7 @@ function removeConditionNode(path: ConditionPath) {
 
 function addAction() {
   if (draft.value.actions.length >= 3) return
-  draft.value.actions.push({ type: 'update_record', config: defaultConfigForActionType('update_record') })
+  draft.value.actions.push(createDraftAction('update_record'))
 }
 
 function parseUserIdsText(value: unknown): string[] {
@@ -2811,6 +2868,8 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
         publicFormViewId: '',
         internalViewId: '',
       }
+    case 'delete_record':
+      return {}
     case 'lock_record':
       return { locked: true }
     case 'wait_for_callback':
@@ -2822,11 +2881,24 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
 
 function onDraftActionTypeChange(action: DraftAction) {
   action.config = defaultConfigForActionType(action.type)
+  action.persisted = false
+  if (action.type === 'delete_record') {
+    setDeleteRecordAcknowledged(action, false)
+  } else if (deleteRecordAcknowledgements.value[action.draftId] !== undefined) {
+    const next = { ...deleteRecordAcknowledgements.value }
+    delete next[action.draftId]
+    deleteRecordAcknowledgements.value = next
+  }
   if (JOB_MODE_REQUIRING_ACTION_TYPES.includes(action.type)) draft.value.executionMode = 'workflow_job_v1'
 }
 
 function removeAction(idx: number) {
-  draft.value.actions.splice(idx, 1)
+  const [removed] = draft.value.actions.splice(idx, 1)
+  if (removed?.draftId && deleteRecordAcknowledgements.value[removed.draftId] !== undefined) {
+    const next = { ...deleteRecordAcknowledgements.value }
+    delete next[removed.draftId]
+    deleteRecordAcknowledgements.value = next
+  }
 }
 
 function moveAction(idx: number, dir: number) {
@@ -2935,6 +3007,9 @@ function buildPayload(): Partial<AutomationRule> {
           fields: fieldPairsToRecord(action.config.fieldUpdates),
         },
       }
+    }
+    if (action.type === 'delete_record') {
+      return { type: action.type, config: {} }
     }
     if (action.type === 'start_approval') {
       // Assemble the {key: value} formDataMapping the backend requires from the editable rows. templateId +

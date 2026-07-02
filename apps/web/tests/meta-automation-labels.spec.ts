@@ -58,9 +58,20 @@ describe('meta-automation-labels', () => {
     expect(automationActionTypeLabel('send_dingtalk_group_message', true)).toBe('发送钉钉群消息')
     expect(automationActionTypeLabel('parallel_branch', false)).toBe('Parallel branch')
     expect(automationActionTypeLabel('parallel_branch', true)).toBe('并行分支')
+    expect(automationActionTypeLabel('delete_record', false)).toBe('Delete record')
+    expect(automationActionTypeLabel('delete_record', true)).toBe('删除记录')
     expect(automationActionTypeLabel('notify', true)).toBe('发送通知')
     expect(automationActionTypeLabel('update_field', true)).toBe('更新字段值')
     expect(automationActionTypeLabel('future_action', true)).toBe('future_action')
+  })
+
+  it('localizes destructive delete_record authoring warnings', () => {
+    expect(automationLabel('actionConfig.deleteRecordWarning', false)).toContain('permanent')
+    expect(automationLabel('actionConfig.deleteRecordAck', false)).toContain('permanently deletes')
+    expect(automationLabel('actionConfig.deleteRecordTestRunHint', false)).toContain('will not delete a real record')
+    expect(automationLabel('actionConfig.deleteRecordWarning', true)).toContain('永久')
+    expect(automationLabel('actionConfig.deleteRecordAck', true)).toContain('永久删除')
+    expect(automationLabel('actionConfig.deleteRecordTestRunHint', true)).toContain('不会删除真实记录')
   })
 
   it('explains required WorkflowJob mode for wait and branch actions', () => {
