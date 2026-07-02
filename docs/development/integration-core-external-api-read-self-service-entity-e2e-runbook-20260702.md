@@ -80,13 +80,15 @@ boundedSmoke=true
 
 ### K3-kind constraint hint (erp:k3-wise-webapi systems)
 
-The K3 WISE adapter hard-restricts read objects: `single_record` / `list_page`
-accept only `object=material`; `detail_with_lines` accepts only
-`object=material-bom`; detail-read key fields are limited to the FNumber family
-(`FNumber` recommended). A config outside these bounds will save and approve
-normally but the probe/read will fail with a coarse
-`READ_SOURCE_PROBE_REJECTED` — that is the adapter scope guard, not an S1
-validation problem.
+The K3 WISE adapter hard-restricts read objects and key fields:
+
+- `single_record`: `object=material`, `keyField=FNumber`;
+- `list_page`: `object=material`, no runtime key by default;
+- `detail_with_lines`: `object=material-bom`, `keyField=FBillNo`.
+
+A config outside these bounds will save and approve normally but the probe/read
+will fail with a coarse `READ_SOURCE_PROBE_REJECTED` — that is the adapter
+scope guard, not an S1 validation problem.
 
 ## Test Steps
 
