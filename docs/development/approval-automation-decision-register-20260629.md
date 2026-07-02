@@ -1,28 +1,33 @@
 # Approval & Process-Automation — decision register (2026-06-29)
 
-> The **actionable gate** to completing the dev-plan (#3379). A code-grounded design-lock workflow
-> authored + adversarially reviewed all 17 heavy/decision rungs; **every one came back owner-gated**
+> The **original actionable gate** to completing the dev-plan (#3379). In the 2026-06-29 pass, a code-grounded
+> design-lock workflow authored + adversarially reviewed all 17 heavy/decision rungs; **every one came back owner-gated**
 > (zero decision-clean), surfacing the open product/security/migration decisions below — each with a
 > **proposed default**. To unblock a rung: approve its defaults (or override), then it can be built
 > design-lock-first. Full design-lock sections: `approval-automation-design-lock-pack-20260629.md`.
 > Three rungs (T1-3, T2-4, T3-6) carry an anchor caveat — verify cited code before building.
+>
+> **As-built update:** this register is the original decision record, not the current open queue. Several rows
+> have since been ratified and shipped: R1 default-closed egress containment (`#3437`/`#3443`/`#3447`/`#3451`),
+> T2-6 (`#3450`), T1-3 (`#3467`), T1-1 slice-2 transfer/jump (`#3468`), T3-4 (`#3474`), and T0-3 (`#3477`).
+> Remaining owner-gated rows still use this register as their decision source.
 
 ## Classification
 
 | Rung | Title | Size | Open decisions | Anchors confirmed |
 |---|---|---|---|---|
-| T0-3 | Expose delete_record in the rule editor (safely) | S | 7 | yes |
-| T1-1 | Node-level SLA + timeout actions | M | 8 | yes |
+| T0-3 | Expose delete_record in the rule editor (safely) | S | 0 — shipped #3477 | yes |
+| T1-1 | Node-level SLA + timeout actions | M | slice-1/slice-2 shipped; terminal auto_* still gated | yes |
 | T1-2 | Inbound webhook endpoint (signed, audited) | M | 9 | yes |
-| T1-3 | approval.* automation trigger | M | 8 | ⚠️ partial |
+| T1-3 | approval.* automation trigger | M | 0 — shipped #3467 | ⚠️ partial, then verified in build |
 | T1-4 | Node field-permissions readonly/editable + authoring UI | M | 4 | yes |
 | T2-1+2 | Scoped approval administrators + handover (bulk reassign) | L | 10 | yes |
 | T2-3 | Person/team process analytics | M | 8 | yes |
-| T2-4 | N-of-M threshold voting node mode | M | 8 | ⚠️ partial |
+| T2-4 | N-of-M threshold voting node mode | M | 0 — shipped + re-entry fix #3406/#3446 | ⚠️ partial, then verified in build |
 | T2-5 | Timezone-aware scheduling | M | 7 | yes |
-| T2-6 | Event-driven dedup ledger | M | 8 | yes |
-| R1 | BPMN runtime governance + SSRF containment | M | 7 | yes |
-| T3-4 | W7 rejection backwrite | M | 6 | yes |
+| T2-6 | Event-driven dedup ledger | M | 0 — shipped #3450 | yes |
+| R1 | BPMN runtime governance + SSRF containment | M | default-closed runtime shipped; destination authorization remains governance-only | yes |
+| T3-4 | W7 rejection backwrite | M | 0 — shipped #3474 | yes |
 | T3-5 | W7 cross-base backwrite | L | 5 | yes |
 | T3-2 | Business/work-day calendar wired to approval SLA | L | 10 | yes |
 | T3-3 | Handwritten signature / compliance | M | 9 | yes |
@@ -385,4 +390,3 @@
   - **proposed default:** Project ALL terminal outcomes into the neutral read-model (rejected/revoked/cancelled included). Leave the legacy W7 source-record write-back approved-only until the separate #3 product decision lands.
 - **Q10.** Base placement / multi-tenancy: which base owns the managed approval-object sheet — one global system sheet, one per template family, or per source base? Is cross-base projection in or out?
   - **proposed default:** One system-owned base/sheet per template family, provisioned lazily on first projection. Cross-base projection is a non-goal for this rung.
-

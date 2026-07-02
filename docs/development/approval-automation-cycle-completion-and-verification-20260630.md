@@ -3,10 +3,16 @@
 > A code-grounded re-audit of the line against the approval-line baseline `f14be042e` (origin/main may have
 > advanced with unrelated commits since — that does not affect these conclusions), the decision-clean work
 > completed this cycle (with verification), one newly-found latent defect surfaced for a decision, and the
-> remaining backlog with a recommended GO order. **Honest headline:** the *ratified-buildable* feature set is
-> exhausted — every remaining rung is owner-gated by an open security/permission/destructive/product/migration
+> remaining backlog with a recommended GO order. **Historical headline at that baseline:** the *ratified-buildable*
+> feature set was exhausted — every then-remaining rung was owner-gated by an open security/permission/destructive/product/migration
 > decision (re-confirmed against code, not just docs). So this cycle completes the **decision-clean hardenings**
 > (which need no owner decision) and teees up the gated rungs for a one-word GO.
+>
+> **As-built update after follow-on rungs shipped.** This 2026-06-30 audit is historical for its cycle, but the
+> open items it surfaced have since moved: T2-4 re-entry quorum bypass shipped in `#3446` (+ cascade regression
+> lock `#3453`), R1 default-closed egress containment shipped through `#3437`/`#3443`/`#3447`/`#3451`, T2-6
+> shipped in `#3450`, and the first-batch runtime shipped in `#3467`/`#3468`/`#3474`/`#3477`. The current queue
+> is the later lane plan, not the original 13-rung list below.
 
 ## 1. Where the line stands (code-verified, not doc-trusted)
 
@@ -24,9 +30,10 @@ A 4-reader audit verified each capability against the actual code (greps + file:
 | T0-2 W7 resultWriteback **backend** | #3384 | approved-path backwrite + `statusField/approverField/completedAtField` validation (automation-service.ts) |
 | R2 redaction (public path) / R3 editor | #3382 | bridge `redactHiddenFormFields`; `webhook.received` removed from the editor selectable set |
 
-**Partial-by-design / latent (verified):** T1-1 slice-2 (transfer/jump/auto_* still publish-rejected); R2 is a
-*latent* gap — `toUnifiedApprovalDTO` returns `form_snapshot` verbatim, redaction lives only on the public
-bridge path; `webhook.received` remains a runtime-inert trigger enum entry (kept until T1-2).
+**Partial-by-design / latent at the time (verified then, updated now):** T1-1 slice-2 transfer/jump has since
+shipped (`#3468`) while `auto_approve`/`auto_reject` remain env-gated/inert terminal effects. R2 was a *latent*
+gap — `toUnifiedApprovalDTO` returns `form_snapshot` verbatim, redaction lives only on the public bridge path;
+`webhook.received` remains a runtime-inert trigger enum entry (kept until T1-2).
 
 ## 2. Completed this cycle (decision-clean — no owner decision required)
 
@@ -47,7 +54,7 @@ All three are pure correctness/robustness on shipped code, built + verified, mer
 
 **Cycle verification total:** tsc 0 · 39 date-reminder unit · 16 approval-metrics unit · 19 + 3 real-DB green.
 
-## 3. Newly-found latent defect — surfaced for a decision (NOT auto-fixed)
+## 3. Newly-found latent defect — later fixed
 
 **T2-4 threshold re-entry quorum bypass** *(reachability self-verified, not reader-trusted).* The threshold
 tally `COUNT(DISTINCT actor_id) … WHERE instance_id=$1 AND action='approve' AND metadata->>'nodeKey'=$2`
@@ -59,35 +66,35 @@ then someone 退回s back to it, is re-satisfied by a **single** fresh approval 
 reads `priorDistinct(A,B)=2 + 1`). *(Admin-jump can't trigger this — `isReachableDownstream` only goes
 forward; the return path is the reachable vector.)* A quorum bypass in a voting mechanism — security-relevant.
 
-This is **owner-gated** because the fix is a vote-scoping *semantic* choice, not a one-liner. **Proposed
-default:** scope the tally to approvals at/after the node's latest activation (`node_breakdown[].activatedAt`
-is already recorded), and reconcile with add-sign/reduce-sign. I can land it as a fail-first real-DB test
-(RED on current code) + the fix in one PR on your GO. *(Analogous to the date-field P2 you caught — a real
-bug found by review, held for a ratified fix rather than guessed.)*
+**As-built:** fixed in `#3446` by scoping the tally to the current node-entry round with
+`to_version >= <re-entry cutoff>`; `#3453` added the same-version cascade regression lock that preserves the
+required `>=` boundary. The earlier proposed `node_breakdown[].activatedAt` direction was not what shipped.
 
-## 4. The remaining backlog is entirely owner-gated — recommended GO order
+## 4. Original recommended GO order — superseded by later shipped slices
 
-All 13 un-shipped rungs were re-validated against code: each still carries a live open decision (none entered
-the ratify→ship pipeline). Recommended order for your next GO, each one design-lock-first:
+At the time, all 13 un-shipped rungs were re-validated against code. Several have since shipped; the list below
+is retained as historical decision context, not current queue state.
 
-1. **R1 — BPMN governance + SSRF containment** *(LIVE EXPOSURE — do first).* `/api/workflow` is mounted
+1. ~~**R1 — BPMN governance + SSRF containment** *(LIVE EXPOSURE — do first).* `/api/workflow` is mounted
    `authenticate`-only (no RBAC) and `BPMNWorkflowEngine` runs a process-supplied `fetch()` (authenticated
-   SSRF). This is an exposure, not a feature gap. **Recommend GO #1.**
-2. **T0-3 — expose `delete_record` in the editor** *(cheapest, S).* Executor exists; needs confirm + permission
-   + anti-misdelete + same-base-only + the `validateCrossBaseWriteConfig` delete/lock extension.
-3. **T2-6 — event-driven dedup ledger** *(substrate).* `record.*`/`form.submitted` rules re-run side effects on
-   redelivery; this is the idempotency substrate several later rungs lean on. Do just before T1-3.
-4. **T1-3 — `approval.*` automation trigger** *(unblocks the most).* Exposes the completion event as a
-   first-class rule trigger; carries the routing-key / templateId-null / loop-depth / cross-tenant decisions.
-5. **T1-1 slice-2 — transfer/jump timeout effects** — the transfer + direct-jump core is decision-clean against
+   SSRF). This is an exposure, not a feature gap.~~ **Shipped default-closed** through `#3437`/`#3443`/`#3447`/`#3451`;
+   live destination authorization remains governance-only.
+2. ~~**T0-3 — expose `delete_record` in the editor** *(cheapest, S).* Executor exists; needs confirm + permission
+   + anti-misdelete + same-base-only + the `validateCrossBaseWriteConfig` delete/lock extension.~~ **Shipped `#3477`.**
+3. ~~**T2-6 — event-driven dedup ledger** *(substrate).* `record.*`/`form.submitted` rules re-run side effects on
+   redelivery; this is the idempotency substrate several later rungs lean on. Do just before T1-3.~~ **Shipped `#3450`.**
+4. ~~**T1-3 — `approval.*` automation trigger** *(unblocks the most).* Exposes the completion event as a
+   first-class rule trigger; carries the routing-key / templateId-null / loop-depth / cross-tenant decisions.~~
+   **Shipped `#3467`.**
+5. ~~**T1-1 slice-2 — transfer/jump timeout effects** — the transfer + direct-jump core is decision-clean against
    the ratified T1-1 defaults (config `transferToUserId`/`jumpToNodeKey`, actor `system:approval-timeout`,
    `metadata.timeoutEffect`, reuse `buildTransferAssignments`/`resolveReturnToNode`; parallel-region already
    rejected; direct jump-to-terminal already blocked). **One open carve-out:** an *indirect* jump to an
    approval node that then auto-completes (e.g. `mergeWithRequester`) cascades to terminal — effectively a
    timeout auto-approve. Proposed default: treat that cascade as a terminal effect → keep it behind the same
-   `auto_approve`/`auto_reject` env gate. Design-lock that carve-out, then it's GO-ready.
+   `auto_approve`/`auto_reject` env gate.~~ **Transfer/jump shipped `#3468`; terminal auto_* remains gated.**
 6. Then **T1-4** (node field-perms authoring + readonly/editable runtime; dep: edit-form-at-node) ·
-   **T3-4** (W7 rejection backwrite; product call: write-then-fail vs write-then-continue) ·
+   ~~**T3-4** (W7 rejection backwrite; product call: write-then-fail vs write-then-continue)~~ **shipped `#3474`** ·
    **T3-5** (W7 cross-base; security arc through the cross-base write gate) ·
    **T1-2** (inbound webhook; signature/replay/audit contract) ·
    **T2-1+2** (scoped admins + handover; permission model + migration) ·
