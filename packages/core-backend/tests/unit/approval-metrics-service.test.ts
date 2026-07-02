@@ -222,7 +222,9 @@ describe('ApprovalMetricsService', () => {
       expect(normalize(clearSql)).toContain('UPDATE approval_metrics')
       expect(normalize(clearSql)).toContain('current_node_deadline_at = NULL')
       expect(normalize(clearSql)).toContain('current_node_timeout_effect = NULL')
-      expect(clearParams).toEqual(['apr-1'])
+      expect(normalize(clearSql)).toContain('approval_instances')
+      expect(normalize(clearSql)).toContain('current_node_key = $2')
+      expect(clearParams).toEqual(['apr-1', 'approval_1'])
     })
 
     it('synthesizes a zero-duration entry when no matching open entry exists', async () => {

@@ -306,12 +306,25 @@ export class ApprovalMetricsService {
       }
       return breakdown
     })
-    // T1-1: the node is decided — clear its timeout deadline so the scanner won't fire for it.
+    // T1-1: the node is decided — clear ITS timeout deadline so the scanner won't fire for it.
+    //
+    // RACE FIX: this clear and the following node's `recordNodeActivation` deadline-set are separate,
+    // unawaited best-effort metrics calls (both fire post-commit via safeMetricsCall). An UNCONDITIONAL
+    // instance-wide clear here can therefore land AFTER the new node's activation write and WIPE the fresh
+    // deadline — silently losing the new node's timeout (affects remind + transfer/jump alike). Scope the
+    // clear to "the instance is still at the decided node": the forward transition already updated
+    // `approval_instances.current_node_key` to the NEXT node inside the committed transaction, so once the
+    // flow has advanced this clear is a safe no-op and the activation write is the sole owner of the
+    // deadline. On a terminal outcome `recordTerminal` clears unconditionally, so nothing is missed.
     await this.query(
       `UPDATE approval_metrics
          SET current_node_deadline_at = NULL, current_node_timeout_effect = NULL
-       WHERE instance_id = $1`,
-      [input.instanceId],
+       WHERE instance_id = $1
+         AND EXISTS (
+           SELECT 1 FROM approval_instances i
+            WHERE i.id = $1 AND i.current_node_key = $2
+         )`,
+      [input.instanceId, input.nodeKey],
     )
   }
 
