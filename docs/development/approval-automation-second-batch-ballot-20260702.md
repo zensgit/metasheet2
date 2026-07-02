@@ -10,6 +10,10 @@
 > notes folded into the "build contract" blocks below so implementation does not repeat known blind spots.
 > This is **per-rung**, not blanket approval: these four items mix unauthenticated ingress, cross-base writes,
 > permission migrations, and approval field-visibility semantics.
+>
+> The product/governance-heavy tail is intentionally not mixed into this implementation batch. It lives in
+> `approval-automation-third-batch-ballot-20260702.md` (A3 destination authorization, business-calendar SLA,
+> signature/compliance, mobile approval surface, and S-band approval-as-records).
 
 ## Recommended lane order
 
@@ -102,5 +106,7 @@
 - `T1-2 all ✅; T3-5 hold; T2-1+2 Q6 ✏️ reuse transfer instead of reassign; T1-4 all ✅`
 - `Lane C all ✅` means T1-2 then T3-5 may be implemented sequentially.
 - `Lane B all ✅` means T2-1+2 then T1-4 may be implemented sequentially.
+- Strategic/product votes belong in `approval-automation-third-batch-ballot-20260702.md`, not this hot-file
+  implementation batch.
 
 No runtime begins until the relevant rung's votes are complete.
