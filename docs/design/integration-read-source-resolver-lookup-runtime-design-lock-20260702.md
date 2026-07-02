@@ -27,13 +27,24 @@ values-free evidence and no silent first-row fallback.
 
 ## Resolver Contract
 
-A runtime-capable resolver config MUST declare:
+A runtime-capable resolver config MUST declare these fields after R0 expands the
+S1 contract:
 
 - `mode: "resolver_lookup"`;
 - one source key input declared by `keyField`;
 - one or more container paths where candidate rows may appear;
 - `fieldMap` with exactly one resolver output target for v1;
-- a multiplicity rule from the fixed set below.
+- `resolverRule` from the fixed set below;
+- rule-specific fields:
+  - `first_when_sorted`: `multiplicityRuleField` as the sort field plus
+    `resolverSortDirection`;
+  - `field_equals`: `multiplicityRuleField` as the discriminator field plus
+    `resolverDiscriminatorValue`;
+  - `exactly_one`: no `multiplicityRuleField`.
+
+Current S1 requires `multiplicityRuleField` for every `resolver_lookup` config.
+R0 must change that: the field becomes rule-specific, not unconditionally
+required. This is an intentional contract extension, not a runtime-only change.
 
 The runtime request remains:
 
@@ -59,7 +70,8 @@ v1 supports only these rules:
    - PASS only when the config declares a sort field and sort direction.
    - Runtime sorts candidates by that declared field and returns the first.
    - FAIL when the sort field is missing on any candidate row, types are mixed,
-     or the sorted order is ambiguous.
+     the sorted order is ambiguous, or the candidate cap was reached before the
+     full candidate set was observed.
 3. `field_equals`
    - PASS only when exactly one candidate has a declared discriminator field
      equal to a declared enum-like discriminator value.
@@ -69,6 +81,11 @@ Anything else is `resolver_rule_not_supported`.
 
 The default MUST NOT be "take the first row". A config without an explicit rule
 is invalid for runtime execution.
+
+`resolverDiscriminatorValue` is config metadata, not runtime data. R0 must bound
+it to a short enum-like token (for example the same bounded-identifier family,
+or an explicitly reviewed equivalent) and reject host/path/secret/value-shaped
+strings. It must never appear in evidence.
 
 ## Candidate Shape Rules
 
@@ -80,6 +97,9 @@ is invalid for runtime execution.
 - Candidate count is capped by the existing platform row cap. If the cap is hit
   before a rule can prove uniqueness, the resolver MUST fail closed with
   `resolver_cap_reached`.
+- The winning row MUST contain the configured fieldMap source. Missing, null, or
+  blank resolved output is `resolver_field_missing`; the resolver must not
+  inherit S3-1's generic fail-soft `null` projection for this mode.
 
 ## Data Plane
 
@@ -113,6 +133,11 @@ Evidence is values-free and may include only:
 - `rule`;
 - booleans such as `capReached`, `ambiguous`, `resolved`.
 
+These fields do not exist in the current S2-a evidence allowlist. R0 must extend
+the canonical server evidence sanitizer and the S3-UI mirror before runtime can
+be ratified. A runtime implementation must not rely on a producer-supplied
+object that later gets silently clamped or coarsened into a generic failure.
+
 Evidence MUST NOT include:
 
 - runtime key;
@@ -138,6 +163,11 @@ Required coarse codes:
 - `READ_SOURCE_RESOLVER_RULE_INVALID`;
 - `READ_SOURCE_RESOLVER_FIELD_MISSING`;
 - `READ_SOURCE_RESOLVER_FAILED`.
+
+These codes are not in the current S2-a registered coarse-code set or the UI
+client mirror. R0 must add them as exact registered values. Prefix matching is
+not allowed; unknown resolver-looking codes must still degrade to the generic
+safe fallback.
 
 The runtime route may map contract failures to the existing
 `READ_SOURCE_READ_CONTRACT_INVALID` only before outbound. Resolver-specific
@@ -168,6 +198,26 @@ The first runtime slice MUST NOT compose resolver output into another call.
 - Runtime callers cannot activate probe or config mutation through the read
   route.
 
+## Existing Configs And Probe Semantics
+
+Existing `resolver_lookup` rows saved before R0 do not contain the new
+`resolverRule` contract. They must remain non-runtime-consumable until a
+consultant re-saves and re-approves them under the new schema. No migration may
+auto-approve or silently reinterpret old rows.
+
+The current S2-b probe can locate a resolver container as a shape exercise, but
+it does not prove resolver selection semantics. R0/R1 must label this honestly:
+shape/probe green is not resolver runtime PASS until the resolver rule evaluator
+also passes.
+
+## Demand Gate
+
+Runtime work starts only for a named standalone resolver lookup demand. The
+first approved demand must identify the configured source, one runtime input
+key, the resolver output target, and the multiplicity rule. It must not require
+resolver-to-BOM composition, recursive expansion, or write-back; those remain
+separate gates.
+
 ## Acceptance Tests For Runtime Slice
 
 The runtime PR that implements this lock must prove:
@@ -190,6 +240,15 @@ The runtime PR that implements this lock must prove:
 14. Resolver output is not composed into any second read.
 
 ## Implementation Slices
+
+R0 — contract and evidence surface extension:
+
+- extend S1 allowlist and validation for `resolverRule`,
+  `resolverSortDirection`, and `resolverDiscriminatorValue`;
+- make `multiplicityRuleField` rule-specific rather than always required;
+- extend S2-a server evidence allowlist and registered coarse-code set;
+- extend the S3-UI evidence mirror and leak tests;
+- prove old resolver rows without `resolverRule` remain fail-closed.
 
 R1 — pure resolver evaluator:
 
