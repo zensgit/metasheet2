@@ -1704,7 +1704,10 @@ function readTemplateVisibilityScope(value: unknown): ApprovalTemplateVisibility
   return { type: value.type, ids } as ApprovalTemplateVisibilityScope
 }
 
-function applyTemplateVisibilityFilter(
+// Exported for reuse by consumers that must enforce single-template visibility for a DB-rebuilt actor
+// (e.g. the automation approval.completed trigger checks the RULE CREATOR's template visibility at save
+// AND at fire time, where no request token exists) — one authoritative scope predicate, not a re-derivation.
+export function applyTemplateVisibilityFilter(
   conditions: string[],
   params: unknown[],
   index: number,

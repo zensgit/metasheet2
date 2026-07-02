@@ -52,6 +52,7 @@ import {
   type AutomationApprovalBridgeRow,
 } from './automation-approval-bridge-service'
 import type { ApprovalCompletionEventV1 } from '../services/ApprovalCompletionEvent'
+import { applyTemplateVisibilityFilter, type ApprovalTemplateVisibilityActor } from '../services/ApprovalProductService'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -959,9 +960,15 @@ export class AutomationService {
     let normalizedActionConfigForUpdate: Record<string, unknown> | undefined
     let normalizedActionsForUpdate: AutomationAction[] | null | undefined
     let normalizedExecutionModeForUpdate: string | null | undefined
+    // T1-3: reuse the rule row already fetched by the action/trigger validation blocks below so the
+    // approval.completed resulting-shape check does NOT add a getRule call for those input shapes
+    // (unit tests mock getRule as a strict response queue — an extra fetch drains it and regresses
+    // existing workflow-action updates). Only a conditions-only edit fetches here on its own.
+    let existingRuleSnapshot: AutomationRule | null | undefined
 
     if (shouldValidateActions) {
       const existing = await this.getRule(ruleId)
+      existingRuleSnapshot = existing
       if (!existing || existing.sheet_id !== sheetId) return null
 
       const nextActionType = input.actionType ?? existing.action_type
@@ -1036,6 +1043,7 @@ export class AutomationService {
     // change on an existing date_field rule). Mirrors createRule's gate so the API can't bypass the UI contract.
     if (input.triggerType !== undefined || input.triggerConfig !== undefined) {
       const existingForTrigger = await this.getRule(ruleId)
+      existingRuleSnapshot = existingForTrigger
       if (!existingForTrigger || existingForTrigger.sheet_id !== sheetId) return null
       const nextTriggerType = input.triggerType ?? existingForTrigger.trigger_type
       const nextTriggerConfig = input.triggerConfig !== undefined ? input.triggerConfig : existingForTrigger.trigger_config
@@ -1086,7 +1094,7 @@ export class AutomationService {
       || input.executionMode !== undefined
       || input.conditions !== undefined
     ) {
-      const existingForApproval = await this.getRule(ruleId)
+      const existingForApproval = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
       if (!existingForApproval || existingForApproval.sheet_id !== sheetId) return null
       const nextTriggerType = input.triggerType ?? existingForApproval.trigger_type
       if (nextTriggerType === APPROVAL_COMPLETED_TRIGGER) {
@@ -1636,10 +1644,13 @@ export class AutomationService {
     if (!(await this.approvalCompletedCreatorAuthorized(createdBy))) {
       return 'approval.completed rules require the creator to hold approvals:read for the configured template'
     }
+    if (!(await this.approvalTemplateVisibleToCreator(templateId, createdBy))) {
+      return 'trigger_config.templateId must reference an approval template visible to the rule creator'
+    }
     return null
   }
 
-  /** T1-3 Q2: the creator must hold `approvals:read` — checked at save AND re-checked at fire (fail-closed). */
+  /** T1-3 Q2 leg 1: the creator must hold `approvals:read` — checked at save AND re-checked at fire (fail-closed). */
   private async approvalCompletedCreatorAuthorized(createdBy: string | null): Promise<boolean> {
     if (!createdBy) return false
     try {
@@ -1647,6 +1658,59 @@ export class AutomationService {
       return hasPermissionCode(codes, 'approvals:read')
     } catch (err) {
       logger.warn('approval.completed creator permission check failed; denying (fail-closed)', err instanceof Error ? err : undefined)
+      return false
+    }
+  }
+
+  /**
+   * T1-3 Q2 leg 2: the creator must SEE the template per approval_templates.visibility_scope — otherwise a
+   * user with automation + approvals:read could bind a hidden template's completions and exfiltrate outcome
+   * data via webhook/notification. Checked at save AND re-checked at fire. There is no request token at
+   * either point, so the visibility actor is REBUILT FROM TRUSTED DB STATE (users.role/department/is_admin
+   * + user_roles ids/names + RBAC permission codes) and evaluated through the SAME
+   * applyTemplateVisibilityFilter predicate the template list/detail routes enforce. Fail-closed on any
+   * lookup error and on a missing/inactive creator.
+   */
+  private async approvalTemplateVisibleToCreator(templateId: string, createdBy: string | null): Promise<boolean> {
+    if (!createdBy) return false
+    try {
+      const userResult = await this.queryFn(
+        `SELECT role, department, is_admin FROM users WHERE id = $1 AND is_active = TRUE`,
+        [createdBy],
+      )
+      const user = userResult.rows[0] as { role?: string | null; department?: string | null; is_admin?: boolean | null } | undefined
+      if (!user) return false
+      const roleRows = await this.queryFn(
+        `SELECT ur.role_id, r.name FROM user_roles ur LEFT JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1`,
+        [createdBy],
+      )
+      const roles = new Set<string>()
+      if (typeof user.role === 'string' && user.role.trim()) roles.add(user.role.trim())
+      for (const row of roleRows.rows as Array<{ role_id?: string | null; name?: string | null }>) {
+        if (typeof row.role_id === 'string' && row.role_id.trim()) roles.add(row.role_id.trim())
+        if (typeof row.name === 'string' && row.name.trim()) roles.add(row.name.trim())
+      }
+      const codes = await listRbacPermissionCodes(createdBy)
+      const actor: ApprovalTemplateVisibilityActor = {
+        userId: createdBy,
+        departmentIds: typeof user.department === 'string' && user.department.trim() ? [user.department.trim()] : [],
+        roles: [...roles],
+        permissions: codes,
+        isTemplateManager:
+          hasPermissionCode(codes, 'approval-templates:manage')
+          || user.is_admin === true
+          || roles.has('admin'),
+      }
+      const conditions: string[] = ['id = $1']
+      const params: unknown[] = [templateId]
+      applyTemplateVisibilityFilter(conditions, params, 2, actor)
+      const visible = await this.queryFn(
+        `SELECT 1 FROM approval_templates WHERE ${conditions.join(' AND ')} LIMIT 1`,
+        params,
+      )
+      return visible.rows.length > 0
+    } catch (err) {
+      logger.warn('approval.completed template visibility check failed; denying (fail-closed)', err instanceof Error ? err : undefined)
       return false
     }
   }
@@ -2130,9 +2194,14 @@ export class AutomationService {
     const outcome = event.transition.toStatus
     for (const rule of rules) {
       if (!approvalCompletedConfiguredOutcomes(rule.trigger_config).has(outcome)) continue
-      // Q2 fire-time re-check: deny + skip when the creator no longer holds approvals:read.
+      // Q2 fire-time re-check (both legs): deny + skip when the creator no longer holds approvals:read OR
+      // can no longer see the template per visibility_scope — completion data must not leak past either.
       if (!(await this.approvalCompletedCreatorAuthorized(rule.created_by))) {
         logger.warn(`approval.completed rule ${rule.id} skipped: creator lacks approvals:read at fire time`)
+        continue
+      }
+      if (!(await this.approvalTemplateVisibleToCreator(templateId, rule.created_by))) {
+        logger.warn(`approval.completed rule ${rule.id} skipped: template ${templateId} not visible to creator at fire time`)
         continue
       }
       try {

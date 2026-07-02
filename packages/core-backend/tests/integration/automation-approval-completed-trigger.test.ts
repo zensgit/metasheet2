@@ -36,6 +36,7 @@ const queryFn = ((sqlText: string, params?: unknown[]) => poolManager.get().quer
 let svc: AutomationService
 let approvals: ApprovalProductService
 let templateId = ''
+const extraTemplateIds: string[] = []
 const ruleIds: string[] = []
 const notifications: Array<{ userIds: string[]; message: string; sheetId: string; recordId: string }> = []
 
@@ -127,7 +128,8 @@ describeIfDatabase('T1-3 approval.completed automation trigger (real DB)', () =>
 
   afterAll(async () => {
     try { svc?.shutdown() } catch { /* noop */ }
-    const instances = await q('SELECT id FROM approval_instances WHERE template_id = $1', [templateId]).catch(() => ({ rows: [] as unknown[] }))
+    const allTemplateIds = [templateId, ...extraTemplateIds].filter(Boolean)
+    const instances = await q('SELECT id FROM approval_instances WHERE template_id = ANY($1::uuid[])', [allTemplateIds]).catch(() => ({ rows: [] as unknown[] }))
     for (const row of instances.rows as Array<{ id: string }>) {
       await q('DELETE FROM approval_assignments WHERE instance_id = $1', [row.id]).catch(() => {})
       await q('DELETE FROM approval_records WHERE instance_id = $1', [row.id]).catch(() => {})
@@ -138,7 +140,9 @@ describeIfDatabase('T1-3 approval.completed automation trigger (real DB)', () =>
       await q('DELETE FROM multitable_automation_executions WHERE rule_id = ANY($1::text[])', [ruleIds]).catch(() => {})
       await q('DELETE FROM automation_rules WHERE id = ANY($1::text[])', [ruleIds]).catch(() => {})
     }
-    if (templateId) await q('DELETE FROM approval_templates WHERE id = $1', [templateId]).catch(() => {})
+    for (const tid of allTemplateIds) {
+      await q('DELETE FROM approval_templates WHERE id = $1', [tid]).catch(() => {})
+    }
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
     await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[CREATOR, REQUESTER, APPROVER, OUTSIDER]]).catch(() => {})
@@ -292,6 +296,58 @@ describeIfDatabase('T1-3 approval.completed automation trigger (real DB)', () =>
     } finally {
       await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:read') ON CONFLICT DO NOTHING`, [CREATOR])
     }
+  })
+
+  test('Q2 visibility leg: hidden template rejected at save; visibility revoked after save → fire-skip', async () => {
+    // Save gate: a template whose visibility_scope excludes CREATOR must be rejected even though the
+    // template EXISTS and CREATOR holds approvals:read — otherwise its completions could be exfiltrated.
+    const hidden = await approvals.createTemplate({
+      ...approvalTemplateRequest(),
+      key: `act-hidden-${TS}`,
+      visibilityScope: { type: 'user', ids: [OUTSIDER] },
+    } as never)
+    const hiddenId = (hidden as { id: string }).id
+    extraTemplateIds.push(hiddenId)
+    await approvals.publishTemplate(hiddenId, { policy: { allowRevoke: true } } as never)
+    await expect(svc.createRule(SHEET_ID, {
+      name: 'hidden template probe',
+      triggerType: 'approval.completed',
+      triggerConfig: { templateId: hiddenId },
+      actionType: 'send_notification',
+      actionConfig: { userIds: [CREATOR], message: 'leak' },
+      createdBy: CREATOR,
+    } as never)).rejects.toThrow(/visible to the rule creator/)
+
+    // Visible-scoped template (CREATOR in scope) saves fine; then the scope flips to exclude CREATOR
+    // BEFORE the approval completes → the fire-time visibility re-check must deny + skip.
+    const scoped = await approvals.createTemplate({
+      ...approvalTemplateRequest(),
+      key: `act-scoped-${TS}`,
+      visibilityScope: { type: 'user', ids: [CREATOR, REQUESTER, APPROVER] },
+    } as never)
+    const scopedId = (scoped as { id: string }).id
+    extraTemplateIds.push(scopedId)
+    await approvals.publishTemplate(scopedId, { policy: { allowRevoke: true } } as never)
+    const rule = await svc.createRule(SHEET_ID, {
+      name: 'scoped template rule',
+      triggerType: 'approval.completed',
+      triggerConfig: { templateId: scopedId },
+      actionType: 'send_notification',
+      actionConfig: { userIds: [CREATOR], message: 'scoped fire' },
+      createdBy: CREATOR,
+    } as never)
+    const ruleId = (rule as { id: string }).id
+    ruleIds.push(ruleId)
+
+    const dto = await approvals.createApproval({ templateId: scopedId, formData: { summary: 'scoped' } }, requesterActor())
+    const instanceId = (dto as { id: string }).id
+    await q(
+      `UPDATE approval_templates SET visibility_scope = $2::jsonb WHERE id = $1`,
+      [scopedId, JSON.stringify({ type: 'user', ids: [OUTSIDER] })],
+    )
+    await approvals.dispatchAction(instanceId, { action: 'approve', comment: 'ok' } as never, approverActor())
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    expect(await executionCount(ruleId), 'creator lost template visibility → fire must skip').toBe(0)
   })
 
   test('Q1: a templateId-null completion is out-of-contract — no crash, no execution', async () => {
