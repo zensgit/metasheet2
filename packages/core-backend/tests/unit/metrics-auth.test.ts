@@ -1,6 +1,7 @@
 import express from 'express'
+import client from 'prom-client'
 import request from 'supertest'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createMetricsAuthMiddleware, resolveMetricsScrapeToken } from '../../src/metrics/metrics'
 
@@ -72,5 +73,17 @@ describe('metrics auth middleware', () => {
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true })
+  })
+
+  it('keeps custom metrics out of the prom-client default registry across module reloads', async () => {
+    client.register.clear()
+
+    vi.resetModules()
+    await import('../../src/metrics/metrics')
+    vi.resetModules()
+    await import('../../src/metrics/metrics')
+
+    expect(client.register.getSingleMetric('http_server_requests_seconds')).toBeUndefined()
+    expect(client.register.getSingleMetric('automation_webhook_rejected_total')).toBeUndefined()
   })
 })

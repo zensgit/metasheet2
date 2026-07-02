@@ -1,268 +1,289 @@
 import type { Application, Request, Response, NextFunction } from 'express'
-import client from 'prom-client'
+import client, {
+  type CounterConfiguration,
+  type GaugeConfiguration,
+  type HistogramConfiguration,
+  type SummaryConfiguration,
+} from 'prom-client'
 
 export const registry = new client.Registry()
 client.collectDefaultMetrics({ register: registry })
 
-const httpHistogram = new client.Histogram({
+function counter<T extends string>(configuration: CounterConfiguration<T>) {
+  return new client.Counter<T>({ ...configuration, registers: [] })
+}
+
+function gauge<T extends string>(configuration: GaugeConfiguration<T>) {
+  return new client.Gauge<T>({ ...configuration, registers: [] })
+}
+
+function histogram<T extends string>(configuration: HistogramConfiguration<T>) {
+  return new client.Histogram<T>({ ...configuration, registers: [] })
+}
+
+function summary<T extends string>(configuration: SummaryConfiguration<T>) {
+  return new client.Summary<T>({ ...configuration, registers: [] })
+}
+
+const httpHistogram = histogram({
   name: 'http_server_requests_seconds',
   help: 'HTTP server request duration in seconds',
   labelNames: ['route', 'method', 'status'] as const,
   buckets: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]
 })
 
-const httpSummary = new client.Summary({
+const httpSummary = summary({
   name: 'http_server_requests_seconds_summary',
   help: 'HTTP request duration summary',
   labelNames: ['route', 'method', 'status'] as const,
   percentiles: [0.5, 0.9, 0.99]
 })
 
-const httpRequestsTotal = new client.Counter({
+const httpRequestsTotal = counter({
   name: 'http_requests_total',
   help: 'Total HTTP requests by method and status',
   labelNames: ['method', 'status'] as const
 })
 
-const jwtAuthFail = new client.Counter({
+const jwtAuthFail = counter({
   name: 'jwt_auth_fail_total',
   help: 'Total JWT auth failures',
   labelNames: ['reason'] as const
 })
 
-const approvalActions = new client.Counter({
+const approvalActions = counter({
   name: 'metasheet_approval_actions_total',
   help: 'Approval actions count',
   labelNames: ['action', 'result'] as const
 })
 
-const approvalConflict = new client.Counter({
+const approvalConflict = counter({
   name: 'metasheet_approval_conflict_total',
   help: 'Approval version conflicts',
   labelNames: ['action'] as const
 })
 
-const automationWebhookRejectedTotal = new client.Counter({
+const automationWebhookRejectedTotal = counter({
   name: 'automation_webhook_rejected_total',
   help: 'Inbound automation webhook attempts rejected before execution',
   labelNames: ['reason'] as const
 })
 
-const rbacPermCacheHits = new client.Counter({
+const rbacPermCacheHits = counter({
   name: 'rbac_perm_cache_hits_total',
   help: 'RBAC permission cache hits',
   labelNames: [] as const
 })
 
-const rbacPermCacheMiss = new client.Counter({
+const rbacPermCacheMiss = counter({
   name: 'rbac_perm_cache_miss_total',
   help: 'RBAC permission cache misses',
   labelNames: [] as const
 })
 
 // Alias (plural) for compatibility with external scripts
-const rbacPermCacheMisses = new client.Counter({
+const rbacPermCacheMisses = counter({
   name: 'rbac_perm_cache_misses_total',
   help: 'RBAC permission cache misses (alias)',
   labelNames: [] as const
 })
 
 // RBAC denials and auth failures (compatibility names)
-const rbacDenials = new client.Counter({
+const rbacDenials = counter({
   name: 'metasheet_rbac_denials_total',
   help: 'Total RBAC permission denials',
   labelNames: [] as const
 })
 
-const authFailures = new client.Counter({
+const authFailures = counter({
   name: 'metasheet_auth_failures_total',
   help: 'Total authentication failures (alias)',
   labelNames: [] as const
 })
 
 // V2 Integration metrics
-const eventsEmittedTotal = new client.Counter({
+const eventsEmittedTotal = counter({
   name: 'metasheet_events_emitted_total',
   help: 'Total events emitted via EventBus',
   labelNames: [] as const
 })
 
-const messagesProcessedTotal = new client.Counter({
+const messagesProcessedTotal = counter({
   name: 'metasheet_messages_processed_total',
   help: 'Total messages processed via MessageBus',
   labelNames: [] as const
 })
 
-const messagesRetriedTotal = new client.Counter({
+const messagesRetriedTotal = counter({
   name: 'metasheet_messages_retried_total',
   help: 'Total message retries',
   labelNames: [] as const
 })
 
-const messagesExpiredTotal = new client.Counter({
+const messagesExpiredTotal = counter({
   name: 'metasheet_messages_expired_total',
   help: 'Total messages expired (dropped before processing)',
   labelNames: [] as const
 })
 
-const permissionDeniedTotal = new client.Counter({
+const permissionDeniedTotal = counter({
   name: 'metasheet_permission_denied_total',
   help: 'Total permission denied (sandbox) occurrences',
   labelNames: [] as const
 })
 
-const rpcTimeoutsTotal = new client.Counter({
+const rpcTimeoutsTotal = counter({
   name: 'metasheet_rpc_timeouts_total',
   help: 'Total RPC timeouts',
   labelNames: [] as const
 })
 
 // Config reload metrics
-const configReloadTotal = new client.Counter({
+const configReloadTotal = counter({
   name: 'metasheet_config_reload_total',
   help: 'Total config reload operations',
   labelNames: ['result', 'telemetry_restart'] as const
 })
 
-const configVersionGauge = new client.Gauge({
+const configVersionGauge = gauge({
   name: 'metasheet_config_version',
   help: 'Current config version (monotonic counter)',
   labelNames: [] as const
 })
 
-const configSamplingRate = new client.Gauge({
+const configSamplingRate = gauge({
   name: 'metasheet_config_sampling_rate',
   help: 'Current telemetry sampling rate',
   labelNames: [] as const
 })
 
 // Plugin reload metrics (Phase 8)
-const pluginReloadTotal = new client.Counter({
+const pluginReloadTotal = counter({
   name: 'metasheet_plugin_reload_total',
   help: 'Total plugin reload operations',
   labelNames: ['plugin_name', 'result'] as const
 })
 
-const pluginReloadDuration = new client.Histogram({
+const pluginReloadDuration = histogram({
   name: 'metasheet_plugin_reload_duration_seconds',
   help: 'Plugin reload duration in seconds',
   labelNames: ['plugin_name'] as const,
   buckets: [0.1, 0.5, 1, 2, 5, 10]
 })
 
-const pluginStatus = new client.Gauge({
+const pluginStatus = gauge({
   name: 'metasheet_plugin_status',
   help: 'Plugin status indicator (1=current status)',
   labelNames: ['plugin_name', 'status'] as const
 })
 
 // Snapshot metrics (Phase 9)
-const snapshotCreateTotal = new client.Counter({
+const snapshotCreateTotal = counter({
   name: 'metasheet_snapshot_create_total',
   help: 'Total snapshot create operations',
   labelNames: ['result'] as const
 })
 
-const snapshotRestoreTotal = new client.Counter({
+const snapshotRestoreTotal = counter({
   name: 'metasheet_snapshot_restore_total',
   help: 'Total snapshot restore operations',
   labelNames: ['result'] as const
 })
 
-const snapshotOperationDuration = new client.Histogram({
+const snapshotOperationDuration = histogram({
   name: 'metasheet_snapshot_operation_duration_seconds',
   help: 'Snapshot operation duration in seconds',
   labelNames: ['operation'] as const,
   buckets: [0.1, 0.5, 1, 2, 5, 10, 30]
 })
 
-const snapshotCleanupTotal = new client.Counter({
+const snapshotCleanupTotal = counter({
   name: 'metasheet_snapshot_cleanup_total',
   help: 'Total snapshot cleanup operations',
   labelNames: ['result'] as const
 })
 
 // Sprint 2: Snapshot Protection Metrics
-const snapshotTagsTotal = new client.Counter({
+const snapshotTagsTotal = counter({
   name: 'metasheet_snapshot_tags_total',
   help: 'Total count of snapshot tags usage',
   labelNames: ['tag'] as const
 })
 
-const snapshotProtectionLevel = new client.Gauge({
+const snapshotProtectionLevel = gauge({
   name: 'metasheet_snapshot_protection_level',
   help: 'Snapshot protection level distribution',
   labelNames: ['level'] as const
 })
 
-const snapshotReleaseChannel = new client.Gauge({
+const snapshotReleaseChannel = gauge({
   name: 'metasheet_snapshot_release_channel',
   help: 'Snapshot release channel distribution',
   labelNames: ['channel'] as const
 })
 
-const protectionRuleEvaluationsTotal = new client.Counter({
+const protectionRuleEvaluationsTotal = counter({
   name: 'metasheet_protection_rule_evaluations_total',
   help: 'Total protection rule evaluations',
   labelNames: ['rule', 'result'] as const
 })
 
-const protectionRuleBlocksTotal = new client.Counter({
+const protectionRuleBlocksTotal = counter({
   name: 'metasheet_protection_rule_blocks_total',
   help: 'Total operations blocked by protection rules',
   labelNames: ['rule', 'operation'] as const
 })
 
-const snapshotProtectedSkippedTotal = new client.Counter({
+const snapshotProtectedSkippedTotal = counter({
   name: 'metasheet_snapshot_protected_skipped_total',
   help: 'Total protected snapshots skipped during cleanup',
   labelNames: [] as const
 })
 
 // Cache metrics (Phase 1)
-const cache_hits_total = new client.Counter({
+const cache_hits_total = counter({
   name: 'cache_hits_total',
   help: 'Total cache hits',
   labelNames: ['impl', 'key_pattern'] as const
 })
 
-const cache_miss_total = new client.Counter({
+const cache_miss_total = counter({
   name: 'cache_miss_total',
   help: 'Total cache misses',
   labelNames: ['impl', 'key_pattern'] as const
 })
 
-const cache_set_total = new client.Counter({
+const cache_set_total = counter({
   name: 'cache_set_total',
   help: 'Total cache sets',
   labelNames: ['impl', 'key_pattern'] as const
 })
 
-const cache_del_total = new client.Counter({
+const cache_del_total = counter({
   name: 'cache_del_total',
   help: 'Total cache deletions',
   labelNames: ['impl', 'key_pattern'] as const
 })
 
-const cache_errors_total = new client.Counter({
+const cache_errors_total = counter({
   name: 'cache_errors_total',
   help: 'Total cache errors',
   labelNames: ['impl', 'error_type'] as const
 })
 
-const cache_invalidate_total = new client.Counter({
+const cache_invalidate_total = counter({
   name: 'cache_invalidate_total',
   help: 'Total cache invalidations',
   labelNames: ['impl', 'tag'] as const
 })
 
-const cache_enabled = new client.Gauge({
+const cache_enabled = gauge({
   name: 'cache_enabled',
   help: 'Whether cache is enabled (1=enabled, 0=disabled)',
   labelNames: ['impl'] as const
 })
 
-const cache_candidate_requests = new client.Counter({
+const cache_candidate_requests = counter({
   name: 'cache_candidate_requests',
   help: 'Requests that could benefit from caching',
   labelNames: ['route', 'method'] as const
@@ -270,20 +291,20 @@ const cache_candidate_requests = new client.Counter({
 
 // Redis metrics (Phase 5 extension)
 // Redis histogram; ensure creation even if Redis client not used yet
-const redisOperationDuration = new client.Histogram({
+const redisOperationDuration = histogram({
   name: 'redis_operation_duration_seconds',
   help: 'Redis cache operation duration in seconds',
   labelNames: ['op'] as const,
   buckets: [0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2]
 })
 
-const redisRecoveryAttemptsTotal = new client.Counter({
+const redisRecoveryAttemptsTotal = counter({
   name: 'redis_recovery_attempts_total',
   help: 'Redis recovery attempts after failure',
   labelNames: ['result'] as const
 })
 
-const redisLastFailureTimestamp = new client.Gauge({
+const redisLastFailureTimestamp = gauge({
   name: 'redis_last_failure_timestamp',
   help: 'Unix timestamp of last Redis failure',
   labelNames: [] as const
@@ -292,26 +313,26 @@ const redisLastFailureTimestamp = new client.Gauge({
 // Fallback metrics (Phase 5)
 // Tracks degraded responses for SLO validation
 // Reasons: http_error, http_timeout, message_error, message_timeout, cache_miss, circuit_breaker
-const fallbackRawTotal = new client.Counter({
+const fallbackRawTotal = counter({
   name: 'metasheet_fallback_total',
   help: 'Total degraded fallback responses (raw count)',
   labelNames: ['reason'] as const
 })
 
-const fallbackEffectiveTotal = new client.Counter({
+const fallbackEffectiveTotal = counter({
   name: 'metasheet_fallback_effective_total',
   help: 'Effective degraded fallback responses (excludes benign causes like cache_miss when COUNT_CACHE_MISS_AS_FALLBACK=false)',
   labelNames: ['reason'] as const
 })
 
 // RBAC table permission check metrics
-const rbacPermissionChecksTotal = new client.Counter({
+const rbacPermissionChecksTotal = counter({
   name: 'rbac_permission_checks_total',
   help: 'Total RBAC permission checks by operation and result',
   labelNames: ['operation', 'result'] as const
 })
 
-const rbacCheckLatencySeconds = new client.Histogram({
+const rbacCheckLatencySeconds = histogram({
   name: 'rbac_check_latency_seconds',
   help: 'RBAC permission check latency in seconds',
   labelNames: ['operation'] as const,
@@ -319,97 +340,97 @@ const rbacCheckLatencySeconds = new client.Histogram({
 })
 
 // View data metrics (view-service)
-const viewDataLatencySeconds = new client.Histogram({
+const viewDataLatencySeconds = histogram({
   name: 'metasheet_view_data_latency_seconds',
   help: 'View data query latency in seconds',
   labelNames: ['type', 'status'] as const,
   buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]
 })
 
-const viewDataRequestsTotal = new client.Counter({
+const viewDataRequestsTotal = counter({
   name: 'metasheet_view_data_requests_total',
   help: 'Total view data requests',
   labelNames: ['type', 'result'] as const
 })
 
 // Sprint 4: Advanced Messaging Metrics
-const dlqMessagesTotal = new client.Counter({
+const dlqMessagesTotal = counter({
   name: 'metasheet_dlq_messages_total',
   help: 'Total messages sent to DLQ',
   labelNames: ['topic'] as const
 })
 
-const delayedMessagesTotal = new client.Counter({
+const delayedMessagesTotal = counter({
   name: 'metasheet_delayed_messages_total',
   help: 'Total delayed messages scheduled',
   labelNames: ['topic'] as const
 })
 
 // BPMN Workflow Engine Metrics
-const bpmnProcessInstancesTotal = new client.Counter({
+const bpmnProcessInstancesTotal = counter({
   name: 'bpmn_process_instances_total',
   help: 'Total BPMN process instances started',
   labelNames: ['definition_key', 'result'] as const
 })
 
-const bpmnProcessInstancesActive = new client.Gauge({
+const bpmnProcessInstancesActive = gauge({
   name: 'bpmn_process_instances_active',
   help: 'Current number of active BPMN process instances',
   labelNames: [] as const
 })
 
-const bpmnActivityExecutionsTotal = new client.Counter({
+const bpmnActivityExecutionsTotal = counter({
   name: 'bpmn_activity_executions_total',
   help: 'Total BPMN activity executions',
   labelNames: ['activity_type', 'result'] as const
 })
 
-const bpmnActivityDurationSeconds = new client.Histogram({
+const bpmnActivityDurationSeconds = histogram({
   name: 'bpmn_activity_duration_seconds',
   help: 'BPMN activity execution duration in seconds',
   labelNames: ['activity_type'] as const,
   buckets: [0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30, 60]
 })
 
-const bpmnProcessDurationSeconds = new client.Histogram({
+const bpmnProcessDurationSeconds = histogram({
   name: 'bpmn_process_duration_seconds',
   help: 'BPMN process instance duration in seconds',
   labelNames: ['definition_key'] as const,
   buckets: [1, 5, 10, 30, 60, 300, 600, 1800, 3600]
 })
 
-const bpmnTimerJobsTotal = new client.Counter({
+const bpmnTimerJobsTotal = counter({
   name: 'bpmn_timer_jobs_total',
   help: 'Total BPMN timer jobs processed',
   labelNames: ['result'] as const
 })
 
-const bpmnSignalEventsTotal = new client.Counter({
+const bpmnSignalEventsTotal = counter({
   name: 'bpmn_signal_events_total',
   help: 'Total BPMN signal events processed',
   labelNames: ['signal_name'] as const
 })
 
-const bpmnMessageEventsTotal = new client.Counter({
+const bpmnMessageEventsTotal = counter({
   name: 'bpmn_message_events_total',
   help: 'Total BPMN message events processed',
   labelNames: ['message_name'] as const
 })
 
-const bpmnProcessErrorsTotal = new client.Counter({
+const bpmnProcessErrorsTotal = counter({
   name: 'bpmn_process_errors_total',
   help: 'Total BPMN process errors',
   labelNames: ['error_type'] as const
 })
 
-const bpmnStuckInstancesGauge = new client.Gauge({
+const bpmnStuckInstancesGauge = gauge({
   name: 'bpmn_stuck_instances',
   help: 'Number of potentially stuck BPMN process instances',
   labelNames: [] as const
 })
 
 // RPC Latency Histogram
-const rpcLatencySeconds = new client.Histogram({
+const rpcLatencySeconds = histogram({
   name: 'metasheet_rpc_latency_seconds',
   help: 'RPC call latency in seconds',
   labelNames: ['method', 'plugin', 'status'] as const,
@@ -417,19 +438,19 @@ const rpcLatencySeconds = new client.Histogram({
 })
 
 // Metrics Stream (real-time WebSocket streaming)
-const metricsStreamClients = new client.Gauge({
+const metricsStreamClients = gauge({
   name: 'metasheet_metrics_stream_clients',
   help: 'Active metrics streaming clients',
   labelNames: [] as const
 })
 
-const metricsStreamPushesTotal = new client.Counter({
+const metricsStreamPushesTotal = counter({
   name: 'metasheet_metrics_stream_pushes_total',
   help: 'Total push events sent via metrics stream',
   labelNames: [] as const
 })
 
-const metricsStreamErrorsTotal = new client.Counter({
+const metricsStreamErrorsTotal = counter({
   name: 'metasheet_metrics_stream_errors_total',
   help: 'Total metrics stream push errors',
   labelNames: [] as const
@@ -438,25 +459,25 @@ const metricsStreamErrorsTotal = new client.Counter({
 // API Gateway + CircuitBreaker observability (Lane 3 / collab-infra rollout).
 // These are exposed via the shared registry so operators can query the
 // same `/metrics/prom` endpoint; no new endpoint is introduced.
-const apigwCbStoreUsedTotal = new client.Counter({
+const apigwCbStoreUsedTotal = counter({
   name: 'apigw_cb_store_used_total',
   help: 'CircuitBreaker store operations by backing implementation',
   labelNames: ['store'] as const
 })
 
-const apigwCbInitTotal = new client.Counter({
+const apigwCbInitTotal = counter({
   name: 'apigw_cb_init_total',
   help: 'APIGateway.initRedisCircuitBreakerStore outcome counts',
   labelNames: ['outcome'] as const
 })
 
-const automationSchedulerLeaderGauge = new client.Gauge({
+const automationSchedulerLeaderGauge = gauge({
   name: 'automation_scheduler_leader',
   help: 'AutomationScheduler leader-lock state (1=current state, 0=other)',
   labelNames: ['state'] as const
 })
 
-const approvalSlaSchedulerLeaderGauge = new client.Gauge({
+const approvalSlaSchedulerLeaderGauge = gauge({
   name: 'approval_sla_scheduler_leader',
   help: 'ApprovalSlaScheduler leader-lock state (1=current state, 0=other)',
   labelNames: ['state'] as const
