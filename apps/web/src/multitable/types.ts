@@ -972,6 +972,7 @@ export type AutomationTriggerType =
   | 'schedule.date_field'
   | 'webhook.received'
   | 'form.submitted'
+  | 'approval.completed'
   // Legacy aliases
   | 'field.changed'
 

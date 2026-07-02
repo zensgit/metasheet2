@@ -31,8 +31,16 @@ export function validateInboundWebhookTriggerAtSave(
   triggerConfig: Record<string, unknown> | null | undefined,
 ): string | null {
   if (triggerType !== WEBHOOK_RECEIVED_TRIGGER) return null
-  if (!inboundWebhookSecret(triggerConfig)) {
+  const secret = inboundWebhookSecret(triggerConfig)
+  if (!secret) {
     return 'webhook.received requires trigger_config.secret'
+  }
+  // Defense-in-depth: the read API returns the secret as this placeholder. A client that naively
+  // round-trips a fetched rule would otherwise PERSIST the placeholder as the literal secret and
+  // silently break every future signature check. Reject it — keep the stored secret by omitting
+  // triggerConfig from the update, or send a real replacement to rotate.
+  if (secret === INBOUND_WEBHOOK_REDACTED_SECRET) {
+    return 'webhook.received trigger_config.secret must not be the redacted placeholder (omit triggerConfig to keep the stored secret, or provide a new one)'
   }
   return null
 }
@@ -90,7 +98,9 @@ export function isTopLevelWebhookJsonObject(value: unknown): value is Record<str
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+export const INBOUND_WEBHOOK_REDACTED_SECRET = '<redacted>'
+
 export function redactInboundWebhookTriggerConfig(config: Record<string, unknown>): Record<string, unknown> {
   if (!Object.prototype.hasOwnProperty.call(config, 'secret')) return config
-  return { ...config, secret: '<redacted>' }
+  return { ...config, secret: INBOUND_WEBHOOK_REDACTED_SECRET }
 }

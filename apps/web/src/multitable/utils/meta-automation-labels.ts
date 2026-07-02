@@ -931,6 +931,8 @@ export function automationTriggerTypeLabel(type: AutomationTriggerType | Unknown
       return isZh ? '收到 Webhook 时' : 'Webhook received'
     case 'form.submitted':
       return isZh ? '当表单提交时' : 'When form submitted'
+    case 'approval.completed':
+      return isZh ? '当审批完成时' : 'When approval completes'
     case 'field.changed':
       return isZh ? '当字段变化时' : 'When field changed'
     default:
