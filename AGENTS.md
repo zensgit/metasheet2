@@ -30,6 +30,7 @@
 ## Commit & Pull Request Guidelines
 - Follow conventional commit prefixes seen in history (e.g., `feat(data-adapters): ...`, `perf(phase11): ...`, `chore(deps): ...`, `docs: ...`); include a scope when possible.
 - PRs should state what changed, why, and how to verify (commands run, coverage snippets). Link relevant issues or Phase docs; attach UI screenshots/GIFs for frontend changes and note migration/rollback steps for backend DB updates.
+- In PR bodies, avoid bare GitHub closing keywords such as `closes #NNN` or `fixes #NNN` for issues that must outlive the PR, including umbrellas and staged follow-ups. Break keyword adjacency instead, such as `close umbrella #NNN` or `#NNN is then closed`; #3317 was accidentally auto-closed by #3491 this way and reopened on 2026-07-02.
 - Keep branches small and single-purpose; update checklists in `trigger-checks.md` when relevant.
 
 ## Security & Configuration Tips
