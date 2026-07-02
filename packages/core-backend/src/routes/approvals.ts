@@ -12,7 +12,7 @@ import { Logger } from '../core/logger'
 import { IPLMAdapter } from '../di/identifiers'
 import { pool } from '../db/pg'
 import { authenticate } from '../middleware/auth'
-import { rbacGuard } from '../rbac/rbac'
+import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../services/AfterSalesApprovalBridgeService'
 import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
 import {
@@ -43,6 +43,7 @@ import type { FormSchema } from '../types/approval-product'
 
 const logger = new Logger('ApprovalsRouter')
 const MAX_APPROVAL_PAGE_SIZE = 200
+const approvalTemplateAdminGuard = rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])
 
 let approvalsDegraded = false
 const allowDegradation = process.env.APPROVALS_OPTIONAL === '1'
@@ -167,6 +168,8 @@ function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTemplateV
     isTemplateManager: req.user?.role === 'admin'
       || roles.includes('admin')
       || permissions.includes('*:*')
+      || permissions.includes('approvals:*')
+      || permissions.includes('approvals:admin-templates')
       || permissions.includes('approval-templates:manage'),
   }
 }
@@ -356,8 +359,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
 
   // Directory lookups for the authoring assignee picker. Registered BEFORE
   // '/api/approval-templates/:id' so 'directory' is not matched as an :id.
-  // Gated by approval-templates:manage (same authoring permission as create/publish).
-  r.get('/api/approval-templates/directory/users', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+  // Gated by approval-templates:manage OR the split template-admin capability (same authoring permission as create/publish).
+  r.get('/api/approval-templates/directory/users', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const q = String(req.query.q || '').trim()
       const limit = Number.parseInt(String(req.query.limit ?? '20'), 10)
@@ -368,7 +371,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.get('/api/approval-templates/directory/roles', authenticate, rbacGuard('approval-templates:manage'), async (_req: Request, res: Response) => {
+  r.get('/api/approval-templates/directory/roles', authenticate, approvalTemplateAdminGuard, async (_req: Request, res: Response) => {
     try {
       const roles = await listDirectoryRoles()
       res.json({ roles })
@@ -381,7 +384,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   // approval_usable=true (the curated set the publish/dry-run HARD GATE enforces). Distinct from
   // /directory/roles, which is the shared author picker that ALSO serves static_role approver selection and
   // intentionally returns ALL roles. Curating only requester.role (NOT static_role) is the ratified scope.
-  r.get('/api/approval-templates/directory/formula-roles', authenticate, rbacGuard('approval-templates:manage'), async (_req: Request, res: Response) => {
+  r.get('/api/approval-templates/directory/formula-roles', authenticate, approvalTemplateAdminGuard, async (_req: Request, res: Response) => {
     try {
       const roles = await listFormulaConditionRoles()
       res.json({ roles })
@@ -393,7 +396,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   // FC-4 — approval-specific formula-condition dry-run. This intentionally uses the
   // exact approval evaluator from publish/execution and stays separate from the
   // sheet-scoped multitable formula dry-run API.
-  r.post('/api/approval-templates/formula-condition/dry-run', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+  r.post('/api/approval-templates/formula-condition/dry-run', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const body = isPlainRecord(req.body) ? req.body : {}
       const expression = typeof body.expression === 'string' ? body.expression : ''
@@ -477,7 +480,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.post('/api/approval-templates', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+  r.post('/api/approval-templates', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const template = await productService.createTemplate({
         key: req.body?.key,
@@ -525,7 +528,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.patch('/api/approval-templates/:id', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+  r.patch('/api/approval-templates/:id', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const template = await productService.updateTemplate(req.params.id, {
         key: req.body?.key,
@@ -556,7 +559,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   // the caller must publish the clone separately before it can initiate
   // instances. Mounted *before* the per-id publish route would not matter
   // (path is distinct), but we keep it adjacent to the other per-id routes.
-  r.post('/api/approval-templates/:id/clone', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+  r.post('/api/approval-templates/:id/clone', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const template = await productService.cloneTemplate(req.params.id)
       res.status(201).json(template)
@@ -570,7 +573,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.post('/api/approval-templates/:id/publish', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+  r.post('/api/approval-templates/:id/publish', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const version = await productService.publishTemplate(req.params.id, {
         policy: req.body?.policy,
@@ -586,7 +589,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.get('/api/approval-templates/:id/versions/:versionId', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+  r.get('/api/approval-templates/:id/versions/:versionId', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const version = await productService.getTemplateVersion(req.params.id, req.params.versionId)
       if (!version) {
@@ -794,10 +797,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  // 委托设置 (delegation config) — ADMIN-managed (approval-templates:manage). An admin
+  // 委托设置 (delegation config) — template-admin managed. An admin
   // configures delegations for any user: the delegator is a chosen field and the list
   // shows 委托人 + 被委托人. v1: one active row per (delegator, scope target).
-  r.get('/api/approval-delegations', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+  r.get('/api/approval-delegations', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const delegatorUserId = typeof req.query.delegatorUserId === 'string' ? req.query.delegatorUserId : undefined
       res.json({ data: await listDelegations(pool.query.bind(pool), { delegatorUserId }) })
@@ -806,7 +809,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.post('/api/approval-delegations', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+  r.post('/api/approval-delegations', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const body = (req.body ?? {}) as Record<string, unknown>
       const created = await createDelegation(pool.query.bind(pool), {
@@ -823,7 +826,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.patch('/api/approval-delegations/:id', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+  r.patch('/api/approval-delegations/:id', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const id = typeof req.params.id === 'string' ? req.params.id : ''
       const body = (req.body ?? {}) as Record<string, unknown>
@@ -842,7 +845,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  r.delete('/api/approval-delegations/:id', authenticate, rbacGuard('approval-templates:manage'), async (req: Request, res: Response) => {
+  r.delete('/api/approval-delegations/:id', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const id = typeof req.params.id === 'string' ? req.params.id : ''
       const disabled = await disableDelegation(pool.query.bind(pool), id)
@@ -1421,6 +1424,72 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         error,
         'APPROVAL_ADMIN_JUMP_FAILED',
         'Failed to jump approval',
+      )
+    }
+  })
+
+  r.post('/api/approvals/admin/reassign', authenticate, rbacGuard('approvals:admin'), async (req: Request, res: Response) => {
+    try {
+      const productService = getProductService()
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const fromUserId = normalizeApprovalText(req.body?.fromUserId)
+      const toUserId = normalizeApprovalText(req.body?.toUserId)
+      const reason = normalizeApprovalText(req.body?.reason)
+      if (!fromUserId) {
+        return res.status(400).json(approvalErrorResponse('VALIDATION_ERROR', 'fromUserId is required'))
+      }
+      if (!toUserId) {
+        return res.status(400).json(approvalErrorResponse('VALIDATION_ERROR', 'toUserId is required'))
+      }
+      if (!reason) {
+        return res.status(400).json(approvalErrorResponse('VALIDATION_ERROR', 'reason is required'))
+      }
+      const instanceIds = Array.isArray(req.body?.instanceIds)
+        ? req.body.instanceIds
+            .filter((value: unknown): value is string => typeof value === 'string')
+            .map((value: string) => value.trim())
+            .filter(Boolean)
+        : undefined
+
+      const actor = {
+        userId,
+        userName: resolveApprovalActorName(req, userId),
+        roles: resolveApprovalActorRoles(req),
+        permissions: resolveApprovalActorPermissions(req),
+        tenantId: resolveApprovalTenantId(req),
+        ip: req.ip || null,
+        userAgent: req.get('user-agent') || null,
+      }
+      const result = await productService.bulkReassignApprovals({
+        fromUserId,
+        toUserId,
+        reason,
+        ...(instanceIds !== undefined ? { instanceIds } : {}),
+      }, actor)
+
+      await publishApprovalCountsForUsers(
+        options,
+        [
+          { userId, roles: actor.roles },
+          { userId: fromUserId },
+          { userId: toUserId },
+          ...result.affectedRequesterIds.map((requesterId) => ({ userId: requesterId })),
+        ],
+        'bulk-reassign',
+      )
+      res.json({ ok: true, data: result })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_BULK_REASSIGN_FAILED',
+        'Failed to bulk reassign approvals',
       )
     }
   })

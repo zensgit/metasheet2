@@ -298,6 +298,7 @@ jobs:
             tests/integration/multitable-automation-start-approval-http.test.ts \
             tests/integration/multitable-form-submit-trigger.test.ts \
             tests/integration/multitable-event-dedup-trigger.test.ts \
+            tests/integration/multitable-inbound-webhook-trigger.test.ts \
             tests/integration/multitable-form-submit-start-approval-smoke.test.ts \
             tests/integration/automation-approval-completed-trigger.test.ts \
             tests/integration/multitable-date-reminder-trigger.test.ts \
@@ -345,6 +346,7 @@ jobs:
             tests/integration/approval-node-sla-remind.test.ts \
             tests/integration/approval-node-timeout-effects.test.ts \
             tests/integration/approval-nofm-threshold.test.ts \
+            tests/integration/approval-bulk-reassign.api.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)

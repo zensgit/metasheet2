@@ -20,6 +20,17 @@ import {
   EVENT_DEDUP_LEDGER_SWEEP_INTERVAL_MS,
   withAutomationEventId,
 } from './automation-event-dedup'
+import {
+  INBOUND_WEBHOOK_SIGNATURE_HEADER,
+  INBOUND_WEBHOOK_TIMESTAMP_HEADER,
+  WEBHOOK_RECEIVED_TRIGGER,
+  inboundWebhookSecret,
+  isTopLevelWebhookJsonObject,
+  redactInboundWebhookTriggerConfig,
+  validateInboundWebhookTriggerAtSave,
+  verifyInboundWebhookSignature,
+  type InboundWebhookRejectReason,
+} from './automation-inbound-webhook'
 import { isValidIanaTimeZone } from './automation-timezone'
 import { ensureRecordNotLocked } from './record-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
@@ -53,6 +64,7 @@ import {
 } from './automation-approval-bridge-service'
 import type { ApprovalCompletionEventV1 } from '../services/ApprovalCompletionEvent'
 import { applyTemplateVisibilityFilter, type ApprovalTemplateVisibilityActor } from '../services/ApprovalProductService'
+import { metrics } from '../metrics/metrics'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -577,6 +589,10 @@ export type AutomationEventPayload = {
   _triggeredBy?: string
 }
 
+export type InboundWebhookDispatchResult =
+  | { accepted: true; execution: AutomationExecution }
+  | { accepted: false; reason: InboundWebhookRejectReason }
+
 function serializeAutomationConditionFieldRows(rows: unknown[]): AutomationConditionField[] {
   return rows
     .map((row) => {
@@ -859,6 +875,9 @@ export class AutomationService {
     const cronTriggerError = this.validateCronTriggerAtSave(input.triggerType, input.triggerConfig ?? null)
     if (cronTriggerError) throw new AutomationRuleValidationError(cronTriggerError)
 
+    const inboundWebhookError = validateInboundWebhookTriggerAtSave(input.triggerType, input.triggerConfig ?? null)
+    if (inboundWebhookError) throw new AutomationRuleValidationError(inboundWebhookError)
+
     // T1-3: approval.completed rules validate templateId/outcomes/actions/conditions + creator permission.
     const approvalCompletedError = await this.validateApprovalCompletedRuleAtSave(
       input.triggerType,
@@ -1065,6 +1084,12 @@ export class AutomationService {
       )
       if (cronTriggerError) throw new AutomationRuleValidationError(cronTriggerError)
 
+      const inboundWebhookError = validateInboundWebhookTriggerAtSave(
+        nextTriggerType,
+        nextTriggerConfig as Record<string, unknown> | null,
+      )
+      if (inboundWebhookError) throw new AutomationRuleValidationError(inboundWebhookError)
+
       // SERVER-SET activation floor: when the RESULT is a date_field rule, persist `effectiveAt`. Converting
       // INTO date_field (prev type differs) activates NOW; staying date_field (config edit) PRESERVES the
       // existing activation (fall back to created_at for pre-fix rules) so an edit never re-opens backfill.
@@ -1085,6 +1110,31 @@ export class AutomationService {
         updates.trigger_config = JSON.stringify(baseConfig)
         if (updates.trigger_type === undefined) updates.trigger_type = nextTriggerType
       }
+    }
+
+    // T1-2: a legacy/direct-DB secret-less webhook.received rule must be blocked on ANY edit, not only
+    // trigger edits. Otherwise an action-only patch would keep an ingestable-looking rule whose inbound path
+    // later has to fail at runtime. Validate the resulting trigger config for every write shape.
+    if (
+      input.triggerType !== undefined
+      || input.triggerConfig !== undefined
+      || input.actionType !== undefined
+      || input.actionConfig !== undefined
+      || input.actions !== undefined
+      || input.executionMode !== undefined
+      || input.conditions !== undefined
+      || input.name !== undefined
+      || input.enabled !== undefined
+    ) {
+      const existingForWebhook = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      existingRuleSnapshot = existingForWebhook
+      if (!existingForWebhook || existingForWebhook.sheet_id !== sheetId) return null
+      const nextTriggerType = input.triggerType ?? existingForWebhook.trigger_type
+      const nextTriggerConfig = (
+        input.triggerConfig !== undefined ? input.triggerConfig : existingForWebhook.trigger_config
+      ) as Record<string, unknown> | null
+      const inboundWebhookError = validateInboundWebhookTriggerAtSave(nextTriggerType, nextTriggerConfig)
+      if (inboundWebhookError) throw new AutomationRuleValidationError(inboundWebhookError)
     }
 
     // T1-3: when the RESULTING rule is approval.completed, validate the full resulting shape (trigger config
@@ -1718,6 +1768,66 @@ export class AutomationService {
       logger.warn('approval.completed template visibility check failed; denying (fail-closed)', err instanceof Error ? err : undefined)
       return false
     }
+  }
+
+  private rejectInboundWebhook(ruleId: string, reason: InboundWebhookRejectReason): InboundWebhookDispatchResult {
+    try {
+      metrics.automationWebhookRejectedTotal.labels(reason).inc()
+    } catch {
+      // Metrics must never change the webhook security outcome.
+    }
+    logger.warn(`webhook.received rejected rule=${ruleId || '<missing>'} reason=${reason}`)
+    return { accepted: false, reason }
+  }
+
+  /**
+   * T1-2 inbound webhook dispatch.
+   *
+   * The caller is anonymous; only possession of the per-rule secret authorizes delivery. The request body is
+   * exposed as `recordData`, but record context is intentionally synthetic (`recordId=''`, `actorId=null`):
+   * caller-supplied `recordId` / `sheetId` / actor-shaped fields are data only and cannot retarget actions
+   * or impersonate a user. Side effects run under the stored rule author, matching scheduled triggers.
+   */
+  async handleInboundWebhook(
+    ruleId: string,
+    rawBody: Buffer,
+    parsedBody: unknown,
+    headers: Record<string, unknown>,
+    nowMs = Date.now(),
+  ): Promise<InboundWebhookDispatchResult> {
+    if (!ruleId) return this.rejectInboundWebhook(ruleId, 'unknown_rule')
+    if (rawBody.length === 0) return this.rejectInboundWebhook(ruleId, 'missing_body')
+    if (!isTopLevelWebhookJsonObject(parsedBody)) return this.rejectInboundWebhook(ruleId, 'invalid_body')
+
+    const rule = await this.getRule(ruleId)
+    if (!rule) return this.rejectInboundWebhook(ruleId, 'unknown_rule')
+    if (rule.trigger_type !== WEBHOOK_RECEIVED_TRIGGER) return this.rejectInboundWebhook(ruleId, 'wrong_trigger')
+    if (!rule.enabled) return this.rejectInboundWebhook(ruleId, 'disabled')
+
+    const secret = inboundWebhookSecret(rule.trigger_config)
+    if (!secret) return this.rejectInboundWebhook(ruleId, 'missing_secret')
+
+    const verified = verifyInboundWebhookSignature({
+      rawBody,
+      secret,
+      timestampHeader: headers[INBOUND_WEBHOOK_TIMESTAMP_HEADER],
+      signatureHeader: headers[INBOUND_WEBHOOK_SIGNATURE_HEADER],
+      nowMs,
+    })
+    if (verified.ok === false) return this.rejectInboundWebhook(ruleId, verified.reason)
+
+    const triggerEvent: AutomationEventPayload & Record<string, unknown> = {
+      sheetId: rule.sheet_id,
+      recordId: '',
+      data: parsedBody,
+      actorId: null,
+      _triggeredBy: WEBHOOK_RECEIVED_TRIGGER,
+      webhook: {
+        body: parsedBody,
+      },
+    }
+    const execution = await this.executeRule(toExecutorRule(rule), triggerEvent)
+    return { accepted: true, execution }
   }
 
   async handleEvent(eventType: string, payload: AutomationEventPayload): Promise<void> {
@@ -2551,7 +2661,10 @@ export type SerializedAutomationRule = {
  * Shape preserved verbatim from the legacy `univer-meta.ts` route.
  */
 export function serializeAutomationRule(rule: AutomationRule): SerializedAutomationRule {
-  const triggerConfig = rule.trigger_config ?? {}
+  const rawTriggerConfig = rule.trigger_config ?? {}
+  const triggerConfig = rule.trigger_type === WEBHOOK_RECEIVED_TRIGGER
+    ? redactInboundWebhookTriggerConfig(rawTriggerConfig)
+    : rawTriggerConfig
   const actionConfig = rule.action_config ?? {}
   return {
     id: rule.id,

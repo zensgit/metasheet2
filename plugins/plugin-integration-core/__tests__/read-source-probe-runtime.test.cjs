@@ -297,6 +297,7 @@ async function testErrorClassificationIsCoarseAndValuesFree() {
   const cases = [
     [Object.assign(new Error('401 from https://k3host M-001'), { name: 'K3WiseWebApiAdapterError', status: 401 }), 'READ_SOURCE_PROBE_AUTH_FAILED', 'K3WiseWebApiAdapterError'],
     [Object.assign(new Error('login failed'), { name: 'K3WiseWebApiAdapterError', details: { code: 'K3_WISE_LOGIN_FAILED' } }), 'READ_SOURCE_PROBE_AUTH_FAILED', 'K3WiseWebApiAdapterError'],
+    [Object.assign(new Error('credentials are not stored'), { name: 'K3WiseWebApiAdapterError', details: { code: 'K3_WISE_CREDENTIALS_MISSING' } }), 'READ_SOURCE_PROBE_AUTH_FAILED', 'K3WiseWebApiAdapterError'],
     [Object.assign(new Error('business response failed'), { name: 'K3WiseWebApiAdapterError', details: { code: 'K3_WISE_READ_BUSINESS_ERROR' } }), 'READ_SOURCE_PROBE_RESPONSE_UNRECOGNIZED', 'K3WiseWebApiAdapterError'],
     [Object.assign(new Error('filter not allowed'), { name: 'AdapterValidationError' }), 'READ_SOURCE_PROBE_REJECTED', 'Error'],
     [Object.assign(new TypeError('fetch failed'), { code: 'ECONNREFUSED' }), 'READ_SOURCE_PROBE_NETWORK_FAILED', 'TypeError'],

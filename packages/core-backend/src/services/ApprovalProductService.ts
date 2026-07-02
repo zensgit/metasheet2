@@ -77,6 +77,7 @@ import { eventBus } from '../integration/events/event-bus'
 
 const metricsLogger = new Logger('ApprovalMetricsHook')
 const nodeTimeoutLogger = new Logger('ApprovalNodeTimeout')
+const approvalProductLogger = new Logger('ApprovalProductService')
 
 function safeMetricsCall(label: string, fn: () => Promise<void>): void {
   Promise.resolve()
@@ -226,6 +227,28 @@ type ApprovalAdminJumpRequest = {
   version: number
   targetNodeKey: string
   reason: string
+}
+
+export type ApprovalBulkReassignSkipReason =
+  | 'not-found'
+  | 'not-pending'
+  | 'not-assigned'
+  | 'target-is-requester'
+  | 'target-already-assignee'
+  | 'target-user-invalid'
+  | 'error'
+
+export type ApprovalBulkReassignRequest = {
+  fromUserId: string
+  toUserId: string
+  instanceIds?: string[]
+  reason: string
+}
+
+export type ApprovalBulkReassignResult = {
+  succeeded: string[]
+  skipped: Array<{ id: string; reason: ApprovalBulkReassignSkipReason }>
+  affectedRequesterIds: string[]
 }
 
 type AdminJumpAuditAssignee = {
@@ -3048,7 +3071,7 @@ export class ApprovalProductService {
    *   - name:  `"{original} (副本)"`
    *   - key:   `"{original}_copy_<6 hex chars>"`     (guarantees uniqueness)
    *
-   * Permission: callers must already hold `approval-templates:manage`; this
+   * Permission: callers must already hold a template-admin capability; this
    * method treats the clone as an ordinary draft creation from the acting
    * admin's perspective.
    */
@@ -3153,6 +3176,8 @@ export class ApprovalProductService {
       roles: actor.roles ?? [],
       permissions: actor.permissions ?? [],
       isTemplateManager: (actor.permissions ?? []).includes('approval-templates:manage')
+        || (actor.permissions ?? []).includes('approvals:admin-templates')
+        || (actor.permissions ?? []).includes('approvals:*')
         || (actor.permissions ?? []).includes('*:*')
         || (actor.roles ?? []).includes('admin'),
     })
@@ -3710,6 +3735,211 @@ export class ApprovalProductService {
       throw new ServiceError('Approval not found after jump', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
     return approval
+  }
+
+  async bulkReassignApprovals(
+    request: ApprovalBulkReassignRequest,
+    actor: CreateApprovalActor & { ip?: string | null; userAgent?: string | null },
+  ): Promise<ApprovalBulkReassignResult> {
+    if (!pool) throw new Error('Database not available')
+
+    const fromUserId = request.fromUserId.trim()
+    const toUserId = request.toUserId.trim()
+    const reason = request.reason.trim()
+    if (!fromUserId) throw new ServiceError('fromUserId is required', 400, 'VALIDATION_ERROR')
+    if (!toUserId) throw new ServiceError('toUserId is required', 400, 'VALIDATION_ERROR')
+    if (!reason) throw new ServiceError('reason is required', 400, 'VALIDATION_ERROR')
+    if (fromUserId === toUserId) {
+      throw new ServiceError('fromUserId and toUserId must be different', 400, 'VALIDATION_ERROR')
+    }
+
+    const targetUser = await pool.query<{ id: string }>(
+      `SELECT id FROM users WHERE id = $1 AND COALESCE(is_active, TRUE) = TRUE LIMIT 1`,
+      [toUserId],
+    )
+    if (targetUser.rows.length === 0) {
+      throw new ServiceError('Target user is not active', 400, 'APPROVAL_REASSIGN_TARGET_INVALID')
+    }
+
+    const hasExplicitInstanceIds = Array.isArray(request.instanceIds)
+    const explicitIds = hasExplicitInstanceIds
+      ? [...new Set(request.instanceIds.map((id) => id.trim()).filter(Boolean))]
+      : []
+    if (explicitIds.length > 200) {
+      throw new ServiceError('Bulk reassign supports at most 200 instances per request', 400, 'VALIDATION_ERROR')
+    }
+
+    let candidateIds = explicitIds
+    if (!hasExplicitInstanceIds) {
+      const candidates = await pool.query<{ instance_id: string }>(
+        `SELECT DISTINCT a.instance_id
+           FROM approval_assignments a
+           JOIN approval_instances i ON i.id = a.instance_id
+          WHERE a.assignment_type = 'user'
+            AND a.assignee_id = $1
+            AND a.is_active = TRUE
+            AND i.status = 'pending'
+            AND COALESCE(i.source_system, 'platform') = 'platform'
+          ORDER BY a.instance_id ASC
+          LIMIT 200`,
+        [fromUserId],
+      )
+      candidateIds = candidates.rows.map((row) => row.instance_id)
+    }
+
+    const result: ApprovalBulkReassignResult = {
+      succeeded: [],
+      skipped: [],
+      affectedRequesterIds: [],
+    }
+    const affectedRequesters = new Set<string>()
+
+    const skip = (id: string, reasonCode: ApprovalBulkReassignSkipReason): void => {
+      result.skipped.push({ id, reason: reasonCode })
+    }
+
+    for (const instanceId of candidateIds) {
+      let client: ApprovalDbClient | null = null
+      try {
+        client = await pool.connect()
+        await client.query('BEGIN')
+
+        const instanceResult = await client.query<ApprovalInstanceRow>(
+          `SELECT * FROM approval_instances WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform' FOR UPDATE`,
+          [instanceId],
+        )
+        const instance = instanceResult.rows[0]
+        if (!instance) {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'not-found')
+          continue
+        }
+        if (instance.status !== 'pending') {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'not-pending')
+          continue
+        }
+
+        const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+        const requesterId = typeof requesterSnapshot?.id === 'string' ? requesterSnapshot.id : null
+        if (requesterId && requesterId === toUserId) {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'target-is-requester')
+          continue
+        }
+
+        const sourceAssignments = await client.query<ApprovalAssignmentRow>(
+          `SELECT *
+             FROM approval_assignments
+            WHERE instance_id = $1
+              AND assignment_type = 'user'
+              AND assignee_id = $2
+              AND is_active = TRUE
+            ORDER BY COALESCE(node_key, ''), created_at ASC
+            FOR UPDATE`,
+          [instanceId, fromUserId],
+        )
+        if (sourceAssignments.rows.length === 0) {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'not-assigned')
+          continue
+        }
+
+        const targetAssignments = await client.query<{ node_key: string | null }>(
+          `SELECT node_key
+             FROM approval_assignments
+            WHERE instance_id = $1
+              AND assignment_type = 'user'
+              AND assignee_id = $2
+              AND is_active = TRUE
+            LIMIT 1`,
+          [instanceId, toUserId],
+        )
+        if (targetAssignments.rows.length > 0) {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'target-already-assignee')
+          continue
+        }
+
+        const nextVersion = instance.version + 1
+        const actorName = actor.userName || actor.userId
+        const reassignments = sourceAssignments.rows.map((assignment) => ({
+          assignmentType: 'user' as const,
+          assigneeId: toUserId,
+          sourceStep: assignment.source_step ?? 0,
+          nodeKey: assignment.node_key || '',
+          metadata: {
+            reassignedFrom: fromUserId,
+            adminReassign: true,
+            previousAssignmentId: assignment.id,
+          },
+        }))
+
+        await client.query(
+          `UPDATE approval_assignments
+              SET is_active = FALSE, updated_at = now()
+            WHERE instance_id = $1
+              AND assignment_type = 'user'
+              AND assignee_id = $2
+              AND is_active = TRUE`,
+          [instanceId, fromUserId],
+        )
+        await this.insertAssignments(client, instanceId, reassignments)
+        await client.query(
+          `UPDATE approval_instances
+              SET version = $2, updated_at = now()
+            WHERE id = $1`,
+          [instanceId, nextVersion],
+        )
+
+        for (const assignment of sourceAssignments.rows) {
+          await this.insertApprovalRecord(client, instanceId, {
+            action: 'reassign',
+            actorId: actor.userId,
+            actorName,
+            comment: reason,
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            metadata: {
+              adminReassign: true,
+              fromUserId,
+              toUserId,
+              nodeKey: assignment.node_key,
+              previousAssignmentId: assignment.id,
+              reason,
+            },
+            targetUserId: toUserId,
+          }, actor)
+        }
+
+        await client.query('COMMIT')
+        result.succeeded.push(instanceId)
+        if (requesterId) affectedRequesters.add(requesterId)
+      } catch (error) {
+        await rollbackQuietly(client)
+        approvalProductLogger.warn(
+          `bulk approval reassign skipped instance ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
+          error instanceof Error ? error : undefined,
+        )
+        skip(instanceId, 'error')
+      } finally {
+        client?.release()
+      }
+    }
+
+    result.affectedRequesterIds = [...affectedRequesters].sort()
+    eventBus.emit('approval.bulk_reassigned', {
+      actorId: actor.userId,
+      fromUserId,
+      toUserId,
+      reason,
+      succeeded: result.succeeded,
+      skipped: result.skipped,
+      affectedRequesterIds: result.affectedRequesterIds,
+    })
+    return result
   }
 
   /**

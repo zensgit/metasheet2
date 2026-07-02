@@ -6,9 +6,9 @@ import { query } from '../db/pg'
  * These deliberately return ONLY an identifier + label (and email for users) — far less
  * than admin-users' ADMIN_USER_PROFILE_SELECT / fetchRoleCatalog. The picker needs to turn
  * a free-text id into a human-pickable option, nothing more, and these endpoints are gated
- * upstream by rbacGuard('approval-templates:manage'). Keeping the shape minimal is the
- * least-privilege choice and avoids re-exposing the full admin user profile through a
- * template-authoring surface.
+ * upstream by the template-admin guard (`approval-templates:manage` or
+ * `approvals:admin-templates`). Keeping the shape minimal is the least-privilege choice
+ * and avoids re-exposing the full admin user profile through a template-authoring surface.
  */
 
 export interface DirectoryUserOption {

@@ -93,6 +93,8 @@ export interface PlmBomMultitableLine {
   source_version: number | null
   source_updated_at: string | null
   sync_status: string
+  // Provider optimistic-concurrency tag (may be absent from an older provider).
+  write_etag?: string | null
 }
 
 export interface PlmBomMultitablePart {
@@ -823,6 +825,7 @@ export async function updatePlmBomMultitableLine(
   bomLineId: string,
   patch: PlmBomMultitableLinePatch,
   idempotencyKey: string,
+  writeEtag?: string | null,
 ): Promise<PlmBomMultitableLineUpdateResult> {
   const dsId = dataSourceId.trim()
   const pid = partId.trim()
@@ -845,7 +848,11 @@ export async function updatePlmBomMultitableLine(
     `/api/plm-workbench/data-sources/${encodeURIComponent(dsId)}/bom-multitable/${encodeURIComponent(pid)}/lines/${encodeURIComponent(lineId)}`,
     {
       method: 'PATCH',
-      headers: { 'Idempotency-Key': idem },
+      headers: {
+        'Idempotency-Key': idem,
+        // Send the write_etag verbatim as If-Match when present (optimistic concurrency).
+        ...(typeof writeEtag === 'string' && writeEtag ? { 'If-Match': writeEtag } : {}),
+      },
       body: JSON.stringify(payload),
       suppressUnauthorizedRedirect: true,
     },

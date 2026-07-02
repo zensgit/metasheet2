@@ -2,6 +2,9 @@ export const APPROVAL_PRODUCT_PERMISSIONS = [
   'approvals:read',
   'approvals:write',
   'approvals:act',
+  'approvals:admin',
+  'approvals:admin-templates',
+  'approvals:admin-data',
   'approval-templates:manage',
 ] as const
 

@@ -158,7 +158,7 @@ import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
 import { isOapiAllowlistRequest } from './multitable/oapi-read-allowlist'
 import { dashboardRouter } from './routes/dashboard'
-import { createAutomationRoutes } from './routes/automation'
+import { automationWebhookJsonParser, createAutomationRoutes } from './routes/automation'
 import { createMultitableAiRoutes } from './routes/multitable-ai'
 import { QueueServiceImpl } from './services/QueueService'
 import { createMultitableButtonRoutes } from './routes/multitable-button'
@@ -967,6 +967,10 @@ export class MetaSheetServer {
       next()
     })
     this.app.use('/api/attendance/import', express.json({ limit: attendanceImportJsonLimit }))
+
+    // T1-2 inbound automation webhooks need the exact raw JSON bytes for HMAC verification and a
+    // narrower body limit than the general API. Parse this prefix before the global JSON parser.
+    this.app.use('/api/multitable/automation/webhooks', automationWebhookJsonParser)
 
     // Body parsing
     this.app.use(express.json({ limit: '10mb' }))

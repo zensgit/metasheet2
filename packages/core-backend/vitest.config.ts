@@ -51,6 +51,9 @@ export default defineConfig({
       // no-DB default job so it doesn't skip-green, and wired as a WHOLE FILE into the
       // `Run approval real-DB integration` step in plugin-tests.yml where it runs against real Postgres.
       'tests/integration/approval-nofm-threshold.test.ts',
+      // T2-1+2 scoped approval admins + bulk handover: real-DB route/service boundary with RBAC and
+      // approval_records CHECK coverage. Excluded from the no-DB default and wired into approval real-DB CI.
+      'tests/integration/approval-bulk-reassign.api.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
@@ -79,6 +82,9 @@ export default defineConfig({
       // does not skip-green, and wired as a WHOLE FILE into the `Run multitable real-DB integration`
       // job in plugin-tests.yml where it runs against real Postgres every PR.
       'tests/integration/multitable-event-dedup-trigger.test.ts',
+      // T1-2 inbound webhook trigger: mounted-route + real-DB execution row. Excluded from the no-DB
+      // default job so it does not skip-green, and wired as a WHOLE FILE into the multitable real-DB lane.
+      'tests/integration/multitable-inbound-webhook-trigger.test.ts',
       // comments.api.test.ts needs setup.integration.ts + a live DB. It stays
       // CI-excluded (NOT wired) because 8 of its tests have a pre-existing real-wire
       // failure (CommentService.mapRowToComment drops containerId/targetId/
