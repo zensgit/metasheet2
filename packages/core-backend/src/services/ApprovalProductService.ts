@@ -76,6 +76,7 @@ import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
 
 const metricsLogger = new Logger('ApprovalMetricsHook')
+const nodeTimeoutLogger = new Logger('ApprovalNodeTimeout')
 
 function safeMetricsCall(label: string, fn: () => Promise<void>): void {
   Promise.resolve()
@@ -306,9 +307,26 @@ const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-app
 const AUTO_APPROVAL_ACTOR_MODES = new Set<AutoApprovalActorMode>(['system', 'original_approver'])
 const NODE_FIELD_ACCESS_VALUES = new Set<NodeFieldAccess>(['editable', 'readonly', 'hidden'])
 // T1-1 node-level SLA. The full effect enum is declared so an off-enum value is a hard reject; slice 1
-// only WIRES `remind` (a notification) — transfer/jump/auto_* are rejected at publish until their slice.
+// wired `remind` (a notification), slice 2 wires `transfer` + `jump` (state mutations) — auto_* remain
+// rejected at publish and runtime-inert (terminal effects stay behind the closed gate below).
 const NODE_TIMEOUT_EFFECTS = new Set<NodeTimeoutEffect>(['remind', 'transfer', 'jump', 'auto_approve', 'auto_reject'])
-const NODE_TIMEOUT_SUPPORTED_EFFECTS = new Set<NodeTimeoutEffect>(['remind'])
+const NODE_TIMEOUT_SUPPORTED_EFFECTS = new Set<NodeTimeoutEffect>(['remind', 'transfer', 'jump'])
+// T1-1 slice-2 QS-b: a timeout-jump whose auto-approval cascade would land the instance in a TERMINAL
+// state is a de-facto auto_approve. That terminal outcome is gated behind this env flag, which the
+// owner keeps CLOSED — when off (default), the effect is skipped entirely (no state mutation).
+const NODE_TIMEOUT_TERMINAL_EFFECTS_ENV = 'APPROVAL_NODE_TIMEOUT_TERMINAL_EFFECTS'
+function nodeTimeoutTerminalEffectsEnabled(): boolean {
+  return process.env[NODE_TIMEOUT_TERMINAL_EFFECTS_ENV] === 'true'
+}
+// T1-1 slice-2 Q7: system sentinel recorded as the actor of a scanner-fired transfer/jump.
+const APPROVAL_TIMEOUT_SYSTEM_ACTOR = 'system:approval-timeout'
+/** Outcome of a scanner-invoked transfer/jump timeout effect (see applyNodeTimeoutEffect). */
+export type ApprovalNodeTimeoutEffectOutcome =
+  | 'applied'
+  | 'skipped_stale'
+  | 'skipped_invalid_config'
+  | 'skipped_terminal_gated'
+  | 'skipped_parallel_state'
 // Upper bound (~69.4 days) guards against an overflowing deadline; lower bound forbids 0/negative.
 const NODE_TIMEOUT_MAX_AFTER_MINUTES = 100000
 const APPROVAL_MAX_AUTO_STEPS = 50
@@ -945,9 +963,15 @@ function normalizeNodeTimeout(
   if (!isRecord(value)) {
     failValidation(context, `${path} must be an object`)
   }
+  // Slice-2 effect targets ride along (trimmed); required/cross-field rules live in
+  // validateNodeTimeoutConfigs so all entry points raise the same APPROVAL_NODE_TIMEOUT_* codes.
+  const transferToUserId = typeof value.transferToUserId === 'string' ? value.transferToUserId.trim() : undefined
+  const jumpToNodeKey = typeof value.jumpToNodeKey === 'string' ? value.jumpToNodeKey.trim() : undefined
   return {
     afterMinutes: value.afterMinutes as number,
     effect: value.effect as NodeTimeoutEffect,
+    ...(transferToUserId ? { transferToUserId } : {}),
+    ...(jumpToNodeKey ? { jumpToNodeKey } : {}),
   }
 }
 
@@ -1035,9 +1059,13 @@ function collectParallelRegionNodeKeys(approvalGraph: ApprovalGraph): Set<string
 /**
  * T1-1 node-level SLA publish/author gate. For every node carrying a `config.timeout`:
  *   - `afterMinutes` must be a whole integer in (0, NODE_TIMEOUT_MAX_AFTER_MINUTES].
- *   - `effect` must be in the declared enum AND supported by slice 1 (`remind` only) — transfer / jump
- *     / auto_* are reserved (APPROVAL_NODE_TIMEOUT_EFFECT_UNSUPPORTED).
+ *   - `effect` must be in the declared enum AND wired (`remind` | `transfer` | `jump`) — auto_* stay
+ *     reserved (APPROVAL_NODE_TIMEOUT_EFFECT_UNSUPPORTED).
  *   - the node must NOT be inside a parallel region (APPROVAL_NODE_TIMEOUT_PARALLEL_UNSUPPORTED).
+ *   - slice-2 target rules (APPROVAL_NODE_TIMEOUT_TARGET_INVALID): transfer requires
+ *     `transferToUserId`; jump requires `jumpToNodeKey` referencing an EXISTING approval node that is
+ *     not the node itself and not inside a parallel region; targets are strictly effect-matched
+ *     (a stray target field on any other effect is rejected); transfer/jump only on approval nodes.
  * Raises the specific codes directly (status 400) so create / update / publish surface the same error
  * regardless of the surrounding validation context.
  */
@@ -1086,6 +1114,52 @@ function validateNodeTimeoutConfigs(approvalGraph: ApprovalGraph): void {
         400,
         'APPROVAL_NODE_TIMEOUT_PARALLEL_UNSUPPORTED',
       )
+    }
+    // T1-1 slice-2 QS-a: per-effect target rules. Strict cross-field — a target that does not belong
+    // to the configured effect is rejected rather than silently ignored, so a saved graph can never
+    // carry a misleading target.
+    const transferToUserId = (timeout as { transferToUserId?: unknown }).transferToUserId
+    const jumpToNodeKey = (timeout as { jumpToNodeKey?: unknown }).jumpToNodeKey
+    const failTarget = (message: string): never => {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} ${message}`,
+        400,
+        'APPROVAL_NODE_TIMEOUT_TARGET_INVALID',
+      )
+    }
+    if (effect === 'transfer' || effect === 'jump') {
+      if (node.type !== 'approval') {
+        failTarget(`timeout.effect '${effect}' is only supported on approval nodes`)
+      }
+    }
+    if (effect === 'transfer') {
+      if (typeof transferToUserId !== 'string' || transferToUserId.trim().length === 0) {
+        failTarget('timeout.transferToUserId is required for the transfer effect')
+      }
+      if (jumpToNodeKey !== undefined) {
+        failTarget('timeout.jumpToNodeKey is not allowed on a transfer effect')
+      }
+    } else if (effect === 'jump') {
+      if (transferToUserId !== undefined) {
+        failTarget('timeout.transferToUserId is not allowed on a jump effect')
+      }
+      const targetKey = typeof jumpToNodeKey === 'string' ? jumpToNodeKey.trim() : ''
+      if (targetKey.length === 0) {
+        failTarget('timeout.jumpToNodeKey is required for the jump effect')
+      }
+      if (targetKey === node.key) {
+        failTarget('timeout.jumpToNodeKey must not target the node itself')
+      }
+      const target = approvalGraph.nodes.find((candidate) => candidate.key === targetKey)
+      if (!target) {
+        failTarget(`timeout.jumpToNodeKey references unknown node ${targetKey}`)
+      } else if (target.type !== 'approval') {
+        failTarget('timeout.jumpToNodeKey must target an approval node')
+      } else if (parallelRegionNodeKeys.has(targetKey)) {
+        failTarget('timeout.jumpToNodeKey must not target a node inside a parallel region')
+      }
+    } else if (transferToUserId !== undefined || jumpToNodeKey !== undefined) {
+      failTarget(`timeout target fields are not allowed on the '${effect}' effect`)
     }
   }
 }
@@ -3636,6 +3710,258 @@ export class ApprovalProductService {
       throw new ServiceError('Approval not found after jump', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
     return approval
+  }
+
+  /**
+   * T1-1 slice-2 — apply a scanner-fired node-timeout effect (`transfer` | `jump`) with the
+   * `system:approval-timeout` actor. Invoked by ApprovalSlaScheduler for due non-remind rows.
+   *
+   * Contract:
+   * - Single-shot: on any outcome that can never self-heal for this activation (applied, invalid
+   *   config, gated terminal cascade, lingering deadline on a terminal instance, in-flight parallel
+   *   state) the armed deadline is consumed INSIDE this transaction — the scheduler must NOT call
+   *   markNodeTimeoutFired for effect rows.
+   * - Race guard: the instance row is locked FOR UPDATE and the armed deadline is re-verified in-txn
+   *   (present, overdue, effect matches the scan); a mismatch is a stale skip that consumes nothing.
+   * - QS-b terminal gate (ships CLOSED): a jump resolution that cascades to a TERMINAL state is
+   *   resolved FIRST and inspected — when APPROVAL_NODE_TIMEOUT_TERMINAL_EFFECTS is not enabled, the
+   *   effect is skipped with zero approval-state mutation (only the timeout is consumed).
+   */
+  async applyNodeTimeoutEffect(id: string, scannedEffect: 'transfer' | 'jump'): Promise<ApprovalNodeTimeoutEffectOutcome> {
+    if (!pool) throw new Error('Database not available')
+
+    let client: ApprovalDbClient | null = null
+    try {
+      client = await pool.connect()
+      await client.query('BEGIN')
+
+      const consumeTimeout = async (): Promise<void> => {
+        await client!.query(
+          `UPDATE approval_metrics
+             SET current_node_deadline_at = NULL, current_node_timeout_effect = NULL
+           WHERE instance_id = $1`,
+          [id],
+        )
+      }
+      const consumeAndSkip = async (outcome: ApprovalNodeTimeoutEffectOutcome, reason: string): Promise<ApprovalNodeTimeoutEffectOutcome> => {
+        await consumeTimeout()
+        await client!.query('COMMIT')
+        nodeTimeoutLogger.warn(
+          `node-timeout ${scannedEffect} skipped: ${JSON.stringify({ instanceId: id, effect: scannedEffect, reason })}`,
+        )
+        return outcome
+      }
+
+      const instanceResult = await client.query<ApprovalInstanceRow>(
+        `SELECT * FROM approval_instances WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform' FOR UPDATE`,
+        [id],
+      )
+      const instance = instanceResult.rows[0]
+      if (!instance) {
+        await client.query('ROLLBACK')
+        return 'skipped_stale'
+      }
+      if (instance.status !== 'pending') {
+        // A lingering deadline on a decided instance (the best-effort terminal metrics cleanup was
+        // missed) — consume it so the scanner stops re-returning the row every tick.
+        await consumeTimeout()
+        await client.query('COMMIT')
+        return 'skipped_stale'
+      }
+
+      // Scan→fire race guard: re-verify the armed deadline inside the transaction.
+      const armedResult = await client.query<{ current_node_deadline_at: string | Date | null; current_node_timeout_effect: string | null }>(
+        `SELECT current_node_deadline_at, current_node_timeout_effect FROM approval_metrics WHERE instance_id = $1 FOR UPDATE`,
+        [id],
+      )
+      const armed = armedResult.rows[0]
+      const deadlineMs = armed?.current_node_deadline_at ? new Date(armed.current_node_deadline_at as string | Date).getTime() : Number.NaN
+      if (!armed || Number.isNaN(deadlineMs) || deadlineMs > Date.now() || armed.current_node_timeout_effect !== scannedEffect) {
+        await client.query('ROLLBACK')
+        return 'skipped_stale'
+      }
+
+      if (!instance.published_definition_id || !instance.current_node_key) {
+        return await consumeAndSkip('skipped_invalid_config', 'instance_not_runtime_managed')
+      }
+      if (readParallelBranchStates(instance.metadata)) {
+        // Timeout effects can't safely mutate an in-flight parallel region (publish rejects these
+        // configs; this is runtime defense-in-depth against a stale published definition).
+        return await consumeAndSkip('skipped_parallel_state', 'parallel_state_in_flight')
+      }
+
+      const runtimeResult = await client.query<PublishedDefinitionRow>(
+        `SELECT * FROM approval_published_definitions WHERE id = $1`,
+        [instance.published_definition_id],
+      )
+      const runtime = runtimeResult.rows[0]
+      if (!runtime) {
+        return await consumeAndSkip('skipped_invalid_config', 'published_definition_missing')
+      }
+      const runtimeGraph = asRuntimeGraph(runtime.runtime_graph)
+      const currentNodeKey = instance.current_node_key
+      const timeoutConfig = nodeTimeoutForKey(runtimeGraph, currentNodeKey)
+      if (!timeoutConfig || timeoutConfig.effect !== scannedEffect) {
+        // The armed deadline no longer matches the current node's configured effect (e.g. the
+        // instance advanced and the best-effort re-stamp has not landed yet). Not ours to consume —
+        // the activation re-stamp owns these columns; next tick sees fresh state.
+        await client.query('ROLLBACK')
+        return 'skipped_stale'
+      }
+
+      const formSnapshot = toNullableRecord(instance.form_snapshot) || {}
+      const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+      const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
+        assignmentResolver: buildApprovalAssignmentResolver({
+          formSnapshot,
+          requesterSnapshot,
+        }),
+        requesterContext: ((d, t, r) => ({
+          department: typeof d === 'string' && d ? d : null,
+          title: typeof t === 'string' && t ? t : null,
+          roles: Array.isArray(r) ? r.filter((role): role is string => typeof role === 'string') : [],
+        }))(requesterSnapshot?.directoryDepartment, requesterSnapshot?.directoryTitle, requesterSnapshot?.directoryRoles),
+      })
+
+      if (scannedEffect === 'transfer') {
+        const targetUserId = timeoutConfig.transferToUserId?.trim()
+        if (!targetUserId) {
+          return await consumeAndSkip('skipped_invalid_config', 'transfer_target_missing')
+        }
+        // Hand the WHOLE node over: every active assignment at the node is deactivated and the
+        // static target takes it (mode semantics reset to the single handed-over approver).
+        await client.query(
+          `UPDATE approval_assignments
+             SET is_active = FALSE, updated_at = now()
+           WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE`,
+          [id, currentNodeKey],
+        )
+        await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, targetUserId))
+        // Parity with the dispatch transfer: an in-place handover does not bump the instance version.
+        await this.insertApprovalRecord(client, id, {
+          action: 'transfer',
+          actorId: APPROVAL_TIMEOUT_SYSTEM_ACTOR,
+          actorName: APPROVAL_TIMEOUT_SYSTEM_ACTOR,
+          comment: null,
+          fromStatus: instance.status,
+          toStatus: instance.status,
+          fromVersion: instance.version,
+          toVersion: instance.version,
+          metadata: { nodeKey: currentNodeKey, timeoutEffect: true, targetUserId },
+          targetUserId,
+        })
+        await consumeTimeout()
+        await client.query('COMMIT')
+        return 'applied'
+      }
+
+      const targetNodeKey = timeoutConfig.jumpToNodeKey?.trim()
+      const targetNode = targetNodeKey ? findRuntimeGraphNode(runtimeGraph, targetNodeKey) : null
+      if (!targetNodeKey || !targetNode || targetNode.type !== 'approval' || targetNodeKey === currentNodeKey) {
+        return await consumeAndSkip('skipped_invalid_config', 'jump_target_invalid')
+      }
+
+      const jumpResolution = executor.resolveReturnToNode(targetNodeKey)
+      const requesterId = requesterSnapshot?.id
+      const resolution = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)
+        ? this.applyAutoApprovalCascade(
+            id,
+            runtimeGraph,
+            executor,
+            jumpResolution,
+            typeof requesterId === 'string' ? requesterId : null,
+            await this.loadApprovalHistory(client, id),
+          )
+        : jumpResolution
+      if (resolution.status !== 'pending' && !nodeTimeoutTerminalEffectsEnabled()) {
+        // QS-b: the jump's auto-approval cascade would land TERMINAL — a de-facto auto_approve. The
+        // terminal gate ships CLOSED, so skip with zero approval-state mutation (resolution was
+        // computed in memory only; nothing has been written yet).
+        return await consumeAndSkip('skipped_terminal_gated', 'terminal_cascade_gated')
+      }
+
+      const nextVersion = instance.version + 1
+      const activeAssignments = await client.query<ApprovalAssignmentRow>(
+        `SELECT * FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE ORDER BY created_at ASC`,
+        [id],
+      )
+      const oldAssignees = assignmentRowsForAudit(activeAssignments.rows)
+      const newAssignees = graphAssignmentsForAudit(resolution.assignments)
+      let completionEvent: ApprovalCompletionEventV1 | null = null
+
+      await this.deactivateAllActiveAssignments(client, id)
+      await client.query(
+        `UPDATE approval_instances
+         SET status = $2,
+             version = $3,
+             current_node_key = $4,
+             current_step = $5,
+             total_steps = $6,
+             updated_at = now()
+         WHERE id = $1`,
+        [
+          id,
+          resolution.status,
+          nextVersion,
+          resolution.currentNodeKey,
+          resolution.currentStep ?? instance.total_steps,
+          resolution.totalSteps,
+        ],
+      )
+      await this.insertAssignments(client, id, resolution.assignments)
+      await this.insertApprovalRecord(client, id, {
+        action: 'jump',
+        actorId: APPROVAL_TIMEOUT_SYSTEM_ACTOR,
+        actorName: APPROVAL_TIMEOUT_SYSTEM_ACTOR,
+        comment: null,
+        fromStatus: instance.status,
+        toStatus: resolution.status,
+        fromVersion: instance.version,
+        toVersion: nextVersion,
+        metadata: {
+          timeoutEffect: true,
+          fromNodeKey: currentNodeKey,
+          toNodeKey: targetNodeKey,
+          nextNodeKey: resolution.currentNodeKey,
+          oldAssignees,
+          newAssignees,
+        },
+      })
+      await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents)
+      await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
+      if (resolution.status === 'approved') {
+        completionEvent = this.buildCompletionEvent(
+          instance,
+          {
+            action: 'jump',
+            fromStatus: instance.status,
+            toStatus: 'approved',
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            nodeKey: currentNodeKey,
+          },
+          { id: APPROVAL_TIMEOUT_SYSTEM_ACTOR, name: APPROVAL_TIMEOUT_SYSTEM_ACTOR },
+        )
+      }
+      await consumeTimeout()
+      await client.query('COMMIT')
+
+      // Post-commit best-effort metrics, mirroring the return path: close the timed-out node's open
+      // breakdown entry, then re-entry activation re-stamps the target node (incl. its own timeout).
+      this.emitNodeDecisionMetric(id, currentNodeKey, APPROVAL_TIMEOUT_SYSTEM_ACTOR)
+      if (resolution.status === 'pending' && resolution.currentNodeKey) {
+        this.emitNodeActivationMetric(id, resolution.currentNodeKey, nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+      }
+      if (completionEvent) {
+        emitApprovalCompletionEvent(completionEvent)
+      }
+      return 'applied'
+    } catch (error) {
+      await rollbackQuietly(client)
+      throw error
+    } finally {
+      client?.release()
+    }
   }
 
   async dispatchAction(

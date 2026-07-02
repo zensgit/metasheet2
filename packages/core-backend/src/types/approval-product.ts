@@ -75,13 +75,20 @@ export interface ApprovalNode {
     | Record<string, never>
 }
 
-// T1-1 node-level SLA + timeout. The effect enum declares the full set; slice 1 wires `remind`
-// only (a notification, no state mutation) — transfer/jump/auto_* are rejected at publish until
-// their slice. `afterMinutes` = whole wall-clock minutes from the node's activation.
+// T1-1 node-level SLA + timeout. The effect enum declares the full set; slice 1 wired `remind`
+// (a notification, no state mutation) and slice 2 wires `transfer` + `jump` (state mutations executed
+// by the scanner with a system actor). auto_approve/auto_reject remain rejected at publish and
+// runtime-inert — a jump whose auto-approval cascade would land TERMINAL is likewise skipped unless
+// the APPROVAL_NODE_TIMEOUT_TERMINAL_EFFECTS gate is explicitly enabled (it ships CLOSED).
+// `afterMinutes` = whole wall-clock minutes from the node's activation.
 export type NodeTimeoutEffect = 'remind' | 'transfer' | 'jump' | 'auto_approve' | 'auto_reject'
 export interface NodeTimeoutConfig {
   afterMinutes: number
   effect: NodeTimeoutEffect
+  /** effect='transfer': static user the node's active assignments are handed to when the deadline fires. */
+  transferToUserId?: string
+  /** effect='jump': approval-node key the instance is sent to (re-entry semantics) when the deadline fires. */
+  jumpToNodeKey?: string
 }
 
 export interface ApprovalNodeConfig {

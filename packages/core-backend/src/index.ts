@@ -95,6 +95,7 @@ import {
   startApprovalSlaScheduler,
   stopApprovalSlaScheduler,
 } from './services/ApprovalSlaScheduler'
+import { ApprovalProductService } from './services/ApprovalProductService'
 import {
   resolveAttendanceSchedulerIntervalMs,
   resolveAttendanceSchedulerLeaderOptions,
@@ -2101,6 +2102,10 @@ export class MetaSheetServer {
             )
           }
         },
+        // T1-1 slice-2: apply due transfer/jump timeout effects (system actor, single-shot inside the
+        // service transaction). Throws propagate to the scheduler's per-row catch → retried next tick.
+        onNodeEffect: async ({ instanceId, effect }) =>
+          new ApprovalProductService().applyNodeTimeoutEffect(instanceId, effect),
       })
       this.logger.info('Approval SLA scheduler initialized')
     } catch (e) {
