@@ -55,7 +55,8 @@ clear raced the next node's activation write (both unawaited post-commit best-ef
 new node's timeout. Fixed by scoping the clear to `approval_instances.current_node_key` (= the next node
 post-commit → the clear is a safe no-op once advanced). **Verify:** tsc 0 · real-DB `approval-node-sla-remind`
 5/5 incl. a new fail-first race-guard test; **RED-before confirmed** (unconditional clear reverted → the
-advanced node's fresh deadline is wiped → test fails).
+advanced node's fresh deadline is wiped → test fails). **Broader regression:** `approval-node-timeout-effects`
+13/13 + `approval-nofm-threshold` 5/5 green (the shared metrics path is unaffected).
 
 _(Additional decision-clean items surfaced by the review workflow are appended in §6.)_
 
@@ -70,9 +71,17 @@ _(Additional decision-clean items surfaced by the review workflow are appended i
   hidden enforced (echo-redaction), readonly persisted-but-runtime-inert (T1-4b later). **On T1-4 vote →
   build Lane B.**
 
-## 6. Review-workflow findings (appended after synthesis)
+## 6. Review findings (adversarial workflow + focused hunt)
 
-_(Confirmed shipped-state + any additional verified decision-clean candidates + gating corrections.)_
+- **Shipped-state: CONFIRMED.** All 11 recently-shipped items are genuinely present on origin/main with live
+  `file:symbol` anchors (verified against git objects, not merge-commit ancestry).
+- **The node-timeout deadline race: INDEPENDENTLY CONFIRMED** as live, with the same call-site evidence
+  (`ApprovalProductService.ts` 5072/5077 approve, 4614/4616 reject/return, 4181/4183 timeout-jump; both emits
+  fire-and-forget via `safeMetricsCall`), the single per-instance deadline column → last-writer-wins race, and
+  the recommended fix = **exactly** the conditional node-scoped clear shipped in #3497. My fix is validated by
+  an independent adversarial pass.
+- **Additional decision-clean candidates:** _(from the focused hunt — appended below; if none beyond the race,
+  that is the finding)._
 
 ## 7. Bottom line
 
