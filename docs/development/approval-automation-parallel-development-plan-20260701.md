@@ -1,7 +1,8 @@
 # Approval & Process-Automation — un-completed items, parallel-development plan & verification (2026-07-01)
 
 > **As-built coordination plan** (updated to main after `#3451`/`#3452`/`#3450`/`#3453`, the A3-a/b slices
-> `#3455`/`#3457`/`#3460`, and the first-batch runtime `#3467`/`#3468`/`#3474`/`#3477` merged). Deep review of what
+> `#3455`/`#3457`/`#3460`, the first-batch runtime `#3467`/`#3468`/`#3474`/`#3477`, and the second-batch
+> runtime `#3489` T1-2 inbound webhook + `#3490` T2-1+2 scoped-admin handover merged). Deep review of what
 > remains on the line, classified by gating and **sequenced into parallel lanes** so work distributes across
 > sessions without hot-file collision. **Shipped since the first cut:** T2-4 re-entry quorum-bypass (`#3446`,
 > `to_version >= cutoff`) + same-version cascade regression (`#3453`), R1-A/R1-B egress closure (`#3437`/`#3443`/
@@ -31,6 +32,9 @@
 - **First-batch runtime — SHIPPED:** `approval.completed` automation trigger (`#3467`), T1-1 slice-2 timeout
   transfer/jump effects (`#3468`), W7 non-approved result writeback (`#3474`), and safe delete_record editor
   exposure (`#3477`) are all on main on the ballot defaults.
+- **Second-batch runtime (partial) — SHIPPED:** T1-2 signed inbound webhook trigger (`#3489`) and T2-1+2
+  scoped approval admins + handover/bulk reassign (`#3490`, incl. the `reassign` action CHECK migration +
+  admin-scope permission codes). The second-batch ballot's remaining rungs (T3-5, T1-4) are still open.
 
 ## 2. Un-completed items — gating
 
@@ -42,12 +46,12 @@
 | ~~R1-B DNS-pinned dispatcher + wiring + redirect re-validation~~ | BPMN/workflow | **SHIPPED (#3447/#3451)** | done — raw BPMN HTTP-task fetch path replaced; default policy deny-all |
 | **R1-A3** configured destination enablement | BPMN/workflow | **runtime SHIPPED** (#3455/#3457/#3460), destinations not yet authorized | governance-only remainder: `#3460` injects the server-owned `BPMN_HTTP_TASK_EGRESS_POLICY` env policy at both BPMN route construction points; `#3455` normalizer + `#3457` route-provenance locks are in. **No core runtime code left** — what remains is authorizing/configuring the first live destination (ops/governance per `#3452`), default stays deny-all |
 | ~~T1-1 slice-2 transfer/jump timeout effects~~ | approval engine | **SHIPPED (#3468)** | done — transfer/jump wired; auto_* terminal effects remain env-gated/inert |
-| T2-1+2 scoped admins + handover | approval engine | unshipped | owner-gated (permission model + migration) |
+| ~~T2-1+2 scoped admins + handover~~ | approval engine | **SHIPPED (#3490)** | done — admin-scope capability codes + `reassign` bulk handover + CHECK/grant migration |
 | T1-4 node field-perms runtime | approval engine | unshipped | owner-gated (edit-form-at-node prerequisite) |
 | ~~T3-4 W7 rejection backwrite~~ | automation/approval | **SHIPPED (#3474)** | done — opt-in non-approved writeback, write-back-then-fail |
 | T3-5 W7 cross-base backwrite | automation/approval | unshipped | owner-gated (cross-base write-gate re-lock) |
 | ~~T0-3 delete_record editor~~ | automation engine | **SHIPPED (#3477)** | done — same-base trigger-record only, ack-gated editor, save-gate hardening |
-| T1-2 inbound webhook | automation engine | unshipped | owner-gated (signature/replay/audit, 9 decisions) |
+| ~~T1-2 inbound webhook~~ | automation engine | **SHIPPED (#3489)** | done — signed (HMAC + timestamp window) inbound trigger, fail-closed secret, uniform reject oracle |
 | ~~T1-3 approval.* trigger~~ | automation engine | **SHIPPED (#3467)** | done — template-routed, record-less v1, T2-6 ledger reuse, permission recheck |
 | ~~T2-6 event-driven dedup ledger~~ | automation engine | **SHIPPED (#3450)** | done — database-backed event fire ledger, sweep, real-DB CI wiring |
 | T3-2 business-calendar SLA · T3-3 signature · T3-1 mobile · T3-6 S-band | product/heavy | unshipped | owner-gated, L (T3-2 dep T1-1) |
@@ -65,12 +69,14 @@ edits to `ApprovalProductService.ts` / `automation-service.ts` collide).
   is **destination authorization** — a config/ops governance act per `#3452`, not code. Default stays deny-all
   until a first named destination is explicitly authorized.
 - **Lane B — approval engine** (`ApprovalProductService.ts` — HOT, so sequential): ~~`T2-4 fix`~~ **done (#3446)**
-  + cascade regression **done (#3453)** + `T1-1 slice-2` **done (#3468)** → next `T2-1+2` → `T1-4`. (`T3-5`
-  W7 cross-base backwrite touches
+  + cascade regression **done (#3453)** + `T1-1 slice-2` **done (#3468)** + `T2-1+2` **done (#3490)** →
+  next `T1-4` field-permissions authoring (awaiting its ballot votes). (`T3-5` W7 cross-base backwrite touches
   `automation-service.ts`, see Lane C.)
 - **Lane C — automation engine** (`automation-service.ts` — HOT, so sequential): ~~`T2-6 dedup`~~ **done (#3450)** →
   `T1-3 approval-trigger` **done (#3467)** → `T3-4` **done (#3474)** → `T0-3 delete_record` **done (#3477)** →
-  next `T1-2 inbound webhook` / `T3-5` W7 cross-base backwrite.
+  `T1-2 inbound webhook` **done (#3489)** → next `T3-5` W7 cross-base backwrite — **owner steer 2026-07-02:
+  design-lock-first as its own slice** (permission/lock/audit surface is heavy; do NOT fold it into the
+  fast demo layer).
 - **Lane D — product/heavy** (separate surfaces): `T3-1 mobile`, `T3-6 S-band`, `T3-2 business-calendar`
   (dep T1-1), `T3-3 signature`.
 
@@ -82,14 +88,17 @@ double-editing.
 ## 4. What's ready to build vs needs a decision
 - **Shipped:** T2-4 fix (#3446) + same-version cascade regression (#3453) · R1-A/R1-B default-closed egress closure
   (#3437/#3443/#3447/#3451) · T2-6 event dedup ledger (#3450) · approval.completed trigger (#3467) ·
-  T1-1 timeout transfer/jump effects (#3468) · W7 non-approved writeback (#3474) · delete_record editor (#3477).
-- **Owner-gated:** the remaining rungs — including A3 configured destination enablement, T1-2 inbound webhook,
-  T3-5 W7 cross-base, T2-1+2 scoped admins/handover, T1-4 field-perms, and product/heavy items. The register (#3385) and the
-  follow-up design-locks hold each rung's open decisions + proposed defaults.
-  **Approve per lane/rung, not blanket** — the remainder mixes distinct risk surfaces (SSRF wiring, destructive
-  delete, permission migration, cross-base write-back), so a single blanket "build on defaults" is unsafe.
+  T1-1 timeout transfer/jump effects (#3468) · W7 non-approved writeback (#3474) · delete_record editor (#3477) ·
+  T1-2 signed inbound webhook (#3489) · T2-1+2 scoped admins + handover (#3490).
+- **Owner-gated:** the remaining rungs — A3 configured destination enablement (governance-only),
+  T3-5 W7 cross-base (**design-lock-first per owner steer 2026-07-02**), T1-4 field-perms authoring, and the
+  product/heavy items. The register (#3385) and the follow-up design-locks hold each rung's open decisions +
+  proposed defaults.
+  **Approve per lane/rung, not blanket** — the remainder mixes distinct risk surfaces (permission migration,
+  cross-base write-back, product semantics), so a single blanket "build on defaults" is unsafe.
   The next executable implementation decision surface is `approval-automation-second-batch-ballot-20260702.md`
-  (T1-2, T3-5, T2-1+2, T1-4). The product/governance-heavy tail is separated into
+  — now **partially executed** (T1-2 `#3489` + T2-1+2 `#3490` shipped; T3-5 + T1-4 still awaiting votes).
+  The product/governance-heavy tail is separated into
   `approval-automation-third-batch-ballot-20260702.md` (A3 destination authorization, T3-2, T3-3,
   T3-1, T3-6) so strategic decisions do not get mistaken for ready implementation queue.
 
@@ -138,13 +147,16 @@ coverage wired into `plugin-tests.yml`, plus regression updates for record-servi
 
 ## 7. Recommendation
 1. **Done:** T2-4 fix + cascade regression (#3446/#3453) · R1-A/R1-B default-closed egress closure
-   (#3437/#3443/#3447/#3451) · T2-6 dedup ledger (#3450) · first-batch runtime (#3467/#3468/#3474/#3477).
+   (#3437/#3443/#3447/#3451) · T2-6 dedup ledger (#3450) · first-batch runtime (#3467/#3468/#3474/#3477) ·
+   second-batch runtime partial (#3489 T1-2 · #3490 T2-1+2).
 2. **A3 is now governance-only:** the egress policy runtime is fully shipped (`#3452` design-lock +
    `#3455`/`#3457`/`#3460` normalizer / provenance locks / server-owned env injection). Default remains deny-all;
    the remaining act is **authorizing the first live destination** (config/ops), which happens when a named
    integration needs it — no code slice to schedule.
-3. **Next feature lanes after owner ratification:** Lane C `T1-2 inbound webhook` or `T3-5` W7 cross-base
-   writeback; Lane B `T2-1+2` scoped admins/handover or `T1-4` field-perms. Continue to ratify
+3. **Next feature lanes after owner ratification:** Lane C `T3-5` W7 cross-base writeback
+   (design-lock-first per owner steer 2026-07-02); Lane B `T1-4` field-perms authoring. A **UI-exposure
+   slice** (approval.completed + webhook.received into the automation rule editor: FE type/label/config
+   UI/tests) is the fastest way to make the shipped triggers visible — currently API-only. Continue to ratify
    register defaults **per lane/rung**, not blanket — the first-batch per-rung ballot now lives as the shipped
    decision record in `approval-automation-first-batch-ballot-20260701.md`; the second-batch ballot is
    `approval-automation-second-batch-ballot-20260702.md`; the third-batch strategic/governance ballot is

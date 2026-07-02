@@ -1,10 +1,12 @@
 # Approval & Process-Automation — second-batch per-rung decision ballot (2026-07-02)
 
-> **Status: PROPOSED — awaiting per-rung owner votes.** This ballot authorizes nothing by itself. It exists
-> to turn the remaining owner-gated queue into explicit, reviewable decisions after the first batch shipped
-> (`#3467`/`#3468`/`#3474`/`#3477`). Vote per line: ✅ adopt default · ✏️ override (state the change) ·
-> ⏸ hold. A rung with every line ✅/✏️ becomes GO for design-lock-first implementation; an unvoted rung
-> remains gated.
+> **Status: PARTIALLY EXECUTED (as-built reconcile 2026-07-02).** T1-2 and T2-1+2 were voted GO on the
+> proposed defaults and are **SHIPPED**: T1-2 signed inbound webhook `#3489` (`fadf1695e`), T2-1+2 scoped
+> admins + handover `#3490` (`2ebb8dd81`) — their tables below are the closed decision record. **Still
+> awaiting per-rung owner votes: T3-5 and T1-4.** For those, vote per line: ✅ adopt default · ✏️ override
+> (state the change) · ⏸ hold; a rung with every line ✅/✏️ becomes GO for design-lock-first implementation;
+> an unvoted rung remains gated. Owner steer 2026-07-02: **T3-5 runs design-lock-first as its own slice**
+> (permission/lock/audit surface is heavy — not part of the fast demo layer).
 >
 > Source of truth for the defaults is `approval-automation-decision-register-20260629.md`, with reviewer
 > notes folded into the "build contract" blocks below so implementation does not repeat known blind spots.
@@ -19,22 +21,24 @@
 
 | Lane | Order | Why |
 |---|---|---|
-| C — automation engine (`automation-service.ts`) | `T1-2 inbound webhook` → `T3-5 W7 cross-base backwrite` | Both touch automation runtime and security gates; keep sequential to avoid hot-file collisions. |
-| B — approval engine / authoring | `T2-1+2 scoped admins + handover` → `T1-4 field permissions` | Permission/handover is the larger admin model slice; field-permission authoring stays bounded and does not unlock edit-form-at-node. |
+| C — automation engine (`automation-service.ts`) | ~~`T1-2 inbound webhook`~~ **done #3489** → `T3-5 W7 cross-base backwrite` (design-lock-first) | Both touch automation runtime and security gates; keep sequential to avoid hot-file collisions. |
+| B — approval engine / authoring | ~~`T2-1+2 scoped admins + handover`~~ **done #3490** → `T1-4 field permissions` | Permission/handover is the larger admin model slice; field-permission authoring stays bounded and does not unlock edit-form-at-node. |
 
 ## T1-2 — inbound webhook endpoint (signed, audited) · M · Lane C first
 
+> **SHIPPED `#3489` (`fadf1695e`)** on the defaults below — closed decision record, not an open vote.
+
 | # | Decision | Proposed default | Vote |
 |---|---|---|---|
-| Q1 | Signature scheme | HMAC-SHA256 over `"${unixSeconds}.${rawBody}"`; header `X-MS-Webhook-Signature: sha256=<hex>` plus `X-MS-Webhook-Timestamp`; compare with `timingSafeEqual`. This intentionally differs from outbound body-only signing so timestamp replay is bound. | ⬜ |
-| Q2 | Secret-less rules | Fail-closed: unsigned / secret-less inbound rules are not ingestable; enforce non-empty secret at create/update for `webhook.received`. Existing secret-less rules are blocked on edit and return uniform reject at ingest. | ⬜ |
-| Q3 | Reject oracle | Uniform `401 { ok: false }` for unknown rule, wrong trigger type, disabled rule, missing secret, stale timestamp, and bad signature. No existence/enabled-state oracle. | ⬜ |
-| Q4 | Replay defense | Signed timestamp with ±300s freshness window. No nonce/dedup table in v1; residual in-window replay risk documented. | ⬜ |
-| Q5 | Dispatch authority | Execute userless under `rule.created_by`, same as scheduled triggers. The rule author's authority is the authority for side effects. | ⬜ |
-| Q6 | Secret at rest | Plaintext parity with outbound webhook secret in `trigger_config` for v1; any read API that exposes trigger config must redact the secret. Encryption-at-rest deferred. | ⬜ |
-| Q7 | Rejected-attempt observability | Accepted requests use existing redacted `AutomationExecution`; rejected attempts get structured security logs + `automation_webhook_rejected_total{reason}` metric. No new audit table. | ⬜ |
-| Q8 | Dispatch timing | Synchronous inline dispatch, returning 202 after executor completion. No queue in v1. | ⬜ |
-| Q9 | Rate/body limits | Per-rule rate limit via existing `RateLimitStore` (default 60/min/rule) and 1 MB body cap on the inbound path. | ⬜ |
+| Q1 | Signature scheme | HMAC-SHA256 over `"${unixSeconds}.${rawBody}"`; header `X-MS-Webhook-Signature: sha256=<hex>` plus `X-MS-Webhook-Timestamp`; compare with `timingSafeEqual`. This intentionally differs from outbound body-only signing so timestamp replay is bound. | ✅ SHIPPED #3489 |
+| Q2 | Secret-less rules | Fail-closed: unsigned / secret-less inbound rules are not ingestable; enforce non-empty secret at create/update for `webhook.received`. Existing secret-less rules are blocked on edit and return uniform reject at ingest. | ✅ SHIPPED #3489 |
+| Q3 | Reject oracle | Uniform `401 { ok: false }` for unknown rule, wrong trigger type, disabled rule, missing secret, stale timestamp, and bad signature. No existence/enabled-state oracle. | ✅ SHIPPED #3489 |
+| Q4 | Replay defense | Signed timestamp with ±300s freshness window. No nonce/dedup table in v1; residual in-window replay risk documented. | ✅ SHIPPED #3489 |
+| Q5 | Dispatch authority | Execute userless under `rule.created_by`, same as scheduled triggers. The rule author's authority is the authority for side effects. | ✅ SHIPPED #3489 |
+| Q6 | Secret at rest | Plaintext parity with outbound webhook secret in `trigger_config` for v1; any read API that exposes trigger config must redact the secret. Encryption-at-rest deferred. | ✅ SHIPPED #3489 |
+| Q7 | Rejected-attempt observability | Accepted requests use existing redacted `AutomationExecution`; rejected attempts get structured security logs + `automation_webhook_rejected_total{reason}` metric. No new audit table. | ✅ SHIPPED #3489 |
+| Q8 | Dispatch timing | Synchronous inline dispatch, returning 202 after executor completion. No queue in v1. | ✅ SHIPPED #3489 |
+| Q9 | Rate/body limits | Per-rule rate limit via existing `RateLimitStore` (default 60/min/rule) and 1 MB body cap on the inbound path. | ✅ SHIPPED #3489 |
 
 **Build contract / reviewer-note must-fixes**
 
@@ -65,18 +69,20 @@
 
 ## T2-1+2 — scoped approval admins + handover/bulk reassign · L · Lane B first
 
+> **SHIPPED `#3490` (`2ebb8dd81`)** on the defaults below — closed decision record, not an open vote.
+
 | # | Decision | Proposed default | Vote |
 |---|---|---|---|
-| Q1 | Meaning of "scoped" | Capability split only. Add global capability codes for template admin, process/recovery admin, and data-recovery admin. Department/category/template-set data scoping is deferred. | ⬜ |
-| Q2 | Who may reassign and to whom | Process/recovery scope (`approvals:admin`) may reassign active user-typed assignments. Target must not be requester and must not already be an active assignee at the node. Full audit required. | ⬜ |
-| Q3 | Permission-code naming | Keep codes under non-namespaced `approvals`: `approvals:admin`, `approvals:admin-templates`, `approvals:admin-data`. Accept `approvals:*` wildcard granting all three. Fix `APPROVAL_PRODUCT_PERMISSIONS` drift in the same change. | ⬜ |
-| Q4 | Batch atomicity | Per-instance transactions, best-effort manifest `{ succeeded, skipped }`. Re-run skips no-longer-assigned instances; no batch dedup table. | ⬜ |
-| Q5 | Source set and cap | Caller may pass explicit `instanceIds`; if omitted, enumerate active user assignments for `fromUserId`, tenant/platform-scoped, excluding role-typed assignments, capped at 200. | ⬜ |
-| Q6 | Audit action + version | Add new `reassign` audit action via CHECK migration; bump `approval_instances.version` per affected instance. Do not reuse `transfer` because revoke-window semantics count transfer as handled. | ⬜ |
-| Q7 | Multi-node / parallel handling | Reassign all active user-typed assignments for the source user across every node/branch in each selected instance; one audit row per `(instance,node)`. | ⬜ |
-| Q8 | Literal swap vs re-resolution | Literal swap to a static user assignment. Drop dynamic/delegation metadata intentionally; stamp `metadata.reassignedFrom` and `metadata.adminReassign=true`. | ⬜ |
-| Q9 | Notifications/events | Refresh counts for source user, target user, and affected requesters; emit `approval.bulk_reassigned` with the manifest. | ⬜ |
-| Q10 | Grants and down migration | Grant new codes to `admin` role in `up()`. `down()` removes role grants/permissions and restores the action CHECK using the established NOT VALID pattern. | ⬜ |
+| Q1 | Meaning of "scoped" | Capability split only. Add global capability codes for template admin, process/recovery admin, and data-recovery admin. Department/category/template-set data scoping is deferred. | ✅ SHIPPED #3490 |
+| Q2 | Who may reassign and to whom | Process/recovery scope (`approvals:admin`) may reassign active user-typed assignments. Target must not be requester and must not already be an active assignee at the node. Full audit required. | ✅ SHIPPED #3490 |
+| Q3 | Permission-code naming | Keep codes under non-namespaced `approvals`: `approvals:admin`, `approvals:admin-templates`, `approvals:admin-data`. Accept `approvals:*` wildcard granting all three. Fix `APPROVAL_PRODUCT_PERMISSIONS` drift in the same change. | ✅ SHIPPED #3490 |
+| Q4 | Batch atomicity | Per-instance transactions, best-effort manifest `{ succeeded, skipped }`. Re-run skips no-longer-assigned instances; no batch dedup table. | ✅ SHIPPED #3490 |
+| Q5 | Source set and cap | Caller may pass explicit `instanceIds`; if omitted, enumerate active user assignments for `fromUserId`, tenant/platform-scoped, excluding role-typed assignments, capped at 200. | ✅ SHIPPED #3490 |
+| Q6 | Audit action + version | Add new `reassign` audit action via CHECK migration; bump `approval_instances.version` per affected instance. Do not reuse `transfer` because revoke-window semantics count transfer as handled. | ✅ SHIPPED #3490 |
+| Q7 | Multi-node / parallel handling | Reassign all active user-typed assignments for the source user across every node/branch in each selected instance; one audit row per `(instance,node)`. | ✅ SHIPPED #3490 |
+| Q8 | Literal swap vs re-resolution | Literal swap to a static user assignment. Drop dynamic/delegation metadata intentionally; stamp `metadata.reassignedFrom` and `metadata.adminReassign=true`. | ✅ SHIPPED #3490 |
+| Q9 | Notifications/events | Refresh counts for source user, target user, and affected requesters; emit `approval.bulk_reassigned` with the manifest. | ✅ SHIPPED #3490 |
+| Q10 | Grants and down migration | Grant new codes to `admin` role in `up()`. `down()` removes role grants/permissions and restores the action CHECK using the established NOT VALID pattern. | ✅ SHIPPED #3490 |
 
 **Build contract / reviewer-note must-fixes**
 
@@ -86,6 +92,11 @@
 - Route guards must prove the split has an enforcement surface, not just new permission rows.
 
 ## T1-4 — node field-permissions authoring · M · Lane B after T2-1+2
+
+> **OPEN — awaiting votes.** Owner steer 2026-07-02: start with the hidden/readonly *configurable authoring
+> surface* and do NOT take on the full runtime semantics in one slice — reconcile this with Q2's
+> hidden-only-exposure default at vote time (either ✏️ Q2 to include a readonly control, or ✅ keep
+> hidden-only UI with readonly persisted-but-unexposed).
 
 | # | Decision | Proposed default | Vote |
 |---|---|---|---|
