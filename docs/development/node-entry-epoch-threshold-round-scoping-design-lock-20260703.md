@@ -4,6 +4,12 @@
 > cutoff-heuristic patch (#3446 name-X · #3453 same-version cascade · #3499 through-X) plus an open condition/cc
 > 4th-vector verify-item, promote the register's **Option B (`nodeEntryEpoch`)** to the next design-lock — the
 > structural fix that retires this bug family. **No runtime is written until this is voted GO.**
+>
+> **Rev 2 (review response):** §4 now splits the two `insertAssignments` semantics — **activation** (mint a new
+> epoch) vs **same-round mutation** (add-sign / reduce-sign / manual transfer / timeout transfer / admin
+> reassign-handover — preserve the epoch, never bump) — because `insertAssignments` is shared (P1). §5 resolves
+> the current epoch from **active** assignments and **fails closed on a mixed/multiple epoch** instead of
+> `MAX()`-collapsing (P2). §7/§9 add the mid-round-mutation and mixed-epoch cases.
 
 ## 1. Problem — the cutoff heuristic is inherently incomplete
 
@@ -47,34 +53,66 @@ Rationale for both a column and metadata: the **current** epoch is read cheaply 
 assignments (authoritative, transactional), while the approve records carry a self-contained epoch so the
 tally is a plain indexed filter with no join to a mutable table.
 
-## 4. Stamping sites
+## 4. Stamping sites — two distinct assignment-insert semantics (CRITICAL, review P1)
 
-- **Every activation path** (the sites that create a node's assignment batch — `insertAssignments` at
-  `ApprovalProductService.ts:~5309`, invoked from initial start, forward `resolveAfterApprove`, `return`,
-  admin/`jump`, and timeout-jump): bump `node_activation_seq`, stamp the new rows' `entry_epoch` with it.
-  **add-sign** adds to the *current* activation → it copies the node's current `entry_epoch` and does **not**
-  bump the sequence (same round). **reduce-sign** removes a row → no epoch change.
-- **`insertApprovalRecord`** (`~5466`) for an approve at node X: set `metadata.nodeEntryEpoch` to the approving
-  assignment's `entry_epoch`. The auto-approval cascade path (`insertAutoApprovalEvents`) stamps the same
-  epoch as the assignments it just created in that transaction.
+`insertAssignments` (`ApprovalProductService.ts:~5309`) is **shared** by both node activations AND same-round
+assignee mutations, so the epoch must be decided by the **caller**, not by "an insert happened". A naive
+"insert → bump seq" rule would (a) split one round across two epochs on a transfer/reassign, or (b) leave the
+transferred-in / reassigned-to assignee's approve at a NULL/foreign epoch → uncounted under the epoch tally.
+Both silently corrupt the quorum. Split the call sites into two classes:
+
+**(A) Activation assignment insert → MINT a new epoch.** The paths that land the instance on a (re)activated
+current node: initial start, forward advance (`resolveAfterApprove`), `return`, admin/`jump`, and timeout-jump.
+Bump `node_activation_seq` by 1 and stamp the new rows' `entry_epoch` = the bumped value.
+
+**(B) Same-round assignment mutation → PRESERVE the current node epoch, NEVER bump.** The paths that change
+who is assigned at the CURRENT node within the SAME round: **add-sign**, **reduce-sign**, **manual transfer**,
+**timeout transfer** (T1-1 slice-2), and **admin scoped reassign / handover** (T2-1+2). Read the current node's
+epoch off its active assignments and stamp any newly-inserted row with THAT epoch (reduce-sign inserts nothing
+→ no change). These MUST NOT bump `node_activation_seq`.
+
+> **Implementation contract:** `insertAssignments` takes the epoch as an **explicit argument** (or splits into
+> `insertActivationAssignments` vs a same-round variant) — activation call-sites pass the freshly-bumped seq;
+> mutation call-sites pass the preserved current epoch. This split is the load-bearing part of the design; the
+> matrix in §7 is the authoritative per-path mapping and every call-site of `insertAssignments` must be
+> classified against it during implementation.
+
+**`insertApprovalRecord`** (`~5466`) for an approve at node X: set `metadata.nodeEntryEpoch` = the approving
+assignment's `entry_epoch` — so a transferred-in / reassigned-to / add-signed approver carries the SAME
+current-round epoch and is counted. The auto-approval cascade (`insertAutoApprovalEvents`) stamps the same
+epoch as the assignments it created in that transaction.
 
 ## 5. The new tally
 
-The threshold dispatch (`~4738-4790`) replaces the cutoff query + `to_version` filter with:
+The threshold dispatch (`~4738-4790`) replaces the cutoff query + `to_version` filter. Resolve the current
+epoch from the node's **ACTIVE** assignments (the authoritative current round) and **fail closed on any
+inconsistency** rather than letting `MAX()` paper over it (review P2):
 
 ```sql
--- current epoch of node X = the epoch of its active assignments (all equal within a round)
-SELECT MAX(entry_epoch) AS epoch
+-- current epoch of node X = the DISTINCT epoch of its ACTIVE assignments
+SELECT DISTINCT entry_epoch
   FROM approval_assignments
- WHERE instance_id = $1 AND node_key = $2 AND entry_epoch IS NOT NULL;
+ WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE;
+```
 
+Interpret the result set:
+- **A single NULL row** (all active rows NULL) → a legacy pre-migration activation → **cutoff-heuristic
+  fallback** (§6).
+- **Exactly one non-NULL epoch** → that is the current epoch → run the tally below.
+- **Mixed NULL/non-NULL, or more than one distinct non-NULL epoch** → a STRUCTURAL invariant violation (a
+  single round must never span epochs; §4's two-semantics split is what guarantees this) → **fail closed**:
+  block resolution and log a structural error. Do **not** `MAX()`-collapse it — silently taking the highest
+  could under- or over-count the quorum. (A defensive belt against a mis-classified `insertAssignments`
+  call-site, so such a bug surfaces loudly instead of as a wrong vote count.)
+
+```sql
 -- quorum tally, scoped to the current round
 SELECT COUNT(DISTINCT actor_id) AS count
   FROM approval_records
  WHERE instance_id = $1
    AND action = 'approve'
    AND metadata->>'nodeKey' = $2
-   AND (metadata->>'nodeEntryEpoch')::int = $3;   -- $3 = current epoch
+   AND (metadata->>'nodeEntryEpoch')::int = $3;   -- $3 = the single current epoch
 ```
 
 `distinctApproverCount = priorDistinctApprovers + 1` (the current actor's assignment is still active) is
@@ -106,8 +144,15 @@ reconstructed. The cutoff code is deleted only after a deprecation window when n
 | same-transaction auto-approval cascade **at** X's entry | **same** as X's just-stamped epoch (must count) |
 | partial approval at X | **same** (no activation) |
 | **add-sign** at X | **same** as X's current epoch (adds to the round; seq NOT bumped) |
-| **reduce-sign** at X | no change |
+| **reduce-sign** at X | no change (no insert) |
+| **manual transfer** at X | **same** as X's current epoch (assignee change within the round; seq NOT bumped) |
+| **timeout transfer** at X (T1-1 s2) | **same** as X's current epoch (seq NOT bumped) |
+| **admin reassign / handover** at X (T2-1+2) | **same** as X's current epoch (seq NOT bumped) |
 | X decided → advances away | X's epoch frozen; next node gets a new epoch |
+
+The bottom block (transfer/reassign/add-sign) is the review-P1 correction: these reuse `insertAssignments`
+but are **class (B)** same-round mutations — they preserve X's epoch so the new assignee's approve counts in
+the same round. Only the top block (activation) mints a new epoch.
 
 The condition/cc-in-the-middle 4th vector is closed: X's epoch is minted when X is *activated*, so it does not
 matter that the upstream approve's `nextNodeKey` named the condition node rather than X.
@@ -137,6 +182,14 @@ matter that the upstream approve's `nextNodeKey` named the condition node rather
   (epoch-less) assignments + approves; assert the dual-read fallback scopes it correctly; then re-activate the
   node and assert the epoch path takes over and excludes the legacy round.
 - **add-sign within a round** counts toward the same round (same epoch); **reduce-sign** unaffected.
+- **NEW — mid-round assignee mutation preserves the epoch (review P1):** on a threshold node mid-round,
+  (i) a **manual transfer**, (ii) a **timeout transfer**, and (iii) an **admin reassign / handover** each hand
+  the seat to a new assignee; the new assignee's approval MUST count under the SAME `nodeEntryEpoch` (i.e. it
+  still contributes toward the current round's quorum, and does NOT reset the count). One test per path; assert
+  `node_activation_seq` did not change across the mutation.
+- **NEW — mixed-epoch fail-closed (review P2):** force a threshold node whose active assignments carry two
+  different non-NULL epochs (a deliberately mis-classified insert) and assert resolution **fails closed** with a
+  structural error rather than silently `MAX()`-resolving.
 - Regression: the normal single-entry 2-of-3 resolves on the 2nd distinct approval; N>M fail-closed unchanged.
 
 ## 10. What it retires
