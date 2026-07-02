@@ -90,13 +90,13 @@ function normalizeStartApprovalConfig(config: Record<string, unknown>): StartApp
   }
 }
 
-function hasPermissionCode(permissionCodes: string[], permissionCode: string): boolean {
+export function hasPermissionCode(permissionCodes: string[], permissionCode: string): boolean {
   if (permissionCodes.includes(permissionCode) || permissionCodes.includes('*:*')) return true
   const resource = permissionCode.split(':')[0]
   return resource ? permissionCodes.includes(`${resource}:*`) : false
 }
 
-async function listRbacPermissionCodes(userId: string): Promise<string[]> {
+export async function listRbacPermissionCodes(userId: string): Promise<string[]> {
   const result = await query<{ code: string }>(
     `SELECT DISTINCT permission_code AS code FROM (
        SELECT up.permission_code

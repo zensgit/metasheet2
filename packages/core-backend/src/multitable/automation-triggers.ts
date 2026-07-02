@@ -13,6 +13,7 @@ export type AutomationTriggerType =
   | 'schedule.date_field'
   | 'webhook.received'
   | 'form.submitted'
+  | 'approval.completed'
 
 export const ALL_TRIGGER_TYPES: AutomationTriggerType[] = [
   'record.created',
@@ -24,6 +25,7 @@ export const ALL_TRIGGER_TYPES: AutomationTriggerType[] = [
   'schedule.date_field',
   'webhook.received',
   'form.submitted',
+  'approval.completed',
 ]
 
 /** Config shape for field.value_changed */
@@ -48,6 +50,18 @@ export interface ScheduleIntervalConfig {
 /** Config shape for webhook.received */
 export interface WebhookReceivedConfig {
   secret?: string
+}
+
+/**
+ * Config shape for approval.completed (T1-3).
+ * Routing is by REQUIRED approval templateId (cross-sheet; the completion event carries no sheet/record).
+ * `outcomes` filters which terminal outcomes fire the rule; omitted = approved only. Dispatch does NOT go
+ * through matchesTrigger/TRIGGER_TYPE_BY_EVENT — approval completions are routed by a dedicated
+ * template-keyed path in AutomationService (they are not multitable record events).
+ */
+export interface ApprovalCompletedConfig {
+  templateId: string
+  outcomes?: Array<'approved' | 'rejected' | 'revoked' | 'cancelled'>
 }
 
 export interface AutomationTrigger {
