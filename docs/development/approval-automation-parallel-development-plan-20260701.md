@@ -88,6 +88,8 @@ double-editing.
   follow-up design-locks hold each rung's open decisions + proposed defaults.
   **Approve per lane/rung, not blanket** — the remainder mixes distinct risk surfaces (SSRF wiring, destructive
   delete, permission migration, cross-base write-back), so a single blanket "build on defaults" is unsafe.
+  The next executable decision surface is `approval-automation-second-batch-ballot-20260702.md`
+  (T1-2, T3-5, T2-1+2, T1-4).
 
 ## 5. T2-4 quorum-bypass fix — AS-BUILT (`#3446`, shipped)
 
@@ -142,6 +144,7 @@ coverage wired into `plugin-tests.yml`, plus regression updates for record-servi
 3. **Next feature lanes after owner ratification:** Lane C `T1-2 inbound webhook` or `T3-5` W7 cross-base
    writeback; Lane B `T2-1+2` scoped admins/handover or `T1-4` field-perms. Continue to ratify
    register defaults **per lane/rung**, not blanket — the first-batch per-rung ballot now lives as the shipped
-   decision record in `approval-automation-first-batch-ballot-20260701.md`. Sizing note: per-rung person-day estimates are
+   decision record in `approval-automation-first-batch-ballot-20260701.md`; the second-batch ballot is
+   `approval-automation-second-batch-ballot-20260702.md`. Sizing note: per-rung person-day estimates are
    optimistic build-effort figures, NOT calendar commitments — on the security/permission/migration rungs
    (T1-2, T2-1+2, T3-5) review rounds can cost more calendar than the build itself.
