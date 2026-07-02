@@ -154,9 +154,10 @@ coverage wired into `plugin-tests.yml`, plus regression updates for record-servi
    the remaining act is **authorizing the first live destination** (config/ops), which happens when a named
    integration needs it — no code slice to schedule.
 3. **Next feature lanes after owner ratification:** Lane C `T3-5` W7 cross-base writeback
-   (design-lock-first per owner steer 2026-07-02); Lane B `T1-4` field-perms authoring. A **UI-exposure
-   slice** (approval.completed + webhook.received into the automation rule editor: FE type/label/config
-   UI/tests) is the fastest way to make the shipped triggers visible — currently API-only. Continue to ratify
+   (design-lock-first per owner steer 2026-07-02); Lane B `T1-4` field-perms authoring. The **UI-exposure
+   slice is shipped by `#3495`** — approval.completed + webhook.received are authorable in the automation
+   rule editor (FE type/labels/config UI/tests, webhook keep-or-rotate secret semantics + backend
+   reject of the `<redacted>` placeholder). Continue to ratify
    register defaults **per lane/rung**, not blanket — the first-batch per-rung ballot now lives as the shipped
    decision record in `approval-automation-first-batch-ballot-20260701.md`; the second-batch ballot is
    `approval-automation-second-batch-ballot-20260702.md`; the third-batch strategic/governance ballot is
