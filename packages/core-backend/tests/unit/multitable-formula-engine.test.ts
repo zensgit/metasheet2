@@ -183,6 +183,13 @@ describe('MultitableFormulaEngine', () => {
       expect(refs).toEqual(['fld_a'])
     })
 
+    it('extracts API-generated UUID field IDs containing hyphens', () => {
+      const refs = mtEngine.extractFieldReferences(
+        '={fld_01234567-89ab-cdef-0123-456789abcdef}+{fld_price}',
+      )
+      expect(refs).toEqual(['fld_01234567-89ab-cdef-0123-456789abcdef', 'fld_price'])
+    })
+
     it('returns empty array for no references', () => {
       const refs = mtEngine.extractFieldReferences('=1+2')
       expect(refs).toEqual([])
@@ -197,6 +204,19 @@ describe('MultitableFormulaEngine', () => {
         sampleFields,
       )
       expect(result).toBe(50)
+    })
+
+    it('resolves API-generated UUID field IDs containing hyphens', async () => {
+      const uuidFieldId = 'fld_01234567-89ab-cdef-0123-456789abcdef'
+      const result = await mtEngine.evaluateField(
+        `={${uuidFieldId}}+{fld_qty}`,
+        { [uuidFieldId]: 20, fld_qty: 5 },
+        [
+          { id: uuidFieldId, name: 'Generated A', type: 'number' },
+          { id: 'fld_qty', name: 'Quantity', type: 'number' },
+        ],
+      )
+      expect(result).toBe(25)
     })
 
     it('evaluates parenthesized field reference groups', async () => {
