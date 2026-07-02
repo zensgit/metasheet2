@@ -181,7 +181,7 @@ function classifyProbeErrorCode(error) {
   const code = typeof error?.code === 'string'
     ? error.code
     : (typeof error?.details?.code === 'string' ? error.details.code : '')
-  if (/LOGIN|TOKEN|AUTH/.test(code)) return 'READ_SOURCE_PROBE_AUTH_FAILED'
+  if (/LOGIN|TOKEN|AUTH|CREDENTIAL/.test(code)) return 'READ_SOURCE_PROBE_AUTH_FAILED'
   if (/BUSINESS/.test(code)) return 'READ_SOURCE_PROBE_RESPONSE_UNRECOGNIZED'
   if (name === 'AdapterValidationError' || name === 'UnsupportedAdapterOperationError') return 'READ_SOURCE_PROBE_REJECTED'
   if (/NOT_CONFIGURED|UNSUPPORTED|REJECTED/.test(code)) return 'READ_SOURCE_PROBE_REJECTED'
