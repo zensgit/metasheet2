@@ -9,6 +9,7 @@ const { MAX_LIST_LIMIT } = httpRoutes
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 const { READ_SMOKE_LIST_REQUEST_MARKER } = require(path.join(__dirname, '..', 'lib', 'read-smoke-marker.cjs'))
+const { createReadSourceConfigStore } = require(path.join(__dirname, '..', 'lib', 'read-source-config-store.cjs'))
 // S4: adapter self-described metadata — the mock registry serves the REAL per-module metadata
 // so the /adapters route assertions verify the actual shipped values (no duplicated literal).
 const ADAPTER_METADATA_BY_KIND = {
@@ -256,6 +257,33 @@ function createMockServices(overrides = {}) {
       async getExternalSystemForAdapter(input) {
         calls.push(['getExternalSystemForAdapter', input])
         return { ...system, id: input.id, credentials: { bearerToken: 'secret-token' } }
+      },
+    },
+    // S2-c: default mock so requireService('readSourceConfigStore', ...) mounts for every test.
+    readSourceConfigStore: {
+      async saveVersion(input) {
+        calls.push(['readSourceConfigSaveVersion', input])
+        return { id: 'rsc_1', systemId: 'sys_1', object: 'material', mode: 'single_record', version: 1, status: 'draft', contentKey: 'ck', reused: false, config: {} }
+      },
+      async list(input) {
+        calls.push(['readSourceConfigList', input])
+        return []
+      },
+      async get(input) {
+        calls.push(['readSourceConfigGet', input])
+        return { id: input.id, status: 'draft' }
+      },
+      async approve(input) {
+        calls.push(['readSourceConfigApprove', input])
+        return { id: input.id, status: 'approved' }
+      },
+      async retire(input) {
+        calls.push(['readSourceConfigRetire', input])
+        return { id: input.id, status: 'retired' }
+      },
+      async listAudit(input) {
+        calls.push(['readSourceConfigListAudit', input])
+        return []
       },
     },
     adapterRegistry: {
@@ -6070,6 +6098,166 @@ async function testReadSourceProbeRoute() {
   console.log('  testReadSourceProbeRoute OK')
 }
 
+// S2-c (#1709 self-service): consultant-tier persistence routes over the REAL store (mock db) —
+// content-keyed idempotent save (201 new / 200 reused), fail-closed status lifecycle, values-free
+// errors and audit, zero adapter creation.
+async function testReadSourceConfigRoutes() {
+  const dbTables = {
+    integration_read_source_configs: [],
+    integration_read_source_config_audit: [],
+  }
+  function matchesWhere(row, where) {
+    return Object.entries(where || {}).every(([key, value]) => {
+      if (value === null || value === undefined) return row[key] === null || row[key] === undefined
+      return row[key] === value
+    })
+  }
+  let idSeq = 0
+  const store = createReadSourceConfigStore({
+    db: {
+      async selectOne(table, where) { return dbTables[table].find((row) => matchesWhere(row, where)) || null },
+      async insertOne(table, row) {
+        const stored = { ...row, created_at: '2026-07-01T00:00:00.000Z', updated_at: '2026-07-01T00:00:00.000Z' }
+        dbTables[table].push(stored)
+        return [stored]
+      },
+      async updateRow(table, set, where) {
+        const row = dbTables[table].find((candidate) => matchesWhere(candidate, where))
+        if (!row) return []
+        Object.assign(row, set)
+        return [row]
+      },
+      async select(table, options = {}) {
+        const filtered = dbTables[table].filter((row) => matchesWhere(row, options.where || {}))
+        return filtered.slice(options.offset || 0, (options.offset || 0) + (options.limit || 1000))
+      },
+    },
+    idGenerator: () => `rsc_${++idSeq}`,
+  })
+  const { calls, services } = createMockServices({ readSourceConfigStore: store })
+  const { routes } = mountRoutes(services)
+
+  const config = {
+    version: 1,
+    systemId: 'sys_1',
+    requiredKind: 'erp:k3-wise-webapi',
+    object: 'material',
+    mode: 'single_record',
+    readPath: '/K3API/Material/GetDetail',
+    readMethod: 'POST',
+    operations: ['read'],
+    keyField: 'FNumber',
+    containerPaths: ['Data'],
+  }
+
+  // save → 201 new draft v1
+  const created = await invoke(routes, 'POST', '/api/integration/read-source-configs', {
+    user: WRITE_USER, query: { workspaceId: 'workspace_1' }, body: { config },
+  })
+  assertOkResponse(created, 201)
+  assert.equal(created.body.data.version, 1)
+  assert.equal(created.body.data.status, 'draft')
+  assert.equal(created.body.data.reused, false)
+  assert.equal(created.body.data.systemId, 'sys_1')
+  const configId = created.body.data.id
+
+  // identical save → 200 reused, still one stored version
+  const reused = await invoke(routes, 'POST', '/api/integration/read-source-configs', {
+    user: WRITE_USER, query: { workspaceId: 'workspace_1' }, body: { config },
+  })
+  assertOkResponse(reused, 200)
+  assert.equal(reused.body.data.reused, true)
+  assert.equal(reused.body.data.id, configId)
+  assert.equal(dbTables.integration_read_source_configs.length, 1)
+
+  // changed save → 201 v2
+  const second = await invoke(routes, 'POST', '/api/integration/read-source-configs', {
+    user: WRITE_USER, query: { workspaceId: 'workspace_1' }, body: { config: { ...config, readMethod: 'GET' } },
+  })
+  assertOkResponse(second, 201)
+  assert.equal(second.body.data.version, 2)
+
+  // read tier cannot mint/approve/retire (write tier only, lock 10)
+  for (const [method, route] of [
+    ['POST', '/api/integration/read-source-configs'],
+    ['POST', '/api/integration/read-source-configs/:id/approve'],
+    ['POST', '/api/integration/read-source-configs/:id/retire'],
+  ]) {
+    const denied = await invoke(routes, method, route, {
+      user: READ_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' }, body: { config },
+    })
+    assert.equal(denied.statusCode, 403, `${route} requires integration write`)
+  }
+
+  // invalid config → 400 values-free (S1 tuples ride through, endpoint never echoed)
+  const invalid = await invoke(routes, 'POST', '/api/integration/read-source-configs', {
+    user: WRITE_USER, query: { workspaceId: 'workspace_1' },
+    body: { config: { ...config, readPath: 'https://evil.example.com/x' } },
+  })
+  assert.equal(invalid.statusCode, 400)
+  assert.equal(invalid.body.error.code, 'READ_SOURCE_CONFIG_INVALID')
+  assert.ok(Array.isArray(invalid.body.error.details.errors) && invalid.body.error.details.errors.length > 0)
+  assert.ok(!JSON.stringify(invalid.body).includes('evil.example.com'), 'validation error is values-free')
+
+  // list + get (read tier)
+  const listed = await invoke(routes, 'GET', '/api/integration/read-source-configs', {
+    user: READ_USER, query: { workspaceId: 'workspace_1', systemId: 'sys_1' },
+  })
+  assertOkResponse(listed, 200)
+  assert.equal(listed.body.data.length, 2)
+  const fetched = await invoke(routes, 'GET', '/api/integration/read-source-configs/:id', {
+    user: READ_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(fetched, 200)
+  assert.equal(fetched.body.data.id, configId)
+  const missing = await invoke(routes, 'GET', '/api/integration/read-source-configs/:id', {
+    user: READ_USER, params: { id: 'rsc_missing' }, query: { workspaceId: 'workspace_1' },
+  })
+  assert.equal(missing.statusCode, 404)
+  assert.equal(missing.body.error.code, 'READ_SOURCE_CONFIG_NOT_FOUND')
+
+  // status lifecycle fail-closed: retire a draft → 409; approve → 200; approve again → 409
+  const earlyRetire = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/retire', {
+    user: WRITE_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
+  })
+  assert.equal(earlyRetire.statusCode, 409)
+  assert.equal(earlyRetire.body.error.code, 'READ_SOURCE_CONFIG_STATUS_CONFLICT')
+  const approved = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/approve', {
+    user: WRITE_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(approved, 200)
+  assert.equal(approved.body.data.status, 'approved')
+  const reApprove = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/approve', {
+    user: WRITE_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
+  })
+  assert.equal(reApprove.statusCode, 409)
+  const retired = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/retire', {
+    user: WRITE_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(retired, 200)
+  assert.equal(retired.body.data.status, 'retired')
+
+  // audit (read tier): actions recorded, detail coarse-only, no config content anywhere
+  const audit = await invoke(routes, 'GET', '/api/integration/read-source-configs/:id/audit', {
+    user: READ_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(audit, 200)
+  assert.deepEqual(
+    audit.body.data.map((entry) => entry.action).sort(),
+    ['reuse_version', 'save_version', 'status_change', 'status_change'],
+  )
+  const auditStr = JSON.stringify(audit.body.data)
+  for (const leak of ['/K3API', 'GetDetail', 'FNumber', 'containerPaths', 'secret-token']) {
+    assert.ok(!auditStr.includes(leak), `audit response must not leak ${leak}`)
+  }
+
+  // persistence surface never creates adapters and never touches external-system storage
+  assert.equal(findCalls(calls, 'createAdapter').length, 0, 'no adapter is created by config persistence routes')
+  assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0, 'external systems are never modified')
+
+  console.log('  testReadSourceConfigRoutes OK')
+}
+
 async function main() {
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
@@ -6092,6 +6280,7 @@ async function main() {
   await testExternalSystemRoutes()
   await testReadSmokeRoute()
   await testReadSourceProbeRoute()
+  await testReadSourceConfigRoutes()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()

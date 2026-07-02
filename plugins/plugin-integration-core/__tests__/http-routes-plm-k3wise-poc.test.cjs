@@ -509,6 +509,15 @@ function createHarness() {
         async deleteTemplate() { return { deleted: 0 } },
         async instantiateTemplate() { return {} },
       },
+      // S2-c: satisfy requireService('readSourceConfigStore', ...) — this harness never exercises it.
+      readSourceConfigStore: {
+        async saveVersion() { return {} },
+        async list() { return [] },
+        async get() { return {} },
+        async approve() { return {} },
+        async retire() { return {} },
+        async listAudit() { return [] },
+      },
     },
     logger: {
       warn() {},
