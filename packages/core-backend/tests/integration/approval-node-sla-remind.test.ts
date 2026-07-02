@@ -20,6 +20,7 @@ const SHOT_ASSIGNEE = `node-sla-approver-${TS}`
 const IDEM_INSTANCE = `node-sla-idem-${TS}`
 const FIRST_INSTANCE = `node-sla-first-${TS}`
 const FIRST_ASSIGNEE = `node-sla-first-approver-${TS}`
+const RACE_INSTANCE = `node-sla-race-${TS}`
 
 function rawQuery<T extends Record<string, unknown> = Record<string, unknown>>(
   sql: string,
@@ -44,7 +45,7 @@ describeIfDatabase('approval node-level SLA remind (T1-1 slice 1) — real DB', 
 
   afterAll(async () => {
     // CASCADE from approval_instances clears approval_metrics + approval_assignments.
-    await rawQuery(`DELETE FROM approval_instances WHERE id = ANY($1)`, [[SHOT_INSTANCE, IDEM_INSTANCE, FIRST_INSTANCE]])
+    await rawQuery(`DELETE FROM approval_instances WHERE id = ANY($1)`, [[SHOT_INSTANCE, IDEM_INSTANCE, FIRST_INSTANCE, RACE_INSTANCE]])
   })
 
   it('has DATABASE_URL configured (sentinel — never skip-green)', () => {
@@ -204,5 +205,47 @@ describeIfDatabase('approval node-level SLA remind (T1-1 slice 1) — real DB', 
     // Single-shot: markNodeTimeoutFired cleared the first-node deadline → a second tick fires nothing.
     await scheduler.tick(new Date())
     expect(reminders.filter((r) => r.instanceId === FIRST_INSTANCE)).toHaveLength(1)
+  })
+
+  it('(d) race guard: a LATE prior-node decision must NOT wipe the already-advanced node\'s fresh deadline', async () => {
+    const metrics = new ApprovalMetricsService(rawQuery)
+
+    // The instance has ALREADY advanced to approval_2 (committed current_node_key) with approval_2's
+    // timeout deadline freshly armed 30 min out. The post-commit metrics writes for the prior node's
+    // decision and the new node's activation are unordered best-effort — this exercises the decision
+    // write LANDING LATE.
+    await seedInstance(RACE_INSTANCE, 'approval_2')
+    await rawQuery(
+      `INSERT INTO approval_metrics
+         (instance_id, template_id, tenant_id, started_at, sla_hours, node_breakdown,
+          current_node_deadline_at, current_node_timeout_effect)
+       VALUES ($1, NULL, 'default', now() - INTERVAL '5 minutes', NULL, $2::jsonb,
+               now() + INTERVAL '30 minutes', 'remind')`,
+      [
+        RACE_INSTANCE,
+        JSON.stringify([
+          { nodeKey: 'approval_1', activatedAt: new Date(Date.now() - 300_000).toISOString(), decidedAt: null, durationSeconds: null, approverIds: [] },
+          { nodeKey: 'approval_2', activatedAt: new Date(Date.now() - 60_000).toISOString(), decidedAt: null, durationSeconds: null, approverIds: [] },
+        ]),
+      ],
+    )
+
+    // A late-landing decision write for the PRIOR node (approval_1) — the instance is at approval_2, so
+    // this must NOT clear approval_2's deadline (pre-fix: the unconditional instance-wide clear wiped it).
+    await metrics.recordNodeDecision({ instanceId: RACE_INSTANCE, nodeKey: 'approval_1', decidedAt: new Date(), approverIds: ['approver-x'] })
+    const survived = await rawQuery<{ current_node_deadline_at: string | null; current_node_timeout_effect: string | null }>(
+      `SELECT current_node_deadline_at, current_node_timeout_effect FROM approval_metrics WHERE instance_id = $1`,
+      [RACE_INSTANCE],
+    )
+    expect(survived.rows[0]?.current_node_deadline_at, 'the advanced node\'s deadline must survive a late prior-node decision').not.toBeNull()
+    expect(survived.rows[0]?.current_node_timeout_effect).toBe('remind')
+
+    // Companion: a decision for the CURRENT node (approval_2) DOES clear it — the normal single-shot path.
+    await metrics.recordNodeDecision({ instanceId: RACE_INSTANCE, nodeKey: 'approval_2', decidedAt: new Date(), approverIds: ['approver-x'] })
+    const cleared = await rawQuery<{ current_node_deadline_at: string | null }>(
+      `SELECT current_node_deadline_at FROM approval_metrics WHERE instance_id = $1`,
+      [RACE_INSTANCE],
+    )
+    expect(cleared.rows[0]?.current_node_deadline_at, 'deciding the current node clears its own deadline').toBeNull()
   })
 })
