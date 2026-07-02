@@ -174,6 +174,20 @@ async function main() {
   S.systemResolved = true
   S.systemKindMatched = systemKind === args.systemKind
 
+  // Differential control: the SHIPPED C3 read-smoke preset against the same system rides the exact
+  // same adapter outbound path (login/token + list read). If it fails alongside the self-service
+  // probe, the failure is environment/K3-side, not this line.
+  const control = await requestJson(args.baseUrl, `/api/integration/external-systems/${systemId}/read-smoke${scope}`, {
+    token, timeoutMs: args.timeoutMs, method: 'POST',
+    body: { presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list' } },
+  })
+  const controlData = control.body?.data || {}
+  S.readSmokeControlHttp = control.status
+  S.readSmokeControlOk = controlData.ok === true
+  S.readSmokeControlErrorCode = typeof controlData.errorCode === 'string' ? controlData.errorCode : ''
+  S.readSmokeControlErrorType = typeof controlData.errorType === 'string' ? controlData.errorType : ''
+  check('read-smoke differential control', S.readSmokeControlOk, `http=${control.status} errorCode=${S.readSmokeControlErrorCode || '-'}`)
+
   const config = buildSmokeConfig({
     systemId,
     systemKind,
@@ -199,6 +213,7 @@ async function main() {
   S.boundedSmokeExecuted = probeData.boundedSmokeExecuted === true
   S.probeRecordCount = Number.isInteger(probeData.recordCount) ? probeData.recordCount : 'absent'
   S.probeErrorCode = typeof probeData.errorCode === 'string' ? probeData.errorCode : ''
+  S.probeErrorType = typeof probeData.errorType === 'string' ? probeData.errorType : ''
   S.probeEvidenceValuesFree = leakScan(probeData, evidenceSentinels)
   must('probe http 200', probe.ok, `http=${probe.status}`)
   must('probe ok + container located', S.probeOk && S.containerLocated, `errorCode=${S.probeErrorCode || '-'}`)
@@ -253,6 +268,7 @@ async function main() {
   S.runtimeHttp = read.status
   S.runtimeEvidenceOk = evidence.ok === true
   S.runtimeErrorCode = typeof evidence.errorCode === 'string' ? evidence.errorCode : ''
+  S.runtimeErrorType = typeof evidence.errorType === 'string' ? evidence.errorType : ''
   S.runtimeDataPresent = dataPlane !== null
   S.runtimeRecordCount = Number.isInteger(dataPlane?.recordCount) ? dataPlane.recordCount : 'absent'
   S.runtimeDataOnlyFieldMapTargets = recordsOnlyTargets(records, salt)
