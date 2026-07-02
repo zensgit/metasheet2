@@ -735,6 +735,46 @@ function defaultCrossBaseWriteQuota(): { limit: number; windowMs: number } {
 // silently defeat the guardrail). `unref`'d cleanup timer prunes expired windows.
 const defaultCrossBaseWriteQuotaStore = new MemoryRateLimitStore(DEFAULT_CROSS_BASE_WRITE_QUOTA_WINDOW_MS)
 
+/**
+ * Shared per-target-base cross-base write quota — the SAME discipline (increment-then-check, keyed by the
+ * resolved target base, env-tunable via CROSS_BASE_WRITE_QUOTA_*) and the SAME default counter store as the
+ * automation executor's gate, exposed for the C2 mirror write-through op's base-A leg (#3440 Lock B: quota
+ * is caller-composed, keyed to base A, never applied to the base-B leg). Sharing the store means automation
+ * writes and mirror-op writes draw from ONE per-base budget in-process, which is the point of the guardrail
+ * (protect the target base), not an accident. Returns true when the write is within quota. Fail-open ONLY on
+ * a counter-store error (store failure, not actor failure — mirrors checkCrossBaseWriteQuota).
+ */
+/**
+ * Test-only: clear the shared cross-base write quota counters (the `_map` getter exists for exactly this).
+ * Lets a real-DB golden assert an absolute limit boundary without prior-test accumulation on the process-
+ * global singleton. Never called by runtime code.
+ */
+export function __resetSharedCrossBaseWriteQuotaForTest(): void {
+  defaultCrossBaseWriteQuotaStore._map.clear()
+}
+
+export async function consumeSharedCrossBaseWriteQuota(
+  targetBaseId: string,
+  override?: { limit?: number; windowMs?: number; store?: RateLimitStore },
+): Promise<boolean> {
+  const def = defaultCrossBaseWriteQuota()
+  const limit = override?.limit ?? def.limit
+  const windowMs = override?.windowMs ?? def.windowMs
+  const store = override?.store ?? defaultCrossBaseWriteQuotaStore
+  const key = `crossbase-write-quota:${targetBaseId}`
+  let count: number
+  try {
+    count = (await store.increment(key, windowMs)).count
+  } catch (err) {
+    logger.warn('Cross-base write quota store error; allowing this write', {
+      targetBaseId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return true
+  }
+  return count <= limit
+}
+
 export interface AutomationDeps {
   eventBus: EventBus
   queryFn: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
