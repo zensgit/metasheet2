@@ -2599,13 +2599,14 @@ describe('AutomationService — Rule CRUD', () => {
     const base = { templateId: 'tpl_1', formDataMapping: { amount: '{{record.amount}}' } }
     const withRW = (rw: unknown) => ({ ...base, resultWriteback: rw })
 
-    // valid: a fixed outcome→field mapping (≥1 field, all non-empty strings)
+    // valid: a fixed outcome→field mapping (≥1 field, all non-empty strings) plus the explicit
+    // non-approved opt-in flag used by T3-4.
     dbExecuteResults.push([])
     const ok = await service.createRule('sheet_1', {
       name: 'Backwrite rule', triggerType: 'record.created', triggerConfig: {},
       actionType: 'start_approval',
-      actionConfig: withRW({ statusField: 'approval_status', approverField: 'approved_by' }),
-      actions: [{ type: 'start_approval', config: withRW({ statusField: 'approval_status', approverField: 'approved_by' }) }],
+      actionConfig: withRW({ statusField: 'approval_status', approverField: 'approved_by', onNonApproved: true }),
+      actions: [{ type: 'start_approval', config: withRW({ statusField: 'approval_status', approverField: 'approved_by', onNonApproved: true }) }],
       executionMode: 'workflow_job_v1', createdBy: 'user_1',
     })
     expect(ok.action_type).toBe('start_approval')
@@ -2625,6 +2626,14 @@ describe('AutomationService — Rule CRUD', () => {
       actions: [{ type: 'start_approval', config: withRW({ statusField: 123 }) }],
       executionMode: 'workflow_job_v1', createdBy: 'user_1',
     })).rejects.toThrow(/resultWriteback\.statusField must be a non-empty string/)
+
+    // invalid: the non-approved path is opt-in by an actual boolean, not a truthy string.
+    await expect(service.createRule('sheet_1', {
+      name: 'Bad non-approved backwrite flag', triggerType: 'record.created', triggerConfig: {},
+      actionType: 'start_approval', actionConfig: withRW({ statusField: 'approval_status', onNonApproved: 'true' }),
+      actions: [{ type: 'start_approval', config: withRW({ statusField: 'approval_status', onNonApproved: 'true' }) }],
+      executionMode: 'workflow_job_v1', createdBy: 'user_1',
+    })).rejects.toThrow(/resultWriteback\.onNonApproved must be a boolean/)
   })
 
   it('A6-3-1: createRule accepts condition_branch only with workflow_job_v1', async () => {

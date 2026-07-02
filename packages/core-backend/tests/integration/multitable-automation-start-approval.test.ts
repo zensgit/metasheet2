@@ -151,7 +151,7 @@ async function createPublishedTemplate(
   return template.id
 }
 
-async function createStartApprovalRule(svc: AutomationService, templateId: string, resultWriteback?: Record<string, string>): Promise<string> {
+async function createStartApprovalRule(svc: AutomationService, templateId: string, resultWriteback?: Record<string, string | boolean>): Promise<string> {
   const startApproval = {
     type: 'start_approval',
     config: {
@@ -242,7 +242,7 @@ async function waitForExecutionStatus(svc: AutomationService, id: string, status
 
 async function executeAndApprove(
   svc: AutomationService,
-  resultWriteback: Record<string, string>,
+  resultWriteback: Record<string, string | boolean>,
   title = 'Q4 plan',
 ): Promise<{ executionId: string; approvalInstanceId: string }> {
   const templateId = await createPublishedTemplate()
@@ -673,6 +673,193 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
       expect(jobs[0]).toMatchObject({ status: 'failed', error: 'Approval completed with rejected' })
       expect(jobs[1]).toMatchObject({ status: 'skipped' })
       jobs.forEach((job) => expect(() => normalizeWorkflowJob(job)).not.toThrow())
+    } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('T3-4: rejected approval does not write existing resultWriteback mapping without explicit opt-in', async () => {
+    const calls: string[] = []
+    const svc = makeAutomationService((async (url: string) => {
+      calls.push(url)
+      return new Response('OK', { status: 200 })
+    }) as never)
+    try {
+      await seedDefaultWritebackFields()
+      const RW = {
+        statusField: 'approval_status',
+        approverField: 'approved_by',
+        completedAtField: 'approved_at',
+      }
+      const templateId = await createPublishedTemplate()
+      const ruleId = await createStartApprovalRule(svc, templateId, RW)
+      await seedSheetRecord('Rejected approved-only writeback path')
+      const execRule = {
+        id: ruleId,
+        name: 'W7 rejected approved-only writeback',
+        sheetId: SHEET,
+        trigger: { type: 'record.created', config: {} },
+        actions: [
+          {
+            type: 'start_approval',
+            config: {
+              templateId,
+              formDataMapping: { summary: 'Record {{record.title}} needs approval' },
+              requester: { mode: 'trigger_actor' },
+              resultWriteback: RW,
+            },
+          },
+          { type: 'send_webhook', config: { url: 'https://example.test/w7-rejected-approved-only-tail' } },
+        ],
+        enabled: true,
+        createdBy: REQUESTER,
+        createdAt: new Date(TS).toISOString(),
+        executionMode: 'workflow_job_v1',
+      }
+
+      const execution = await svc.executeRule(execRule as never, {
+        sheetId: SHEET,
+        recordId: RECORD,
+        data: { title: 'Rejected approved-only writeback path' },
+        actorId: REQUESTER,
+      })
+      executionIds.push(execution.id)
+      const bridge = await q(
+        `SELECT approval_instance_id
+           FROM multitable_automation_approval_bridges
+          WHERE execution_id = $1`,
+        [execution.id],
+      )
+      approvalIds.push(bridge.rows[0].approval_instance_id)
+
+      const approvals = new ApprovalProductService()
+      const approvalAfterAction = await approvals.dispatchAction(
+        bridge.rows[0].approval_instance_id,
+        { action: 'reject', comment: 'no' },
+        { userId: APPROVER, userName: APPROVER },
+      )
+      expect(approvalAfterAction.status).toBe('rejected')
+
+      const failed = await waitForExecutionStatus(svc, execution.id, 'failed')
+      expect(failed.steps[0]).toMatchObject({
+        actionType: 'start_approval',
+        status: 'failed',
+        error: 'Approval completed with rejected',
+      })
+      expect(failed.steps[1]).toMatchObject({
+        actionType: 'send_webhook',
+        status: 'skipped',
+      })
+      expect(calls).toEqual([])
+
+      const rec = await q<{ data: Record<string, unknown> }>(
+        'SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [RECORD, SHEET],
+      )
+      const data = rec.rows[0].data
+      expect(data).not.toHaveProperty('approval_status')
+      expect(data).not.toHaveProperty('approved_by')
+      expect(data).not.toHaveProperty('approved_at')
+
+      const finalBridge = await q(
+        'SELECT status, outcome FROM multitable_automation_approval_bridges WHERE execution_id = $1',
+        [execution.id],
+      )
+      expect(finalBridge.rows[0]).toMatchObject({ status: 'resumed', outcome: 'rejected' })
+    } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('T3-4: rejected approval writes resultWriteback when explicitly opted in, then still fails without running the tail', async () => {
+    const calls: string[] = []
+    const svc = makeAutomationService((async (url: string) => {
+      calls.push(url)
+      return new Response('OK', { status: 200 })
+    }) as never)
+    try {
+      await seedDefaultWritebackFields()
+      const RW = {
+        statusField: 'approval_status',
+        approverField: 'approved_by',
+        completedAtField: 'approved_at',
+        onNonApproved: true,
+      }
+      const templateId = await createPublishedTemplate()
+      const ruleId = await createStartApprovalRule(svc, templateId, RW)
+      await seedSheetRecord('Rejected writeback path')
+      const execRule = {
+        id: ruleId,
+        name: 'W7 rejected writeback',
+        sheetId: SHEET,
+        trigger: { type: 'record.created', config: {} },
+        actions: [
+          {
+            type: 'start_approval',
+            config: {
+              templateId,
+              formDataMapping: { summary: 'Record {{record.title}} needs approval' },
+              requester: { mode: 'trigger_actor' },
+              resultWriteback: RW,
+            },
+          },
+          { type: 'send_webhook', config: { url: 'https://example.test/w7-rejected-writeback-tail' } },
+        ],
+        enabled: true,
+        createdBy: REQUESTER,
+        createdAt: new Date(TS).toISOString(),
+        executionMode: 'workflow_job_v1',
+      }
+
+      const execution = await svc.executeRule(execRule as never, {
+        sheetId: SHEET,
+        recordId: RECORD,
+        data: { title: 'Rejected writeback path' },
+        actorId: REQUESTER,
+      })
+      executionIds.push(execution.id)
+      const bridge = await q(
+        `SELECT approval_instance_id
+           FROM multitable_automation_approval_bridges
+          WHERE execution_id = $1`,
+        [execution.id],
+      )
+      approvalIds.push(bridge.rows[0].approval_instance_id)
+
+      const approvals = new ApprovalProductService()
+      const approvalAfterAction = await approvals.dispatchAction(
+        bridge.rows[0].approval_instance_id,
+        { action: 'reject', comment: 'no' },
+        { userId: APPROVER, userName: APPROVER },
+      )
+      expect(approvalAfterAction.status).toBe('rejected')
+
+      const failed = await waitForExecutionStatus(svc, execution.id, 'failed')
+      expect(failed.steps[0]).toMatchObject({
+        actionType: 'start_approval',
+        status: 'failed',
+        error: 'Approval completed with rejected',
+      })
+      expect(failed.steps[1]).toMatchObject({
+        actionType: 'send_webhook',
+        status: 'skipped',
+      })
+      expect(calls).toEqual([])
+
+      const rec = await q<{ data: Record<string, unknown> }>(
+        'SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [RECORD, SHEET],
+      )
+      const data = rec.rows[0].data
+      expect(data.approval_status).toBe('rejected')
+      expect(data.approved_by).toBe(APPROVER)
+      expect(typeof data.approved_at).toBe('string')
+
+      const finalBridge = await q(
+        'SELECT status, outcome FROM multitable_automation_approval_bridges WHERE execution_id = $1',
+        [execution.id],
+      )
+      expect(finalBridge.rows[0]).toMatchObject({ status: 'resumed', outcome: 'rejected' })
     } finally {
       svc.shutdown()
     }
