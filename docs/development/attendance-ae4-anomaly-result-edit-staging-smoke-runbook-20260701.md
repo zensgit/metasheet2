@@ -87,6 +87,35 @@ ADMIN_TOKEN='<admin bearer token>'
 The PASS stamp must include `DEPLOY_SHA`, `STAMP`, and residue `0`. Do not use a
 local branch SHA as the deploy SHA.
 
+## Optional API/DB Helper
+
+Use the helper to execute the backend portions of this runbook before the manual
+AE-3 UI probe:
+
+```bash
+BASE_URL="$BASE_URL" \
+DATABASE_URL="$DATABASE_URL" \
+DEPLOY_SHA="$DEPLOY_SHA" \
+ORG_ID="${ORG_ID:-default}" \
+ADMIN_TOKEN="$ADMIN_TOKEN" \
+NON_ADMIN_TOKEN="${NON_ADMIN_TOKEN:-}" \
+node scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs
+```
+
+The helper drives the real staging API for the audited correction route, the
+affected-employee notification paths, replay/idempotency, import-based
+same-facts and changed-facts recompute, non-admin `403`, and closed-cycle `409`.
+It uses SQL only for synthetic seed, exact assertions, and cleanup. A successful
+helper run prints:
+
+```text
+AE4_RESULT_EDIT_API_DB_SMOKE_PASS deploy=<sha> stamp=<ae4-smoke-...> org=<org> notifyRecord=<uuid> skipRecord=<uuid> residue=0
+```
+
+This is **not** the final AE-4 PASS stamp because it does not operate the AE-3
+modal in a browser. The final closeout still requires the manual UI step below
+and must use `AE4_RESULT_EDIT_STAGING_SMOKE_PASS`.
+
 ## Preflight
 
 Run these checks before creating any business rows:
@@ -326,16 +355,19 @@ Expected:
 ## Step 7 — residue check
 
 After restoring settings, cleanup all stamped rows. The residue check must
-verify every category is zero:
+verify every category is zero. Use a literal `:stamp` matching
+`/^ae4-smoke-[A-Za-z0-9-]+$/`, exact `:smoke_idempotency_keys`, exact captured
+`:smoke_import_batch_ids`, and `:user_prefix = :stamp || '-'`; do not use an
+unescaped wildcard stamp for cleanup.
 
 ```sql
 SELECT
-  (SELECT count(*) FROM attendance_records WHERE meta->>'smokeStamp' = :stamp) AS records,
+  (SELECT count(*) FROM attendance_records WHERE org_id = :org_id AND meta->>'smokeStamp' = :stamp) AS records,
   (SELECT count(*) FROM attendance_record_result_edits
     WHERE org_id = :org_id
       AND (
         record_id = ANY(:smoke_record_ids::uuid[])
-        OR idempotency_key LIKE ('ae4-smoke:' || :stamp || ':%')
+        OR idempotency_key = ANY(:smoke_idempotency_keys::text[])
       )) AS edits,
   (SELECT count(*) FROM attendance_notification_deliveries
     WHERE org_id = :org_id
@@ -344,20 +376,20 @@ SELECT
         source_key LIKE ('attendance_result_edit:' || :org_id || ':' || :notify_record_id || ':%')
         OR source_key LIKE ('attendance_result_edit:' || :org_id || ':' || :skip_record_id || ':%')
       )) AS deliveries,
-  (SELECT count(*) FROM attendance_payroll_cycles WHERE org_id = :org_id AND metadata::text LIKE :stamp_like) AS cycles,
-  (SELECT count(*) FROM attendance_requests WHERE org_id = :org_id AND metadata::text LIKE :stamp_like) AS requests,
-  (SELECT count(*) FROM attendance_events WHERE org_id = :org_id AND meta::text LIKE :stamp_like) AS events,
+  (SELECT count(*) FROM attendance_payroll_cycles WHERE org_id = :org_id AND metadata->>'smokeStamp' = :stamp) AS cycles,
+  (SELECT count(*) FROM attendance_requests WHERE org_id = :org_id AND metadata->>'smokeStamp' = :stamp) AS requests,
+  (SELECT count(*) FROM attendance_events WHERE org_id = :org_id AND meta->>'smokeStamp' = :stamp) AS events,
   (SELECT count(*) FROM attendance_import_batches
     WHERE org_id = :org_id
-      AND (meta::text LIKE :stamp_like OR id = ANY(:smoke_import_batch_ids::uuid[]))) AS import_batches,
+      AND (meta->>'smokeStamp' = :stamp OR id = ANY(:smoke_import_batch_ids::uuid[]))) AS import_batches,
   (SELECT count(*) FROM attendance_import_items
     WHERE org_id = :org_id
       AND batch_id = ANY(:smoke_import_batch_ids::uuid[])) AS import_items,
   (SELECT count(*) FROM attendance_import_jobs
     WHERE org_id = :org_id
-      AND (payload::text LIKE :stamp_like OR batch_id = ANY(:smoke_import_batch_ids::uuid[]))) AS import_jobs,
-  (SELECT count(*) FROM user_orgs WHERE user_id LIKE :user_prefix) AS user_orgs,
-  (SELECT count(*) FROM users WHERE id LIKE :user_prefix) AS users;
+      AND batch_id = ANY(:smoke_import_batch_ids::uuid[])) AS import_jobs,
+  (SELECT count(*) FROM user_orgs WHERE org_id = :org_id AND left(user_id, length(:user_prefix)) = :user_prefix) AS user_orgs,
+  (SELECT count(*) FROM users WHERE left(id, length(:user_prefix)) = :user_prefix) AS users;
 ```
 
 Adjust column names only if staging schema differs; do not narrow residue to
