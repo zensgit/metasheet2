@@ -802,7 +802,7 @@ interface PlmBomWritebackAdapter extends PlmBomReviewAdapter {
     partId: string,
     bomLineId: string,
     patch: BomMultitableLinePatch,
-    options?: { idempotencyKey?: string },
+    options?: { idempotencyKey?: string; ifMatch?: string },
   ): Promise<{ data?: BomMultitableLineUpdateResult[]; error?: Error }>
 }
 
@@ -868,6 +868,10 @@ function providerErrorStatus(error: unknown): number | null {
 
 function relayProviderWritebackError(error: unknown): { status: number; reason: string } {
   const status = providerErrorStatus(error)
+  // 412 = stale If-Match (optimistic-concurrency conflict): distinct reason so the UI reloads.
+  if (status === 412) {
+    return { status: 412, reason: 'precondition-failed' }
+  }
   if (status && [400, 403, 404, 409, 422].includes(status)) {
     return { status, reason: 'provider-rejected' }
   }
@@ -1004,7 +1008,12 @@ router.patch(
       })
     }
 
-    const result = await adapter.updateBomMultitableLine(partId, bomLineId, patch, { idempotencyKey })
+    // Optional optimistic-concurrency: forward the client's If-Match to the provider unchanged.
+    const ifMatch = (req.header('If-Match') || '').trim()
+    const result = await adapter.updateBomMultitableLine(partId, bomLineId, patch, {
+      idempotencyKey,
+      ...(ifMatch ? { ifMatch } : {}),
+    })
     if (result.error) {
       const relayed = relayProviderWritebackError(result.error)
       return res.status(relayed.status).json({

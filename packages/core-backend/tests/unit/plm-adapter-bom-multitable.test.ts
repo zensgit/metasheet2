@@ -260,6 +260,30 @@ describe('PLMAdapter.updateBomMultitableLine (PLM-COLLAB P3 — thin success-onl
     expect(options.headers['Idempotency-Key']).toBe('workbench-submit-1')
   })
 
+  it('sends the write_etag verbatim as If-Match (strong-ETag quotes preserved -> byte round-trip)', async () => {
+    const adapter = createAdapter('yuantus')
+    const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })
+    ;(adapter as never as { select: unknown }).select = select
+
+    await adapter.updateBomMultitableLine('P4', 'R8', { quantity: 6 }, { idempotencyKey: 'k1', ifMatch: '"bom-line:abc123"' })
+
+    const [, options] = select.mock.calls[0]
+    // the literal quotes MUST survive: a stripped/re-encoded quote would silently 412 every write
+    expect(options.headers['If-Match']).toBe('"bom-line:abc123"')
+    expect(options.headers['Idempotency-Key']).toBe('k1')
+  })
+
+  it('omits If-Match when no write_etag is provided (backward-safe: old provider / etag-less read)', async () => {
+    const adapter = createAdapter('yuantus')
+    const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })
+    ;(adapter as never as { select: unknown }).select = select
+
+    await adapter.updateBomMultitableLine('P4', 'R8', { quantity: 6 }, { idempotencyKey: 'k1' })
+
+    const [, options] = select.mock.calls[0]
+    expect('If-Match' in options.headers).toBe(false)
+  })
+
   it('null cell is a real "clear" edit, not empty: kept in payload, request issued', async () => {
     const adapter = createAdapter('yuantus')
     const select = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R8' }], metadata: { totalCount: 1 } })

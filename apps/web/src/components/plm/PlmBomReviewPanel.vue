@@ -120,6 +120,7 @@ function makeIdempotencyKey(): string {
 }
 
 function writebackMessage(status: number): string {
+  if (status === 412) return '此行已被他人修改，已重新载入最新值，请确认后重试。'
   if (status === 403) return '无写回授权或权限不足。'
   if (status === 404) return '该 BOM 行不存在或不属于当前 Part。'
   if (status === 409) return '该 BOM 行当前不可写，或提交键已用于不同写入。'
@@ -150,12 +151,22 @@ async function submitLinePatch(payload: { line: PlmBomMultitableLine; patch: Plm
       lineId,
       payload.patch,
       key,
+      payload.line.write_etag,
     )
     if (outcome.ok) {
       applyLinePatch(payload.line, payload.patch)
       const { [lineId]: _doneKey, ...rest } = retryKeys.value
       retryKeys.value = rest
       lineMessages.value = { ...lineMessages.value, [lineId]: '写回成功。' }
+      return
+    }
+    if (outcome.status === 412) {
+      // Optimistic-concurrency conflict: a concurrent edit landed first. Reload the fresh context
+      // (new write_etags; load() also drops every retry key, so the re-submit mints a fresh
+      // Idempotency-Key rather than replaying the cached original), then surface the conflict so the
+      // user reviews the current value and re-decides. Never report the dropped edit as success.
+      await load()
+      lineMessages.value = { ...lineMessages.value, [lineId]: writebackMessage(412) }
       return
     }
     lineMessages.value = { ...lineMessages.value, [lineId]: writebackMessage(outcome.status) }

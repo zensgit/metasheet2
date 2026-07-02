@@ -289,4 +289,53 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
     expect(res.status).toBe(409)
     expect(res.body.reason).toBe('provider-rejected')
   })
+
+  it('write route forwards the client If-Match header to the provider (optimistic concurrency)', async () => {
+    const updateBomMultitableLine = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R1' }] })
+    dsMocks.getDataSource.mockReturnValue({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest(
+          { supported: true, api_version: 'v1', entitled: true },
+          { bom_multitable_writeback: { supported: true, api_version: 'v1', entitled: true } },
+        ),
+      }),
+      getBomMultitableContext: vi.fn(),
+      updateBomMultitableLine,
+    })
+    const res = await request(app)
+      .patch(WRITE_URL)
+      .set('Idempotency-Key', 'submit-1')
+      .set('If-Match', '"bom-line:etag-x"')
+      .send({ quantity: 5 })
+    expect(res.status).toBe(200)
+    expect(updateBomMultitableLine).toHaveBeenCalledWith(
+      'P1',
+      'R1',
+      { quantity: 5 },
+      { idempotencyKey: 'submit-1', ifMatch: '"bom-line:etag-x"' },
+    )
+  })
+
+  it('write route relays a provider 412 as a distinct precondition-failed conflict', async () => {
+    const stale = Object.assign(new Error('If-Match precondition failed'), { response: { status: 412 } })
+    dsMocks.getDataSource.mockReturnValue({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest(
+          { supported: true, api_version: 'v1', entitled: true },
+          { bom_multitable_writeback: { supported: true, api_version: 'v1', entitled: true } },
+        ),
+      }),
+      getBomMultitableContext: vi.fn(),
+      updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: stale }),
+    })
+    const res = await request(app)
+      .patch(WRITE_URL)
+      .set('Idempotency-Key', 'submit-1')
+      .set('If-Match', '"bom-line:stale"')
+      .send({ quantity: 5 })
+    expect(res.status).toBe(412)
+    expect(res.body.reason).toBe('precondition-failed')
+  })
 })
