@@ -68,4 +68,5 @@
 ## 投票方式
 - Historical voting instruction: direct chat replies or file edits were accepted while this ballot was open.
 - Current as-built: all first-batch rungs are shipped; do not treat this file as an open authorization request.
-- 第二批候选(仍需 per-rung GO):T1-2 inbound webhook · T3-5 cross-base backwrite · T2-1+2 · T1-4。
+- 第二批候选(仍需 per-rung GO)已整理到
+  `approval-automation-second-batch-ballot-20260702.md`:T1-2 inbound webhook · T3-5 cross-base backwrite · T2-1+2 · T1-4。
