@@ -278,6 +278,13 @@ module.exports = {
   ReadSourceProbeRuntimeError,
   prepareReadSourceProbe,
   executeReadSourceProbe,
+  // S3-1: the probe and the configured read (read-source-read-runtime.cjs) must build the SAME overlay,
+  // the SAME request, and classify errors identically — promoted so the read runtime reuses these verbatim
+  // instead of copying them. Kept in __internals too so existing consumers/tests are untouched.
+  buildReadSourceProbeOverlayPreset,
+  buildReadSourceProbeRequest,
+  classifyProbeErrorCode,
+  normalizeReadSourceProbeInputs,
   __internals: {
     buildReadSourceProbeOverlayPreset,
     buildReadSourceProbeRequest,
