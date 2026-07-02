@@ -24,6 +24,7 @@ const ROUTES = [
   ['GET', '/api/integration/read-source-configs/:id/audit', 'readSourceConfigsAudit'],
   ['POST', '/api/integration/read-source-configs/:id/approve', 'readSourceConfigsApprove'],
   ['POST', '/api/integration/read-source-configs/:id/retire', 'readSourceConfigsRetire'],
+  ['POST', '/api/integration/read-source-configs/:id/read', 'readSourceConfigsRead'],
   ['GET', '/api/integration/external-systems/:id/objects', 'externalSystemObjects'],
   ['GET', '/api/integration/external-systems/:id/schema', 'externalSystemSchema'],
   ['GET', '/api/integration/pipelines', 'pipelinesList'],
@@ -106,7 +107,14 @@ const {
   ReadSourceConfigValidationError,
   ReadSourceConfigNotFoundError,
   ReadSourceConfigConflictError,
+  ReadSourceConfigNotApprovedError,
 } = require('./read-source-config-store.cjs')
+// S3-2 (#1709 self-service): runtime-tier configured read — consumes an APPROVED stored config version;
+// data plane (mapped values) flows to the authorized caller, evidence stays values-free.
+const {
+  prepareConfiguredRead,
+  executeConfiguredRead,
+} = require('./read-source-read-runtime.cjs')
 const { K3_REFERENCE_MAPPING_TEMPLATES } = require('./reference-mapping-templates.cjs')
 const { listReferenceIntegrationTemplates } = require('./reference-integration-templates.cjs')
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
@@ -1474,6 +1482,10 @@ function mapReadSourceConfigError(error) {
   if (error instanceof ReadSourceConfigNotFoundError) {
     return new HttpRouteError(404, 'READ_SOURCE_CONFIG_NOT_FOUND', 'read-source config not found')
   }
+  if (error instanceof ReadSourceConfigNotApprovedError) {
+    // Fail-closed runtime gate: draft/retired versions are not consumable. Coarse status enum only.
+    return new HttpRouteError(409, 'READ_SOURCE_CONFIG_NOT_APPROVED', 'read-source config version is not approved', { status: error.details && error.details.status })
+  }
   if (error instanceof ReadSourceConfigConflictError) {
     return new HttpRouteError(409, 'READ_SOURCE_CONFIG_STATUS_CONFLICT', 'read-source config status transition is not allowed', error.details)
   }
@@ -1499,7 +1511,7 @@ function createHandlers(services, options = {}) {
   const deadLetters = requireService('deadLetterStore', ['listDeadLetters'])
   const stagingInstaller = requireService('stagingInstaller', ['installStaging', 'listStagingDescriptors'])
   const templateRegistry = requireService('templateRegistry', ['upsertTemplate', 'getTemplate', 'listTemplates', 'deleteTemplate', 'instantiateTemplate'])
-  const readSourceConfigs = requireService('readSourceConfigStore', ['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit'])
+  const readSourceConfigs = requireService('readSourceConfigStore', ['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime'])
   const context = options.context || {}
   const configuredTableActions = context && context.config
     ? (context.config.stockPreparationTableActions || context.config.tableActions)
@@ -1819,6 +1831,63 @@ function createHandlers(services, options = {}) {
         })))
       } catch (error) {
         throw mapReadSourceConfigError(error)
+      }
+    },
+
+    // S3-2 (#1709 self-service): runtime-tier configured read — the end-user/cleansing tier consumes an
+    // ALREADY-APPROVED read-source config version and supplies ONLY the preset-declared named key input.
+    // No raw endpoint/filter/body/response-path can enter: the stored config is S1-normalized and the
+    // request body is a strict {inputs} allowlist. The data plane (fieldMap-mapped values) flows to the
+    // authorized caller under the S0 two-tier model; evidence stays values-free. requireAccess('read') IS
+    // the designed runtime tier: config-time surfaces (save/approve/probe) stay write-tier, and an
+    // approved preset + key-only body is exactly the end-user surface S0 defines.
+    async readSourceConfigsRead(req, res) {
+      requireAccess(req, 'read')
+      const body = requestBody(req)
+      // Strict body allowlist BEFORE anything else: only { inputs } may ride in from the runtime request.
+      if (body !== undefined && body !== null) {
+        if (typeof body !== 'object' || Array.isArray(body)) {
+          throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: 'not_object' })
+        }
+        const unexpected = Object.keys(body).filter((key) => key !== 'inputs')
+        if (unexpected.length > 0) {
+          throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: 'unexpected_field' })
+        }
+      }
+      let row
+      try {
+        row = await readSourceConfigs.getForRuntime(scopedInput(req, { id: requestParams(req).id }))
+      } catch (error) {
+        throw mapReadSourceConfigError(error)
+      }
+      let prepared
+      try {
+        prepared = prepareConfiguredRead({ config: row.config, inputs: body ? body.inputs : undefined })
+      } catch (error) {
+        // Coarse, values-free reason only (never the stored config, key, or values).
+        throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: error && typeof error.reason === 'string' ? error.reason : 'invalid' })
+      }
+      // Backend credential context via the stored systemId reference — resolution stays dynamic (lock 5).
+      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
+        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+        : externalSystems.getExternalSystem.bind(externalSystems)
+      const system = await loadSystem(scopedInput(req, { id: row.systemId }))
+      if (!system || system.kind !== prepared.plan.requiredKind) {
+        throw new HttpRouteError(409, 'READ_SOURCE_READ_KIND_MISMATCH', 'external system kind does not match the approved config')
+      }
+      try {
+        const { evidence, data } = await executeConfiguredRead(prepared, {
+          system,
+          createAdapter: (adapterSystem) => adapterRegistry.createAdapter(adapterSystem, { principal: requestPrincipal(req) }),
+        })
+        return sendOk(res, { evidence, data })
+      } catch (error) {
+        // Defense-in-depth only: the route pre-checks kind above, so the executor's own kind re-check
+        // (same guard, second layer) is unreachable here unless the runtime module changes.
+        if (error instanceof ReadSourceProbeRuntimeError) {
+          throw new HttpRouteError(409, 'READ_SOURCE_READ_KIND_MISMATCH', 'external system kind does not match the approved config')
+        }
+        throw error
       }
     },
 

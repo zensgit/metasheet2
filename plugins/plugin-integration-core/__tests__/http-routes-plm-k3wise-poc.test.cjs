@@ -517,6 +517,7 @@ function createHarness() {
         async approve() { return {} },
         async retire() { return {} },
         async listAudit() { return [] },
+        async getForRuntime() { return {} },
       },
     },
     logger: {
