@@ -261,6 +261,18 @@ export interface RecordPatchInput {
    * Absent for session writes → strict no-op (the session write path is unchanged).
    */
   oapiAudit?: OapiWriteAuditContext
+  /**
+   * C2 cross-base mirror write-through (#3440 §3/§4): an authority/no-oracle guard the dedicated mirror op
+   * injects so its Lock-B (asymmetric two-leg authority) + Lock-C (per-record no-oracle mask on the named
+   * forward record) checks run INSIDE this patch's mutation transaction — the guard takes FOR UPDATE on its
+   * gating rows first, so authorization cannot drift between check and edge write (TOCTOU, permission-revert
+   * lesson). Runs as the FIRST statement of the transaction, before any record row is read or mutated; a
+   * throw aborts the whole patch. The guard MAY finalize the pending link change values it computed under
+   * those locks (the link set-diff and target validation read `changes` later, inside this same
+   * transaction). Never set by the general PATCH / bulk / Yjs / restore paths — the mirror stays read-only
+   * on every existing path (C2/I-1); this seam carries authorization for the ONE gated op only.
+   */
+  preWriteGuard?: (query: QueryFn) => Promise<void>
 }
 
 export interface RecordPatchResult {
@@ -693,6 +705,8 @@ export class RecordWriteService {
       mirrorInvalidationBySheet.set(mirrorSheetId, group)
     }
     const updates = await this.pool.transaction(async ({ query }) => {
+      // C2 mirror write-through: in-transaction authority/no-oracle guard (see RecordPatchInput.preWriteGuard).
+      if (input.preWriteGuard) await input.preWriteGuard(query)
       const updated: Array<{ recordId: string; version: number }> = []
 
       // Native person (人员): resolve the sheet member set ONCE per patch op (lazily, only when a

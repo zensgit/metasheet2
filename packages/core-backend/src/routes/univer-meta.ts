@@ -198,6 +198,8 @@ import {
   RecordPatchFieldValidationError as RecordServicePatchFieldValidationError,
 } from '../multitable/record-service'
 import { canUnlock, ensureRecordNotLocked, mapRecordLockState } from '../multitable/record-lock'
+import { resolveCrossBaseWriteAuthority } from '../multitable/cross-base-write-authority'
+import { consumeSharedCrossBaseWriteQuota } from '../multitable/automation-executor'
 import {
   acquireAutoNumberSheetWriteLock,
   allocateAutoNumberValues,
@@ -15221,6 +15223,236 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] lock record failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update record lock state' } })
+    }
+  })
+
+
+  // ── C2 cross-base editable-mirror write-through (#3440 design-lock / #3441 build spec) ────────────────
+  // The ONE deliberately-gated path that lets a base-B actor edit a cross-base mirror field M_B by mutating
+  // the single canonical FORWARD edge (F_A, rec_A, rec_B) THROUGH RecordWriteService.patchRecords (Lock A:
+  // the forward service supplies dedup / link-target-exists / revision / mirror-invalidation — never a
+  // hand-rolled meta_links INSERT/DELETE, and never a row keyed by M_B). Authorization runs INSIDE the
+  // patch transaction via preWriteGuard (Lock B asymmetric two-leg authority + Lock C per-record no-oracle
+  // mask), after FOR UPDATE on the gating rows (sheets + both records) so base/permission cannot drift
+  // between check and edge write (§4; permission-revert lesson). Default-off behind
+  // MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE — and NOT enable-ready until the Decision-F concurrency gate
+  // (forward link-edit ↔ this op) is proven closed by its own golden (build spec §6).
+  //
+  // Same-base mirrors stay read-only on every path incl. this one (Decision D): the op REFUSES a same-base
+  // pairing. The general PATCH / bulk / create / form / import / plugin-SDK / Yjs / snapshot paths are
+  // untouched — the mirror read-only floor (C2/I-1, isFieldAlwaysReadOnly) is never widened.
+  router.post('/crossbase/mirror-link', async (req: Request, res: Response) => {
+    // W-flag: unset → the op does not exist as a write path (mirror read-only exactly as today).
+    if (String(process.env.MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE ?? '').trim().toLowerCase() !== 'true') {
+      return res.status(403).json({ ok: false, error: { code: 'MIRROR_WRITE_DISABLED', message: 'Cross-base mirror editing is not enabled' } })
+    }
+    const schema = z.object({
+      sheetId: z.string().min(1), // base-B sheet — where the mirror field lives
+      recordId: z.string().min(1), // rec_B — the record whose mirror cell is being edited
+      fieldId: z.string().min(1), // M_B — the mirror field id
+      action: z.enum(['add', 'remove']),
+      foreignRecordId: z.string().min(1), // rec_A — the base-A record to link/unlink
+      // Lock B base-A leg: the explicit declared base-A opt-in (claim == truth via the C1 primitive).
+      targetBaseId: z.string().min(1),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+    // Lock C uniform fail-closed deny (no-oracle): masked ≡ missing ≡ row-denied ≡ locked ≡ record-scope-
+    // denied on the named rec_A — ONE byte-identical status+body for every per-record rec_A outcome, on
+    // BOTH verbs, thrown from the guard and emitted from exactly one site below. No response byte (and no
+    // success/noop split) may distinguish "exists but unreadable" from "does not exist", nor "was linked"
+    // from "never existed" (the REMOVE-side linkage oracle).
+    class MirrorLinkTargetUnavailableError extends Error {}
+    // Coarse actor-side denials (base-B leg / base-A leg) — these are about the ACTOR's own authority, not
+    // about rec_A, so they may be distinguishable from each other (but carry no rec_A information).
+    class MirrorOpDeniedError extends Error {
+      constructor(public readonly denyCode: 'RECORD_EDIT_DENIED' | 'FIELD_POLICY_DENIED' | 'CLAIM_MISMATCH' | 'BASE_NOT_WRITABLE') { super(denyCode) }
+    }
+    class MirrorOpQuotaError extends Error {}
+    class MirrorOpRecordMissingError extends Error {}
+    try {
+      const pool = poolManager.get()
+      const q = pool.query.bind(pool)
+      const { sheetId: sheetB, recordId: recB, fieldId: mirrorFieldId, action, foreignRecordId: recA, targetBaseId: declaredBaseClaim } = parsed.data
+
+      const { access, capabilities: capsB, sheetScope: scopeB } = await resolveSheetCapabilities(req, q, sheetB)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      const actorId = getRequestActorId(req)
+      const actorUserId = access.userId
+
+      // Resolve the mirror pairing M_B → F_A. Config-shape failures are plain validation responses — they
+      // describe the actor's OWN sheet-B field config, never rec_A.
+      const mirrorFieldRes = await q('SELECT id, type, property FROM meta_fields WHERE id = $1 AND sheet_id = $2', [mirrorFieldId, sheetB])
+      const mirrorFieldRow = mirrorFieldRes.rows[0] as { id?: unknown; type?: unknown; property?: unknown } | undefined
+      if (!mirrorFieldRow || String(mirrorFieldRow.type) !== 'link') {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Mirror field not found: ${mirrorFieldId}` } })
+      }
+      const mirrorProperty = normalizeJson(mirrorFieldRow.property)
+      const mirrorCfg = parseLinkFieldConfig(mirrorFieldRow.property)
+      const forwardFieldId = typeof mirrorProperty.mirrorOf === 'string' && mirrorProperty.mirrorOf.trim().length > 0 ? mirrorProperty.mirrorOf.trim() : ''
+      const sheetA = mirrorCfg?.foreignSheetId ?? ''
+      if (!forwardFieldId || !sheetA) {
+        return res.status(422).json({ ok: false, error: { code: 'NOT_A_MIRROR_FIELD', message: 'Field is not a mirror-side twoWay link' } })
+      }
+      const forwardFieldRes = await q('SELECT id, type, property FROM meta_fields WHERE id = $1 AND sheet_id = $2', [forwardFieldId, sheetA])
+      const forwardFieldRow = forwardFieldRes.rows[0] as { id?: unknown; type?: unknown; property?: unknown } | undefined
+      const forwardCfg = forwardFieldRow && String(forwardFieldRow.type) === 'link' ? parseLinkFieldConfig(forwardFieldRow.property) : null
+      if (!forwardCfg || forwardCfg.twoWay !== true || forwardCfg.mirrorFieldId !== mirrorFieldId || forwardCfg.foreignSheetId !== sheetB) {
+        return res.status(422).json({ ok: false, error: { code: 'MIRROR_PAIRING_INVALID', message: 'Mirror field is not paired to a matching forward link' } })
+      }
+      const basesRes = await q('SELECT id, base_id FROM meta_sheets WHERE id = ANY($1::text[])', [[sheetA, sheetB]])
+      const baseBySheet = new Map<string, string | null>()
+      for (const r of basesRes.rows as Array<{ id: unknown; base_id: unknown }>) {
+        baseBySheet.set(String(r.id), typeof r.base_id === 'string' ? r.base_id : null)
+      }
+      if (!baseBySheet.has(sheetA) || !baseBySheet.has(sheetB)) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Sheet not found for mirror pairing' } })
+      }
+      const baseA = baseBySheet.get(sheetA) ?? null
+      const baseB = baseBySheet.get(sheetB) ?? null
+      // Decision D: the SAME-base mirror stays read-only — this op exists for the cross-base pairing only
+      // (null-aware, same comparison as the read path's cross-base resolution).
+      if (baseA === baseB) {
+        return res.status(403).json({ ok: false, error: { code: 'MIRROR_WRITE_CROSSBASE_ONLY', message: 'Same-base mirror fields are read-only' } })
+      }
+
+      // Sheet-A write context (schema/echo-mask/guards) — config-level, resolved pre-transaction; the
+      // per-row gating happens under FOR UPDATE inside the guard below.
+      const { capabilities: capsA, sheetScope: scopeA } = await resolveSheetCapabilities(req, q, sheetA)
+      const patchContext = await buildRecordPatchContext(req, q, sheetA, access, capsA)
+      if (!patchContext) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetA}` } })
+      }
+
+      // The single forward change. Its value is FINALIZED inside the guard (under the gating locks, in the
+      // same transaction the set-diff + link-target validation read it), so the resolved edge set cannot
+      // drift between resolve and write (§4).
+      const forwardChange: { fieldId: string; value: unknown } = { fieldId: forwardFieldId, value: [] }
+
+      const preWriteGuard = async (query: QueryFn): Promise<void> => {
+        // Gating-row locks FIRST, deterministic order (sheets sorted, then records): serializes against
+        // permission grant/revoke (which take the sheet FOR UPDATE) and against concurrent instances of
+        // this op. The forward writer re-locks rec_A later in this same transaction (no-op).
+        await query('SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE', [[sheetA, sheetB].sort()])
+        const recBRes = await query('SELECT id, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE', [recB, sheetB])
+        const recBRow = recBRes.rows[0] as { created_by?: unknown; locked?: unknown; locked_by?: unknown } | undefined
+        if (!recBRow) throw new MirrorOpRecordMissingError() // the actor's OWN record — a plain 404, no rec_A info
+
+        // ── Lock B, base-B acting-side leg — RECORD-level edit eligibility on rec_B (owner-ratified:
+        // record-edit / row-level-deny / mirror-op field policy). NO C1 primitive, NO claim, NO quota —
+        // base-B is the acting side, not a cross-base canonical-edge target.
+        if (!capsB.canEditRecord) throw new MirrorOpDeniedError('RECORD_EDIT_DENIED')
+        const recBScopeMap = await loadRecordPermissionScopeMap(query, sheetB, [recB], actorUserId)
+        const recBCreatedBy = typeof recBRow.created_by === 'string' ? recBRow.created_by : null
+        if (!ensureRecordWriteAllowed(capsB, scopeB, access, recBCreatedBy, 'edit', recBScopeMap, recB)) {
+          throw new MirrorOpDeniedError('RECORD_EDIT_DENIED')
+        }
+        if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, sheetB)) && (await loadDeniedRecordIds(query, sheetB, actorUserId)).has(recB)) {
+          throw new MirrorOpDeniedError('RECORD_EDIT_DENIED')
+        }
+        // Editing rec_B.M_B is semantically a rec_B edit even though the physical mutation lands on
+        // rec_A.F_A — a locked rec_B blocks the op like any other rec_B edit.
+        ensureRecordNotLocked(actorId, recBRow, () => new MirrorOpDeniedError('RECORD_EDIT_DENIED'))
+        // Mirror-op field policy: a per-subject hide / explicit per-subject read-only on M_B for THIS actor
+        // denies the op. (The DERIVED mirrorOf read-only is what this dedicated op is gated to bypass; the
+        // per-subject field_permissions scope is not.)
+        const mirrorFieldScope = (await loadFieldPermissionScopeMap(query, sheetB, actorUserId)).get(mirrorFieldId)
+        if (mirrorFieldScope && (mirrorFieldScope.visible === false || mirrorFieldScope.readOnly === true)) {
+          throw new MirrorOpDeniedError('FIELD_POLICY_DENIED')
+        }
+
+        // ── Lock B, base-A canonical-owner leg — the C1 primitive (claim==truth BEFORE base-writable,
+        // fail-closed), then the caller-composed base-A-keyed quota as the LAST authority gate (same
+        // discipline + same shared per-base budget as automation cross-base writes). base-B consumed no
+        // claim and no quota above.
+        const authority = await resolveCrossBaseWriteAuthority({ actorId: actorUserId, targetBaseId: baseA, declaredBaseClaim, queryFn: query })
+        if ('reason' in authority) {
+          throw new MirrorOpDeniedError(authority.reason === 'claim_mismatch' ? 'CLAIM_MISMATCH' : 'BASE_NOT_WRITABLE')
+        }
+        if (!(await consumeSharedCrossBaseWriteQuota(baseA as string))) {
+          throw new MirrorOpQuotaError()
+        }
+
+        // ── Lock C — per-record no-oracle mask on the NAMED rec_A, BEFORE any edge-existence read (the
+        // REMOVE-side linkage oracle): base-read + foreign-field readability (canonical read-path helper),
+        // sheet-A read gate, existence, row-level read deny, record-scope deny, record lock — every one of
+        // them the SAME MirrorLinkTargetUnavailableError, so masked ≡ missing ≡ denied, byte-identical.
+        const readability = await resolveForeignFieldReadability(req, query, baseB, [sheetA])
+        const readEntry = readability.get(sheetA)
+        if (!readEntry || readEntry.readableFieldIds.size === 0) throw new MirrorLinkTargetUnavailableError()
+        const readableSheets = await resolveReadableSheetIds(req, query, [sheetA])
+        if (!readableSheets.has(sheetA)) throw new MirrorLinkTargetUnavailableError()
+        const recARes = await query('SELECT id, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE', [recA, sheetA])
+        const recARow = recARes.rows[0] as { created_by?: unknown; locked?: unknown; locked_by?: unknown } | undefined
+        if (!recARow) throw new MirrorLinkTargetUnavailableError()
+        if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, sheetA)) && (await loadDeniedRecordIds(query, sheetA, actorUserId)).has(recA)) {
+          throw new MirrorLinkTargetUnavailableError()
+        }
+        const recAScope = (await loadRecordPermissionScopeMap(query, sheetA, [recA], actorUserId)).get(recA)
+        if (recAScope && recAScope.accessLevel === 'none') throw new MirrorLinkTargetUnavailableError()
+        ensureRecordNotLocked(actorId, recARow, () => new MirrorLinkTargetUnavailableError())
+
+        // ── Only now may edge existence be read: finalize the forward set under the held locks. The
+        // forward writer's own set-diff + ON CONFLICT dedup make a re-add a no-op (never a duplicate
+        // canonical row) and a remove-nonlinked a no-op.
+        const currentRes = await query('SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2', [forwardFieldId, recA])
+        const currentIds = (currentRes.rows as Array<{ foreign_record_id: unknown }>).map((r) => String(r.foreign_record_id))
+        forwardChange.value = action === 'add'
+          ? (currentIds.includes(recB) ? currentIds : [...currentIds, recB])
+          : currentIds.filter((id) => id !== recB)
+      }
+
+      const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
+      const recordWriteService = new RecordWriteService(pool, eventBus, writeHelpers)
+      if (yjsInvalidator) {
+        recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
+      }
+      const result = await recordWriteService.patchRecords({
+        sheetId: sheetA,
+        changesByRecord: new Map([[recA, [forwardChange]]]) as Map<string, Array<{ fieldId: string; value: unknown; expectedVersion?: number }>>,
+        actorId,
+        fields: patchContext.fields,
+        visiblePropertyFields: patchContext.readableEchoFields,
+        visiblePropertyFieldIds: patchContext.readableEchoFieldIds,
+        attachmentFields: patchContext.attachmentFields,
+        fieldById: patchContext.fieldById,
+        capabilities: capsA,
+        sheetScope: scopeA,
+        access,
+        source: 'crossbase-mirror-write',
+        preWriteGuard,
+      })
+      return res.json({
+        ok: true,
+        data: {
+          action,
+          recordId: recB,
+          fieldId: mirrorFieldId,
+          forward: { sheetId: sheetA, recordId: recA, fieldId: forwardFieldId, version: result.updated[0]?.version ?? null },
+        },
+      })
+    } catch (err) {
+      if (err instanceof MirrorLinkTargetUnavailableError) {
+        // The ONE uniform fail-closed body (Lock C). Do not add fields, vary the message, or branch here.
+        return res.status(403).json({ ok: false, error: { code: 'MIRROR_LINK_TARGET_UNAVAILABLE', message: 'Link target is not available' } })
+      }
+      if (err instanceof MirrorOpRecordMissingError) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${parsed.data.recordId}` } })
+      }
+      if (err instanceof MirrorOpDeniedError) {
+        return res.status(403).json({ ok: false, error: { code: err.denyCode, message: 'Cross-base mirror edit denied' } })
+      }
+      if (err instanceof MirrorOpQuotaError) {
+        return res.status(429).json({ ok: false, error: { code: 'CROSS_BASE_WRITE_QUOTA_EXCEEDED', message: 'Cross-base write quota exceeded for the target base' } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] crossbase mirror-link failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to apply mirror link edit' } })
     }
   })
 
