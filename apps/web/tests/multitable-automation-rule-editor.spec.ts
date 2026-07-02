@@ -333,6 +333,76 @@ describe('MetaAutomationRuleEditor', () => {
     expect(lockOption?.disabled).toBe(false)
   })
 
+  it('offers delete_record as a first-class action but requires an explicit destructive acknowledgement', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    ;(container.querySelector('[data-field="name"]') as HTMLInputElement).value = 'Delete trigger record'
+    ;(container.querySelector('[data-field="name"]') as HTMLInputElement).dispatchEvent(new Event('input'))
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    const deleteOption = Array.from(actionSelect.options).find((option) => option.value === 'delete_record')
+    expect(deleteOption).toBeTruthy()
+    expect(deleteOption?.disabled).toBe(false)
+
+    actionSelect.value = 'delete_record'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(container.querySelector('[data-action-config="delete_record"]')).toBeTruthy()
+    expect(container.querySelector('[data-field="deleteRecordTestRunHint"]')?.textContent)
+      .toContain('will not delete a real record')
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+    saveBtn.click()
+    expect(saved).not.toHaveBeenCalled()
+
+    const ack = container.querySelector('[data-field="deleteRecordAck"]') as HTMLInputElement
+    expect(ack.checked).toBe(false)
+    ack.checked = true
+    ack.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].actions).toEqual([{ type: 'delete_record', config: {} }])
+    expect(saved.mock.calls[0][0].actionConfig).toEqual({})
+  })
+
+  it('pre-checks the destructive acknowledgement for an existing delete_record rule and preserves empty config', async () => {
+    const saved = vi.fn()
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      rule: fakeRule({
+        name: 'Existing delete',
+        actionType: 'delete_record',
+        actionConfig: {},
+        actions: [{ type: 'delete_record', config: {} }],
+      }),
+      onSave: saved,
+    })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    const ack = container.querySelector('[data-field="deleteRecordAck"]') as HTMLInputElement
+    expect(actionSelect.value).toBe('delete_record')
+    expect(ack.checked).toBe(true)
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].actions).toEqual([{ type: 'delete_record', config: {} }])
+    expect(saved.mock.calls[0][0].actions[0].config).not.toHaveProperty('deleteRecordAck')
+    expect(saved.mock.calls[0][0].actions[0].config).not.toHaveProperty('targetBaseId')
+  })
+
   it('keeps existing lock_record actions selectable and enabled', async () => {
     const { container } = mount({
       visible: true,
