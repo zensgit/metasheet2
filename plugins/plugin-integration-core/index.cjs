@@ -19,6 +19,7 @@ const COMMUNICATION_NAMESPACE = 'integration-core'
 const { createCredentialStore } = require('./lib/credential-store.cjs')
 const { createDb } = require('./lib/db.cjs')
 const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
+const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
 const { createAdapterRegistry } = require('./lib/contracts.cjs')
 const { createHttpAdapterFactory, HTTP_ADAPTER_METADATA } = require('./lib/adapters/http-adapter.cjs')
 const { createYuantusPlmWrapperAdapterFactory, YUANTUS_PLM_ADAPTER_METADATA } = require('./lib/adapters/plm-yuantus-wrapper.cjs')
@@ -47,6 +48,7 @@ const PLUGIN_PHASE = 'integration-core-mvp'
 let activeContext = null
 let credentialStore = null
 let externalSystemRegistry = null
+let readSourceConfigStore = null
 let adapterRegistry = null
 let pipelineRegistry = null
 let templateRegistry = null
@@ -210,6 +212,8 @@ module.exports = {
       db,
       credentialStore,
     })
+    // S2-c (#1709): content-keyed read-source config versions + values-free audit.
+    readSourceConfigStore = createReadSourceConfigStore({ db })
     adapterRegistry = createAdapterRegistry({ logger })
       .registerAdapter('http', createHttpAdapterFactory(), { metadata: HTTP_ADAPTER_METADATA })
       .registerAdapter('plm:yuantus-wrapper', createYuantusPlmWrapperAdapterFactory(), { metadata: YUANTUS_PLM_ADAPTER_METADATA })
@@ -262,6 +266,7 @@ module.exports = {
       logger,
       services: {
         externalSystemRegistry,
+        readSourceConfigStore,
         adapterRegistry,
         pipelineRegistry,
         templateRegistry,
@@ -286,6 +291,7 @@ module.exports = {
     registeredRoutes.length = 0
     credentialStore = null
     externalSystemRegistry = null
+    readSourceConfigStore = null
     adapterRegistry = null
     pipelineRegistry = null
     templateRegistry = null

@@ -18,6 +18,12 @@ const ROUTES = [
   ['POST', '/api/integration/external-systems/:id/test', 'externalSystemsTest'],
   ['POST', '/api/integration/external-systems/:id/read-smoke', 'externalSystemReadSmoke'],
   ['POST', '/api/integration/external-systems/:id/read-source-probe', 'externalSystemReadSourceProbe'],
+  ['POST', '/api/integration/read-source-configs', 'readSourceConfigsSave'],
+  ['GET', '/api/integration/read-source-configs', 'readSourceConfigsList'],
+  ['GET', '/api/integration/read-source-configs/:id', 'readSourceConfigsGet'],
+  ['GET', '/api/integration/read-source-configs/:id/audit', 'readSourceConfigsAudit'],
+  ['POST', '/api/integration/read-source-configs/:id/approve', 'readSourceConfigsApprove'],
+  ['POST', '/api/integration/read-source-configs/:id/retire', 'readSourceConfigsRetire'],
   ['GET', '/api/integration/external-systems/:id/objects', 'externalSystemObjects'],
   ['GET', '/api/integration/external-systems/:id/schema', 'externalSystemSchema'],
   ['GET', '/api/integration/pipelines', 'pipelinesList'],
@@ -94,6 +100,13 @@ const {
   prepareReadSourceProbe,
   executeReadSourceProbe,
 } = require('./read-source-probe-runtime.cjs')
+// S2-c (#1709 self-service): content-keyed config persistence + values-free audit. Stores the S1
+// normalized structure and a systemId reference only — never a resolved URL, credential, or probe response.
+const {
+  ReadSourceConfigValidationError,
+  ReadSourceConfigNotFoundError,
+  ReadSourceConfigConflictError,
+} = require('./read-source-config-store.cjs')
 const { K3_REFERENCE_MAPPING_TEMPLATES } = require('./reference-mapping-templates.cjs')
 const { listReferenceIntegrationTemplates } = require('./reference-integration-templates.cjs')
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
@@ -1439,6 +1452,34 @@ async function persistExternalSystemTestResult(externalSystems, req, system, res
   }))
 }
 
+// S2-c: map read-source-config store errors to HTTP, keeping the payload values-free — the S1
+// validator's { code, field, reason } tuples ride through untouched; nothing echoes the submitted
+// config, a path, or a key.
+function mapReadSourceConfigError(error) {
+  if (error instanceof ReadSourceConfigValidationError) {
+    // S1 tuples are values-free EXCEPT the unexpected-field case, where `field` is the raw
+    // caller-supplied key name (could be URL/secret-shaped). Coarsen it here at the route boundary;
+    // the S1 validator itself stays untouched.
+    let details = error.details
+    if (details && Array.isArray(details.errors)) {
+      details = {
+        ...details,
+        errors: details.errors.map((entry) => (
+          entry && entry.code === 'READ_SOURCE_UNEXPECTED_FIELD' ? { ...entry, field: '(unexpected)' } : entry
+        )),
+      }
+    }
+    return new HttpRouteError(400, 'READ_SOURCE_CONFIG_INVALID', 'read-source config is invalid', details)
+  }
+  if (error instanceof ReadSourceConfigNotFoundError) {
+    return new HttpRouteError(404, 'READ_SOURCE_CONFIG_NOT_FOUND', 'read-source config not found')
+  }
+  if (error instanceof ReadSourceConfigConflictError) {
+    return new HttpRouteError(409, 'READ_SOURCE_CONFIG_STATUS_CONFLICT', 'read-source config status transition is not allowed', error.details)
+  }
+  return error
+}
+
 function createHandlers(services, options = {}) {
   function requireService(name, methods) {
     const service = services[name]
@@ -1458,6 +1499,7 @@ function createHandlers(services, options = {}) {
   const deadLetters = requireService('deadLetterStore', ['listDeadLetters'])
   const stagingInstaller = requireService('stagingInstaller', ['installStaging', 'listStagingDescriptors'])
   const templateRegistry = requireService('templateRegistry', ['upsertTemplate', 'getTemplate', 'listTemplates', 'deleteTemplate', 'instantiateTemplate'])
+  const readSourceConfigs = requireService('readSourceConfigStore', ['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit'])
   const context = options.context || {}
   const configuredTableActions = context && context.config
     ? (context.config.stockPreparationTableActions || context.config.tableActions)
@@ -1695,6 +1737,88 @@ function createHandlers(services, options = {}) {
           throw new HttpRouteError(409, 'READ_SOURCE_PROBE_KIND_MISMATCH', 'external system kind does not match the probe config')
         }
         throw error
+      }
+    },
+
+    // S2-c (#1709 self-service): consultant-tier persistence routes. Save is content-keyed idempotent
+    // (identical config → the existing version, 200; new content → next version, 201). Status lifecycle
+    // draft → approved → retired is fail-closed. Errors are values-free: the S1 validator's
+    // { code, field, reason } tuples or a coarse status conflict — never the submitted config or a path.
+    async readSourceConfigsSave(req, res) {
+      // Consultant/admin tier (S2 design-lock lock 10): minting a persisted version is config-time
+      // trust — integration write only, never end-user reachable.
+      requireAccess(req, 'write')
+      const body = requestBody(req)
+      try {
+        const saved = await readSourceConfigs.saveVersion(scopedInput(req, {
+          config: body.config,
+          actor: requestPrincipal(req),
+        }))
+        return sendOk(res, saved, saved.reused ? 200 : 201)
+      } catch (error) {
+        throw mapReadSourceConfigError(error)
+      }
+    },
+
+    async readSourceConfigsList(req, res) {
+      requireAccess(req, 'read')
+      const query = requestQuery(req)
+      try {
+        return sendOk(res, await readSourceConfigs.list(scopedInput(req, {
+          systemId: query.systemId,
+          status: query.status,
+          limit: asListLimit(query.limit),
+          offset: asListOffset(query.offset),
+        })))
+      } catch (error) {
+        throw mapReadSourceConfigError(error)
+      }
+    },
+
+    async readSourceConfigsGet(req, res) {
+      requireAccess(req, 'read')
+      try {
+        return sendOk(res, await readSourceConfigs.get(scopedInput(req, { id: requestParams(req).id })))
+      } catch (error) {
+        throw mapReadSourceConfigError(error)
+      }
+    },
+
+    async readSourceConfigsAudit(req, res) {
+      requireAccess(req, 'read')
+      const query = requestQuery(req)
+      try {
+        return sendOk(res, await readSourceConfigs.listAudit(scopedInput(req, {
+          configId: requestParams(req).id,
+          limit: asListLimit(query.limit),
+          offset: asListOffset(query.offset),
+        })))
+      } catch (error) {
+        throw mapReadSourceConfigError(error)
+      }
+    },
+
+    async readSourceConfigsApprove(req, res) {
+      requireAccess(req, 'write')
+      try {
+        return sendOk(res, await readSourceConfigs.approve(scopedInput(req, {
+          id: requestParams(req).id,
+          actor: requestPrincipal(req),
+        })))
+      } catch (error) {
+        throw mapReadSourceConfigError(error)
+      }
+    },
+
+    async readSourceConfigsRetire(req, res) {
+      requireAccess(req, 'write')
+      try {
+        return sendOk(res, await readSourceConfigs.retire(scopedInput(req, {
+          id: requestParams(req).id,
+          actor: requestPrincipal(req),
+        })))
+      } catch (error) {
+        throw mapReadSourceConfigError(error)
       }
     },
 
