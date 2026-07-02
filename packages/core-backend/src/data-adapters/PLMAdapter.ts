@@ -691,6 +691,9 @@ export interface BomMultitableLine {
   source_version: number | null;
   source_updated_at: string | null;
   sync_status: string;
+  // Provider optimistic-concurrency tag (Yuantus #917/#927); strong ETag `"bom-line:<sha256>"`.
+  // Optional at runtime: an older provider may omit it -> the write path sends no If-Match (today's behavior).
+  write_etag?: string | null;
 }
 
 export interface BomMultitablePart {
@@ -745,6 +748,8 @@ export interface BomMultitableLineUpdateResult {
 
 export interface BomMultitableLineUpdateOptions {
   idempotencyKey?: string;
+  // Optimistic-concurrency: the line's write_etag, sent as `If-Match`; a stale value -> provider 412.
+  ifMatch?: string;
 }
 
 // Field guard for the governed BOM multi-table context. Validates EVERY field declared on
@@ -792,6 +797,8 @@ function isBomMultitableLine(value: unknown): value is BomMultitableLine {
     && isNumberOrNull(l.source_version)
     && isStringOrNull(l.source_updated_at)
     && typeof l.sync_status === 'string'
+    // tolerant: absent (older provider) OR string|null -> valid; never breaks the READ panel
+    && (l.write_etag === undefined || isStringOrNull(l.write_etag))
   );
 }
 
@@ -2158,8 +2165,8 @@ export class PLMAdapter extends HTTPAdapter {
         context: {
           part: { part_id: partId, item_number: 'P-001', name: 'Mock Assembly', state: 'Released', generation: 1 },
           lines: [
-            { bom_line_id: 'R1', part_id: 'C1', item_number: 'C-001', name: 'Bracket', state: 'Draft', generation: 1, quantity: 2, uom: 'EA', find_num: '10', refdes: 'R1,R2', level: 1, path: [partId], path_labels: ['P-001'], source_version: 1, source_updated_at: now, sync_status: 'snapshot' },
-            { bom_line_id: 'R2', part_id: 'D1', item_number: 'D-001', name: 'Screw', state: 'Released', generation: 2, quantity: 4, uom: 'EA', find_num: '20', refdes: 'R3', level: 2, path: [partId, 'C1'], path_labels: ['P-001', 'C-001'], source_version: 2, source_updated_at: now, sync_status: 'snapshot' },
+            { bom_line_id: 'R1', part_id: 'C1', write_etag: '"bom-line:mock-r1"', item_number: 'C-001', name: 'Bracket', state: 'Draft', generation: 1, quantity: 2, uom: 'EA', find_num: '10', refdes: 'R1,R2', level: 1, path: [partId], path_labels: ['P-001'], source_version: 1, source_updated_at: now, sync_status: 'snapshot' },
+            { bom_line_id: 'R2', part_id: 'D1', write_etag: '"bom-line:mock-r2"', item_number: 'D-001', name: 'Screw', state: 'Released', generation: 2, quantity: 4, uom: 'EA', find_num: '20', refdes: 'R3', level: 2, path: [partId, 'C1'], path_labels: ['P-001', 'C-001'], source_version: 2, source_updated_at: now, sync_status: 'snapshot' },
           ],
           source_version: 1,
           source_updated_at: now,
@@ -2250,10 +2257,14 @@ export class PLMAdapter extends HTTPAdapter {
         ? options.idempotencyKey.trim()
         : randomUUID()
 
+    const headers: Record<string, string> = { 'Idempotency-Key': idempotencyKey }
+    // Forward the caller's write_etag verbatim as If-Match (strong ETag incl. its literal quotes).
+    const ifMatch = typeof options.ifMatch === 'string' ? options.ifMatch.trim() : ''
+    if (ifMatch) headers['If-Match'] = ifMatch
     return this.select<BomMultitableLineUpdateResult>(`/api/v1/bom/multitable/${partId}/lines/${bomLineId}`, {
       method: 'PATCH',
       data: payload,
-      headers: { 'Idempotency-Key': idempotencyKey },
+      headers,
     })
   }
 

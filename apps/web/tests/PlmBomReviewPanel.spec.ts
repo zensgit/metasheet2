@@ -13,7 +13,7 @@ import PlmBomReviewPanel from '../src/components/plm/PlmBomReviewPanel.vue'
 const CONTEXT = {
   part: { part_id: 'P1', item_number: 'P-001', name: 'Assembly', state: 'Released', generation: 3 },
   lines: [
-    { bom_line_id: 'R1', part_id: 'C1', item_number: 'C-001', name: 'Bracket', state: 'Draft', generation: 1, quantity: 2, uom: 'EA', find_num: '10', refdes: 'R1,R2', level: 1, path: ['P1'], path_labels: ['P-001'], source_version: 1, source_updated_at: '2026-06-05T00:00:00', sync_status: 'snapshot' },
+    { bom_line_id: 'R1', part_id: 'C1', write_etag: '"bom-line:etag-r1"', item_number: 'C-001', name: 'Bracket', state: 'Draft', generation: 1, quantity: 2, uom: 'EA', find_num: '10', refdes: 'R1,R2', level: 1, path: ['P1'], path_labels: ['P-001'], source_version: 1, source_updated_at: '2026-06-05T00:00:00', sync_status: 'snapshot' },
     { bom_line_id: 'R2', part_id: 'D1', item_number: 'D-001', name: 'Screw', state: 'Released', generation: 2, quantity: 4, uom: 'EA', find_num: '20', refdes: 'R3', level: 2, path: ['P1', 'C1'], path_labels: ['P-001', 'C-001'], source_version: 2, source_updated_at: '2026-06-05T00:00:00', sync_status: 'snapshot' },
   ],
   source_version: 3,
@@ -108,7 +108,7 @@ describe('PlmBomReviewPanel (P3-C BOM review + governed write-back)', () => {
     ;(container.querySelector('[data-testid="plm-bom-review-save"]') as HTMLButtonElement).click()
     await flushUi()
 
-    expect(updateLineMock).toHaveBeenCalledWith('plm-ds', 'P1', 'R1', { quantity: 6 }, 'submit-key-1')
+    expect(updateLineMock).toHaveBeenCalledWith('plm-ds', 'P1', 'R1', { quantity: 6 }, 'submit-key-1', '"bom-line:etag-r1"')
     expect(container.textContent).toContain('写回成功。')
     expect(quantity.value).toBe('6')
   })
@@ -137,9 +137,48 @@ describe('PlmBomReviewPanel (P3-C BOM review + governed write-back)', () => {
     save.click()
     await flushUi()
 
-    expect(updateLineMock).toHaveBeenNthCalledWith(1, 'plm-ds', 'P1', 'R1', { refdes: 'R9' }, 'submit-key-1')
-    expect(updateLineMock).toHaveBeenNthCalledWith(2, 'plm-ds', 'P1', 'R1', { refdes: 'R9' }, 'submit-key-1')
+    expect(updateLineMock).toHaveBeenNthCalledWith(1, 'plm-ds', 'P1', 'R1', { refdes: 'R9' }, 'submit-key-1', '"bom-line:etag-r1"')
+    expect(updateLineMock).toHaveBeenNthCalledWith(2, 'plm-ds', 'P1', 'R1', { refdes: 'R9' }, 'submit-key-1', '"bom-line:etag-r1"')
     expect(randomUUID).toHaveBeenCalledTimes(1)
+    expect(container.textContent).toContain('写回成功。')
+  })
+
+  it('on a 412 conflict reloads the fresh context, surfaces the conflict, sends write_etag verbatim, and re-mints the key', async () => {
+    const randomUUID = vi.fn()
+      .mockReturnValueOnce('submit-key-1')
+      .mockReturnValueOnce('submit-key-2')
+    vi.stubGlobal('crypto', { randomUUID })
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    updateLineMock
+      .mockResolvedValueOnce({ ok: false, status: 412, reason: 'precondition-failed', message: 'stale etag' })
+      .mockResolvedValueOnce({ ok: true, bom_line_id: 'R1' })
+    mountPanel()
+    await flushUi()
+    await setPartAndLoad('P1')
+    expect(getContextMock).toHaveBeenCalledTimes(1)
+
+    const refdes = container.querySelector('[data-testid="plm-bom-review-refdes-input"]') as HTMLInputElement
+    refdes.value = 'R9'
+    refdes.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="plm-bom-review-save"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // the strong ETag rode as the 6th arg VERBATIM (literal quotes preserved -> byte round-trip)
+    expect(updateLineMock).toHaveBeenNthCalledWith(1, 'plm-ds', 'P1', 'R1', { refdes: 'R9' }, 'submit-key-1', '"bom-line:etag-r1"')
+    // 412 -> reloaded fresh context, surfaced the conflict, did NOT report success
+    expect(getContextMock).toHaveBeenCalledTimes(2)
+    expect(container.textContent).toContain('已被他人修改')
+    expect(container.textContent).not.toContain('写回成功。')
+
+    // re-submit after the reload mints a FRESH key (the stale one was dropped) -> no cached replay
+    const refdes2 = container.querySelector('[data-testid="plm-bom-review-refdes-input"]') as HTMLInputElement
+    refdes2.value = 'R9'
+    refdes2.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="plm-bom-review-save"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateLineMock).toHaveBeenNthCalledWith(2, 'plm-ds', 'P1', 'R1', { refdes: 'R9' }, 'submit-key-2', '"bom-line:etag-r1"')
     expect(container.textContent).toContain('写回成功。')
   })
 
