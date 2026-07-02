@@ -24,7 +24,8 @@
   round via `to_version >= <re-entry cutoff>` (schema-free, uses existing data); no re-entry -> exact old query.
   The `#3453` follow-up locks the same-version requester auto-approval cascade boundary that requires `>=`.
 - **T2-6 event dedup ledger — SHIPPED (`#3450`):** automation record-change/form-submit dispatch now has a
-  database-backed event-fire ledger, TTL/count sweep, real-DB coverage, and CI wiring. This removes the substrate
+  database-backed event-fire ledger (7-day TTL retention sweep only — no count cap), real-DB coverage, and CI
+  wiring. This removes the substrate
   blocker for approval-trigger and inbound-webhook work, but those feature rungs remain owner-gated.
 
 ## 2. Un-completed items — gating
@@ -109,10 +110,16 @@ so a future `>` change fails).
 a database-backed fire ledger, redelivery/replay can execute side effects more than once. T1-2 inbound webhook and
 T1-3 approval-trigger both need the same substrate before they can safely expose higher-frequency event sources.
 
-**Shipped implementation:** `meta_automation_event_fires` stores `(rule_id, base_id, event_key)` first-write-wins
-claims, with a bounded retention sweep (TTL + per-rule cap). The executor checks/claims before side effects and
-skips duplicate deliveries without treating them as rule failures. Record-service/write-service integrations feed
-stable event identities for the currently shipped sources.
+**Shipped implementation (exact shape):** `meta_automation_event_fires(rule_id, dedup_key, fired_at)` with
+**PRIMARY KEY `(rule_id, dedup_key)`** (+ `fired_at` index; `rule_id` FK → `automation_rules` ON DELETE CASCADE).
+`dedup_key = ${eventType}:${_eventId}` — a transport `_eventId` is stamped at every emit site for the shipped
+sources (record.created/updated/deleted, form.submitted, field.value_changed via record.updated); a missing
+`_eventId` stays **fail-open during rollout** (the ledger only gates stamped events). Claim-then-fire:
+`INSERT … ON CONFLICT DO NOTHING RETURNING` — the rule executes only if it won the insert (at-most-once), and a
+lost claim is a skipped duplicate, not a rule failure. Retention: **7-day TTL sweep only** (`fired_at < cutoff`,
+kicked at most once per 24h, best-effort) — there is NO `base_id` column, NO `event_key` column, and NO per-rule
+count cap. T1-3 will reuse this ledger with `dedup_key = approval.completed:${event.eventId}` (the approval
+completion event's own unique id — no `_eventId` stamping needed) and **no new migration** (ballot Q5).
 
 **Verification:** pure dedup-key tests, automation-service unit coverage, real-DB `multitable-event-dedup-trigger`
 coverage wired into `plugin-tests.yml`, plus regression updates for record-service/write-service callers.
