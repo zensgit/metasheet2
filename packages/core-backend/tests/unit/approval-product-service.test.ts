@@ -2021,14 +2021,25 @@ describe('ApprovalProductService', () => {
       )).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_NODE_TIMEOUT_INVALID' })
     })
 
-    it.each(['transfer', 'jump', 'auto_approve', 'auto_reject'])(
-      'rejects the unsupported (slice-1) effect %s',
+    it.each(['auto_approve', 'auto_reject'])(
+      'rejects the still-unwired terminal effect %s',
       async (effect) => {
         const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
         const service = new ApprovalProductService()
         await expect(service.createTemplate(
           timeoutRequest({ afterMinutes: 30, effect }) as never,
         )).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_NODE_TIMEOUT_EFFECT_UNSUPPORTED' })
+      },
+    )
+
+    it.each(['transfer', 'jump'])(
+      'rejects the slice-2 effect %s without its required target',
+      async (effect) => {
+        const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+        const service = new ApprovalProductService()
+        await expect(service.createTemplate(
+          timeoutRequest({ afterMinutes: 30, effect }) as never,
+        )).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_NODE_TIMEOUT_TARGET_INVALID' })
       },
     )
 

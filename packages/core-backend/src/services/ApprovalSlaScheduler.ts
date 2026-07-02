@@ -41,7 +41,19 @@ export interface ApprovalSlaSchedulerOptions {
    * timeout is still single-shot via `markNodeTimeoutFired`).
    */
   onNodeReminder?: (reminder: ApprovalNodeTimeoutReminder) => Promise<void> | void
+  /**
+   * T1-1 slice-2: apply a due state-mutating timeout effect (`transfer` | `jump`). Wired in index.ts
+   * to `ApprovalProductService.applyNodeTimeoutEffect`, which owns the single-shot consumption inside
+   * its own transaction — the scheduler must NOT call `markNodeTimeoutFired` for effect rows. Returns
+   * the outcome string for logging. Absent → effect rows are left un-fired (slice-1 posture).
+   */
+  onNodeEffect?: (request: ApprovalNodeTimeoutEffectRequest) => Promise<string> | string
   logger?: Logger
+}
+
+export interface ApprovalNodeTimeoutEffectRequest {
+  instanceId: string
+  effect: 'transfer' | 'jump'
 }
 
 /** Minimal DB surface the scheduler needs for node-timeout assignee resolution (pg Pool satisfies it). */
@@ -90,6 +102,7 @@ export class ApprovalSlaScheduler {
   private readonly onBreach: ApprovalSlaSchedulerOptions['onBreach']
   private readonly pool: ApprovalSlaSchedulerPool | null
   private readonly onNodeReminder: ApprovalSlaSchedulerOptions['onNodeReminder']
+  private readonly onNodeEffect: ApprovalSlaSchedulerOptions['onNodeEffect']
   private timer: NodeJS.Timeout | null = null
   private renewalTimer: NodeJS.Timeout | null = null
   private acquisitionTimer: NodeJS.Timeout | null = null
@@ -111,6 +124,7 @@ export class ApprovalSlaScheduler {
     // `undefined` (option omitted) → shared pool; explicit `null` → no assignee lookup.
     this.pool = options.pool === undefined ? defaultPool : options.pool
     this.onNodeReminder = options.onNodeReminder
+    this.onNodeEffect = options.onNodeEffect
     this.logger = options.logger ?? new Logger('ApprovalSlaScheduler')
     if (this.leaderOptions) {
       this.setLeaderGauge('follower')
@@ -203,10 +217,10 @@ export class ApprovalSlaScheduler {
 
   /**
    * T1-1 node-level SLA scan. For each metrics row whose current node has passed its deadline:
-   * resolve the node's active assignees and dispatch a node-overdue reminder (slice 1 wires `remind`
-   * only), then mark the timeout fired so it is strictly single-shot. Per-row isolation: a single
-   * failure (no assignees, dispatch error) leaves that row un-fired (retried next tick, at-least-once)
-   * and never breaks the rest of the batch or the tick.
+   * `remind` → resolve active assignees, dispatch the reminder, then markNodeTimeoutFired (single-shot
+   * here); `transfer`/`jump` (slice 2) → delegate to onNodeEffect, which consumes the timeout inside
+   * its own transaction (never marked here). Per-row isolation: a single failure leaves that row
+   * un-fired (retried next tick, at-least-once) and never breaks the rest of the batch or the tick.
    */
   private async fireNodeTimeouts(now: Date): Promise<void> {
     let due: Array<{ instanceId: string; effect: string }> = []
@@ -218,17 +232,26 @@ export class ApprovalSlaScheduler {
     }
     for (const row of due) {
       try {
-        // Slice 1 wires `remind` only. Other effects can't be published yet (publish gate), so leave
-        // an unexpected row un-fired rather than silently consuming an effect we don't handle.
-        if (row.effect !== 'remind') continue
-        const assigneeIds = await this.resolveActiveAssignees(row.instanceId)
-        if (this.onNodeReminder) {
-          await this.onNodeReminder({ instanceId: row.instanceId, effect: row.effect, assigneeIds })
+        if (row.effect === 'remind') {
+          const assigneeIds = await this.resolveActiveAssignees(row.instanceId)
+          if (this.onNodeReminder) {
+            await this.onNodeReminder({ instanceId: row.instanceId, effect: row.effect, assigneeIds })
+          }
+          await this.metrics.markNodeTimeoutFired(row.instanceId)
+        } else if ((row.effect === 'transfer' || row.effect === 'jump') && this.onNodeEffect) {
+          // Slice-2 state-mutating effects: the service call owns the single-shot consumption inside
+          // its transaction — no markNodeTimeoutFired here. A throw leaves the row un-fired (nothing
+          // mutated) and it retries next tick.
+          const outcome = await this.onNodeEffect({ instanceId: row.instanceId, effect: row.effect })
+          this.logger.info(`Node-timeout ${row.effect} for ${row.instanceId}: ${outcome}`)
+        } else {
+          // auto_* (runtime-inert) or an unwired effect hook — leave the row un-fired rather than
+          // silently consuming an effect we don't handle.
+          continue
         }
-        await this.metrics.markNodeTimeoutFired(row.instanceId)
       } catch (error) {
         this.logger.warn(
-          `Node-timeout remind failed for ${row.instanceId}: ${error instanceof Error ? error.message : String(error)}`,
+          `Node-timeout ${row.effect} failed for ${row.instanceId}: ${error instanceof Error ? error.message : String(error)}`,
         )
       }
     }
