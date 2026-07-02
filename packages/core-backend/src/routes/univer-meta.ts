@@ -7550,37 +7550,70 @@ export function univerMetaRouter(): Router {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
       }
 
-      const result = await pool.query(
-        `SELECT
-            rp.id,
-            rp.sheet_id,
-            rp.record_id,
-            rp.subject_type,
-            rp.subject_id,
-            rp.access_level,
-            rp.created_at,
-            rp.created_by,
-            u.name AS user_name,
-            u.email AS user_email,
-            u.is_active AS user_is_active,
-            r.name AS role_name,
-            r.description AS role_description,
-            g.name AS group_name,
-            g.description AS group_description
-         FROM record_permissions rp
-         LEFT JOIN users u
-           ON rp.subject_type = 'user'
-          AND u.id = rp.subject_id
-         LEFT JOIN roles r
-           ON rp.subject_type = 'role'
-          AND r.id::text = rp.subject_id
-         LEFT JOIN platform_member_groups g
-           ON rp.subject_type = 'member-group'
-          AND g.id::text = rp.subject_id
-         WHERE rp.sheet_id = $1 AND rp.record_id = $2
-         ORDER BY rp.created_at ASC`,
-        [sheetId, recordId],
-      )
+      let result: { rows: any[] }
+      try {
+        result = await pool.query(
+          `SELECT
+              rp.id,
+              rp.sheet_id,
+              rp.record_id,
+              rp.subject_type,
+              rp.subject_id,
+              rp.access_level,
+              rp.created_at,
+              rp.created_by,
+              u.name AS user_name,
+              u.email AS user_email,
+              u.is_active AS user_is_active,
+              r.name AS role_name,
+              r.description AS role_description,
+              g.name AS group_name,
+              g.description AS group_description
+           FROM record_permissions rp
+           LEFT JOIN users u
+             ON rp.subject_type = 'user'
+            AND u.id = rp.subject_id
+           LEFT JOIN roles r
+             ON rp.subject_type = 'role'
+            AND r.id::text = rp.subject_id
+           LEFT JOIN platform_member_groups g
+             ON rp.subject_type = 'member-group'
+            AND g.id::text = rp.subject_id
+           WHERE rp.sheet_id = $1 AND rp.record_id = $2
+           ORDER BY rp.created_at ASC`,
+          [sheetId, recordId],
+        )
+      } catch (err) {
+        if (!isUndefinedTableError(err, 'platform_member_groups')) throw err
+        result = await pool.query(
+          `SELECT
+              rp.id,
+              rp.sheet_id,
+              rp.record_id,
+              rp.subject_type,
+              rp.subject_id,
+              rp.access_level,
+              rp.created_at,
+              rp.created_by,
+              u.name AS user_name,
+              u.email AS user_email,
+              u.is_active AS user_is_active,
+              r.name AS role_name,
+              r.description AS role_description,
+              NULL::text AS group_name,
+              NULL::text AS group_description
+           FROM record_permissions rp
+           LEFT JOIN users u
+             ON rp.subject_type = 'user'
+            AND u.id = rp.subject_id
+           LEFT JOIN roles r
+             ON rp.subject_type = 'role'
+            AND r.id::text = rp.subject_id
+           WHERE rp.sheet_id = $1 AND rp.record_id = $2
+           ORDER BY rp.created_at ASC`,
+          [sheetId, recordId],
+        )
+      }
       const items = (result.rows as any[]).map((row) => ({
         id: String(row.id),
         sheetId: String(row.sheet_id),
