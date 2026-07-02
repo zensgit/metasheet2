@@ -5,7 +5,7 @@
 > runtime is NOT blind-built on presumed votes; instead every remaining rung is made **one vote from build**
 > (design-lock / build-spec), and the decision-clean work is completed + verified this batch.
 
-## 1. Shipped on main (code-verified, as of `d1578808c`)
+## 1. Shipped / queued in this batch (code-verified, base through #3441 `a206a5bb` + this PR)
 
 Engine parity with 钉钉/飞书 approval is ~85% — the recent burst closed most of it:
 - **Correctness/security:** T2-4 re-entry quorum fix + cascade regression (#3446/#3453) · R1 SSRF egress
