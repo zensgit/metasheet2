@@ -249,6 +249,16 @@
     <section class="integration-workbench__panel">
       <div class="integration-workbench__panel-head">
         <div>
+          <h2>读取源配置(顾问自助)</h2>
+          <p>标准化第三方 API 只读读取源:S1 结构校验 → 定位容器探测 → 内容寻址保存版本 → 审批。运行时只消费已审批版本;本面板不含写入 / 删除。</p>
+        </div>
+      </div>
+      <IntegrationReadSourceConfigPanel :scope="currentScope()" :systems="systems" />
+    </section>
+
+    <section class="integration-workbench__panel">
+      <div class="integration-workbench__panel-head">
+        <div>
           <h2>选择系统与数据集</h2>
           <p>来源对象决定从哪里取数，目标模板决定写到哪里。先选系统，再加载可选数据集或模板。</p>
         </div>
@@ -1400,6 +1410,7 @@ import {
   type WorkbenchExternalSystem,
 } from '../services/integration/workbench'
 import MetaIntegrationFieldRuleAuthoring from '../components/integration/MetaIntegrationFieldRuleAuthoring.vue'
+import IntegrationReadSourceConfigPanel from '../components/integration/IntegrationReadSourceConfigPanel.vue'
 import PlmBomReviewPanel from '../components/plm/PlmBomReviewPanel.vue'
 
 type WorkbenchSide = 'source' | 'target'
