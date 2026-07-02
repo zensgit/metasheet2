@@ -213,6 +213,10 @@ function validateStartApprovalConfig(config: Record<string, unknown>, path: stri
   // resume-time action-fingerprint drift guard (cannot be swapped after the approval suspends).
   if (config.resultWriteback !== undefined) {
     if (!isRecord(config.resultWriteback)) return `${path}.resultWriteback must be an object`
+    const onNonApproved = config.resultWriteback.onNonApproved
+    if (onNonApproved !== undefined && typeof onNonApproved !== 'boolean') {
+      return `${path}.resultWriteback.onNonApproved must be a boolean`
+    }
     let mapped = 0
     for (const field of RESULT_WRITEBACK_FIELDS) {
       const value = config.resultWriteback[field]
@@ -2077,6 +2081,7 @@ export class AutomationService {
 
     const result = this.approvalCompletionStepResult(event)
     if (event.transition.toStatus !== 'approved') {
+      await this.tryWriteApprovalResultBack(bridge, execRule.actions[bridge.stepIndex]?.config ?? {}, event, result)
       await this.failApprovalBridgeExecution(execution, bridge, result.error ?? `Approval completed with ${event.transition.toStatus}`, result)
       return
     }
@@ -2098,21 +2103,10 @@ export class AutomationService {
     // W7-1: declared approval-result backwrite to the SOURCE record (fixed mapping, values from the
     // event, through the lock guard). Best-effort — a locked/missing record logs + skips rather than
     // crashing the resume, so the automation's remaining actions still run.
-    try {
-      const backwritten = await this.writeApprovalResultBack(bridge, execRule.actions[bridge.stepIndex]?.config ?? {}, event)
-      // W7-1a: merge the backwrite into the resume snapshot so the TAIL actions (send_webhook /
-      // update_record / ...) see the just-written result, not the pre-approval record.
-      if (backwritten) recordData = { ...recordData, ...backwritten }
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err)
-      logger.warn(`approval-result backwrite skipped for bridge ${bridge.id}: ${reason}`)
-      // W7-obs: surface the skip on the start_approval step result so it shows in the run history —
-      // an admin shouldn't need log access to see a misconfigured/blocked backwrite.
-      ;(result as { output?: Record<string, unknown> }).output = {
-        ...((result as { output?: Record<string, unknown> }).output ?? {}),
-        backwriteSkipped: reason,
-      }
-    }
+    const backwritten = await this.tryWriteApprovalResultBack(bridge, execRule.actions[bridge.stepIndex]?.config ?? {}, event, result)
+    // W7-1a: merge the backwrite into the resume snapshot so the TAIL actions (send_webhook /
+    // update_record / ...) see the just-written result, not the pre-approval record.
+    if (backwritten) recordData = { ...recordData, ...backwritten }
 
     const triggerEvent = bridge.triggerEvent ?? {}
     const context: ExecutionContext = {
@@ -2158,6 +2152,27 @@ export class AutomationService {
       output,
       error: `Approval completed with ${event.transition.toStatus}`,
       durationMs: 0,
+    }
+  }
+
+  private async tryWriteApprovalResultBack(
+    bridge: AutomationApprovalBridgeRow,
+    startApprovalConfig: Record<string, unknown>,
+    event: ApprovalCompletionEventV1,
+    result: AutomationStepResult,
+  ): Promise<Record<string, unknown> | null> {
+    try {
+      return await this.writeApprovalResultBack(bridge, startApprovalConfig, event)
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err)
+      logger.warn(`approval-result backwrite skipped for bridge ${bridge.id}: ${reason}`)
+      // W7-obs: surface the skip on the start_approval step result so it shows in the run history —
+      // an admin shouldn't need log access to see a misconfigured/blocked backwrite.
+      result.output = {
+        ...(isRecord(result.output) ? result.output : {}),
+        backwriteSkipped: reason,
+      }
+      return null
     }
   }
 
@@ -2260,8 +2275,9 @@ export class AutomationService {
    * event ONLY (never user-templated strings — that keeps the write path values-constrained, the whole
    * reason this was gated). Goes through the record lock guard (B1: an automation does not implicitly own
    * a lock). Null-safe: `approver` is null on auto/system approval (the field is written null, not
-   * crashed). Same-base only (the source record that started the approval). Approval-only is enforced by
-   * the caller (runs in the approved branch); rejection backwrite is a named follow-up.
+   * crashed). Same-base only (the source record that started the approval). The approved branch always
+   * writes when configured; non-approved terminal outcomes require the explicit `onNonApproved` opt-in so
+   * existing saved rules keep the former approved-only contract.
    */
   private async writeApprovalResultBack(
     bridge: AutomationApprovalBridgeRow,
@@ -2270,6 +2286,7 @@ export class AutomationService {
   ): Promise<Record<string, unknown> | null> {
     const writeback = isRecord(startApprovalConfig.resultWriteback) ? startApprovalConfig.resultWriteback : null
     if (!writeback || !bridge.recordId || !bridge.sheetId) return null
+    if (event.transition.toStatus !== 'approved' && writeback.onNonApproved !== true) return null
     await this.assertResultWritebackFields(bridge.sheetId, writeback, event.transition.toStatus)
     const patch: Record<string, unknown> = {}
     const statusField = resultWritebackFieldId(writeback, 'statusField')
