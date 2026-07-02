@@ -49,6 +49,11 @@ function normalizedConfig(mode, overrides = {}) {
     cfg.headerContainerPaths = ['Data.Page1']
     cfg.lineContainerPaths = ['Data.Page2']
   }
+  if (mode === 'resolver_lookup') {
+    cfg.keyField = 'FMaterialId'
+    cfg.containerPaths = ['Data.Rows']
+    cfg.multiplicityRuleField = 'FIsCurrent'
+  }
   Object.assign(cfg, overrides)
   const result = validateReadSourceConfig(cfg)
   assert.equal(result.valid, true, `${mode} fixture must validate: ${JSON.stringify(result.errors)}`)
@@ -130,6 +135,12 @@ async function testPrepareFailClosed() {
   assert.throws(
     () => prepareConfiguredRead({ config }),
     (error) => error instanceof ReadSourceProbeContractError && error.reason === 'key_required',
+  )
+  // resolver_lookup runtime is a later gated slice — its multiplicity selection semantics are undesigned,
+  // so the configured read rejects the mode outright rather than silently running a plain keyed read.
+  assert.throws(
+    () => prepareConfiguredRead({ config: normalizedConfig('resolver_lookup'), inputs: { key: 'M-001' } }),
+    (error) => error instanceof ReadSourceProbeContractError && error.reason === 'mode_not_supported',
   )
 }
 
@@ -244,6 +255,16 @@ async function testContainerMissingAndShapeMismatch() {
   const noRawOutcome = await executeConfiguredRead(single, noRaw.deps)
   assert.equal(noRawOutcome.evidence.errorCode, 'READ_SOURCE_PROBE_RESPONSE_UNRECOGNIZED')
   assert.equal(noRawOutcome.data, null)
+
+  // Scalar/array entries INSIDE a row container are a shape mismatch, not rows — mapping them would
+  // fabricate all-null records under ok:true.
+  const list = prepareConfiguredRead({ config: normalizedConfig('list_page') })
+  const scalarRows = mockDeps({ read: () => ({ records: [], raw: { Data: { Data: ['error SIGMA-VALUE', 42] } } }) })
+  const scalarRowsOutcome = await executeConfiguredRead(list, scalarRows.deps)
+  assert.equal(scalarRowsOutcome.evidence.ok, false)
+  assert.equal(scalarRowsOutcome.evidence.errorCode, 'READ_SOURCE_PROBE_SHAPE_MISMATCH')
+  assert.equal(scalarRowsOutcome.data, null, 'no fabricated all-null records from scalar rows')
+  assertEvidenceValuesFree(scalarRowsOutcome.evidence)
 }
 
 async function testAdapterErrorsAreCoarseWithNullData() {

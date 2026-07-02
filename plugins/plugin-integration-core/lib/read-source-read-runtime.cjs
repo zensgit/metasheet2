@@ -32,6 +32,12 @@ const { applyReadSmokePresetOverlay } = require('./read-smoke.cjs')
 
 const CONFIGURED_READ_BODY_KEYS = Object.freeze(['config', 'inputs'])
 
+// resolver_lookup runtime is a LATER gated slice: its selection semantics (how multiplicityRuleField picks
+// among candidate rows) are not designed anywhere on this line yet, so executing it as a plain keyed read
+// would silently drop the multiplicity rule. Fail-closed reject instead — flagged, not silently dropped
+// (same discipline as the S1 marker-gating deferral in read-source-config.cjs).
+const CONFIGURED_READ_SUPPORTED_MODES = Object.freeze(['single_record', 'list_page', 'detail_with_lines'])
+
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
@@ -46,7 +52,12 @@ function prepareConfiguredRead(body) {
   if (!Object.keys(body).every((key) => CONFIGURED_READ_BODY_KEYS.includes(key))) {
     throw new ReadSourceProbeContractError('unexpected_field')
   }
-  const plan = normalizeReadSourceProbeContract({ config: body.config })
+  // A configured read IS a bounded, capped read — build the plan with boundedSmoke true so the plan and
+  // its evidence say so consistently (no boundedSmoke:false + boundedSmokeExecuted:true contradiction).
+  const plan = normalizeReadSourceProbeContract({ config: body.config, boundedSmoke: true })
+  if (!CONFIGURED_READ_SUPPORTED_MODES.includes(plan.mode)) {
+    throw new ReadSourceProbeContractError('mode_not_supported')
+  }
   const fieldMap = body.config && body.config.fieldMap
   if (!Array.isArray(fieldMap) || fieldMap.length === 0) {
     throw new ReadSourceProbeContractError('field_map_required')
@@ -170,6 +181,12 @@ async function executeConfiguredRead(prepared, { system, createAdapter, timeoutM
     if (Array.isArray(value)) {
       rows = value.slice(0, plan.rowCap)
       if (value.length >= plan.rowCap) capReached = true
+      // Fail-closed: scalar/array entries inside a row container are a shape mismatch, not a row — mapping
+      // them would fabricate all-null records under ok:true.
+      if (!rows.every(isPlainObject)) {
+        shapeOk = false
+        continue
+      }
     } else if (isPlainObject(value)) {
       rows = [value]
     } else {
