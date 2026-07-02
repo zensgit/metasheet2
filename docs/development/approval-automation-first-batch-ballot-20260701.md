@@ -7,13 +7,13 @@
 > (`264cac7fb`). The tables below are retained as the decision record; the `票` column now records the
 > shipped disposition, not an open request for approval.
 
-> **Per-rung ballot** (NOT blanket approval) for the four first-batch rungs picked by unblock-value:
-> T1-3 · T3-4 · T0-3 (Lane C, sequential — same hot file) ∥ T1-1 slice-2 (Lane B). Each line = one open
-> decision + the proposed default. **Vote per item:** ✅ adopt default · ✏️ override (state the change) ·
-> ⏸ hold. A rung with all items ✅/✏️ is GO — build starts on the ratified defaults, fail-first + real-DB,
-> PR-for-review. An un-voted rung stays gated. Full decision text + code anchors live in
-> `approval-automation-decision-register-20260629.md`; this ballot **amends 3 defaults** with
-> post-register facts (marked **AMENDED**, with the reason). Sizing figures are optimistic build-effort,
+> **Historical ballot record** (NOT blanket approval) for the four first-batch rungs picked by unblock-value:
+> T1-3 · T3-4 · T0-3 (Lane C, sequential — same hot file) ∥ T1-1 slice-2 (Lane B). While this ballot was
+> open, each line represented one decision + proposed default and accepted ✅ adopt default · ✏️ override ·
+> ⏸ hold votes. All rows are now closed as shipped; do not treat the paragraph or tables below as a current
+> authorization request. Full decision text + code anchors live in
+> `approval-automation-decision-register-20260629.md`; this ballot **amended 3 defaults** with
+> post-register facts (marked **AMENDED**, with the reason). Sizing figures were optimistic build-effort,
 > **not calendar commitments** — review rounds on security/permission surfaces may dominate.
 
 ## T1-3 — `approval.*` automation trigger · M (~2–3pd) · Lane C first
