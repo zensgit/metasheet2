@@ -17,6 +17,7 @@
     "events.emit",
     "events.listen",
     "database.read",
-    "database.write"
+    "database.write",
+    "database.transaction"
   ]
 }

@@ -95,8 +95,21 @@ function stableStringify(value) {
   return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`
 }
 
+// Content key EXCLUDES the caller-supplied `version` field: the row version is minted by this
+// store, so two configs identical in every effective field must collapse to one version no matter
+// what version number the caller typed into the form.
 function contentKeyFor(normalizedConfig) {
-  return crypto.createHash('sha256').update(stableStringify(normalizedConfig), 'utf8').digest('hex')
+  const { version, ...content } = normalizedConfig
+  return crypto.createHash('sha256').update(stableStringify(content), 'utf8').digest('hex')
+}
+
+// Postgres unique-violation routing (constraint names from migration 062).
+const CONTENT_KEY_CONSTRAINT = 'uniq_integration_read_source_configs_content'
+const FAMILY_VERSION_CONSTRAINT = 'uniq_integration_read_source_configs_family_version'
+const MAX_MINT_ATTEMPTS = 3
+
+function isUniqueViolation(error, constraint) {
+  return Boolean(error) && error.code === '23505' && error.constraint === constraint
 }
 
 function rowToPublicReadSourceConfig(row) {
@@ -147,13 +160,17 @@ function createReadSourceConfigStore({ db, idGenerator = crypto.randomUUID } = {
     typeof db.selectOne !== 'function' ||
     typeof db.insertOne !== 'function' ||
     typeof db.updateRow !== 'function' ||
-    typeof db.select !== 'function'
+    typeof db.select !== 'function' ||
+    typeof db.transaction !== 'function'
   ) {
-    throw new Error('createReadSourceConfigStore: scoped db helper is required')
+    // transaction is REQUIRED: version minting and status transitions must be atomic with their
+    // audit rows (same discipline as integration-templates.cjs).
+    throw new Error('createReadSourceConfigStore: scoped db helper (incl. transaction) is required')
   }
 
-  async function appendAudit({ tenantId, workspaceId, configId, action, actor, detail }) {
-    await db.insertOne(AUDIT_TABLE, {
+  // Audit runs against a caller-supplied executor so it can join the surrounding transaction.
+  async function appendAudit(executor, { tenantId, workspaceId, configId, action, actor, detail }) {
+    await executor.insertOne(AUDIT_TABLE, {
       id: idGenerator(),
       tenant_id: tenantId,
       workspace_id: workspaceId ?? null,
@@ -163,6 +180,26 @@ function createReadSourceConfigStore({ db, idGenerator = crypto.randomUUID } = {
       // Values-free by construction: callers only pass { version } or { from, to } enums/counts.
       detail: detail ?? {},
     })
+  }
+
+  // Idempotent-save reuse path. RETIRED content is fail-closed: identical content may not be
+  // silently revived through save — that is a status decision, not a save.
+  async function reuseExisting(existing, { tenantId, workspaceId, actor }) {
+    if (existing.status === 'retired') {
+      throw new ReadSourceConfigConflictError('read-source config content is retired', {
+        id: existing.id,
+        reason: 'content_retired',
+      })
+    }
+    await appendAudit(db, {
+      tenantId,
+      workspaceId,
+      configId: existing.id,
+      action: 'reuse_version',
+      actor,
+      detail: { version: existing.version },
+    })
+    return { ...rowToPublicReadSourceConfig(existing), reused: true }
   }
 
   async function saveVersion(input = {}) {
@@ -185,49 +222,73 @@ function createReadSourceConfigStore({ db, idGenerator = crypto.randomUUID } = {
       mode: normalized.mode,
     }
 
-    // Idempotent save (lock 6): identical content in the same family is a no-op.
-    const existing = await db.selectOne(CONFIG_TABLE, { ...family, content_key: contentKey })
-    if (existing) {
-      await appendAudit({
-        tenantId,
-        workspaceId,
-        configId: existing.id,
-        action: 'reuse_version',
-        actor,
-        detail: { version: existing.version },
-      })
-      return { ...rowToPublicReadSourceConfig(existing), reused: true }
+    // Mint loop: each attempt is ONE transaction (a 23505 aborts the PG transaction, so a retry
+    // must restart, never continue inside the aborted one). The two unique indexes turn races into
+    // routable 23505s: content-key violation → someone else saved identical content → loop back to
+    // the reuse path; family-version violation → concurrent mint took our number → bounded retry.
+    for (let attempt = 1; attempt <= MAX_MINT_ATTEMPTS; attempt += 1) {
+      // Idempotent save (lock 6): identical content in the same family is a no-op.
+      const existing = await db.selectOne(CONFIG_TABLE, { ...family, content_key: contentKey })
+      if (existing) {
+        return reuseExisting(existing, { tenantId, workspaceId, actor })
+      }
+      try {
+        return await db.transaction(async (trx) => {
+          const familyRows = await trx.select(CONFIG_TABLE, { where: family, limit: 10000 })
+          const nextVersion = familyRows.reduce((max, row) => {
+            const version = Number.isInteger(row.version) ? row.version : Number(row.version) || 0
+            return version > max ? version : max
+          }, 0) + 1
+
+          // The stored structure is the S1 normalized config with `version` overwritten to the
+          // MINTED row version — the caller-typed version field never survives into storage
+          // (it is also excluded from the content key). Clone first: normalized is frozen.
+          const storedConfig = JSON.parse(JSON.stringify(normalized))
+          storedConfig.version = nextVersion
+
+          const inserted = firstRow(await trx.insertOne(CONFIG_TABLE, {
+            id: idGenerator(),
+            tenant_id: tenantId,
+            workspace_id: workspaceId,
+            system_id: normalized.systemId,
+            object: normalized.object,
+            mode: normalized.mode,
+            config: storedConfig,
+            content_key: contentKey,
+            version: nextVersion,
+            status: 'draft',
+            created_by: actor,
+            updated_by: actor,
+          }))
+          await appendAudit(trx, {
+            tenantId,
+            workspaceId,
+            configId: inserted.id,
+            action: 'save_version',
+            actor,
+            detail: { version: nextVersion },
+          })
+          return { ...rowToPublicReadSourceConfig(inserted), reused: false }
+        })
+      } catch (error) {
+        if (isUniqueViolation(error, CONTENT_KEY_CONSTRAINT)) {
+          // Concurrent identical save won the insert — its row exists now; route to the reuse path.
+          const winner = await db.selectOne(CONFIG_TABLE, { ...family, content_key: contentKey })
+          if (winner) {
+            return reuseExisting(winner, { tenantId, workspaceId, actor })
+          }
+          continue
+        }
+        if (isUniqueViolation(error, FAMILY_VERSION_CONSTRAINT)) {
+          // Concurrent mint took our version number — bounded retry with a fresh transaction.
+          continue
+        }
+        throw error
+      }
     }
-
-    const familyRows = await db.select(CONFIG_TABLE, { where: family, limit: 10000 })
-    const nextVersion = familyRows.reduce((max, row) => {
-      const version = Number.isInteger(row.version) ? row.version : Number(row.version) || 0
-      return version > max ? version : max
-    }, 0) + 1
-
-    const inserted = firstRow(await db.insertOne(CONFIG_TABLE, {
-      id: idGenerator(),
-      tenant_id: tenantId,
-      workspace_id: workspaceId,
-      system_id: normalized.systemId,
-      object: normalized.object,
-      mode: normalized.mode,
-      config: normalized,
-      content_key: contentKey,
-      version: nextVersion,
-      status: 'draft',
-      created_by: actor,
-      updated_by: actor,
-    }))
-    await appendAudit({
-      tenantId,
-      workspaceId,
-      configId: inserted.id,
-      action: 'save_version',
-      actor,
-      detail: { version: nextVersion },
+    throw new ReadSourceConfigConflictError('read-source config version minting conflicted', {
+      reason: 'mint_conflict',
     })
-    return { ...rowToPublicReadSourceConfig(inserted), reused: false }
   }
 
   async function list(input = {}) {
@@ -291,27 +352,31 @@ function createReadSourceConfigStore({ db, idGenerator = crypto.randomUUID } = {
         requested: spec.to,
       })
     }
-    const updated = firstRow(await db.updateRow(
-      CONFIG_TABLE,
-      { status: spec.to, updated_by: actor },
-      { ...scopeWhere({ tenantId, workspaceId }), id: row.id, status: spec.from },
-    ))
-    if (!updated) {
-      // Row changed between load and update (fail-closed on the optimistic status guard).
-      throw new ReadSourceConfigConflictError(`read-source config must be ${spec.from} to ${kind}`, {
-        id: row.id,
-        requested: spec.to,
+    // Status flip + its audit row are one atomic unit — a transition may never be observable
+    // without its audit entry.
+    return db.transaction(async (trx) => {
+      const updated = firstRow(await trx.updateRow(
+        CONFIG_TABLE,
+        { status: spec.to, updated_by: actor },
+        { ...scopeWhere({ tenantId, workspaceId }), id: row.id, status: spec.from },
+      ))
+      if (!updated) {
+        // Row changed between load and update (fail-closed on the optimistic status guard).
+        throw new ReadSourceConfigConflictError(`read-source config must be ${spec.from} to ${kind}`, {
+          id: row.id,
+          requested: spec.to,
+        })
+      }
+      await appendAudit(trx, {
+        tenantId,
+        workspaceId,
+        configId: row.id,
+        action: 'status_change',
+        actor,
+        detail: { from: spec.from, to: spec.to },
       })
-    }
-    await appendAudit({
-      tenantId,
-      workspaceId,
-      configId: row.id,
-      action: 'status_change',
-      actor,
-      detail: { from: spec.from, to: spec.to },
+      return rowToPublicReadSourceConfig(updated)
     })
-    return rowToPublicReadSourceConfig(updated)
   }
 
   async function approve(input = {}) {

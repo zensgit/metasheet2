@@ -14,6 +14,7 @@ const {
   createReadSourceConfigStore,
   __internals,
 } = require(path.join(__dirname, '..', 'lib', 'read-source-config-store.cjs'))
+const { validateReadSourceConfig } = require(path.join(__dirname, '..', 'lib', 'read-source-config.cjs'))
 
 const CONFIG_TABLE = 'integration_read_source_configs'
 const AUDIT_TABLE = 'integration_read_source_config_audit'
@@ -57,6 +58,10 @@ function createMockDb() {
       calls.push(['select', table, JSON.parse(JSON.stringify(options))])
       const filtered = tables[table].filter((row) => matchesWhere(row, options.where || {}))
       return filtered.slice(options.offset || 0, (options.offset || 0) + (options.limit || 1000))
+    },
+    async transaction(callback) {
+      calls.push(['transaction'])
+      return callback(this)
     },
   }
 }
@@ -136,8 +141,12 @@ async function testSaveStoresNormalizedOnlyAndMintsDraft() {
   assert.equal(saved.object, 'material')
   assert.match(saved.contentKey, /^[0-9a-f]{64}$/)
   const row = db.tables[CONFIG_TABLE][0]
-  assert.equal(row.config.systemId, 'sys_1', 'stored config is the normalized (trimmed) structure')
-  assert.deepEqual(row.config.operations, ['read'])
+  // ENTIRE stored structure === S1 normalized output, with version overwritten to the MINTED
+  // row version (the caller-typed version field never survives into storage).
+  const expected = JSON.parse(JSON.stringify(validateReadSourceConfig(validConfig()).normalized))
+  expected.version = row.version
+  assert.deepEqual(JSON.parse(JSON.stringify(row.config)), expected, 'stored config is exactly the normalized structure with the minted version')
+  assert.equal(row.config.version, row.version, 'stored config.version mirrors the minted row version')
   assert.equal(row.created_by, 'consultant_1')
 }
 
@@ -153,11 +162,135 @@ async function testContentKeyIdempotency() {
   assert.equal(db.tables[CONFIG_TABLE].length, 1, 'idempotent save is a no-op on the config table')
   assert.deepEqual(db.tables[AUDIT_TABLE].map((row) => row.action), ['save_version', 'reuse_version'])
 
-  // Changed content → next version in the family.
+  // Same effective config differing ONLY in the caller-typed version field → still reused
+  // (version is excluded from the content key).
+  const versionOnly = await store.saveVersion({ ...SCOPE, config: validConfig({ version: 42 }), actor: 'consultant_1' })
+  assert.equal(versionOnly.reused, true)
+  assert.equal(versionOnly.id, first.id)
+  assert.equal(db.tables[CONFIG_TABLE].length, 1)
+
+  // Changed content → next version in the family; its stored config carries the MINTED version.
   const third = await store.saveVersion({ ...SCOPE, config: validConfig({ readMethod: 'GET' }), actor: 'consultant_1' })
   assert.equal(third.reused, false)
   assert.equal(third.version, 2)
   assert.equal(db.tables[CONFIG_TABLE].length, 2)
+  const mintedRow = db.tables[CONFIG_TABLE].find((row) => row.version === 2)
+  assert.equal(mintedRow.config.version, 2, 'stored config.version === minted row version')
+}
+
+// Review item 3: identical content whose only existing row is RETIRED must NOT be silently
+// revived as reused — it conflicts, and appends no audit row.
+async function testRetiredContentReuseFailsClosed() {
+  const { db, store } = newStore()
+  const saved = await store.saveVersion({ ...SCOPE, config: validConfig(), actor: 'c' })
+  await store.approve({ ...SCOPE, id: saved.id, actor: 'c' })
+  await store.retire({ ...SCOPE, id: saved.id, actor: 'c' })
+  const auditCountBefore = db.tables[AUDIT_TABLE].length
+  await assert.rejects(
+    () => store.saveVersion({ ...SCOPE, config: validConfig(), actor: 'c' }),
+    (error) => {
+      assert.ok(error instanceof ReadSourceConfigConflictError)
+      assert.equal(error.details.reason, 'content_retired')
+      return true
+    },
+  )
+  assert.equal(db.tables[AUDIT_TABLE].length, auditCountBefore, 'retired-content conflict appends no audit row')
+  assert.equal(db.tables[CONFIG_TABLE].length, 1, 'no new row minted')
+}
+
+// Review item 1c: 23505 routing. Content-key violation → the concurrent winner's row is reused;
+// family-version violation → bounded retry, then typed Conflict when persistent.
+async function testUniqueViolationRouting() {
+  const CONTENT_CONSTRAINT = 'uniq_integration_read_source_configs_content'
+  const VERSION_CONSTRAINT = 'uniq_integration_read_source_configs_family_version'
+
+  function raceDb({ constraint, failures = 1, winnerRowAfterFailure = null }) {
+    const base = createMockDb()
+    let remainingFailures = failures
+    let insertsBlocked = failures
+    const wrapped = {
+      ...base,
+      tables: base.tables,
+      calls: base.calls,
+      async selectOne(table, where) {
+        // Simulate the race window: the winner's row becomes visible only AFTER our insert failed.
+        if (winnerRowAfterFailure && table === CONFIG_TABLE && insertsBlocked > 0) return null
+        if (winnerRowAfterFailure && table === CONFIG_TABLE && insertsBlocked === 0 && base.tables[CONFIG_TABLE].length === 0) {
+          base.tables[CONFIG_TABLE].push(winnerRowAfterFailure)
+        }
+        return base.selectOne(table, where)
+      },
+      async insertOne(table, row) {
+        if (table === CONFIG_TABLE && remainingFailures > 0) {
+          remainingFailures -= 1
+          insertsBlocked -= 1
+          const error = new Error('duplicate key value violates unique constraint')
+          error.code = '23505'
+          error.constraint = constraint
+          throw error
+        }
+        return base.insertOne(table, row)
+      },
+      async transaction(callback) {
+        base.calls.push(['transaction'])
+        return callback(wrapped)
+      },
+    }
+    return wrapped
+  }
+
+  // (a) content-key violation → reuse the winner's row (no new config row, reuse audit appended).
+  const winnerRow = {
+    id: 'rsc_winner',
+    tenant_id: 'tenant_1',
+    workspace_id: 'workspace_1',
+    system_id: 'sys_1',
+    object: 'material',
+    mode: 'single_record',
+    config: { systemId: 'sys_1', version: 1 },
+    content_key: __internals.contentKeyFor(validateReadSourceConfig(validConfig()).normalized),
+    version: 1,
+    status: 'draft',
+    created_at: 'x',
+    updated_at: 'x',
+  }
+  const contentDb = raceDb({ constraint: CONTENT_CONSTRAINT, failures: 1, winnerRowAfterFailure: winnerRow })
+  const contentStore = createReadSourceConfigStore({ db: contentDb, idGenerator: () => 'id_x' })
+  const reused = await contentStore.saveVersion({ ...SCOPE, config: validConfig(), actor: 'c' })
+  assert.equal(reused.reused, true)
+  assert.equal(reused.id, 'rsc_winner')
+  assert.equal(contentDb.tables[CONFIG_TABLE].length, 1, 'loser never inserts a duplicate content row')
+  assert.deepEqual(contentDb.tables[AUDIT_TABLE].map((row) => row.action), ['reuse_version'])
+
+  // (b) transient version violation → retry mints successfully.
+  const transientDb = raceDb({ constraint: VERSION_CONSTRAINT, failures: 1 })
+  const transientStore = createReadSourceConfigStore({ db: transientDb, idGenerator: () => 'id_y' })
+  const minted = await transientStore.saveVersion({ ...SCOPE, config: validConfig(), actor: 'c' })
+  assert.equal(minted.reused, false)
+  assert.equal(minted.version, 1)
+  assert.equal(transientDb.tables[CONFIG_TABLE].length, 1)
+
+  // (c) persistent version violation → bounded retry (3) then typed Conflict.
+  const persistentDb = raceDb({ constraint: VERSION_CONSTRAINT, failures: 99 })
+  const persistentStore = createReadSourceConfigStore({ db: persistentDb, idGenerator: () => 'id_z' })
+  await assert.rejects(
+    () => persistentStore.saveVersion({ ...SCOPE, config: validConfig(), actor: 'c' }),
+    (error) => {
+      assert.ok(error instanceof ReadSourceConfigConflictError)
+      assert.equal(error.details.reason, 'mint_conflict')
+      return true
+    },
+  )
+  const insertAttempts = persistentDb.calls.filter(([name]) => name === 'transaction').length
+  assert.equal(insertAttempts, 3, 'mint retries are bounded at 3 attempts')
+
+  // (d) an unrelated 23505 (unknown constraint) is NOT swallowed.
+  const foreignDb = raceDb({ constraint: 'some_other_constraint', failures: 1 })
+  const foreignStore = createReadSourceConfigStore({ db: foreignDb, idGenerator: () => 'id_w' })
+  await assert.rejects(
+    () => foreignStore.saveVersion({ ...SCOPE, config: validConfig(), actor: 'c' }),
+    (error) => error.code === '23505' && error.constraint === 'some_other_constraint',
+  )
 }
 
 async function testFamilyIsolation() {
@@ -258,6 +391,12 @@ async function testContentKeyHelperIsStable() {
   const key2 = __internals.contentKeyFor({ a: [1, { c: 3, d: 4 }], b: 2 })
   assert.equal(key1, key2, 'content key is key-order independent')
   assert.notEqual(key1, __internals.contentKeyFor({ a: [1, { c: 3, d: 4 }], b: 3 }))
+  // version is EXCLUDED from the hash input: the row version is store-minted.
+  assert.equal(
+    __internals.contentKeyFor({ a: 1, version: 1 }),
+    __internals.contentKeyFor({ a: 1, version: 99 }),
+    'caller-typed version field does not participate in the content key',
+  )
 }
 
 async function main() {
@@ -266,6 +405,8 @@ async function main() {
   await testContentKeyIdempotency()
   await testFamilyIsolation()
   await testStatusTransitionsFailClosed()
+  await testRetiredContentReuseFailsClosed()
+  await testUniqueViolationRouting()
   await testScopingAndNotFound()
   await testAuditTrailIsValuesFree()
   await testContentKeyHelperIsStable()

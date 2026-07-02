@@ -9,7 +9,13 @@ const path = require('node:path')
 
 const repoRoot = path.resolve(__dirname, '..', '..', '..')
 const migrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '062_create_integration_read_source_configs.sql')
-const sql = fs.readFileSync(migrationPath, 'utf8')
+const rawSql = fs.readFileSync(migrationPath, 'utf8')
+// Strip full-line SQL comments BEFORE matching, so an assertion can never be satisfied by
+// commented-out DDL (a `-- CREATE TRIGGER ...` line must not pass the trigger check).
+const sql = rawSql
+  .split('\n')
+  .filter((line) => !line.trim().startsWith('--'))
+  .join('\n')
 
 function tableBlock(table) {
   const match = sql.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\(([\\s\\S]*?)\\n\\);`, 'm'))
@@ -50,6 +56,12 @@ assert.match(
   /CREATE UNIQUE INDEX IF NOT EXISTS uniq_integration_read_source_configs_content\s*\n\s*ON integration_read_source_configs \(tenant_id, COALESCE\(workspace_id, ''\), system_id, object, mode, content_key\);/,
   'unique content index covers (scope, system, object, mode, content_key)',
 )
+// Version-minting race backstop (review item 1a): unique family+version expression index.
+assert.match(
+  sql,
+  /CREATE UNIQUE INDEX IF NOT EXISTS uniq_integration_read_source_configs_family_version\s*\n\s*ON integration_read_source_configs \(tenant_id, COALESCE\(workspace_id, ''\), system_id, object, mode, version\);/,
+  'unique family-version index backstops concurrent version minting',
+)
 assert.match(
   sql,
   /CREATE INDEX IF NOT EXISTS idx_integration_read_source_configs_system/,
@@ -73,8 +85,13 @@ assert.match(
   'audit lookup index exists',
 )
 
-// updated_at trigger rides the 057 shared function.
-assert.match(sql, /trg_integration_read_source_configs_updated_at/, 'configs table has an updated_at trigger')
-assert.match(sql, /EXECUTE FUNCTION integration_set_updated_at\(\)/, 'trigger reuses integration_set_updated_at')
+// updated_at trigger rides the 057 shared function — anchored as ONE block (name + timing +
+// function) so a renamed trigger, wrong table, or wrong function cannot slip through, and the
+// comment-stripping above guarantees this matches live DDL, not a comment.
+assert.match(
+  sql,
+  /CREATE TRIGGER trg_integration_read_source_configs_updated_at\s*\n\s*BEFORE UPDATE ON integration_read_source_configs\s*\n\s*FOR EACH ROW EXECUTE FUNCTION integration_set_updated_at\(\);/,
+  'configs table has the anchored updated_at trigger block',
+)
 
 console.log('read-source-config-migration.test.cjs OK')

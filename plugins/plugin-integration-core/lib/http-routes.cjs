@@ -1457,7 +1457,19 @@ async function persistExternalSystemTestResult(externalSystems, req, system, res
 // config, a path, or a key.
 function mapReadSourceConfigError(error) {
   if (error instanceof ReadSourceConfigValidationError) {
-    return new HttpRouteError(400, 'READ_SOURCE_CONFIG_INVALID', 'read-source config is invalid', error.details)
+    // S1 tuples are values-free EXCEPT the unexpected-field case, where `field` is the raw
+    // caller-supplied key name (could be URL/secret-shaped). Coarsen it here at the route boundary;
+    // the S1 validator itself stays untouched.
+    let details = error.details
+    if (details && Array.isArray(details.errors)) {
+      details = {
+        ...details,
+        errors: details.errors.map((entry) => (
+          entry && entry.code === 'READ_SOURCE_UNEXPECTED_FIELD' ? { ...entry, field: '(unexpected)' } : entry
+        )),
+      }
+    }
+    return new HttpRouteError(400, 'READ_SOURCE_CONFIG_INVALID', 'read-source config is invalid', details)
   }
   if (error instanceof ReadSourceConfigNotFoundError) {
     return new HttpRouteError(404, 'READ_SOURCE_CONFIG_NOT_FOUND', 'read-source config not found')

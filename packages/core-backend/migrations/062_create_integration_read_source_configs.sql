@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS integration_read_source_configs (
 -- never store '' — callers should pass NULL for "no workspace".
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_integration_read_source_configs_content
   ON integration_read_source_configs (tenant_id, COALESCE(workspace_id, ''), system_id, object, mode, content_key);
+-- Version-minting backstop: the store computes max(version)+1 inside a transaction, but two
+-- concurrent minters could still read the same max — this index turns that race into a 23505
+-- the store retries (bounded), instead of silently minting duplicate family versions.
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_integration_read_source_configs_family_version
+  ON integration_read_source_configs (tenant_id, COALESCE(workspace_id, ''), system_id, object, mode, version);
 CREATE INDEX IF NOT EXISTS idx_integration_read_source_configs_system
   ON integration_read_source_configs (tenant_id, COALESCE(workspace_id, ''), system_id);
 CREATE INDEX IF NOT EXISTS idx_integration_read_source_configs_status

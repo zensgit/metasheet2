@@ -6131,6 +6131,9 @@ async function testReadSourceConfigRoutes() {
         const filtered = dbTables[table].filter((row) => matchesWhere(row, options.where || {}))
         return filtered.slice(options.offset || 0, (options.offset || 0) + (options.limit || 1000))
       },
+      async transaction(callback) {
+        return callback(this)
+      },
     },
     idGenerator: () => `rsc_${++idSeq}`,
   })
@@ -6199,6 +6202,22 @@ async function testReadSourceConfigRoutes() {
   assert.ok(Array.isArray(invalid.body.error.details.errors) && invalid.body.error.details.errors.length > 0)
   assert.ok(!JSON.stringify(invalid.body).includes('evil.example.com'), 'validation error is values-free')
 
+  // unexpected-field key names are coarsened at the route boundary: a URL/secret-shaped KEY
+  // must not ride into the 400 payload (review item 5).
+  const urlKey = await invoke(routes, 'POST', '/api/integration/read-source-configs', {
+    user: WRITE_USER, query: { workspaceId: 'workspace_1' },
+    body: { config: { ...config, 'https://exfil.example.com/steal?token=abc': true } },
+  })
+  assert.equal(urlKey.statusCode, 400)
+  const urlKeyStr = JSON.stringify(urlKey.body)
+  for (const leak of ['exfil.example.com', 'https://', 'token=abc']) {
+    assert.ok(!urlKeyStr.includes(leak), `unexpected-field 400 must not echo the raw key (${leak})`)
+  }
+  assert.ok(
+    urlKey.body.error.details.errors.some((entry) => entry.code === 'READ_SOURCE_UNEXPECTED_FIELD' && entry.field === '(unexpected)'),
+    'unexpected-field tuple is coarsened to the fixed sentinel',
+  )
+
   // list + get (read tier)
   const listed = await invoke(routes, 'GET', '/api/integration/read-source-configs', {
     user: READ_USER, query: { workspaceId: 'workspace_1', systemId: 'sys_1' },
@@ -6250,6 +6269,19 @@ async function testReadSourceConfigRoutes() {
   for (const leak of ['/K3API', 'GetDetail', 'FNumber', 'containerPaths', 'secret-token']) {
     assert.ok(!auditStr.includes(leak), `audit response must not leak ${leak}`)
   }
+
+  // retired content cannot be silently revived through save → 409, and no audit row appears
+  // (review item 3).
+  const retiredSave = await invoke(routes, 'POST', '/api/integration/read-source-configs', {
+    user: WRITE_USER, query: { workspaceId: 'workspace_1' }, body: { config },
+  })
+  assert.equal(retiredSave.statusCode, 409)
+  assert.equal(retiredSave.body.error.code, 'READ_SOURCE_CONFIG_STATUS_CONFLICT')
+  assert.equal(retiredSave.body.error.details.reason, 'content_retired')
+  const auditAfter = await invoke(routes, 'GET', '/api/integration/read-source-configs/:id/audit', {
+    user: READ_USER, params: { id: configId }, query: { workspaceId: 'workspace_1' },
+  })
+  assert.equal(auditAfter.body.data.length, audit.body.data.length, 'retired-content conflict appends no audit row')
 
   // persistence surface never creates adapters and never touches external-system storage
   assert.equal(findCalls(calls, 'createAdapter').length, 0, 'no adapter is created by config persistence routes')
