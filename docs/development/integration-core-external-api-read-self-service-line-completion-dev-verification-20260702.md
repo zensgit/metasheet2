@@ -66,3 +66,28 @@ S2 设计锁 10 条 × 实际落点:
 ## 7. 使用摘要(顾问视角)
 
 注册外部系统(既有)→ 工作台「读取源配置」新建配置(S1 表单,四模式)→ **定位容器探测**(values-free 证据确认容器/形状)→ **保存版本**(幂等,同内容复用)→ **审批**(draft→approved)→ 运行层经 `POST /read-source-configs/:id/read` 以业务键消费,得到 fieldMap 数据面 + values-free 证据。retire 下线版本(approved→retired,运行层立刻 409)。
+
+---
+
+## 8. 真机验收 addendum(2026-07-02,#3488 关闭后补记)
+
+本节把实体机端到端验收固化为 as-built:上文第 4/5 节的验证止于 mock + 平台契约;以下为部署环境的真机证据链。
+
+### 8.1 验收通道(全部 MERGED)
+
+| 工件 | PR / SHA |
+| --- | --- |
+| 实体机 E2E runbook(含 K3 BOM keyField=FBillNo 修正) | #3478 → dbd3768d8 |
+| postdeploy 冒烟 workflow + values-free 脚本(list_page 无键默认) | #3481 |
+| 差分对照(同系统 C3 read-smoke 同路径定责)+ errorType 采集 | #3484 |
+| CREDENTIAL 类错误归入 AUTH_FAILED 粗类 | #3485 |
+
+### 8.2 结果(values-free,#3488 记录)
+
+- 第一轮(补凭证前):平台链全 PASS(save 201 / reuse 200 / 审计双动作 / approve 200 / 走私 400 / retire 200 / retire 后 409;全部泄漏扫描通过);K3 外呼 `K3_WISE_CREDENTIALS_MISSING`,差分对照(已交付 C3 read-smoke)同败 → 定责部署环境该注册系统凭证缺失,非本线缺陷。
+- 第二轮(operator 现场补录凭证后,serving commit `dbd3768d8`):`readSmokeControlOk=true · probeOk=true · containerLocated=true · boundedSmokeExecuted=true · runtimeEvidenceOk=true · runtimeDataPresent=true · overall=PASS · valuesFreeEvidence=true · writeExecuted=false · resolverRuntimeExecuted=false`。**#3488 以实体机 PASS 关闭。**
+
+### 8.3 后续边界更新
+
+- `resolver_lookup` 运行时设计锁已合并(#3479 → 5f48dadeb,修订版含 R0 契约/证据面扩展切片、multiplicityRuleField 对账、demand gate);R0–R3 仍为各自独立 opt-in,启动前置 = #1709 的 material→FBillNo GATE-front 形状回传(#3415 规范)。
+- #1709 保持 OPEN/on-hold;§6 的其余 OUT 项不变。
