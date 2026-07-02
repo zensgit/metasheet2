@@ -1,10 +1,12 @@
 # Approval & Process-Automation — un-completed items, parallel-development plan & verification (2026-07-01)
 
-> **As-built coordination plan** (updated to main after `#3451`/`#3452`/`#3450`/`#3453` merged). Deep review of what
+> **As-built coordination plan** (updated to main after `#3451`/`#3452`/`#3450`/`#3453` and the A3-a/b slices
+> `#3455`/`#3457`/`#3460` merged). Deep review of what
 > remains on the line, classified by gating and **sequenced into parallel lanes** so work distributes across
 > sessions without hot-file collision. **Shipped since the first cut:** T2-4 re-entry quorum-bypass (`#3446`,
 > `to_version >= cutoff`) + same-version cascade regression (`#3453`), R1-A/R1-B egress closure (`#3437`/`#3443`/
-> `#3447`/`#3451`), A3 rollout design-lock (`#3452`), and T2-6 event dedup ledger (`#3450`). **Honest framing:** the
+> `#3447`/`#3451`), A3 rollout design-lock + **runtime policy plumbing** (`#3452` + `#3455`/`#3457`/`#3460`),
+> and T2-6 event dedup ledger (`#3450`). **Honest framing:** the
 > remainder is owner-gated (design-lock-first) — so "complete all development" is realized by
 > *ratifying defaults **per lane/rung** (not blanket — it mixes SSRF / destructive-delete / permission-migration
 > / cross-base-writeback risk) + distributing the lanes*, not one session building everything.
@@ -22,7 +24,8 @@
   round via `to_version >= <re-entry cutoff>` (schema-free, uses existing data); no re-entry -> exact old query.
   The `#3453` follow-up locks the same-version requester auto-approval cascade boundary that requires `>=`.
 - **T2-6 event dedup ledger — SHIPPED (`#3450`):** automation record-change/form-submit dispatch now has a
-  database-backed event-fire ledger, TTL/count sweep, real-DB coverage, and CI wiring. This removes the substrate
+  database-backed event-fire ledger (7-day TTL retention sweep only — no count cap), real-DB coverage, and CI
+  wiring. This removes the substrate
   blocker for approval-trigger and inbound-webhook work, but those feature rungs remain owner-gated.
 
 ## 2. Un-completed items — gating
@@ -33,7 +36,7 @@
 | ~~T2-4 same-version cascade regression~~ | approval engine | **SHIPPED (#3453)** | done — locks that same-version auto-approval at re-entry counts under `>=` |
 | ~~ISATAP `0200:5efe` u/l-bit + IPv4-compat~~ | BPMN (guard) | **SHIPPED (#3437/#3443)** | done — classifier folds both ISATAP u/l forms + `::/96` |
 | ~~R1-B DNS-pinned dispatcher + wiring + redirect re-validation~~ | BPMN/workflow | **SHIPPED (#3447/#3451)** | done — raw BPMN HTTP-task fetch path replaced; default policy deny-all |
-| **R1-A3** policy rollout / configured destination enablement | BPMN/workflow | design-lock shipped, runtime unshipped | owner/governance-gated; `#3452` records server-owned policy source and no live destination authorization |
+| **R1-A3** configured destination enablement | BPMN/workflow | **runtime SHIPPED** (#3455/#3457/#3460), destinations not yet authorized | governance-only remainder: `#3460` injects the server-owned `BPMN_HTTP_TASK_EGRESS_POLICY` env policy at both BPMN route construction points; `#3455` normalizer + `#3457` route-provenance locks are in. **No core runtime code left** — what remains is authorizing/configuring the first live destination (ops/governance per `#3452`), default stays deny-all |
 | T1-1 slice-2 transfer/jump timeout effects | approval engine | unshipped | owner-gated (transfer/jump **target-config schema** + indirect jump→terminal carve-out; auto_* env-gated) |
 | T2-1+2 scoped admins + handover | approval engine | unshipped | owner-gated (permission model + migration) |
 | T1-4 node field-perms runtime | approval engine | unshipped | owner-gated (edit-form-at-node prerequisite) |
@@ -52,10 +55,11 @@ The constraint is **hot files**: items sharing one runtime file must be **sequen
 edits to `ApprovalProductService.ts` / `automation-service.ts` collide).
 
 - **Lane A — BPMN/workflow** (`BPMNWorkflowEngine.ts`, `routes/workflow*`, `guards/egress-guard.ts`):
-  R1-A guard/classifier **done** (#3437/#3443), dispatcher **done** (#3447), engine wiring **done** (#3451).
-  The remaining BPMN egress work is **A3 policy rollout/configured enablement**, which is a governance gate:
-  server-owned policy source, route-provenance negative controls, and explicit destination enablement. No live
-  destination is authorized by the default-closed R1-B runtime.
+  R1-A guard/classifier **done** (#3437/#3443), dispatcher **done** (#3447), engine wiring **done** (#3451),
+  **A3 policy plumbing done** (#3455 normalizer / #3457 route-provenance locks / #3460 server-owned
+  `BPMN_HTTP_TASK_EGRESS_POLICY` env injection at both route construction points). The ONLY remaining egress work
+  is **destination authorization** — a config/ops governance act per `#3452`, not code. Default stays deny-all
+  until a first named destination is explicitly authorized.
 - **Lane B — approval engine** (`ApprovalProductService.ts` — HOT, so sequential): ~~`T2-4 fix`~~ **done (#3446)**
   + cascade regression **done (#3453)** → next `T1-1 slice-2` → `T2-1+2` → `T1-4`. (`T3-4/T3-5` W7-backwrite touch
   `automation-service.ts`, see Lane C.)
@@ -106,10 +110,16 @@ so a future `>` change fails).
 a database-backed fire ledger, redelivery/replay can execute side effects more than once. T1-2 inbound webhook and
 T1-3 approval-trigger both need the same substrate before they can safely expose higher-frequency event sources.
 
-**Shipped implementation:** `meta_automation_event_fires` stores `(rule_id, base_id, event_key)` first-write-wins
-claims, with a bounded retention sweep (TTL + per-rule cap). The executor checks/claims before side effects and
-skips duplicate deliveries without treating them as rule failures. Record-service/write-service integrations feed
-stable event identities for the currently shipped sources.
+**Shipped implementation (exact shape):** `meta_automation_event_fires(rule_id, dedup_key, fired_at)` with
+**PRIMARY KEY `(rule_id, dedup_key)`** (+ `fired_at` index; `rule_id` FK → `automation_rules` ON DELETE CASCADE).
+`dedup_key = ${eventType}:${_eventId}` — a transport `_eventId` is stamped at every emit site for the shipped
+sources (record.created/updated/deleted, form.submitted, field.value_changed via record.updated); a missing
+`_eventId` stays **fail-open during rollout** (the ledger only gates stamped events). Claim-then-fire:
+`INSERT … ON CONFLICT DO NOTHING RETURNING` — the rule executes only if it won the insert (at-most-once), and a
+lost claim is a skipped duplicate, not a rule failure. Retention: **7-day TTL sweep only** (`fired_at < cutoff`,
+kicked at most once per 24h, best-effort) — there is NO `base_id` column, NO `event_key` column, and NO per-rule
+count cap. T1-3 will reuse this ledger with `dedup_key = approval.completed:${event.eventId}` (the approval
+completion event's own unique id — no `_eventId` stamping needed) and **no new migration** (ballot Q5).
 
 **Verification:** pure dedup-key tests, automation-service unit coverage, real-DB `multitable-event-dedup-trigger`
 coverage wired into `plugin-tests.yml`, plus regression updates for record-service/write-service callers.
@@ -117,9 +127,13 @@ coverage wired into `plugin-tests.yml`, plus regression updates for record-servi
 ## 7. Recommendation
 1. **Done:** T2-4 fix + cascade regression (#3446/#3453) · R1-A/R1-B default-closed egress closure
    (#3437/#3443/#3447/#3451) · T2-6 dedup ledger (#3450).
-2. **Next security gate:** A3 egress policy rollout/configured enablement — design-lock shipped in `#3452`, but
-   runtime still requires per-slice owner opt-in. Default runtime remains deny-all until a server-owned policy is
-   explicitly configured.
+2. **A3 is now governance-only:** the egress policy runtime is fully shipped (`#3452` design-lock +
+   `#3455`/`#3457`/`#3460` normalizer / provenance locks / server-owned env injection). Default remains deny-all;
+   the remaining act is **authorizing the first live destination** (config/ops), which happens when a named
+   integration needs it — no code slice to schedule.
 3. **Next feature lanes after owner ratification:** Lane C `T1-3 approval-trigger` / `T1-2 inbound webhook`
    (dedup dependency now met), or Lane B `T1-1 slice-2` (transfer/jump timeout effects). Continue to ratify
-   register defaults **per lane/rung**, not blanket.
+   register defaults **per lane/rung**, not blanket — the first-batch per-rung ballot lives in
+   `approval-automation-first-batch-ballot-20260701.md`. Sizing note: per-rung person-day estimates are
+   optimistic build-effort figures, NOT calendar commitments — on the security/permission/migration rungs
+   (T1-2, T2-1+2, T3-5) review rounds can cost more calendar than the build itself.
