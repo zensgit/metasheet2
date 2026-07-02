@@ -4735,26 +4735,33 @@ export class ApprovalProductService {
         // write an action='approve' record carrying metadata.nodeKey (Q5).
         const threshold = executor.getApprovalThreshold(currentNodeKey)
         // T2-4 RE-ENTRY quorum fix: scope the DISTINCT-approver tally to the CURRENT node-entry round. A
-        // `threshold` node can be RETURNED/JUMPED back to after it already resolved (the 退回/return path admits
-        // any previously-visited approval node), and `approval_records` are append-only — so without scoping,
-        // approve records from a PRIOR entry still count toward N and re-satisfy the node on stale votes (a
-        // quorum bypass: a 2-of-3 that A+B already approved would resolve on a single fresh vote). The current
-        // round begins at the `to_version` of the most recent return/jump that re-entered THIS node; approve
-        // records are stamped `to_version = <bumped version>`, so those recorded AT-OR-AFTER the re-entry
-        // (`to_version >= cutoff`) belong to the current round. `>=` (not `>`) is deliberate: a return/jump can
-        // trigger an auto-approval cascade AT the re-entered node in the SAME transaction (insertAutoApprovalEvents
-        // writes those approve records at `to_version = <re-entry version> = cutoff`) — legitimate current-round
-        // votes that must count. Prior-round approves are strictly `< cutoff` (they predate the version bump), so
-        // `>=` admits the cascade without re-admitting stale votes. With NO re-entry (cutoff null) the tally is
-        // the whole-node count — byte-identical to the pre-fix behaviour (zero regression). The graph is validated
-        // ACYCLIC (executor cycle guards), so a threshold node is only re-enterable via a return/jump — this
-        // marker is complete (no forward-loop re-entry path).
+        // `threshold` node round-scoping. A threshold node X can be RE-ENTERED after it already resolved —
+        // either DIRECTLY (a return/jump targeting X) OR THROUGH X (a return/jump to an UPSTREAM node, then
+        // normal forward approval progressing back down to X). `approval_records` are append-only, so without
+        // round-scoping the prior round's approves at X still count toward N and re-satisfy the node on stale
+        // votes (a quorum bypass: a 2-of-3 that A+B already approved would resolve on a single fresh vote).
+        //
+        // The current round begins at the `to_version` of the most recent ENTRY into X — captured as ANY
+        // record that lands the instance on X:
+        //   • an upstream approve advancing into X: metadata.nextNodeKey = X AND metadata.nodeKey <> X.
+        //     The `<> X` guard EXCLUDES X's OWN partial-approve records (which carry nodeKey=X/nextNodeKey=X
+        //     and must not bump the cutoff mid-round), so only a transition FROM another node counts.
+        //   • a return/jump naming X explicitly: metadata.targetNodeKey = X OR metadata.toNodeKey = X.
+        // (The earlier fix only matched return/jump records that NAMED X, missing re-entry THROUGH X from an
+        // upstream return target — a real second bypass. Keying off the entry transition closes both.)
+        //
+        // Approve records are stamped `to_version = <bumped version>`; those AT-OR-AFTER the entry
+        // (`to_version >= cutoff`) belong to the current round. `>=` (not `>`) is deliberate: an entry can
+        // trigger an auto-approval cascade AT X in the SAME transaction (insertAutoApprovalEvents writes those
+        // at `to_version = entry version = cutoff`) — current-round votes that must count; prior-round approves
+        // are strictly `< cutoff`. cutoff is NULL only when X was never entered by a recorded transition (e.g.
+        // an immediately-active first node) AND never re-entered → the whole-node count, which for such a
+        // first-round-only node is exactly the current round.
         const reentryCutoffResult = await client.query<{ cutoff: number | string | null }>(
           `SELECT MAX(to_version) AS cutoff
              FROM approval_records
              WHERE instance_id = $1
-               AND action IN ('return', 'jump')
-               AND ( metadata->>'nextNodeKey' = $2
+               AND ( ( metadata->>'nextNodeKey' = $2 AND COALESCE(metadata->>'nodeKey', '') <> $2 )
                   OR metadata->>'targetNodeKey' = $2
                   OR metadata->>'toNodeKey' = $2 )`,
           [id, currentNodeKey],

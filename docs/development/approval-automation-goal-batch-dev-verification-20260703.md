@@ -80,12 +80,46 @@ _(Additional decision-clean items surfaced by the review workflow are appended i
   fire-and-forget via `safeMetricsCall`), the single per-instance deadline column → last-writer-wins race, and
   the recommended fix = **exactly** the conditional node-scoped clear shipped in #3497. My fix is validated by
   an independent adversarial pass.
-- **Additional decision-clean candidates:** _(from the focused hunt — appended below; if none beyond the race,
-  that is the finding)._
+- **Additional decision-clean bug FOUND + FIXED (#3499): a SECOND T2-4 threshold quorum bypass.** The
+  focused adversarial hunt found that my earlier re-entry fix (#3446) was incomplete: the cutoff only matched
+  return/jump records that *named* the threshold node X, missing re-entry *through* X (a return/jump to an
+  upstream ancestor, then forward approval back down to X — the forward step is an `approve` at the upstream
+  node with `nextNodeKey=X`, which the cutoff never inspected → `cutoff=NULL` → whole-node fallback → stale
+  votes re-counted → single-vote quorum bypass). Fixed by keying the cutoff off the entry *transition* into X
+  (`nextNodeKey=X AND nodeKey<>X` OR `targetNodeKey/toNodeKey=X`). **Verify:** real-DB 6/6 incl. a new
+  fail-first `N1→X(2-of-3)→N3` through-re-entry test, RED-before confirmed; prior re-entry + cascade `>=`
+  regression + timeout-effects 13/13 green. Decision-clean (the round-scoped semantics were already the chosen
+  intent).
+- **Other surfaces verified CLEAN by the hunt:** inbound webhook (HMAC/timestamp-window/uniform-reject/secret
+  redaction incl. redacted-placeholder round-trip rejection, per-ruleId rate limiter), T1-3 approval.completed
+  (dual authz re-checked at fire, fail-closed, ledger-idempotent), W7 non-approved backwrite (opt-in,
+  lock-fail-closed), SLA scheduler (per-row isolation, single-shot, in-txn deadline re-verify), T2-1+2 bulk
+  reassign (`FOR UPDATE`, skips, ≤200 cap, N>M fail-closed). No other decision-clean defect surfaced.
+- **OPEN VERIFY-ITEM (potential 4th vector, NOT yet fixed):** the `#3499` cutoff keys off an `approve` record
+  whose `nextNodeKey` literally equals X. If an **intermediate condition/cc node sits between the upstream
+  return target and X** (`N1 → condition → X`, a linear flow), the upstream approve's `nextNodeKey` may be the
+  *condition* node (immediate successor), not X — in which case `cutoff=NULL` → whole-node fallback → the
+  through-X bypass could survive for that graph shape. **Not spiraled into a 4th reactive fix this turn**
+  (advisor guidance); logged as a verify-item feeding the structural decision below.
+
+## 6b. STRUCTURAL owner-decision — durable round-scoping vs reactive patching
+
+This is the **3rd patch to the same cutoff heuristic** (#3446 name-X · #3453 same-version cascade · #3499
+through-X), and the verify-item above may be a 4th. Reconstructing "which round am I in" by pattern-matching
+`nextNodeKey`/`targetNodeKey`/`toNodeKey` across append-only records is inherently whack-a-mole. The register's
+originally-proposed **Option B (`nodeEntryEpoch`)** — a per-node-entry epoch stamped at activation and carried
+on each approve record, so the tally filters `metadata.nodeEntryEpoch = <current>` — makes round-scoping
+**provably complete** regardless of entry vector, at the cost of one schema/stamping change (#3446 deferred it
+as "simpler without it"). **Owner decision:** keep patching the cutoff heuristic reactively, OR do the one
+`nodeEntryEpoch` migration that closes the class. Recommend the epoch; it retires this whole bug family
+(and the verify-item) in one ratified change.
 
 ## 7. Bottom line
 
-The buildable-without-a-vote surface is completed + verified (#3497). The heavy remainder is owner-gated;
+The buildable-without-a-vote surface is completed + verified — **two decision-clean bugs found + fixed this
+batch: the node-timeout deadline-clear race (#3497, merged) and a second T2-4 threshold quorum bypass (#3499)**
+— plus a broader-surface hunt that verified the rest of the recently-shipped runtime clean. The heavy remainder
+is owner-gated;
 it is now one vote from build in three genuinely-parallel lanes (B / C / D), with the two nearest rungs
 (T3-5, T1-4) design-locked. Recommended fastest path: vote T3-5 + T1-4 to start B/C, and open Lane D on
 T3-6 (the differentiation move) in parallel. Sizing figures are optimistic build-effort, NOT calendar
