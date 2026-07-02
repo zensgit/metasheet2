@@ -5917,6 +5917,159 @@ async function testReadSmokeRoute() {
   console.log('  testReadSmokeRoute OK')
 }
 
+// S2-b (#1709 self-service): fixed locate-container probe route. S1-validated config only; backend
+// credential context; probe-time path re-guard; values-free evidence; no persistence; no write path.
+async function testReadSourceProbeRoute() {
+  const readArgs = []
+  const writeCalls = []
+  const storedK3System = {
+    id: 'sys_1',
+    tenantId: 'tenant_1',
+    kind: 'erp:k3-wise-webapi',
+    role: 'target',
+    credentials: { bearerToken: 'secret-token' },
+    config: {
+      objects: {
+        material: { operations: ['upsert'], savePath: '/K3API/Material/Save' },
+      },
+    },
+  }
+  const storedK3SystemBefore = clone(storedK3System)
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return storedK3System
+      },
+    },
+    adapterRegistry: {
+      createAdapter(input) {
+        calls.push(['createAdapter', input])
+        return {
+          async read(req) {
+            readArgs.push(req)
+            return {
+              records: [{ FName: 'SECRET-NAME', FNumber: req.filters.FNumber }],
+              raw: { Data: { FName: 'SECRET-NAME', FNumber: req.filters.FNumber } },
+            }
+          },
+          async upsert(b) { writeCalls.push(['upsert', b]); return {} },
+          async save(b) { writeCalls.push(['save', b]); return {} },
+          async submit(b) { writeCalls.push(['submit', b]); return {} },
+          async audit(b) { writeCalls.push(['audit', b]); return {} },
+        }
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+  const probeConfig = {
+    version: 1,
+    systemId: 'sys_1',
+    requiredKind: 'erp:k3-wise-webapi',
+    object: 'material',
+    mode: 'single_record',
+    readPath: '/K3API/Material/GetDetail',
+    readMethod: 'POST',
+    operations: ['read'],
+    keyField: 'FNumber',
+    containerPaths: ['Data'],
+  }
+
+  // success: one read, values-free S2-a evidence, backend credential context, no write, system untouched
+  const ok = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+    user: WRITE_USER, params: { id: 'sys_1' }, query: { workspaceId: 'workspace_1' },
+    body: { config: probeConfig, boundedSmoke: true, inputs: { key: 'M-001' } },
+  })
+  assertOkResponse(ok, 200)
+  assert.equal(ok.body.data.ok, true)
+  assert.equal(ok.body.data.object, 'material')
+  assert.equal(ok.body.data.mode, 'single_record')
+  assert.deepEqual(ok.body.data.containers, { primary: { type: 'object', arrayLength: null } })
+  assert.equal(ok.body.data.containerLocated, true)
+  assert.equal(ok.body.data.boundedSmokeExecuted, true)
+  assert.equal(ok.body.data.recordCount, 1)
+  assert.equal(readArgs.length, 1, 'adapter.read called exactly once')
+  assert.deepEqual(readArgs[0], { object: 'material', filters: { FNumber: 'M-001' } })
+  assert.equal(writeCalls.length, 0, 'no upsert/save/submit/audit called')
+  assert.ok(findCall(calls, 'getExternalSystemForAdapter'), 'used backend getExternalSystemForAdapter')
+  const adapterSystem = findCall(calls, 'createAdapter')[1]
+  assert.deepEqual(adapterSystem.config.objects.material, {
+    operations: ['upsert', 'read'],
+    savePath: '/K3API/Material/Save',
+    readPath: '/K3API/Material/GetDetail',
+    readMethod: 'POST',
+  }, 'probe applies a non-persisted read-only overlay before adapter creation')
+  assert.deepEqual(storedK3System, storedK3SystemBefore, 'stored external system object is not mutated')
+  assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0, 'probe never persists/alters the system')
+  const okStr = JSON.stringify(ok.body.data)
+  for (const leak of ['M-001', 'SECRET-NAME', 'secret-token', '/K3API', 'GetDetail']) {
+    assert.ok(!okStr.includes(leak), `probe response must not leak ${leak}`)
+  }
+
+  // read access is not enough: live credentialed outbound probe requires integration write
+  const denied = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+    user: READ_USER, params: { id: 'sys_1' }, body: { config: probeConfig, inputs: { key: 'M-001' } },
+  })
+  assert.equal(denied.statusCode, 403, 'read user cannot trigger the probe (requires integration write)')
+
+  // contract-invalid → 400 with a coarse values-free reason (raw path/method/credential cannot ride in)
+  const rawPath = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+    user: WRITE_USER, params: { id: 'sys_1' },
+    body: { config: { ...probeConfig, readPath: 'https://evil.example.com/x' }, inputs: { key: 'M-001' } },
+  })
+  assert.equal(rawPath.statusCode, 400, 'absolute readPath is fail-closed')
+  assert.ok(!JSON.stringify(rawPath.body).includes('evil.example.com'), 'contract error is values-free')
+  const missingKey = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+    user: WRITE_USER, params: { id: 'sys_1' }, body: { config: probeConfig },
+  })
+  assert.equal(missingKey.statusCode, 400, 'missing required key input is fail-closed')
+
+  // URL :id must name the config's systemId → 409, and the system is never loaded
+  const before = findCalls(calls, 'getExternalSystemForAdapter').length
+  const mismatch = await invoke(routes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+    user: WRITE_USER, params: { id: 'sys_other' }, body: { config: probeConfig, inputs: { key: 'M-001' } },
+  })
+  assert.equal(mismatch.statusCode, 409, 'systemId mismatch is fail-closed')
+  assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, before, 'mismatched probe never loads the system')
+
+  // wrong system kind → 409 fail-closed
+  const wrongKind = createMockServices({
+    externalSystemRegistry: { async getExternalSystemForAdapter(input) { return { id: input.id, kind: 'http' } } },
+  })
+  const { routes: wkRoutes } = mountRoutes(wrongKind.services)
+  const wk = await invoke(wkRoutes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+    user: WRITE_USER, params: { id: 'sys_1' }, body: { config: probeConfig, inputs: { key: 'M-001' } },
+  })
+  assert.equal(wk.statusCode, 409, 'wrong system kind is fail-closed')
+
+  // adapter failure → 200 + coarse values-free error evidence (never the message/key/host)
+  const failSvc = createMockServices({
+    externalSystemRegistry: { async getExternalSystemForAdapter(input) { return { id: input.id, kind: 'erp:k3-wise-webapi', credentials: {} } } },
+    adapterRegistry: { createAdapter() { return {
+      async read() {
+        const e = new Error('login to https://k3host failed for M-001')
+        e.name = 'K3WiseWebApiAdapterError'
+        e.details = { code: 'K3_WISE_LOGIN_FAILED' }
+        throw e
+      },
+    } } },
+  })
+  const { routes: fRoutes } = mountRoutes(failSvc.services)
+  const fail = await invoke(fRoutes, 'POST', '/api/integration/external-systems/:id/read-source-probe', {
+    user: WRITE_USER, params: { id: 'sys_1' }, body: { config: probeConfig, inputs: { key: 'M-001' } },
+  })
+  assertOkResponse(fail, 200)
+  assert.equal(fail.body.data.ok, false)
+  assert.equal(fail.body.data.errorCode, 'READ_SOURCE_PROBE_AUTH_FAILED')
+  assert.equal(fail.body.data.errorType, 'K3WiseWebApiAdapterError')
+  const failStr = JSON.stringify(fail.body.data)
+  for (const leak of ['M-001', 'k3host', 'login']) {
+    assert.ok(!failStr.includes(leak), `probe failure evidence must not leak ${leak}`)
+  }
+
+  console.log('  testReadSourceProbeRoute OK')
+}
+
 async function main() {
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
@@ -5938,6 +6091,7 @@ async function main() {
   await testTemplatePreviewBulkReadGuards()
   await testExternalSystemRoutes()
   await testReadSmokeRoute()
+  await testReadSourceProbeRoute()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()

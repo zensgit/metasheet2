@@ -17,6 +17,7 @@ const ROUTES = [
   ['DELETE', '/api/integration/external-systems/:id', 'externalSystemsDelete'],
   ['POST', '/api/integration/external-systems/:id/test', 'externalSystemsTest'],
   ['POST', '/api/integration/external-systems/:id/read-smoke', 'externalSystemReadSmoke'],
+  ['POST', '/api/integration/external-systems/:id/read-source-probe', 'externalSystemReadSourceProbe'],
   ['GET', '/api/integration/external-systems/:id/objects', 'externalSystemObjects'],
   ['GET', '/api/integration/external-systems/:id/schema', 'externalSystemSchema'],
   ['GET', '/api/integration/pipelines', 'pipelinesList'],
@@ -86,6 +87,13 @@ const {
   readSmokeErrorEvidence,
   normalizeReadSmokeContract,
 } = require('./read-smoke.cjs')
+// S2-b (#1709 self-service): fixed locate-container probe runtime. Consumes the S2-a contract only;
+// evidence is the S2-a values-free schema on success and failure alike.
+const {
+  ReadSourceProbeRuntimeError,
+  prepareReadSourceProbe,
+  executeReadSourceProbe,
+} = require('./read-source-probe-runtime.cjs')
 const { K3_REFERENCE_MAPPING_TEMPLATES } = require('./reference-mapping-templates.cjs')
 const { listReferenceIntegrationTemplates } = require('./reference-integration-templates.cjs')
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
@@ -1644,6 +1652,49 @@ function createHandlers(services, options = {}) {
         return sendOk(res, readSmokeSuccessEvidence(preset, result, contract))
       } catch (error) {
         return sendOk(res, readSmokeErrorEvidence(preset, error, contract))
+      }
+    },
+
+    // S2-b (#1709 self-service): fixed locate-container probe route — the line's first live outbound read.
+    // S1-validated config ONLY (the S2-a normalizer fail-closes any raw path/method/response/credential),
+    // registered-system resolution ONLY (backend getExternalSystemForAdapter credential context; the URL :id
+    // must name the config's systemId), probe-time re-run of isSafeRelativeReadPath inside the runtime,
+    // platform-fixed timeout/row-cap, and values-free S2-a evidence on success AND failure. No persistence,
+    // no system mutation, no write path.
+    async externalSystemReadSourceProbe(req, res) {
+      // Same conservative tier as read-smoke (S2 design-lock lock 10): an active credentialed outbound
+      // probe is a connection/probe action → operator/integration-write only, never end-user reachable.
+      requireAccess(req, 'write')
+      let probe
+      try {
+        probe = prepareReadSourceProbe(requestBody(req))
+      } catch (error) {
+        // Coarse, values-free reason only (never the submitted config, path, key, or values).
+        throw new HttpRouteError(400, 'READ_SOURCE_PROBE_CONTRACT_INVALID', 'read-source probe contract is invalid', { reason: error && typeof error.reason === 'string' ? error.reason : 'invalid' })
+      }
+      // Fail-closed: the URL :id and the config's systemId must name the same registered system.
+      if (requestParams(req).id !== probe.plan.systemId) {
+        throw new HttpRouteError(409, 'READ_SOURCE_PROBE_SYSTEM_MISMATCH', 'probe config does not reference this external system')
+      }
+      // Backend credential context — NOT the public, credential-stripped system response.
+      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
+        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+        : externalSystems.getExternalSystem.bind(externalSystems)
+      const system = await loadSystem(scopedInput(req, { id: requestParams(req).id }))
+      if (!system || system.kind !== probe.plan.requiredKind) {
+        throw new HttpRouteError(409, 'READ_SOURCE_PROBE_KIND_MISMATCH', 'external system kind does not match the probe config')
+      }
+      try {
+        const evidence = await executeReadSourceProbe(probe, {
+          system,
+          createAdapter: (adapterSystem) => adapterRegistry.createAdapter(adapterSystem, { principal: requestPrincipal(req) }),
+        })
+        return sendOk(res, evidence)
+      } catch (error) {
+        if (error instanceof ReadSourceProbeRuntimeError) {
+          throw new HttpRouteError(409, 'READ_SOURCE_PROBE_KIND_MISMATCH', 'external system kind does not match the probe config')
+        }
+        throw error
       }
     },
 
