@@ -9,7 +9,7 @@ const { MAX_LIST_LIMIT } = httpRoutes
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 const { READ_SMOKE_LIST_REQUEST_MARKER } = require(path.join(__dirname, '..', 'lib', 'read-smoke-marker.cjs'))
-const { createReadSourceConfigStore } = require(path.join(__dirname, '..', 'lib', 'read-source-config-store.cjs'))
+const { createReadSourceConfigStore, ReadSourceConfigNotApprovedError } = require(path.join(__dirname, '..', 'lib', 'read-source-config-store.cjs'))
 // S4: adapter self-described metadata — the mock registry serves the REAL per-module metadata
 // so the /adapters route assertions verify the actual shipped values (no duplicated literal).
 const ADAPTER_METADATA_BY_KIND = {
@@ -272,6 +272,10 @@ function createMockServices(overrides = {}) {
       async get(input) {
         calls.push(['readSourceConfigGet', input])
         return { id: input.id, status: 'draft' }
+      },
+      async getForRuntime(input) {
+        calls.push(['readSourceConfigGetForRuntime', input])
+        return { id: input.id, status: 'approved', systemId: 'sys_1', config: {} }
       },
       async approve(input) {
         calls.push(['readSourceConfigApprove', input])
@@ -6290,6 +6294,140 @@ async function testReadSourceConfigRoutes() {
   console.log('  testReadSourceConfigRoutes OK')
 }
 
+// S3-2 (#1709 self-service): runtime-tier configured read route. Approved-config-only, key-only body,
+// data-plane values to the caller, values-free evidence, read tier by design (S0 two-tier model).
+async function testReadSourceConfiguredReadRoute() {
+  const readArgs = []
+  const writeCalls = []
+  const approvedConfig = {
+    version: 3,
+    systemId: 'sys_1',
+    requiredKind: 'erp:k3-wise-webapi',
+    object: 'material',
+    mode: 'single_record',
+    readPath: '/K3API/Material/GetDetail',
+    readMethod: 'POST',
+    operations: ['read'],
+    keyField: 'FNumber',
+    containerPaths: ['Data'],
+    fieldMap: [
+      { source: 'FName', target: 'col_name' },
+      { source: 'FModel', target: 'col_model' },
+    ],
+  }
+  const storeCalls = []
+  const services = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        return { id: input.id, kind: 'erp:k3-wise-webapi', credentials: { bearerToken: 'secret-token' }, config: { objects: {} } }
+      },
+    },
+    readSourceConfigStore: {
+      async saveVersion() { return {} },
+      async list() { return [] },
+      async get() { return {} },
+      async approve() { return {} },
+      async retire() { return {} },
+      async listAudit() { return [] },
+      async getForRuntime(input) {
+        storeCalls.push(['getForRuntime', input])
+        if (input.id === 'rsc_draft') {
+          const error = new Error('read-source config version is not approved')
+          error.name = 'ReadSourceConfigNotApprovedError'
+          Object.setPrototypeOf(error, ReadSourceConfigNotApprovedError.prototype)
+          error.details = { id: input.id, status: 'draft' }
+          throw error
+        }
+        return { id: input.id, systemId: 'sys_1', object: 'material', mode: 'single_record', version: 3, status: 'approved', config: approvedConfig }
+      },
+    },
+    adapterRegistry: {
+      createAdapter() {
+        return {
+          async read(req) {
+            readArgs.push(req)
+            return {
+              records: [],
+              raw: { Data: { FName: 'SECRET-NAME', FModel: 'MX-9', FNumber: req.filters.FNumber, FUnclassified: 'DROP-ME' } },
+            }
+          },
+          async upsert(b) { writeCalls.push(['upsert', b]); return {} },
+          async save(b) { writeCalls.push(['save', b]); return {} },
+        }
+      },
+    },
+  }).services
+  const { routes } = mountRoutes(services)
+
+  // success: read tier is ALLOWED (the designed runtime tier), data plane carries ONLY mapped targets,
+  // evidence stays values-free.
+  const ok = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    user: READ_USER, params: { id: 'rsc_ok' }, query: { workspaceId: 'workspace_1' },
+    body: { inputs: { key: 'M-001' } },
+  })
+  assertOkResponse(ok, 200)
+  assert.equal(ok.body.data.evidence.ok, true)
+  assert.deepEqual(ok.body.data.data.containers.primary.records, [{ col_name: 'SECRET-NAME', col_model: 'MX-9' }])
+  assert.equal(ok.body.data.data.recordCount, 1)
+  assert.equal(readArgs.length, 1, 'adapter.read called exactly once')
+  assert.deepEqual(readArgs[0], { object: 'material', filters: { FNumber: 'M-001' } })
+  assert.equal(writeCalls.length, 0, 'no write surface touched')
+  const evidenceStr = JSON.stringify(ok.body.data.evidence)
+  for (const leak of ['M-001', 'SECRET-NAME', 'MX-9', 'col_name', 'FName', 'DROP-ME', 'secret-token', '/K3API']) {
+    assert.ok(!evidenceStr.includes(leak), `evidence must not leak ${leak}`)
+  }
+  const dataStr = JSON.stringify(ok.body.data.data)
+  assert.ok(!dataStr.includes('DROP-ME') && !dataStr.includes('FUnclassified'), 'unmapped raw fields never reach the data plane')
+
+  // approved-only: draft/retired → 409 coarse
+  const draft = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    user: READ_USER, params: { id: 'rsc_draft' }, body: { inputs: { key: 'M-001' } },
+  })
+  assert.equal(draft.statusCode, 409, 'non-approved config is fail-closed')
+  assert.equal(draft.body.error.code, 'READ_SOURCE_CONFIG_NOT_APPROVED')
+
+  // strict body allowlist: a config (or any extra key) can never ride in from the runtime request
+  const smuggle = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    user: READ_USER, params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' }, config: { readPath: 'https://evil.example.com' } },
+  })
+  assert.equal(smuggle.statusCode, 400, 'extra body keys are fail-closed')
+  assert.ok(!JSON.stringify(smuggle.body).includes('evil.example.com'), 'error is values-free')
+
+  // unauthenticated rejected
+  const anon = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' } },
+  })
+  assert.equal(anon.statusCode, 401, 'unauthenticated caller rejected')
+
+  // approved config whose registered system kind has drifted → 409 fail-closed, no adapter read
+  const readsBefore = readArgs.length
+  const wrongKind = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) { return { id: input.id, kind: 'http' } },
+    },
+    readSourceConfigStore: {
+      async saveVersion() { return {} },
+      async list() { return [] },
+      async get() { return {} },
+      async approve() { return {} },
+      async retire() { return {} },
+      async listAudit() { return [] },
+      async getForRuntime(input) {
+        return { id: input.id, systemId: 'sys_1', object: 'material', mode: 'single_record', version: 3, status: 'approved', config: approvedConfig }
+      },
+    },
+  }).services
+  const { routes: wkRoutes } = mountRoutes(wrongKind)
+  const wk = await invoke(wkRoutes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    user: READ_USER, params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' } },
+  })
+  assert.equal(wk.statusCode, 409, 'kind drift is fail-closed')
+  assert.equal(wk.body.error.code, 'READ_SOURCE_READ_KIND_MISMATCH')
+  assert.equal(readArgs.length, readsBefore, 'no outbound read on kind mismatch')
+
+  console.log('  testReadSourceConfiguredReadRoute OK')
+}
+
 async function main() {
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
@@ -6313,6 +6451,7 @@ async function main() {
   await testReadSmokeRoute()
   await testReadSourceProbeRoute()
   await testReadSourceConfigRoutes()
+  await testReadSourceConfiguredReadRoute()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()
