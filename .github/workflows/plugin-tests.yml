@@ -346,6 +346,7 @@ jobs:
             tests/integration/approval-node-sla-remind.test.ts \
             tests/integration/approval-node-timeout-effects.test.ts \
             tests/integration/approval-nofm-threshold.test.ts \
+            tests/integration/approval-bulk-reassign.api.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)

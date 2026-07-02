@@ -44,14 +44,13 @@ describe('approval admin jump migration and bootstrap sync', () => {
     expect(roleDeleteIndex).toBeLessThan(permissionDeleteIndex)
   })
 
-  it('T-bootstrap keeps approval_schema_bootstrap action check aligned with add_sign/reduce_sign (P1-B)', async () => {
+  it('T-bootstrap keeps approval_schema_bootstrap action check aligned with reassign (P1-B)', async () => {
     const source = await fs.readFile(BOOTSTRAP_PATH, 'utf8')
 
-    // The delegation runtime added approval_delegations to the bootstrap and bumped the
-    // version; the action CHECK still permits add_sign/reduce_sign (Lane D / migration
-    // zzzz20260616130000).
-    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260622-delegations'")
-    expect(source).toContain("'remind', 'jump', 'add_sign', 'reduce_sign'")
+    // The scoped-admin runtime added admin reassign to the bootstrap and bumped the
+    // version; the action CHECK still permits add_sign/reduce_sign plus reassign.
+    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260702-admin-reassign'")
+    expect(source).toContain("'remind', 'jump', 'add_sign', 'reduce_sign', 'reassign'")
   })
 
   it('does not mutate immutable historical approval action migrations', async () => {

@@ -205,7 +205,7 @@ describeIfDatabase('approval directory endpoints (P1-static-picker backend, real
     expect(res.status).toBe(403)
   })
 
-  it('routes are gated by least-privilege approval-templates:manage, NOT ensurePlatformAdmin', () => {
+  it('routes are gated by the least-privilege template-admin guard, NOT ensurePlatformAdmin', () => {
     const src = readFileSync(path.resolve(__dirname, '../../src/routes/approvals.ts'), 'utf8')
     const lines = src.split('\n')
     const usersLine = lines.find((l) => l.includes("'/api/approval-templates/directory/users'"))
@@ -214,9 +214,10 @@ describeIfDatabase('approval directory endpoints (P1-static-picker backend, real
     expect(usersLine).toBeTruthy()
     expect(rolesLine).toBeTruthy()
     expect(formulaRolesLine).toBeTruthy()
-    expect(usersLine).toContain("rbacGuard('approval-templates:manage')")
-    expect(rolesLine).toContain("rbacGuard('approval-templates:manage')")
-    expect(formulaRolesLine).toContain("rbacGuard('approval-templates:manage')")
+    expect(src).toContain("rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])")
+    expect(usersLine).toContain('approvalTemplateAdminGuard')
+    expect(rolesLine).toContain('approvalTemplateAdminGuard')
+    expect(formulaRolesLine).toContain('approvalTemplateAdminGuard')
     expect(usersLine).not.toContain('ensurePlatformAdmin')
     expect(rolesLine).not.toContain('ensurePlatformAdmin')
     expect(formulaRolesLine).not.toContain('ensurePlatformAdmin')
