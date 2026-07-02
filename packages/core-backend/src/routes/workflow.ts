@@ -12,6 +12,7 @@ import { Logger } from '../core/logger'
 import { loadValidators } from '../types/validator'
 import { loadMulter, createUploadMiddleware, createOptionalUpload } from '../types/multer'
 import type { RequestWithFile } from '../types/multer'
+import { buildBpmnWorkflowEngineOptionsFromServerConfig } from '../workflow/bpmnHttpTaskEgressPolicy'
 
 // Load validators (express-validator or no-op fallbacks)
 const { body, param, query } = loadValidators()
@@ -23,7 +24,7 @@ const optionalUpload = createOptionalUpload(upload, 'bpmnFile')
 
 const router = Router()
 const logger = new Logger('WorkflowAPI')
-const workflowEngine = new BPMNWorkflowEngine()
+const workflowEngine = new BPMNWorkflowEngine(buildBpmnWorkflowEngineOptionsFromServerConfig())
 
 // Initialize engine unless explicitly disabled (e.g., CI smoke).
 if (process.env.DISABLE_WORKFLOW === 'true') {

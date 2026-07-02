@@ -2,7 +2,8 @@
 
 Survey of the BPMN HTTP-task SSRF boundary line (design-lock `#3428` plus A3
 rollout lock `#3452`): what is landed, what is verified, and what remains
-gated. Grounded against `origin/main` after `#3457`.
+gated. Grounded against `origin/main` after `#3457` plus this A3-c runtime
+policy-injection slice.
 
 ## 1. Baseline
 
@@ -26,25 +27,27 @@ gated. Grounded against `origin/main` after `#3457`.
 | Helper API hardening | `#3443` / `925932837` | `isBlockedEgressIp()` always folds in the well-known NAT64 prefix even for direct helper callers passing custom prefixes, preventing future default-prefix drift. |
 | A1 IP-pinned dispatcher | `#3447` / `be35eec6` | Adds `dispatchPinnedEgressRequest`: resolve-all DNS, deny if any resolved IP is unsafe, pin the chosen validated IP, revalidate redirects, cap redirects, and require manual redirect handling. No engine wiring in that slice. |
 | A2 engine wiring | `#3451` / `5193432a8` | Replaces the raw `fetch` path in `executeHttpTask` with the pinned dispatcher plus HTTPS JSON transport; preserves Host/SNI while connecting to the pinned IP; enforces GET/POST only; rejects `Authorization`, `Cookie`, `Host`, `Proxy-*`, `Forwarded`, and `X-Forwarded-*`; caps headers, redirects, timeout, and response size; default policy remains fail-closed. |
-| A3 rollout policy design-lock | `#3452` / `771871e05` | Locks the next governance gate: server-owned policy source only, exact DNS host policy entries, NAT64 prefixes as classifier metadata only, fail-closed malformed/absent config, both engine construction sites sharing one loader path, route provenance negative controls, and values-free evidence. No runtime/config loader or live destination enablement. |
+| A3 rollout policy design-lock | `#3452` / `771871e05` | Locks the next governance gate: server-owned policy source only, exact DNS host policy entries, NAT64 prefixes as classifier metadata only, fail-closed malformed/absent config, both engine construction sites sharing one loader path, route provenance negative controls, and values-free evidence. The design-lock itself did not enable runtime egress. |
 | A3-a policy normalizer | `#3455` / `cead5a84d` | Adds `normalizeBpmnHttpTaskEgressPolicyConfig`: server-owned policy config parsing, exact ASCII DNS host validation, `/96` deployment NAT64 prefix normalization, duplicate rejection, order-independent fingerprinting, and values-free metadata/errors. No route/runtime/config loader, DNS lookup, transport, persistence, or live allowlist enablement. |
 | A3-b route provenance negative controls | `#3457` / `4bd15aca3` | Locks that workflow deploy/start/designer payloads, start variables, and BPMN extension XML cannot smuggle egress policy into `BPMNWorkflowEngine`. Adds route and engine negative controls while keeping A3-c runtime policy injection gated. |
+| A3-c runtime policy injection | `#3460` | Injects the normalized backend-only `BPMN_HTTP_TASK_EGRESS_POLICY` source into both BPMN route engine construction sites. Missing/malformed/invalid config still injects the default empty allowlist. No concrete production/staging destination is committed. |
 
 ## 3. Current Runtime State
 
 `executeHttpTask` is no longer a naked outbound fetch site. It now calls
 `dispatchPinnedEgressRequest` with:
 
-- `defaultEgressPolicy()` when no explicit policy is injected, which means a
-  missing allowlist denies all HTTP-task egress;
+- a route-injected policy loaded from backend-only
+  `BPMN_HTTP_TASK_EGRESS_POLICY`, or the default empty allowlist when config is
+  missing/malformed/invalid;
 - a DNS resolver that returns all A/AAAA answers and validates every answer;
 - `createPinnedHttpsJsonTransport()`, which connects to the pinned IP and keeps
   the original hostname for Host/SNI;
 - method/header filtering before the dispatcher sees the request.
 
 That closes the live full-read SSRF path by default. Existing workflows that
-depended on unconstrained HTTP tasks now fail closed unless a policy is injected
-by a future rollout/configuration slice.
+depended on unconstrained HTTP tasks now fail closed unless deployment-owned
+server config supplies an exact-host allowlist.
 
 ## 4. Verification
 
@@ -76,31 +79,33 @@ by a future rollout/configuration slice.
   6 files / 112 tests PASS; `git diff --check` PASS.
 - `#3457` fresh CI passed `test (18.x)`, `test (20.x)`, coverage, K3 WISE,
   after-sales, and the contract gates after rebasing to the current main.
+- A3-c runtime verification covers missing/malformed config fail-closed,
+  allowlisted-host pass-through via mocked DNS/transport, request/BPMN/variables
+  policy-smuggling negative controls, both route construction sites sharing the
+  same server-owned policy source, and the convergence guard that prevents the
+  policy helper from importing `BPMNWorkflowEngine`.
 
 ## 5. Remaining Gate
 
-The R1 code path is closed by default. `#3452` locks the rollout policy shape,
-`#3455` implements the pure policy normalizer, and `#3457` locks route
-provenance negative controls. The runtime injection/configuration path is still
-a separate gate. This is intentional: the design-lock treated fail-closed
-rollout as a behavior change and required the policy-enablement path to be its
-own step.
+The R1 code path is closed by default, and the A3 rollout runtime now has a
+server-owned policy source. Configuring any real destination remains a separate
+deployment/governance action, but the code path for policy injection is shipped
+by this slice.
 
 | Remaining item | State | Why it remains separate |
 |---|---|---|
-| A3-c runtime policy injection / configured policy enablement | **A3-a/A3-b SHIPPED; RUNTIME GATED** | `#3452` defines the server-owned policy model, `#3455` validates the policy shape, and `#3457` proves route/user/BPMN inputs cannot supply policy. No product/admin configuration surface, config loader, engine construction injection, or live allowlist rollout has been opened. Enabling real destinations remains an owner/governance decision, not an automatic continuation. |
+| Concrete destination rollout | **CONFIGURATION GATED** | The code supports backend-only `BPMN_HTTP_TASK_EGRESS_POLICY`, but no production/staging host is committed here. Choosing a real host remains an owner/governance deployment decision. |
 
 ## 6. Outcome
 
 - R1 design-lock, guard, IP classifier hardening, dispatcher, engine wiring,
-  A3-a policy normalizer, and A3-b route provenance negative controls are all
-  merged on `main`.
+  A3-a policy normalizer, A3-b route provenance negative controls, and A3-c
+  runtime policy injection are all merged or implemented by this line.
 - The original live SSRF hole is closed by default: no configured allowlist means
   no outbound HTTP-task request is dispatched.
-- The remaining work is not another blind SSRF patch; it is the explicit A3-c
-  policy/rollout runtime. `#3452` defines the server-owned policy source,
-  `#3455` validates the policy contract, and `#3457` locks route-level
-  provenance controls; runtime injection still requires per-slice owner opt-in.
+- The remaining work is not another blind SSRF patch; it is concrete
+  deployment-owned allowlist configuration, if/when an owner chooses a real
+  destination.
 
 ## Invariants Held
 
