@@ -6,6 +6,13 @@
 > rest. Companion artifacts: the **decision register** (`approval-automation-decision-register-20260629.md`),
 > the **design-lock pack** (`approval-automation-design-lock-pack-20260629.md`), and the evidence base —
 > the **refresh audit** (`docs/research/approval-automation-refresh-audit-20260629.md`).
+>
+> **As-built update after later rungs shipped.** This report remains the 2026-06-29 decision-register
+> closeout, but several rungs it listed as owner-gated have since been ratified and shipped: R1 default-closed
+> egress containment, T2-6 dedup, T1-3 approval.completed trigger, T1-1 slice-2 timeout transfer/jump, T3-4
+> non-approved W7 writeback, and T0-3 delete_record editor exposure. Treat the register/pack below as the
+> historical decision record plus remaining-gate reference, not as a current claim that all 17 rungs are still
+> open.
 
 ## 1. The honest finding (why "complete all 20 rungs, merged" was not the deliverable)
 
@@ -44,16 +51,16 @@ asserts as fail-first, **plus** the save Guarantee (holds via binding-persistenc
 
 ## 3. The gate to everything else — the decision register
 
-All 17 remaining rungs are catalogued in the **decision register** with their open decisions + proposed
-defaults. The fastest path to building any of them: **approve its proposed defaults (or override), and it
-becomes design-lock-first buildable.** A few high-signal examples (full list in the register):
+The original 17 rungs were catalogued in the **decision register** with their open decisions + proposed
+defaults. Several of those decisions have since been approved and shipped; the remaining rungs still follow the
+same path: **approve its proposed defaults (or override), and it becomes design-lock-first buildable.** A few
+high-signal examples from the original register (full list in the register):
 
-- **T0-3 expose `delete_record`** (7 decisions) — default: same-base trigger-record delete only, required
-  anti-misdelete acknowledgement kept out of persisted config, no cross-base UI in v1.
+- **T0-3 expose `delete_record`** — shipped later on the same-base trigger-record default (#3477).
 - **T1-1 node-level SLA + timeout** (8) — the open call is the timeout effect set + invalidation semantics.
 - **R1 BPMN governance + SSRF** (7) — the security containment approach (gate the route / allowlist
   service-task fetch); this is the discovered-risk ticket, recommend triaging first.
-- **T3-4 W7 rejection backwrite** (6) — the product call: write-back-then-continue-tail vs -then-fail.
+- **T3-4 W7 rejection backwrite** — shipped later as opt-in write-back-then-fail (#3474).
 
 Caveat: **T1-3, T2-4, T3-6** had cited anchors the adversarial reviewer could not fully confirm — verify
 the code references before building those three.
@@ -71,12 +78,12 @@ status is: **a complete, decision-ready plan to parity, with the decision-clean 
 
 ## 5. Recommended completion sequence (each a separate opt-in after its decisions land)
 
-1. **Land the shipped increment:** confirm the T0-2 §5 deviation (#3384), merge #3384 + #3382.
-2. **Triage the risk ticket R1** (BPMN governance/SSRF) — security, independent of features.
-3. **First parity arc — T1-1 node-level SLA + timeout actions** (highest benchmark value, no hard deps)
-   once its timeout-effect decisions are approved.
-4. Then T1-2 inbound webhook · T1-3 `approval.*` trigger · T1-4 field-perms — per their registers.
-5. Ops/admin (T2-*) and strategic L arcs (T3-*) as scoped, decision-led arcs.
+1. **Landed:** #3384 + #3382, R1 default-closed egress containment, T2-6, T1-3, T1-1 slice-2, T3-4,
+   and T0-3 have all shipped in later PRs.
+2. **Remaining feature/security lanes:** T1-2 inbound webhook, T3-5 W7 cross-base, T2-1+2 scoped
+   admins/handover, T1-4 field-perms, and the strategic L arcs remain decision-led.
+3. **Governance-only remainder:** R1 destination authorization remains deny-all until a named destination is
+   explicitly approved/configured.
 
 Nothing in §5 is started by this report. Approve a rung's register entries and I'll produce its
 design-lock then implementation, verified the same way as §2.

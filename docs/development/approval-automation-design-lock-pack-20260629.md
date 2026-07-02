@@ -6,6 +6,13 @@
 > register (`approval-automation-decision-register-20260629.md`) for the open decisions + proposed
 > defaults that unblock it. Anchor caveat: T1-3 / T2-4 / T3-6 had cited anchors the reviewer could not
 > fully confirm — verify against code before implementing.
+>
+> **As-built update:** this pack remains the historical design-lock source. Some sections are now shipped
+> implementations rather than open proposals: R1 default-closed egress containment, T2-6 dedup, T1-3
+> approval.completed trigger, T1-1 slice-2 transfer/jump, T3-4 non-approved W7 writeback, and T0-3
+> delete_record editor exposure. The shipped status and current queue are summarized in
+> `approval-automation-parallel-development-plan-20260701.md` and
+> `approval-automation-first-batch-ballot-20260701.md`.
 
 ---
 
@@ -1334,4 +1341,3 @@ GO and only after D1–D10 are answered. Brand-neutral: states MetaSheet capabil
 benchmarked internally, no external product names in the contract.
 
 ---
-

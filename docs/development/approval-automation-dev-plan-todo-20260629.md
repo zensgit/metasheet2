@@ -10,11 +10,18 @@
 > approved before any runtime/UI code). Status markers:
 > **🔒** gated — needs an explicit owner GO · **⬜** GO'd, not started · **🟡** in progress / partial · **✅** shipped.
 > Sizes: **S** ≈ ≤1–2 PRs contained · **M** ≈ a small arc · **L** ≈ a multi-PR arc with its own design-lock.
+>
+> **Historical snapshot notice (updated after first-batch runtime landed).** This 2026-06-29 TODO is retained as
+> the original ladder, not the current queue. Current as-built status moved forward through R1 default-closed
+> egress containment, T2-6 dedup, T1-3 approval.completed trigger, T1-1 slice-2 timeout transfer/jump, T3-4
+> non-approved W7 writeback, and T0-3 delete_record editor exposure. For the current queue and lane ordering,
+> use `docs/development/approval-automation-parallel-development-plan-20260701.md`; for the first-batch
+> decisions, use `docs/development/approval-automation-first-batch-ballot-20260701.md`.
 
-## Where we are (one line)
-Core is **done**: baseline 9/9, P1 3✅+1🟡, automation engine mature (8/9 triggers live, 12+2 actions,
+## Historical "where we were" snapshot (one line)
+At the time, core was **done**: baseline 9/9, P1 3✅+1🟡, automation engine mature (8/9 triggers live, 12+2 actions,
 full scheduler/jobs/suspend-resume/conditions/retry/depth/idempotency), W6 + W7 approved-path shipped.
-Frontier = P2 (0✅/3🟡/3⬜), P3 (1✅/2🟡/2⬜), the S-band, a short parity list, and a risk-triage track.
+Frontier then = P2 (0✅/3🟡/3⬜), P3 (1✅/2🟡/2⬜), the S-band, a short parity list, and a risk-triage track.
 
 ---
 
@@ -46,25 +53,23 @@ These are not "build-next" features — they are exposures/decisions the audit s
 
 - [ ] **🔒 T0-1 — W6 deployed operator sign-off.** Owner decision on PR #3373: accept the in-process seam
   as ship evidence, or require the deployed staging smoke first. **No dev** — a governance close-out.
-- [ ] **🔒 T0-2 — W7 `resultWriteback` UI implementation.** The design-lock (#3375) is **merged**; implement
+- [x] **✅ T0-2 — W7 `resultWriteback` UI implementation.** Shipped after this snapshot; the design-lock (#3375) drove
   per it: three optional source-field pickers writing the backend config keys `statusField` /
   `approverField` / `completedAtField` (UI labels are separate), omit-when-empty, **preserve the current
   configured value in each picker** (P2 fix), explicit-carry in `buildActionPayload` (+ pass `requester`
-  through), two fail-first round-trip tests. **Size S–M · design-lock done → ready on GO.**
-- [ ] **🔒 T0-3 — Expose `delete_record` in the rule editor.** Full guarded executor support exists but it
-  is backend-only. Add to the selectable set behind confirm + permission + anti-misdelete. **Size S.**
+  through), two fail-first round-trip tests.
+- [x] **✅ T0-3 — Expose `delete_record` in the rule editor.** Shipped as first-batch runtime (#3477):
+  same-base trigger-record only, acknowledgement-gated editor, save-gate hardening.
 
 ## Track 1 — High-frequency parity (contained)
 
-- [ ] **🔒 T1-1 — Node-level SLA + timeout actions.** Per-node timeout with a defined effect set
-  (remind / transfer / jump / auto-approve / auto-reject). Today SLA is template-level + remind only.
-  **Highest parity value, no hard deps — recommended first feature arc after the finish-lines.**
-  **Size M · design-lock-first** (timeout-effect + invalidation semantics).
+- [x] **✅ T1-1 — Node-level SLA + timeout actions.** Slice-1 remind and slice-2 transfer/jump are shipped
+  (#3404/#3468). `auto_approve`/`auto_reject` remain env-gated/inert terminal effects, and business-calendar
+  SLA is still a separate gated rung.
 - [ ] **🔒 T1-2 — Inbound webhook endpoint** (signed, audited) — makes `webhook.received` real (closes R3).
   **Size M · design-lock-first** (signature + trigger-audit contract).
-- [ ] **🔒 T1-3 — `approval.*` automation trigger.** "On approval terminal (approved/rejected/…) → run an
-  automation rule." The completion event already drives W6 resume; this exposes it as a first-class rule
-  trigger. **Size M · design-lock-first** (trigger contract + loop/depth guard).
+- [x] **✅ T1-3 — `approval.*` automation trigger.** Shipped as `approval.completed` first-class trigger
+  (#3467): template-routed, record-less v1, T2-6 ledger reuse, permission recheck.
 - [ ] **🔒 T1-4 — Finish P1-C node field-permissions.** `readonly`/`editable` runtime (today only `hidden`
   works) + authoring UI. **Size S–M · dep:** edit-form-at-node direction (snapshots are write-once at create).
 
@@ -89,8 +94,8 @@ These are not "build-next" features — they are exposures/decisions the audit s
 - [ ] **🔒 T3-2 — Business/work-day calendar wired to SLA** (multi-time-dimension, non-counting windows).
   The calendar exists (attendance) but is unwired. **Size L · dep:** T1-1 node-SLA.
 - [ ] **🔒 T3-3 — Handwritten signature / compliance.** Absent. **Size M–L.**
-- [ ] **🔒 T3-4 — W7 rejection backwrite.** **Size M · design-lock-first** — the open product call:
-  rejected/cancelled/revoked → write-back-then-continue-tail vs write-back-then-fail.
+- [x] **✅ T3-4 — W7 rejection backwrite.** Shipped as opt-in non-approved resultWriteback (#3474):
+  write-back-then-fail, three non-approved terminal states.
 - [ ] **🔒 T3-5 — W7 cross-base backwrite.** **Size M–L · design-lock-first** — security arc
   (perm / lock / audit / target-resolution re-lock); routes through the existing cross-base write gate.
 - [ ] **🔒 T3-6 — S-band: approval data as first-class multitable records.** Strategic; broader than the
