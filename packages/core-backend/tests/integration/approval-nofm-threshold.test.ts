@@ -129,6 +129,46 @@ function buildThresholdReentryGraph() {
   }
 }
 
+// Re-entry THROUGH the threshold node (not TO it): an upstream approval node precedes X, and the RETURN
+// targets that UPSTREAM node. The return record names the upstream node, NOT X — so a cutoff that only
+// matched return/jump records naming X missed this vector. Forward approval then progresses upstream→X,
+// re-entering X while its prior-round approves persist. This is a distinct second bypass from the direct
+// return-to-X case above.
+function buildThresholdThroughReentryGraph() {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      {
+        key: 'approval_upstream',
+        type: 'approval',
+        config: { assigneeType: 'user', assigneeIds: ['approver-p'], approvalMode: 'single' },
+      },
+      {
+        key: 'approval_threshold',
+        type: 'approval',
+        config: {
+          assigneeType: 'user',
+          assigneeIds: ['approver-a', 'approver-b', 'approver-c'],
+          approvalMode: 'threshold',
+          approvalThreshold: 2,
+        },
+      },
+      {
+        key: 'approval_second',
+        type: 'approval',
+        config: { assigneeType: 'user', assigneeIds: ['approver-a'], approvalMode: 'single' },
+      },
+      { key: 'end', type: 'end', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-upstream', source: 'start', target: 'approval_upstream' },
+      { key: 'edge-upstream-threshold', source: 'approval_upstream', target: 'approval_threshold' },
+      { key: 'edge-threshold-second', source: 'approval_threshold', target: 'approval_second' },
+      { key: 'edge-second-end', source: 'approval_second', target: 'end' },
+    ],
+  }
+}
+
 // Same re-entry shape as above, but the threshold node includes the requester and enables
 // merge-with-requester auto approval. On RETURN, the auto-approval audit row is inserted
 // at the SAME to_version as the return record. That legitimate current-round vote must
@@ -542,6 +582,57 @@ describeIfDatabase('Approval T2-4 N-of-M threshold (门槛会签) API', () => {
     expect(afterFresh.currentNodeKey).toBe('approval_threshold')
 
     // A SECOND fresh distinct approval resolves the current round → advances again (fresh quorum still works).
+    const afterFresh2 = await act(bTok, { action: 'approve', comment: 'B r2 (2 of 2)' })
+    expect(afterFresh2.currentNodeKey).toBe('approval_second')
+  })
+
+  it('does NOT re-satisfy a threshold node RE-ENTERED THROUGH an upstream return target (second bypass)', async () => {
+    const adminToken = await authToken(baseUrl, 'approval-admin-threshold')
+    const requesterToken = await authToken(baseUrl, 'requester-threshold')
+    const pTok = await authToken(baseUrl, 'approver-p')
+    const aTok = await authToken(baseUrl, 'approver-a')
+    const bTok = await authToken(baseUrl, 'approver-b')
+
+    const templateId = await publishGraphTemplate(adminToken, buildThresholdThroughReentryGraph())
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'through re-entry quorum' } },
+    })
+    expect(create.status).toBe(201)
+    const inst = (await create.json()) as { id: string; currentNodeKey: string | null }
+    createdApprovalIds.add(inst.id)
+    expect(inst.currentNodeKey).toBe('approval_upstream')
+
+    const act = async (token: string, body: object) =>
+      (await jsonRequest(baseUrl, `/api/approvals/${inst.id}/actions`, token, { method: 'POST', body })).json() as Promise<{
+        status: string
+        currentNodeKey: string | null
+      }>
+
+    // Round 1: P approves upstream → advances to threshold; A + B approve the 2-of-3 → advances to second.
+    const afterP = await act(pTok, { action: 'approve', comment: 'P r1' })
+    expect(afterP.currentNodeKey).toBe('approval_threshold')
+    await act(aTok, { action: 'approve', comment: 'A r1' })
+    const afterB = await act(bTok, { action: 'approve', comment: 'B r1' })
+    expect(afterB.currentNodeKey).toBe('approval_second')
+
+    // RETURN to the UPSTREAM node — the return record names approval_upstream, NOT approval_threshold.
+    // This is the vector the earlier (name-X-only) cutoff missed.
+    const afterReturn = await act(aTok, { action: 'return', targetNodeKey: 'approval_upstream', comment: 'send back upstream' })
+    expect(afterReturn.currentNodeKey).toBe('approval_upstream')
+
+    // Round 2: P re-approves upstream → forward INTO the threshold node (re-entry THROUGH X).
+    const afterP2 = await act(pTok, { action: 'approve', comment: 'P r2' })
+    expect(afterP2.currentNodeKey).toBe('approval_threshold')
+
+    // ONE fresh approval must NOT re-satisfy the 2-of-3 on the stale round-1 A+B votes.
+    // (Pre-fix: cutoff query finds no return/jump NAMING approval_threshold → cutoff NULL → whole-node tally
+    // counts round-1 A+B → single vote resolves and the instance would already be at approval_second.)
+    const afterFresh = await act(aTok, { action: 'approve', comment: 'A r2 (1 of 2)' })
+    expect(afterFresh.status).toBe('pending')
+    expect(afterFresh.currentNodeKey).toBe('approval_threshold')
+
+    // A second fresh distinct approval resolves the current round → advances.
     const afterFresh2 = await act(bTok, { action: 'approve', comment: 'B r2 (2 of 2)' })
     expect(afterFresh2.currentNodeKey).toBe('approval_second')
   })
