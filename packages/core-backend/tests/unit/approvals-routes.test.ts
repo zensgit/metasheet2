@@ -39,6 +39,7 @@ vi.mock('../../src/middleware/auth', () => ({
 
 vi.mock('../../src/rbac/rbac', () => ({
   rbacGuard: () => (_req: express.Request, _res: express.Response, next: express.NextFunction) => next(),
+  rbacGuardAny: () => (_req: express.Request, _res: express.Response, next: express.NextFunction) => next(),
 }))
 
 describe('approvals routes', () => {

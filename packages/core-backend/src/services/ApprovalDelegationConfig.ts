@@ -1,9 +1,9 @@
 /**
  * Approval delegation (委托) — config CRUD (WRITE path).
  *
- * Manages rows in `approval_delegations` for the 委托设置 surface — ADMIN-managed (via
- * approval-templates:manage at the route): an admin creates / lists / patches / disables
- * time-boxed delegations for any user (the delegator is a chosen field). Kept separate
+ * Manages rows in `approval_delegations` for the 委托设置 surface — template-admin managed
+ * at the route: an admin creates / lists / patches / disables time-boxed delegations
+ * for any user (the delegator is a chosen field). Kept separate
  * from the read-only resolve seam (ApprovalDelegations.ts) so the convergence-guarded
  * create-approval path stays write-free.
  */
@@ -131,7 +131,7 @@ export async function listDelegations(query: QueryFn, filter: { delegatorUserId?
 
 /**
  * Disable (soft-delete) a delegation by id. Admin-managed (gated by
- * approval-templates:manage at the route); returns false for an unknown/already-inactive id.
+ * the template-admin guard at the route); returns false for an unknown/already-inactive id.
  */
 export async function disableDelegation(query: QueryFn, id: string): Promise<boolean> {
   const res = await query<{ id: string }>(
