@@ -39,12 +39,14 @@
             <option value="schedule.interval">{{ automationTriggerTypeLabel('schedule.interval', isZh) }}</option>
             <option value="schedule.date_field">{{ automationTriggerTypeLabel('schedule.date_field', isZh) }}</option>
             <!--
-              `webhook.received` is intentionally NOT offered here: it is runtime-inert today
-              (no inbound ingestion route exists, the scheduler skips it, and it has no
-              TRIGGER_TYPE_BY_EVENT entry), so a saved rule would silently never fire. This is a
-              UI-only removal — the backend trigger-type enum is deliberately left intact pending a
-              real inbound webhook endpoint, at which point this option can be re-exposed.
+              `webhook.received` is live since the signed inbound endpoint shipped (T1-2):
+              POST /api/multitable/automation/webhooks/:ruleId with HMAC-SHA256 timestamp-bound
+              signatures. `approval.completed` is the T1-3 template-routed approval-completion
+              trigger (record-less v1 — the backend save gate restricts its actions to the
+              notification family and requires template visibility for the rule creator).
             -->
+            <option value="webhook.received">{{ automationTriggerTypeLabel('webhook.received', isZh) }}</option>
+            <option value="approval.completed">{{ automationTriggerTypeLabel('approval.completed', isZh) }}</option>
           </select>
 
           <!-- field.value_changed config -->
@@ -105,6 +107,49 @@
             <label class="meta-rule-editor__label">{{ isZh ? '触发时间（UTC，可选）' : 'Time of day (UTC, optional)' }}</label>
             <input v-model="draft.triggerConfig.timeOfDay" class="meta-rule-editor__input" type="time" placeholder="09:00" data-field="timeOfDay" />
             <div class="meta-rule-editor__hint" data-field="dateFieldTimeHint">{{ isZh ? '每天按此 UTC 时间触发；服务重启后会补发当天到点的提醒。' : 'Fires daily at this UTC time; a restart catches up today\'s due reminders.' }}</div>
+          </template>
+
+          <!-- webhook.received (signed inbound) config -->
+          <template v-if="draft.triggerType === 'webhook.received'">
+            <label class="meta-rule-editor__label">{{ isZh ? '签名密钥（Secret）' : 'Signing secret' }}</label>
+            <input
+              v-model="draft.triggerConfig.secret"
+              class="meta-rule-editor__input"
+              type="password"
+              autocomplete="new-password"
+              :placeholder="savedWebhookSecretConfigured ? (isZh ? '已配置 — 留空保持不变，输入新值以更换' : 'Configured — leave blank to keep, enter a new value to rotate') : (isZh ? '必填：用于 HMAC-SHA256 请求签名' : 'Required: used for HMAC-SHA256 request signing')"
+              data-field="webhookSecret"
+            />
+            <div class="meta-rule-editor__hint" data-field="webhookEndpointHint">
+              {{ isZh
+                ? `保存后向 POST /api/multitable/automation/webhooks/${props.rule?.id || '<规则ID>'} 发送 JSON 对象请求；请求头需携带 X-MS-Webhook-Timestamp（Unix 秒）与 X-MS-Webhook-Signature: sha256=HMAC_SHA256(secret, "时间戳.请求体")，时间戳新鲜窗口 ±300 秒。密钥保存后只写不读（读取接口返回打码值）。`
+                : `After saving, POST a JSON object to /api/multitable/automation/webhooks/${props.rule?.id || '<ruleId>'} with X-MS-Webhook-Timestamp (unix seconds) and X-MS-Webhook-Signature: sha256=HMAC_SHA256(secret, "timestamp.body"); freshness window is ±300s. The secret is write-only after save (reads return a redacted value).` }}
+            </div>
+          </template>
+
+          <!-- approval.completed (T1-3 template-routed) config -->
+          <template v-if="draft.triggerType === 'approval.completed'">
+            <label class="meta-rule-editor__label">{{ isZh ? '审批模板' : 'Approval template' }}</label>
+            <select v-if="approvalTemplates.length > 0" v-model="draft.triggerConfig.templateId" class="meta-rule-editor__select" data-field="approvalCompletedTemplateId">
+              <option value="">{{ isZh ? '请选择审批模板' : 'Select an approval template' }}</option>
+              <option v-for="t in approvalTemplates" :key="t.id" :value="t.id">{{ t.name || t.id }}</option>
+            </select>
+            <input v-else v-model="draft.triggerConfig.templateId" class="meta-rule-editor__input" type="text" :placeholder="isZh ? '审批模板 ID' : 'Approval template ID'" data-field="approvalCompletedTemplateId" />
+            <label class="meta-rule-editor__label">{{ isZh ? '触发的完成结果（默认仅“通过”）' : 'Completion outcomes that fire (default: approved only)' }}</label>
+            <div class="meta-rule-editor__hint" data-field="approvalCompletedOutcomes">
+              <label v-for="outcome in APPROVAL_COMPLETED_OUTCOME_OPTIONS" :key="outcome" style="margin-right: 12px;">
+                <input v-model="approvalCompletedOutcomes" type="checkbox" :value="outcome" :data-field="`approvalOutcome-${outcome}`" />
+                {{ approvalCompletedOutcomeLabel(outcome) }}
+              </label>
+            </div>
+            <div class="meta-rule-editor__hint" data-field="approvalCompletedHint">
+              {{ isZh
+                ? '配置的审批模板完成时触发。该触发器无记录上下文：动作仅支持通知类（站内通知 / Webhook / 邮件 / 钉钉消息），不支持记录读写与发起审批，且不支持触发条件；创建者需持有审批读取权限并对该模板可见（保存与触发时均校验）。'
+                : 'Fires when the configured approval template completes. Record-less: only notification-family actions (notification / webhook / email / DingTalk) are allowed — no record actions, no start-approval, no conditions; the rule creator must hold approvals read permission and template visibility (checked at save AND at fire).' }}
+            </div>
+            <div v-if="approvalCompletedBlockReason" class="meta-rule-editor__hint" data-field="approvalCompletedBlockReason" style="color: var(--ms-color-danger, #d03050);">
+              {{ approvalCompletedBlockReason }}
+            </div>
           </template>
         </section>
 
@@ -1357,6 +1402,70 @@ let personRecipientSuggestionLoadId = 0
 let copiedPreviewResetTimer: ReturnType<typeof setTimeout> | null = null
 const { isZh } = useLocale()
 
+// ── T1-3 / T1-2 trigger exposure (approval.completed + webhook.received) ──
+const APPROVAL_COMPLETED_OUTCOME_OPTIONS = ['approved', 'rejected', 'revoked', 'cancelled'] as const
+type ApprovalCompletedOutcome = (typeof APPROVAL_COMPLETED_OUTCOME_OPTIONS)[number]
+// FE mirror of the backend save allowlist (record-less v1): non-notification actions are save-rejected
+// server-side; mirroring here blocks a doomed save with a visible reason instead of a round-trip error.
+const APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES = new Set<string>([
+  'send_notification',
+  'send_webhook',
+  'send_email',
+  'send_dingtalk_group_message',
+  'send_dingtalk_person_message',
+])
+
+function approvalCompletedOutcomeLabel(outcome: ApprovalCompletedOutcome): string {
+  const zh = isZh.value
+  switch (outcome) {
+    case 'approved': return zh ? '通过' : 'Approved'
+    case 'rejected': return zh ? '拒绝' : 'Rejected'
+    case 'revoked': return zh ? '撤销' : 'Revoked'
+    case 'cancelled': return zh ? '取消' : 'Cancelled'
+  }
+}
+
+// Checkbox model over triggerConfig.outcomes; empty selection degrades to the backend default
+// (approved-only) so an all-unchecked state can never persist a never-firing rule.
+const approvalCompletedOutcomes = computed<string[]>({
+  get: () => {
+    const raw = draft.value.triggerConfig.outcomes
+    const valid = Array.isArray(raw)
+      ? raw.filter((entry): entry is string => typeof entry === 'string' && (APPROVAL_COMPLETED_OUTCOME_OPTIONS as readonly string[]).includes(entry))
+      : []
+    return valid.length ? valid : ['approved']
+  },
+  set: (value) => {
+    draft.value.triggerConfig.outcomes = value
+  },
+})
+
+const approvalCompletedBlockReason = computed<string>(() => {
+  if (draft.value.triggerType !== 'approval.completed') return ''
+  const zh = isZh.value
+  const templateId = typeof draft.value.triggerConfig.templateId === 'string' ? draft.value.triggerConfig.templateId.trim() : ''
+  if (!templateId) return zh ? '请选择审批模板。' : 'Select an approval template.'
+  if (draft.value.conditions.conditions.length > 0) {
+    return zh ? '审批完成触发器不支持触发条件，请先移除所有条件。' : 'The approval-completed trigger does not support conditions — remove them first.'
+  }
+  const disallowed = draft.value.actions.find((action) => !APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES.has(action.type))
+  if (disallowed) {
+    const label = automationActionTypeLabel(disallowed.type, zh)
+    return zh
+      ? `动作「${label}」不可用于审批完成触发器（仅支持通知类动作）。`
+      : `Action "${label}" is not allowed on the approval-completed trigger (notification-family actions only).`
+  }
+  return ''
+})
+
+// T1-2: the read API redacts the stored inbound-webhook secret, so a hydrated rule proves a secret
+// exists without exposing it — the editor keeps it unless the user types a replacement.
+const savedWebhookSecretConfigured = computed(() => {
+  if (props.rule?.triggerType !== 'webhook.received') return false
+  const config = props.rule?.triggerConfig as Record<string, unknown> | undefined
+  return typeof config?.secret === 'string' && (config.secret as string).length > 0
+})
+
 const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   'update_record',
   'create_record',
@@ -1937,10 +2046,14 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
 }
 
 function draftFromRule(rule: AutomationRule): Draft {
+  const triggerConfig = { ...rule.triggerConfig, ...(rule.trigger?.config ?? {}) }
+  // T1-2: the read API returns the inbound-webhook secret as the '<redacted>' placeholder — never let
+  // the placeholder reach the input (or round-trip into a save, which would corrupt the real secret).
+  if (triggerConfig.secret === '<redacted>') triggerConfig.secret = ''
   return {
     name: rule.name,
     triggerType: rule.triggerType,
-    triggerConfig: { ...rule.triggerConfig, ...(rule.trigger?.config ?? {}) },
+    triggerConfig,
     conditions: conditionGroupFromRule(rule.conditions),
     actions: rule.actions && rule.actions.length
       ? rule.actions.map((a) => createDraftAction(a.type, draftConfigFromAction(a.type, a.config), true))
@@ -2225,6 +2338,14 @@ function setDeleteRecordAcknowledged(action: DraftAction, checked: boolean): voi
 const canSave = computed(() => {
   if (!draft.value.name.trim()) return false
   if (draft.value.actions.length < 1) return false
+  // T1-3: mirror the backend save gate (templateId / no-conditions / notification-only actions).
+  if (draft.value.triggerType === 'approval.completed' && approvalCompletedBlockReason.value) return false
+  // T1-2: a signing secret is required; an existing rule with a stored (redacted-on-read) secret may
+  // leave the field blank to keep it.
+  if (draft.value.triggerType === 'webhook.received') {
+    const secret = typeof draft.value.triggerConfig.secret === 'string' ? draft.value.triggerConfig.secret.trim() : ''
+    if (!secret && !(props.rule?.id && savedWebhookSecretConfigured.value)) return false
+  }
   if (conditionBranchReadOnlyReason.value) return false // A6-3-2a point #3: never save a non-round-trippable loaded branch
   if (conditionBranchKeyError.value) return false // A6-3-2a point #1: branch key safe/unique mirror
   if (parallelBranchReadOnlyReason.value) return false // A6-3-4/W3-2a: never save a non-round-trippable loaded join
@@ -2985,6 +3106,21 @@ function buildPayload(): Partial<AutomationRule> {
     triggerConfig.direction = triggerConfig.direction === 'after' ? 'after' : 'before'
     triggerConfig.offsetDays = Number(triggerConfig.offsetDays) || 0
   }
+  if (d.triggerType === 'approval.completed') {
+    // T1-3: trimmed templateId; outcomes only when a valid non-empty selection exists (omitted =
+    // backend default approved-only).
+    triggerConfig.templateId = typeof triggerConfig.templateId === 'string' ? triggerConfig.templateId.trim() : ''
+    const outcomes = Array.isArray(triggerConfig.outcomes)
+      ? (triggerConfig.outcomes as unknown[]).filter(
+          (entry): entry is string => typeof entry === 'string' && (APPROVAL_COMPLETED_OUTCOME_OPTIONS as readonly string[]).includes(entry),
+        )
+      : []
+    if (outcomes.length) triggerConfig.outcomes = outcomes
+    else delete triggerConfig.outcomes
+  }
+  if (d.triggerType === 'webhook.received') {
+    triggerConfig.secret = typeof triggerConfig.secret === 'string' ? triggerConfig.secret.trim() : ''
+  }
   const actions = d.actions.map((action) => {
     if (action.type === 'condition_branch') {
       // A6-3-2a point #3: read-only (unsupported loaded shape) re-emits the preserved original
@@ -3140,7 +3276,7 @@ function buildPayload(): Partial<AutomationRule> {
     }
     return { type: action.type, config: action.config }
   })
-  return {
+  const payload: Partial<AutomationRule> = {
     name: d.name.trim(),
     triggerType: d.triggerType,
     triggerConfig,
@@ -3158,6 +3294,20 @@ function buildPayload(): Partial<AutomationRule> {
     // legacy waits/branches) — enforced here so the payload is correct regardless of toggle state.
     executionMode: requiresJobMode.value ? 'workflow_job_v1' : d.executionMode,
   }
+  // T1-2 keep-stored-secret semantics: editing an existing webhook rule with a blank secret input
+  // means "keep the stored secret" — OMIT the trigger config entirely so the backend preserves it
+  // (sending the config would either blank the secret or, worse, persist the '<redacted>' placeholder
+  // as the literal secret and silently break signature verification).
+  if (
+    d.triggerType === 'webhook.received'
+    && props.rule?.id
+    && savedWebhookSecretConfigured.value
+    && !(typeof triggerConfig.secret === 'string' && triggerConfig.secret)
+  ) {
+    delete payload.triggerConfig
+    delete payload.trigger
+  }
+  return payload
 }
 
 async function onSave() {

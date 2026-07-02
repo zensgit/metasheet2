@@ -6,6 +6,7 @@ function flushPromises() {
 }
 
 import MetaAutomationRuleEditor from '../src/multitable/components/MetaAutomationRuleEditor.vue'
+import { automationTriggerTypeLabel } from '../src/multitable/utils/meta-automation-labels'
 import { useLocale } from '../src/composables/useLocale'
 import type { AutomationRule, ConditionGroup } from '../src/multitable/types'
 
@@ -218,11 +219,12 @@ describe('MetaAutomationRuleEditor', () => {
     const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
     expect(triggerSelect).toBeTruthy()
     // record.created/updated/deleted + field.value_changed + form.submitted + schedule.cron/interval/date_field
-    // `webhook.received` is intentionally NOT selectable: it is runtime-inert (no inbound ingestion
-    // route, scheduler skips it, no TRIGGER_TYPE_BY_EVENT entry) so a saved rule would never fire.
-    expect(triggerSelect.options.length).toBe(8)
+    // + webhook.received (selectable since the signed inbound endpoint shipped, T1-2 #3489)
+    // + approval.completed (T1-3 #3467 template-routed trigger).
+    expect(triggerSelect.options.length).toBe(10)
     const triggerValues = Array.from(triggerSelect.options).map((option) => option.value)
-    expect(triggerValues).not.toContain('webhook.received')
+    expect(triggerValues).toContain('webhook.received')
+    expect(triggerValues).toContain('approval.completed')
   })
 
   it('localizes core rule editor chrome in zh-CN while keeping raw select values', async () => {
@@ -3968,5 +3970,133 @@ describe('MetaAutomationRuleEditor', () => {
     expect(navigator.clipboard?.writeText).toHaveBeenCalledTimes(1)
     expect(vi.mocked(navigator.clipboard!.writeText).mock.calls[0]?.[0]).toBe('Please fill Sample field value')
     expect(container.textContent).toContain('Copied')
+  })
+
+  it('exposes webhook.received and approval.completed as trigger options with localized labels', async () => {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
+    const values = Array.from(triggerSelect.options).map((option) => option.value)
+    expect(values).toContain('webhook.received')
+    expect(values).toContain('approval.completed')
+    expect(automationTriggerTypeLabel('approval.completed', false)).toBe('When approval completes')
+    expect(automationTriggerTypeLabel('approval.completed', true)).toBe('当审批完成时')
+  })
+
+  it('approval.completed: mirrors the backend save gate (template + notification-only actions) and serializes outcomes', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    ;(container.querySelector('[data-field="name"]') as HTMLInputElement).value = 'Notify on completion'
+    ;(container.querySelector('[data-field="name"]') as HTMLInputElement).dispatchEvent(new Event('input'))
+
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
+    triggerSelect.value = 'approval.completed'
+    triggerSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    // No template selected yet → blocked with a visible reason.
+    expect(saveBtn.disabled).toBe(true)
+    expect(container.querySelector('[data-field="approvalCompletedBlockReason"]')?.textContent)
+      .toContain('Select an approval template')
+
+    // No published templates were loaded in this harness → the text-input fallback is offered.
+    const templateInput = container.querySelector('[data-field="approvalCompletedTemplateId"]') as HTMLInputElement
+    templateInput.value = '  tpl-approval-1  '
+    templateInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    // Default action (update_record) is not in the notification-family allowlist → still blocked.
+    expect(saveBtn.disabled).toBe(true)
+    expect(container.querySelector('[data-field="approvalCompletedBlockReason"]')?.textContent)
+      .toContain('notification-family actions only')
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    actionSelect.value = 'send_notification'
+    actionSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    // Outcomes default to approved-only; add "rejected".
+    const approvedBox = container.querySelector('[data-field="approvalOutcome-approved"]') as HTMLInputElement
+    const rejectedBox = container.querySelector('[data-field="approvalOutcome-rejected"]') as HTMLInputElement
+    expect(approvedBox.checked).toBe(true)
+    expect(rejectedBox.checked).toBe(false)
+    rejectedBox.click()
+    await flushPromises()
+
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].triggerType).toBe('approval.completed')
+    expect(saved.mock.calls[0][0].triggerConfig).toEqual({
+      templateId: 'tpl-approval-1',
+      outcomes: ['approved', 'rejected'],
+    })
+  })
+
+  it('webhook.received: requires a signing secret for a new rule and serializes it trimmed', async () => {
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+    await flushPromises()
+
+    ;(container.querySelector('[data-field="name"]') as HTMLInputElement).value = 'Inbound hook'
+    ;(container.querySelector('[data-field="name"]') as HTMLInputElement).dispatchEvent(new Event('input'))
+
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
+    triggerSelect.value = 'webhook.received'
+    triggerSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+    expect(container.querySelector('[data-field="webhookEndpointHint"]')?.textContent)
+      .toContain('/api/multitable/automation/webhooks/')
+
+    const secretInput = container.querySelector('[data-field="webhookSecret"]') as HTMLInputElement
+    secretInput.value = '  s3cret-1  '
+    secretInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(saved.mock.calls[0][0].triggerConfig).toEqual({ secret: 's3cret-1' })
+  })
+
+  it('webhook.received: an existing rule with a redacted secret keeps the stored secret by omitting triggerConfig', async () => {
+    const saved = vi.fn()
+    const rule = fakeRule({
+      id: 'rule_wh',
+      triggerType: 'webhook.received',
+      triggerConfig: { secret: '<redacted>' },
+    })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+
+    const secretInput = container.querySelector('[data-field="webhookSecret"]') as HTMLInputElement
+    // The read placeholder must never reach the input.
+    expect(secretInput.value).toBe('')
+    expect(secretInput.placeholder).toContain('leave blank to keep')
+
+    const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    expect(saved).toHaveBeenCalledTimes(1)
+    const keepPayload = saved.mock.calls[0][0]
+    expect(keepPayload.triggerType).toBe('webhook.received')
+    // Keep-stored-secret semantics: config omitted entirely so the backend preserves the real secret
+    // (round-tripping '<redacted>' would corrupt it — the backend now also rejects that literal).
+    expect('triggerConfig' in keepPayload).toBe(false)
+    expect('trigger' in keepPayload).toBe(false)
+
+    // Typing a replacement rotates the secret explicitly.
+    secretInput.value = 'rotated-secret'
+    secretInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+    saveBtn.click()
+    expect(saved).toHaveBeenCalledTimes(2)
+    expect(saved.mock.calls[1][0].triggerConfig).toEqual({ secret: 'rotated-secret' })
   })
 })

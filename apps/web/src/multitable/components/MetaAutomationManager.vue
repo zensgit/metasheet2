@@ -1840,6 +1840,10 @@ function describeTrigger(rule: AutomationRule): string {
       const fid = rule.triggerConfig?.fieldId as string | undefined
       return automationCardTriggerSummary(rule.triggerType, fid ? fieldNameById(fid) : '', isZh.value)
     }
+    // T1-2/T1-3: editor-exposed triggers get their localized type label in the card summary.
+    case 'webhook.received':
+    case 'approval.completed':
+      return automationTriggerTypeLabel(rule.triggerType, isZh.value)
     default:
       return String(rule.triggerType)
   }

@@ -52,6 +52,14 @@ describe('automation inbound webhook helpers', () => {
     expect(validateInboundWebhookTriggerAtSave('record.created', {})).toBeNull()
   })
 
+  test('save gate rejects the redacted read-placeholder as a literal secret (round-trip corruption guard)', () => {
+    // The read API serializes the secret as '<redacted>'; a client that round-trips a fetched rule must
+    // NOT be able to persist the placeholder as the real secret (which would break every future signature).
+    expect(validateInboundWebhookTriggerAtSave('webhook.received', { secret: '<redacted>' }))
+      .toBe('webhook.received trigger_config.secret must not be the redacted placeholder (omit triggerConfig to keep the stored secret, or provide a new one)')
+    expect(redactInboundWebhookTriggerConfig({ secret: 'real' }).secret).toBe('<redacted>')
+  })
+
   test('HTTP rule serialization redacts webhook trigger secrets', () => {
     expect(redactInboundWebhookTriggerConfig({ secret: 'live-secret', label: 'ingress' }))
       .toEqual({ secret: '<redacted>', label: 'ingress' })
