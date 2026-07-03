@@ -273,6 +273,11 @@ function mockAdminJumpQueries(options: {
     if (statement.startsWith('UPDATE approval_assignments SET is_active = FALSE')) {
       return { rows: [], rowCount: assignments.length }
     }
+    // nodeEntryEpoch (2026-07-03): the admin jump is an ACTIVATION — it bumps node_activation_seq
+    // and stamps the new epoch. Answer the bump with a value BEFORE the broad UPDATE handler below.
+    if (statement.startsWith('UPDATE approval_instances SET node_activation_seq = node_activation_seq + 1')) {
+      return { rows: [{ node_activation_seq: 1 }], rowCount: 1 }
+    }
     if (statement.startsWith('UPDATE approval_instances')) {
       return { rows: [], rowCount: 1 }
     }
@@ -417,6 +422,7 @@ describe('ApprovalProductService adminJump', () => {
       'finance-1',
       2,
       'finance_review',
+      1, // entry_epoch (nodeEntryEpoch): the jump activation's bumped node_activation_seq
       '{}',
     ])
 
@@ -483,6 +489,7 @@ describe('ApprovalProductService adminJump', () => {
       'director-1',
       3,
       'director_review',
+      1, // entry_epoch (nodeEntryEpoch): the jump activation's bumped node_activation_seq
       '{}',
     ])
 
@@ -543,6 +550,7 @@ describe('ApprovalProductService adminJump', () => {
       'requester-1',
       2,
       'finance_review',
+      1, // entry_epoch (nodeEntryEpoch): the jump activation's bumped node_activation_seq
       JSON.stringify({ resolvedFrom: { kind: 'requester', sourceIndex: 0 } }),
     ])
 
@@ -593,6 +601,7 @@ describe('ApprovalProductService adminJump', () => {
       'director-1',
       3,
       'director_review',
+      1, // entry_epoch (nodeEntryEpoch): the jump activation's bumped node_activation_seq
       '{}',
     ])
 
