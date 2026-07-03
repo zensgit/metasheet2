@@ -76,10 +76,28 @@ for the already-shipped egress runtime (#3455/#3457/#3460). **No runtime changed
   running green with no `DATABASE_URL`.
 - **Verify:** tsc 0 · new evidence 7/7 · new + all 6 existing egress suites **121 tests green** · one-file diff.
 
+## Review round (post-verification — findings fixed)
+
+An independent PR review found guard/analytics correctness issues (not architecture — the sharp structural
+fences doing their job). All fixed on their branches:
+- **#3516 (A3)** — the evidence test imports `BPMNWorkflowEngine`, which the convergence guard requires every
+  importer to classify. **Fixed:** added to `BPMN_IMPORT_ALLOWLIST` as disposition `TEST` (values-free
+  authorization evidence, not a runtime consumer). Guard 4/4.
+- **#3519 (T3-6)** — the projection service writes `meta_records.data` directly; the rich-longText write-sink
+  guard requires every writer classified. **Fixed:** disposition `SAFE` (writes only fixed system columns,
+  never `form_snapshot`/rich-longText). Guard 3/3.
+- **#3521 (T3-2)** — the analytics **candidate denominators** counted only `sla_hours IS NOT NULL`, so a
+  business-calendar breached row (`sla_hours` NULL, `sla_due_at` set) inflated the breach rate. **Fixed:** all
+  6 denominators (summary/template/requester-dept/breached-report candidate + HAVING + ORDER) now count
+  `(sla_hours IS NOT NULL OR sla_due_at IS NOT NULL)`; legacy breach UPDATE untouched. New real-DB assertion,
+  RED-before confirmed (candidate=0 pre-fix).
+- **#3517 (T3-1)** — **approved** in review (CI green, clear default-off boundary).
+
 ## Line status after this batch
 
-**All decision-clean / ratified-runtime slices are built.** With these 4 PRs, every remaining approval-line
-item has its **runtime built and in review** — nothing on the line is now blocked on undone development:
+**All decision-clean / ratified-runtime slices are built.** With these 4 PRs (guard/analytics review-fixes
+applied), every remaining approval-line item has its **runtime built and in review** — nothing on the line is
+now blocked on undone development:
 - T3-6 + T3-2 runtimes: built (#3519 / #3521), each on a merged design-lock.
 - T3-1 v0 responsive: built (#3517); native/push remains gated on a future Notification Hub.
 - A3: evidence built (#3516); the actual destination authorization is the operator's env-config act.
