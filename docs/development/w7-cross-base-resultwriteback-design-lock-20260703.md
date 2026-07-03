@@ -1,14 +1,14 @@
-# T3-5 — W7 cross-base resultWriteback · DESIGN-LOCK (PROPOSED) · 2026-07-03
+# T3-5 — W7 cross-base resultWriteback · DESIGN-LOCK (RATIFIED — SHIPPED #3506) · 2026-07-03
 
-> **Status: PROPOSED design-lock — awaiting the T3-5 per-rung votes in
-> `approval-automation-second-batch-ballot-20260702.md`.** Per the owner steer (2026-07-02) T3-5 runs
-> **design-lock-first as its own slice** — its permission/lock/audit surface is heavy, so it is NOT part of
-> the fast demo layer. This doc turns the register's Q1–Q5 + reviewer notes into a buildable contract so the
-> rung is one ratification from implementation. **No runtime is written until the ballot rung is voted GO.**
+> **Status: RATIFIED — SHIPPED by `#3506` (`e80f622e5`).** The T3-5 per-rung votes in
+> `approval-automation-second-batch-ballot-20260702.md` were executed as recorded: literal target triple,
+> trigger-actor cross-base authority, shared cross-base quota, source-record untouched, no merge into the
+> source tail context. Review hardening also landed: a target triple resolving back to the source base fails
+> closed instead of becoming a same-base arbitrary-record write.
 
-## 1. What ships today vs the gap
+## 1. What shipped vs the gap
 
-W7 `resultWriteback` (backend #3384, non-approved extension #3474) writes the approval outcome
+Before #3506, W7 `resultWriteback` (backend #3384, non-approved extension #3474) wrote the approval outcome
 (`statusField` / `approverField` / `completedAtField`, plus `onNonApproved` opt-in) back onto the **source
 record only** — `writeApprovalResultBack` (automation-service.ts) resolves fields against the trigger sheet and
 writes through `ensureRecordNotLocked(event.actor?.id)` with NO cross-base authority check. Record-mutating
@@ -17,10 +17,11 @@ automation actions (`update_record` etc.) already cross bases through the execut
 sheet's real `base_id`, the **effective (trigger) actor** must pass `resolveBaseWritable(actorId, …)`
 (fail-closed on no userId — no fallback to the rule owner), and a per-target-base quota is consumed.
 
-**Gap:** `resultWriteback` cannot target another base. T3-5 extends it to a **literal cross-base target**,
-reusing the same gate — not a new write path.
+**Shipped by #3506:** `resultWriteback` can target another base through a **literal cross-base target**,
+reusing the same gate — not a new write path. The source-base path remains separate, and a same-base target
+triple is rejected rather than silently treated as a cross-base write.
 
-## 2. Locked decisions (register Q1–Q5, defaults adopted unless the ballot overrides)
+## 2. Locked decisions (register Q1–Q5, shipped defaults)
 
 - **Q1 — effective actor:** the **trigger actor** read from `bridge.triggerEvent`, matching the executor
   cross-base gate's ratified "effective actor = trigger actor". Null/system approvals (`event.actor` null) and
@@ -39,7 +40,7 @@ reusing the same gate — not a new write path.
 - **Q5 — quota:** share the **singleton per-target-base cross-base write quota** with update/create/delete/
   lock. A blocked/not-found attempt still consumes a slot (matches existing executor posture).
 
-## 3. Build contract (reviewer-note must-fixes — fold in at implementation)
+## 3. Build contract (reviewer-note must-fixes — shipped)
 
 1. **Anti-misroute:** the same-base source record is **not** mutated when a cross-base target is configured
    (the write goes to the target, not the trigger record). Real-DB test asserts the source row is unchanged.
@@ -67,6 +68,6 @@ reusing the same gate — not a new write path.
 
 ## 5. Status / next step
 
-Design-lock **PROPOSED**. On the owner voting the T3-5 rung GO (ballot), implement on the above contract in
-**Lane C** (`automation-service.ts` — sequential with other automation-runtime work), fail-first + real-DB,
-PR-for-review. Until then, no runtime.
+Design-lock **RATIFIED — SHIPPED** by #3506. The second-batch ballot entry is now a closed decision record.
+Named follow-ups remain separate decisions: dynamic link-field target resolution and an idempotent
+cross-base-backwrite ledger for resume retries.
