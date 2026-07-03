@@ -64,7 +64,12 @@ describe('readSourceConfigs pure helpers', () => {
       draft.keyField = 'FNumber'
       draft.containerPaths = 'Data'
     }
-    if (mode === 'resolver_lookup') draft.multiplicityRuleField = 'FIsCurrent'
+    // R3: a valid resolver_lookup needs resolverRule + exactly one fieldMap target. Base = exactly_one
+    // (the simplest rule — no multiplicityRuleField / sortDirection / discriminatorValue).
+    if (mode === 'resolver_lookup') {
+      draft.resolverRule = 'exactly_one'
+      draft.fieldMap = [{ source: 'FItemID', target: 'item_id' }]
+    }
     if (mode === 'list_page') draft.containerPaths = 'Data.Data, Data.DATA'
     if (mode === 'detail_with_lines') {
       draft.headerContainerPaths = 'Data.Page1'
@@ -91,13 +96,57 @@ describe('readSourceConfigs pure helpers', () => {
     missingLines.lineContainerPaths = ''
     expect(validateReadSourceDraft(missingLines).some((p) => p.includes('lineContainerPaths'))).toBe(true)
 
-    const missingMultiplicity = validDraft('resolver_lookup')
-    missingMultiplicity.multiplicityRuleField = ''
-    expect(validateReadSourceDraft(missingMultiplicity).some((p) => p.includes('multiplicityRuleField'))).toBe(true)
+    const missingRule = validDraft('resolver_lookup')
+    missingRule.resolverRule = ''
+    expect(validateReadSourceDraft(missingRule).some((p) => p.includes('resolverRule'))).toBe(true)
 
     const halfFieldMap = validDraft('single_record')
     halfFieldMap.fieldMap = [{ source: 'FName', target: '' }]
     expect(validateReadSourceDraft(halfFieldMap).some((p) => p.includes('fieldMap'))).toBe(true)
+  })
+
+  it('R3 resolver_lookup: per-rule required/forbidden validation + rule-specific payload shaping', () => {
+    // exactly_one (from validDraft) is valid with just resolverRule + one fieldMap target; sends none of
+    // the three rule-specific keys.
+    const one = validDraft('resolver_lookup')
+    expect(validateReadSourceDraft(one)).toEqual([])
+    const onePayload = buildReadSourceConfigPayload(one)
+    expect(onePayload.resolverRule).toBe('exactly_one')
+    expect(onePayload.multiplicityRuleField).toBeUndefined()
+    expect(onePayload.resolverSortDirection).toBeUndefined()
+    expect(onePayload.resolverDiscriminatorValue).toBeUndefined()
+
+    // first_when_sorted: needs sort field + direction; forbids discriminatorValue (not sent even if set).
+    const sorted = validDraft('resolver_lookup')
+    sorted.resolverRule = 'first_when_sorted'
+    expect(validateReadSourceDraft(sorted).some((p) => p.includes('multiplicityRuleField'))).toBe(true)
+    sorted.multiplicityRuleField = 'FVersion'
+    expect(validateReadSourceDraft(sorted).some((p) => p.includes('resolverSortDirection'))).toBe(true)
+    sorted.resolverSortDirection = 'desc'
+    sorted.resolverDiscriminatorValue = 'STRAY' // set but forbidden for this rule
+    expect(validateReadSourceDraft(sorted)).toEqual([])
+    const sortedPayload = buildReadSourceConfigPayload(sorted)
+    expect(sortedPayload).toMatchObject({ resolverRule: 'first_when_sorted', multiplicityRuleField: 'FVersion', resolverSortDirection: 'desc' })
+    expect(sortedPayload.resolverDiscriminatorValue).toBeUndefined() // forbidden field never rides along
+
+    // field_equals: needs discriminator field + bounded token value; forbids sortDirection.
+    const eq = validDraft('resolver_lookup')
+    eq.resolverRule = 'field_equals'
+    eq.multiplicityRuleField = 'FIsCurrent'
+    expect(validateReadSourceDraft(eq).some((p) => p.includes('resolverDiscriminatorValue'))).toBe(true)
+    eq.resolverDiscriminatorValue = 'has space' // not a bounded token
+    expect(validateReadSourceDraft(eq).some((p) => p.includes('token'))).toBe(true)
+    eq.resolverDiscriminatorValue = 'Y'
+    eq.resolverSortDirection = 'asc' // set but forbidden for this rule
+    expect(validateReadSourceDraft(eq)).toEqual([])
+    const eqPayload = buildReadSourceConfigPayload(eq)
+    expect(eqPayload).toMatchObject({ resolverRule: 'field_equals', multiplicityRuleField: 'FIsCurrent', resolverDiscriminatorValue: 'Y' })
+    expect(eqPayload.resolverSortDirection).toBeUndefined()
+
+    // resolver_lookup requires exactly one fieldMap target.
+    const twoTargets = validDraft('resolver_lookup')
+    twoTargets.fieldMap = [{ source: 'FItemID', target: 'a' }, { source: 'FName', target: 'b' }]
+    expect(validateReadSourceDraft(twoTargets).some((p) => p.includes('fieldMap'))).toBe(true)
   })
 
   it('coarse relative-path guard mirrors the server reject classes', () => {
@@ -402,10 +451,29 @@ describe('IntegrationReadSourceConfigPanel', () => {
     expect(root.querySelector('[data-testid="rsc-header-container-paths"]')).not.toBeNull()
     expect(root.querySelector('[data-testid="rsc-line-container-paths"]')).not.toBeNull()
 
-    // resolver_lookup: multiplicity field appears
+    // resolver_lookup R3: resolverRule select appears; per-rule inputs show/hide.
     setSelect(root, 'rsc-mode', 'resolver_lookup')
     await flushUi()
-    expect(root.querySelector('[data-testid="rsc-multiplicity-field"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="rsc-resolver-rule"]')).not.toBeNull()
+    // exactly_one: none of the three rule-specific inputs render.
+    setSelect(root, 'rsc-resolver-rule', 'exactly_one')
+    await flushUi()
+    expect(root.querySelector('[data-testid="rsc-resolver-sort-field"]')).toBeNull()
+    expect(root.querySelector('[data-testid="rsc-resolver-sort-direction"]')).toBeNull()
+    expect(root.querySelector('[data-testid="rsc-resolver-discriminator-field"]')).toBeNull()
+    expect(root.querySelector('[data-testid="rsc-resolver-discriminator-value"]')).toBeNull()
+    // first_when_sorted: sort field + direction, NO discriminator value.
+    setSelect(root, 'rsc-resolver-rule', 'first_when_sorted')
+    await flushUi()
+    expect(root.querySelector('[data-testid="rsc-resolver-sort-field"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="rsc-resolver-sort-direction"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="rsc-resolver-discriminator-value"]')).toBeNull()
+    // field_equals: discriminator field + value, NO sort direction.
+    setSelect(root, 'rsc-resolver-rule', 'field_equals')
+    await flushUi()
+    expect(root.querySelector('[data-testid="rsc-resolver-discriminator-field"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="rsc-resolver-discriminator-value"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="rsc-resolver-sort-direction"]')).toBeNull()
 
     // valid single_record enables the buttons
     setSelect(root, 'rsc-mode', 'single_record')
