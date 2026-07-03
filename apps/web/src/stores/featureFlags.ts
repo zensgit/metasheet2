@@ -10,6 +10,15 @@ export interface ProductFeatures {
   attendanceAdmin: boolean
   attendanceImport: boolean
   plm: boolean
+  /**
+   * T3-1 v0 — mobile approval surface (responsive web) rollout gate (ballot Q11).
+   * Tenant/user-scoped, DEFAULT OFF: the flag is only true when the backend
+   * session payload (or an authorized dev override) explicitly enables it.
+   * There is intentionally NO plugin/admin inference — an admin does not get
+   * the mobile surface for free — so the desktop approval center/detail stay
+   * byte-identical for every tenant that has not opted in.
+   */
+  approvalMobile: boolean
   mode: ProductMode
 }
 
@@ -40,6 +49,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
   attendanceAdmin: false,
   attendanceImport: false,
   plm: false,
+  approvalMobile: false,
   mode: 'platform',
 }
 
@@ -157,6 +167,12 @@ function extractFeaturesFromPayload(payload: any): Partial<ProductFeatures> {
           : typeof featuresNode.plm_workbench === 'boolean'
             ? featuresNode.plm_workbench
             : undefined,
+    approvalMobile:
+      typeof featuresNode.approvalMobile === 'boolean'
+        ? featuresNode.approvalMobile
+        : typeof featuresNode.approval_mobile === 'boolean'
+          ? featuresNode.approval_mobile
+          : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -251,12 +267,21 @@ function resolveFeatures(
     mode = 'platform'
   }
 
+  // T3-1 v0 rollout gate: default OFF. Only an explicit backend/override boolean
+  // flips it on — no inference from admin role or product mode. `boolOrDefault`
+  // returns false when neither source supplies a boolean.
+  const approvalMobile = boolOrDefault(
+    override.approvalMobile,
+    backend.approvalMobile,
+  )
+
   return {
     attendance,
     workflow,
     attendanceAdmin,
     attendanceImport,
     plm,
+    approvalMobile,
     mode,
   }
 }
