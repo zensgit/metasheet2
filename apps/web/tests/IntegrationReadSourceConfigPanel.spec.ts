@@ -230,6 +230,44 @@ describe('readSourceConfigs pure helpers', () => {
       expect(text.includes(errorCode)).toBe(false)
       expect(text.includes(errorType)).toBe(false)
     }
+
+    // R0 (#1709): the 9 resolver codes + resolver evidence keys render; non-vocabulary codes/rule drop.
+    const resolver = normalizeReadSourceProbeEvidence({
+      ok: false,
+      object: 'material',
+      mode: 'resolver_lookup',
+      boundedSmoke: false,
+      errorCode: 'READ_SOURCE_RESOLVER_AMBIGUOUS',
+      errorType: 'ReadSourceResolverError',
+      candidateCount: 2,
+      matchedCount: 2,
+      ambiguous: true,
+      resolved: false,
+      rule: 'field_equals',
+    })
+    expect(resolver).toMatchObject({
+      errorCode: 'READ_SOURCE_RESOLVER_AMBIGUOUS',
+      errorType: 'ReadSourceResolverError',
+      candidateCount: 2,
+      matchedCount: 2,
+      ambiguous: true,
+      resolved: false,
+      rule: 'field_equals',
+    })
+    // a resolver-looking-but-unregistered code + a raw rule string fall back / drop (no prefix match).
+    const bogusResolver = normalizeReadSourceProbeEvidence({
+      ok: false,
+      object: 'material',
+      mode: 'resolver_lookup',
+      boundedSmoke: false,
+      errorCode: 'READ_SOURCE_RESOLVER_SECRET_MAT-001',
+      rule: 'take_the_first_row',
+    })
+    expect(bogusResolver?.errorCode).toBe('READ_SOURCE_PROBE_FAILED')
+    expect('rule' in (bogusResolver ?? {})).toBe(false)
+    const bogusText = JSON.stringify(bogusResolver)
+    expect(bogusText.includes('MAT-001')).toBe(false)
+    expect(bogusText.includes('take_the_first_row')).toBe(false)
   })
 
   it('payload assembly normalizes readPath to carry the leading slash (server byte-normalization mirror)', () => {

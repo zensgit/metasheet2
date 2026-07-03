@@ -16,6 +16,25 @@ const READ_SOURCE_PROBE_CONTRACT_TOP_KEYS = Object.freeze(['config', 'boundedSmo
 const READ_SOURCE_PROBE_CONTAINER_ALIASES = Object.freeze(['primary', 'header', 'lines'])
 const READ_SOURCE_PROBE_ERROR_CODE = 'READ_SOURCE_PROBE_CONTRACT_INVALID'
 const READ_SOURCE_PROBE_DEFAULT_ERROR = 'READ_SOURCE_PROBE_FAILED'
+// R0 (#1709 / resolver design-lock): the exact resolver coarse-code allowlist. Registered as EXACT values in
+// the probe error-code set below so safeErrorCode accepts them — PREFIX MATCHING IS NOT ALLOWED, an unknown
+// resolver-looking code still degrades to the generic safe fallback. R1's evaluator produces these; R0 only
+// registers the surface so a producer object is not silently clamped into a generic failure.
+const READ_SOURCE_RESOLVER_ERROR_CODES = Object.freeze([
+  'READ_SOURCE_RESOLVER_CONTAINER_NOT_FOUND',
+  'READ_SOURCE_RESOLVER_SHAPE_MISMATCH',
+  'READ_SOURCE_RESOLVER_NO_MATCH',
+  'READ_SOURCE_RESOLVER_AMBIGUOUS',
+  'READ_SOURCE_RESOLVER_CAP_REACHED',
+  'READ_SOURCE_RESOLVER_RULE_NOT_SUPPORTED',
+  'READ_SOURCE_RESOLVER_RULE_INVALID',
+  'READ_SOURCE_RESOLVER_FIELD_MISSING',
+  'READ_SOURCE_RESOLVER_FAILED',
+])
+// The resolver evidence `rule` value is a closed vocabulary (mirrors read-source-config RESOLVER_RULES).
+const READ_SOURCE_RESOLVER_RULES = Object.freeze(['exactly_one', 'first_when_sorted', 'field_equals'])
+const READ_SOURCE_RESOLVER_RULE_SET = new Set(READ_SOURCE_RESOLVER_RULES)
+
 const READ_SOURCE_PROBE_ERROR_CODES = Object.freeze([
   READ_SOURCE_PROBE_ERROR_CODE,
   READ_SOURCE_PROBE_DEFAULT_ERROR,
@@ -28,6 +47,7 @@ const READ_SOURCE_PROBE_ERROR_CODES = Object.freeze([
   'READ_SOURCE_PROBE_RESPONSE_UNRECOGNIZED',
   'READ_SOURCE_PROBE_SHAPE_MISMATCH',
   'READ_SOURCE_PROBE_TIMEOUT',
+  ...READ_SOURCE_RESOLVER_ERROR_CODES,
 ])
 const READ_SOURCE_PROBE_ERROR_CODE_SET = new Set(READ_SOURCE_PROBE_ERROR_CODES)
 const READ_SOURCE_PROBE_ERROR_TYPES = Object.freeze([
@@ -37,16 +57,21 @@ const READ_SOURCE_PROBE_ERROR_TYPES = Object.freeze([
   'K3WiseWebApiAdapterError',
   'ReadSourceProbeContractError',
   'ReadSourceProbeRuntimeError',
+  'ReadSourceResolverError',
   'TimeoutError',
   'TypeError',
 ])
 const READ_SOURCE_PROBE_ERROR_TYPE_SET = new Set(READ_SOURCE_PROBE_ERROR_TYPES)
-const READ_SOURCE_PROBE_EVIDENCE_COUNT_KEYS = Object.freeze(['recordCount', 'rowCount', 'sampleCount'])
+// R0: resolver evidence counts (candidateCount/matchedCount) join the values-free count allowlist.
+const READ_SOURCE_PROBE_EVIDENCE_COUNT_KEYS = Object.freeze(['recordCount', 'rowCount', 'sampleCount', 'candidateCount', 'matchedCount'])
 const READ_SOURCE_PROBE_EVIDENCE_BOOLEAN_KEYS = Object.freeze([
   'containerLocated',
   'boundedSmokeExecuted',
   'timeoutReached',
   'capReached',
+  // R0: resolver evidence booleans.
+  'ambiguous',
+  'resolved',
 ])
 
 class ReadSourceProbeContractError extends Error {
@@ -157,6 +182,12 @@ function safeCount(value) {
   return null
 }
 
+// R0: the resolver evidence `rule` field is a closed vocabulary — exact membership, never a producer-supplied
+// free string (values-free: a raw/unknown rule string is dropped, not echoed).
+function safeResolverRule(value) {
+  return typeof value === 'string' && READ_SOURCE_RESOLVER_RULE_SET.has(value) ? value : null
+}
+
 function safeErrorCode(value) {
   if (typeof value !== 'string') return null
   const code = value.trim()
@@ -215,6 +246,10 @@ function readSourceProbeEvidence(plan, result) {
     if (typeof source[key] === 'boolean') evidence[key] = source[key]
   }
 
+  // R0: the resolver `rule` field, closed-vocabulary only (absent for non-resolver probes).
+  const rule = safeResolverRule(source.rule)
+  if (rule !== null) evidence.rule = rule
+
   if (!evidence.ok) {
     evidence.errorCode = safeErrorCode(source.errorCode) || READ_SOURCE_PROBE_DEFAULT_ERROR
     evidence.errorType = safeErrorType(source.errorType) || 'Error'
@@ -230,8 +265,11 @@ module.exports = {
   READ_SOURCE_PROBE_CONTAINER_ALIASES,
   READ_SOURCE_PROBE_ERROR_CODES,
   READ_SOURCE_PROBE_ERROR_TYPES,
+  READ_SOURCE_RESOLVER_ERROR_CODES,
+  READ_SOURCE_RESOLVER_RULES,
   ReadSourceProbeContractError,
   normalizeReadSourceProbeContract,
   readSourceProbeContractErrorEvidence,
   readSourceProbeEvidence,
+  safeResolverRule,
 }

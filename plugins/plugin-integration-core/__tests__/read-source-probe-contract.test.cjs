@@ -10,10 +10,14 @@ const { validateReadSourceConfig } = require(path.join(__dirname, '..', 'lib', '
 const {
   READ_SOURCE_PROBE_TIMEOUT_MS,
   READ_SOURCE_PROBE_ROW_CAP,
+  READ_SOURCE_PROBE_ERROR_CODES,
+  READ_SOURCE_RESOLVER_ERROR_CODES,
+  READ_SOURCE_RESOLVER_RULES,
   ReadSourceProbeContractError,
   normalizeReadSourceProbeContract,
   readSourceProbeContractErrorEvidence,
   readSourceProbeEvidence,
+  safeResolverRule,
 } = require(path.join(__dirname, '..', 'lib', 'read-source-probe-contract.cjs'))
 
 function normalizedConfig(mode) {
@@ -46,7 +50,11 @@ function normalizedConfig(mode) {
     cfg.keyField = 'FMaterialId'
     cfg.keyEncoding = 'structured_json_field'
     cfg.containerPaths = ['Data.Rows']
+    // R0 contract: field_equals rule (discriminator field + value) + exactly one output target.
+    cfg.resolverRule = 'field_equals'
     cfg.multiplicityRuleField = 'FIsCurrent'
+    cfg.resolverDiscriminatorValue = 'current'
+    cfg.fieldMap = [{ source: 'FItemID', target: 'item_id' }]
   }
   const result = validateReadSourceConfig(cfg)
   assert.equal(result.valid, true, `${mode} fixture must validate: ${JSON.stringify(result.errors)}`)
@@ -274,6 +282,47 @@ assertContractReason({ config: null }, 'config_required')
       assert.ok(!text.includes(leak), `unsafe error evidence must not leak ${leak}`)
     }
   }
+}
+
+// --- R0 resolver evidence surface (#1709) ---
+{
+  // All 9 resolver codes are registered as EXACT members of the probe error-code set.
+  const nine = [
+    'READ_SOURCE_RESOLVER_CONTAINER_NOT_FOUND', 'READ_SOURCE_RESOLVER_SHAPE_MISMATCH',
+    'READ_SOURCE_RESOLVER_NO_MATCH', 'READ_SOURCE_RESOLVER_AMBIGUOUS', 'READ_SOURCE_RESOLVER_CAP_REACHED',
+    'READ_SOURCE_RESOLVER_RULE_NOT_SUPPORTED', 'READ_SOURCE_RESOLVER_RULE_INVALID',
+    'READ_SOURCE_RESOLVER_FIELD_MISSING', 'READ_SOURCE_RESOLVER_FAILED',
+  ]
+  assert.deepEqual([...READ_SOURCE_RESOLVER_ERROR_CODES], nine)
+  for (const code of nine) assert.ok(READ_SOURCE_PROBE_ERROR_CODES.includes(code), `${code} registered`)
+
+  const plan = normalizeReadSourceProbeContract({ config: normalizedConfig('list_page') })
+  // A resolver failure code passes through exactly; resolver counts/booleans/rule are permitted values-free.
+  const ev = readSourceProbeEvidence(plan, {
+    ok: false, errorCode: 'READ_SOURCE_RESOLVER_AMBIGUOUS', errorType: 'ReadSourceResolverError',
+    candidateCount: 2, matchedCount: 2, ambiguous: true, resolved: false, rule: 'field_equals',
+  })
+  assert.equal(ev.errorCode, 'READ_SOURCE_RESOLVER_AMBIGUOUS')
+  assert.equal(ev.errorType, 'ReadSourceResolverError')
+  assert.equal(ev.candidateCount, 2)
+  assert.equal(ev.matchedCount, 2)
+  assert.equal(ev.ambiguous, true)
+  assert.equal(ev.resolved, false)
+  assert.equal(ev.rule, 'field_equals')
+
+  // NO prefix matching: a resolver-looking-but-unregistered code + a raw rule string fall back / drop.
+  const bogus = readSourceProbeEvidence(plan, {
+    ok: false, errorCode: 'READ_SOURCE_RESOLVER_SECRET_MAT-001', rule: 'take_the_first',
+    candidateCount: 'lots', matchedCount: -1,
+  })
+  assert.equal(bogus.errorCode, 'READ_SOURCE_PROBE_FAILED', 'unregistered resolver-looking code falls back')
+  assert.ok(!('rule' in bogus), 'non-vocabulary rule is dropped')
+  assert.ok(!('candidateCount' in bogus) && !('matchedCount' in bogus), 'non-count values are dropped')
+  assert.ok(!JSON.stringify(bogus).includes('MAT-001') && !JSON.stringify(bogus).includes('take_the_first'))
+
+  assert.deepEqual([...READ_SOURCE_RESOLVER_RULES], ['exactly_one', 'first_when_sorted', 'field_equals'])
+  assert.equal(safeResolverRule('exactly_one'), 'exactly_one')
+  assert.equal(safeResolverRule('take_the_first'), null)
 }
 
 console.log('read-source-probe-contract.test.cjs OK')

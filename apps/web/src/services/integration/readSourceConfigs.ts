@@ -105,9 +105,15 @@ export interface ReadSourceProbeEvidence {
   boundedSmokeExecuted?: boolean
   timeoutReached?: boolean
   capReached?: boolean
+  // R0 (#1709 resolver): values-free resolver evidence surface.
+  ambiguous?: boolean
+  resolved?: boolean
   recordCount?: number
   rowCount?: number
   sampleCount?: number
+  candidateCount?: number
+  matchedCount?: number
+  rule?: string
   errorCode?: string
   errorType?: string
 }
@@ -320,8 +326,10 @@ export function buildReadSourceConfigPayload(draft: ReadSourceConfigDraft): Read
 
 const EVIDENCE_CONTAINER_ALIASES = ['primary', 'header', 'lines'] as const
 const EVIDENCE_SHAPE_TYPES = new Set(['array', 'null', 'object', 'string', 'number', 'boolean', 'missing', 'other'])
-const EVIDENCE_BOOLEAN_KEYS = ['containerLocated', 'boundedSmokeExecuted', 'timeoutReached', 'capReached'] as const
-const EVIDENCE_COUNT_KEYS = ['recordCount', 'rowCount', 'sampleCount'] as const
+const EVIDENCE_BOOLEAN_KEYS = ['containerLocated', 'boundedSmokeExecuted', 'timeoutReached', 'capReached', 'ambiguous', 'resolved'] as const
+const EVIDENCE_COUNT_KEYS = ['recordCount', 'rowCount', 'sampleCount', 'candidateCount', 'matchedCount'] as const
+// R0: resolver evidence `rule` closed vocabulary (mirrors read-source-config RESOLVER_RULES).
+const EVIDENCE_RESOLVER_RULES = new Set(['exactly_one', 'first_when_sorted', 'field_equals'])
 
 // Client-side mirrors of the FROZEN S2-a vocabularies — source of truth:
 // plugins/plugin-integration-core/lib/read-source-probe-contract.cjs
@@ -339,6 +347,17 @@ const READ_SOURCE_PROBE_ERROR_CODES = new Set([
   'READ_SOURCE_PROBE_RESPONSE_UNRECOGNIZED',
   'READ_SOURCE_PROBE_SHAPE_MISMATCH',
   'READ_SOURCE_PROBE_TIMEOUT',
+  // R0 (#1709 resolver): the 9 exact resolver coarse codes (no prefix match — unknown resolver-looking
+  // codes still fall back to READ_SOURCE_PROBE_FAILED).
+  'READ_SOURCE_RESOLVER_CONTAINER_NOT_FOUND',
+  'READ_SOURCE_RESOLVER_SHAPE_MISMATCH',
+  'READ_SOURCE_RESOLVER_NO_MATCH',
+  'READ_SOURCE_RESOLVER_AMBIGUOUS',
+  'READ_SOURCE_RESOLVER_CAP_REACHED',
+  'READ_SOURCE_RESOLVER_RULE_NOT_SUPPORTED',
+  'READ_SOURCE_RESOLVER_RULE_INVALID',
+  'READ_SOURCE_RESOLVER_FIELD_MISSING',
+  'READ_SOURCE_RESOLVER_FAILED',
 ])
 const READ_SOURCE_PROBE_ERROR_TYPES = new Set([
   'Error',
@@ -347,6 +366,7 @@ const READ_SOURCE_PROBE_ERROR_TYPES = new Set([
   'K3WiseWebApiAdapterError',
   'ReadSourceProbeContractError',
   'ReadSourceProbeRuntimeError',
+  'ReadSourceResolverError',
   'TimeoutError',
   'TypeError',
 ])
@@ -396,6 +416,8 @@ export function normalizeReadSourceProbeEvidence(value: unknown): ReadSourceProb
     const count = safeCount(value[key])
     if (count !== null) evidence[key] = count
   }
+  // R0: resolver `rule` closed-vocabulary only — a raw/unknown rule string is dropped, never rendered.
+  if (typeof value.rule === 'string' && EVIDENCE_RESOLVER_RULES.has(value.rule)) evidence.rule = value.rule
   if (!evidence.ok) {
     evidence.errorCode = typeof value.errorCode === 'string' && READ_SOURCE_PROBE_ERROR_CODES.has(value.errorCode)
       ? value.errorCode

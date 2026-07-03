@@ -20,14 +20,25 @@ const READ_SOURCE_MODES = Object.freeze(['single_record', 'list_page', 'detail_w
 const READ_SOURCE_METHODS = Object.freeze(['GET', 'POST'])
 const READ_SOURCE_KEY_ENCODINGS = Object.freeze(['structured_json_field', 'filter_expression', 'numeric_id'])
 
+// resolver_lookup multiplicity rules (R0 contract extension, #1709 / resolver design-lock 2026-07-02).
+// The default MUST NOT be "take the first row" — resolverRule is REQUIRED for resolver_lookup (below), so an
+// old/pre-R0 resolver config that never declared it is fail-closed invalid (never silently reinterpreted).
+const RESOLVER_RULES = Object.freeze(['exactly_one', 'first_when_sorted', 'field_equals'])
+const RESOLVER_SORT_DIRECTIONS = Object.freeze(['asc', 'desc'])
+
 // Per-mode REQUIRED fields — hardcoded for the four modes (NOT a generic schema engine; per the design-lock,
-// "the four read modes" means "knows each mode's shape").
+// "the four read modes" means "knows each mode's shape"). resolver_lookup: multiplicityRuleField is no longer
+// unconditionally required — it is RULE-specific (validateResolverContract below), so the base requirement is
+// only keyField + containerPaths + resolverRule.
 const MODE_REQUIRED_FIELDS = Object.freeze({
   single_record: Object.freeze(['keyField', 'containerPaths']),
   list_page: Object.freeze(['containerPaths']),
   detail_with_lines: Object.freeze(['headerContainerPaths', 'lineContainerPaths']),
-  resolver_lookup: Object.freeze(['keyField', 'containerPaths', 'multiplicityRuleField']),
+  resolver_lookup: Object.freeze(['keyField', 'containerPaths', 'resolverRule']),
 })
+
+// Keys that only make sense for resolver_lookup — must NOT ride in under any other mode.
+const RESOLVER_ONLY_KEYS = Object.freeze(['resolverRule', 'resolverSortDirection', 'resolverDiscriminatorValue'])
 
 // Keys that would carry a write surface (fail-closed: read-only line).
 const WRITE_SHAPED_KEYS = Object.freeze(['savePath', 'submitPath', 'auditPath', 'deletePath', 'writePath'])
@@ -42,6 +53,8 @@ const ALLOWED_CONFIG_KEYS = Object.freeze(new Set([
   'version', 'systemId', 'requiredKind', 'object', 'mode', 'readPath', 'readMethod', 'operations',
   'keyField', 'keyEncoding', 'containerPaths', 'headerContainerPaths', 'lineContainerPaths',
   'multiplicityRuleField', 'fieldMap',
+  // R0: resolver_lookup contract keys (rule-gated below; rejected on non-resolver modes).
+  'resolverRule', 'resolverSortDirection', 'resolverDiscriminatorValue',
 ]))
 
 function isNonEmptyString(value) {
@@ -181,6 +194,53 @@ function validateReadSourceConfig(config) {
     push('READ_SOURCE_FIELD_MAP_INVALID', 'fieldMap', 'invalid_field_map')
   }
 
+  // R0 resolver_lookup contract (rule-gated multiplicity; #1709 / resolver design-lock). The resolver keys
+  // are rejected on any other mode; for resolver_lookup, resolverRule selects which rule-specific fields are
+  // required vs forbidden. Values-free: reasons are coarse enums, no config value is echoed.
+  if (config.mode !== 'resolver_lookup') {
+    for (const key of RESOLVER_ONLY_KEYS) {
+      if (config[key] !== undefined) push('READ_SOURCE_RESOLVER_KEY_NOT_ALLOWED', key, 'resolver_only_key')
+    }
+  } else {
+    const rule = config.resolverRule
+    const has = (k) => config[k] !== undefined
+    // resolverRule presence is enforced by MODE_REQUIRED_FIELDS; validate the VALUE here (a pre-R0 config
+    // with no resolverRule is already fail-closed via the required-field check — never reinterpreted).
+    if (rule !== undefined && !RESOLVER_RULES.includes(rule)) {
+      push('READ_SOURCE_RESOLVER_RULE_NOT_SUPPORTED', 'resolverRule', 'not_allowlisted')
+    }
+    if (config.resolverSortDirection !== undefined && !RESOLVER_SORT_DIRECTIONS.includes(config.resolverSortDirection)) {
+      push('READ_SOURCE_RESOLVER_RULE_INVALID', 'resolverSortDirection', 'not_allowlisted')
+    }
+    // resolverDiscriminatorValue is config METADATA (a short enum-like token), never runtime data — reject a
+    // host/path/secret/value-shaped string (bounded identifier + the global secret-shape scan below).
+    if (config.resolverDiscriminatorValue !== undefined && !isBoundedIdentifier(config.resolverDiscriminatorValue)) {
+      push('READ_SOURCE_RESOLVER_RULE_INVALID', 'resolverDiscriminatorValue', 'invalid_token')
+    }
+    // Rule-specific required / forbidden fields (only when the rule itself is a known value).
+    if (RESOLVER_RULES.includes(rule)) {
+      if (rule === 'exactly_one') {
+        for (const k of ['multiplicityRuleField', 'resolverSortDirection', 'resolverDiscriminatorValue']) {
+          if (has(k)) push('READ_SOURCE_RESOLVER_RULE_INVALID', k, 'not_allowed_for_exactly_one')
+        }
+      } else if (rule === 'first_when_sorted') {
+        if (!has('multiplicityRuleField')) push('READ_SOURCE_RESOLVER_RULE_INVALID', 'multiplicityRuleField', 'required_sort_field_for_first_when_sorted')
+        if (!has('resolverSortDirection')) push('READ_SOURCE_RESOLVER_RULE_INVALID', 'resolverSortDirection', 'required_for_first_when_sorted')
+        if (has('resolverDiscriminatorValue')) push('READ_SOURCE_RESOLVER_RULE_INVALID', 'resolverDiscriminatorValue', 'not_allowed_for_first_when_sorted')
+      } else if (rule === 'field_equals') {
+        if (!has('multiplicityRuleField')) push('READ_SOURCE_RESOLVER_RULE_INVALID', 'multiplicityRuleField', 'required_discriminator_field_for_field_equals')
+        if (!has('resolverDiscriminatorValue')) push('READ_SOURCE_RESOLVER_RULE_INVALID', 'resolverDiscriminatorValue', 'required_for_field_equals')
+        if (has('resolverSortDirection')) push('READ_SOURCE_RESOLVER_RULE_INVALID', 'resolverSortDirection', 'not_allowed_for_field_equals')
+      }
+    }
+    // fieldMap: REQUIRED and exactly ONE resolver output target for v1.
+    if (config.fieldMap === undefined) {
+      push('READ_SOURCE_RESOLVER_RULE_INVALID', 'fieldMap', 'resolver_requires_one_target')
+    } else if (Array.isArray(config.fieldMap) && config.fieldMap.length !== 1) {
+      push('READ_SOURCE_RESOLVER_RULE_INVALID', 'fieldMap', 'resolver_requires_exactly_one_target')
+    }
+  }
+
   // version — positive integer (audit/versioning surface; store is a later cut).
   if (!Number.isInteger(config.version) || config.version < 1) {
     push('READ_SOURCE_VERSION_INVALID', 'version', 'must_be_positive_integer')
@@ -212,6 +272,10 @@ function normalizeReadSourceConfig(config) {
   if (config.keyField !== undefined) out.keyField = config.keyField.trim()
   if (config.keyEncoding !== undefined) out.keyEncoding = config.keyEncoding
   if (config.multiplicityRuleField !== undefined) out.multiplicityRuleField = config.multiplicityRuleField.trim()
+  // R0 resolver_lookup contract fields (already validated; enum values are not trimmed as they are exact).
+  if (config.resolverRule !== undefined) out.resolverRule = config.resolverRule
+  if (config.resolverSortDirection !== undefined) out.resolverSortDirection = config.resolverSortDirection
+  if (config.resolverDiscriminatorValue !== undefined) out.resolverDiscriminatorValue = config.resolverDiscriminatorValue.trim()
   const trimList = (field) => {
     if (Array.isArray(config[field])) out[field] = Object.freeze(config[field].map((p) => p.trim()))
   }
@@ -228,6 +292,8 @@ module.exports = {
   READ_SOURCE_MODES,
   READ_SOURCE_METHODS,
   READ_SOURCE_KEY_ENCODINGS,
+  RESOLVER_RULES,
+  RESOLVER_SORT_DIRECTIONS,
   isSafeRelativeReadPath,
   validateReadSourceConfig,
   normalizeReadSourceConfig,
