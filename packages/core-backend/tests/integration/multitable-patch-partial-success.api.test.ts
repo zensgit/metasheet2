@@ -85,6 +85,8 @@ describe('Multitable POST /patch partialSuccess', () => {
           expect(params).toEqual(['sheet_partial'])
           return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -141,6 +143,8 @@ describe('Multitable POST /patch partialSuccess', () => {
         if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
           return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
