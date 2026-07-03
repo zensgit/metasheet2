@@ -581,7 +581,7 @@ export class ApprovalMetricsService {
          PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_seconds)
            FILTER (WHERE duration_seconds IS NOT NULL)::text AS p95_duration,
          COUNT(*) FILTER (WHERE sla_breached = TRUE)::text AS sla_breach_count,
-         COUNT(*) FILTER (WHERE sla_hours IS NOT NULL)::text AS sla_candidate_count
+         COUNT(*) FILTER (WHERE sla_hours IS NOT NULL OR sla_due_at IS NOT NULL)::text AS sla_candidate_count
        FROM approval_metrics
        ${where}`,
       params,
@@ -614,7 +614,7 @@ export class ApprovalMetricsService {
          COUNT(*) FILTER (WHERE terminal_state = 'revoked')::text AS revoked,
          AVG(duration_seconds) FILTER (WHERE duration_seconds IS NOT NULL)::text AS avg_duration,
          COUNT(*) FILTER (WHERE sla_breached = TRUE)::text AS sla_breach_count,
-         COUNT(*) FILTER (WHERE sla_hours IS NOT NULL)::text AS sla_candidate_count
+         COUNT(*) FILTER (WHERE sla_hours IS NOT NULL OR sla_due_at IS NOT NULL)::text AS sla_candidate_count
        FROM approval_metrics
        ${where}
        GROUP BY template_id
@@ -708,7 +708,7 @@ export class ApprovalMetricsService {
          COUNT(*) FILTER (WHERE m.terminal_state = 'revoked')::text AS revoked,
          AVG(m.duration_seconds) FILTER (WHERE m.duration_seconds IS NOT NULL)::text AS avg_duration,
          COUNT(*) FILTER (WHERE m.sla_breached = TRUE)::text AS sla_breach_count,
-         COUNT(*) FILTER (WHERE m.sla_hours IS NOT NULL)::text AS sla_candidate_count
+         COUNT(*) FILTER (WHERE m.sla_hours IS NOT NULL OR m.sla_due_at IS NOT NULL)::text AS sla_candidate_count
        FROM approval_metrics m
        LEFT JOIN approval_instances i ON i.id = m.instance_id
        ${where}
@@ -803,7 +803,7 @@ export class ApprovalMetricsService {
       `SELECT
          template_id,
          COUNT(*)::text AS total,
-         COUNT(*) FILTER (WHERE sla_hours IS NOT NULL)::text AS sla_candidate_count,
+         COUNT(*) FILTER (WHERE sla_hours IS NOT NULL OR sla_due_at IS NOT NULL)::text AS sla_candidate_count,
          COUNT(*) FILTER (WHERE sla_breached = TRUE)::text AS sla_breach_count,
          AVG(duration_seconds) FILTER (WHERE duration_seconds IS NOT NULL)::text AS avg_duration,
          PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_seconds)
@@ -811,10 +811,10 @@ export class ApprovalMetricsService {
        FROM approval_metrics
        ${where}
        GROUP BY template_id
-       HAVING COUNT(*) FILTER (WHERE sla_hours IS NOT NULL) > 0
+       HAVING COUNT(*) FILTER (WHERE sla_hours IS NOT NULL OR sla_due_at IS NOT NULL) > 0
        ORDER BY
          (COUNT(*) FILTER (WHERE sla_breached = TRUE))::float
-           / NULLIF(COUNT(*) FILTER (WHERE sla_hours IS NOT NULL), 0) DESC,
+           / NULLIF(COUNT(*) FILTER (WHERE sla_hours IS NOT NULL OR sla_due_at IS NOT NULL), 0) DESC,
          COUNT(*) FILTER (WHERE sla_breached = TRUE) DESC,
          COUNT(*) DESC
        LIMIT $${templateLimitParam.length}`,

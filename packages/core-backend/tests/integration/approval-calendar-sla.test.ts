@@ -416,6 +416,29 @@ describeIfDatabase('Approval T3-2 business-calendar SLA — real DB', () => {
     expect(row.rows[0]?.sla_breached_at).not.toBeNull()
   })
 
+  it('analytics denominator (review P2): a business-calendar breached row (sla_hours NULL) counts as an SLA CANDIDATE, not just a breach', async () => {
+    // Before the fix, the candidate denominators counted only `sla_hours IS NOT NULL`, so a calendar row
+    // (sla_hours NULL, sla_due_at set, sla_breached TRUE) inflated the breach numerator while the candidate
+    // denominator stayed 0 → a >100% (or divide-by-near-zero) breach rate. The predicate now counts
+    // `sla_hours IS NOT NULL OR sla_due_at IS NOT NULL`. Isolated by a unique tenant.
+    const metrics = new ApprovalMetricsService(rawQuery)
+    const tenantId = `t32-denom-${Date.now()}`
+    const instanceId = `${tenantId}-i1`
+    await seedInstance(instanceId, 'approval_1')
+    await rawQuery(
+      `INSERT INTO approval_metrics
+         (instance_id, template_id, tenant_id, started_at, sla_hours, sla_due_at, sla_unit,
+          sla_breached, sla_breached_at, node_breakdown)
+       VALUES ($1, NULL, $2, now() - INTERVAL '2 hours', NULL, now() - INTERVAL '1 minute', 'business',
+               TRUE, now(), '[]'::jsonb)`,
+      [instanceId, tenantId],
+    )
+    const summary = await metrics.getMetricsSummary({ tenantId })
+    expect(summary.slaBreachCount).toBe(1)
+    // The calendar row IS a candidate — denominator includes it (was 0 before the fix → inflated rate).
+    expect(summary.slaCandidateCount).toBe(1)
+  })
+
   it('legacy sla_hours path is byte-identical (no calendar columns) and still index-served', async () => {
     const metrics = new ApprovalMetricsService(rawQuery)
     const instanceId = `t32-legacy-${Date.now()}`
