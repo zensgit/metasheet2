@@ -55,6 +55,12 @@ const REC_A_MISSING = `rec_c2w_missing_${TS}` // never inserted
 const OWNER = `u_c2w_owner_${TS}` // owns BASE_A (base-A writable) + full multitable perms
 const READONLY = `u_c2w_ro_${TS}` // multitable:read only (base-B leg: canEditRecord=false)
 const NOBASEA = `u_c2w_nba_${TS}` // full sheet perms but NOT base-A writable (no ownership, no base codes)
+// The FEATURE'S ACTUAL TARGET USER: authorized purely via the cross-base C1 leg (a DB `multitable:base:write`
+// code → resolveBaseWritable(BASE_A)=true) + a sheet-B write grant (spreadsheet_permissions → capsB
+// record-edit for the base-B leg), but with NO global `multitable:write` and NO sheet-A grant → capsA
+// (sheet-A) record-write is FALSE. Proves the op authorizes the forward write from the guard's C1/quota/
+// Lock-C authority, not the disjoint sheet-level `multitable:write` axis patchRecords would otherwise impose.
+const TARGET = `u_c2w_tgt_${TS}`
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
@@ -101,14 +107,24 @@ describeIfDatabase('C2 cross-base mirror write-through — op runtime goldens (r
     app.use((req, _res, next) => { ;(req as express.Request & { user?: unknown }).user = currentUser; next() })
     app.use('/api/multitable', univerMetaRouter())
 
-    for (const u of [OWNER, READONLY, NOBASEA]) {
+    for (const u of [OWNER, READONLY, NOBASEA, TARGET]) {
       await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [u])
     }
+    // TARGET base-A leg (C1): a DB base-write code → resolveBaseWritable(BASE_A)=true (reads
+    // user_permissions, NOT req.user.perms — disjoint from capsA). (The sheet-B grant for the base-B leg is
+    // inserted after the sheets exist, below.)
+    await q("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'multitable:base:write') ON CONFLICT DO NOTHING", [TARGET])
     // OWNER owns BASE_A ⇒ resolveBaseWritable(BASE_A) true for OWNER; nobody owns BASE_B and no actor holds
     // base codes for it ⇒ an op success ALSO proves C1 is not invoked for the base-B leg (it would fail).
     await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1,$2,$3)', [BASE_A, 'C2W A', OWNER])
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_B, 'C2W B'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3),($4,$5,$6)', [SA, BASE_A, 'A', SB, BASE_B, 'B'])
+    // TARGET base-B leg: a sheet-B FULL write grant (spreadsheet:write ⇒ canRead+canWrite) → capsB
+    // .canEditRecord lifted for sheet B ONLY; sheet A stays ungranted so capsA.canEditRecord=false. TARGET's
+    // Lock-C READ access to base-A/sheet-A comes from its req.user.perms (multitable:read + multitable:base:read,
+    // set per-test) — base:read satisfies the cross-base resolveBaseReadable(BASE_A) gate WITHOUT lifting any
+    // WRITE capability, keeping the forward write authorized solely by the guard's C1/quota/Lock-C authority.
+    await q("INSERT INTO spreadsheet_permissions (sheet_id, subject_type, subject_id, perm_code) VALUES ($1,'user',$2,'spreadsheet:write')", [SB, TARGET])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [F_A, SA, 'Fwd', 'link', JSON.stringify({ foreignSheetId: SB, foreignBaseId: BASE_B, twoWay: true, mirrorFieldId: M_B }), 1])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
@@ -128,7 +144,9 @@ describeIfDatabase('C2 cross-base mirror write-through — op runtime goldens (r
     await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[SA, SB]]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[SA, SB]]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE_A, BASE_B]]).catch(() => {})
-    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[OWNER, READONLY, NOBASEA]]).catch(() => {})
+    await q('DELETE FROM spreadsheet_permissions WHERE sheet_id = ANY($1::text[])', [[SA, SB]]).catch(() => {})
+    await q('DELETE FROM user_permissions WHERE user_id = $1', [TARGET]).catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[OWNER, READONLY, NOBASEA, TARGET]]).catch(() => {})
     await poolManager.get().end?.()
   })
 
@@ -307,6 +325,48 @@ describeIfDatabase('C2 cross-base mirror write-through — op runtime goldens (r
     const remove = await mirrorOp({ action: 'remove', foreignRecordId: REC_A2 })
     expect(remove.status).toBe(200)
     expect(await forwardEdgeCount(REC_A2, REC_B1)).toBe(0)
+  })
+
+  // ── W-Target: the C1-only actor (the feature's actual target user) — authority from the guard, NOT
+  //    the disjoint sheet-level multitable:write axis. Fail-first for the over-deny fix: WITHOUT
+  //    authorizationPreValidated, patchRecords' ensureRecordWriteAllowed(capsA) throws (capsA.canEditRecord
+  //    =false here) and the route degrades to 500 — this golden goes RED.
+  test('W-Target: C1-authorized actor with NO global multitable:write (sheet-B grant only) succeeds — add+remove one canonical edge', async () => {
+    __resetSharedCrossBaseWriteQuotaForTest()
+    // NO multitable:write ⇒ capsA.canEditRecord=false. base-A WRITE via the DB base:write code (C1);
+    // base:read satisfies Lock-C cross-base read of BASE_A; base-B via the sheet-B write grant.
+    asUser(TARGET, ['multitable:read', 'multitable:base:read'])
+    const add = await mirrorOp()
+    expect(add.status).toBe(200)
+    expect(add.body?.data?.forward?.fieldId).toBe(F_A)
+    expect(await forwardEdgeCount(REC_A1, REC_B1)).toBe(1)
+    expect(await mirrorRows()).toBe(0)
+    const remove = await mirrorOp({ action: 'remove' })
+    expect(remove.status).toBe(200)
+    expect(await forwardEdgeCount(REC_A1, REC_B1)).toBe(0)
+  })
+
+  // ── W-C write-mask: rec_A READABLE but a per-record record_permissions 'read' (read-only) scope denies
+  //    the WRITE — uniform, byte-identical to missing (masked ≡ missing ≡ NOT-WRITABLE, no oracle). Fail-
+  //    first for the Lock-C write-mask: without the `accessLevel==='read'` branch the read-only actor would
+  //    reach the edge write and the two responses diverge.
+  test('W-C write-mask: read-only record scope on rec_A ⇒ uniform MIRROR_LINK_TARGET_UNAVAILABLE, byte-identical to missing, no edge', async () => {
+    __resetSharedCrossBaseWriteQuotaForTest()
+    // TARGET can READ REC_A2 (multitable:read + a record 'read' grant) but the 'read' scope forbids WRITE.
+    await q('INSERT INTO record_permissions (sheet_id, record_id, subject_type, subject_id, access_level) VALUES ($1,$2,$3,$4,$5)',
+      [SA, REC_A2, 'user', TARGET, 'read'])
+    asUser(TARGET, ['multitable:read', 'multitable:base:read'])
+    try {
+      const readOnly = await mirrorOp({ foreignRecordId: REC_A2 })
+      const missing = await mirrorOp({ foreignRecordId: REC_A_MISSING })
+      expect(readOnly.status).toBe(missing.status)
+      expect(readOnly.body).toEqual(missing.body) // read-only ≡ missing: no write-vs-nonexistent oracle
+      expect(readOnly.status).toBe(403)
+      expect(readOnly.body?.error?.code).toBe('MIRROR_LINK_TARGET_UNAVAILABLE')
+      expect(await forwardEdgeCount(REC_A2, REC_B1)).toBe(0)
+    } finally {
+      await q('DELETE FROM record_permissions WHERE sheet_id = $1', [SA]).catch(() => {})
+    }
   })
 
   // ── Decision D guard: the op refuses a SAME-base pairing ─────────────────

@@ -273,6 +273,19 @@ export interface RecordPatchInput {
    * on every existing path (C2/I-1); this seam carries authorization for the ONE gated op only.
    */
   preWriteGuard?: (query: QueryFn) => Promise<void>
+  /**
+   * C2 cross-base mirror write-through (#3440 Lock A/B): when true, skip the SHEET-LEVEL
+   * `ensureRecordWriteAllowed` record-write gate for the records this patch mutates — the mirror op's
+   * `preWriteGuard` has ALREADY established the full authorization the design-lock specifies (Lock B base-A
+   * C1 base-level write authority + quota, base-B rec_B record-edit leg, Lock C per-record read+write mask on
+   * the named forward record). The service's own `ensureRecordWriteAllowed(capsA)` is `multitable:write`
+   * (a DISJOINT permission axis from C1's `resolveBaseWritable`), so applying it here would wrongly re-gate —
+   * and over-deny — the feature's target actor (a base-B actor authorized purely via C1, without global
+   * `multitable:write` or a sheet-A grant). ONLY the dedicated, guard-protected mirror op may set this; every
+   * other patchRecords protection (FOR UPDATE lock, ensureRecordNotLocked, link-target-exists validation,
+   * dedup, revision, mirror-invalidation, field validation) still runs. Never set by any general path.
+   */
+  authorizationPreValidated?: boolean
 }
 
 export interface RecordPatchResult {
@@ -610,6 +623,7 @@ export class RecordWriteService {
       sheetScope,
       access,
       source,
+      authorizationPreValidated,
     } = input
 
     const h = this.helpers
@@ -751,7 +765,13 @@ export class RecordWriteService {
         }
         const recordRow: any = (recordRes.rows as any[])[0]
 
+        // authorizationPreValidated: the C2 mirror op's preWriteGuard already carries the design-lock's
+        // full authority (base-A C1 base-level write + quota + base-B rec_B edit + Lock-C per-record
+        // read+write mask). The sheet-level ensureRecordWriteAllowed axis (multitable:write) is disjoint
+        // from C1 and would over-deny the target actor, so it is skipped for that op ONLY. All other
+        // guards below (lock, link-target, dedup, validation) still run.
         if (
+          !authorizationPreValidated &&
           !h.ensureRecordWriteAllowed(
             capabilities,
             sheetScope,

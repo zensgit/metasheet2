@@ -15392,8 +15392,16 @@ export function univerMetaRouter(): Router {
         if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, sheetA)) && (await loadDeniedRecordIds(query, sheetA, actorUserId)).has(recA)) {
           throw new MirrorLinkTargetUnavailableError()
         }
+        // Lock C per-record READ+WRITE mask on rec_A (#3440 Lock C: masked ≡ missing ≡ NOT-WRITABLE, all
+        // uniform). base-A authority (Lock B) is BASE-level; a per-record record_permissions scope that
+        // limits this actor to read-deny ('none') OR read-only ('read') on rec_A must fail closed on the
+        // WRITE — folded into the SAME MirrorLinkTargetUnavailableError so read-only is byte-identical to
+        // masked/missing (no linkage/existence oracle). No scope entry ⇒ the base-level write authority
+        // already proven by the C1 leg governs (allowed) — do NOT re-impose a sheet-level write requirement.
         const recAScope = (await loadRecordPermissionScopeMap(query, sheetA, [recA], actorUserId)).get(recA)
-        if (recAScope && recAScope.accessLevel === 'none') throw new MirrorLinkTargetUnavailableError()
+        if (recAScope && (recAScope.accessLevel === 'none' || recAScope.accessLevel === 'read')) {
+          throw new MirrorLinkTargetUnavailableError()
+        }
         ensureRecordNotLocked(actorId, recARow, () => new MirrorLinkTargetUnavailableError())
 
         // ── Only now may edge existence be read: finalize the forward set under the held locks. The
@@ -15425,6 +15433,11 @@ export function univerMetaRouter(): Router {
         access,
         source: 'crossbase-mirror-write',
         preWriteGuard,
+        // The preWriteGuard above has already established the design-lock's full authority (base-A C1
+        // base-level write + quota + base-B rec_B edit + Lock-C per-record read+write mask). Skip the
+        // service's sheet-level ensureRecordWriteAllowed (multitable:write) gate — a disjoint permission
+        // axis from C1 that would over-deny the C1-only target actor (#3440 Lock A/B).
+        authorizationPreValidated: true,
       })
       return res.json({
         ok: true,
