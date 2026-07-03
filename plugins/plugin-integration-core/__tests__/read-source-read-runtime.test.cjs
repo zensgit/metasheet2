@@ -52,7 +52,10 @@ function normalizedConfig(mode, overrides = {}) {
   if (mode === 'resolver_lookup') {
     cfg.keyField = 'FMaterialId'
     cfg.containerPaths = ['Data.Rows']
-    cfg.multiplicityRuleField = 'FIsCurrent'
+    // R0 contract shape (a valid resolver_lookup config); S3-1 still fail-closes it as mode_not_supported
+    // until R2 wires the evaluator — the executor rejects the MODE, not the contract.
+    cfg.resolverRule = 'exactly_one'
+    cfg.fieldMap = [{ source: 'FItemID', target: 'item_id' }]
   }
   Object.assign(cfg, overrides)
   const result = validateReadSourceConfig(cfg)

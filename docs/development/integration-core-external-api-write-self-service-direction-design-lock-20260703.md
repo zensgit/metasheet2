@@ -103,7 +103,7 @@ any of:
 | --- | --- | --- |
 | **W0** (this doc) | direction design-lock: two-tier write model, ladder, save-time validation, dry-run-first, sandbox-first, delete excluded | nothing (docs) |
 | **W1** | **write-target config model + validator** — the proven write-op set only; save-time validation; content-keyed versioned store + approve/retire lifecycle (fork the read `read-source-config` + `read-source-config-store` shapes) | no dry-run, no apply, no runtime |
-| **W2** | **dry-run contract + values-free preview evidence** — a no-write preview that resolves the endpoint + composes the target body from the field map and returns `{rowsAffected-estimate, coarse-outcome-codes}`, issuing a **one-time content-hashed dry-run token** (fork the shipped C6 `createDryRunToken` discipline) | no apply |
+| **W2** | **dry-run contract + values-free preview evidence** — a no-write preview that resolves the endpoint + composes the target body from the field map and returns `{rowsAffected-estimate, coarse-outcome-codes}`, issuing a **one-time token bound to a recomputed content/revision hash** (the token itself is random; the binding is the hash, C6-style). C6's token helpers are file-internal to `external-write-dry-run.cjs` — so **extract/promote a shared token helper (with tripwire tests) or fork the discipline**, never a second scheme | no apply |
 | **W3** | **sandbox apply** — redeems a dry-run token against the **sandbox** target only; then a **re-pull idempotency + human-field-preservation** check proves a re-apply is a no-op | sandbox only; never production |
 | **W4** | **production apply** — the **separately owner-gated** rung; redeems a fresh dry-run token against production behind a two-step confirm + Idempotency-Key; first production write is owner-authorized, sandbox-proven, diverse-sample-tested | **owner production gate**; never end-user reachable |
 
@@ -121,9 +121,13 @@ end-user-authored write target remain out of every rung.
    The runtime multitable actor tier can invoke an approved target's dry-run/sandbox path but
    has **no path** to trigger a production write.
 3. **Dry-run first — no write without a token.** A write apply (sandbox or production)
-   requires a **one-time, content-hashed, plugin-stored** dry-run token bound to the exact
-   normalized config + payload set; a mismatch or a re-consumed token fail-closes (reuse the
-   C6 `CONSUMING_TOKEN_KEYS` / `requireConsumableTokenStore` one-time-consume discipline).
+   requires a **one-time, plugin-stored dry-run token bound to a recomputed content/revision
+   hash** of the exact normalized config + payload set (the token is random; the binding is
+   the hash); a mismatch or a re-consumed token fail-closes. The C6 one-time-consume helpers
+   (`createDryRunToken` / `CONSUMING_TOKEN_KEYS` / `requireConsumableTokenStore`) are
+   **file-internal to `external-write-dry-run.cjs`, not exported** — so W2 must **extract/
+   promote a shared token helper (with tripwire tests) or fork the discipline**, not import
+   the current internal constants.
 4. **Sandbox first — production is never the first write.** The first apply of any target
    goes to the sandbox binding; production apply is unreachable until a sandbox apply +
    re-pull idempotency proof exists for that target version.
@@ -162,15 +166,19 @@ implementation composes rather than re-derives:
   draft→approved→retired lifecycle + values-free audit — fork wholesale); the named-inputs
   runtime discipline (`normalizeReadSourceProbeInputs`, bounded ≤128-char control-char-free
   key never echoed) as the template for how a write runtime request carries only keys.
-- **C6 external-write dry-run spine (shipped).** `external-write-dry-run.cjs`:
-  `createDryRunToken` (one-time content-hashed token, plugin-stored),
-  `CONSUMING_TOKEN_KEYS` / `requireConsumableTokenStore` (one-time consume), `TARGET_KIND`
-  target-scoping, row caps (`DEFAULT_MAX_ROWS` / `MAX_ROWS` / page caps), `SAFE_WRITE_ERROR_CODES`
-  (values-free error allowlist); routes `POST /pipelines/:id/external-write/dry-run` +
+- **C6 external-write dry-run spine (shipped).** `external-write-dry-run.cjs` exports only
+  the high-level flow — `dryRunExternalWrite` / `applyExternalWrite` / `ExternalWriteDryRunError`
+  publicly, and `consumeDryRunToken` / `buildRevision` / `TARGET_KIND` under `__internals`
+  (test-visible). The token helpers `createDryRunToken` / `CONSUMING_TOKEN_KEYS` /
+  `requireConsumableTokenStore` are **pure file-internal — not exported at all**. Discipline
+  to inherit (not import): a random one-time token bound to a recomputed content/**revision**
+  hash (`buildRevision`), one-time consume, `TARGET_KIND` target-scoping, row caps
+  (`DEFAULT_MAX_ROWS` / `MAX_ROWS` / page caps), `SAFE_WRITE_ERROR_CODES` (values-free error
+  allowlist); routes `POST /pipelines/:id/external-write/dry-run` +
   `POST /pipelines/:id/external-write/apply`. The write self-service **generalizes** this
-  pipeline-scoped dry-run→apply into a **consultant-authored, config-driven** write target,
-  reusing the token/idempotency/target-scoping discipline — it does not fork a second token
-  scheme.
+  pipeline-scoped dry-run→apply into a **consultant-authored, config-driven** write target by
+  **extracting/promoting a shared token helper (with tripwire tests) or forking the
+  discipline** — never a second, parallel token scheme.
 - **Adapter contract (shipped).** `contracts.cjs` (`createAdapterRegistry`,
   `normalizeUpsertRequest`, `createUpsertResult`, `unsupportedAdapterOperation`) and the
   model gated write adapter `k3-wise-webapi-adapter.cjs` (`upsert` with `ensureOperation`
@@ -197,7 +205,8 @@ implementation composes rather than re-derives:
   path.
 - No config-model, validator, dry-run runtime, apply writer, wizard, or UI in this doc (those
   are W1+).
-- No new credential store, no new token scheme (reuse the read credential reference model +
+- No new credential store, and **no second/parallel token scheme** — share/extract the C6
+  token discipline or fork it (do NOT invent a new one) (reuse the read credential reference model +
   the C6 token).
 
 ## Disposition
