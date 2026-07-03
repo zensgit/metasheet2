@@ -29,6 +29,19 @@ const RECORD = `rec_w6_${TS}`
 const REQUESTER = `w6_requester_${TS}`
 const APPROVER = `w6_approver_${TS}`
 const NO_APPROVAL_PERMISSION = `w6_no_approval_${TS}`
+
+// T3-5 cross-base resultWriteback fixtures. The target sheets live in DIFFERENT bases from the source
+// (BASE/SHEET), so a resultWriteback aimed at them is a genuine cross-base write governed by the shared
+// executor gate. XB_BASE_OK is OWNED BY REQUESTER (the trigger actor) → base-write via ownership;
+// XB_BASE_DENY is owned by APPROVER → REQUESTER has NO base-write on it.
+const XB_BASE_OK = `base_w6_xbok_${TS}`
+const XB_SHEET_OK = `sheet_w6_xbok_${TS}`
+const XB_REC_OK = `rec_w6_xbok_${TS}`
+const XB_REC_NULL = `rec_w6_xbnull_${TS}` // second target record for the null-actor canary
+const XB_BASE_DENY = `base_w6_xbdeny_${TS}`
+const XB_SHEET_DENY = `sheet_w6_xbdeny_${TS}`
+const XB_REC_DENY = `rec_w6_xbdeny_${TS}`
+
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
 const executionIds: string[] = []
@@ -232,6 +245,24 @@ async function seedDefaultWritebackFields(): Promise<void> {
   ])
 }
 
+// T3-5: seed the cross-base target bases/sheets/records + the OK target's writeback fields. Field ids are
+// GLOBALLY UNIQUE (meta_fields PK is `id`), so the target sheet cannot reuse the source's `approval_status`
+// etc — it gets its own `xb_*` ids. Idempotent upserts so a re-run stays clean.
+async function seedCrossBaseTargets(): Promise<void> {
+  await q(`INSERT INTO meta_bases (id, name, owner_id) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET owner_id = EXCLUDED.owner_id`, [XB_BASE_OK, 'W6 XB Target OK', REQUESTER])
+  await q(`INSERT INTO meta_bases (id, name, owner_id) VALUES ($1,$2,$3) ON CONFLICT (id) DO UPDATE SET owner_id = EXCLUDED.owner_id`, [XB_BASE_DENY, 'W6 XB Target Deny', APPROVER])
+  await q(`INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3) ON CONFLICT (id) DO NOTHING`, [XB_SHEET_OK, XB_BASE_OK, 'W6 XB Target Sheet OK'])
+  await q(`INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3) ON CONFLICT (id) DO NOTHING`, [XB_SHEET_DENY, XB_BASE_DENY, 'W6 XB Target Sheet Deny'])
+  for (const [rec, sheet] of [[XB_REC_OK, XB_SHEET_OK], [XB_REC_NULL, XB_SHEET_OK], [XB_REC_DENY, XB_SHEET_DENY]] as const) {
+    await q(`INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,'{}'::jsonb,1) ON CONFLICT (id) DO UPDATE SET data='{}'::jsonb, version=1`, [rec, sheet])
+  }
+  const seedField = (id: string, name: string, type: string, property: Record<string, unknown>, order: number) =>
+    q(`INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6) ON CONFLICT (id) DO NOTHING`, [id, XB_SHEET_OK, name, type, JSON.stringify(property), order])
+  await seedField('xb_status', 'XB Status', 'select', { options: [{ value: 'approved' }, { value: 'rejected' }] }, 10)
+  await seedField('xb_by', 'XB By', 'string', {}, 11)
+  await seedField('xb_at', 'XB At', 'dateTime', {}, 12)
+}
+
 async function waitForExecutionStatus(svc: AutomationService, id: string, status: string) {
   await vi.waitFor(async () => {
     const execution = await svc.logs.getById(id)
@@ -293,6 +324,71 @@ async function executeAndApprove(
   return { executionId: execution.id, approvalInstanceId }
 }
 
+// T3-5: run a start_approval whose resultWriteback carries a cross-base target triple, then approve it.
+// The persisted rule (createStartApprovalRule) and the inline execRule share the SAME action config so the
+// resume-time fingerprint guard passes. `triggerActorId` is the actor stamped on the TRIGGER event (the
+// governing identity for the cross-base gate); null models a system/scheduled trigger with no actor.
+async function runCrossBaseBackwrite(
+  svc: AutomationService,
+  resultWriteback: Record<string, string>,
+  opts: { title: string; triggerActorId: string | null },
+): Promise<string> {
+  const templateId = await createPublishedTemplate()
+  const ruleId = await createStartApprovalRule(svc, templateId, resultWriteback)
+  await seedSheetRecord(opts.title)
+  await seedDefaultWritebackFields() // source fields (exercised by the §3.1 source-resident-field canary)
+  const execRule = {
+    id: ruleId,
+    name: 'W6 start approval',
+    sheetId: SHEET,
+    trigger: { type: 'record.created', config: {} },
+    actions: [
+      { type: 'start_approval', config: { templateId, formDataMapping: { summary: 'Record {{record.title}} needs approval' }, requester: { mode: 'trigger_actor' }, resultWriteback } },
+      { type: 'send_webhook', config: { url: 'https://example.test/w6-tail' } },
+    ],
+    enabled: true,
+    createdBy: REQUESTER,
+    createdAt: new Date(TS).toISOString(),
+    executionMode: 'workflow_job_v1',
+  }
+  const execution = await svc.executeRule(execRule as never, {
+    sheetId: SHEET,
+    recordId: RECORD,
+    data: { title: opts.title },
+    ...(opts.triggerActorId !== null ? { actorId: opts.triggerActorId } : {}),
+  })
+  executionIds.push(execution.id)
+  const bridge = await q(
+    `SELECT approval_instance_id FROM multitable_automation_approval_bridges WHERE execution_id = $1`,
+    [execution.id],
+  )
+  approvalIds.push(bridge.rows[0].approval_instance_id)
+  const approvals = new ApprovalProductService()
+  await approvals.dispatchAction(
+    bridge.rows[0].approval_instance_id,
+    { action: 'approve', comment: 'go' },
+    { userId: APPROVER, userName: APPROVER },
+  )
+  await waitForExecutionStatus(svc, execution.id, 'success')
+  return execution.id
+}
+
+// T3-5 save-gate helper: persist a start_approval rule with the given resultWriteback shape. A fake
+// templateId is fine — createRule validates the config SHAPE, not template existence.
+function createSaveGateRule(svc: AutomationService, resultWriteback: Record<string, string>) {
+  const config = { templateId: 'tpl-fake', formDataMapping: { summary: 'x' }, resultWriteback }
+  return svc.createRule(SHEET, {
+    name: 'T3-5 save gate',
+    triggerType: 'record.created',
+    triggerConfig: {},
+    actionType: 'start_approval',
+    actionConfig: config,
+    actions: [{ type: 'start_approval', config }] as never,
+    executionMode: 'workflow_job_v1',
+    createdBy: REQUESTER,
+  })
+}
+
 describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)', () => {
   beforeAll(async () => {
     await ensureApprovalSchemaReady()
@@ -318,6 +414,12 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET])
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE])
+    // T3-5 cross-base target fixtures.
+    const xbSheets = [XB_SHEET_OK, XB_SHEET_DENY]
+    await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [xbSheets]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [xbSheets]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [xbSheets]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[XB_BASE_OK, XB_BASE_DENY]]).catch(() => {})
     for (const id of templateIds) {
       await q('DELETE FROM approval_published_definitions WHERE template_id = $1::uuid', [id])
       await q('DELETE FROM approval_template_versions WHERE template_id = $1::uuid', [id])
@@ -589,6 +691,140 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
       const rec = await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [RECORD, SHEET])
       const data = rec.rows[0].data as Record<string, unknown>
       expect(data).not.toHaveProperty('approval_status_number')
+    } finally {
+      svc.shutdown()
+    }
+  })
+
+  // ── T3-5: cross-base resultWriteback ─────────────────────────────────────────
+  // The approval outcome is written back onto a record in ANOTHER base, gated by the SAME executor
+  // cross-base write gate as update/create/delete/lock (trigger-actor base-write, claim==truth, shared
+  // per-target-base quota). RED before T3-5: the target triple is ignored — the backwrite validates/writes
+  // against the SOURCE sheet, so a target-only field id skips (field-not-found) and the target is untouched.
+
+  test('T3-5: approved cross-base resultWriteback writes onto the TARGET record; source untouched; step output carries the triple', async () => {
+    const webhookBodies: string[] = []
+    const updatedEvents: Array<Record<string, unknown>> = []
+    const subId = eventBus.subscribe('multitable.record.updated', (p: unknown) => { updatedEvents.push(p as Record<string, unknown>) })
+    const svc = makeAutomationService((async (_url: string, o?: { body?: string }) => {
+      if (o?.body) webhookBodies.push(o.body)
+      return new Response('OK', { status: 200 })
+    }) as never)
+    try {
+      await seedCrossBaseTargets()
+      const RW = { statusField: 'xb_status', approverField: 'xb_by', completedAtField: 'xb_at', targetBaseId: XB_BASE_OK, targetSheetId: XB_SHEET_OK, targetRecordId: XB_REC_OK }
+      const executionId = await runCrossBaseBackwrite(svc, RW, { title: 'Q4 plan', triggerActorId: REQUESTER })
+
+      // Target record carries the outcome — values from the completion EVENT (approver = APPROVER), even
+      // though the trigger actor that AUTHORIZED the cross-base write is REQUESTER (two distinct identities).
+      const tgt = (await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [XB_REC_OK, XB_SHEET_OK])).rows[0].data as Record<string, unknown>
+      // Exact body: ONLY the three mapped keys land on the target — no extra/leaked key from the patch builder.
+      expect(tgt).toEqual({ xb_status: 'approved', xb_by: APPROVER, xb_at: expect.any(String) })
+      // §3.1 anti-misroute: the SOURCE record is NOT mutated by the cross-base backwrite.
+      const src = (await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [RECORD, SHEET])).rows[0].data as Record<string, unknown>
+      expect(src).toEqual({ title: 'Q4 plan' })
+      // §3.3 non-merge: the tail send_webhook's recordData snapshot does NOT see the cross-base patch.
+      expect(webhookBodies.length).toBeGreaterThan(0)
+      const body = JSON.parse(webhookBodies[webhookBodies.length - 1]) as { data?: Record<string, unknown> }
+      expect(body.data).not.toHaveProperty('xb_status')
+      expect(body.data?.title).toBe('Q4 plan')
+      // Q3 audit: the start_approval step output carries the target triple, with no skip.
+      const resumed = (await svc.logs.getById(executionId))!
+      const startStep = resumed.steps.find((s) => s.actionType === 'start_approval')
+      expect(startStep?.output).toMatchObject({ crossBaseBackwrite: { targetBaseId: XB_BASE_OK, targetSheetId: XB_SHEET_OK, targetRecordId: XB_REC_OK } })
+      expect(startStep?.output).not.toHaveProperty('backwriteSkipped')
+      // Q3 fan-out: the cross-base backwrite emits multitable.record.updated for the TARGET sheet/record
+      // (not the source), so the target base's subscribers see it live. (Actor-omission on the realtime
+      // publish is a separate privacy channel; this asserts the chaining emit fired for the right record.)
+      expect(updatedEvents.some((e) => e.recordId === XB_REC_OK && e.sheetId === XB_SHEET_OK
+        && (e.changes as Record<string, unknown> | undefined)?.xb_status === 'approved')).toBe(true)
+      expect(updatedEvents.some((e) => e.recordId === RECORD)).toBe(false) // source never emitted
+    } finally {
+      eventBus.unsubscribe(subId)
+      svc.shutdown()
+    }
+  })
+
+  test('T3-5: cross-base backwrite where the TRIGGER actor lacks target base-write → skip (backwriteSkipped); target + source unchanged', async () => {
+    const svc = makeAutomationService((async () => new Response('OK', { status: 200 })) as never)
+    try {
+      await seedCrossBaseTargets()
+      // XB_BASE_DENY is owned by APPROVER; the trigger actor REQUESTER has NO base-write there.
+      const RW = { statusField: 'xb_status', targetBaseId: XB_BASE_DENY, targetSheetId: XB_SHEET_DENY, targetRecordId: XB_REC_DENY }
+      const executionId = await runCrossBaseBackwrite(svc, RW, { title: 'Q4 plan', triggerActorId: REQUESTER })
+
+      const tgt = (await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [XB_REC_DENY, XB_SHEET_DENY])).rows[0].data as Record<string, unknown>
+      expect(tgt).toEqual({}) // unchanged — fail-closed, no partial write
+      const src = (await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [RECORD, SHEET])).rows[0].data as Record<string, unknown>
+      expect(src).toEqual({ title: 'Q4 plan' })
+      const resumed = (await svc.logs.getById(executionId))!
+      const startStep = resumed.steps.find((s) => s.actionType === 'start_approval')
+      expect(startStep?.output).toMatchObject({ backwriteSkipped: expect.stringContaining('base-write') })
+      expect(startStep?.output).not.toHaveProperty('crossBaseBackwrite')
+    } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('T3-5: null trigger actor → cross-base backwrite skipped even though the rule creator owns the target base (no requester fallback)', async () => {
+    const svc = makeAutomationService((async () => new Response('OK', { status: 200 })) as never)
+    try {
+      await seedCrossBaseTargets()
+      // XB_BASE_OK is owned by REQUESTER (the rule creator / approval requester). The TRIGGER actor is null;
+      // the gate uses the TRIGGER actor (NOT event.requester which resolves to REQUESTER) → fail-closed.
+      const RW = { statusField: 'xb_status', targetBaseId: XB_BASE_OK, targetSheetId: XB_SHEET_OK, targetRecordId: XB_REC_NULL }
+      const executionId = await runCrossBaseBackwrite(svc, RW, { title: 'Q4 plan', triggerActorId: null })
+
+      const tgt = (await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [XB_REC_NULL, XB_SHEET_OK])).rows[0].data as Record<string, unknown>
+      expect(tgt).toEqual({}) // unchanged
+      const resumed = (await svc.logs.getById(executionId))!
+      const startStep = resumed.steps.find((s) => s.actionType === 'start_approval')
+      expect(startStep?.output).toMatchObject({ backwriteSkipped: expect.stringContaining('base-write') })
+    } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('T3-5: a cross-base target with a SOURCE-resident field id does NOT mutate the source record (anti-misroute)', async () => {
+    const svc = makeAutomationService((async () => new Response('OK', { status: 200 })) as never)
+    try {
+      await seedCrossBaseTargets()
+      // 'approval_status' EXISTS in the SOURCE sheet but NOT in the target sheet. Pre-T3-5 the backwrite
+      // ignored the target triple and wrote 'approval_status' onto the SOURCE record (the misroute). With
+      // T3-5 the write is routed to the cross-base target, where the field is absent → the backwrite skips
+      // → the source record stays untouched. This is the sharpest proof of §3.1 (source not mutated).
+      const RW = { statusField: 'approval_status', targetBaseId: XB_BASE_OK, targetSheetId: XB_SHEET_OK, targetRecordId: XB_REC_OK }
+      const executionId = await runCrossBaseBackwrite(svc, RW, { title: 'Q4 plan', triggerActorId: REQUESTER })
+
+      const src = (await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [RECORD, SHEET])).rows[0].data as Record<string, unknown>
+      expect(src).toEqual({ title: 'Q4 plan' }) // NOT mutated — no approval_status on the source
+      const resumed = (await svc.logs.getById(executionId))!
+      const startStep = resumed.steps.find((s) => s.actionType === 'start_approval')
+      expect(startStep?.output).toMatchObject({ backwriteSkipped: expect.stringContaining('target field not found') })
+    } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('T3-5 save gate: a PARTIAL cross-base target triple is rejected at rule-save', async () => {
+    const svc = makeAutomationService((async () => new Response('OK', { status: 200 })) as never)
+    try {
+      await seedSheetRecord('save gate')
+      await expect(
+        createSaveGateRule(svc, { statusField: 'xb_status', targetSheetId: XB_SHEET_OK }),
+      ).rejects.toThrow(/cross-base target requires/)
+    } finally {
+      svc.shutdown()
+    }
+  })
+
+  test('T3-5 save gate: the FULL cross-base target triple is accepted at rule-save', async () => {
+    const svc = makeAutomationService((async () => new Response('OK', { status: 200 })) as never)
+    try {
+      await seedSheetRecord('save gate')
+      const rule = await createSaveGateRule(svc, { statusField: 'xb_status', targetBaseId: XB_BASE_OK, targetSheetId: XB_SHEET_OK, targetRecordId: XB_REC_OK })
+      ruleIds.push(rule.id)
+      expect(rule.id).toBeTruthy()
     } finally {
       svc.shutdown()
     }

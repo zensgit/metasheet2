@@ -1793,8 +1793,11 @@ export class AutomationExecutor {
    * record-create guard at record-service.ts). The state is unreachable today (sheets are hard-deleted)
    * but this hardens against a future sheet-soft-delete feature.
    */
-  private async resolveSheetBaseId(sheetId: string): Promise<string | null | undefined> {
-    const res = await this.deps.queryFn('SELECT base_id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
+  private async resolveSheetBaseId(
+    sheetId: string,
+    queryFn: AutomationDeps['queryFn'],
+  ): Promise<string | null | undefined> {
+    const res = await queryFn('SELECT base_id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
     const row = (res.rows as Array<{ base_id?: unknown }>)[0]
     if (!row) return undefined
     return typeof row.base_id === 'string' ? row.base_id : null
@@ -1821,6 +1824,31 @@ export class AutomationExecutor {
     declaredTargetBaseId: string | undefined,
     context: ExecutionContext,
   ): Promise<CrossBaseWriteGate> {
+    // Thin adapter: unpack the automation `ExecutionContext` (trigger sheet + trigger actor) and delegate to
+    // the context-agnostic gate below. Record-mutating actions (update/create/delete/lock) route here.
+    return this.evaluateCrossBaseWriteGate(
+      this.deps.queryFn,
+      context.actorId ?? null,
+      context.sheetId,
+      targetSheetId,
+      declaredTargetBaseId,
+    )
+  }
+
+  /**
+   * ②b write-gate, CONTEXT-AGNOSTIC "new shape" (queryFn, actorId, triggerSheetId, targetSheetId,
+   * declaredTargetBaseId). The record-mutating executors delegate here via `evaluateCrossBaseWrite`, and the
+   * T3-5 approval cross-base resultWriteback backwrite calls it directly on the SAME executor instance so it
+   * shares the per-target-base write QUOTA (Q5) with update/create/delete/lock. Behaviour is unchanged from
+   * the pre-T3-5 method; only the trigger sheet/actor + queryFn are now explicit params instead of `context`.
+   */
+  async evaluateCrossBaseWriteGate(
+    queryFn: AutomationDeps['queryFn'],
+    actorId: string | null,
+    triggerSheetId: string,
+    targetSheetId: string,
+    declaredTargetBaseId: string | undefined,
+  ): Promise<CrossBaseWriteGate> {
     // Fast-path: a write to the SAME sheet as the trigger, with no explicit cross-base `targetBaseId`,
     // is DEFINITIONALLY same-base — a sheet cannot exist in two bases — so skip the base lookups
     // entirely. This keeps a legitimate same-sheet write from fail-closing when the sheet row is
@@ -1830,7 +1858,7 @@ export class AutomationExecutor {
     const declaredBaseClaim = typeof declaredTargetBaseId === 'string' && declaredTargetBaseId.trim()
       ? declaredTargetBaseId.trim()
       : null
-    if (targetSheetId === context.sheetId && declaredBaseClaim === null) {
+    if (targetSheetId === triggerSheetId && declaredBaseClaim === null) {
       return { crossBase: false }
     }
 
@@ -1840,7 +1868,7 @@ export class AutomationExecutor {
     // a soft-deleted target (undefined → null) would collapse against a legacy-null trigger base
     // (null === null → same-base) and silently SKIP the gate. Treating it as a cross-base rejection keeps
     // legitimate legacy-null-base SAME-BASE writes (both sides null, both rows present) unaffected.
-    const rawTargetBaseId = await this.resolveSheetBaseId(targetSheetId)
+    const rawTargetBaseId = await this.resolveSheetBaseId(targetSheetId, queryFn)
     if (rawTargetBaseId === undefined) {
       return {
         crossBase: true,
@@ -1849,7 +1877,7 @@ export class AutomationExecutor {
       }
     }
 
-    const triggerBaseId = (await this.resolveSheetBaseId(context.sheetId)) ?? null
+    const triggerBaseId = (await this.resolveSheetBaseId(triggerSheetId, queryFn)) ?? null
     const targetBaseId = rawTargetBaseId ?? null
 
     // Same-base (null-aware, mirrors `baseIdsAreCrossBase` = strict `!==`): null-vs-null and
@@ -1863,10 +1891,10 @@ export class AutomationExecutor {
     // computed at the top, reused here.)
     const claimed = declaredBaseClaim
     const authority = await resolveCrossBaseWriteAuthority({
-      actorId: context.actorId ?? null,
+      actorId,
       targetBaseId,
       declaredBaseClaim: claimed,
-      queryFn: this.deps.queryFn,
+      queryFn,
     })
     if ('reason' in authority) {
       if (authority.reason === 'claim_mismatch') {
