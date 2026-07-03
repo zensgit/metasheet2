@@ -26,6 +26,7 @@ const TS = Date.now()
 const BASE = `base_w6_start_${TS}`
 const SHEET = `sheet_w6_start_${TS}`
 const RECORD = `rec_w6_${TS}`
+const SAME_BASE_TARGET_RECORD = `rec_w6_same_target_${TS}`
 const REQUESTER = `w6_requester_${TS}`
 const APPROVER = `w6_approver_${TS}`
 const NO_APPROVAL_PERMISSION = `w6_no_approval_${TS}`
@@ -331,7 +332,7 @@ async function executeAndApprove(
 async function runCrossBaseBackwrite(
   svc: AutomationService,
   resultWriteback: Record<string, string>,
-  opts: { title: string; triggerActorId: string | null },
+  opts: { title: string; triggerActorId: string | null; beforeApprove?: () => Promise<void> },
 ): Promise<string> {
   const templateId = await createPublishedTemplate()
   const ruleId = await createStartApprovalRule(svc, templateId, resultWriteback)
@@ -363,6 +364,7 @@ async function runCrossBaseBackwrite(
     [execution.id],
   )
   approvalIds.push(bridge.rows[0].approval_instance_id)
+  await opts.beforeApprove?.()
   const approvals = new ApprovalProductService()
   await approvals.dispatchAction(
     bridge.rows[0].approval_instance_id,
@@ -741,6 +743,43 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
       expect(updatedEvents.some((e) => e.recordId === RECORD)).toBe(false) // source never emitted
     } finally {
       eventBus.unsubscribe(subId)
+      svc.shutdown()
+    }
+  })
+
+  test('T3-5: target triple resolving to the SOURCE base is rejected (no same-base arbitrary target write)', async () => {
+    const svc = makeAutomationService((async () => new Response('OK', { status: 200 })) as never)
+    try {
+      const RW = {
+        statusField: 'approval_status',
+        targetBaseId: BASE,
+        targetSheetId: SHEET,
+        targetRecordId: SAME_BASE_TARGET_RECORD,
+      }
+      const executionId = await runCrossBaseBackwrite(svc, RW, {
+        title: 'Same-base target plan',
+        triggerActorId: REQUESTER,
+        beforeApprove: async () => {
+          await q(
+            `INSERT INTO meta_records (id, sheet_id, data, version, created_by)
+             VALUES ($1, $2, $3::jsonb, 1, $4)
+             ON CONFLICT (id) DO UPDATE
+                SET data = EXCLUDED.data,
+                    version = 1`,
+            [SAME_BASE_TARGET_RECORD, SHEET, JSON.stringify({ title: 'same-base target' }), REQUESTER],
+          )
+        },
+      })
+
+      const src = (await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [RECORD, SHEET])).rows[0].data as Record<string, unknown>
+      expect(src).toEqual({ title: 'Same-base target plan' })
+      const sameBaseTarget = (await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [SAME_BASE_TARGET_RECORD, SHEET])).rows[0].data as Record<string, unknown>
+      expect(sameBaseTarget).toEqual({ title: 'same-base target' })
+      const resumed = (await svc.logs.getById(executionId))!
+      const startStep = resumed.steps.find((s) => s.actionType === 'start_approval')
+      expect(startStep?.output).toMatchObject({ backwriteSkipped: expect.stringContaining('different base') })
+      expect(startStep?.output).not.toHaveProperty('crossBaseBackwrite')
+    } finally {
       svc.shutdown()
     }
   })

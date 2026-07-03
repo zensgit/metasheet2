@@ -2543,10 +2543,10 @@ export class AutomationService {
       targetSheetId,
       targetBaseId,
     )
-    if (gate.crossBase && gate.ok === false) throw new Error(gate.error)
-    // gate.crossBase === false means the declared target resolved to the SAME base as the source — a same-base
-    // DIFFERENT-record write; no authority gate applies (consistent with same-base update_record). The write
-    // still targets targetRecordId, so §3.1 (source not mutated) holds regardless.
+    if (!gate.crossBase) {
+      throw new Error('cross-base resultWriteback target must resolve to a different base')
+    }
+    if (gate.ok === false) throw new Error(gate.error)
 
     // Target field-type/read validation runs against the TARGET sheet (deferred from save per Q4).
     await this.assertResultWritebackFields(targetSheetId, writeback, event.transition.toStatus)
