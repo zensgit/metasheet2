@@ -23,10 +23,22 @@ run time**, never from memory.
 | 1 | **AE-4** anomaly-result-edit closeout | `docs/development/attendance-ae4-anomaly-result-edit-staging-smoke-runbook-20260701.md` | `scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs` (`AE4_RESULT_EDIT_API_DB_SMOKE_PASS`) | `AE4_RESULT_EDIT_STAGING_SMOKE_PASS deploy=<sha> stamp=<ae4-smoke-...> org=<org> notifyRecord=<uuid> skipRecord=<uuid> residue=0` |
 | 2 | **RD-4/5** report-digest config card + producer/worker | `docs/development/attendance-rd45-report-digest-staging-smoke-runbook-20260702.md` | `scripts/ops/staging-attendance-report-digest-rd45-smoke.mjs` (`RD45_REPORT_DIGEST_API_DB_SMOKE_PASS`) | `RD45_REPORT_DIGEST_STAGING_SMOKE_PASS deploy=<sha> stamp=<rd45-smoke-...> org=<rd45-smoke-...-org> produced=<n> dedupOk=1 sendProof=<sent\|failed_recipient_not_bound\|failed_channel_not_configured> residue=0` |
 | 3 | **OT-bank v1-8** 三例验收 + settlement | `docs/development/attendance-overtime-bank-v18-staging-smoke-runbook-20260702.md` | `scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs` (`OTBANK_V18_API_DB_SMOKE_PASS`) | `OTBANK_V18_STAGING_SMOKE_PASS deploy=<sha> stamp=<otbank-v18-smoke-...> org=<org> cycle=<uuid> residue=0` |
+| 4 | **MP-6** makeup-punch (optional) | `docs/development/attendance-makeup-punch-mp6-staging-smoke-runbook-20260703.md` | `scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs` (`MP6_MAKEUP_PUNCH_API_DB_SMOKE_PASS`) | `MP6_MAKEUP_PUNCH_STAGING_SMOKE_PASS deploy=<sha> stamp=<mp6-smoke-...> org=<org> quota=1 approvals=1 residue=0` |
 
 Each helper prints an `*_API_DB_SMOKE_PASS` line that is **not** the final
 stamp; the final `*_STAGING_SMOKE_PASS` stamps are recorded by the operator in
 the respective runbooks after the manual/decision steps there.
+
+**Optional 4th smoke (MP-6 makeup-punch).** Row 4 is an OPTIONAL addition to
+this window — it can run standalone OR as the 4th smoke on the SAME deploy SHA.
+Run it AFTER OT-bank v1-8, since it also touches `attendance_requests` /
+`attendance_records` and the approval-engine tables; its distinct `mp6-smoke-`
+stamp keeps it fully isolated from the three smokes above (which are not
+rewritten here). MP-6 enforcement is subject-scoped — no org-wide enumeration, so
+the OT-bank settlement-population guard does not apply — but enabling
+`makeupPunchPolicy` flips a GLOBAL settings row, so run it under the window's
+single-tenant posture (its runbook OQ-3 records that decision). MP-6 writes NO
+notification deliveries.
 
 ## 2. One deploy SHA for the whole window
 
@@ -150,9 +162,10 @@ residue query is anchored on the stamp — never on broad text or types:
 | AE-4 | `ae4-smoke-<suffix>-…` | `ae4-smoke:<STAMP>:…` |
 | RD-4/5 | `rd45-smoke-<suffix>-…` | `rd45-smoke:<STAMP>:…` (no occupant — digest source keys are deterministic; see the RD runbook's known-family-deviation section) |
 | OT-bank v1-8 | `otbank-v18-smoke-<suffix>-…` | `otbank-v18-smoke:<STAMP>:…` |
+| MP-6 (optional) | `mp6-smoke-<suffix>-…` | `mp6-smoke:<STAMP>:…` (attachment key only) |
 
-The three prefixes are mutually exclusive by construction, so residue queries
-cannot collide. Helpers regex-lock their stamps and refuse unstamped ids.
+The prefixes are mutually exclusive by construction, so residue queries cannot
+collide. Helpers regex-lock their stamps and refuse unstamped ids.
 
 **Settings.** `PUT /api/attendance/settings` merges per policy key, so each
 smoke PUTs ONLY its own keys and siblings survive: AE-4 owns
@@ -254,6 +267,21 @@ SELECT count(*) AS holidays FROM attendance_holidays WHERE name = :otbank_holida
 -- approval-engine rows written by the v1-8 request chain (ids captured by the helper)
 SELECT count(*) AS approval_instances FROM approval_instances WHERE id = ANY(:otbank_approval_ids::text[]);
 
+-- MP-6 makeup-punch (optional 4th smoke) — subject-scoped rows by the mp6 stamp/prefix
+-- (all zero; ids captured from the MP-6 helper run). 'mp6-smoke-' is 10 chars.
+SELECT count(*) AS mp6_requests FROM attendance_requests
+ WHERE org_id = :org_id AND (id = ANY(:mp6_request_ids::uuid[]) OR left(user_id, 10) = 'mp6-smoke-');
+SELECT count(*) AS mp6_records FROM attendance_records
+ WHERE org_id = :org_id AND left(user_id, 10) = 'mp6-smoke-';
+SELECT count(*) AS mp6_events FROM attendance_events
+ WHERE org_id = :org_id AND meta->>'requestId' = ANY(:mp6_request_ids::text[]);
+SELECT count(*) AS mp6_approval_instances FROM approval_instances WHERE id = ANY(:mp6_approval_ids::text[]);
+SELECT count(*) AS mp6_users FROM users WHERE left(id, 10) = 'mp6-smoke-';
+SELECT count(*) AS mp6_user_orgs FROM user_orgs WHERE left(user_id, 10) = 'mp6-smoke-';
+-- MP-6 writes NO deliveries — this must be 0 (never delete by source_type alone)
+SELECT count(*) AS mp6_deliveries FROM attendance_notification_deliveries
+ WHERE org_id = :org_id AND left(recipient_user_id, 10) = 'mp6-smoke-';
+
 -- settings: compare the live document to the window baseline
 -- (GET /api/attendance/settings vs /tmp/window-settings-before.json — policy keys equal)
 ```
@@ -284,6 +312,10 @@ the window baseline.
       `OTBANK_V18_STAGING_SMOKE_PASS` recorded in the v1-8 runbook with deploy
       SHA + residue 0; the v1-8 row in the overtime-bank design-verification
       doc flips to done in a follow-up docs PR (not from this plan alone).
+- [ ] MP-6 (optional): helper `MP6_MAKEUP_PUNCH_API_DB_SMOKE_PASS`; OQ-1 (token)
+      and OQ-3 (single-tenant / org) decisions recorded; final
+      `MP6_MAKEUP_PUNCH_STAGING_SMOKE_PASS` recorded in the MP-6 runbook with
+      deploy SHA + residue 0. Skip cleanly if MP-6 is not run this window.
 - [ ] Consolidated residue sweep (§7) all-zero; env flags rolled back;
       settings equal the window baseline.
 - [ ] Each stamp names the exact deployed SHA (the precedent window's missing
