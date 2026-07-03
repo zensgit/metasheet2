@@ -113,6 +113,11 @@ describeIfDatabase('C2 cross-base mirror write-through — op runtime goldens (r
     // TARGET base-A leg (C1): a DB base-write code → resolveBaseWritable(BASE_A)=true (reads
     // user_permissions, NOT req.user.perms — disjoint from capsA). (The sheet-B grant for the base-B leg is
     // inserted after the sheets exist, below.)
+    // Seed the permission-catalog parent row FIRST: user_permissions.permission_code FKs to
+    // permissions(code), and this suite must not depend on a sibling test seeding it earlier in the CI
+    // ordering (it stably FK-violated on the 20.x real-DB run when nothing had). Matches the pattern in
+    // multitable-base-writable-resolver.test.ts.
+    await q("INSERT INTO permissions (code, name, description) VALUES ('multitable:base:write', 'Base Write', 'C2 mirror write-through tests') ON CONFLICT (code) DO NOTHING")
     await q("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'multitable:base:write') ON CONFLICT DO NOTHING", [TARGET])
     // OWNER owns BASE_A ⇒ resolveBaseWritable(BASE_A) true for OWNER; nobody owns BASE_B and no actor holds
     // base codes for it ⇒ an op success ALSO proves C1 is not invoked for the base-B leg (it would fail).
