@@ -1,8 +1,8 @@
-# Attendance MP-5 — makeup-punch request-side UX design-lock (PROPOSED)
+# Attendance MP-5 — makeup-punch request-side UX design-lock (RATIFIED)
 
-**Status:** PROPOSED · **Date:** 2026-07-03 · **Slice:** MP-5 (Request Center UX for `makeupPunchPolicy` rejections)
+**Status:** RATIFIED (owner review, 2026-07-03) · **Date:** 2026-07-03 · **Slice:** MP-5 (Request Center UX for `makeupPunchPolicy` rejections)
 
-This document proposes the request-side UX slice that follows the ratified makeup-punch policy runtime and the MP-4 admin config card. It writes **no runtime code**. Runtime starts only after owner ratification and remains a separate PR.
+This document locks the request-side UX slice that follows the ratified makeup-punch policy runtime and the MP-4 admin config card. It writes **no runtime code**. Runtime remains a separate PR.
 
 ---
 
