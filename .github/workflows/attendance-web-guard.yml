@@ -23,6 +23,7 @@ on:
       - 'apps/web/tests/attendance-admin-regressions.spec.ts'
       - 'apps/web/tests/attendance-admin-anchor-nav.spec.ts'
       - 'apps/web/tests/AttendanceRequestCenterSection.result-edit.spec.ts'
+      - 'apps/web/tests/attendance-selfservice-dashboard.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
   push:
     branches: [main]
@@ -32,6 +33,7 @@ on:
       - 'apps/web/tests/attendance-admin-regressions.spec.ts'
       - 'apps/web/tests/attendance-admin-anchor-nav.spec.ts'
       - 'apps/web/tests/AttendanceRequestCenterSection.result-edit.spec.ts'
+      - 'apps/web/tests/attendance-selfservice-dashboard.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
 
 jobs:
@@ -74,4 +76,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run attendance web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav AttendanceRequestCenterSection.result-edit --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard --reporter=dot

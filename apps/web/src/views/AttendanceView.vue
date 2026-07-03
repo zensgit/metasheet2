@@ -892,7 +892,7 @@
                 min="0"
               />
             </label>
-            <label v-if="isLeaveRequest" class="attendance__field" for="attendance-request-attachment">
+            <label v-if="isLeaveRequest || isMakeupRequest" class="attendance__field" for="attendance-request-attachment">
               <span>{{ tr('Attachment URL', '附件链接') }}</span>
               <input
                 id="attendance-request-attachment"
@@ -9058,6 +9058,7 @@ import {
 } from './attendance/attendanceCalendarPolicyOverrides'
 import { useAttendanceAdminImportBatches } from './attendance/useAttendanceAdminImportBatches'
 import { normalizeImportPayloadColumns } from './attendance/attendanceImportPayload'
+import { resolveMakeupPunchRequestStatusCopy } from './attendance/makeupPunchRequestStatus'
 import {
   buildRuleSetPreviewRecommendations,
   summarizeRuleSetPreviewResult,
@@ -13865,6 +13866,10 @@ const scheduleDispatchForm = reactive({
 })
 
 const isLeaveRequest = computed(() => requestForm.requestType === 'leave')
+// MP-5: the three makeup-punch request types share the leave attachment field.
+const isMakeupRequest = computed(() =>
+  ['missed_check_in', 'missed_check_out', 'time_correction'].includes(requestForm.requestType),
+)
 const isOvertimeRequest = computed(() => requestForm.requestType === 'overtime')
 const isShiftSwapRequest = computed(() => requestForm.requestType === 'shift_swap')
 const isLeaveOrOvertimeRequest = computed(() => isLeaveRequest.value || isOvertimeRequest.value)
@@ -14949,7 +14954,18 @@ async function prefillRequestFromRecordTimeline(record: AttendanceRecord): Promi
   await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
 }
 
+// MP-5 stale-error gate: a fresh prefill must not keep showing a prior
+// request-submit policy rejection (e.g. a previous date's MAKEUP_PUNCH_* banner),
+// so a stale failure cannot visually stick to a newly prefilled draft. A
+// successful submit clears it via its own `setStatus('Request submitted.')`.
+function clearRequestSubmitStatus(): void {
+  if (statusKind.value === 'error' && statusMeta.value?.context === 'request-submit') {
+    setStatus('')
+  }
+}
+
 async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void> {
+  clearRequestSubmitStatus()
   if (item.state === 'pending') {
     setStatus(
       appendStatusContext(
@@ -15008,6 +15024,7 @@ async function openQuickRequestDraft(requestType: AttendanceRequest['request_typ
 }
 
 async function openMissingPunchQuickAction(): Promise<void> {
+  clearRequestSubmitStatus()
   const anomaly = anomalies.value.find(item => item.state !== 'pending')
   if (anomaly) {
     await prefillRequestFromAnomaly(anomaly)
@@ -17972,7 +17989,16 @@ function classifyStatusError(
 
   if (code) meta.code = code
 
-  if (code === 'COMMIT_TOKEN_INVALID' || code === 'COMMIT_TOKEN_REQUIRED') {
+  // MP-5: request-side makeup-punch policy rejections. Matched on the server code
+  // FIRST so it wins over the generic status-based 403/409/500 branches below
+  // (CROSS_USER may carry 403, QUOTA may carry 409/422). meta.code stays set so
+  // the banner keeps showing the exact server code for support/admins.
+  const makeupCopy = context === 'request-submit' ? resolveMakeupPunchRequestStatusCopy(code, tr) : null
+  if (makeupCopy) {
+    message = makeupCopy.message
+    if (makeupCopy.hint) meta.hint = makeupCopy.hint
+    if (makeupCopy.action) meta.action = makeupCopy.action
+  } else if (code === 'COMMIT_TOKEN_INVALID' || code === 'COMMIT_TOKEN_REQUIRED') {
     message = tr('Import token expired before request completed.', '导入令牌已过期，请重试。')
     meta.hint = tr('Click retry to refresh commit token and submit again.', '点击重试以刷新导入令牌并重新提交。')
     meta.action = context === 'import-run' ? 'retry-run-import' : 'retry-preview-import'
