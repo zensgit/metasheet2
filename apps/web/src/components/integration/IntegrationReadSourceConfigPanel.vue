@@ -72,10 +72,39 @@
           </label>
         </template>
 
-        <label v-if="draft.mode === 'resolver_lookup'" class="integration-read-source__field">
-          <span>multiplicityRuleField(必填)</span>
-          <input v-model="draft.multiplicityRuleField" data-testid="rsc-multiplicity-field" placeholder="FIsCurrent" />
-        </label>
+        <template v-if="draft.mode === 'resolver_lookup'">
+          <label class="integration-read-source__field">
+            <span>resolverRule(必填)</span>
+            <select v-model="draft.resolverRule" data-testid="rsc-resolver-rule">
+              <option value="">选择解析规则…</option>
+              <option value="exactly_one">exactly_one(唯一命中)</option>
+              <option value="first_when_sorted">first_when_sorted(排序取首)</option>
+              <option value="field_equals">field_equals(判别字段相等)</option>
+            </select>
+          </label>
+          <!-- first_when_sorted: sort field + direction. exactly_one shows none of these three. -->
+          <label v-if="draft.resolverRule === 'first_when_sorted'" class="integration-read-source__field">
+            <span>multiplicityRuleField(排序字段,必填)</span>
+            <input v-model="draft.multiplicityRuleField" data-testid="rsc-resolver-sort-field" placeholder="FVersion" />
+          </label>
+          <label v-if="draft.resolverRule === 'first_when_sorted'" class="integration-read-source__field">
+            <span>resolverSortDirection(必填)</span>
+            <select v-model="draft.resolverSortDirection" data-testid="rsc-resolver-sort-direction">
+              <option value="">选择方向…</option>
+              <option value="asc">asc(升序取首)</option>
+              <option value="desc">desc(降序取首)</option>
+            </select>
+          </label>
+          <!-- field_equals: discriminator field + bounded token value. -->
+          <label v-if="draft.resolverRule === 'field_equals'" class="integration-read-source__field">
+            <span>multiplicityRuleField(判别字段,必填)</span>
+            <input v-model="draft.multiplicityRuleField" data-testid="rsc-resolver-discriminator-field" placeholder="FIsCurrent" />
+          </label>
+          <label v-if="draft.resolverRule === 'field_equals'" class="integration-read-source__field">
+            <span>resolverDiscriminatorValue(有界枚举样 token,必填)</span>
+            <input v-model="draft.resolverDiscriminatorValue" data-testid="rsc-resolver-discriminator-value" placeholder="Y" />
+          </label>
+        </template>
 
         <label v-if="draft.mode !== 'detail_with_lines'" class="integration-read-source__field">
           <span>containerPaths(逗号/换行分隔的点号路径,必填)</span>

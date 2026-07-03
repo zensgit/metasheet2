@@ -12,6 +12,20 @@ import type { IntegrationScope } from './workbench'
 export const READ_SOURCE_MODES = ['single_record', 'list_page', 'detail_with_lines', 'resolver_lookup'] as const
 export type ReadSourceMode = typeof READ_SOURCE_MODES[number]
 
+// R3 (#1709): resolver_lookup config-authoring vocabulary — mirrors the R0 server contract
+// (plugins/plugin-integration-core/lib/read-source-config.cjs RESOLVER_RULES / RESOLVER_SORT_DIRECTIONS).
+// The server stays authoritative; these drive the per-rule form + coarse client gating only.
+export const RESOLVER_RULES = ['exactly_one', 'first_when_sorted', 'field_equals'] as const
+export type ResolverRule = typeof RESOLVER_RULES[number]
+export const RESOLVER_SORT_DIRECTIONS = ['asc', 'desc'] as const
+export type ResolverSortDirection = typeof RESOLVER_SORT_DIRECTIONS[number]
+// Coarse mirror of the server's bounded enum-like discriminator token (isBoundedIdentifier). Client hint
+// only; the server re-checks + runs the secret-shape scan.
+const RESOLVER_DISCRIMINATOR_TOKEN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/
+export function isCoarseResolverDiscriminatorToken(value: string): boolean {
+  return RESOLVER_DISCRIMINATOR_TOKEN.test(value.trim())
+}
+
 export const READ_SOURCE_METHODS = ['GET', 'POST'] as const
 export type ReadSourceMethod = typeof READ_SOURCE_METHODS[number]
 
@@ -39,6 +53,9 @@ export interface ReadSourceConfigPayload {
   keyField?: string
   keyEncoding?: ReadSourceKeyEncoding
   multiplicityRuleField?: string
+  resolverRule?: ResolverRule
+  resolverSortDirection?: ResolverSortDirection
+  resolverDiscriminatorValue?: string
   containerPaths?: string[]
   headerContainerPaths?: string[]
   lineContainerPaths?: string[]
@@ -57,6 +74,9 @@ export interface ReadSourceConfigDraft {
   keyField: string
   keyEncoding: '' | ReadSourceKeyEncoding
   multiplicityRuleField: string
+  resolverRule: '' | ResolverRule
+  resolverSortDirection: '' | ResolverSortDirection
+  resolverDiscriminatorValue: string
   containerPaths: string
   headerContainerPaths: string
   lineContainerPaths: string
@@ -205,7 +225,10 @@ export const READ_SOURCE_MODE_REQUIRED_FIELDS: Record<ReadSourceMode, string[]> 
   single_record: ['keyField', 'containerPaths'],
   list_page: ['containerPaths'],
   detail_with_lines: ['headerContainerPaths', 'lineContainerPaths'],
-  resolver_lookup: ['keyField', 'containerPaths', 'multiplicityRuleField'],
+  // R3: mirrors R0's MODE_REQUIRED_FIELDS — multiplicityRuleField is no longer unconditional
+  // (it became rule-specific); resolverRule is the required base field. Per-rule required fields
+  // (sort field/direction, discriminator field/value) are enforced in validateReadSourceDraft.
+  resolver_lookup: ['keyField', 'containerPaths', 'resolverRule'],
 }
 
 export function createReadSourceConfigDraft(): ReadSourceConfigDraft {
@@ -220,6 +243,9 @@ export function createReadSourceConfigDraft(): ReadSourceConfigDraft {
     keyField: '',
     keyEncoding: '',
     multiplicityRuleField: '',
+    resolverRule: '',
+    resolverSortDirection: '',
+    resolverDiscriminatorValue: '',
     containerPaths: '',
     headerContainerPaths: '',
     lineContainerPaths: '',
@@ -262,8 +288,8 @@ export function validateReadSourceDraft(draft: ReadSourceConfigDraft): string[] 
   }
   for (const field of READ_SOURCE_MODE_REQUIRED_FIELDS[draft.mode] ?? []) {
     if (field === 'keyField' && !draft.keyField.trim()) problems.push(`keyField 为 ${draft.mode} 模式必填`)
-    if (field === 'multiplicityRuleField' && !draft.multiplicityRuleField.trim()) {
-      problems.push(`multiplicityRuleField 为 ${draft.mode} 模式必填`)
+    if (field === 'resolverRule' && !draft.resolverRule) {
+      problems.push('resolverRule 为 resolver_lookup 模式必填')
     }
     if (field === 'containerPaths' && parseContainerPathList(draft.containerPaths).length === 0) {
       problems.push(`containerPaths 为 ${draft.mode} 模式必填`)
@@ -282,6 +308,25 @@ export function validateReadSourceDraft(draft: ReadSourceConfigDraft): string[] 
       problems.push('fieldMap 行需同时填写 source 与 target(或整行留空)')
       break
     }
+  }
+  // R3: resolver_lookup per-rule required/forbidden — mirrors R0's validateResolverContract. The
+  // server is authoritative; this gives instant coarse feedback (values never echoed).
+  if (draft.mode === 'resolver_lookup' && draft.resolverRule) {
+    const nonEmptyFieldMap = draft.fieldMap.filter((e) => e.source.trim() && e.target.trim())
+    if (nonEmptyFieldMap.length !== 1) problems.push('resolver_lookup 需恰好一个 fieldMap 目标')
+    if (draft.resolverRule === 'first_when_sorted') {
+      if (!draft.multiplicityRuleField.trim()) problems.push('multiplicityRuleField(排序字段)为 first_when_sorted 必填')
+      if (!draft.resolverSortDirection) problems.push('resolverSortDirection 为 first_when_sorted 必填')
+    } else if (draft.resolverRule === 'field_equals') {
+      if (!draft.multiplicityRuleField.trim()) problems.push('multiplicityRuleField(判别字段)为 field_equals 必填')
+      if (!draft.resolverDiscriminatorValue.trim()) {
+        problems.push('resolverDiscriminatorValue 为 field_equals 必填')
+      } else if (!isCoarseResolverDiscriminatorToken(draft.resolverDiscriminatorValue)) {
+        problems.push('resolverDiscriminatorValue 需为有界枚举样 token(不接受空格/路径/密钥样字符串)')
+      }
+    }
+    // exactly_one: multiplicityRuleField / sortDirection / discriminatorValue are all forbidden —
+    // the form does not render them, so no forbidden-field problem is reachable here.
   }
   return problems
 }
@@ -305,8 +350,19 @@ export function buildReadSourceConfigPayload(draft: ReadSourceConfigDraft): Read
   const wantsKeyField = draft.mode === 'single_record' || draft.mode === 'resolver_lookup' || draft.mode === 'detail_with_lines'
   if (wantsKeyField && draft.keyField.trim()) payload.keyField = draft.keyField.trim()
   if (wantsKeyField && draft.keyEncoding) payload.keyEncoding = draft.keyEncoding
-  if (draft.mode === 'resolver_lookup' && draft.multiplicityRuleField.trim()) {
-    payload.multiplicityRuleField = draft.multiplicityRuleField.trim()
+  if (draft.mode === 'resolver_lookup' && draft.resolverRule) {
+    // Send resolverRule always, and ONLY the rule-relevant fields — R0's validator rejects a
+    // field forbidden for the chosen rule (e.g. discriminatorValue on first_when_sorted), so the
+    // form must not ride them along.
+    payload.resolverRule = draft.resolverRule
+    if (draft.resolverRule === 'first_when_sorted') {
+      if (draft.multiplicityRuleField.trim()) payload.multiplicityRuleField = draft.multiplicityRuleField.trim()
+      if (draft.resolverSortDirection) payload.resolverSortDirection = draft.resolverSortDirection
+    } else if (draft.resolverRule === 'field_equals') {
+      if (draft.multiplicityRuleField.trim()) payload.multiplicityRuleField = draft.multiplicityRuleField.trim()
+      if (draft.resolverDiscriminatorValue.trim()) payload.resolverDiscriminatorValue = draft.resolverDiscriminatorValue.trim()
+    }
+    // exactly_one: no multiplicityRuleField / sortDirection / discriminatorValue (all forbidden server-side).
   }
   if (draft.mode === 'detail_with_lines') {
     const header = parseContainerPathList(draft.headerContainerPaths)
