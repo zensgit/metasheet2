@@ -54,6 +54,9 @@ export default defineConfig({
       // T2-1+2 scoped approval admins + bulk handover: real-DB route/service boundary with RBAC and
       // approval_records CHECK coverage. Excluded from the no-DB default and wired into approval real-DB CI.
       'tests/integration/approval-bulk-reassign.api.test.ts',
+      // T3-3 node signaturePolicy declared-inert floor: real HTTP + real DB round-trip.
+      // Excluded from the no-DB default and wired into approval real-DB CI so it cannot skip-green.
+      'tests/integration/approval-node-signature-policy.api.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

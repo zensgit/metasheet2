@@ -142,6 +142,15 @@ describeIfDatabase('T3-3 node signaturePolicy (declared-inert) API', () => {
     expect(nodeConfigOf(template.approvalGraph, 'approval_1')).not.toHaveProperty('signaturePolicy')
   })
 
+  it('preserves required:false as an explicit policy value (not omitted as default-absent)', async () => {
+    const adminToken = await authToken(baseUrl, 'sig-admin')
+    const createRes = await createTemplate(adminToken, buildGraph({ required: false, kind: 'typed' }))
+    expect(createRes.status).toBe(201)
+    const template = (await createRes.json()) as { id: string; approvalGraph: JsonRecord }
+    templateIds.add(template.id)
+    expect(nodeConfigOf(template.approvalGraph, 'approval_1').signaturePolicy).toEqual({ required: false, kind: 'typed' })
+  })
+
   it('is DECLARED-INERT: a required signaturePolicy does NOT block approve (no signature supplied)', async () => {
     const adminToken = await authToken(baseUrl, 'sig-admin')
     const requesterToken = await authToken(baseUrl, 'sig-requester')
@@ -162,11 +171,13 @@ describeIfDatabase('T3-3 node signaturePolicy (declared-inert) API', () => {
     expect(((await act.json()) as { status: string }).status).toBe('approved')
   })
 
-  it('rejects a malformed signaturePolicy at publish (non-boolean required / bad appliesTo)', async () => {
+  it('rejects a malformed signaturePolicy at publish (non-boolean required / bad appliesTo / unknown key)', async () => {
     const adminToken = await authToken(baseUrl, 'sig-admin')
     const bad1 = await createTemplate(adminToken, buildGraph({ required: 'yes' }))
     expect(bad1.status).toBe(400)
     const bad2 = await createTemplate(adminToken, buildGraph({ required: true, appliesTo: 'always' }))
     expect(bad2.status).toBe(400)
+    const bad3 = await createTemplate(adminToken, buildGraph({ required: true, captureMode: 'typed' }))
+    expect(bad3.status).toBe(400)
   })
 })

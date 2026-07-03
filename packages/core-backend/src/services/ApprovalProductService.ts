@@ -988,6 +988,12 @@ function normalizeNodeSignaturePolicy(
   if (!isRecord(value)) {
     failValidation(context, `${path} must be an object`)
   }
+  const allowedKeys = new Set(['required', 'kind', 'appliesTo'])
+  for (const key of Object.keys(value)) {
+    if (!allowedKeys.has(key)) {
+      failValidation(context, `${path}.${key} is not supported`)
+    }
+  }
   if (typeof value.required !== 'boolean') {
     failValidation(context, `${path}.required must be a boolean`)
   }
