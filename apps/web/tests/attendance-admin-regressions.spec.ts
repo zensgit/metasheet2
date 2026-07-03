@@ -3192,6 +3192,174 @@ describe('Attendance admin regressions', () => {
     })
   })
 
+  it('loads makeupPunchPolicy into the admin card and PUTs ONLY { makeupPunchPolicy }', async () => {
+    attendanceSettingsData = {
+      attendanceBonusPolicy: {
+        enabled: true,
+        anyLeaveBreaksFullAttendance: false,
+        lateBeyondThresholdBreaksFullAttendance: true,
+      },
+      makeupPunchPolicy: {
+        enabled: true,
+        timezone: 'America/Los_Angeles',
+        cycle: { type: 'calendar_month', startDay: 15 },
+        quota: {
+          maxRequestsPerCycle: 5,
+          countStatuses: ['pending', 'approved'],
+          principal: 'self_service_user',
+        },
+        submitWindow: { unit: 'calendar_day', days: 14 },
+        allowedAnomalyTypes: ['missing_check_in', 'late', 'normal'],
+        allowedRequestTypes: ['missed_check_in', 'time_correction'],
+        requireReason: false,
+        requireAttachment: true,
+      },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-makeup-punch-policy"]')!.click()
+    await flushUi(4)
+
+    const section = container!.querySelector<HTMLElement>('[data-attendance-makeup-punch-policy]')
+    expect(section).toBeTruthy()
+    const enabled = section!.querySelector<HTMLInputElement>('[data-makeup-punch="enabled"]')
+    const timezone = section!.querySelector<HTMLInputElement>('[data-makeup-punch="timezone"]')
+    const cycleType = section!.querySelector<HTMLSelectElement>('[data-makeup-punch="cycle-type"]')
+    const cycleStartDay = section!.querySelector<HTMLInputElement>('[data-makeup-punch="cycle-start-day"]')
+    const quotaMax = section!.querySelector<HTMLInputElement>('[data-makeup-punch="quota-max"]')
+    const countPending = section!.querySelector<HTMLInputElement>('[data-makeup-punch-count-status="pending"]')
+    const countApproved = section!.querySelector<HTMLInputElement>('[data-makeup-punch-count-status="approved"]')
+    const quotaPrincipal = section!.querySelector<HTMLSelectElement>('[data-makeup-punch="quota-principal"]')
+    const windowUnit = section!.querySelector<HTMLSelectElement>('[data-makeup-punch="window-unit"]')
+    const windowDays = section!.querySelector<HTMLInputElement>('[data-makeup-punch="window-days"]')
+    const missingCheckIn = section!.querySelector<HTMLInputElement>('[data-makeup-punch-anomaly-type="missing_check_in"]')
+    const earlyLeave = section!.querySelector<HTMLInputElement>('[data-makeup-punch-anomaly-type="early_leave"]')
+    const normal = section!.querySelector<HTMLInputElement>('[data-makeup-punch-anomaly-type="normal"]')
+    const requestTypesReadonly = section!.querySelector<HTMLElement>('[data-makeup-punch="request-types-readonly"]')
+    const requestTypeInputs = section!.querySelectorAll<HTMLInputElement>('[data-makeup-punch-request-type] input, input[data-makeup-punch-request-type]')
+    const missedCheckIn = section!.querySelector<HTMLElement>('[data-makeup-punch-request-type="missed_check_in"]')
+    const missedCheckOut = section!.querySelector<HTMLElement>('[data-makeup-punch-request-type="missed_check_out"]')
+    const timeCorrection = section!.querySelector<HTMLElement>('[data-makeup-punch-request-type="time_correction"]')
+    const requireReason = section!.querySelector<HTMLInputElement>('[data-makeup-punch="require-reason"]')
+    const requireAttachment = section!.querySelector<HTMLInputElement>('[data-makeup-punch="require-attachment"]')
+    expect(Boolean(enabled && timezone && cycleType && cycleStartDay && quotaMax && countPending && countApproved && quotaPrincipal && windowUnit && windowDays && missingCheckIn && earlyLeave && normal && requestTypesReadonly && missedCheckIn && missedCheckOut && timeCorrection && requireReason && requireAttachment)).toBe(true)
+
+    expect(enabled!.checked).toBe(true)
+    expect(timezone!.value).toBe('America/Los_Angeles')
+    expect(cycleType!.disabled).toBe(true)
+    expect(cycleType!.value).toBe('calendar_month')
+    expect(cycleStartDay!.value).toBe('15')
+    expect(quotaMax!.value).toBe('5')
+    expect(countPending!.checked).toBe(true)
+    expect(countApproved!.checked).toBe(true)
+    expect(quotaPrincipal!.disabled).toBe(true)
+    expect(quotaPrincipal!.value).toBe('self_service_user')
+    expect(windowUnit!.disabled).toBe(true)
+    expect(windowUnit!.value).toBe('calendar_day')
+    expect(windowDays!.value).toBe('14')
+    expect(missingCheckIn!.checked).toBe(true)
+    expect(earlyLeave!.checked).toBe(false)
+    expect(normal!.checked).toBe(true)
+    expect(requestTypeInputs).toHaveLength(0)
+    expect(requireReason!.checked).toBe(false)
+    expect(requireAttachment!.checked).toBe(true)
+
+    quotaMax!.value = '7'
+    quotaMax!.dispatchEvent(new Event('input', { bubbles: true }))
+    earlyLeave!.checked = true
+    earlyLeave!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(1)
+    normal!.checked = false
+    normal!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(1)
+    countApproved!.checked = false
+    countApproved!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(1)
+    requireReason!.checked = true
+    requireReason!.dispatchEvent(new Event('change', { bubbles: true }))
+    requireAttachment!.checked = false
+    requireAttachment!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    section!.querySelector<HTMLButtonElement>('[data-makeup-punch="save"]')!.click()
+    await flushUi(6)
+
+    expect(lastSettingsPutBody()).toEqual({
+      makeupPunchPolicy: {
+        enabled: true,
+        timezone: 'America/Los_Angeles',
+        cycle: { type: 'calendar_month', startDay: 15 },
+        quota: {
+          maxRequestsPerCycle: 7,
+          countStatuses: ['pending'],
+          principal: 'self_service_user',
+        },
+        submitWindow: { unit: 'calendar_day', days: 14 },
+        allowedAnomalyTypes: ['missing_check_in', 'late', 'early_leave'],
+        allowedRequestTypes: ['missed_check_in', 'missed_check_out', 'time_correction'],
+        requireReason: true,
+        requireAttachment: false,
+      },
+    })
+  })
+
+  it('blocks invalid makeupPunchPolicy saves before PUT', async () => {
+    attendanceSettingsData = {
+      makeupPunchPolicy: {
+        enabled: true,
+        timezone: 'Asia/Shanghai',
+        cycle: { type: 'calendar_month', startDay: 1 },
+        quota: {
+          maxRequestsPerCycle: 3,
+          countStatuses: ['pending', 'approved'],
+          principal: 'self_service_user',
+        },
+        submitWindow: { unit: 'calendar_day', days: 30 },
+        allowedAnomalyTypes: ['late'],
+        allowedRequestTypes: ['time_correction'],
+        requireReason: true,
+        requireAttachment: false,
+      },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-makeup-punch-policy"]')!.click()
+    await flushUi(4)
+
+    const section = container!.querySelector<HTMLElement>('[data-attendance-makeup-punch-policy]')
+    expect(section).toBeTruthy()
+    const timezone = section!.querySelector<HTMLInputElement>('[data-makeup-punch="timezone"]')
+    expect(timezone).toBeTruthy()
+    timezone!.value = 'Not/AZone'
+    timezone!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+    section!.querySelector<HTMLButtonElement>('[data-makeup-punch="save"]')!.click()
+    await flushUi(6)
+
+    let settingsPuts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(settingsPuts).toHaveLength(0)
+
+    timezone!.value = 'Asia/Shanghai'
+    timezone!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+    const late = section!.querySelector<HTMLInputElement>('[data-makeup-punch-anomaly-type="late"]')
+    expect(late).toBeTruthy()
+    late!.click()
+    await flushUi(2)
+    section!.querySelector<HTMLButtonElement>('[data-makeup-punch="save"]')!.click()
+    await flushUi(6)
+
+    settingsPuts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(settingsPuts).toHaveLength(0)
+  })
+
   it('loads multiShiftDay into the config card and PUTs ONLY { multiShiftDay }', async () => {
     attendanceSettingsData = {
       multiShiftDay: { enabled: true, maxSlots: 3 },

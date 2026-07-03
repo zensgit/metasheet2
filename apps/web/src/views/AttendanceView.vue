@@ -2178,6 +2178,167 @@
               </button>
             </div>
             <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.makeupPunchPolicy)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.makeupPunchPolicy)"
+              data-attendance-makeup-punch-policy
+            >
+              <div class="attendance__admin-section-header">
+                <h4>{{ tr('Makeup punch policy', '补卡策略') }}</h4>
+              </div>
+              <p class="attendance__field-hint">
+                {{ tr('Controls self-service makeup-punch quota, submit window, allowed anomaly types, and reason/attachment requirements. Request types are fixed in v1 because the backend enforcement uses a constant.', '控制员工自助补卡的周期额度、提交时限、可补异常类型，以及原因/附件要求。申请类型在 v1 固定，因为后端强约束使用常量。') }}
+              </p>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field attendance__field--checkbox" for="attendance-makeup-punch-enabled">
+                  <span>{{ tr('Enable makeup-punch enforcement', '启用补卡强约束') }}</span>
+                  <input
+                    id="attendance-makeup-punch-enabled"
+                    v-model="makeupPunchPolicyForm.enabled"
+                    type="checkbox"
+                    data-makeup-punch="enabled"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-makeup-punch-timezone">
+                  <span>{{ tr('Policy timezone', '规则时区') }}</span>
+                  <input
+                    id="attendance-makeup-punch-timezone"
+                    v-model.trim="makeupPunchPolicyForm.timezone"
+                    type="text"
+                    placeholder="Asia/Shanghai"
+                    data-makeup-punch="timezone"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-makeup-punch-cycle-type">
+                  <span>{{ tr('Cycle type', '周期类型') }}</span>
+                  <select id="attendance-makeup-punch-cycle-type" disabled data-makeup-punch="cycle-type">
+                    <option value="calendar_month">{{ tr('Calendar month', '自然月') }}</option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-makeup-punch-cycle-start">
+                  <span>{{ tr('Cycle start day', '周期起始日') }}</span>
+                  <input
+                    id="attendance-makeup-punch-cycle-start"
+                    v-model.number="makeupPunchPolicyForm.cycleStartDay"
+                    type="number"
+                    min="1"
+                    max="31"
+                    data-makeup-punch="cycle-start-day"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-makeup-punch-quota">
+                  <span>{{ tr('Requests per cycle', '每周期补卡次数') }}</span>
+                  <input
+                    id="attendance-makeup-punch-quota"
+                    v-model.number="makeupPunchPolicyForm.maxRequestsPerCycle"
+                    type="number"
+                    min="1"
+                    max="99"
+                    data-makeup-punch="quota-max"
+                  />
+                </label>
+                <fieldset class="attendance__field" data-makeup-punch="count-statuses">
+                  <legend>{{ tr('Quota-counting statuses', '计入额度的状态') }}</legend>
+                  <label
+                    v-for="option in MAKEUP_PUNCH_COUNT_STATUS_OPTIONS"
+                    :key="option.value"
+                    class="attendance__field--inline"
+                  >
+                    <input
+                      v-model="makeupPunchPolicyForm.countStatuses"
+                      type="checkbox"
+                      :value="option.value"
+                      :data-makeup-punch-count-status="option.value"
+                    />
+                    <span>{{ option.label }}</span>
+                  </label>
+                </fieldset>
+                <label class="attendance__field" for="attendance-makeup-punch-quota-principal">
+                  <span>{{ tr('Quota principal', '额度主体') }}</span>
+                  <select id="attendance-makeup-punch-quota-principal" disabled data-makeup-punch="quota-principal">
+                    <option value="self_service_user">{{ tr('Self-service user', '自助申请人') }}</option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-makeup-punch-window-unit">
+                  <span>{{ tr('Submit-window unit', '提交窗口单位') }}</span>
+                  <select id="attendance-makeup-punch-window-unit" disabled data-makeup-punch="window-unit">
+                    <option value="calendar_day">{{ tr('Calendar day', '自然日') }}</option>
+                  </select>
+                </label>
+                <label class="attendance__field" for="attendance-makeup-punch-window-days">
+                  <span>{{ tr('Submit window (calendar days)', '提交时限（自然日）') }}</span>
+                  <input
+                    id="attendance-makeup-punch-window-days"
+                    v-model.number="makeupPunchPolicyForm.submitWindowDays"
+                    type="number"
+                    min="0"
+                    max="180"
+                    data-makeup-punch="window-days"
+                  />
+                </label>
+              </div>
+              <fieldset class="attendance__field" data-makeup-punch="anomaly-types">
+                <legend>{{ tr('Allowed anomaly types', '可补异常类型') }}</legend>
+                <label
+                  v-for="option in MAKEUP_PUNCH_ANOMALY_OPTIONS"
+                  :key="option.value"
+                  class="attendance__field--inline"
+                >
+                  <input
+                    v-model="makeupPunchPolicyForm.allowedAnomalyTypes"
+                    type="checkbox"
+                    :value="option.value"
+                    :data-makeup-punch-anomaly-type="option.value"
+                  />
+                  <span>{{ option.label }}</span>
+                </label>
+              </fieldset>
+              <div class="attendance__field" data-makeup-punch="request-types-readonly">
+                <span>{{ tr('Request types', '申请类型') }}</span>
+                <p class="attendance__field-hint">
+                  {{ tr('Fixed in v1 — not org-configurable until the backend gate is wired.', 'v1 固定，不开放组织级配置；后端门禁接入前不可编辑。') }}
+                </p>
+                <div class="attendance__chip-list">
+                  <span
+                    v-for="option in MAKEUP_PUNCH_REQUEST_TYPE_OPTIONS"
+                    :key="option.value"
+                    class="attendance__status-chip"
+                    :data-makeup-punch-request-type="option.value"
+                  >
+                    {{ option.label }}
+                  </span>
+                </div>
+              </div>
+              <div class="attendance__admin-grid">
+                <label class="attendance__field attendance__field--checkbox" for="attendance-makeup-punch-reason">
+                  <span>{{ tr('Require reason', '要求填写原因') }}</span>
+                  <input
+                    id="attendance-makeup-punch-reason"
+                    v-model="makeupPunchPolicyForm.requireReason"
+                    type="checkbox"
+                    data-makeup-punch="require-reason"
+                  />
+                </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-makeup-punch-attachment">
+                  <span>{{ tr('Require attachment URL', '要求附件链接') }}</span>
+                  <input
+                    id="attendance-makeup-punch-attachment"
+                    v-model="makeupPunchPolicyForm.requireAttachment"
+                    type="checkbox"
+                    data-makeup-punch="require-attachment"
+                  />
+                </label>
+              </div>
+              <button
+                class="attendance__btn attendance__btn--primary"
+                :disabled="settingsLoading"
+                data-makeup-punch="save"
+                @click="saveMakeupPunchPolicy"
+              >
+                {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save makeup-punch policy', '保存补卡规则') }}
+              </button>
+            </div>
+            <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
               class="attendance__admin-section"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
@@ -9500,6 +9661,21 @@ interface AttendanceSettings {
     anyLeaveBreaksFullAttendance?: boolean
     lateBeyondThresholdBreaksFullAttendance?: boolean
   }
+  makeupPunchPolicy?: {
+    enabled?: boolean
+    timezone?: string
+    cycle?: { type?: 'calendar_month'; startDay?: number }
+    quota?: {
+      maxRequestsPerCycle?: number
+      countStatuses?: Array<'pending' | 'approved'>
+      principal?: 'self_service_user'
+    }
+    submitWindow?: { unit?: 'calendar_day'; days?: number }
+    allowedAnomalyTypes?: string[]
+    allowedRequestTypes?: string[]
+    requireReason?: boolean
+    requireAttachment?: boolean
+  }
   attendanceReportDigestPolicy?: {
     enabled?: boolean
     timezone?: string
@@ -13760,6 +13936,60 @@ const attendanceBonusPolicyForm = reactive({
   enabled: false,
   anyLeaveBreaksFullAttendance: true,
   lateBeyondThresholdBreaksFullAttendance: true,
+})
+
+type MakeupPunchAnomalyType =
+  | 'missing_check_in'
+  | 'missing_check_out'
+  | 'late'
+  | 'severe_late'
+  | 'absence_late'
+  | 'early_leave'
+  | 'normal'
+type MakeupPunchRequestType = 'missed_check_in' | 'missed_check_out' | 'time_correction'
+type MakeupPunchQuotaStatus = 'pending' | 'approved'
+
+const MAKEUP_PUNCH_DEFAULT_ANOMALY_TYPES: MakeupPunchAnomalyType[] = [
+  'missing_check_in',
+  'missing_check_out',
+  'late',
+  'severe_late',
+  'absence_late',
+  'early_leave',
+]
+const MAKEUP_PUNCH_DEFAULT_REQUEST_TYPES: MakeupPunchRequestType[] = ['missed_check_in', 'missed_check_out', 'time_correction']
+const MAKEUP_PUNCH_DEFAULT_COUNT_STATUSES: MakeupPunchQuotaStatus[] = ['pending', 'approved']
+const MAKEUP_PUNCH_ANOMALY_OPTIONS: Array<{ value: MakeupPunchAnomalyType; label: string }> = [
+  { value: 'missing_check_in', label: tr('Missing check-in', '缺上班卡') },
+  { value: 'missing_check_out', label: tr('Missing check-out', '缺下班卡') },
+  { value: 'late', label: tr('Late', '迟到') },
+  { value: 'severe_late', label: tr('Severe late', '严重迟到') },
+  { value: 'absence_late', label: tr('Absence late', '旷工迟到') },
+  { value: 'early_leave', label: tr('Early leave', '早退') },
+  { value: 'normal', label: tr('Normal-day correction', '正常日修正') },
+]
+const MAKEUP_PUNCH_REQUEST_TYPE_OPTIONS: Array<{ value: MakeupPunchRequestType; label: string }> = [
+  { value: 'missed_check_in', label: tr('Missed check-in', '补上班卡') },
+  { value: 'missed_check_out', label: tr('Missed check-out', '补下班卡') },
+  { value: 'time_correction', label: tr('Time correction', '时间更正') },
+]
+const MAKEUP_PUNCH_COUNT_STATUS_OPTIONS: Array<{ value: MakeupPunchQuotaStatus; label: string }> = [
+  { value: 'pending', label: tr('Pending', '待审批') },
+  { value: 'approved', label: tr('Approved', '已通过') },
+]
+
+// 补卡规则 MP-4 admin card. Saved via saveMakeupPunchPolicy → PUTs ONLY { makeupPunchPolicy }, matching the
+// backend MP-1 bounded config shape. `normal` is available but not selected by default (§3: normal correction off).
+const makeupPunchPolicyForm = reactive({
+  enabled: false,
+  timezone: 'Asia/Shanghai',
+  cycleStartDay: 1,
+  maxRequestsPerCycle: 3,
+  countStatuses: [...MAKEUP_PUNCH_DEFAULT_COUNT_STATUSES] as MakeupPunchQuotaStatus[],
+  submitWindowDays: 30,
+  allowedAnomalyTypes: [...MAKEUP_PUNCH_DEFAULT_ANOMALY_TYPES] as MakeupPunchAnomalyType[],
+  requireReason: true,
+  requireAttachment: false,
 })
 
 type AttendanceReportDigestChannel = 'work_notification' | 'email_smtp'
@@ -19918,6 +20148,7 @@ async function loadSettings() {
     applyOvertimeBankPolicyToForm(data.data || {})
     applyLeaveOffsetToForm(data.data || {})
     applyAttendanceBonusToForm(data.data || {})
+    applyMakeupPunchPolicyToForm(data.data || {})
     applyReportDigestPolicyToForm(data.data || {})
     applyMultiShiftDayToForm(data.data || {})
     applyOutdoorToForm(data.data || {})
@@ -19976,6 +20207,87 @@ function applyAttendanceBonusToForm(settings: AttendanceSettings) {
   // the two break-toggles default ON (matches the backend normalizer default).
   attendanceBonusPolicyForm.anyLeaveBreaksFullAttendance = p.anyLeaveBreaksFullAttendance !== false
   attendanceBonusPolicyForm.lateBeyondThresholdBreaksFullAttendance = p.lateBeyondThresholdBreaksFullAttendance !== false
+}
+
+function normalizeMakeupPunchAnomalyTypes(value: unknown): MakeupPunchAnomalyType[] {
+  const allowed = new Set<MakeupPunchAnomalyType>(MAKEUP_PUNCH_ANOMALY_OPTIONS.map(option => option.value))
+  const result: MakeupPunchAnomalyType[] = []
+  for (const item of Array.isArray(value) ? value : []) {
+    if (allowed.has(item as MakeupPunchAnomalyType) && !result.includes(item as MakeupPunchAnomalyType)) {
+      result.push(item as MakeupPunchAnomalyType)
+    }
+  }
+  return result.length ? result : [...MAKEUP_PUNCH_DEFAULT_ANOMALY_TYPES]
+}
+
+function normalizeMakeupPunchCountStatuses(value: unknown): MakeupPunchQuotaStatus[] {
+  const allowed = new Set<MakeupPunchQuotaStatus>(MAKEUP_PUNCH_COUNT_STATUS_OPTIONS.map(option => option.value))
+  const result: MakeupPunchQuotaStatus[] = []
+  for (const item of Array.isArray(value) ? value : []) {
+    if (allowed.has(item as MakeupPunchQuotaStatus) && !result.includes(item as MakeupPunchQuotaStatus)) {
+      result.push(item as MakeupPunchQuotaStatus)
+    }
+  }
+  return result.length ? result : [...MAKEUP_PUNCH_DEFAULT_COUNT_STATUSES]
+}
+
+function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback
+}
+
+function applyMakeupPunchPolicyToForm(settings: AttendanceSettings) {
+  const p = settings.makeupPunchPolicy || {}
+  makeupPunchPolicyForm.enabled = p.enabled === true
+  makeupPunchPolicyForm.timezone = typeof p.timezone === 'string' && p.timezone.trim()
+    ? p.timezone.trim()
+    : 'Asia/Shanghai'
+  makeupPunchPolicyForm.cycleStartDay = boundedInteger(p.cycle?.startDay, 1, 1, 31)
+  makeupPunchPolicyForm.maxRequestsPerCycle = boundedInteger(p.quota?.maxRequestsPerCycle, 3, 1, 99)
+  makeupPunchPolicyForm.countStatuses = normalizeMakeupPunchCountStatuses(p.quota?.countStatuses)
+  makeupPunchPolicyForm.submitWindowDays = boundedInteger(p.submitWindow?.days, 30, 0, 180)
+  makeupPunchPolicyForm.allowedAnomalyTypes = normalizeMakeupPunchAnomalyTypes(p.allowedAnomalyTypes)
+  makeupPunchPolicyForm.requireReason = p.requireReason !== false
+  makeupPunchPolicyForm.requireAttachment = p.requireAttachment === true
+}
+
+function isValidIanaTimezone(value: string): boolean {
+  try {
+    // Constructing the formatter is enough to trigger RangeError for invalid IANA names.
+    new Intl.DateTimeFormat('en-US', { timeZone: value })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function makeupPunchPolicyError(): string | null {
+  const timezone = makeupPunchPolicyForm.timezone.trim()
+  if (!timezone) {
+    return tr('Makeup-punch policy timezone is required', '补卡规则时区不能为空')
+  }
+  if (!isValidIanaTimezone(timezone)) {
+    return tr('Makeup-punch policy timezone must be a valid IANA timezone', '补卡规则时区必须是有效的 IANA 时区')
+  }
+  const cycleStartDay = Number(makeupPunchPolicyForm.cycleStartDay)
+  if (!Number.isInteger(cycleStartDay) || cycleStartDay < 1 || cycleStartDay > 31) {
+    return tr('Cycle start day must be 1-31', '周期起始日必须为 1-31')
+  }
+  const maxRequestsPerCycle = Number(makeupPunchPolicyForm.maxRequestsPerCycle)
+  if (!Number.isInteger(maxRequestsPerCycle) || maxRequestsPerCycle < 1 || maxRequestsPerCycle > 99) {
+    return tr('Requests per cycle must be 1-99', '每周期补卡次数必须为 1-99')
+  }
+  if (makeupPunchPolicyForm.countStatuses.length === 0) {
+    return tr('Select at least one quota-counting status', '至少选择一种计入额度的状态')
+  }
+  const submitWindowDays = Number(makeupPunchPolicyForm.submitWindowDays)
+  if (!Number.isInteger(submitWindowDays) || submitWindowDays < 0 || submitWindowDays > 180) {
+    return tr('Submit window must be 0-180 calendar days', '提交时限必须为 0-180 个自然日')
+  }
+  if (makeupPunchPolicyForm.allowedAnomalyTypes.length === 0) {
+    return tr('Select at least one anomaly type', '至少选择一种可补异常类型')
+  }
+  return null
 }
 
 function normalizeReportDigestRecipients(value: unknown, fallback: AttendanceReportDigestRecipient[]): AttendanceReportDigestRecipient[] {
@@ -20633,6 +20945,59 @@ async function saveAttendanceBonusPolicy() {
     setStatus(tr('Full-attendance policy updated.', '满勤规则已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save full-attendance policy', '保存满勤规则失败'), 'save-settings')
+  } finally {
+    settingsLoading.value = false
+  }
+}
+
+async function saveMakeupPunchPolicy() {
+  const error = makeupPunchPolicyError()
+  if (error) {
+    setStatus(error, 'error')
+    return
+  }
+  settingsLoading.value = true
+  try {
+    const payload = {
+      makeupPunchPolicy: {
+        enabled: makeupPunchPolicyForm.enabled === true,
+        timezone: makeupPunchPolicyForm.timezone.trim(),
+        cycle: {
+          type: 'calendar_month',
+          startDay: Number(makeupPunchPolicyForm.cycleStartDay),
+        },
+        quota: {
+          maxRequestsPerCycle: Number(makeupPunchPolicyForm.maxRequestsPerCycle),
+          countStatuses: normalizeMakeupPunchCountStatuses(makeupPunchPolicyForm.countStatuses),
+          principal: 'self_service_user',
+        },
+        submitWindow: {
+          unit: 'calendar_day',
+          days: Number(makeupPunchPolicyForm.submitWindowDays),
+        },
+        allowedAnomalyTypes: normalizeMakeupPunchAnomalyTypes(makeupPunchPolicyForm.allowedAnomalyTypes),
+        allowedRequestTypes: [...MAKEUP_PUNCH_DEFAULT_REQUEST_TYPES],
+        requireReason: makeupPunchPolicyForm.requireReason === true,
+        requireAttachment: makeupPunchPolicyForm.requireAttachment === true,
+      },
+    }
+    const response = await apiFetchWithTimeout('/api/attendance/settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw createForbiddenError()
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      throw createApiError(response, data, tr('Failed to save makeup-punch policy', '保存补卡规则失败'))
+    }
+    adminForbidden.value = false
+    applyMakeupPunchPolicyToForm((data.data || payload) as AttendanceSettings)
+    setStatus(tr('Makeup-punch policy updated.', '补卡规则已更新。'))
+  } catch (error: any) {
+    setStatusFromError(error, tr('Failed to save makeup-punch policy', '保存补卡规则失败'), 'save-settings')
   } finally {
     settingsLoading.value = false
   }
