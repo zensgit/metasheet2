@@ -1,8 +1,8 @@
-# Attendance batch anomaly resolution — design lock (PROPOSED)
+# Attendance batch anomaly resolution — design lock (RATIFIED)
 
 > Date: 2026-07-03
 > Baseline: `origin/main@43e7e704c` (post MP-6 staging-smoke prep #3527 and AE-3 runtime line).
-> Status: **PROPOSED**. This document is a design lock only. It does not authorize runtime, backend schema, staging closeout, or production enablement. Runtime remains a separate owner-reviewed PR after ratification.
+> Status: **RATIFIED** on 2026-07-03 after owner review. This document is a design lock only. It does not authorize runtime, backend schema, staging closeout, or production enablement. Runtime remains a separate owner-reviewed PR.
 
 ## 1. Why this slice exists
 
@@ -243,7 +243,7 @@ If the operator wants end-to-end browser proof, add it as an optional AE-4 adden
 
 ## 9. Owner decisions before runtime
 
-Recommended defaults for ratification:
+Ratified defaults:
 
 1. **Backend shape:** UI-orchestrated per-row calls in v1; no backend batch endpoint.
 2. **Max rows:** 50 selected rows per modal.
@@ -253,4 +253,4 @@ Recommended defaults for ratification:
 6. **Staging:** no new staging gate before merge; optional AE-4 addendum only after the current window is closed.
 7. **Read-surface scope:** v1 is current-loaded-row batching; true cross-employee batch processing is a separate read-surface + authorization design.
 
-Owner ratification flips this document to RATIFIED and unlocks a separate frontend runtime PR.
+Owner ratification is complete. This unlocks a separate frontend runtime PR; it does not authorize merging runtime changes into this documentation PR.
