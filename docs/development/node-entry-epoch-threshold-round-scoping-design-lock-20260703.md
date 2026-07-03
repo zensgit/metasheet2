@@ -96,7 +96,12 @@ SELECT DISTINCT entry_epoch
 ```
 
 Interpret the result set:
-- **A single NULL row** (all active rows NULL) → a legacy pre-migration activation → **cutoff-heuristic
+- **Empty result set** (no active assignments at the node) → **fail closed** (structural error), **NOT** the
+  legacy fallback. At the tally point the resolving actor's own assignment is still active (it is deactivated
+  *after* the tally), so a threshold node being resolved must have ≥1 active assignment; an empty set is an
+  anomaly, not a legacy row, and must surface loudly rather than be papered over by the cutoff heuristic.
+  *(Runtime implementation note, review 2026-07-03.)*
+- **A single NULL row** (active rows all NULL epoch) → a legacy pre-migration activation → **cutoff-heuristic
   fallback** (§6).
 - **Exactly one non-NULL epoch** → that is the current epoch → run the tally below.
 - **Mixed NULL/non-NULL, or more than one distinct non-NULL epoch** → a STRUCTURAL invariant violation (a
