@@ -92,6 +92,13 @@ export interface NodeTimeoutConfig {
   transferToUserId?: string
   /** effect='jump': approval-node key the instance is sent to (re-entry semantics) when the deadline fires. */
   jumpToNodeKey?: string
+  /**
+   * T3-2 SLA-unit discriminator. Default/absent === 'wall_clock' — `afterMinutes` elapses as UTC
+   * wall-clock (byte-identical to T1-1). When 'business', the deadline is computed against a
+   * working-day calendar (WorkdayCalendarPort): only minutes on a working day and outside every
+   * non-counting window count. Provider-absent → fail-open to wall-clock.
+   */
+  unit?: 'wall_clock' | 'business'
 }
 
 export interface ApprovalNodeConfig {

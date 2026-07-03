@@ -963,6 +963,21 @@ export interface PluginServices {
   attendanceScheduler?: {
     registerJob(job: { name?: string; run(): Promise<unknown> }): (() => void) | null
   }
+  /**
+   * T3-2 — host→plugin surface for binding the process-wide working-day calendar provider that the
+   * approval SLA path consults through the WorkdayCalendarPort. `register` returns an unbind function.
+   * A provider whose `resolve` returns null (foreign / unmapped org) or throws is treated as fail-open
+   * by approval. The registered provider MAY read `attendance_*`; approval never does.
+   */
+  workdayCalendar?: {
+    register(provider: {
+      resolve(orgId: string, asOf: Date): Promise<{
+        timezone: string
+        isWorkingDay(dayIso: string): boolean
+        nonCountingWindows: Array<{ startMinuteOfDay: number; endMinuteOfDay: number; daysOfWeek?: number[] }>
+      } | null>
+    }): (() => void)
+  }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService
   rbacProvisioning: PluginRbacProvisioningService

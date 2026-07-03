@@ -10,6 +10,35 @@
  */
 
 import { pool } from '../db/pg'
+import { Logger } from '../core/logger'
+import {
+  getWorkdayCalendarRegistry,
+  computeWorkdayDeadline,
+  WORKDAY_SEARCH_CAP_DAYS,
+} from '../core/workday-calendar-port'
+
+const calendarSlaLogger = new Logger('ApprovalCalendarSla')
+
+/**
+ * T3-2 calendar SLA descriptor threaded from the caller into a node-activation stamp. Present ONLY when
+ * the activating node opted into a business-time SLA (`NodeTimeoutConfig.unit === 'business'`). `orgId`
+ * is the calendar org resolved from the requester/org snapshot at instance start (falls back to 'default').
+ */
+export interface CalendarSlaInput {
+  afterMinutes: number
+  orgId: string
+}
+
+/**
+ * The armed calendar deadline: the absolute business-time due instant and the resolved timezone it was
+ * computed in (persisted for audit). Fully snapshotted at the activation instant — a later calendar edit
+ * never moves an already-armed deadline.
+ */
+interface ResolvedCalendarDeadline {
+  dueAt: Date
+  timezone: string
+  orgId: string
+}
 
 export type Query = <T = unknown>(
   sql: string,
@@ -43,6 +72,11 @@ export interface ApprovalMetricsRow {
   sla_breached: boolean
   sla_breached_at: string | null
   node_breakdown: NodeBreakdownEntry[]
+  // T3-2 calendar SLA (nullable / absent on legacy + non-calendar rows).
+  sla_calendar_org_id?: string | null
+  sla_timezone?: string | null
+  sla_due_at?: string | null
+  sla_unit?: 'wall_clock' | 'business' | null
   created_at: string
   updated_at: string
 }
@@ -188,6 +222,10 @@ export class ApprovalMetricsService {
     // instance start — this is the one activation path that does NOT flow through recordNodeActivation.
     timeoutDeadline?: Date | null
     timeoutEffect?: string | null
+    // T3-2: present when the initial node opted into a business-time SLA. Computes sla_due_at via the
+    // WorkdayCalendarPort (snapshot asOf startedAt; fail-open to wall-clock); its due instant also drives
+    // current_node_deadline_at so the node-timeout effect fires at the business deadline.
+    calendarSla?: CalendarSlaInput | null
   }): Promise<void> {
     const tenantId = resolveTenantId(input.tenantId)
     const initialBreakdown: NodeBreakdownEntry[] = input.initialNodeKey
@@ -199,11 +237,16 @@ export class ApprovalMetricsService {
         approverIds: [],
       }]
       : []
+    const calendar = input.calendarSla
+      ? await this.resolveCalendarDeadline(input.calendarSla, input.startedAt, input.instanceId)
+      : null
+    const deadline = calendar ? calendar.dueAt : (input.timeoutDeadline ?? null)
     await this.query(
       `INSERT INTO approval_metrics
          (instance_id, template_id, tenant_id, started_at, sla_hours, node_breakdown,
-          current_node_deadline_at, current_node_timeout_effect)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+          current_node_deadline_at, current_node_timeout_effect,
+          sla_due_at, sla_timezone, sla_calendar_org_id, sla_unit)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12)
        ON CONFLICT (instance_id) DO NOTHING`,
       [
         input.instanceId,
@@ -212,8 +255,12 @@ export class ApprovalMetricsService {
         input.startedAt.toISOString(),
         input.slaHours ?? null,
         JSON.stringify(initialBreakdown),
-        input.timeoutDeadline ? input.timeoutDeadline.toISOString() : null,
+        deadline ? deadline.toISOString() : null,
         input.timeoutEffect ?? null,
+        calendar ? calendar.dueAt.toISOString() : null,
+        calendar ? calendar.timezone : null,
+        calendar ? calendar.orgId : null,
+        calendar ? 'business' : null,
       ],
     )
   }
@@ -231,6 +278,10 @@ export class ApprovalMetricsService {
     // columns are cleared so the previous node's deadline can never linger on the new node.
     timeoutDeadline?: Date | null
     timeoutEffect?: string | null
+    // T3-2: present when the activating node opted into a business-time SLA. sla_due_at is computed via
+    // the WorkdayCalendarPort (snapshot asOf activatedAt; fail-open to wall-clock) and also drives
+    // current_node_deadline_at. Absent → the calendar columns are cleared (like the T1-1 deadline).
+    calendarSla?: CalendarSlaInput | null
   }): Promise<void> {
     let added = false
     await this.mutateBreakdown(input.instanceId, (breakdown) => {
@@ -252,18 +303,84 @@ export class ApprovalMetricsService {
     // to the new node's deadline if it has a timeout, else NULL (clearing the prior node's). A
     // retry / re-emit (an open entry already exists → `added` stays false) is a strict no-op, so it
     // can never push out or clear an existing deadline. Best-effort, like every metrics write.
+    //
+    // T3-2: on a business-time node the calendar due instant replaces the naive deadline (so the effect
+    // fires at the business time) and populates the sla_* columns; a wall-clock / no-timeout node clears
+    // them, so a prior node's calendar deadline can never linger on the new node.
     if (added) {
+      const calendar = input.calendarSla
+        ? await this.resolveCalendarDeadline(input.calendarSla, input.activatedAt, input.instanceId)
+        : null
+      const deadline = calendar ? calendar.dueAt : (input.timeoutDeadline ?? null)
       await this.query(
         `UPDATE approval_metrics
            SET current_node_deadline_at = $2,
-               current_node_timeout_effect = $3
+               current_node_timeout_effect = $3,
+               sla_due_at = $4,
+               sla_timezone = $5,
+               sla_calendar_org_id = $6,
+               sla_unit = $7
          WHERE instance_id = $1`,
         [
           input.instanceId,
-          input.timeoutDeadline ? input.timeoutDeadline.toISOString() : null,
+          deadline ? deadline.toISOString() : null,
           input.timeoutEffect ?? null,
+          calendar ? calendar.dueAt.toISOString() : null,
+          calendar ? calendar.timezone : null,
+          calendar ? calendar.orgId : null,
+          calendar ? 'business' : null,
         ],
       )
+    }
+  }
+
+  /**
+   * T3-2 — resolve the business-time due instant for a calendar-typed node SLA, fully snapshotted at
+   * the activation instant. Consults the WorkdayCalendarPort registry:
+   *   - provider bound + calendar for org → walk `afterMinutes` of counting time forward (Q3/Q6);
+   *   - provider UNBOUND, provider THROWS, or org UNRESOLVED (`resolve` → null) → FAIL OPEN to natural
+   *     elapsed arithmetic (activatedAt + afterMinutes, wall-clock), timezone APP_TIMEZONE → UTC, log (Q4);
+   *   - forward search capped at 366 days (Q10) — an all-non-working calendar clamps + logs.
+   * NEVER throws — a calendar failure must not block approval creation or disable SLA tracking.
+   */
+  private async resolveCalendarDeadline(
+    input: CalendarSlaInput,
+    activatedAt: Date,
+    instanceId: string,
+  ): Promise<ResolvedCalendarDeadline> {
+    const orgId = input.orgId
+    const fallbackTimezone = process.env.APP_TIMEZONE || 'UTC'
+    const naiveDueAt = new Date(activatedAt.getTime() + input.afterMinutes * 60_000)
+    const provider = getWorkdayCalendarRegistry().get()
+    if (!provider) {
+      calendarSlaLogger.warn(
+        `Calendar SLA fail-open for ${instanceId}: no WorkdayCalendarPort provider bound — using wall-clock elapsed`,
+      )
+      return { dueAt: naiveDueAt, timezone: fallbackTimezone, orgId }
+    }
+    try {
+      const calendar = await provider.resolve(orgId, activatedAt)
+      if (!calendar) {
+        calendarSlaLogger.warn(
+          `Calendar SLA fail-open for ${instanceId}: provider returned no calendar for org '${orgId}' — using wall-clock elapsed`,
+        )
+        return { dueAt: naiveDueAt, timezone: fallbackTimezone, orgId }
+      }
+      const timezone = typeof calendar.timezone === 'string' && calendar.timezone.trim().length > 0
+        ? calendar.timezone
+        : fallbackTimezone
+      const { dueAt, clamped } = computeWorkdayDeadline(activatedAt, input.afterMinutes, calendar)
+      if (clamped) {
+        calendarSlaLogger.warn(
+          `Calendar SLA search cap for ${instanceId}: no working time found within ${WORKDAY_SEARCH_CAP_DAYS} days for org '${orgId}' — clamped to horizon`,
+        )
+      }
+      return { dueAt, timezone, orgId }
+    } catch (error) {
+      calendarSlaLogger.warn(
+        `Calendar SLA fail-open for ${instanceId}: provider threw (${error instanceof Error ? error.message : String(error)}) — using wall-clock elapsed`,
+      )
+      return { dueAt: naiveDueAt, timezone: fallbackTimezone, orgId }
     }
   }
 
@@ -316,9 +433,12 @@ export class ApprovalMetricsService {
     // `approval_instances.current_node_key` to the NEXT node inside the committed transaction, so once the
     // flow has advanced this clear is a safe no-op and the activation write is the sole owner of the
     // deadline. On a terminal outcome `recordTerminal` clears unconditionally, so nothing is missed.
+    // T3-2: the calendar SLA columns are cleared alongside the T1-1 deadline (same scoped guard) so a
+    // decided node's business due can never linger; the next node's activation is the sole owner of them.
     await this.query(
       `UPDATE approval_metrics
-         SET current_node_deadline_at = NULL, current_node_timeout_effect = NULL
+         SET current_node_deadline_at = NULL, current_node_timeout_effect = NULL,
+             sla_due_at = NULL, sla_timezone = NULL, sla_calendar_org_id = NULL, sla_unit = NULL
        WHERE instance_id = $1
          AND EXISTS (
            SELECT 1 FROM approval_instances i
@@ -385,6 +505,8 @@ export class ApprovalMetricsService {
    * caller can emit audit events / notifications.
    */
   async checkSlaBreaches(now: Date): Promise<string[]> {
+    // LEGACY path (unchanged, byte-identical): `sla_hours` elapsed since started_at. Served by the
+    // preserved partial index idx_approval_metrics_sla_scan — do NOT modify this predicate.
     const result = await this.query<{ instance_id: string }>(
       `UPDATE approval_metrics
          SET sla_breached = TRUE,
@@ -396,7 +518,24 @@ export class ApprovalMetricsService {
        RETURNING instance_id`,
       [now.toISOString()],
     )
-    return result.rows.map((row) => row.instance_id)
+    // T3-2 CALENDAR path (§6): rebase overdue detection on the actual business-time `sla_due_at`. A
+    // separate UPDATE keeps the legacy predicate untouched and lets Postgres use the NEW partial index
+    // idx_approval_metrics_sla_due_scan. Rows with sla_due_at NULL (legacy / non-calendar) are untouched.
+    const calendar = await this.query<{ instance_id: string }>(
+      `UPDATE approval_metrics
+         SET sla_breached = TRUE,
+             sla_breached_at = $1
+       WHERE terminal_at IS NULL
+         AND sla_due_at IS NOT NULL
+         AND sla_breached = FALSE
+         AND sla_due_at < $1
+       RETURNING instance_id`,
+      [now.toISOString()],
+    )
+    const ids = new Set<string>()
+    for (const row of result.rows) ids.add(row.instance_id)
+    for (const row of calendar.rows) ids.add(row.instance_id)
+    return [...ids]
   }
 
   async getMetricsSummary(input: MetricsSummaryQuery = {}): Promise<MetricsSummary> {
