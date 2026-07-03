@@ -109,6 +109,11 @@ const BPMN_IMPORT_ALLOWLIST: Array<{ file: string; disposition: 'LEGACY-RUNTIME'
     disposition: 'TEST',
     reason: 'R1 BPMN HTTP-task SSRF closure regression tests only — not a product runtime consumer.',
   },
+  {
+    file: 'workflow/__tests__/BPMNWorkflowEngine.a3-egress-evidence.test.ts',
+    disposition: 'TEST',
+    reason: 'A3/A4 values-free egress destination-authorization evidence tests only — exercises the shipped egress guard through the real env path, not a product runtime consumer.',
+  },
 ]
 
 /**
