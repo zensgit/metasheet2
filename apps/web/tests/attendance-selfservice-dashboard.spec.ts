@@ -3,6 +3,7 @@ import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { useLocale } from '../src/composables/useLocale'
 import { apiFetch } from '../src/utils/api'
+import { resolveMakeupPunchRequestStatusCopy } from '../src/views/attendance/makeupPunchRequestStatus'
 
 const authMockState = vi.hoisted(() => ({
   currentUserId: 'swap-user-a',
@@ -548,6 +549,107 @@ function installShiftSwapSelfServiceMock(options: { actorUserId?: string } = {})
 
   return { createBodies, acceptCalls, rejectCalls, cancelCalls }
 }
+
+// MP-5: wrap the default overview mock so POST /api/attendance/requests returns a
+// makeup-punch policy rejection (and capture each POST body). `succeedAfter`
+// lets a retry succeed after N rejections (used by the attachment-retry test).
+function installMakeupRejectMock(options: { code: string; status?: number; succeedAfter?: number }) {
+  const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+  const createBodies: Array<Record<string, unknown>> = []
+  vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+    const url = typeof input === 'string' ? input : input.url
+    const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+    if (url.endsWith('/api/attendance/requests') && method === 'POST') {
+      createBodies.push(JSON.parse(String((init as RequestInit | undefined)?.body || '{}')))
+      if (options.succeedAfter !== undefined && createBodies.length > options.succeedAfter) {
+        return jsonResponse(200, { ok: true, data: { request: { id: 'req-new', status: 'pending' } } })
+      }
+      return jsonResponse(options.status ?? 422, {
+        ok: false,
+        error: { code: options.code, message: options.code },
+      })
+    }
+    if (defaultImpl) return defaultImpl(input, init)
+    return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+  })
+  return { createBodies }
+}
+
+function setFormValue(root: HTMLElement, selector: string, value: string): void {
+  const el = root.querySelector<HTMLInputElement | HTMLSelectElement>(selector)
+  expect(el, `expected ${selector}`).toBeTruthy()
+  el!.value = value
+  el!.dispatchEvent(new Event(el!.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }))
+}
+
+function requestPostCount(): number {
+  return vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+    String(url).endsWith('/api/attendance/requests')
+    && String((init as RequestInit | undefined)?.method || 'GET').toUpperCase() === 'POST',
+  ).length
+}
+
+function requestListGetCount(): number {
+  return vi.mocked(apiFetch).mock.calls.filter(([url]) =>
+    typeof url === 'string' && url.includes('/api/attendance/requests?'),
+  ).length
+}
+
+function settingsFetchCount(): number {
+  return vi.mocked(apiFetch).mock.calls.filter(([url]) =>
+    typeof url === 'string' && url.includes('/api/attendance/settings'),
+  ).length
+}
+
+describe('MP-5 makeup-punch request status copy (pure)', () => {
+  const tr = (en: string) => en
+
+  it('maps all seven MAKEUP_PUNCH_* codes with correct message/action', () => {
+    const quota = resolveMakeupPunchRequestStatusCopy('MAKEUP_PUNCH_QUOTA_EXCEEDED', tr)
+    expect(quota?.message).toBe('Makeup-punch quota for this cycle has been used.')
+    expect(quota?.action).toBe('reload-requests')
+
+    const window = resolveMakeupPunchRequestStatusCopy('MAKEUP_PUNCH_WINDOW_EXPIRED', tr)
+    expect(window?.message).toContain('outside the allowed makeup-punch window')
+    expect(window?.action).toBeUndefined()
+
+    const future = resolveMakeupPunchRequestStatusCopy('MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED', tr)
+    expect(future?.message).toContain('Future work dates cannot be submitted')
+    expect(future?.action).toBeUndefined()
+
+    const type = resolveMakeupPunchRequestStatusCopy('MAKEUP_PUNCH_TYPE_NOT_ALLOWED', tr)
+    expect(type?.message).toContain('not eligible under the current makeup-punch policy')
+    expect(type?.action).toBeUndefined()
+    // Must not claim an anomaly definitely does not exist.
+    expect(String(type?.hint)).not.toMatch(/no anomaly (exists|is present|was found)/i)
+    expect(String(type?.hint)).toContain('anomaly quick action if available')
+
+    const reason = resolveMakeupPunchRequestStatusCopy('MAKEUP_PUNCH_REASON_REQUIRED', tr)
+    expect(reason?.message).toContain('A reason is required')
+    expect(reason?.action).toBe('retry-submit-request')
+
+    const attachment = resolveMakeupPunchRequestStatusCopy('MAKEUP_PUNCH_ATTACHMENT_REQUIRED', tr)
+    expect(attachment?.message).toContain('An attachment is required')
+    expect(attachment?.action).toBe('retry-submit-request')
+
+    // CROSS_USER is PUT-only: covered by the pure mapper, never a faked POST.
+    const crossUser = resolveMakeupPunchRequestStatusCopy('MAKEUP_PUNCH_CROSS_USER_FORBIDDEN', tr)
+    expect(crossUser?.message).toContain('cannot be edited for another user')
+    expect(crossUser?.action).toBeUndefined()
+  })
+
+  it('returns null for non-makeup codes', () => {
+    expect(resolveMakeupPunchRequestStatusCopy('PUNCH_TOO_SOON', tr)).toBeNull()
+    expect(resolveMakeupPunchRequestStatusCopy('FORBIDDEN', tr)).toBeNull()
+    expect(resolveMakeupPunchRequestStatusCopy('', tr)).toBeNull()
+  })
+
+  it('renders Chinese copy when tr picks the zh string', () => {
+    const zh = (_en: string, zhText: string) => zhText
+    const quota = resolveMakeupPunchRequestStatusCopy('MAKEUP_PUNCH_QUOTA_EXCEEDED', zh)
+    expect(quota?.message).toContain('补卡')
+  })
+})
 
 describe('Attendance self-service dashboard', () => {
   let app: App<Element> | null = null
@@ -1151,5 +1253,280 @@ describe('Attendance self-service dashboard', () => {
     const afterRefresh = effectiveCalls()
     expect(afterRefresh.length).toBeGreaterThan(baselineCalls)
     expect(afterRefresh.some((call) => String(call[0]).includes('userId=typed-user-pr2'))).toBe(true)
+  })
+
+  // ---- MP-5 makeup-punch request-side UX runtime ----
+
+  it('MP-5 no-success-on-reject: anomaly-prefilled draft rejected with QUOTA_EXCEEDED shows failure, appends no row', async () => {
+    const { createBodies } = installMakeupRejectMock({ code: 'MAKEUP_PUNCH_QUOTA_EXCEEDED', status: 409 })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    // Anomaly quick action = per-anomaly "Create request" button → prefill only, no POST.
+    findButton(container!, 'Create request').click()
+    await flushUi(3)
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
+    expect(requestPostCount()).toBe(0)
+
+    const listGetsBefore = requestListGetCount()
+    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+
+    const pageText = container!.textContent ?? ''
+    expect(pageText).toContain('Makeup-punch quota for this cycle has been used.')
+    expect(pageText).toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
+    expect(pageText).toContain('Reload requests')
+    expect(pageText).not.toContain('Request submitted.')
+    expect(createBodies).toHaveLength(1)
+    // Reject must not reload the request list → no fake row appended for this date.
+    expect(requestListGetCount()).toBe(listGetsBefore)
+  })
+
+  it('MP-5 mapper: WINDOW_EXPIRED direct submit shows localized message + code, no action button', async () => {
+    installMakeupRejectMock({ code: 'MAKEUP_PUNCH_WINDOW_EXPIRED', status: 422 })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    setFormValue(container!, '#attendance-request-type', 'missed_check_in')
+    await flushUi(2)
+    setFormValue(container!, '#attendance-request-work-date', '2026-04-01')
+    setFormValue(container!, '#attendance-request-in', '2026-04-01T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+
+    const pageText = container!.textContent ?? ''
+    expect(pageText).toContain('This work date is outside the allowed makeup-punch window.')
+    expect(pageText).toContain('Code: MAKEUP_PUNCH_WINDOW_EXPIRED')
+    expect(pageText).not.toContain('Request submitted.')
+  })
+
+  it('MP-5 mapper: FUTURE_DATE_UNSUPPORTED direct submit shows localized message + code', async () => {
+    installMakeupRejectMock({ code: 'MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED', status: 422 })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    setFormValue(container!, '#attendance-request-type', 'missed_check_in')
+    await flushUi(2)
+    setFormValue(container!, '#attendance-request-work-date', '2026-05-01')
+    setFormValue(container!, '#attendance-request-in', '2026-05-01T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+
+    const pageText = container!.textContent ?? ''
+    expect(pageText).toContain('Future work dates cannot be submitted for makeup punch.')
+    expect(pageText).toContain('Code: MAKEUP_PUNCH_FUTURE_DATE_UNSUPPORTED')
+    expect(pageText).not.toContain('Request submitted.')
+  })
+
+  it('MP-5 mapper: TYPE_NOT_ALLOWED hint points to policy eligibility, never "no anomaly exists"', async () => {
+    installMakeupRejectMock({ code: 'MAKEUP_PUNCH_TYPE_NOT_ALLOWED', status: 422 })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Create request').click()
+    await flushUi(3)
+    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+
+    const pageText = container!.textContent ?? ''
+    expect(pageText).toContain('The selected date/type is not eligible under the current makeup-punch policy.')
+    expect(pageText).toContain('Code: MAKEUP_PUNCH_TYPE_NOT_ALLOWED')
+    expect(pageText).toContain('anomaly quick action if available')
+    expect(pageText).not.toMatch(/no anomaly (exists|is present|was found)/i)
+    expect(pageText).not.toContain('Request submitted.')
+  })
+
+  it('MP-5 mapper: REASON_REQUIRED keeps a submit-focused retry action', async () => {
+    installMakeupRejectMock({ code: 'MAKEUP_PUNCH_REASON_REQUIRED', status: 422 })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    setFormValue(container!, '#attendance-request-type', 'missed_check_in')
+    await flushUi(2)
+    setFormValue(container!, '#attendance-request-work-date', '2026-04-13')
+    setFormValue(container!, '#attendance-request-in', '2026-04-13T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+
+    const pageText = container!.textContent ?? ''
+    expect(pageText).toContain('A reason is required by the makeup-punch policy.')
+    expect(pageText).toContain('Code: MAKEUP_PUNCH_REASON_REQUIRED')
+    expect(pageText).toContain('Retry submit request')
+    expect(pageText).not.toContain('Request submitted.')
+  })
+
+  it('MP-5 attachment gate: ATTACHMENT_REQUIRED exposes the input; retry after filling sends attachmentUrl', async () => {
+    const { createBodies } = installMakeupRejectMock({
+      code: 'MAKEUP_PUNCH_ATTACHMENT_REQUIRED',
+      status: 422,
+      succeedAfter: 1,
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    setFormValue(container!, '#attendance-request-type', 'time_correction')
+    await flushUi(2)
+    // Attachment field is exposed for makeup request types (broadened v-if).
+    const attachments = container!.querySelectorAll('#attendance-request-attachment')
+    expect(attachments).toHaveLength(1) // no duplicate DOM id
+    setFormValue(container!, '#attendance-request-work-date', '2026-04-13')
+    setFormValue(container!, '#attendance-request-in', '2026-04-13T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+
+    const afterReject = container!.textContent ?? ''
+    expect(afterReject).toContain('An attachment is required by the makeup-punch policy.')
+    expect(afterReject).toContain('Code: MAKEUP_PUNCH_ATTACHMENT_REQUIRED')
+    expect(afterReject).toContain('Retry submit request')
+    expect(afterReject).not.toContain('Request submitted.')
+    expect(createBodies).toHaveLength(1)
+    expect(createBodies[0].attachmentUrl).toBeUndefined()
+
+    // Fill the attachment URL and retry → succeeds and carries attachmentUrl.
+    setFormValue(container!, '#attendance-request-attachment', 'https://example.com/proof.png')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+
+    expect(createBodies).toHaveLength(2)
+    expect(createBodies[1].attachmentUrl).toBe('https://example.com/proof.png')
+  })
+
+  it('MP-5 shared path: missing-punch quick action (with anomaly) posts exactly one request, none during prefill', async () => {
+    const { createBodies } = installMakeupRejectMock({ code: 'IGNORED', succeedAfter: 0 })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
+    expect(requestPostCount()).toBe(0)
+
+    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+
+    expect(requestPostCount()).toBe(1)
+    expect(createBodies).toHaveLength(1)
+    expect(createBodies[0].requestType).toBe('missed_check_in')
+  })
+
+  it('MP-5 shared path: missing-punch quick action with no anomaly still posts one request', async () => {
+    installOverviewMock()
+    const baseImpl = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/anomalies?')) {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (baseImpl) return baseImpl(input, init)
+      return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+    })
+    const { createBodies } = installMakeupRejectMock({ code: 'IGNORED', succeedAfter: 0 })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-work-date')?.value).toBeTruthy()
+    expect(requestPostCount()).toBe(0)
+
+    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+
+    expect(requestPostCount()).toBe(1)
+    expect(createBodies).toHaveLength(1)
+  })
+
+  it('MP-5 no settings leak: the employee MP-5 flow makes no GET /api/attendance/settings', async () => {
+    installMakeupRejectMock({ code: 'MAKEUP_PUNCH_QUOTA_EXCEEDED', status: 409 })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Create request').click()
+    await flushUi(3)
+    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+
+    expect(settingsFetchCount()).toBe(0)
+  })
+
+  it('MP-5 stale-error: a new prefill clears a prior request-submit rejection banner', async () => {
+    installMakeupRejectMock({ code: 'MAKEUP_PUNCH_QUOTA_EXCEEDED', status: 409 })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Create request').click()
+    await flushUi(3)
+    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+    expect(container!.textContent).toContain('Makeup-punch quota for this cycle has been used.')
+    expect(container!.textContent).toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
+
+    // A fresh prefill must drop the stale request-submit rejection banner.
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+    expect(container!.textContent).not.toContain('Makeup-punch quota for this cycle has been used.')
+    expect(container!.textContent).not.toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
+  })
+
+  it('MP-5 stale-error: manually CHANGING the draft (work date) clears a prior request-submit rejection', async () => {
+    // §6 gate-4 is "changing OR refilling"; this covers the changing half — a hand edit
+    // of a form field, with no fresh prefill, must still drop a prior MAKEUP_PUNCH_* banner.
+    installMakeupRejectMock({ code: 'MAKEUP_PUNCH_QUOTA_EXCEEDED', status: 409 })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Create request').click()
+    await flushUi(3)
+    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+    expect(container!.textContent).toContain('Makeup-punch quota for this cycle has been used.')
+    expect(container!.textContent).toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
+
+    // Manually edit the work-date field only (no quick action / no prefill).
+    setFormValue(container!, '#attendance-request-work-date', '2026-04-20')
+    await flushUi(2)
+    expect(container!.textContent).not.toContain('Makeup-punch quota for this cycle has been used.')
+    expect(container!.textContent).not.toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
+  })
+
+  it('MP-5 stale-error: manually CHANGING the request type clears a prior request-submit rejection', async () => {
+    installMakeupRejectMock({ code: 'MAKEUP_PUNCH_QUOTA_EXCEEDED', status: 409 })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Create request').click()
+    await flushUi(3)
+    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+    expect(container!.textContent).toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
+
+    setFormValue(container!, '#attendance-request-type', 'time_correction')
+    await flushUi(2)
+    expect(container!.textContent).not.toContain('Makeup-punch quota for this cycle has been used.')
+    expect(container!.textContent).not.toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
   })
 })
