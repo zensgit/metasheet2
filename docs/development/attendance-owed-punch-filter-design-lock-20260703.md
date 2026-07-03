@@ -1,6 +1,7 @@
-# Owed-punch anomaly filter design-lock (PROPOSED)
+# Owed-punch anomaly filter design-lock (RATIFIED)
 
-> Status: **PROPOSED**. This is a post-H2 humanization design lock only.
+> Status: **RATIFIED** on 2026-07-03 after owner review. This is a
+> post-H2 humanization design lock only.
 > It does not authorize runtime, staging, production enablement, or closing any
 > staging umbrella.
 >
@@ -157,7 +158,7 @@ Relationship to adjacent lines:
 
 | Slice | Scope | Notes |
 |---|---|---|
-| OF-0 | This design lock | docs-only, owner ratify before runtime |
+| OF-0 | This design lock | docs-only, ratified before runtime |
 | OF-1 | Backend classifier + anomaly route filter | shared classifier, `filter=owed_punch`, route tests, HMR parity test |
 | OF-2 | Frontend anomaly card control | segmented/chip control, stale-clear, web-guard coverage |
 | OF-3 | Optional closeout note | update humanization ledger only after OF-1/2 land |
@@ -204,13 +205,13 @@ Frontend:
 
 Docs / process:
 
-- keep this file `PROPOSED` until owner ratifies it;
+- keep runtime changes in a separate PR after this RATIFIED design lock;
 - runtime PR body must avoid bare closing keywords for any umbrella issue that
   outlives the PR.
 
 ## 6. Owner Decisions
 
-Recommended defaults for ratification:
+Ratified defaults:
 
 1. **Route filter instead of client-only filtering.** This keeps totals and
    pagination honest.
