@@ -166,6 +166,11 @@ describeIfDatabase('delegation (委托) config CRUD — real-DB API', () => {
     const after = await req(base, '/api/approval-delegations', adminTok)
     const afterRows = ((await after.json()) as { data: Array<{ id: string }> }).data
     expect(afterRows.find((r) => r.id === id)).toBeUndefined()
+
+    // audit history: ?includeInactive=true surfaces the disabled row again (active:false)
+    const hist = await req(base, '/api/approval-delegations?includeInactive=true', adminTok)
+    const histRows = ((await hist.json()) as { data: Array<{ id: string; active: boolean }> }).data
+    expect(histRows.find((r) => r.id === id)).toMatchObject({ active: false })
   })
 
   it('end-to-end: create a delegation via the API → start an approval → assignment resolves to the delegatee', async () => {
@@ -210,5 +215,13 @@ describeIfDatabase('delegation (委托) config CRUD — real-DB API', () => {
     ).rows.map((r) => r.assignee_id)
     expect(assignees).toContain(e2eTo)
     expect(assignees).not.toContain(e2eFrom)
+
+    // 4) audit derivation from REAL resolver output: the admin audit view reports
+    //    routedApprovalCount for the delegator, derived from the `delegatedFrom` trail the
+    //    resolver stamped on approval_assignments.metadata (NOT a hand-inserted fixture).
+    const audit = await req(base, `/api/approval-delegations?includeInactive=true&delegatorUserId=${encodeURIComponent(e2eFrom)}`, adminTok)
+    const auditRows = ((await audit.json()) as { data: Array<{ delegatorUserId: string; routedApprovalCount: number }> }).data
+    // e2eFrom is unique per run and exactly one instance routed through the delegation → exactly 1.
+    expect(auditRows.find((r) => r.delegatorUserId === e2eFrom)?.routedApprovalCount).toBe(1)
   })
 })

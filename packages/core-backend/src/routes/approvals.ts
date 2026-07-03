@@ -38,7 +38,7 @@ import {
   fetchCuratedApprovalRoleIds,
 } from '../services/approval-directory'
 import { isDatabaseSchemaError } from '../utils/database-errors'
-import { createDelegation, listDelegations, disableDelegation, updateDelegation } from '../services/ApprovalDelegationConfig'
+import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
 import type { FormSchema } from '../types/approval-product'
 
 const logger = new Logger('ApprovalsRouter')
@@ -803,9 +803,73 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   r.get('/api/approval-delegations', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const delegatorUserId = typeof req.query.delegatorUserId === 'string' ? req.query.delegatorUserId : undefined
-      res.json({ data: await listDelegations(pool.query.bind(pool), { delegatorUserId }) })
+      // Audit mode: `?includeInactive=true` also returns disabled/expired rows (history).
+      const includeInactive = req.query.includeInactive === 'true' || req.query.includeInactive === '1'
+      const rows = await listDelegations(pool.query.bind(pool), { delegatorUserId, includeInactive })
+      // The routed-approval count is an AUDIT metric derived from the frozen `delegatedFrom`
+      // trail on approval_assignments.metadata (per-delegator granularity). It is a hash
+      // aggregate over approval_assignments (no expression index on delegatedFrom), so it is
+      // computed ONLY in audit mode — the default (active/operational) view stays a single
+      // small query and never pays the aggregate on its hot path.
+      if (!includeInactive) {
+        return res.json({ data: rows })
+      }
+      const routed = await countDelegatedApprovals(pool.query.bind(pool), delegatorUserId ? { delegatorUserId } : {})
+      res.json({ data: rows.map((row) => ({ ...row, routedApprovalCount: routed[row.delegatorUserId] ?? 0 })) })
     } catch (error) {
       handleApprovalsError(res, error, 'APPROVAL_DELEGATION_LIST_FAILED', 'Failed to list delegations')
+    }
+  })
+
+  // 我的委托 (self-service) — participant-gated (approvals:read), scoped to the ACTOR.
+  // The two boundaries this introduces (design-lock §3): create FORCES delegator = actor
+  // (body.delegatorUserId is ignored), and disable is 403 (not 404) on another's row.
+  // Registered BEFORE the admin `/:id` routes so `/mine` is never shadowed by `:id`.
+  r.get('/api/approval-delegations/mine', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    try {
+      const actorId = resolveApprovalActorId(req)
+      if (!actorId) return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_UNRESOLVED', 'Unable to resolve actor'))
+      // Own active + history (audit visibility for the delegator themselves), newest first.
+      const rows = await listDelegations(pool.query.bind(pool), { delegatorUserId: actorId, includeInactive: true })
+      const routed = await countDelegatedApprovals(pool.query.bind(pool), { delegatorUserId: actorId })
+      res.json({ data: rows.map((row) => ({ ...row, routedApprovalCount: routed[row.delegatorUserId] ?? 0 })) })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DELEGATION_MINE_LIST_FAILED', 'Failed to list own delegations')
+    }
+  })
+
+  r.post('/api/approval-delegations/mine', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    try {
+      const actorId = resolveApprovalActorId(req)
+      if (!actorId) return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_UNRESOLVED', 'Unable to resolve actor'))
+      const body = (req.body ?? {}) as Record<string, unknown>
+      // delegator is FORCED to the actor — body.delegatorUserId is never read (structural
+      // guarantee that a user cannot create a delegation on someone else's behalf).
+      const created = await createDelegation(pool.query.bind(pool), {
+        delegatorUserId: actorId,
+        delegateeUserId: typeof body.delegateeUserId === 'string' ? body.delegateeUserId : '',
+        scope: (typeof body.scope === 'string' ? body.scope : '') as 'all' | 'template',
+        scopeTemplateId: typeof body.scopeTemplateId === 'string' ? body.scopeTemplateId : null,
+        startAt: typeof body.startAt === 'string' ? body.startAt : '',
+        endAt: typeof body.endAt === 'string' ? body.endAt : '',
+      })
+      res.status(201).json({ data: created })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DELEGATION_MINE_CREATE_FAILED', 'Failed to create own delegation')
+    }
+  })
+
+  r.delete('/api/approval-delegations/mine/:id', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    try {
+      const actorId = resolveApprovalActorId(req)
+      if (!actorId) return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_UNRESOLVED', 'Unable to resolve actor'))
+      const id = typeof req.params.id === 'string' ? req.params.id : ''
+      const result = await disableOwnDelegation(pool.query.bind(pool), id, actorId)
+      if (result.status === 'not_found') return res.status(404).json(approvalErrorResponse('APPROVAL_DELEGATION_NOT_FOUND', 'Delegation not found'))
+      if (result.status === 'forbidden') return res.status(403).json(approvalErrorResponse('APPROVAL_DELEGATION_FORBIDDEN', 'You can only manage your own delegation'))
+      res.json({ data: { id, disabled: true } })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_DELEGATION_MINE_DISABLE_FAILED', 'Failed to disable own delegation')
     }
   })
 
