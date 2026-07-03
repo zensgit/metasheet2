@@ -1487,4 +1487,46 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.textContent).not.toContain('Makeup-punch quota for this cycle has been used.')
     expect(container!.textContent).not.toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
   })
+
+  it('MP-5 stale-error: manually CHANGING the draft (work date) clears a prior request-submit rejection', async () => {
+    // §6 gate-4 is "changing OR refilling"; this covers the changing half — a hand edit
+    // of a form field, with no fresh prefill, must still drop a prior MAKEUP_PUNCH_* banner.
+    installMakeupRejectMock({ code: 'MAKEUP_PUNCH_QUOTA_EXCEEDED', status: 409 })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Create request').click()
+    await flushUi(3)
+    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+    expect(container!.textContent).toContain('Makeup-punch quota for this cycle has been used.')
+    expect(container!.textContent).toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
+
+    // Manually edit the work-date field only (no quick action / no prefill).
+    setFormValue(container!, '#attendance-request-work-date', '2026-04-20')
+    await flushUi(2)
+    expect(container!.textContent).not.toContain('Makeup-punch quota for this cycle has been used.')
+    expect(container!.textContent).not.toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
+  })
+
+  it('MP-5 stale-error: manually CHANGING the request type clears a prior request-submit rejection', async () => {
+    installMakeupRejectMock({ code: 'MAKEUP_PUNCH_QUOTA_EXCEEDED', status: 409 })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Create request').click()
+    await flushUi(3)
+    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
+    findButton(container!, 'Submit request').click()
+    await flushUi(4)
+    expect(container!.textContent).toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
+
+    setFormValue(container!, '#attendance-request-type', 'time_correction')
+    await flushUi(2)
+    expect(container!.textContent).not.toContain('Makeup-punch quota for this cycle has been used.')
+    expect(container!.textContent).not.toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
+  })
 })

@@ -14964,6 +14964,24 @@ function clearRequestSubmitStatus(): void {
   }
 }
 
+// MP-5 stale-error gate (§6 gate-4 = "changing OR refilling the draft"). The prefill
+// entry points cover the refill half; this watcher covers the changing half — manually
+// editing any of the request-form fields drops a prior request-submit policy rejection,
+// so an A-date MAKEUP_PUNCH_* banner cannot stick to a B-date draft the user typed by
+// hand. clearRequestSubmitStatus is a no-op unless the current banner is a request-submit
+// error, so firing it on every edit is safe (and idempotent after the first clear).
+watch(
+  () => [
+    requestForm.workDate,
+    requestForm.requestType,
+    requestForm.requestedInAt,
+    requestForm.requestedOutAt,
+    requestForm.attachmentUrl,
+    requestForm.reason,
+  ],
+  () => clearRequestSubmitStatus(),
+)
+
 async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void> {
   clearRequestSubmitStatus()
   if (item.state === 'pending') {
