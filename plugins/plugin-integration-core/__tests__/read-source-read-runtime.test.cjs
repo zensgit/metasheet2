@@ -52,8 +52,8 @@ function normalizedConfig(mode, overrides = {}) {
   if (mode === 'resolver_lookup') {
     cfg.keyField = 'FMaterialId'
     cfg.containerPaths = ['Data.Rows']
-    // R0 contract shape (a valid resolver_lookup config); S3-1 still fail-closes it as mode_not_supported
-    // until R2 wires the evaluator — the executor rejects the MODE, not the contract.
+    // R2-supported resolver_lookup config shape; the executor now accepts this mode and threads the
+    // normalized config into the R1 evaluator.
     cfg.resolverRule = 'exactly_one'
     cfg.fieldMap = [{ source: 'FItemID', target: 'item_id' }]
   }
