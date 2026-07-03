@@ -1047,6 +1047,50 @@
               </el-checkbox>
             </el-form-item>
           </div>
+          <!-- T1-4 node field permissions: per-form-field access at this approval node. `隐藏` is
+               enforced at runtime (server echo-redaction); `只读` round-trips but is not yet enforced
+               (T1-4b). A field left `可编辑` carries no persisted entry (absent === editable). -->
+          <div class="template-authoring__field-perms" data-testid="approval-step-field-permissions">
+            <div class="template-authoring__field-perms-head">
+              <strong>字段权限</strong>
+              <span class="template-authoring__hint">
+                「隐藏」在审批到该节点时对所有查看者隐藏该字段（仅回显隐藏，不影响审批人解析与条件路由）；「只读」将在后续版本生效。字段默认为「可编辑」。
+              </span>
+            </div>
+            <div v-if="fieldPermissionFields.length === 0" class="template-authoring__hint">
+              请先在上方添加表单字段，即可为本步骤设置字段权限。
+            </div>
+            <div
+              v-for="field in fieldPermissionFields"
+              :key="field.id"
+              class="template-authoring__field-perm-row"
+              data-testid="approval-step-field-permission-row"
+            >
+              <span class="template-authoring__field-perm-label">{{ field.label || field.id }}（{{ field.id }}）</span>
+              <el-select
+                :model-value="stepFieldAccess(step, field.id)"
+                :disabled="readOnly"
+                size="small"
+                style="width: 130px"
+                :data-testid="`approval-step-field-access-${field.id}`"
+                @update:model-value="(access: NodeFieldAccess) => onStepFieldAccessChange(step, field.id, access)"
+              >
+                <el-option label="可编辑" value="editable" />
+                <el-option label="只读" value="readonly" />
+                <el-option label="隐藏" value="hidden" />
+              </el-select>
+              <span
+                v-if="stepFieldAccess(step, field.id) === 'readonly'"
+                class="template-authoring__hint"
+                data-testid="approval-step-field-readonly-hint"
+              >只读将在后续版本（T1-4b）生效，当前保存但暂不强制</span>
+              <span
+                v-else-if="stepFieldAccess(step, field.id) === 'hidden' && routingDriverFieldIds.has(field.id)"
+                class="template-authoring__hint template-authoring__hint--warn"
+                data-testid="approval-step-field-routing-hint"
+              >该字段被审批人来源引用；隐藏仅影响回显，不影响审批人解析</span>
+            </div>
+          </div>
         </div>
       </el-card>
 
@@ -1093,6 +1137,8 @@ import {
   draftFromTemplate,
   graphReadOnlyReason,
   parseIdsText,
+  stepFieldAccess,
+  setStepFieldPermission,
   unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
   approvalFormulaInsertOptions,
@@ -1133,6 +1179,7 @@ import type {
   ApprovalNode,
   CcNodeConfig,
   ConditionNodeConfig,
+  NodeFieldAccess,
   ParallelJoinMode,
   ParallelNodeConfig,
 } from '../../types/approval'
@@ -1592,6 +1639,23 @@ function setApprovalSourceLevel(nodeKey: string, value: number): void {
 }
 
 const userFields = computed(() => draft.value.fields.filter((field) => field.type === 'user' && field.id.trim()))
+
+// T1-4 node field permissions: every top-level form field is a candidate for a per-node access
+// override (the linear editor shows the same field list for every approval step).
+const fieldPermissionFields = computed(() => draft.value.fields.filter((field) => field.id.trim()))
+// Form fields that DRIVE routing (a form_field_user assignee source references them). Hiding one is
+// allowed — redaction is echo-only, so resolution is unaffected — but the UI surfaces a hint.
+const routingDriverFieldIds = computed(() => {
+  const ids = new Set<string>()
+  for (const step of draft.value.steps) {
+    if (step.sourceKind === 'form_field_user' && step.fieldId.trim()) ids.add(step.fieldId.trim())
+  }
+  return ids
+})
+function onStepFieldAccessChange(step: ApprovalStepDraft, fieldId: string, access: NodeFieldAccess): void {
+  step.fieldPermissions = setStepFieldPermission(step.fieldPermissions, fieldId, access)
+}
+
 const formSchemaPreview = computed(() => JSON.stringify(buildFormSchema(draft.value), null, 2))
 const approvalGraphPreview = computed(() => JSON.stringify(buildApprovalGraph(draft.value), null, 2))
 

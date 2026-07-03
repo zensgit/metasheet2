@@ -56,6 +56,17 @@ export interface ApprovalNode {
     | Record<string, never>
 }
 
+// Byte-mirrors backend packages/core-backend/src/types/approval-product.ts:51-56 (P1-C node-level
+// field permissions). `editable` (the absent default) === current behavior. Only `hidden` is
+// enforced at runtime (server-side echo-redaction — already shipped in #2799); `readonly`/`editable`
+// are contract-stable but runtime-inert (readonly enforcement is deferred to T1-4b). The authoring
+// editor may set `hidden`/`readonly`; both round-trip, `readonly` carries a "not-yet-enforced" hint.
+export type NodeFieldAccess = 'editable' | 'readonly' | 'hidden'
+export interface NodeFieldPermission {
+  fieldId: string
+  access: NodeFieldAccess
+}
+
 export interface ApprovalNodeConfig {
   assigneeType?: ApprovalAssigneeType
   assigneeIds?: string[]
@@ -63,6 +74,9 @@ export interface ApprovalNodeConfig {
   approvalMode?: ApprovalMode
   emptyAssigneePolicy?: EmptyAssigneePolicy
   autoApprovalPolicy?: AutoApprovalPolicy
+  // P1-C node-level field permissions. Default-absent === editable === current behavior. `hidden`
+  // entries are enforced server-side (echo-redaction); `readonly`/`editable` are runtime-inert.
+  fieldPermissions?: NodeFieldPermission[]
 }
 
 // Byte-mirrors backend packages/core-backend/src/types/approval-product.ts:121-128.
