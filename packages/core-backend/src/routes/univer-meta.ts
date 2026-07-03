@@ -15277,7 +15277,9 @@ export function univerMetaRouter(): Router {
       const q = pool.query.bind(pool)
       const { sheetId: sheetB, recordId: recB, fieldId: mirrorFieldId, action, foreignRecordId: recA, targetBaseId: declaredBaseClaim } = parsed.data
 
-      const { access, capabilities: capsB, sheetScope: scopeB } = await resolveSheetCapabilities(req, q, sheetB)
+      // base-B sheet resolution: only `access` is taken here — the base-B capability is re-derived UNDER the
+      // guard's sheet lock (§4, below) so it cannot drift between this resolve and the edge write.
+      const { access } = await resolveSheetCapabilities(req, q, sheetB)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
@@ -15338,17 +15340,25 @@ export function univerMetaRouter(): Router {
         // permission grant/revoke (which take the sheet FOR UPDATE) and against concurrent instances of
         // this op. The forward writer re-locks rec_A later in this same transaction (no-op).
         await query('SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE', [[sheetA, sheetB].sort()])
+        // §4: re-derive the base-B sheet capability UNDER the lock so a concurrent sheet-B grant revoke
+        // cannot be missed. capsB/scopeB above were resolved PRE-transaction; because a sheet-B write grant
+        // LIFTS the capability (applyContextSheetSchemaWriteGrant), a revoke committing between that resolve
+        // and this lock would leave the base-B leg checking STALE (still-writable) caps. Mirror exactly what
+        // resolveSheetCapabilities does, but with the transaction query holding the sheet FOR UPDATE.
+        const freshScopeB = (await loadSheetPermissionScopeMap(query, [sheetB], actorUserId)).get(sheetB)
+        const freshCapsB = applyContextSheetSchemaWriteGrant(deriveCapabilities(access.permissions, access.isAdminRole), freshScopeB, access.isAdminRole)
         const recBRes = await query('SELECT id, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE', [recB, sheetB])
         const recBRow = recBRes.rows[0] as { created_by?: unknown; locked?: unknown; locked_by?: unknown } | undefined
         if (!recBRow) throw new MirrorOpRecordMissingError() // the actor's OWN record — a plain 404, no rec_A info
 
         // ── Lock B, base-B acting-side leg — RECORD-level edit eligibility on rec_B (owner-ratified:
         // record-edit / row-level-deny / mirror-op field policy). NO C1 primitive, NO claim, NO quota —
-        // base-B is the acting side, not a cross-base canonical-edge target.
-        if (!capsB.canEditRecord) throw new MirrorOpDeniedError('RECORD_EDIT_DENIED')
+        // base-B is the acting side, not a cross-base canonical-edge target. Uses the freshly re-derived
+        // (under-lock) base-B capability so authorization cannot drift between check and edge write (§4).
+        if (!freshCapsB.canEditRecord) throw new MirrorOpDeniedError('RECORD_EDIT_DENIED')
         const recBScopeMap = await loadRecordPermissionScopeMap(query, sheetB, [recB], actorUserId)
         const recBCreatedBy = typeof recBRow.created_by === 'string' ? recBRow.created_by : null
-        if (!ensureRecordWriteAllowed(capsB, scopeB, access, recBCreatedBy, 'edit', recBScopeMap, recB)) {
+        if (!ensureRecordWriteAllowed(freshCapsB, freshScopeB, access, recBCreatedBy, 'edit', recBScopeMap, recB)) {
           throw new MirrorOpDeniedError('RECORD_EDIT_DENIED')
         }
         if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, sheetB)) && (await loadDeniedRecordIds(query, sheetB, actorUserId)).has(recB)) {

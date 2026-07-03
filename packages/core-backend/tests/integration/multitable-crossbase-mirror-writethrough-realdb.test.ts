@@ -239,6 +239,25 @@ describeIfDatabase('C2 cross-base mirror write-through — op runtime goldens (r
     expect(await forwardEdgeCount(REC_A1, REC_B1)).toBe(0)
   })
 
+  test('W-B: per-subject field policy (M_B read-only/hidden) denies the op ⇒ FIELD_POLICY_DENIED, no edge', async () => {
+    // build-spec §5 W-A base-B denial: "the relevant mirror-op field policy on rec_B". The DERIVED mirrorOf
+    // read-only is exactly what this dedicated op is gated to bypass — but an EXPLICIT per-subject
+    // field_permissions hide/read-only on M_B for the acting user is NOT bypassed. OWNER passes every other
+    // leg, so this isolates the field-policy denial (thrown in the base-B leg, before base-A quota).
+    await q("INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,'user',$3,true,true)",
+      [SB, M_B, OWNER])
+    try {
+      const res = await mirrorOp()
+      expect(res.status).toBe(403)
+      expect(res.body?.error?.code).toBe('FIELD_POLICY_DENIED')
+      expect(await forwardEdgeCount(REC_A1, REC_B1)).toBe(0)
+      // Fail-first: deleting the guard's field-policy check (op ~lines 145-148) lets the op reach the write
+      // ⇒ 200 with no FIELD_POLICY_DENIED code → this golden goes RED.
+    } finally {
+      await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND field_id = $2', [SB, M_B]).catch(() => {})
+    }
+  })
+
   test('W-B: rec_B row-denied actor cannot use the mirror op as a bypass (RECORD-level, not base-level) — and the denial consumes NO base-A quota', async () => {
     // Row-level read deny on rec_B for OWNER: record-edit eligibility on the SPECIFIC rec_B fails even
     // though OWNER's sheet/base-level authority is intact — the record-level upgrade the lock ratified.
