@@ -6428,6 +6428,109 @@ async function testReadSourceConfiguredReadRoute() {
   console.log('  testReadSourceConfiguredReadRoute OK')
 }
 
+// R2 (#1709): resolver_lookup end-to-end through the S3-2 route — approved-only, key-only, read-tier,
+// standalone (data carries ONLY the resolver target+value), no write, values-free.
+async function testReadSourceResolverReadRoute() {
+  const readArgs = []
+  const writeCalls = []
+  const resolverConfig = {
+    version: 1,
+    systemId: 'sys_1',
+    requiredKind: 'erp:k3-wise-webapi',
+    object: 'material',
+    mode: 'resolver_lookup',
+    readPath: '/K3API/Material/GetList',
+    readMethod: 'POST',
+    operations: ['read'],
+    keyField: 'FNumber',
+    containerPaths: ['Data.Rows'],
+    resolverRule: 'exactly_one',
+    fieldMap: [{ source: 'FItemID', target: 'item_id' }],
+  }
+  const services = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        return { id: input.id, kind: 'erp:k3-wise-webapi', credentials: { bearerToken: 'secret-token' }, config: { objects: {} } }
+      },
+    },
+    readSourceConfigStore: {
+      async saveVersion() { return {} },
+      async list() { return [] },
+      async get() { return {} },
+      async approve() { return {} },
+      async retire() { return {} },
+      async listAudit() { return [] },
+      async getForRuntime(input) {
+        if (input.id === 'rsc_draft') {
+          const error = new Error('not approved')
+          error.name = 'ReadSourceConfigNotApprovedError'
+          Object.setPrototypeOf(error, ReadSourceConfigNotApprovedError.prototype)
+          error.details = { id: input.id, status: 'draft' }
+          throw error
+        }
+        return { id: input.id, systemId: 'sys_1', object: 'material', mode: 'resolver_lookup', version: 1, status: 'approved', config: resolverConfig }
+      },
+    },
+    adapterRegistry: {
+      createAdapter() {
+        return {
+          async read(req) {
+            readArgs.push(req)
+            return { records: [], raw: { Data: { Rows: [{ FItemID: 4242, FName: 'SECRET-NAME', FNumber: req.filters.FNumber }] } } }
+          },
+          async upsert(b) { writeCalls.push(['upsert', b]); return {} },
+          async save(b) { writeCalls.push(['save', b]); return {} },
+        }
+      },
+    },
+  }).services
+  const { routes } = mountRoutes(services)
+
+  // exactly_one resolves; read-tier; keyed outbound read once; standalone data; no write; values-free.
+  const ok = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    user: READ_USER, params: { id: 'rsc_resolver' }, body: { inputs: { key: 'M-001' } },
+  })
+  assertOkResponse(ok, 200)
+  assert.equal(ok.body.data.evidence.ok, true)
+  assert.equal(ok.body.data.evidence.rule, 'exactly_one')
+  assert.equal(ok.body.data.evidence.resolved, true)
+  assert.deepEqual(ok.body.data.data, { resolver: { target: 'item_id', value: 4242 } })
+  assert.equal(readArgs.length, 1, 'exactly one outbound keyed read — no composition/chaining')
+  assert.deepEqual(readArgs[0], { object: 'material', filters: { FNumber: 'M-001' } })
+  assert.equal(writeCalls.length, 0, 'resolver is read-only — no write surface touched')
+  const evStr = JSON.stringify(ok.body.data.evidence)
+  for (const leak of ['4242', 'FItemID', 'item_id', 'FNumber', 'SECRET-NAME', 'M-001', 'secret-token', '/K3API']) {
+    assert.ok(!evStr.includes(leak), `resolver evidence must not leak ${leak}`)
+  }
+
+  // >1 candidate → AMBIGUOUS coarse code, data null (still 200 — a resolved outcome, not a route error).
+  const many = createMockServices({
+    externalSystemRegistry: { async getExternalSystemForAdapter(input) { return { id: input.id, kind: 'erp:k3-wise-webapi', credentials: {}, config: { objects: {} } } } },
+    readSourceConfigStore: {
+      async saveVersion() { return {} }, async list() { return [] }, async get() { return {} },
+      async approve() { return {} }, async retire() { return {} }, async listAudit() { return [] },
+      async getForRuntime(input) { return { id: input.id, systemId: 'sys_1', object: 'material', mode: 'resolver_lookup', version: 1, status: 'approved', config: resolverConfig } },
+    },
+    adapterRegistry: { createAdapter() { return { async read() { return { records: [], raw: { Data: { Rows: [{ FItemID: 1 }, { FItemID: 2 }] } } } }, async upsert() { return {} }, async save() { return {} } } } },
+  }).services
+  const ambRes = await invoke(mountRoutes(many).routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    user: READ_USER, params: { id: 'rsc_resolver' }, body: { inputs: { key: 'M-001' } },
+  })
+  assertOkResponse(ambRes, 200)
+  assert.equal(ambRes.body.data.evidence.ok, false)
+  assert.equal(ambRes.body.data.evidence.errorCode, 'READ_SOURCE_RESOLVER_AMBIGUOUS')
+  assert.equal(ambRes.body.data.data, null)
+
+  // approved-only still holds for resolver configs.
+  const draft = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    user: READ_USER, params: { id: 'rsc_draft' }, body: { inputs: { key: 'M-001' } },
+  })
+  assert.equal(draft.statusCode, 409)
+  assert.equal(draft.body.error.code, 'READ_SOURCE_CONFIG_NOT_APPROVED')
+
+  console.log('  testReadSourceResolverReadRoute OK')
+}
+
 async function main() {
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
@@ -6452,6 +6555,7 @@ async function main() {
   await testReadSourceProbeRoute()
   await testReadSourceConfigRoutes()
   await testReadSourceConfiguredReadRoute()
+  await testReadSourceResolverReadRoute()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()

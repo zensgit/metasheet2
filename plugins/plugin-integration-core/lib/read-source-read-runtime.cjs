@@ -28,15 +28,20 @@ const {
   classifyProbeErrorCode,
   normalizeReadSourceProbeInputs,
 } = require('./read-source-probe-runtime.cjs')
+// R2 (#1709): resolver_lookup runtime = the R1 pure evaluator, wired here (standalone only). The evaluator
+// owns all multiplicity-rule selection + values-free evidence; this executor only supplies the outbound
+// keyed read + the config, then returns the evaluator's { evidence, data } verbatim.
+const { evaluateResolver } = require('./read-source-resolver-evaluator.cjs')
 const { applyReadSmokePresetOverlay } = require('./read-smoke.cjs')
 
 const CONFIGURED_READ_BODY_KEYS = Object.freeze(['config', 'inputs'])
 
-// resolver_lookup runtime is a LATER gated slice: its selection semantics (how multiplicityRuleField picks
-// among candidate rows) are not designed anywhere on this line yet, so executing it as a plain keyed read
-// would silently drop the multiplicity rule. Fail-closed reject instead — flagged, not silently dropped
-// (same discipline as the S1 marker-gating deferral in read-source-config.cjs).
-const CONFIGURED_READ_SUPPORTED_MODES = Object.freeze(['single_record', 'list_page', 'detail_with_lines'])
+// R2 (#1709, owner-authorized 2026-07-03): resolver_lookup is now a supported runtime mode — its multiplicity
+// selection semantics were designed (resolver design-lock) and implemented as the R1 pure evaluator, which
+// this executor invokes. STANDALONE ONLY: the resolver resolves one key to one value and returns it; its
+// output is NEVER fed into a second read / BOM lookup / any chained call (no composition — a separate,
+// still-ungated slice). The other three modes keep the generic field-map data plane below.
+const CONFIGURED_READ_SUPPORTED_MODES = Object.freeze(['single_record', 'list_page', 'detail_with_lines', 'resolver_lookup'])
 
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
@@ -65,6 +70,11 @@ function prepareConfiguredRead(body) {
   return Object.freeze({
     plan,
     fieldMap,
+    // R2: the S1-normalized config (body.config is byte-equal to the validator's normalized output — the
+    // S2-a contract's assertS1NormalizedConfig guarantees it) is threaded through for resolver_lookup, whose
+    // evaluator consumes resolverRule / multiplicityRuleField / resolverSortDirection /
+    // resolverDiscriminatorValue / containerPaths / fieldMap. The other modes ignore it.
+    config: body.config,
     inputs: normalizeReadSourceProbeInputs(plan, body.inputs),
   })
 }
@@ -123,7 +133,7 @@ function failureOutcome(plan, errorCode, errorType, extra) {
 // values-free in the probe vocabulary, data null on any failure. `timeoutMs` is dependency injection for
 // tests only; the platform constants are never request-reachable.
 async function executeConfiguredRead(prepared, { system, createAdapter, timeoutMs = READ_SOURCE_PROBE_TIMEOUT_MS }) {
-  const { plan, fieldMap, inputs } = prepared
+  const { plan, fieldMap, config, inputs } = prepared
   // Execution-time defense-in-depth — same re-guard as the S2-b probe: no adapter, no outbound path for
   // a readPath that lost the config-time guarantee.
   if (!isSafeRelativeReadPath(plan.readPath)) {
@@ -161,6 +171,15 @@ async function executeConfiguredRead(prepared, { system, createAdapter, timeoutM
   const raw = raced && raced.raw
   if (!isPlainObject(raw)) {
     return failureOutcome(plan, 'READ_SOURCE_PROBE_RESPONSE_UNRECOGNIZED', 'ReadSourceProbeRuntimeError')
+  }
+
+  // R2 (#1709): resolver_lookup BYPASSES the generic field-map data plane below. The R1 evaluator locates the
+  // candidate container, applies the config's multiplicity rule (exactly_one / first_when_sorted /
+  // field_equals — each with its own fail-closed detail), and returns { evidence, data } where data carries
+  // ONLY the one resolver output target+value. STANDALONE: that value is returned to the caller and NEVER
+  // fed into a second read / BOM lookup / chained call (composition is a separate, still-ungated slice).
+  if (plan.mode === 'resolver_lookup') {
+    return evaluateResolver(config, raw, { rowCap: plan.rowCap })
   }
 
   const shapes = {}

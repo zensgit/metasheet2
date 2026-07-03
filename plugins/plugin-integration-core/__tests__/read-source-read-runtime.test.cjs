@@ -52,8 +52,8 @@ function normalizedConfig(mode, overrides = {}) {
   if (mode === 'resolver_lookup') {
     cfg.keyField = 'FMaterialId'
     cfg.containerPaths = ['Data.Rows']
-    // R0 contract shape (a valid resolver_lookup config); S3-1 still fail-closes it as mode_not_supported
-    // until R2 wires the evaluator — the executor rejects the MODE, not the contract.
+    // R2-supported resolver_lookup config shape; the executor now accepts this mode and threads the
+    // normalized config into the R1 evaluator.
     cfg.resolverRule = 'exactly_one'
     cfg.fieldMap = [{ source: 'FItemID', target: 'item_id' }]
   }
@@ -139,12 +139,59 @@ async function testPrepareFailClosed() {
     () => prepareConfiguredRead({ config }),
     (error) => error instanceof ReadSourceProbeContractError && error.reason === 'key_required',
   )
-  // resolver_lookup runtime is a later gated slice — its multiplicity selection semantics are undesigned,
-  // so the configured read rejects the mode outright rather than silently running a plain keyed read.
-  assert.throws(
-    () => prepareConfiguredRead({ config: normalizedConfig('resolver_lookup'), inputs: { key: 'M-001' } }),
-    (error) => error instanceof ReadSourceProbeContractError && error.reason === 'mode_not_supported',
-  )
+  // R2 (#1709): resolver_lookup is now a SUPPORTED runtime mode (wired to the R1 evaluator) — prepare no
+  // longer fail-closes it; the prepared object threads the normalized config for the evaluator.
+  const resolverPrepared = prepareConfiguredRead({ config: normalizedConfig('resolver_lookup'), inputs: { key: 'M-001' } })
+  assert.equal(resolverPrepared.plan.mode, 'resolver_lookup')
+  assert.equal(resolverPrepared.config.resolverRule, 'exactly_one')
+}
+
+// R2 (#1709): resolver_lookup runs through the R1 evaluator — standalone, values-free, no write, no
+// composition. The executor does the outbound keyed read and hands the raw response to evaluateResolver.
+async function testResolverLookupRuntime() {
+  const prepared = prepareConfiguredRead({ config: normalizedConfig('resolver_lookup'), inputs: { key: 'M-001' } })
+
+  // exactly_one PASS: one candidate → resolved to the single output target+value.
+  const one = mockDeps({
+    read: (req) => ({
+      records: [{}],
+      raw: { Data: { Rows: [{ FItemID: 4242, FName: 'SIGMA-VALUE', FMaterialId: req.filters.FMaterialId }] } },
+    }),
+  })
+  const ok = await executeConfiguredRead(prepared, one.deps)
+  assert.equal(ok.evidence.ok, true)
+  assert.equal(ok.evidence.rule, 'exactly_one')
+  assert.equal(ok.evidence.resolved, true)
+  assert.equal(ok.evidence.candidateCount, 1)
+  // Data plane: ONLY the one resolver target+value — never a full row, container map, or downstream read.
+  assert.deepEqual(ok.data, { resolver: { target: 'item_id', value: 4242 } })
+  // No composition: the resolved value is not fed anywhere — exactly one outbound read, nothing chained.
+  assert.equal(one.state.readArgs.length, 1)
+  assert.deepEqual(one.state.readArgs[0], { object: 'material', filters: { FMaterialId: 'M-001' } })
+  // No write: resolver is read-only.
+  assert.equal(one.state.writeCalls.length, 0)
+  // Values-free: the resolved value, candidate field names, and key never ride into evidence.
+  const evText = JSON.stringify(ok.evidence)
+  for (const leak of ['4242', 'FItemID', 'item_id', 'FMaterialId', 'SIGMA-VALUE', 'M-001']) {
+    assert.ok(!evText.includes(leak), `resolver evidence must not leak ${leak}`)
+  }
+
+  // >1 candidate → AMBIGUOUS, data null (exactly_one keeps its own fail-closed detail, not silently first).
+  const many = mockDeps({
+    read: () => ({ records: [{}], raw: { Data: { Rows: [{ FItemID: 1 }, { FItemID: 2 }] } } }),
+  })
+  const amb = await executeConfiguredRead(prepared, many.deps)
+  assert.equal(amb.evidence.ok, false)
+  assert.equal(amb.evidence.errorCode, 'READ_SOURCE_RESOLVER_AMBIGUOUS')
+  assert.equal(amb.evidence.ambiguous, true)
+  assert.equal(amb.data, null)
+  assert.equal(many.state.writeCalls.length, 0)
+
+  // container missing → resolver coarse code, data null (no generic-mode leakage into resolver outcomes).
+  const missing = mockDeps({ read: () => ({ records: [{}], raw: { Data: {} } }) })
+  const miss = await executeConfiguredRead(prepared, missing.deps)
+  assert.equal(miss.evidence.errorCode, 'READ_SOURCE_RESOLVER_CONTAINER_NOT_FOUND')
+  assert.equal(miss.data, null)
 }
 
 async function testSingleRecordDataPlane() {
@@ -318,6 +365,7 @@ async function testTimeoutInjectableAndPathReGuard() {
 
 async function main() {
   await testPrepareFailClosed()
+  await testResolverLookupRuntime()
   await testSingleRecordDataPlane()
   await testListPageCapAndProjection()
   await testDetailWithLinesBothContainersMapped()
