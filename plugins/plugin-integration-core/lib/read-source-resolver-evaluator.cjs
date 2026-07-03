@@ -4,7 +4,9 @@
 // docs/design/integration-read-source-resolver-lookup-runtime-design-lock-20260702.md).
 //
 // Scope fence: pure function. NO route, NO persistence, NO adapter, NO outbound call, NO S3-1 executor
-// wiring (that is R2, not authorized). It consumes an S1-normalized `resolver_lookup` config (the R0
+// wiring INSIDE this module (this stays pure). The R2 executor wiring — approved-authorized and merged
+// 2026-07-03 (#3526) — lives in read-source-read-runtime.cjs, which invokes this evaluator standalone.
+// It consumes an S1-normalized `resolver_lookup` config (the R0
 // contract surface: resolverRule / resolverSortDirection / resolverDiscriminatorValue / rule-specific
 // multiplicityRuleField / fieldMap with exactly one target) plus a raw response object, locates the
 // candidate container with the S3-1 own-property dotted walker, applies the declared multiplicity rule,
