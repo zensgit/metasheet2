@@ -1,12 +1,11 @@
 # Approval & Process-Automation — second-batch per-rung decision ballot (2026-07-02)
 
-> **Status: PARTIALLY EXECUTED (as-built reconcile 2026-07-02).** T1-2 and T2-1+2 were voted GO on the
-> proposed defaults and are **SHIPPED**: T1-2 signed inbound webhook `#3489` (`fadf1695e`), T2-1+2 scoped
-> admins + handover `#3490` (`2ebb8dd81`) — their tables below are the closed decision record. **Still
-> awaiting per-rung owner votes: T3-5 and T1-4.** For those, vote per line: ✅ adopt default · ✏️ override
-> (state the change) · ⏸ hold; a rung with every line ✅/✏️ becomes GO for design-lock-first implementation;
-> an unvoted rung remains gated. Owner steer 2026-07-02: **T3-5 runs design-lock-first as its own slice**
-> (permission/lock/audit surface is heavy — not part of the fast demo layer).
+> **Status: EXECUTED / CLOSED DECISION RECORD (as-built reconcile 2026-07-03).** All four second-batch
+> rungs were voted GO on their recorded defaults or owner-steered amendments and are **SHIPPED**:
+> T1-2 signed inbound webhook `#3489` (`fadf1695e`), T2-1+2 scoped admins + handover `#3490`
+> (`2ebb8dd81`), T1-4 field-permissions authoring `#3505` (`df8d43bf9`), and T3-5 W7 cross-base
+> resultWriteback `#3506` (`e80f622e5`). The tables below are now historical decision records, not
+> open votes.
 >
 > Source of truth for the defaults is `approval-automation-decision-register-20260629.md`, with reviewer
 > notes folded into the "build contract" blocks below so implementation does not repeat known blind spots.
@@ -21,8 +20,8 @@
 
 | Lane | Order | Why |
 |---|---|---|
-| C — automation engine (`automation-service.ts`) | ~~`T1-2 inbound webhook`~~ **done #3489** → `T3-5 W7 cross-base backwrite` (design-lock-first) | Both touch automation runtime and security gates; keep sequential to avoid hot-file collisions. |
-| B — approval engine / authoring | ~~`T2-1+2 scoped admins + handover`~~ **done #3490** → `T1-4 field permissions` | Permission/handover is the larger admin model slice; field-permission authoring stays bounded and does not unlock edit-form-at-node. |
+| C — automation engine (`automation-service.ts`) | ~~`T1-2 inbound webhook`~~ **done #3489** → ~~`T3-5 W7 cross-base backwrite`~~ **done #3506** | Both touched automation runtime and security gates; shipped sequentially to avoid hot-file collisions. |
+| B — approval engine / authoring | ~~`T2-1+2 scoped admins + handover`~~ **done #3490** → ~~`T1-4 field permissions`~~ **done #3505** | Permission/handover was the larger admin model slice; field-permission authoring stayed bounded and did not unlock edit-form-at-node. |
 
 ## T1-2 — inbound webhook endpoint (signed, audited) · M · Lane C first
 
@@ -51,13 +50,17 @@
 
 ## T3-5 — W7 cross-base resultWriteback · L · Lane C after T1-2
 
+> **SHIPPED `#3506` (`e80f622e5`)** on the defaults below, plus the review hardening that a target triple
+> resolving back to the source base fails closed instead of becoming a same-base arbitrary-record write. Closed
+> decision record, not an open vote.
+
 | # | Decision | Proposed default | Vote |
 |---|---|---|---|
-| Q1 | Effective actor for cross-base gate | Use the original trigger actor from `bridge.triggerEvent`, matching executor cross-base writes. Null/system approvals fail closed for cross-base backwrite. Same actor is used for target-record lock checks. | ⬜ |
-| Q2 | Target record addressing | Literal target triple only: `targetBaseId` + `targetSheetId` + `targetRecordId` on `resultWriteback`. Dynamic link-field target resolution is a named follow-up, not v1. | ⬜ |
-| Q3 | Audit/provenance | No new audit table in v1. Extend the `start_approval` step output with target base/sheet/record ids; omit actor from target-base realtime fan-out, matching cross-base privacy posture. | ⬜ |
-| Q4 | Save validation | If any target id is present, require the full triple at save. Defer target field-type/read validation to runtime; do not block save on author's target-base write authority. Runtime re-checks trigger actor authority every run. | ⬜ |
-| Q5 | Quota | Share the singleton per-target-base cross-base write quota with update/create/delete/lock. A blocked/not-found attempt still consumes a slot, matching existing executor posture. | ⬜ |
+| Q1 | Effective actor for cross-base gate | Use the original trigger actor from `bridge.triggerEvent`, matching executor cross-base writes. Null/system approvals fail closed for cross-base backwrite. Same actor is used for target-record lock checks. | ✅ SHIPPED #3506 |
+| Q2 | Target record addressing | Literal target triple only: `targetBaseId` + `targetSheetId` + `targetRecordId` on `resultWriteback`. Dynamic link-field target resolution is a named follow-up, not v1. | ✅ SHIPPED #3506 |
+| Q3 | Audit/provenance | No new audit table in v1. Extend the `start_approval` step output with target base/sheet/record ids; omit actor from target-base realtime fan-out, matching cross-base privacy posture. | ✅ SHIPPED #3506 |
+| Q4 | Save validation | If any target id is present, require the full triple at save. Defer target field-type/read validation to runtime; do not block save on author's target-base write authority. Runtime re-checks trigger actor authority every run. | ✅ SHIPPED #3506 |
+| Q5 | Quota | Share the singleton per-target-base cross-base write quota with update/create/delete/lock. A blocked/not-found attempt still consumes a slot, matching existing executor posture. | ✅ SHIPPED #3506 |
 
 **Build contract / reviewer-note must-fixes**
 
@@ -93,17 +96,17 @@
 
 ## T1-4 — node field-permissions authoring · M · Lane B after T2-1+2
 
-> **OPEN — awaiting votes.** Owner steer 2026-07-02: start with the hidden/readonly *configurable authoring
-> surface* and do NOT take on the full runtime semantics in one slice — reconcile this with Q2's
-> hidden-only-exposure default at vote time (either ✏️ Q2 to include a readonly control, or ✅ keep
-> hidden-only UI with readonly persisted-but-unexposed).
+> **SHIPPED `#3505` (`df8d43bf9`)** with the owner-steered hidden/readonly configurable authoring
+> surface. Runtime redaction for hidden fields already existed; this slice shipped the authoring UI and
+> preservation/anti-flatten contract. Readonly remains persisted but runtime-inert until a later edit-form-at-node
+> slice. Closed decision record, not an open vote.
 
 | # | Decision | Proposed default | Vote |
 |---|---|---|---|
-| Q1 | edit-form-at-node | Defer. This rung does not build mid-flow form editing or write-back to `form_snapshot`; readonly/editable remain runtime-inert. Create a later T1-4b for edit-form-at-node + readonly/editable enforcement. | ⬜ |
-| Q2 | What UI exposes | Expose only `hidden` in authoring UI. Do not expose readonly/editable controls while they have no runtime effect. | ⬜ |
-| Q3 | Authoring surface | Linear steps editor only. Complex-graph fieldPermissions remain preserved/read-only; complex authoring is a later G-6-style slice. | ⬜ |
-| Q4 | Hiding routing-driver fields | Allow it. Redaction is echo-only and does not affect assignee resolution or condition routing; show a non-blocking hint when a hidden field also drives routing. | ⬜ |
+| Q1 | edit-form-at-node | Defer. This rung does not build mid-flow form editing or write-back to `form_snapshot`; readonly/editable remain runtime-inert. Create a later T1-4b for edit-form-at-node + readonly/editable enforcement. | ✅ SHIPPED #3505 |
+| Q2 | What UI exposes | Owner-steered amendment: expose `hidden`, `readonly`, and `editable` as configurable authoring states while keeping readonly/editable runtime-inert in this slice. | ✅ SHIPPED #3505 |
+| Q3 | Authoring surface | Linear steps editor only. Complex-graph fieldPermissions remain preserved/read-only; complex authoring is a later G-6-style slice. | ✅ SHIPPED #3505 |
+| Q4 | Hiding routing-driver fields | Allow it. Redaction is echo-only and does not affect assignee resolution or condition routing; show a non-blocking hint when a hidden field also drives routing. | ✅ SHIPPED #3505 |
 
 **Build contract / reviewer-note must-fixes**
 
@@ -115,9 +118,10 @@
 ## Voting examples
 
 - `T1-2 all ✅; T3-5 hold; T2-1+2 Q6 ✏️ reuse transfer instead of reassign; T1-4 all ✅`
-- `Lane C all ✅` means T1-2 then T3-5 may be implemented sequentially.
-- `Lane B all ✅` means T2-1+2 then T1-4 may be implemented sequentially.
+- Historical: `Lane C all ✅` meant T1-2 then T3-5 could be implemented sequentially; both are now shipped.
+- Historical: `Lane B all ✅` meant T2-1+2 then T1-4 could be implemented sequentially; both are now shipped.
 - Strategic/product votes belong in `approval-automation-third-batch-ballot-20260702.md`, not this hot-file
   implementation batch.
 
-No runtime begins until the relevant rung's votes are complete.
+No additional runtime begins from this second-batch ballot; it is closed. Strategic/product votes remain in
+`approval-automation-third-batch-ballot-20260702.md`.

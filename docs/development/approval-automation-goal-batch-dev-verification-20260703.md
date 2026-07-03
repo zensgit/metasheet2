@@ -2,8 +2,9 @@
 
 > `/goal` deliverable: deep-review the line, sequence the remaining items for **parallel development**,
 > complete everything genuinely buildable, and record dev + verification. **Discipline honored:** gated
-> runtime is NOT blind-built on presumed votes; instead every remaining rung is made **one vote from build**
-> (design-lock / build-spec), and the decision-clean work is completed + verified this batch.
+> runtime was not blind-built on presumed votes; design-lock/build-spec came first. As of the 2026-07-03
+> as-built reconcile, the second-batch runtime rungs that were made one-vote-from-build here have since shipped
+> (`#3505` / `#3506`). The remaining runtime is the third-batch owner/governance tail.
 
 ## 1. Shipped / queued in this batch (code-verified, base through #3441 `a206a5bb` + this PR)
 
@@ -15,17 +16,20 @@ Engine parity with 钉钉/飞书 approval is ~85% — the recent burst closed mo
   T1-2 signed inbound webhook (#3489) · T3-4 W7 rejection backwrite (#3474) · T0-3 delete_record editor
   (#3477).
 - **Approval engine:** T1-1 slice-2 transfer/jump timeout effects (#3468) · T2-1+2 scoped admins + handover
-  (#3490).
-- **UX:** rule editor exposes approval.completed + webhook.received (#3495) · **approval-center batch
-  approve/reject + list-level urge (#3496, open)**.
+  (#3490) · T1-4 field-permissions authoring (#3505).
+- **UX:** rule editor exposes approval.completed + webhook.received (#3495) · approval-center batch
+  approve/reject + list-level urge (#3496, merged).
+- **W7/cross-base:** T3-5 cross-base resultWriteback shipped (#3506) after the design-lock-first contract,
+  including trigger-actor gate/lock, source untouched, non-merge into tail context, and same-base target-triple
+  fail-closed hardening.
 
 ## 2. Remaining items — gating (authoritative)
 
 | Item | Subsystem | Size | Gating | Made-ready this batch |
 |---|---|---|---|---|
 | **node-timeout deadline-clear race** | approval metrics | S | **decision-clean → BUILT (#3497)** | ✅ shipped-for-review |
-| **T3-5** W7 cross-base backwrite | automation (Lane C) | L | design-lock-first (owner) | **design-lock #3-5 doc** |
-| **T1-4** node field-perms authoring | approval (Lane B) | M | owner-vote-needed | **build-spec doc** |
+| ~~T3-5 W7 cross-base backwrite~~ | automation (Lane C) | L | **SHIPPED (#3506)** | literal cross-base target triple + trigger-actor authority/lock |
+| ~~T1-4 node field-perms authoring~~ | approval (Lane B) | M | **SHIPPED (#3505)** | field-permissions authoring UI + preservation/anti-flatten |
 | **T3-2** business-calendar SLA | product | L | owner-vote-needed (3rd ballot) | reuse-attendance note |
 | **T3-3** node signature/compliance | approval | M-L | owner-vote-needed (declared-inert first) | 3rd ballot |
 | **T3-1** mobile approval | product | L | owner-vote-needed (blocked on notif hub) | 3rd ballot |
@@ -34,10 +38,9 @@ Engine parity with 钉钉/飞书 approval is ~85% — the recent burst closed mo
 
 ## 3. Parallel-development plan (lanes — concurrent, hot-file-sequential within a lane)
 
-- **Lane B — approval engine** (`ApprovalProductService.ts` hot): T1-4 field-perms authoring (on vote) →
-  T3-3 signature (declared-inert first).
-- **Lane C — automation engine** (`automation-service.ts` hot): T3-5 cross-base backwrite (on vote,
-  design-lock ready).
+- **Lane B — approval engine** (`ApprovalProductService.ts` hot): T1-4 field-perms authoring **shipped (#3505)** →
+  next third-batch T3-3 signature (declared-inert first, owner-voted).
+- **Lane C — automation engine** (`automation-service.ts` hot): T3-5 cross-base backwrite **shipped (#3506)**.
 - **Lane D — product/heavy** (separate surfaces, fully parallel): T3-6 approvals-as-records (highest
   differentiation — unlocks 飞书-grade reporting + re-automation for free), T3-2 calendar-SLA (reuse the
   attendance effective-calendar substrate → L drops toward M), T3-1 mobile (responsive pass; native blocked
@@ -45,8 +48,8 @@ Engine parity with 钉钉/飞书 approval is ~85% — the recent burst closed mo
 - **Lane A — BPMN:** A3 is governance-only — no code slice; authorize a destination when a named integration
   needs it.
 
-Dependency notes: T3-2 → T1-1 node-SLA (met) · T3-5/T3-3 sit on their hot files so stay sequential within
-their lanes · Lane D items share no runtime hot file → genuinely parallel.
+Dependency notes: T3-2 → T1-1 node-SLA (met) · T3-3 sits on the approval hot file and stays sequential within
+Lane B · Lane D items share no runtime hot file → genuinely parallel.
 
 ## 4. Completed this batch (decision-clean — no owner vote) + verification
 
@@ -60,16 +63,14 @@ advanced node's fresh deadline is wiped → test fails). **Broader regression:**
 
 _(Additional decision-clean items surfaced by the review workflow are appended in §6.)_
 
-## 5. Made one-vote-from-build this batch (authorized design, no runtime)
+## 5. Made one-vote-from-build, then shipped in follow-up PRs
 
 - **T3-5 design-lock** (`w7-cross-base-resultwriteback-design-lock-20260703.md`) — register Q1–Q5 + the 5
   reviewer must-fixes turned into a build contract + fail-first verification plan. Reuses the ratified
-  executor cross-base gate; literal target triple; trigger-actor authority fail-closed. **On T3-5 vote → build
-  Lane C.**
+  executor cross-base gate; literal target triple; trigger-actor authority fail-closed. **Shipped by #3506**.
 - **T1-4 build-spec** (`t1-4-node-field-permissions-authoring-build-spec-20260703.md`) — folds the owner
-  hidden/readonly steer + reconciles it with the register Q2 hidden-only default (the one vote to settle);
-  hidden enforced (echo-redaction), readonly persisted-but-runtime-inert (T1-4b later). **On T1-4 vote →
-  build Lane B.**
+  hidden/readonly steer + records the Q2 decision settled before #3505;
+  hidden enforced (echo-redaction), readonly persisted-but-runtime-inert (T1-4b later). **Shipped by #3505**.
 
 ## 6. Review findings (adversarial workflow + focused hunt)
 
@@ -118,9 +119,8 @@ as "simpler without it"). **Owner decision:** keep patching the cutoff heuristic
 
 The buildable-without-a-vote surface is completed + verified — **two decision-clean bugs found + fixed this
 batch: the node-timeout deadline-clear race (#3497, merged) and a second T2-4 threshold quorum bypass (#3499)**
-— plus a broader-surface hunt that verified the rest of the recently-shipped runtime clean. The heavy remainder
-is owner-gated;
-it is now one vote from build in three genuinely-parallel lanes (B / C / D), with the two nearest rungs
-(T3-5, T1-4) design-locked. Recommended fastest path: vote T3-5 + T1-4 to start B/C, and open Lane D on
-T3-6 (the differentiation move) in parallel. Sizing figures are optimistic build-effort, NOT calendar
-commitments — the security/permission/product rungs' review rounds can dominate.
+— plus a broader-surface hunt that verified the rest of the recently-shipped runtime clean. The two nearest
+owner-voted implementation rungs from this doc have since shipped: **T1-4 (#3505)** and **T3-5 (#3506)**.
+The heavy remainder is the third-batch owner/governance tail: A3 destination authorization, T3-2 calendar-SLA,
+T3-3 signature/compliance, T3-1 mobile approval, and T3-6 approvals-as-records. Sizing figures are optimistic
+build-effort, NOT calendar commitments — the security/permission/product rungs' review rounds can dominate.
