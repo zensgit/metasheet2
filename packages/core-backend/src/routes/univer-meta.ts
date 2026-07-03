@@ -15472,6 +15472,27 @@ export function univerMetaRouter(): Router {
       if (err instanceof MirrorOpQuotaError) {
         return res.status(429).json({ ok: false, error: { code: 'CROSS_BASE_WRITE_QUOTA_EXCEEDED', message: 'Cross-base write quota exceeded for the target base' } })
       }
+      // Generic RecordWriteService errors from the forward-write MECHANICS (field validation, version).
+      // These surface only AFTER the guard's Lock-C uniform mask has already established rec_A's
+      // existence + readability + writability under the FOR UPDATE lock, so they carry no rec_A
+      // existence/linkage signal the guard did not already settle — mapping them off the generic 500 to
+      // their proper statuses (parity with the /patch template) adds no new oracle. Messages stay coarse
+      // (values-free), NOT the raw service message, since this is a no-oracle-sensitive route.
+      if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) {
+        return res.status(409).json({ ok: false, error: { code: 'VERSION_CONFLICT', message: 'Cross-base mirror edit conflicted with a concurrent write' } })
+      }
+      if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) {
+        return res.status(403).json({ ok: false, error: { code: 'FIELD_FORBIDDEN', message: 'Cross-base mirror edit forbidden' } })
+      }
+      if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) {
+        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Cross-base mirror edit is invalid' } })
+      }
+      // A post-guard record-not-found can only concern the named rec_A (rec_B is 404'd in the guard) and
+      // is impossible under its held FOR UPDATE lock — but if it ever surfaces it MUST collapse into the
+      // ONE uniform Lock-C body, never a distinguishable 404 (no rec_A existence oracle).
+      if (err instanceof ServiceNotFoundError || err instanceof RecordServiceNotFoundError) {
+        return res.status(403).json({ ok: false, error: { code: 'MIRROR_LINK_TARGET_UNAVAILABLE', message: 'Link target is not available' } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] crossbase mirror-link failed:', err)
