@@ -180,6 +180,9 @@ export interface ApprovalAssignmentRow {
   node_key: string | null
   is_active: boolean
   metadata: Record<string, unknown>
+  // nodeEntryEpoch (design-lock 2026-07-03): the instance's node_activation_seq at the
+  // activation that created this assignment. NULL for pre-migration (legacy) rows.
+  entry_epoch?: number | null
   created_at: Date
   updated_at: Date
 }
