@@ -497,7 +497,7 @@ describe('ApprovalMetricsService', () => {
       ])
 
       const templatesSql = normalize(queryMock.mock.calls[3][0])
-      expect(templatesSql).toContain('HAVING COUNT(*) FILTER (WHERE sla_hours IS NOT NULL) > 0')
+      expect(templatesSql).toContain('HAVING COUNT(*) FILTER (WHERE sla_hours IS NOT NULL OR sla_due_at IS NOT NULL) > 0')
       expect(templatesSql).toContain('sla_breached = TRUE')
       expect(templatesSql).toContain('LIMIT $4')
     })
