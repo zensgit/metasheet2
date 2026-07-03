@@ -23,9 +23,13 @@ each gated (admins bypass, so the extra lookup never touches the admin hot path)
    the base list + 3 sheet-list routes. Filters projection sheets out for non-admins; since a base surfaces
    in the base list only if it has ≥1 readable sheet, this also **hides the projection base itself**.
 3. **`resolveReadableSheetIds`** (`permission-service.ts`) — a second listing path; filters projection sheets.
-
-`resolveSheetCapabilitiesForUser` (`sheet-capabilities.ts`) has **no callers** on any read path (verified) →
-no gate needed.
+4. **`resolveSheetCapabilitiesForUser`** (`sheet-capabilities.ts`) — **review P1 correction**: this resolver is
+   NOT REST-only; it fronts the **collab sheet-room auth** (`index.ts:2289`), **Yjs record auth**
+   (`index.ts:2370`), and **api-token capability** (`routes/api-tokens.ts:141`) read paths. An earlier claim
+   that it had "no callers" was wrong — a non-admin with global `multitable:read` would have gotten
+   `canRead:true` on a projection sheet via collab/Yjs. Now gated with the same guard + query shape; locked by
+   a resolver-level unit test (non-admin `multitable:read` → `canRead:false`; ordinary sheet + admin →
+   `canRead:true`), RED-before confirmed.
 
 ## Mechanism
 - **`approval-projection-constants.ts`** (new, **import-side-effect-free**): the single source of truth for
