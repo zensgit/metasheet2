@@ -93,7 +93,12 @@ describe('ApprovalMetricsService', () => {
       expect(normalize(deadlineSql)).toContain('UPDATE approval_metrics')
       expect(normalize(deadlineSql)).toContain('SET current_node_deadline_at = $2')
       expect(normalize(deadlineSql)).toContain('current_node_timeout_effect = $3')
-      expect(deadlineParams).toEqual(['apr-1', null, null])
+      // T3-2: the same clearing UPDATE now also NULLs the calendar SLA columns (no calendarSla on this
+      // activation → sla_due_at/sla_timezone/sla_calendar_org_id/sla_unit all cleared). Legacy behavior
+      // (both T1-1 deadline columns cleared) is unchanged.
+      expect(normalize(deadlineSql)).toContain('sla_due_at = $4')
+      expect(normalize(deadlineSql)).toContain('sla_unit = $7')
+      expect(deadlineParams).toEqual(['apr-1', null, null, null, null, null, null])
 
       // Re-emit with an existing open entry → mutate returns null, `added` stays
       // false → NO breakdown UPDATE and crucially NO deadline UPDATE (this is the
@@ -133,7 +138,9 @@ describe('ApprovalMetricsService', () => {
       expect(normalize(deadlineSql)).toContain('UPDATE approval_metrics')
       expect(normalize(deadlineSql)).toContain('SET current_node_deadline_at = $2')
       expect(normalize(deadlineSql)).toContain('current_node_timeout_effect = $3')
-      expect(deadlineParams).toEqual(['apr-1', '2026-04-25T15:00:00.000Z', 'auto_reject'])
+      // T3-2: a wall-clock timeout (no calendarSla) stamps the naive deadline and leaves the calendar
+      // columns NULL — byte-identical SLA behavior, additive columns only.
+      expect(deadlineParams).toEqual(['apr-1', '2026-04-25T15:00:00.000Z', 'auto_reject', null, null, null, null])
     })
 
     it('returns silently when the instance has no metrics row', async () => {
@@ -268,21 +275,29 @@ describe('ApprovalMetricsService', () => {
   })
 
   describe('checkSlaBreaches', () => {
-    it('returns breached instance ids from the update', async () => {
-      queryMock.mockResolvedValueOnce({
-        rows: [{ instance_id: 'apr-1' }, { instance_id: 'apr-9' }],
-        rowCount: 2,
-      })
+    it('unions breached ids from the legacy (sla_hours) and calendar (sla_due_at) scans', async () => {
+      // T3-2: two UPDATEs run — the byte-identical legacy sla_hours predicate, then the calendar
+      // sla_due_at predicate — and their returned ids are merged (deduped).
+      queryMock
+        .mockResolvedValueOnce({ rows: [{ instance_id: 'apr-1' }, { instance_id: 'apr-9' }], rowCount: 2 })
+        .mockResolvedValueOnce({ rows: [{ instance_id: 'apr-9' }, { instance_id: 'apr-cal' }], rowCount: 2 })
 
       const now = new Date('2026-04-25T12:00:00Z')
       const breached = await service.checkSlaBreaches(now)
 
-      expect(breached).toEqual(['apr-1', 'apr-9'])
-      const [sql, params] = queryMock.mock.calls[0]
-      expect(normalize(sql)).toContain(`sla_breached = TRUE`)
-      expect(normalize(sql)).toContain(`started_at + (sla_hours * interval '1 hour') < $1`)
-      expect(normalize(sql)).toContain(`RETURNING instance_id`)
-      expect(params[0]).toBe('2026-04-25T12:00:00.000Z')
+      expect(breached).toEqual(['apr-1', 'apr-9', 'apr-cal'])
+      expect(queryMock).toHaveBeenCalledTimes(2)
+      // Legacy predicate is preserved byte-identical (still served by idx_approval_metrics_sla_scan).
+      const [legacySql, legacyParams] = queryMock.mock.calls[0]
+      expect(normalize(legacySql)).toContain(`sla_breached = TRUE`)
+      expect(normalize(legacySql)).toContain(`started_at + (sla_hours * interval '1 hour') < $1`)
+      expect(normalize(legacySql)).toContain(`RETURNING instance_id`)
+      expect(legacyParams[0]).toBe('2026-04-25T12:00:00.000Z')
+      // Calendar predicate keys on the absolute sla_due_at (new partial index).
+      const [calendarSql, calendarParams] = queryMock.mock.calls[1]
+      expect(normalize(calendarSql)).toContain(`sla_due_at IS NOT NULL`)
+      expect(normalize(calendarSql)).toContain(`sla_due_at < $1`)
+      expect(calendarParams[0]).toBe('2026-04-25T12:00:00.000Z')
     })
   })
 
@@ -482,7 +497,7 @@ describe('ApprovalMetricsService', () => {
       ])
 
       const templatesSql = normalize(queryMock.mock.calls[3][0])
-      expect(templatesSql).toContain('HAVING COUNT(*) FILTER (WHERE sla_hours IS NOT NULL) > 0')
+      expect(templatesSql).toContain('HAVING COUNT(*) FILTER (WHERE sla_hours IS NOT NULL OR sla_due_at IS NOT NULL) > 0')
       expect(templatesSql).toContain('sla_breached = TRUE')
       expect(templatesSql).toContain('LIMIT $4')
     })

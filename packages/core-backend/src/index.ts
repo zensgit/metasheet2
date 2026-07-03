@@ -16,6 +16,10 @@ import { createContainer } from './di/container'
 import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService } from './di/identifiers'
 import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
+import {
+  getWorkdayCalendarRegistry,
+  type WorkdayCalendarPort,
+} from './core/workday-calendar-port'
 import type {
   CoreAPI,
   UserInfo,
@@ -227,6 +231,9 @@ export class MetaSheetServer {
   private pluginCommunicationNamespacesByPlugin = new Map<string, Set<string>>()
   private pluginCommunicationNamespaceOwners = new Map<string, string>()
   private pluginAttendanceSchedulerUnregistersByPlugin = new Map<string, Set<() => void>>()
+  // T3-2: the plugin (if any) that currently owns the bound WorkdayCalendarPort provider, so a
+  // reload/deactivate of that plugin unbinds it and the SLA path fails open again.
+  private workdayCalendarProviderOwner: string | null = null
   private port: number
   private host?: string
   private portLocked: boolean
@@ -909,8 +916,26 @@ export class MetaSheetServer {
     return wrappedUnregister
   }
 
+  private registerPluginWorkdayCalendarProvider(pluginName: string, provider: WorkdayCalendarPort): (() => void) {
+    getWorkdayCalendarRegistry().register(provider)
+    this.workdayCalendarProviderOwner = pluginName
+    this.logger.info(`WorkdayCalendarPort provider bound by plugin: ${pluginName}`)
+    return () => {
+      if (this.workdayCalendarProviderOwner === pluginName) {
+        getWorkdayCalendarRegistry().unregister()
+        this.workdayCalendarProviderOwner = null
+      }
+    }
+  }
+
   private cleanupPluginRuntimeRegistrations(pluginName: string): void {
     this.removePluginRoutes(pluginName)
+
+    // T3-2: unbind this plugin's working-day calendar provider so the SLA path fails open again.
+    if (this.workdayCalendarProviderOwner === pluginName) {
+      getWorkdayCalendarRegistry().unregister()
+      this.workdayCalendarProviderOwner = null
+    }
 
     const namespaces = this.pluginCommunicationNamespacesByPlugin.get(pluginName)
     if (namespaces) {
@@ -1662,6 +1687,11 @@ export class MetaSheetServer {
         notification: notificationService,
         attendanceScheduler: {
           registerJob: (job: { name?: string; run(): Promise<unknown> }) => this.registerPluginAttendanceSchedulerJob(pluginName, job),
+        },
+        // T3-2: let a plugin bind the working-day calendar provider the approval SLA path consults.
+        // Registration is tracked per-plugin so a plugin reload/deactivate unbinds it (fail-open again).
+        workdayCalendar: {
+          register: (provider: WorkdayCalendarPort) => this.registerPluginWorkdayCalendarProvider(pluginName, provider),
         },
         automationRegistry,
         rbacProvisioning,
@@ -2596,6 +2626,21 @@ if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
 // ============================================================
 // View Provider System Exports
 // ============================================================
+
+// T3-2 WorkdayCalendarPort exports — the approval SLA business-calendar port + registry.
+export {
+  getWorkdayCalendarRegistry,
+  registerWorkdayCalendarProvider,
+  unregisterWorkdayCalendarProvider,
+  computeWorkdayDeadline,
+  WORKDAY_SEARCH_CAP_DAYS,
+} from './core/workday-calendar-port'
+export type {
+  WorkdayCalendarPort,
+  WorkdayCalendar,
+  RecurringWindow,
+  WorkdayDeadlineResult,
+} from './core/workday-calendar-port'
 
 // View Config Provider exports
 export { getViewConfigRegistry, registerViewConfigProvider, unregisterViewConfigProvider } from './core/view-config-registry'

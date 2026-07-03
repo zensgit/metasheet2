@@ -20452,6 +20452,49 @@ module.exports = {
         context.api.events.emit(type, data)
       }
     }
+
+    // T3-2: register the working-day calendar provider (adapter) the approval SLA path consults through
+    // the WorkdayCalendarPort. This is the ONLY approval↔attendance coupling — approval never reads
+    // attendance_* tables; it calls resolve(orgId, asOf) and receives a snapshot day-mask. The adapter
+    // wraps resolveEffectiveCalendar over a bounded horizon (asOf .. asOf+368d, with a 1-day margin so
+    // every tz-day the 366-day forward walk can touch is covered) and returns an in-memory working-day set.
+    if (context?.services?.workdayCalendar?.register) {
+      try {
+        const DAY_MS = 86400000
+        context.services.workdayCalendar.register({
+          async resolve(orgId, asOf) {
+            const anchor = asOf instanceof Date ? asOf : new Date(asOf)
+            if (Number.isNaN(anchor.getTime())) return null
+            const from = new Date(anchor.getTime() - DAY_MS).toISOString().slice(0, 10)
+            const to = new Date(anchor.getTime() + 368 * DAY_MS).toISOString().slice(0, 10)
+            // A foreign / unmapped org is the provider's call — resolveEffectiveCalendar throws on
+            // invalid input, which the approval side treats as fail-open (never blocks creation).
+            const resolved = await resolveEffectiveCalendar(db, {
+              orgId: orgId || DEFAULT_ORG_ID,
+              from,
+              to,
+              orgOnly: true,
+            })
+            const working = new Set()
+            for (const item of resolved?.items || []) {
+              if (item?.effective?.isWorkingDay && typeof item.date === 'string') {
+                working.add(item.date)
+              }
+            }
+            return {
+              timezone: typeof resolved?.timezone === 'string' && resolved.timezone ? resolved.timezone : 'UTC',
+              isWorkingDay: (dayIso) => working.has(dayIso),
+              // v1: intra-day non-counting windows are not derived from attendance shifts yet — day-mask only.
+              nonCountingWindows: [],
+            }
+          },
+        })
+        logger.info('Attendance registered WorkdayCalendarPort provider for approval SLA')
+      } catch (err) {
+        logger.warn(`Attendance WorkdayCalendarPort registration failed: ${err && err.message ? err.message : err}`)
+      }
+    }
+
     async function userManagesAttendanceGroup(orgId, groupId, userId) {
       const rows = await db.query(
         `SELECT 1

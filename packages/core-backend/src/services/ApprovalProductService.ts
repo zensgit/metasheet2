@@ -1031,11 +1031,17 @@ function normalizeNodeTimeout(
   // validateNodeTimeoutConfigs so all entry points raise the same APPROVAL_NODE_TIMEOUT_* codes.
   const transferToUserId = typeof value.transferToUserId === 'string' ? value.transferToUserId.trim() : undefined
   const jumpToNodeKey = typeof value.jumpToNodeKey === 'string' ? value.jumpToNodeKey.trim() : undefined
+  // T3-2 SLA-unit discriminator rides along; the strict value gate lives in validateNodeTimeoutConfigs.
+  // 'wall_clock' is the default → omit it so a wall-clock timeout stays byte-identical to T1-1's shape.
+  const unit = value.unit === 'business' ? 'business' as const
+    : value.unit === 'wall_clock' ? 'wall_clock' as const
+    : undefined
   return {
     afterMinutes: value.afterMinutes as number,
     effect: value.effect as NodeTimeoutEffect,
     ...(transferToUserId ? { transferToUserId } : {}),
     ...(jumpToNodeKey ? { jumpToNodeKey } : {}),
+    ...(unit === 'business' ? { unit } : {}),
   }
 }
 
@@ -1170,6 +1176,16 @@ function validateNodeTimeoutConfigs(approvalGraph: ApprovalGraph): void {
         `approvalGraph node ${node.key} timeout.effect '${effect}' is not supported yet`,
         400,
         'APPROVAL_NODE_TIMEOUT_EFFECT_UNSUPPORTED',
+      )
+    }
+    // T3-2: the SLA-unit discriminator, when present, must be one of the two known units — an unknown
+    // value is rejected (never silently coerced to the wall-clock default).
+    const unit = (timeout as { unit?: unknown }).unit
+    if (unit !== undefined && unit !== 'wall_clock' && unit !== 'business') {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} timeout.unit must be 'wall_clock' or 'business'`,
+        400,
+        'APPROVAL_NODE_TIMEOUT_INVALID',
       )
     }
     if (parallelRegionNodeKeys.has(node.key)) {
@@ -2096,6 +2112,19 @@ function getApprovalNodeConfig(runtimeGraph: RuntimeGraph, nodeKey: string): App
 function nodeTimeoutForKey(runtimeGraph: RuntimeGraph, nodeKey: string): NodeTimeoutConfig | undefined {
   const config = getApprovalNodeConfig(runtimeGraph, nodeKey) as { timeout?: NodeTimeoutConfig } | null
   return config?.timeout ?? undefined
+}
+
+/**
+ * T3-2 (Q2): the calendar org for a business-time node SLA, resolved from the FROZEN requester/org
+ * snapshot. Deterministic per instance (the snapshot never changes) so every node of an instance
+ * resolves the same org. Falls back to the literal `default` org when no explicit org mapping exists.
+ * Approval passes this resolved org to the port — never a raw attendance id.
+ */
+function resolveCalendarSlaOrgId(requesterSnapshot: Record<string, unknown> | null | undefined): string {
+  const org = requesterSnapshot && typeof requesterSnapshot.orgId === 'string'
+    ? requesterSnapshot.orgId.trim()
+    : ''
+  return org.length > 0 ? org : 'default'
 }
 
 /**
@@ -3525,6 +3554,14 @@ export class ApprovalProductService {
       const initialTimeout = initial.currentNodeKey
         ? nodeTimeoutForKey(runtimeGraph, initial.currentNodeKey)
         : undefined
+      // T3-2: a business-unit initial node arms its deadline through the calendar (org resolved from the
+      // frozen requester snapshot, §2); otherwise the wall-clock deadline is stamped exactly as T1-1.
+      const initialCalendarSla = initialTimeout?.unit === 'business'
+        ? {
+            afterMinutes: initialTimeout.afterMinutes,
+            orgId: resolveCalendarSlaOrgId(requesterSnapshot as unknown as Record<string, unknown>),
+          }
+        : undefined
       await this.metrics.recordInstanceStart({
       instanceId,
       templateId: bundle.template.id,
@@ -3534,8 +3571,10 @@ export class ApprovalProductService {
       initialNodeKey: initial.currentNodeKey,
       ...(initialTimeout?.effect
         ? {
-            timeoutDeadline: new Date(startedAt.getTime() + initialTimeout.afterMinutes * 60000),
             timeoutEffect: initialTimeout.effect,
+            ...(initialCalendarSla
+              ? { calendarSla: initialCalendarSla }
+              : { timeoutDeadline: new Date(startedAt.getTime() + initialTimeout.afterMinutes * 60000) }),
           }
         : {}),
       })
@@ -3788,7 +3827,7 @@ export class ApprovalProductService {
       }
 
       if (resolution.currentNodeKey) {
-        this.emitNodeActivationMetric(id, resolution.currentNodeKey, nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+        this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
     } catch (error) {
       await rollbackQuietly(client)
@@ -4276,7 +4315,7 @@ export class ApprovalProductService {
       // breakdown entry, then re-entry activation re-stamps the target node (incl. its own timeout).
       this.emitNodeDecisionMetric(id, currentNodeKey, APPROVAL_TIMEOUT_SYSTEM_ACTOR)
       if (resolution.status === 'pending' && resolution.currentNodeKey) {
-        this.emitNodeActivationMetric(id, resolution.currentNodeKey, nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+        this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
       if (completionEvent) {
         emitApprovalCompletionEvent(completionEvent)
@@ -4722,7 +4761,7 @@ export class ApprovalProductService {
         await client.query('COMMIT')
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
         if (resolution.currentNodeKey) {
-          this.emitNodeActivationMetric(id, resolution.currentNodeKey, nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+          this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
         }
         return (await this.getApproval(id))!
       }
@@ -5215,7 +5254,7 @@ export class ApprovalProductService {
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'approved')
       } else if (resolution.currentNodeKey && resolution.currentNodeKey !== currentNodeKey) {
-        this.emitNodeActivationMetric(id, resolution.currentNodeKey, nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+        this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
     } catch (error) {
       await rollbackQuietly(client)
@@ -5246,11 +5285,22 @@ export class ApprovalProductService {
     )
   }
 
-  private emitNodeActivationMetric(instanceId: string, nodeKey: string, timeout?: NodeTimeoutConfig): void {
+  private emitNodeActivationMetric(
+    instanceId: string,
+    nodeKey: string,
+    calendarOrgId: string,
+    timeout?: NodeTimeoutConfig,
+  ): void {
     const activatedAt = new Date()
     // T1-1: when the activating node declares a timeout, stamp its absolute deadline + effect so the
     // SLA scanner can fire on it. No timeout → recordNodeActivation clears the columns (so the prior
     // node's deadline can never linger). Still inside safeMetricsCall — a best-effort write.
+    //
+    // T3-2: a business-unit timeout passes `calendarSla` instead of a naive `timeoutDeadline` — the
+    // metrics service computes the business-time deadline via the WorkdayCalendarPort (fail-open safe).
+    const calendarSla = timeout?.unit === 'business'
+      ? { afterMinutes: timeout.afterMinutes, orgId: calendarOrgId }
+      : undefined
     safeMetricsCall(`recordNodeActivation(${instanceId}/${nodeKey})`, () =>
       this.metrics.recordNodeActivation({
         instanceId,
@@ -5258,8 +5308,10 @@ export class ApprovalProductService {
         activatedAt,
         ...(timeout?.effect
           ? {
-              timeoutDeadline: new Date(activatedAt.getTime() + timeout.afterMinutes * 60000),
               timeoutEffect: timeout.effect,
+              ...(calendarSla
+                ? { calendarSla }
+                : { timeoutDeadline: new Date(activatedAt.getTime() + timeout.afterMinutes * 60000) }),
             }
           : {}),
       }),
