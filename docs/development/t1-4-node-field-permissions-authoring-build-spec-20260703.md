@@ -1,9 +1,9 @@
-# T1-4 — Node field-permissions authoring · BUILD-SPEC (vote-ready) · 2026-07-03
+# T1-4 — Node field-permissions authoring · BUILD-SPEC (RATIFIED — SHIPPED #3505) · 2026-07-03
 
-> **Status: awaiting the T1-4 per-rung votes** in `approval-automation-second-batch-ballot-20260702.md`.
-> This spec folds the owner steer (2026-07-02): **start from the hidden/readonly configurable authoring
-> surface; do NOT take on the full mid-flow runtime semantics in one slice.** It reconciles that steer with
-> the register's Q2 hidden-only default (below) so the rung is one vote from build. **No runtime until voted.**
+> **Status: RATIFIED — SHIPPED by `#3505` (`df8d43bf9`).** The second-batch ballot adopted the owner steer:
+> expose the hidden/readonly/editable authoring surface while keeping readonly/editable runtime-inert until a
+> later edit-form-at-node slice. #3505 also shipped the malformed `fieldPermissions` fail-closed guard so
+> invalid entries become unsupported/read-only rather than silently flattening on save.
 
 ## 1. What's already shipped (contract layer, P1-C)
 
@@ -13,19 +13,17 @@
 form (`:1021`). So the **data model + validation is done**; the gaps are (a) an authoring UI to set it and
 (b) runtime enforcement.
 
-## 2. The reconcile the vote must settle (Q1/Q2 + owner steer)
+## 2. Shipped reconcile (Q1/Q2 + owner steer)
 
 - **Register Q1 default:** defer edit-form-at-node — readonly/editable stay **runtime-inert** this rung; a
   later **T1-4b** builds mid-flow form editing + readonly/editable enforcement.
 - **Register Q2 default:** expose **only `hidden`** in the authoring UI (don't offer readonly/editable while
   they have no runtime effect).
 - **Owner steer (2026-07-02):** start from the **hidden/readonly configurable** authoring surface.
-- **The one vote decision (Q2):** ✏️ **expose hidden + readonly (persisted, readonly runtime-inert with a
-  "takes effect in a later slice" hint)**, OR ✅ **hidden-only UI** (readonly stays persist-able via API but
-  unexposed). Recommend the ✏️ path per the steer — it makes the config authorable now without shipping the
-  heavy runtime — provided the UI clearly marks readonly as not-yet-enforced.
+- **Shipped Q2 decision:** expose hidden + readonly + editable as configurable authoring states. Readonly is
+  persisted but runtime-inert in this slice and remains explicitly deferred to T1-4b.
 
-## 3. Scope (on the ✏️ reconcile)
+## 3. Shipped scope
 
 - **Authoring UI** (linear-steps editor only — Q3; complex-graph `fieldPermissions` stay preserved/read-only):
   per approval node, a per-form-field access selector offering `hidden` + `readonly` (+ implicit default
@@ -58,6 +56,5 @@ readonly, blocks nothing, and round-trips.
 
 ## 6. Status / next step
 
-Vote-ready. On the T1-4 rung voted GO (with the Q2 reconcile decided), build in **Lane B**
-(`ApprovalProductService.ts` authoring/validation + the template-authoring FE), fail-first + real-DB/vue-tsc,
-PR-for-review. Until then, no runtime.
+Build-spec **RATIFIED — SHIPPED** by #3505. The second-batch ballot entry is now a closed decision record.
+T1-4b remains a separate future slice for edit-form-at-node plus readonly/editable runtime enforcement.
