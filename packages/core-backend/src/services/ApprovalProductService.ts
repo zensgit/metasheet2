@@ -3415,8 +3415,11 @@ export class ApprovalProductService {
         ],
       )
 
-      await this.insertAssignments(client, instanceId, initial.assignments)
-      await this.insertAutoApprovalEvents(client, instanceId, 0, initial.status, initial.autoApprovalEvents)
+      // ACTIVATION (nodeEntryEpoch §4·A): initial node activation mints a fresh epoch. The
+      // same-transaction auto-approval cascade at this node carries that same epoch (§7).
+      const initialEntryEpoch = await this.bumpNodeActivationSeq(client, instanceId)
+      await this.insertAssignments(client, instanceId, initial.assignments, initialEntryEpoch)
+      await this.insertAutoApprovalEvents(client, instanceId, 0, initial.status, initial.autoApprovalEvents, initialEntryEpoch)
       await this.insertCcEvents(client, instanceId, 0, initial.status, initial.ccEvents)
       await this.insertApprovalRecord(client, instanceId, {
         action: 'created',
@@ -3659,7 +3662,9 @@ export class ApprovalProductService {
           resolution.totalSteps,
         ],
       )
-      await this.insertAssignments(client, id, resolution.assignments)
+      // ACTIVATION (nodeEntryEpoch §4·A): admin jump lands the instance on a (re)activated node.
+      const jumpEntryEpoch = await this.bumpNodeActivationSeq(client, id)
+      await this.insertAssignments(client, id, resolution.assignments, jumpEntryEpoch)
       await this.insertApprovalRecord(client, id, {
         action: 'jump',
         actorId: actor.userId,
@@ -3682,7 +3687,7 @@ export class ApprovalProductService {
           parallelStateCleared: Boolean(parallelState),
         },
       }, actor)
-      await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents)
+      await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, jumpEntryEpoch)
       await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
       if (resolution.status === 'approved') {
         completionEvent = this.buildCompletionEvent(
@@ -3863,17 +3868,32 @@ export class ApprovalProductService {
 
         const nextVersion = instance.version + 1
         const actorName = actor.userName || actor.userId
-        const reassignments = sourceAssignments.rows.map((assignment) => ({
-          assignmentType: 'user' as const,
-          assigneeId: toUserId,
-          sourceStep: assignment.source_step ?? 0,
-          nodeKey: assignment.node_key || '',
-          metadata: {
-            reassignedFrom: fromUserId,
-            adminReassign: true,
-            previousAssignmentId: assignment.id,
-          },
-        }))
+        // MUTATION (nodeEntryEpoch §4·B): admin reassign / handover keeps the SAME round — the
+        // reassigned-in approver's approve must count toward the current quorum, so the handed seat
+        // PRESERVES its epoch (NEVER bump node_activation_seq). Read each seat's epoch off its
+        // STILL-ACTIVE source row (queried above, before the deactivate below). A user's seats are
+        // normally at one node/epoch; a parallel handover can span nodes, so insert grouped by epoch
+        // to never create a mixed-epoch node.
+        const reassignmentsByEpoch = new Map<
+          number | null,
+          Array<{ assignmentType: 'user'; assigneeId: string; sourceStep: number; nodeKey: string; metadata: Record<string, unknown> }>
+        >()
+        for (const assignment of sourceAssignments.rows) {
+          const epoch = assignment.entry_epoch ?? null
+          const bucket = reassignmentsByEpoch.get(epoch) ?? []
+          bucket.push({
+            assignmentType: 'user' as const,
+            assigneeId: toUserId,
+            sourceStep: assignment.source_step ?? 0,
+            nodeKey: assignment.node_key || '',
+            metadata: {
+              reassignedFrom: fromUserId,
+              adminReassign: true,
+              previousAssignmentId: assignment.id,
+            },
+          })
+          reassignmentsByEpoch.set(epoch, bucket)
+        }
 
         await client.query(
           `UPDATE approval_assignments
@@ -3884,7 +3904,9 @@ export class ApprovalProductService {
               AND is_active = TRUE`,
           [instanceId, fromUserId],
         )
-        await this.insertAssignments(client, instanceId, reassignments)
+        for (const [epoch, bucket] of reassignmentsByEpoch) {
+          await this.insertAssignments(client, instanceId, bucket, epoch)
+        }
         await client.query(
           `UPDATE approval_instances
               SET version = $2, updated_at = now()
@@ -4058,6 +4080,10 @@ export class ApprovalProductService {
         if (!targetUserId) {
           return await consumeAndSkip('skipped_invalid_config', 'transfer_target_missing')
         }
+        // MUTATION (nodeEntryEpoch §4·B): timeout transfer hands the node over WITHIN the same round.
+        // Read the current epoch BEFORE the node-wide deactivate below (afterwards the node is empty)
+        // and stamp the handed-to assignee with it; NEVER bump node_activation_seq.
+        const timeoutTransferEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
         // Hand the WHOLE node over: every active assignment at the node is deactivated and the
         // static target takes it (mode semantics reset to the single handed-over approver).
         await client.query(
@@ -4066,7 +4092,7 @@ export class ApprovalProductService {
            WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE`,
           [id, currentNodeKey],
         )
-        await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, targetUserId))
+        await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, targetUserId), timeoutTransferEntryEpoch)
         // Parity with the dispatch transfer: an in-place handover does not bump the instance version.
         await this.insertApprovalRecord(client, id, {
           action: 'transfer',
@@ -4138,7 +4164,9 @@ export class ApprovalProductService {
           resolution.totalSteps,
         ],
       )
-      await this.insertAssignments(client, id, resolution.assignments)
+      // ACTIVATION (nodeEntryEpoch §4·A): timeout-jump re-activates the jump target node.
+      const timeoutJumpEntryEpoch = await this.bumpNodeActivationSeq(client, id)
+      await this.insertAssignments(client, id, resolution.assignments, timeoutJumpEntryEpoch)
       await this.insertApprovalRecord(client, id, {
         action: 'jump',
         actorId: APPROVAL_TIMEOUT_SYSTEM_ACTOR,
@@ -4157,7 +4185,7 @@ export class ApprovalProductService {
           newAssignees,
         },
       })
-      await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents)
+      await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, timeoutJumpEntryEpoch)
       await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
       if (resolution.status === 'approved') {
         completionEvent = this.buildCompletionEvent(
@@ -4311,8 +4339,12 @@ export class ApprovalProductService {
         if (!currentNodeKey) {
           throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
         }
+        // MUTATION (nodeEntryEpoch §4·B): manual transfer keeps the SAME round. Read the node's
+        // current epoch BEFORE deactivating the actor's seat (a single-approver node would be EMPTY at
+        // the read otherwise) and stamp the handed-to assignee with it; NEVER bump node_activation_seq.
+        const transferEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
-        await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, request.targetUserId))
+        await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, request.targetUserId), transferEntryEpoch)
         await this.insertApprovalRecord(client, id, {
           action: 'transfer',
           actorId: actor.userId,
@@ -4356,10 +4388,15 @@ export class ApprovalProductService {
             'APPROVAL_ADD_SIGN_IN_PARALLEL_UNSUPPORTED',
           )
         }
+        // MUTATION (nodeEntryEpoch §4·B): add-sign extends the CURRENT round — the added co-signer's
+        // approve must count toward the same quorum, so preserve the node's current epoch (its active
+        // siblings still hold it here — no deactivation precedes this insert); NEVER bump the seq.
+        const addSignEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
         await this.insertAssignments(
           client,
           id,
           executor.buildAddSignAssignments(currentNodeKey, targetUserIds, actor.userId),
+          addSignEntryEpoch,
         )
         await client.query(
           `UPDATE approval_instances SET version = $2, updated_at = now() WHERE id = $1`,
@@ -4592,7 +4629,11 @@ export class ApprovalProductService {
             resolution.totalSteps,
           ],
         )
-        await this.insertAssignments(client, id, resolution.assignments)
+        // ACTIVATION (nodeEntryEpoch §4·A): a return re-activates the target node — a FRESH round.
+        // Its same-transaction auto-approval cascade (e.g. requester merge) carries this new epoch,
+        // so the re-entered threshold node's stale prior-round votes (a different epoch) never count.
+        const returnEntryEpoch = await this.bumpNodeActivationSeq(client, id)
+        await this.insertAssignments(client, id, resolution.assignments, returnEntryEpoch)
         await this.insertApprovalRecord(client, id, {
           action: 'return',
           actorId: actor.userId,
@@ -4608,7 +4649,7 @@ export class ApprovalProductService {
             nextNodeKey: resolution.currentNodeKey,
           },
         }, actor)
-        await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents)
+        await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, returnEntryEpoch)
         await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
         await client.query('COMMIT')
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
@@ -4662,6 +4703,14 @@ export class ApprovalProductService {
       }
 
       const approvalMode = executor.getApprovalMode(currentNodeKey)
+      // nodeEntryEpoch (§5): capture the current node's entry epoch NOW — while the resolving
+      // actor's assignment is still active (every mode below deactivates it) so the DISTINCT read
+      // is authoritative and fails closed on empty/mixed. Reused by the threshold tally (null =>
+      // legacy cutoff fallback; a single epoch => epoch tally) AND stamped onto this node's approve
+      // records so a later re-entry (a new epoch) never re-counts them.
+      const currentNodeEpoch = currentNodeKey
+        ? await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+        : null
       // Approval aggregation semantics:
       //   'all'    (会签): deactivate only the actor's assignment, short-circuit if siblings remain.
       //   'any'    (或签): first approver wins — deactivate siblings with an audit trail
@@ -4695,6 +4744,8 @@ export class ApprovalProductService {
               approvalMode,
               aggregateComplete: false,
               remainingAssignments,
+              // nodeEntryEpoch (§4): every approve at this node carries its current round's epoch.
+              ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
             },
           }, actor)
           await client.query('COMMIT')
@@ -4734,60 +4785,66 @@ export class ApprovalProductService {
         // across role rows / re-dispatch, and auto-approvals are included because they too
         // write an action='approve' record carrying metadata.nodeKey (Q5).
         const threshold = executor.getApprovalThreshold(currentNodeKey)
-        // T2-4 RE-ENTRY quorum fix: scope the DISTINCT-approver tally to the CURRENT node-entry round. A
-        // `threshold` node round-scoping. A threshold node X can be RE-ENTERED after it already resolved —
-        // either DIRECTLY (a return/jump targeting X) OR THROUGH X (a return/jump to an UPSTREAM node, then
-        // normal forward approval progressing back down to X). `approval_records` are append-only, so without
-        // round-scoping the prior round's approves at X still count toward N and re-satisfy the node on stale
-        // votes (a quorum bypass: a 2-of-3 that A+B already approved would resolve on a single fresh vote).
-        //
-        // The current round begins at the `to_version` of the most recent ENTRY into X — captured as ANY
-        // record that lands the instance on X:
-        //   • an upstream approve advancing into X: metadata.nextNodeKey = X AND metadata.nodeKey <> X.
-        //     The `<> X` guard EXCLUDES X's OWN partial-approve records (which carry nodeKey=X/nextNodeKey=X
-        //     and must not bump the cutoff mid-round), so only a transition FROM another node counts.
-        //   • a return/jump naming X explicitly: metadata.targetNodeKey = X OR metadata.toNodeKey = X.
-        // (The earlier fix only matched return/jump records that NAMED X, missing re-entry THROUGH X from an
-        // upstream return target — a real second bypass. Keying off the entry transition closes both.)
-        //
-        // Approve records are stamped `to_version = <bumped version>`; those AT-OR-AFTER the entry
-        // (`to_version >= cutoff`) belong to the current round. `>=` (not `>`) is deliberate: an entry can
-        // trigger an auto-approval cascade AT X in the SAME transaction (insertAutoApprovalEvents writes those
-        // at `to_version = entry version = cutoff`) — current-round votes that must count; prior-round approves
-        // are strictly `< cutoff`. cutoff is NULL only when X was never entered by a recorded transition (e.g.
-        // an immediately-active first node) AND never re-entered → the whole-node count, which for such a
-        // first-round-only node is exactly the current round.
-        const reentryCutoffResult = await client.query<{ cutoff: number | string | null }>(
-          `SELECT MAX(to_version) AS cutoff
-             FROM approval_records
-             WHERE instance_id = $1
-               AND ( ( metadata->>'nextNodeKey' = $2 AND COALESCE(metadata->>'nodeKey', '') <> $2 )
-                  OR metadata->>'targetNodeKey' = $2
-                  OR metadata->>'toNodeKey' = $2 )`,
-          [id, currentNodeKey],
-        )
-        const rawCutoff = reentryCutoffResult.rows[0]?.cutoff
-        const reentryCutoff = rawCutoff === null || rawCutoff === undefined ? null : Number(rawCutoff)
-        const priorApproversResult =
-          reentryCutoff === null
-            ? await client.query<{ count: string }>(
-                `SELECT COUNT(DISTINCT actor_id) AS count
-                   FROM approval_records
-                   WHERE instance_id = $1
-                     AND action = 'approve'
-                     AND metadata->>'nodeKey' = $2`,
-                [id, currentNodeKey],
-              )
-            : await client.query<{ count: string }>(
-                `SELECT COUNT(DISTINCT actor_id) AS count
-                   FROM approval_records
-                   WHERE instance_id = $1
-                     AND action = 'approve'
-                     AND metadata->>'nodeKey' = $2
-                     AND to_version >= $3`,
-                [id, currentNodeKey, reentryCutoff],
-              )
-        const priorDistinctApprovers = Number.parseInt(priorApproversResult.rows[0]?.count || '0', 10)
+        // T2-4 quorum tally scoped to the CURRENT node-entry round (nodeEntryEpoch, design-lock
+        // 2026-07-03 §5). `currentNodeEpoch` was resolved above from the node's ACTIVE assignments and
+        // already failed closed on an empty/mixed set. A threshold node X can be RE-ENTERED after it
+        // resolved — direct return/jump to X, forward re-entry THROUGH X from an upstream target,
+        // timeout-jump, OR forward through a condition/cc node in between. Each re-entry mints a FRESH
+        // epoch at activation, so the prior round's append-only approves carry a DIFFERENT epoch and can
+        // never re-satisfy N on stale votes. Complete for every entry vector by construction — no
+        // transition-metadata (nextNodeKey/targetNodeKey/toNodeKey/to_version) inference.
+        let priorDistinctApprovers: number
+        if (currentNodeEpoch === null) {
+          // Dual-read fallback (§6): a legacy pre-migration activation — the active assignments carry a
+          // NULL epoch and this round's approves have no metadata.nodeEntryEpoch. Keep the RETAINED
+          // cutoff heuristic (#3446/#3499 entry-transition cutoff + #3453 `>=` same-tx cascade) until the
+          // node next re-activates and stamps an epoch, at which point the instance transparently switches
+          // to the epoch path. Dormant legacy fallback — NOT deleted.
+          const reentryCutoffResult = await client.query<{ cutoff: number | string | null }>(
+            `SELECT MAX(to_version) AS cutoff
+               FROM approval_records
+               WHERE instance_id = $1
+                 AND ( ( metadata->>'nextNodeKey' = $2 AND COALESCE(metadata->>'nodeKey', '') <> $2 )
+                    OR metadata->>'targetNodeKey' = $2
+                    OR metadata->>'toNodeKey' = $2 )`,
+            [id, currentNodeKey],
+          )
+          const rawCutoff = reentryCutoffResult.rows[0]?.cutoff
+          const reentryCutoff = rawCutoff === null || rawCutoff === undefined ? null : Number(rawCutoff)
+          const priorApproversResult =
+            reentryCutoff === null
+              ? await client.query<{ count: string }>(
+                  `SELECT COUNT(DISTINCT actor_id) AS count
+                     FROM approval_records
+                     WHERE instance_id = $1
+                       AND action = 'approve'
+                       AND metadata->>'nodeKey' = $2`,
+                  [id, currentNodeKey],
+                )
+              : await client.query<{ count: string }>(
+                  `SELECT COUNT(DISTINCT actor_id) AS count
+                     FROM approval_records
+                     WHERE instance_id = $1
+                       AND action = 'approve'
+                       AND metadata->>'nodeKey' = $2
+                       AND to_version >= $3`,
+                  [id, currentNodeKey, reentryCutoff],
+                )
+          priorDistinctApprovers = Number.parseInt(priorApproversResult.rows[0]?.count || '0', 10)
+        } else {
+          // Epoch tally (§5): count DISTINCT approvers whose approve carries THIS node's current epoch.
+          // A plain indexed filter on the self-contained epoch — no join to the mutable assignment table.
+          const epochApproversResult = await client.query<{ count: string }>(
+            `SELECT COUNT(DISTINCT actor_id) AS count
+               FROM approval_records
+               WHERE instance_id = $1
+                 AND action = 'approve'
+                 AND metadata->>'nodeKey' = $2
+                 AND (metadata->>'nodeEntryEpoch')::int = $3`,
+            [id, currentNodeKey, currentNodeEpoch],
+          )
+          priorDistinctApprovers = Number.parseInt(epochApproversResult.rows[0]?.count || '0', 10)
+        }
         const distinctApproverCount = priorDistinctApprovers + 1
         // Deactivate the actor's own assignment first (whether or not the threshold is met).
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
@@ -4832,6 +4889,9 @@ export class ApprovalProductService {
               approvalThreshold: threshold,
               approvedCount: distinctApproverCount,
               remainingAssignments,
+              // nodeEntryEpoch (§4): this partial vote is a PRIOR approver the next round-mate's
+              // tally counts — it MUST carry the current round's epoch to be included.
+              ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
             },
           }, actor)
           await client.query('COMMIT')
@@ -4981,12 +5041,18 @@ export class ApprovalProductService {
           resolution.totalSteps,
         ],
       )
-      await this.insertAssignments(client, id, resolution.assignments)
+      // ACTIVATION (nodeEntryEpoch §4·A): forward advance activates the NEXT node — a new epoch.
+      // The resolving approve record below stays on the CURRENT node's epoch (`currentNodeEpoch`,
+      // captured before any deactivation); only the newly-inserted assignments + the cascade at the
+      // next node carry `advanceEntryEpoch`.
+      const advanceEntryEpoch = await this.bumpNodeActivationSeq(client, id)
+      await this.insertAssignments(client, id, resolution.assignments, advanceEntryEpoch)
       const approveRecordMetadata: Record<string, unknown> = {
         nodeKey: currentNodeKey,
         nextNodeKey: resolution.currentNodeKey,
         approvalMode,
         aggregateComplete: true,
+        ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
       }
       if (isInParallelRegion) {
         approveRecordMetadata.parallelNodeKey = parallelState?.parallelNodeKey
@@ -5055,7 +5121,7 @@ export class ApprovalProductService {
           },
         })
       }
-      await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents)
+      await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, advanceEntryEpoch)
       await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
       const completionEvent = resolution.status === 'approved'
         ? this.buildCompletionEvent(
@@ -5313,27 +5379,107 @@ export class ApprovalProductService {
     )
   }
 
+  // nodeEntryEpoch (design-lock 2026-07-03 §4): `insertAssignments` is SHARED by node
+  // activations AND same-round assignee mutations, so the epoch is decided by the CALLER,
+  // never by "an insert happened". `entryEpoch` is stamped on `entry_epoch` for every row:
+  //   - ACTIVATION call-sites pass the freshly-bumped `bumpNodeActivationSeq` value (a new epoch).
+  //   - SAME-ROUND MUTATION call-sites pass the node's PRESERVED current epoch
+  //     (`currentNodeEntryEpoch`, read BEFORE the old rows are deactivated) — NEVER bumped.
+  // `null` is only passed by a mutation preserving a legacy (pre-migration) NULL epoch; it
+  // stamps SQL NULL so the dual-read fallback (§6) keeps scoping that round by the cutoff.
   private async insertAssignments(
     client: { query: typeof pool.query },
     instanceId: string,
     assignments: Array<{ assignmentType: 'user' | 'role'; assigneeId: string; nodeKey: string; sourceStep: number; metadata?: unknown }>,
+    entryEpoch: number | null,
   ): Promise<void> {
     await this.assertNoActiveAssignmentConflicts(client, instanceId, assignments)
     for (const assignment of assignments) {
       await client.query(
         `INSERT INTO approval_assignments
-         (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, TRUE, $6::jsonb, now(), now())`,
+         (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch, metadata, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7::jsonb, now(), now())`,
         [
           instanceId,
           assignment.assignmentType,
           assignment.assigneeId,
           assignment.sourceStep,
           assignment.nodeKey,
+          entryEpoch,
           JSON.stringify(assignment.metadata ?? {}),
         ],
       )
     }
+  }
+
+  // nodeEntryEpoch source (§3): a per-instance monotonic activation sequence. Bumped by 1
+  // at each node ACTIVATION; the post-increment value is that activation's epoch, stamped on
+  // the rows `insertAssignments` inserts for it. Same-round mutations MUST NOT call this.
+  private async bumpNodeActivationSeq(
+    client: { query: typeof pool.query },
+    instanceId: string,
+  ): Promise<number> {
+    const result = await client.query<{ node_activation_seq: number | string }>(
+      `UPDATE approval_instances
+          SET node_activation_seq = node_activation_seq + 1
+        WHERE id = $1
+      RETURNING node_activation_seq`,
+      [instanceId],
+    )
+    const raw = result.rows[0]?.node_activation_seq
+    if (raw === undefined || raw === null) {
+      throw new ServiceError(
+        'Failed to bump node activation sequence — approval instance not found',
+        500,
+        'APPROVAL_NODE_ACTIVATION_SEQ_MISSING',
+        { instanceId },
+      )
+    }
+    return Number(raw)
+  }
+
+  // nodeEntryEpoch resolution (§5): the CURRENT epoch of a node = the DISTINCT `entry_epoch`
+  // of its ACTIVE assignments (the authoritative current round). Fail closed rather than let
+  // a MAX() paper over an inconsistency:
+  //   - EMPTY (no active assignments) → structural error. The resolving actor's own assignment
+  //     is still active at the tally/read point, so a node being resolved/mutated must have ≥1.
+  //   - a single NULL epoch (legacy pre-migration activation) → return null → cutoff fallback (§6).
+  //   - exactly one non-NULL epoch → return it → epoch tally.
+  //   - mixed NULL/non-NULL, or >1 distinct non-NULL → a STRUCTURAL invariant violation (a single
+  //     round must never span epochs) → fail closed. Never MAX()-collapse.
+  private async currentNodeEntryEpoch(
+    client: { query: typeof pool.query },
+    instanceId: string,
+    nodeKey: string,
+  ): Promise<number | null> {
+    const result = await client.query<{ entry_epoch: number | string | null }>(
+      `SELECT DISTINCT entry_epoch
+         FROM approval_assignments
+        WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE`,
+      [instanceId, nodeKey],
+    )
+    if (result.rows.length === 0) {
+      throw new ServiceError(
+        `Approval node ${nodeKey} has no active assignments to resolve the current entry epoch`,
+        409,
+        'APPROVAL_NODE_ENTRY_EPOCH_EMPTY',
+        { instanceId, nodeKey },
+      )
+    }
+    if (result.rows.length > 1) {
+      throw new ServiceError(
+        `Approval node ${nodeKey} active assignments span multiple entry epochs (structural invariant violated)`,
+        500,
+        'APPROVAL_NODE_ENTRY_EPOCH_MIXED',
+        {
+          instanceId,
+          nodeKey,
+          epochs: result.rows.map((row) => (row.entry_epoch === null ? null : Number(row.entry_epoch))),
+        },
+      )
+    }
+    const only = result.rows[0]?.entry_epoch
+    return only === null || only === undefined ? null : Number(only)
   }
 
   // Dynamic-source discriminator. `metadata.resolvedFrom` is written ONLY by
@@ -5412,12 +5558,19 @@ export class ApprovalProductService {
     }
   }
 
+  // nodeEntryEpoch (§4/§7): a same-transaction auto-approval cascade at a node's ENTRY carries
+  // the SAME epoch as the assignments that activation created — so a requester merge / auto-vote
+  // at a threshold node counts toward the round the tally scopes to. Callers pass the freshly
+  // bumped activation epoch; `null` (legacy activation) stamps nothing so the round stays on the
+  // cutoff fallback. Applied to the 'approve' rows the tally reads AND the 'sign' skip rows
+  // (harmless — the tally filters action='approve').
   private async insertAutoApprovalEvents(
     client: { query: typeof pool.query },
     instanceId: string,
     version: number,
     status: string,
     autoApprovalEvents: ApprovalGraphAutoApprovalEvent[],
+    entryEpoch: number | null,
   ): Promise<void> {
     for (const event of autoApprovalEvents) {
       const skipped = event.metadata?.skipped === true
@@ -5439,6 +5592,7 @@ export class ApprovalProductService {
           autoApproved: true,
           reason: event.reason,
           ...(event.metadata ?? {}),
+          ...(entryEpoch !== null ? { nodeEntryEpoch: entryEpoch } : {}),
         },
       })
     }
