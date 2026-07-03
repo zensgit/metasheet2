@@ -2062,6 +2062,29 @@ export class MetaSheetServer {
       this.logger.error('AutomationService initialization failed; continuing in degraded mode', e as Error)
     }
 
+    // T3-6: approval read-model projection. Subscribe the terminal projection trigger to the approval
+    // completion bus (the create-hook path lives inside ApprovalProductService.createApproval), then
+    // start the leader-gated §6b reconcile sweep that self-heals any best-effort lost write.
+    try {
+      const { getApprovalRecordProjectionService } = await import(
+        './multitable/approval-record-projection-service'
+      )
+      const {
+        startApprovalProjectionSweepScheduler,
+        resolveApprovalProjectionSweepLeaderOptions,
+        resolveApprovalProjectionSweepIntervalMs,
+      } = await import('./services/ApprovalProjectionSweepScheduler')
+      getApprovalRecordProjectionService().subscribe(eventBus)
+      const projectionSweepLeaderOptions = await resolveApprovalProjectionSweepLeaderOptions()
+      startApprovalProjectionSweepScheduler({
+        leaderOptions: projectionSweepLeaderOptions,
+        intervalMs: resolveApprovalProjectionSweepIntervalMs(),
+      })
+      this.logger.info('Approval record projection initialized')
+    } catch (e) {
+      this.logger.error('Approval record projection initialization failed; continuing in degraded mode', e as Error)
+    }
+
     // Bind external data-source manager to DB and load persisted sources (A0)
     try {
       const { db: kyselyDbDataSources } = await import('./db/db')

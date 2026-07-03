@@ -90,8 +90,11 @@
         </template>
         <!-- Wave 2 WP3 slice 2 — bulk 全部标记已读. Disabled until the server
              reports at least one unread row for the current filter so clicking
-             never issues a no-op round-trip. -->
-        <div class="approval-center__tab-toolbar">
+             never issues a no-op round-trip.
+             T3-1 v0: batch multi-select is desktop-only — checkbox fan-out over
+             an el-table selection is not a touch gesture, and the mobile action
+             set (ballot Q8) is approve/reject/comment/initiate only. -->
+        <div v-if="!isMobileLayout" class="approval-center__tab-toolbar">
           <!-- 操作台: batch approve/reject over the current selection. Each row still runs the
                authoritative single-instance server transition (frontend fan-out, not a bulk endpoint). -->
           <span
@@ -144,7 +147,15 @@
             待处理考勤审批
           </el-button>
         </div>
+        <ApprovalMobileList
+          v-if="isMobileLayout"
+          :approvals="store.pendingApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无待处理审批'"
+          @select="handleRowClick"
+        />
         <el-table
+          v-else
           ref="pendingTableRef"
           v-loading="store.loading"
           :data="store.pendingApprovals"
@@ -199,7 +210,15 @@
       </el-tab-pane>
 
       <el-tab-pane label="我发起的" name="mine">
+        <ApprovalMobileList
+          v-if="isMobileLayout"
+          :approvals="store.myApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无我发起的审批'"
+          @select="handleRowClick"
+        />
         <el-table
+          v-else
           v-loading="store.loading"
           :data="store.myApprovals"
           style="width: 100%"
@@ -263,7 +282,15 @@
       </el-tab-pane>
 
       <el-tab-pane label="抄送我的" name="cc">
+        <ApprovalMobileList
+          v-if="isMobileLayout"
+          :approvals="store.ccApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无抄送我的审批'"
+          @select="handleRowClick"
+        />
         <el-table
+          v-else
           v-loading="store.loading"
           :data="store.ccApprovals"
           style="width: 100%"
@@ -310,7 +337,15 @@
       </el-tab-pane>
 
       <el-tab-pane label="已完成" name="completed">
+        <ApprovalMobileList
+          v-if="isMobileLayout"
+          :approvals="store.completedApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无已完成审批'"
+          @select="handleRowClick"
+        />
         <el-table
+          v-else
           v-loading="store.loading"
           :data="store.completedApprovals"
           style="width: 100%"
@@ -391,7 +426,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -401,10 +436,23 @@ import { useApprovalPermissions } from '../../approvals/permissions'
 import { dispatchAction, getPendingCount, markAllApprovalsRead, remindApproval } from '../../approvals/api'
 import { runApprovalBatchAction } from '../../approvals/useApprovalBatchActions'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
+import { useFeatureFlags } from '../../stores/featureFlags'
+import { useMobileViewport } from '../../composables/useMobileViewport'
+import ApprovalMobileList from './ApprovalMobileList.vue'
 
 const router = useRouter()
 const store = useApprovalStore()
 const { canWrite } = useApprovalPermissions()
+
+// T3-1 v0 — mobile approval surface (ballot Q10/Q11). The layout switches to the
+// touch-first card list ONLY when the tenant/user has opted in via the
+// `approvalMobile` feature flag AND the viewport is narrow. The flag is loaded
+// once by the app shell (main.ts / App.vue); this view reads it reactively and
+// never triggers a load, so with the flag OFF the desktop table path is
+// unchanged for every viewport.
+const { hasFeature } = useFeatureFlags()
+const { isMobile } = useMobileViewport()
+const isMobileLayout = computed(() => hasFeature('approvalMobile') && isMobile.value)
 
 // ── 操作台: batch approve/reject over the pending selection ────────────────
 const pendingTableRef = ref<{ clearSelection: () => void } | null>(null)
@@ -788,6 +836,42 @@ onMounted(() => {
   .approval-center__attendance-entry {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+/* T3-1 v0 — responsive chrome. The center is only rendered as the touch-first
+   card list when the `approvalMobile` flag is on, but the header/toolbar chrome
+   should reflow on any narrow viewport so the search + filters never overflow
+   horizontally. */
+@media (max-width: 768px) {
+  .approval-center {
+    padding: 16px 12px;
+  }
+
+  .approval-center__header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .approval-center__toolbar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .approval-center__toolbar :deep(.el-input),
+  .approval-center__toolbar :deep(.el-select) {
+    width: 100% !important;
+    margin-left: 0 !important;
+  }
+
+  .approval-center__toolbar :deep(.el-button) {
+    margin-left: 0 !important;
+    width: 100%;
+  }
+
+  .approval-center__pagination {
+    justify-content: center;
   }
 }
 </style>

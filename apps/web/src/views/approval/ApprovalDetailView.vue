@@ -240,8 +240,13 @@
             </el-button>
           </div>
           <div class="approval-detail__actions-secondary">
+            <!-- T3-1 v0 (ballot Q8): the deferred action set —
+                 退回/转交/加签/减签/催办/撤回 — is desktop-only. The mobile
+                 surface exposes approve/reject/comment only, so each deferred
+                 control is additionally gated on `!isMobileLayout`. 评论 stays
+                 visible on both surfaces. -->
             <el-button
-              v-if="canAct && returnableNodes.length > 0"
+              v-if="canAct && !isMobileLayout && returnableNodes.length > 0"
               type="warning"
               :loading="store.loading"
               @click="openReturnDialog"
@@ -249,7 +254,7 @@
               退回
             </el-button>
             <el-button
-              v-if="canAct"
+              v-if="canAct && !isMobileLayout"
               type="warning"
               :loading="store.loading"
               @click="openTransferDialog"
@@ -258,7 +263,7 @@
             </el-button>
             <!-- P1-B 加签: pull additional co-signer(s) into the current node. -->
             <el-button
-              v-if="canAct"
+              v-if="canAct && !isMobileLayout"
               type="primary"
               plain
               :loading="store.loading"
@@ -270,7 +275,7 @@
             <!-- P1-B 减签: remove a previously add-signed co-signer at the
                  current node. Only shown when at least one such row exists. -->
             <el-button
-              v-if="canAct && reducibleAssignees.length > 0"
+              v-if="canAct && !isMobileLayout && reducibleAssignees.length > 0"
               type="primary"
               plain
               :loading="store.loading"
@@ -283,7 +288,7 @@
                  a pending instance; server-side rate-limits to once per hour
                  per user per instance (429 → surfaced as a friendly toast). -->
             <el-button
-              v-if="isRequester"
+              v-if="isRequester && !isMobileLayout"
               type="primary"
               plain
               :loading="remindLoading"
@@ -293,7 +298,7 @@
               <el-icon style="margin-right: 4px"><Bell /></el-icon>催一下
             </el-button>
             <el-popconfirm
-              v-if="isRequester"
+              v-if="isRequester && !isMobileLayout"
               title="确认撤回此审批？"
               confirm-button-text="确认"
               cancel-button-text="取消"
@@ -556,6 +561,8 @@ import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { markApprovalRead, remindApproval } from '../../approvals/api'
+import { useFeatureFlags } from '../../stores/featureFlags'
+import { useMobileViewport } from '../../composables/useMobileViewport'
 import {
   buildDetailRowsForDisplay,
   findDetailFieldInSchema,
@@ -567,6 +574,17 @@ const router = useRouter()
 const store = useApprovalStore()
 const templateStore = useApprovalTemplateStore()
 const { canAct } = useApprovalPermissions()
+
+// T3-1 v0 — mobile approval surface (ballot Q8/Q11). When the tenant/user has
+// opted into `approvalMobile` AND the viewport is narrow, the action bar is
+// restricted to the v0 mobile action set — approve / reject / comment — and the
+// deferred actions (transfer / return / add-sign / reduce-sign / revoke /
+// remind) are hidden. The flag is loaded by the app shell; this view only reads
+// it, so with the flag OFF the desktop action bar is unchanged for every
+// viewport.
+const { hasFeature } = useFeatureFlags()
+const { isMobile } = useMobileViewport()
+const isMobileLayout = computed(() => hasFeature('approvalMobile') && isMobile.value)
 
 const approval = computed(() => store.activeApproval)
 
@@ -853,6 +871,26 @@ function openCommentDialog() {
   commentDialogVisible.value = true
 }
 
+// T3-1 v0 (ballot Q7): the mobile surface reuses the SAME version-less unified
+// `/api/approvals/:id/actions` endpoint as desktop (via `store.executeAction`).
+// Its only concurrency guard is refresh-on-4xx: when the action is rejected with
+// a 4xx (the instance advanced under the approver — a stale action), re-pull the
+// detail + history so the mobile action bar reflects live state instead of a
+// stale one. Scoped to the mobile layout so desktop behavior is unchanged.
+function is4xxConflict(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  const match = /API error:\s*(\d{3})/.exec(message)
+  if (!match) return false
+  const status = Number(match[1])
+  return status >= 400 && status < 500
+}
+
+async function refreshAfterStaleMobileAction(id: string, error: unknown): Promise<void> {
+  if (!isMobileLayout.value) return
+  if (!is4xxConflict(error)) return
+  await Promise.all([store.loadDetail(id), store.loadHistory(id)]).catch(() => undefined)
+}
+
 async function submitAction() {
   const id = route.params.id as string
   try {
@@ -863,8 +901,9 @@ async function submitAction() {
     ElMessage.success(currentAction.value === 'approve' ? '审批已通过' : '审批已驳回')
     actionDialogVisible.value = false
     await store.loadHistory(id)
-  } catch {
+  } catch (error) {
     ElMessage.error('操作失败，请重试')
+    await refreshAfterStaleMobileAction(id, error)
   }
 }
 
@@ -944,8 +983,9 @@ async function submitComment() {
     ElMessage.success('评论已提交')
     commentDialogVisible.value = false
     await store.loadHistory(id)
-  } catch {
+  } catch (error) {
     ElMessage.error('评论提交失败，请重试')
+    await refreshAfterStaleMobileAction(id, error)
   }
 }
 
@@ -1220,9 +1260,20 @@ onMounted(async () => {
   gap: 12px;
 }
 
-/* Responsive: stack on small screens */
+/* Responsive: stack on small screens.
+   T3-1 v0: on the mobile approval surface the action set is restricted to
+   approve/reject/comment (deferred actions hidden), so the remaining controls
+   are laid out as full-width, comfortably tappable rows. */
 @media (max-width: 768px) {
+  .approval-detail {
+    padding: 16px 12px;
+  }
+
   .approval-detail__body {
+    grid-template-columns: 1fr;
+  }
+
+  .approval-detail__meta {
     grid-template-columns: 1fr;
   }
 
@@ -1233,7 +1284,15 @@ onMounted(async () => {
 
   .approval-detail__actions-primary,
   .approval-detail__actions-secondary {
+    flex-direction: column;
+    align-items: stretch;
     justify-content: center;
+  }
+
+  .approval-detail__actions-primary :deep(.el-button),
+  .approval-detail__actions-secondary :deep(.el-button) {
+    width: 100%;
+    margin-left: 0;
   }
 }
 </style>

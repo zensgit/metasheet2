@@ -88,6 +88,10 @@ const ALLOWLIST: Record<string, { disposition: 'CHOKEPOINT' | 'SAFE'; reason: st
     disposition: 'SAFE',
     reason: 'writes ONLY auto-number columns (numeric sequence values) — never a user-supplied longText carrier',
   },
+  'multitable/approval-record-projection-service.ts': {
+    disposition: 'SAFE',
+    reason: 'T3-6 read-model projection writes ONLY the fixed system columns (requestNo/templateId/name/status/outcome/requesterId/approverId/timestamps/currentNodeKey) derived from approval_instances+approval_records — never form_snapshot or a user-supplied rich-longText carrier',
+  },
   'multitable/formula-engine.ts': {
     disposition: 'SAFE',
     reason: 'writes ONLY computed formula-result keys — derived server-side, never raw user HTML',
