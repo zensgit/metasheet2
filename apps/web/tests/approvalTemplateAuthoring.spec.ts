@@ -336,12 +336,11 @@ describe('approval template authoring helpers', () => {
     expect(rebuilt.nodes.some((node) => node.type === 'parallel')).toBe(true)
   })
 
-  it('fails closed on a node carrying fieldPermissions (no node-field editor yet)', () => {
-    // P1-C: fieldPermissions is NOT in the FE allowlist until a node-field
-    // permission editor ships. A template carrying it must render read-only in
-    // the MVP editor (never silently flattened) so the hidden-field config is
-    // preserved on the round-trip.
-    const reason = unsupportedTemplateAuthoringReason(buildTemplate({
+  it('authors + round-trips fieldPermissions on a linear node (T1-4 — no longer fail-closed)', () => {
+    // T1-4: the linear editor now AUTHORS node-level field permissions, so a linear approval node
+    // carrying `fieldPermissions` is supported (not read-only) and its hidden/readonly config
+    // round-trips through hydrate→build unchanged (never flattened).
+    const template = buildTemplate({
       approvalGraph: {
         nodes: [
           { key: 'start', type: 'start', name: '发起', config: {} },
@@ -363,9 +362,12 @@ describe('approval template authoring helpers', () => {
           { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
         ],
       },
-    }))
+    })
 
-    expect(reason).toContain('暂不支持的配置')
+    expect(unsupportedTemplateAuthoringReason(template)).toBeNull()
+    const rebuilt = buildApprovalGraph(draftFromTemplate(template))
+    const node = rebuilt.nodes.find((candidate) => candidate.key === 'approval_1')!
+    expect((node.config as ApprovalNodeConfig).fieldPermissions).toEqual([{ fieldId: 'amount', access: 'hidden' }])
   })
 
   it('blocks existing attachment fields because the MVP has no upload runtime', () => {
@@ -686,7 +688,8 @@ describe('TemplateAuthoringView', () => {
   })
 
   // POST-GATE combined-view acceptance (runbook Stage A1/A2): A picker + E self-approver
-  // coexist editable on one template; the same shape carrying B fieldPermissions is fail-closed.
+  // coexist editable on one template; the same shape carrying B fieldPermissions is now ALSO
+  // editable (T1-4 ships the node field-permissions editor) and renders the per-field access selector.
   function buildComboGraph(node1Config: Record<string, unknown>) {
     return {
       nodes: [
@@ -715,16 +718,68 @@ describe('TemplateAuthoringView', () => {
     expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('combined view A2: the same template carrying fieldPermissions opens fail-closed (B) — unsupported alert + save disabled', async () => {
+  it('combined view A2: the same template carrying fieldPermissions is editable (T1-4) — no unsupported alert, save enabled, per-field access selector renders the hidden value', async () => {
     routeParams = { id: 'tpl_combo_fp' }
     getTemplateSpy.mockResolvedValue(buildTemplate({
-      approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['u1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { mergeWithRequester: true }, fieldPermissions: [{ fieldId: 'secret', access: 'hidden' }] }),
+      approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['u1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { mergeWithRequester: true }, fieldPermissions: [{ fieldId: 'amount', access: 'hidden' }] }),
     }))
     await mountView()
     await flushUi()
 
-    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).not.toBeNull() // B fail-closed
-    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(true) // save disabled
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // B now editable, not fail-closed
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // save enabled
+    expect(container!.querySelector('[data-testid="approval-step-field-permissions"]')).not.toBeNull() // the per-field access editor renders
+    const amountAccess = container!.querySelector('[data-testid="approval-step-field-access-amount"]') as HTMLSelectElement
+    expect(amountAccess).not.toBeNull()
+    expect(amountAccess.value).toBe('hidden') // hydrated from the stored fieldPermission
+  })
+
+  it('T1-4 write wire: selecting readonly through the SFC control writes {fieldId,access:readonly} to the save payload AND renders the readonly hint', async () => {
+    // The default template is LINEAR (fields amount + reviewer) so the field-permissions editor is
+    // live. This drives the @update:model-value → onStepFieldAccessChange → setStepFieldPermission →
+    // save-payload wire that a pure-helper test can't see (wire-vs-fixture discipline).
+    routeParams = { id: 'tpl_t14_write' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-step-field-readonly-hint"]')).toBeNull() // no hint yet
+
+    const amountAccess = container!.querySelector('[data-testid="approval-step-field-access-amount"]') as HTMLSelectElement
+    expect(amountAccess).not.toBeNull()
+    amountAccess.value = 'readonly'
+    amountAccess.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-step-field-readonly-hint"]')).not.toBeNull() // hint now renders
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    const node = payload.approvalGraph.nodes.find((candidate: any) => candidate.key === 'approval_1')
+    expect(node.config.fieldPermissions).toEqual([{ fieldId: 'amount', access: 'readonly' }]) // WRITTEN via the control
+  })
+
+  it('T1-4 routing hint: hiding a form_field_user routing-driver field renders the routing hint and does NOT block save (non-blocking)', async () => {
+    // The default template's approval step resolves its approver from the `reviewer` form field
+    // (form_field_user), so `reviewer` is a routing driver.
+    routeParams = { id: 'tpl_t14_routing' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-step-field-routing-hint"]')).toBeNull() // reviewer editable → no hint
+
+    const reviewerAccess = container!.querySelector('[data-testid="approval-step-field-access-reviewer"]') as HTMLSelectElement
+    expect(reviewerAccess).not.toBeNull()
+    reviewerAccess.value = 'hidden'
+    reviewerAccess.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-step-field-routing-hint"]')).not.toBeNull() // driver hidden → hint
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false) // non-blocking
   })
 
   it('direct_manager reads back editable: a saved direct_manager template is NOT fail-closed (no unsupported alert, save enabled, sourceKind hydrated)', async () => {

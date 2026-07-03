@@ -323,4 +323,189 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
     expect(body.formSnapshot).not.toHaveProperty('secret')
     expect(body.formSnapshot).toHaveProperty('reason', 'present')
   })
+
+  // T1-4 §4 build contract — echo-ONLY redaction. These lock behavior that #2799 already ships
+  // correctly (no RED-before): a hidden field that ALSO drives routing must still route, and a
+  // `readonly` entry must persist + round-trip while producing NO runtime redaction.
+
+  it('resolves a form_field_user assignee from a hidden driver field while redacting it from the echo (routing unaffected)', async () => {
+    const adminToken = await authToken(baseUrl, 'p1c-admin')
+    const requesterToken = await authToken(baseUrl, 'p1c-requester')
+
+    const formSchema = {
+      fields: [
+        { id: 'reason', type: 'text', label: '事由', required: true },
+        { id: 'approver', type: 'user', label: '审批人' },
+      ],
+    }
+    // approval_1 resolves its approver FROM `approver` AND hides `approver`. The assignee is resolved
+    // at create from the STORED snapshot; the echo redaction is read-time only.
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          config: {
+            assigneeSources: [{ kind: 'form_field_user', fieldId: 'approver' }],
+            fieldPermissions: [{ fieldId: 'approver', access: 'hidden' }],
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-1', source: 'start', target: 'approval_1' },
+        { key: 'edge-1-end', source: 'approval_1', target: 'end' },
+      ],
+    }
+
+    const created = await authorPublishStart(
+      baseUrl,
+      adminToken,
+      requesterToken,
+      `p1c-driver-${Date.now()}`,
+      formSchema,
+      graph,
+      { reason: 'trip', approver: 'p1c-manager-driven' },
+      bookkeeping,
+    )
+    expect(created.currentNodeKey).toBe('approval_1')
+
+    const detail = await jsonRequest(baseUrl, `/api/approvals/${created.id}`, requesterToken)
+    expect(detail.status).toBe(200)
+    const body = await detail.json() as {
+      formSnapshot: JsonRecord | null
+      assignments: Array<{ assigneeId: string; isActive: boolean }>
+    }
+    // Echo hides the routing driver...
+    expect(body.formSnapshot).not.toHaveProperty('approver')
+    expect(body.formSnapshot).toHaveProperty('reason', 'trip')
+    // ...but the assignee was resolved from its stored value (routing unaffected).
+    expect(body.assignments.some((assignment) => assignment.assigneeId === 'p1c-manager-driven' && assignment.isActive)).toBe(true)
+  })
+
+  it('routes a downstream condition on a hidden driver field unchanged while redacting it at the hiding node', async () => {
+    const adminToken = await authToken(baseUrl, 'p1c-admin')
+    const requesterToken = await authToken(baseUrl, 'p1c-requester')
+    const manager1Token = await authToken(baseUrl, 'p1c-manager-1')
+
+    const formSchema = {
+      fields: [
+        { id: 'reason', type: 'text', label: '事由', required: true },
+        { id: 'amount', type: 'text', label: '金额' },
+      ],
+    }
+    // approval_1 hides `amount`; the DOWNSTREAM condition routes on `amount`. Approving approval_1
+    // dispatches to the condition, which reads the STORED (un-redacted) `amount` → the `high` branch.
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: ['p1c-manager-1'], fieldPermissions: [{ fieldId: 'amount', access: 'hidden' }] },
+        },
+        {
+          key: 'cond_1',
+          type: 'condition',
+          config: { branches: [{ edgeKey: 'to-high', rules: [{ fieldId: 'amount', operator: 'eq', value: 'big' }] }], defaultEdgeKey: 'to-low' },
+        },
+        { key: 'approval_high', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['p1c-high'] } },
+        { key: 'approval_low', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['p1c-low'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-1', source: 'start', target: 'approval_1' },
+        { key: 'edge-1-c', source: 'approval_1', target: 'cond_1' },
+        { key: 'to-high', source: 'cond_1', target: 'approval_high' },
+        { key: 'to-low', source: 'cond_1', target: 'approval_low' },
+        { key: 'edge-high-end', source: 'approval_high', target: 'end' },
+        { key: 'edge-low-end', source: 'approval_low', target: 'end' },
+      ],
+    }
+
+    const created = await authorPublishStart(
+      baseUrl,
+      adminToken,
+      requesterToken,
+      `p1c-cond-${Date.now()}`,
+      formSchema,
+      graph,
+      { reason: 'trip', amount: 'big' },
+      bookkeeping,
+    )
+    expect(created.currentNodeKey).toBe('approval_1')
+
+    // While AT approval_1, `amount` is redacted from the echo...
+    const detail = await jsonRequest(baseUrl, `/api/approvals/${created.id}`, requesterToken)
+    const body = await detail.json() as { formSnapshot: JsonRecord | null }
+    expect(body.formSnapshot).not.toHaveProperty('amount')
+    expect(body.formSnapshot).toHaveProperty('reason', 'trip')
+
+    // ...and approving approval_1 routes the condition on the STORED `amount` → the high branch.
+    const approve = await jsonRequest(baseUrl, `/api/approvals/${created.id}/actions`, manager1Token, {
+      method: 'POST',
+      body: { action: 'approve', comment: 'ok' },
+    })
+    expect(approve.status).toBe(200)
+    const advanced = await approve.json() as { currentNodeKey: string | null }
+    expect(advanced.currentNodeKey).toBe('approval_high')
+  })
+
+  it('persists a readonly fieldPermission that round-trips through save/load and stays runtime-inert (still echoed)', async () => {
+    const adminToken = await authToken(baseUrl, 'p1c-admin')
+    const requesterToken = await authToken(baseUrl, 'p1c-requester')
+
+    const graph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: ['p1c-manager-1'], fieldPermissions: [{ fieldId: 'secret', access: 'readonly' }] },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-1', source: 'start', target: 'approval_1' },
+        { key: 'edge-1-end', source: 'approval_1', target: 'end' },
+      ],
+    }
+
+    const templateResponse = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: { key: `p1c-ro-${Date.now()}`, name: 'p1c-readonly', formSchema: buildFormSchema(), approvalGraph: graph },
+    })
+    expect(templateResponse.status).toBe(201)
+    const template = await templateResponse.json() as { id: string }
+    bookkeeping.templates.add(template.id)
+
+    // Round-trip: GET the saved template → the readonly fieldPermission survived normalize/save/load.
+    const getTemplate = await jsonRequest(baseUrl, `/api/approval-templates/${template.id}`, adminToken)
+    expect(getTemplate.status).toBe(200)
+    const templateDetail = await getTemplate.json() as {
+      approvalGraph: { nodes: Array<{ key: string; config: { fieldPermissions?: Array<{ fieldId: string; access: string }> } }> }
+    }
+    const savedNode = templateDetail.approvalGraph.nodes.find((node) => node.key === 'approval_1')
+    expect(savedNode?.config.fieldPermissions).toEqual([{ fieldId: 'secret', access: 'readonly' }])
+
+    // Runtime-inert: publish + create → `secret` is STILL echoed (readonly is not redacted).
+    const publish = await jsonRequest(baseUrl, `/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publish.status).toBe(200)
+    const createResponse = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId: template.id, formData: { reason: 'trip', secret: 'shown' } },
+    })
+    expect(createResponse.status).toBe(201)
+    const created = await createResponse.json() as { id: string }
+    bookkeeping.approvals.add(created.id)
+
+    const detail = await jsonRequest(baseUrl, `/api/approvals/${created.id}`, requesterToken)
+    const body = await detail.json() as { formSnapshot: JsonRecord | null }
+    expect(body.formSnapshot).toHaveProperty('secret', 'shown')
+    expect(body.formSnapshot).toHaveProperty('reason', 'trip')
+  })
 })

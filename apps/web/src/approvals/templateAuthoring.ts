@@ -14,6 +14,8 @@ import type {
   FormFieldVisibilityRule,
   FormOption,
   FormSchema,
+  NodeFieldAccess,
+  NodeFieldPermission,
   CreateApprovalTemplateRequest,
   UpdateApprovalTemplateRequest,
 } from '../types/approval'
@@ -138,6 +140,13 @@ export interface ApprovalStepDraft {
   // mirroring `FieldAuthoringDraft.original`.
   mergeWithRequester: boolean
   originalAutoApprovalPolicy?: AutoApprovalPolicy
+  // T1-4 node-level field permissions (linear editor). One entry per NON-editable form field
+  // (`editable` is the absent default, so a field left editable carries no entry). Hydrated from
+  // `config.fieldPermissions` and re-emitted by `buildStepConfig`, which prunes entries whose field
+  // was deleted (backend cross-ref safety) and drops any `editable` entry. `hidden` is enforced at
+  // runtime (server echo-redaction, shipped #2799); `readonly` round-trips but is runtime-inert
+  // (enforcement deferred to T1-4b).
+  fieldPermissions: NodeFieldPermission[]
 }
 
 export interface TemplateAuthoringDraft {
@@ -260,6 +269,7 @@ export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
     approvalMode: 'single',
     emptyAssigneePolicy: 'error',
     mergeWithRequester: false,
+    fieldPermissions: [],
   }
 }
 
@@ -318,6 +328,39 @@ function formatIds(ids?: string[]): string {
 
 function isAuthorableFieldType(value: FormFieldType): value is AuthorableFieldType {
   return AUTHORABLE_FIELD_TYPES.includes(value as AuthorableFieldType)
+}
+
+function isNodeFieldAccess(value: unknown): value is NodeFieldAccess {
+  return value === 'editable' || value === 'readonly' || value === 'hidden'
+}
+
+/**
+ * T1-4: the access a step assigns to a form field — the matching `fieldPermissions` entry's access,
+ * or `editable` (the absent default) when the field has no entry. Pure; used by the authoring UI.
+ */
+export function stepFieldAccess(step: ApprovalStepDraft, fieldId: string): NodeFieldAccess {
+  const entry = step.fieldPermissions.find((permission) => permission.fieldId === fieldId)
+  return entry ? entry.access : 'editable'
+}
+
+/**
+ * T1-4: return a NEW `fieldPermissions` array with `fieldId` set to `access`. `editable` removes the
+ * entry (absent === editable === the byte-stable default); a non-editable access updates the entry
+ * IN PLACE (position-stable, so an untouched load→save keeps the hydrated order) or appends a new one.
+ * Pure — the caller assigns the result back so Vue reactivity fires.
+ */
+export function setStepFieldPermission(
+  permissions: NodeFieldPermission[],
+  fieldId: string,
+  access: NodeFieldAccess,
+): NodeFieldPermission[] {
+  if (access === 'editable') {
+    return permissions.filter((permission) => permission.fieldId !== fieldId)
+  }
+  if (permissions.some((permission) => permission.fieldId === fieldId)) {
+    return permissions.map((permission) => (permission.fieldId === fieldId ? { fieldId, access } : permission))
+  }
+  return [...permissions, { fieldId, access }]
 }
 
 function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
@@ -391,6 +434,16 @@ function stepDraftFromApprovalNode(
   const autoApprovalPolicy = config.autoApprovalPolicy as AutoApprovalPolicy | undefined
   const mergeWithRequester = autoApprovalPolicy?.mergeWithRequester === true
 
+  // T1-4: hydrate node-level field permissions. Only well-formed { fieldId, access-in-enum } entries
+  // are carried; a malformed entry is separately caught by `unsupportedTemplateAuthoringReason`
+  // (fail-closed read-only) so it is never silently re-saved.
+  const fieldPermissions = Array.isArray(config.fieldPermissions)
+    ? config.fieldPermissions
+        .filter((entry): entry is NodeFieldPermission =>
+          isPlainRecord(entry) && typeof entry.fieldId === 'string' && isNodeFieldAccess(entry.access))
+        .map((entry) => ({ fieldId: entry.fieldId, access: entry.access }))
+    : []
+
   return {
     localId: nextLocalId('step'),
     name: node.name ?? `审批人 ${index}`,
@@ -403,6 +456,7 @@ function stepDraftFromApprovalNode(
     emptyAssigneePolicy: config.emptyAssigneePolicy === 'auto-approve' ? 'auto-approve' : 'error',
     mergeWithRequester,
     ...(autoApprovalPolicy ? { originalAutoApprovalPolicy: autoApprovalPolicy } : {}),
+    fieldPermissions,
   }
 }
 
@@ -484,8 +538,9 @@ const RECOGNISED_GRAPH_NODE_TYPES = new Set([
 // The approval-node config keys the BACKEND `normalizeApprovalGraph` re-emits for a COMPLEX graph
 // (ApprovalProductService.ts:899-911). Any other key — TOP-LEVEL or NESTED — is silently dropped on
 // save. NB: this is the COMPLEX path's allowlist ONLY — the linear path reconstructs via
-// `buildStepConfig`, which does NOT preserve `fieldPermissions`, so the two allowlists must stay
-// SEPARATE (sharing would let a linear node's `fieldPermissions` through, then flatten it).
+// `buildStepConfig`, which authors + re-emits `fieldPermissions` (T1-4) but NOT `timeout` /
+// `approvalThreshold`, so the two allowlists must stay SEPARATE (sharing would let a linear node's
+// unrepresented key through, then flatten it).
 const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
   'assigneeType',
   'assigneeIds',
@@ -651,6 +706,9 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
       'approvalMode',
       'emptyAssigneePolicy',
       'autoApprovalPolicy',
+      // T1-4: `fieldPermissions` is now authored + preserved by the linear path (buildStepConfig),
+      // so it is no longer an unknown config key that would force the whole template read-only.
+      'fieldPermissions',
     ]
     if (Object.keys(config).some((key) => !allowedConfigKeys.includes(key))) return true
     const sources = config.assigneeSources
@@ -658,6 +716,17 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
       if (!Array.isArray(sources) || sources.length !== 1) return true
       const source = sources[0] as ApprovalAssigneeSource
       if (!['static_user', 'static_role', 'requester', 'form_field_user', 'direct_manager', 'dept_head', 'continuous_managers', 'manager_at_level'].includes(source?.kind)) return true
+    }
+    // T1-4: `buildStepConfig` re-emits only { fieldId, access } per entry (the backend allowlist),
+    // so a linear node carrying an ARRAY-shaped fieldPermissions with an extra key or non-object
+    // entry would be silently flattened on save — fail-closed to read-only instead (mirrors the
+    // complex path's `complexApprovalConfigHasBackendDrop`).
+    const perms = config.fieldPermissions
+    if (perms !== undefined) {
+      if (!Array.isArray(perms)) return true
+      for (const perm of perms) {
+        if (!isPlainRecord(perm) || hasKeyOutside(perm, BACKEND_FIELD_PERMISSION_KEYS)) return true
+      }
     }
     return false
   })
@@ -822,7 +891,7 @@ function sourceFromStep(step: ApprovalStepDraft): ApprovalAssigneeSource {
  * mirroring `buildFormSchema`'s `delete next.visibilityRule` omit-empty discipline so a
  * bare `{}` is never persisted.
  */
-function buildStepConfig(step: ApprovalStepDraft): ApprovalNodeConfig {
+function buildStepConfig(step: ApprovalStepDraft, fieldIds: Set<string>): ApprovalNodeConfig {
   const autoApprovalPolicy: AutoApprovalPolicy = {
     ...step.originalAutoApprovalPolicy,
     ...(step.mergeWithRequester ? { mergeWithRequester: true } : {}),
@@ -832,11 +901,20 @@ function buildStepConfig(step: ApprovalStepDraft): ApprovalNodeConfig {
   if (!step.mergeWithRequester) {
     delete autoApprovalPolicy.mergeWithRequester
   }
+  // T1-4: emit only NON-editable entries (editable === absent default) whose field still exists —
+  // pruning an entry for a deleted field keeps the backend cross-reference
+  // (`validateNodeFieldPermissionsAgainstFormSchema`) satisfied. Omit the key entirely when empty
+  // (mirrors the autoApprovalPolicy omit-empty discipline so a bare `[]` is never persisted). Fresh
+  // objects so the emitted graph never aliases the reactive draft.
+  const fieldPermissions = step.fieldPermissions
+    .filter((permission) => permission.access !== 'editable' && fieldIds.has(permission.fieldId))
+    .map((permission) => ({ fieldId: permission.fieldId, access: permission.access }))
   return {
     assigneeSources: [sourceFromStep(step)],
     approvalMode: step.approvalMode,
     emptyAssigneePolicy: step.emptyAssigneePolicy,
     ...(Object.keys(autoApprovalPolicy).length > 0 ? { autoApprovalPolicy } : {}),
+    ...(fieldPermissions.length > 0 ? { fieldPermissions } : {}),
   }
 }
 
@@ -857,11 +935,14 @@ export function buildApprovalGraph(draft: TemplateAuthoringDraft): ApprovalGraph
     // emptyAssigneePolicy / autoApprovalPolicy + every other node + ALL edges stay byte-identical.
     return applyApprovalNodeEditsToGraph(withCcEdits, draft.approvalNodeEdits ?? {})
   }
+  // T1-4: the set of live top-level form-field ids — `buildStepConfig` prunes any fieldPermission
+  // whose field was deleted so a dangling fieldId can never reach the backend cross-reference.
+  const fieldIds = new Set(draft.fields.map((field) => field.id.trim()).filter(Boolean))
   const approvalNodes = draft.steps.map((step, index) => ({
     key: `approval_${index + 1}`,
     type: 'approval' as const,
     name: step.name.trim() || `审批人 ${index + 1}`,
-    config: buildStepConfig(step),
+    config: buildStepConfig(step, fieldIds),
   }))
   const nodes: ApprovalGraph['nodes'] = [
     { key: 'start', type: 'start', name: '发起', config: {} },
