@@ -117,6 +117,22 @@ export interface ApprovalNodeConfig {
   fieldPermissions?: NodeFieldPermission[]
   // T1-1 node-level SLA: optional per-node timeout + effect (slice 1: remind only).
   timeout?: NodeTimeoutConfig
+  // T3-3 node signature / compliance — slice 1: DECLARED-INERT. Persisted + round-tripped on the node
+  // config but NOT enforced at runtime — approve/reject never blocks on a signature until enforcement is
+  // separately ratified (mirrors the fieldPermissions readonly/auto_* declared-but-do-not-wire precedent).
+  // Default-absent === no signature policy === current behavior (byte-stable).
+  signaturePolicy?: SignaturePolicy
+}
+
+/**
+ * T3-3 slice 1 (declared-inert): a node's signature/attestation requirement. `kind` is contract-OPEN
+ * (v1 authoring offers typed/click attestation; handwritten-image capture is a separate later slice — Q1).
+ * `appliesTo` defaults to approve-only when absent (Q7). NOT enforced this slice.
+ */
+export interface SignaturePolicy {
+  required: boolean
+  kind?: string
+  appliesTo?: 'approve' | 'approve_reject'
 }
 
 export type ApprovalAssigneeSource =
