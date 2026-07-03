@@ -26,6 +26,7 @@ import type {
   FormFieldVisibilityRule,
   NodeFieldAccess,
   NodeFieldPermission,
+  SignaturePolicy,
   NodeTimeoutConfig,
   NodeTimeoutEffect,
   PublishApprovalTemplateRequest,
@@ -971,6 +972,39 @@ function normalizeNodeFieldPermissions(
 }
 
 /**
+ * T3-3 slice 1 (declared-inert): normalize a node's `signaturePolicy` (shape only). Persisted +
+ * round-tripped so it survives normalize → publish → reload → dispatch re-normalize, but NOT enforced at
+ * runtime this slice. `required` must be a boolean; `kind` is contract-OPEN (any non-empty string when
+ * present — Q1); `appliesTo` when present must be `approve` | `approve_reject` (default approve-only — Q7).
+ * Absent → `undefined` so the caller omits the key (default-absent nodes stay byte-identical). Invalid shape
+ * → `failValidation(400)`, never a coerced default (no silent flatten).
+ */
+function normalizeNodeSignaturePolicy(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): SignaturePolicy | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) {
+    failValidation(context, `${path} must be an object`)
+  }
+  if (typeof value.required !== 'boolean') {
+    failValidation(context, `${path}.required must be a boolean`)
+  }
+  if (value.kind !== undefined && !isNonEmptyString(value.kind)) {
+    failValidation(context, `${path}.kind must be a non-empty string`)
+  }
+  if (value.appliesTo !== undefined && value.appliesTo !== 'approve' && value.appliesTo !== 'approve_reject') {
+    failValidation(context, `${path}.appliesTo must be approve or approve_reject`)
+  }
+  return {
+    required: value.required,
+    ...(value.kind !== undefined ? { kind: (value.kind as string).trim() } : {}),
+    ...(value.appliesTo !== undefined ? { appliesTo: value.appliesTo as SignaturePolicy['appliesTo'] } : {}),
+  }
+}
+
+/**
  * T1-1: preserve a node's `timeout` config through normalization so it survives into the stored /
  * runtime graph (the surrounding `normalizedNode.config` is a strict whitelist — an un-copied field is
  * silently dropped). Shape-only here; the strict semantic gate (integer range, supported effect, no
@@ -1288,6 +1322,11 @@ function normalizeApprovalGraph(
             context,
             `approvalGraph.nodes[${index}].config.timeout`,
           )
+          const signaturePolicy = normalizeNodeSignaturePolicy(
+            node.config.signaturePolicy,
+            context,
+            `approvalGraph.nodes[${index}].config.signaturePolicy`,
+          )
           normalizedNode.config = {
             ...(hasLegacyAssignees
               ? {
@@ -1302,6 +1341,7 @@ function normalizeApprovalGraph(
             ...(autoApprovalPolicy ? { autoApprovalPolicy } : {}),
             ...(fieldPermissions ? { fieldPermissions } : {}),
             ...(timeout ? { timeout } : {}),
+            ...(signaturePolicy ? { signaturePolicy } : {}),
           }
         }
         break
