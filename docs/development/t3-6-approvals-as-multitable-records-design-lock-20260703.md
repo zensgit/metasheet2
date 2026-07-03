@@ -3,8 +3,13 @@
 > **Status: PROPOSED design-lock — awaiting the T3-6 votes** in
 > `approval-automation-third-batch-ballot-20260702.md` (Q1–Q10). This turns the ballot decisions into an
 > implementable architecture. **No runtime until voted GO.** T3-6 is the differentiation move: once approval
-> data is a multitable read-model, 飞书-grade reporting / dashboards / re-automation come for free on the
-> existing multitable analytics — instead of a bespoke approval-reporting module.
+> data is a multitable read-model, **飞书-grade reporting / dashboards / views / formulas come for free** on the
+> existing multitable analytics — instead of a bespoke approval-reporting module. **Re-automation ON the
+> projected rows is deliberately v1-OUT** and specified as a gated follow-up (§6a) — see the P1 decision.
+>
+> **Rev 2 (review):** adds §6a (does the projection write emit `record.*` automation events — the decision
+> that gates the "re-automation" claim and its security surface, P1) and §6b (the deterministic reconcile/
+> backfill mechanism that keeps the read-model consistent after a best-effort failure, P2).
 
 ## 1. Shape — one-way materialized read-model projection
 
@@ -55,8 +60,49 @@ cross-base projection is a non-goal in the first slice). The sheet is **admin/ow
   "zero approval coupling".
 - **PII**: project only the §3 allowlist; full-form projection is gated behind the Q7 erasure/legal-hold policy.
 - **Idempotent** under redelivery (§4); a re-projected event never creates a duplicate row.
-- Projection failures are **best-effort + observable** (never fail the parent approval flow — mirror the
-  metrics/W7 best-effort posture), with a structured error + a backfill/repair path noted.
+- Projection failures are **best-effort** (never fail the parent approval flow — mirror the metrics/W7
+  best-effort posture); made consistent by the reconcile mechanism in §6b (not merely "noted").
+
+## 6a. Does the projection write emit `record.*` automation events? — DECISION (P1)
+
+The projection writes rows into a multitable sheet. Whether that write goes **through the automation event
+bus** (firing `record.created` / `record.updated`) is a load-bearing decision that gates both the
+"re-automation" claim and a real security/loop surface — it must be decided here, not defaulted in code.
+
+**Decision (v1): NO — the projection write does NOT emit `record.*` automation events.** It is a direct,
+system-path materialization (record-service write with the event emission suppressed / bypassed), so:
+- the "for free" benefit is precisely scoped to **reporting / dashboards / views / formulas / analytics** over
+  the projected data — NOT auto-triggering record automations;
+- there is **no projection→automation loop** (a `record.created` rule on the system sheet cannot fire, so it
+  cannot `start_approval` → new approval → projection → … );
+- no `_automationDepth` threading, no source-marker, no dedup, no per-rule permission reconciliation needed in
+  v1.
+
+**Gated follow-up (v2 "re-automation on projected rows"), if later voted:** emitting events would require ALL
+of — a **source marker** (`triggerEvent._projectionSource='approval'`) so downstream rules can distinguish a
+projection write from a user edit; a **loop/depth guard** (seed `_automationDepth`, and forbid `start_approval`
+on the system sheet's rules) to break projection→approval→projection cycles; a **T2-6 dedup key**
+(`approval.projection:{instanceId}:{projected_version}`) so a re-projection is not a re-fire; and a
+**permission boundary** (whose authority runs those rules on a system-owned sheet). Until that is designed and
+voted, the projection is event-silent. *(This resolves the doc's earlier over-broad "re-automation for free".)*
+
+## 6b. Reconcile / backfill — deterministic self-heal (P2)
+
+Best-effort projection means a create or terminal write can be lost (transient DB error, a missed event). The
+read-model must be **self-healing**, not permanently drifted:
+
+- **`reconcileApprovalProjection(instanceId)`** — reads the AUTHORITATIVE state from `approval_instances` (+
+  `approval_records` for the outcome/approver/timestamps) and re-derives the §3 columns, then **idempotent
+  upsert** into the mapped record **guarded by `projected_version`**: write only if the source's version is
+  newer than the mapping row's `projected_version` (so a concurrent live projection is never clobbered). Creates
+  the mapping + record if absent.
+- **Sweep** — a periodic scan (mirror the SLA scanner / T2-6 retention sweep, leader-gated) that finds
+  instances whose `approval_instances.version > projection.projected_version`, or terminal instances with no
+  mapping row, and reconciles them. Plus an **on-demand admin endpoint** to reconcile one instance or a full
+  template family.
+- **Observability** — the mapping row carries `projected_version`, `last_projected_at`, `last_error`; a drift
+  metric (`approval_projection_stale_total`) surfaces rows behind their source. So a lost write is visibly
+  caught and repaired on the next sweep instead of silently rotting the report.
 
 ## 7. Verification plan (fail-first)
 
@@ -68,12 +114,20 @@ cross-base projection is a non-goal in the first slice). The sheet is **admin/ow
 - **redelivery** of create and of terminal → no duplicate row / no double-update (idempotent).
 - **no write-back**: editing the projected record does not mutate the approval instance.
 - **visibility**: the system sheet is admin/owner-scoped; a non-admin cannot read it in the first slice.
-- **best-effort**: a forced projection failure does not fail the approval transition (row repairable later).
+- **best-effort**: a forced projection failure does not fail the approval transition.
+- **event-silence (§6a)**: a projection create/update fires NO `record.created`/`record.updated` automation —
+  assert that an automation rule on the system sheet does NOT execute when a projection row is written/updated.
+- **reconcile (§6b)**: delete/stale a mapped row (simulate a lost write), run `reconcileApprovalProjection`
+  (and the sweep) → the row is restored to the authoritative §3 columns; run it again → no change (idempotent
+  by `projected_version`); a concurrent newer live projection is not clobbered.
 
-## 8. Open owner decisions (the ballot votes)
+## 8. Open owner decisions (the ballot votes + the two rev-2 decisions)
 
-Q1–Q10 in the third-batch ballot. The load-bearing ones: Q2 (accept the explicit create-hook coupling),
-Q4/Q7 (allowlist-only now; form/PII gated), Q5 (side mapping table). Recommend adopting the proposed defaults.
+Q1–Q10 in the third-batch ballot — load-bearing: Q2 (accept the explicit create-hook coupling), Q4/Q7
+(allowlist-only now; form/PII gated), Q5 (side mapping table). **Plus the two decisions this rev makes
+explicit:** **P1 (§6a)** — projection is event-SILENT in v1 (re-automation gated to a v2 with source-marker +
+loop-guard + dedup + permission); **P2 (§6b)** — a deterministic `projected_version`-guarded reconcile
+job/endpoint + sweep is part of v1, not a "noted" afterthought. Recommend adopting all as proposed.
 
 ## 9. Status / next step
 
