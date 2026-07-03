@@ -120,6 +120,22 @@ describe('T1-4 linear field-permissions authoring', () => {
     expect(unsupportedTemplateAuthoringReason(template)).not.toBeNull()
   })
 
+  it('treats a fieldPermission entry with an OUT-OF-ENUM access as unsupported (fail-closed, never silent flatten)', () => {
+    // `access: 'bogus'` would pass hydrate's filter-then-drop → silently deleted on save. It must instead
+    // fail the linear guard to read-only. (Review P2.)
+    const template = buildTemplate(linearGraph([
+      { fieldId: 'secret', access: 'bogus' } as unknown as NodeFieldPermission,
+    ]))
+    expect(unsupportedTemplateAuthoringReason(template)).not.toBeNull()
+  })
+
+  it('treats a fieldPermission entry with a NON-STRING fieldId as unsupported (fail-closed)', () => {
+    const template = buildTemplate(linearGraph([
+      { fieldId: 123, access: 'hidden' } as unknown as NodeFieldPermission,
+    ]))
+    expect(unsupportedTemplateAuthoringReason(template)).not.toBeNull()
+  })
+
   it('hydrates the step draft with the node fieldPermissions', () => {
     const template = buildTemplate(linearGraph([
       { fieldId: 'secret', access: 'hidden' },

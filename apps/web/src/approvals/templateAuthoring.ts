@@ -439,8 +439,7 @@ function stepDraftFromApprovalNode(
   // (fail-closed read-only) so it is never silently re-saved.
   const fieldPermissions = Array.isArray(config.fieldPermissions)
     ? config.fieldPermissions
-        .filter((entry): entry is NodeFieldPermission =>
-          isPlainRecord(entry) && typeof entry.fieldId === 'string' && isNodeFieldAccess(entry.access))
+        .filter((entry): entry is NodeFieldPermission => !isBackendDroppedFieldPermission(entry))
         .map((entry) => ({ fieldId: entry.fieldId, access: entry.access }))
     : []
 
@@ -576,6 +575,19 @@ function hasKeyOutside(value: unknown, allowed: string[]): boolean {
   return isPlainRecord(value) && Object.keys(value).some((key) => !allowed.includes(key))
 }
 
+// T1-4: a `fieldPermissions[]` entry the backend `normalizeApprovalGraph` re-emits verbatim is EXACTLY
+// `{ fieldId: <non-empty string>, access: 'editable'|'readonly'|'hidden' }`. Anything else — an extra key,
+// a non-string/empty fieldId, OR an out-of-enum access value — is dropped/normalized away on save. Both the
+// linear authoring guard and the complex-drop check must treat such an entry as a backend-drop (fail-closed
+// to read-only) so hydrate/buildStepConfig never SILENTLY flattens it. Single source of truth for both.
+function isBackendDroppedFieldPermission(perm: unknown): boolean {
+  return !isPlainRecord(perm)
+    || hasKeyOutside(perm, BACKEND_FIELD_PERMISSION_KEYS)
+    || typeof perm.fieldId !== 'string'
+    || perm.fieldId.length === 0
+    || !isNodeFieldAccess(perm.access)
+}
+
 /**
  * True when a COMPLEX approval node's config carries a key — TOP-LEVEL or NESTED in assigneeSources[]
  * / autoApprovalPolicy / fieldPermissions[] — that the backend `normalizeApprovalGraph` does NOT
@@ -596,7 +608,7 @@ function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): b
   const perms = config.fieldPermissions
   if (Array.isArray(perms)) {
     for (const perm of perms) {
-      if (!isPlainRecord(perm) || hasKeyOutside(perm, BACKEND_FIELD_PERMISSION_KEYS)) return true
+      if (isBackendDroppedFieldPermission(perm)) return true
     }
   }
   return false
@@ -725,7 +737,7 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     if (perms !== undefined) {
       if (!Array.isArray(perms)) return true
       for (const perm of perms) {
-        if (!isPlainRecord(perm) || hasKeyOutside(perm, BACKEND_FIELD_PERMISSION_KEYS)) return true
+        if (isBackendDroppedFieldPermission(perm)) return true
       }
     }
     return false
