@@ -384,13 +384,30 @@ const EVIDENCE_CONTAINER_ALIASES = ['primary', 'header', 'lines'] as const
 const EVIDENCE_SHAPE_TYPES = new Set(['array', 'null', 'object', 'string', 'number', 'boolean', 'missing', 'other'])
 const EVIDENCE_BOOLEAN_KEYS = ['containerLocated', 'boundedSmokeExecuted', 'timeoutReached', 'capReached', 'ambiguous', 'resolved'] as const
 const EVIDENCE_COUNT_KEYS = ['recordCount', 'rowCount', 'sampleCount', 'candidateCount', 'matchedCount'] as const
-// R0: resolver evidence `rule` closed vocabulary (mirrors read-source-config RESOLVER_RULES).
-const EVIDENCE_RESOLVER_RULES = new Set(['exactly_one', 'first_when_sorted', 'field_equals'])
+// R0: resolver evidence `rule` closed vocabulary (mirrors read-source-config RESOLVER_RULES). Exported for
+// the mirror-parity tripwire.
+export const EVIDENCE_RESOLVER_RULES = new Set(['exactly_one', 'first_when_sorted', 'field_equals'])
 
 // Client-side mirrors of the FROZEN S2-a vocabularies — source of truth:
 // plugins/plugin-integration-core/lib/read-source-probe-contract.cjs
 // (READ_SOURCE_PROBE_ERROR_CODES / READ_SOURCE_PROBE_ERROR_TYPES). Anything outside these closed
 // sets — even an enum-SHAPED string — is replaced by the coarse fallback, never rendered verbatim.
+// R0 (#1709 resolver): the 9 exact resolver coarse codes (no prefix match — unknown resolver-looking
+// codes still fall back to READ_SOURCE_PROBE_FAILED). Client mirror of the server's exported
+// READ_SOURCE_RESOLVER_ERROR_CODES (read-source-probe-contract.cjs); kept as a named export so the
+// mirror-parity tripwire (multitable-resolver-vocab-mirror.spec.ts) can assert it === the server set.
+export const RESOLVER_ERROR_CODES = [
+  'READ_SOURCE_RESOLVER_CONTAINER_NOT_FOUND',
+  'READ_SOURCE_RESOLVER_SHAPE_MISMATCH',
+  'READ_SOURCE_RESOLVER_NO_MATCH',
+  'READ_SOURCE_RESOLVER_AMBIGUOUS',
+  'READ_SOURCE_RESOLVER_CAP_REACHED',
+  'READ_SOURCE_RESOLVER_RULE_NOT_SUPPORTED',
+  'READ_SOURCE_RESOLVER_RULE_INVALID',
+  'READ_SOURCE_RESOLVER_FIELD_MISSING',
+  'READ_SOURCE_RESOLVER_FAILED',
+] as const
+
 const READ_SOURCE_PROBE_ERROR_CODES = new Set([
   'READ_SOURCE_PROBE_CONTRACT_INVALID',
   'READ_SOURCE_PROBE_FAILED',
@@ -403,17 +420,7 @@ const READ_SOURCE_PROBE_ERROR_CODES = new Set([
   'READ_SOURCE_PROBE_RESPONSE_UNRECOGNIZED',
   'READ_SOURCE_PROBE_SHAPE_MISMATCH',
   'READ_SOURCE_PROBE_TIMEOUT',
-  // R0 (#1709 resolver): the 9 exact resolver coarse codes (no prefix match — unknown resolver-looking
-  // codes still fall back to READ_SOURCE_PROBE_FAILED).
-  'READ_SOURCE_RESOLVER_CONTAINER_NOT_FOUND',
-  'READ_SOURCE_RESOLVER_SHAPE_MISMATCH',
-  'READ_SOURCE_RESOLVER_NO_MATCH',
-  'READ_SOURCE_RESOLVER_AMBIGUOUS',
-  'READ_SOURCE_RESOLVER_CAP_REACHED',
-  'READ_SOURCE_RESOLVER_RULE_NOT_SUPPORTED',
-  'READ_SOURCE_RESOLVER_RULE_INVALID',
-  'READ_SOURCE_RESOLVER_FIELD_MISSING',
-  'READ_SOURCE_RESOLVER_FAILED',
+  ...RESOLVER_ERROR_CODES,
 ])
 const READ_SOURCE_PROBE_ERROR_TYPES = new Set([
   'Error',
