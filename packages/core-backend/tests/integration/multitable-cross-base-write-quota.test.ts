@@ -203,4 +203,22 @@ describeIfDatabase('cross-base write QUOTA guardrail (real DB)', () => {
     expect(over.steps[0]?.error ?? '').toMatch(/quota/i)
     expect(await countRecords(SHEET_D)).toBe(before + 2) // only the 2 under-limit writes landed
   })
+
+  // ── Q-6: T3-5 cross-base backwrite gate shares the per-target-base counter with create_record (Q5) ──
+  // `evaluateCrossBaseWriteGate` is the reusable "new shape" gate the approval resultWriteback cross-base
+  // backwrite calls. Filling BASE_B via a real create_record must make a subsequent backwrite-gate
+  // evaluation for BASE_B reject on quota — proving the SHARED per-target-base bucket AND that an
+  // authorized gate evaluation consumes a slot (the backwrite's "blocked/not-found still consumes" posture).
+  test('Q-6: the cross-base backwrite gate shares the per-target-base quota with create_record', async () => {
+    const { executor } = makeExecutor({ limit: 2, windowMs: 60_000, store: new MemoryRateLimitStore() })
+    // Slot 1 via a real create_record cross-base write.
+    expect((await executor.execute(crossBaseCreate(SHEET_B, BASE_B, 'q6-c1'), trigger)).steps[0]?.status).toBe('success')
+    // Slot 2 via the backwrite gate directly (authorized: OWNER owns BASE_B) → ok, consumes the 2nd slot.
+    const gate2 = await executor.evaluateCrossBaseWriteGate(q, OWNER, SHEET_A, SHEET_B, BASE_B)
+    expect(gate2).toEqual({ crossBase: true, ok: true })
+    // 3rd attempt now exceeds limit=2 → quota reject via the SHARED BASE_B counter.
+    const gate3 = await executor.evaluateCrossBaseWriteGate(q, OWNER, SHEET_A, SHEET_B, BASE_B)
+    expect(gate3).toMatchObject({ crossBase: true, ok: false })
+    if (gate3.crossBase && gate3.ok === false) expect(gate3.error).toMatch(/quota/i)
+  })
 })

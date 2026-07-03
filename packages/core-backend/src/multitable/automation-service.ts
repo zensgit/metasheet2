@@ -144,6 +144,9 @@ const MAX_PARALLEL_BRANCHES = 10
 const MAX_PARALLEL_BRANCH_ACTIONS = 20
 const RESULT_WRITEBACK_FIELDS = ['statusField', 'approverField', 'completedAtField'] as const
 type ResultWritebackField = typeof RESULT_WRITEBACK_FIELDS[number]
+// T3-5: optional cross-base target on a resultWriteback — a LITERAL triple (no expression templating).
+// When any is set the save gate requires all three; runtime routes the backwrite to the target record.
+const RESULT_WRITEBACK_TARGET_KEYS = ['targetBaseId', 'targetSheetId', 'targetRecordId'] as const
 const TEXT_RESULT_WRITEBACK_TYPES = new Set(['string', 'longText'])
 const STATUS_RESULT_WRITEBACK_TYPES = new Set([...TEXT_RESULT_WRITEBACK_TYPES, 'select'])
 const COMPLETED_AT_RESULT_WRITEBACK_TYPES = new Set([...TEXT_RESULT_WRITEBACK_TYPES, 'dateTime'])
@@ -237,6 +240,20 @@ function validateStartApprovalConfig(config: Record<string, unknown>, path: stri
       mapped += 1
     }
     if (mapped === 0) return `${path}.resultWriteback must map at least one of statusField/approverField/completedAtField`
+    // T3-5 cross-base target: an OPTIONAL literal triple. If ANY of the three target ids is present, require
+    // the FULL triple as non-empty strings (Q4). No expression templating — literal ids only. Target
+    // field-type/read validation AND the author's target-base write authority are DEFERRED to runtime (the
+    // executor cross-base gate re-checks the TRIGGER actor's authority every run).
+    const writeback = config.resultWriteback
+    const anyTargetPresent = RESULT_WRITEBACK_TARGET_KEYS.some((key) => writeback[key] !== undefined)
+    if (anyTargetPresent) {
+      for (const key of RESULT_WRITEBACK_TARGET_KEYS) {
+        const value = writeback[key]
+        if (typeof value !== 'string' || value.trim().length === 0) {
+          return `${path}.resultWriteback cross-base target requires ${RESULT_WRITEBACK_TARGET_KEYS.join(' + ')} (all non-empty) when any is set`
+        }
+      }
+    }
   }
   return null
 }
@@ -278,6 +295,53 @@ function resultWritebackFieldId(writeback: Record<string, unknown>, field: Resul
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   return trimmed.length > 0 ? trimmed : null
+}
+
+// T3-5: read one cross-base target id (trimmed non-empty string, else null).
+function resultWritebackTargetId(
+  writeback: Record<string, unknown>,
+  key: typeof RESULT_WRITEBACK_TARGET_KEYS[number],
+): string | null {
+  const value = writeback[key]
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+// T3-5: does this resultWriteback opt into a cross-base target? (Any of the triple present as a non-empty
+// string. The save gate has already enforced the FULL triple when any is set, so runtime can read all three.)
+function isCrossBaseWriteback(writeback: Record<string, unknown>): boolean {
+  return RESULT_WRITEBACK_TARGET_KEYS.some((key) => resultWritebackTargetId(writeback, key) !== null)
+}
+
+// Discriminated result of a backwrite: same-base returns the `patch` (merged into the resume tail context);
+// cross-base returns only the target triple (its patch is NOT merged into the tail — §3.3).
+type ApprovalBackwriteOutcome =
+  | { kind: 'same-base'; patch: Record<string, unknown> }
+  | { kind: 'cross-base'; target: { targetBaseId: string; targetSheetId: string; targetRecordId: string } }
+
+// The backwrite patch: DECLARED fixed field→value mapping, VALUES sourced from the completion EVENT only
+// (status = outcome, approver = the approval actor, completedAt = the event time). Never the trigger actor.
+function buildResultWritebackPatch(
+  writeback: Record<string, unknown>,
+  event: ApprovalCompletionEventV1,
+): Record<string, unknown> {
+  const patch: Record<string, unknown> = {}
+  const statusField = resultWritebackFieldId(writeback, 'statusField')
+  const approverField = resultWritebackFieldId(writeback, 'approverField')
+  const completedAtField = resultWritebackFieldId(writeback, 'completedAtField')
+  if (statusField) patch[statusField] = event.transition.toStatus
+  if (approverField) patch[approverField] = event.actor?.id ?? null
+  if (completedAtField) patch[completedAtField] = event.occurredAt
+  return patch
+}
+
+// T3-5: the EFFECTIVE actor for a cross-base backwrite is the TRIGGER actor stamped on the stored trigger
+// event (NOT the resume/request actor). Trimmed non-empty string, else null → fail-closed at the gate.
+function readTriggerActorId(triggerEvent: unknown): string | null {
+  if (!triggerEvent || typeof triggerEvent !== 'object' || Array.isArray(triggerEvent)) return null
+  const value = (triggerEvent as Record<string, unknown>).actorId
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 }
 
 type ResultWritebackTargetField = {
@@ -2273,7 +2337,19 @@ export class AutomationService {
     result: AutomationStepResult,
   ): Promise<Record<string, unknown> | null> {
     try {
-      return await this.writeApprovalResultBack(bridge, startApprovalConfig, event)
+      const outcome = await this.writeApprovalResultBack(bridge, startApprovalConfig, event)
+      if (!outcome) return null
+      if (outcome.kind === 'cross-base') {
+        // Q3 audit: extend the start_approval step output with the target triple. §3.3: the cross-base
+        // patch is NOT merged into the resume `recordData` the tail actions see (unlike the same-base
+        // W7-1a merge) — return null so the caller's `if (backwritten)` merge is skipped.
+        result.output = {
+          ...(isRecord(result.output) ? result.output : {}),
+          crossBaseBackwrite: { ...outcome.target },
+        }
+        return null
+      }
+      return outcome.patch
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
       logger.warn(`approval-result backwrite skipped for bridge ${bridge.id}: ${reason}`)
@@ -2394,61 +2470,173 @@ export class AutomationService {
     bridge: AutomationApprovalBridgeRow,
     startApprovalConfig: Record<string, unknown>,
     event: ApprovalCompletionEventV1,
-  ): Promise<Record<string, unknown> | null> {
+  ): Promise<ApprovalBackwriteOutcome | null> {
     const writeback = isRecord(startApprovalConfig.resultWriteback) ? startApprovalConfig.resultWriteback : null
     if (!writeback || !bridge.recordId || !bridge.sheetId) return null
     if (event.transition.toStatus !== 'approved' && writeback.onNonApproved !== true) return null
+
+    // T3-5: a configured cross-base target routes the backwrite to the TARGET record in another base
+    // (gated by the shared executor cross-base write gate). The SOURCE record is NOT mutated.
+    if (isCrossBaseWriteback(writeback)) {
+      return this.writeApprovalResultBackCrossBase(bridge, writeback, event)
+    }
+
+    // ── same-base (W7-1): write onto the SOURCE record that started the approval ──
     await this.assertResultWritebackFields(bridge.sheetId, writeback, event.transition.toStatus)
-    const patch: Record<string, unknown> = {}
-    const statusField = resultWritebackFieldId(writeback, 'statusField')
-    const approverField = resultWritebackFieldId(writeback, 'approverField')
-    const completedAtField = resultWritebackFieldId(writeback, 'completedAtField')
-    if (statusField) patch[statusField] = event.transition.toStatus
-    if (approverField) patch[approverField] = event.actor?.id ?? null
-    if (completedAtField) patch[completedAtField] = event.occurredAt
+    const patch = buildResultWritebackPatch(writeback, event)
     if (Object.keys(patch).length === 0) return null
 
+    // W7-1a parity: the shared tail lock-checks the SOURCE record (actor = the approval actor), writes the
+    // patch, and emits the chaining event + realtime fan-out (actor passed through) so UI / subscribers /
+    // downstream record.updated automations see the backwrite live. onMissing: 'skip' — a gone record
+    // returns null (the resume's own missing-record path already handled it), NOT an error.
+    const actorId = event.actor?.id ?? null
+    const wrote = await this.applyResultWritebackPatch(bridge.sheetId, bridge.recordId, patch, {
+      lockActorId: actorId,
+      chainActorId: actorId,
+      realtimeActorId: actorId ?? undefined,
+      automationDepth: this.backwriteAutomationDepth(bridge),
+      lockedMessage: 'source record is locked',
+      onMissing: 'skip',
+    })
+    if (!wrote) return null
+    return { kind: 'same-base', patch }
+  }
+
+  /**
+   * T3-5 cross-base approval-result backwrite: write the outcome onto a record in ANOTHER base, gated by the
+   * SAME executor cross-base write gate as update/create/delete/lock (`evaluateCrossBaseWriteGate` on the
+   * shared executor instance → shared per-target-base quota, claim==truth, base-write authority). Q1: the
+   * EFFECTIVE actor is the TRIGGER actor (from `bridge.triggerEvent`), NOT the resume/request actor; a
+   * null/system trigger actor fails CLOSED (no owner/requester fallback) and the SAME actor governs the
+   * target-record lock. VALUES still come from the completion EVENT (approver = the approval actor), never
+   * the trigger actor. Anti-misroute: the write targets `targetRecordId` only — the SOURCE record is never
+   * mutated. Any gate reject / missing target / lock throws → surfaced as `backwriteSkipped`, no write.
+   *
+   * Quota note (§3.5 limitation): a resume RETRY re-consumes a per-target-base quota slot — there is no
+   * idempotent cross-base-backwrite ledger in v1. Out of scope; recorded here so it is not mistaken for a bug.
+   */
+  private async writeApprovalResultBackCrossBase(
+    bridge: AutomationApprovalBridgeRow,
+    writeback: Record<string, unknown>,
+    event: ApprovalCompletionEventV1,
+  ): Promise<Extract<ApprovalBackwriteOutcome, { kind: 'cross-base' }> | null> {
+    const targetBaseId = resultWritebackTargetId(writeback, 'targetBaseId')
+    const targetSheetId = resultWritebackTargetId(writeback, 'targetSheetId')
+    const targetRecordId = resultWritebackTargetId(writeback, 'targetRecordId')
+    // The save gate requires the full triple when any target id is set; defend regardless (executor-parity:
+    // last line of defense even if save validation were bypassed).
+    if (!targetBaseId || !targetSheetId || !targetRecordId || !bridge.sheetId) {
+      throw new Error('cross-base resultWriteback requires targetBaseId + targetSheetId + targetRecordId')
+    }
+
+    // Q1 effective actor = the TRIGGER actor. Null → fail-closed via the gate (resolveBaseWritable false).
+    const triggerActorId = readTriggerActorId(bridge.triggerEvent)
+
+    // Cross-base write gate (shared per-target-base quota — Q5). A reject (unauthorized / null actor / claim
+    // mismatch / quota) throws → `backwriteSkipped`, NO write. NOTE: an authorized gate eval CONSUMES a quota
+    // slot before the record-level checks below, so a blocked-by-lock / not-found target still spends a slot.
+    const gate = await this.executor.evaluateCrossBaseWriteGate(
+      this.queryFn,
+      triggerActorId,
+      bridge.sheetId,
+      targetSheetId,
+      targetBaseId,
+    )
+    if (!gate.crossBase) {
+      throw new Error('cross-base resultWriteback target must resolve to a different base')
+    }
+    if (gate.ok === false) throw new Error(gate.error)
+
+    // Target field-type/read validation runs against the TARGET sheet (deferred from save per Q4).
+    await this.assertResultWritebackFields(targetSheetId, writeback, event.transition.toStatus)
+    const patch = buildResultWritebackPatch(writeback, event)
+    if (Object.keys(patch).length === 0) return null
+
+    // Shared tail, TARGET-retargeted: lock-check governed by the SAME (trigger) actor; the realtime publish
+    // OMITS the actor (cross-base privacy posture — realtimeActorId undefined), while the chaining event
+    // carries the trigger actor (matching executeUpdateRecord cross-base). onMissing: 'throw' — a missing
+    // target record fails closed (never a silent no-op), mirroring the executor "target record not found".
+    const wrote = await this.applyResultWritebackPatch(targetSheetId, targetRecordId, patch, {
+      lockActorId: triggerActorId,
+      chainActorId: triggerActorId,
+      realtimeActorId: undefined,
+      automationDepth: this.backwriteAutomationDepth(bridge),
+      lockedMessage: 'target record is locked',
+      onMissing: 'throw',
+      missingMessage: `cross-base resultWriteback target record not found: ${targetRecordId} ∉ ${targetSheetId}`,
+    })
+    if (!wrote) return null // unreachable with onMissing:'throw'; keeps the boolean contract total
+    return { kind: 'cross-base', target: { targetBaseId, targetSheetId, targetRecordId } }
+  }
+
+  // Depth guard shared by both backwrite paths: inherit the trigger's `_automationDepth` + 1 so a
+  // backwrite-driven cascade can't run away.
+  private backwriteAutomationDepth(bridge: AutomationApprovalBridgeRow): number {
+    return (((bridge.triggerEvent as Record<string, unknown> | null)?._automationDepth as number) ?? 0) + 1
+  }
+
+  /**
+   * Shared tail for BOTH W7 backwrite paths: lock-check the target record (governed by `lockActorId`,
+   * B1), write the patch via the bare `|| $1::jsonb` UPDATE, then emit the chaining event + realtime
+   * fan-out. Returns true when the row was written, false when the record is gone AND `onMissing` is
+   * 'skip' (a gone record with 'throw' raises `missingMessage` instead). `realtimeActorId` is the actor
+   * surfaced on the realtime publish — `undefined` OMITS it (the cross-base privacy posture).
+   *
+   * rich-longText SAFE: the patch carries ONLY system outcome values (status enum / approver id / ISO
+   * timestamp), never user-supplied longText — classified SAFE in the rich-longText write-sink guard.
+   */
+  private async applyResultWritebackPatch(
+    sheetId: string,
+    recordId: string,
+    patch: Record<string, unknown>,
+    opts: {
+      lockActorId: string | null
+      chainActorId: string | null
+      realtimeActorId: string | undefined
+      automationDepth: number
+      lockedMessage: string
+      onMissing: 'skip' | 'throw'
+      missingMessage?: string
+    },
+  ): Promise<boolean> {
     const lockRes = await this.queryFn(
       'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
-      [bridge.recordId, bridge.sheetId],
+      [recordId, sheetId],
     )
     const lockRow = lockRes.rows[0] as { locked?: unknown; locked_by?: unknown; created_by?: unknown } | undefined
-    if (!lockRow) return null // record gone — the resume's own missing-record path already handled it
-    ensureRecordNotLocked(event.actor?.id ?? null, lockRow, () => new Error('source record is locked'))
-    // rich-longText SAFE: patch carries ONLY system outcome values (status enum / approver id / ISO
-    // timestamp), never user-supplied longText — classified SAFE in the rich-longText write-sink guard.
-    // lock-guarded: the backwrite respects the source record lock via ensureRecordNotLocked just above (B1).
+    if (!lockRow) {
+      if (opts.onMissing === 'throw') throw new Error(opts.missingMessage ?? `resultWriteback target record not found: ${recordId} ∉ ${sheetId}`)
+      return false // record gone — the caller's missing-record path already handled it
+    }
+    ensureRecordNotLocked(opts.lockActorId, lockRow, () => new Error(opts.lockedMessage))
+    // lock-guarded: resultWriteback patch — ensureRecordNotLocked (opts.lockActorId = the trigger actor for a
+    // cross-base target) is enforced immediately above, so a locked target record throws → backwriteSkipped.
     await this.queryFn(
       `UPDATE meta_records
        SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, version = version + 1, updated_at = NOW()
        WHERE id = $2 AND sheet_id = $3`,
-      [JSON.stringify(patch), bridge.recordId, bridge.sheetId],
+      [JSON.stringify(patch), recordId, sheetId],
     )
-
-    // W7-1a parity: emit the chaining event + realtime fan-out, matching update_record, so UI /
-    // subscribers / downstream record.updated automations see the backwrite live. Depth-guarded
-    // (inherits the trigger's _automationDepth + 1) so a backwrite-driven cascade can't run away.
-    const actorId = event.actor?.id ?? null
-    const automationDepth = (((bridge.triggerEvent as Record<string, unknown> | null)?._automationDepth as number) ?? 0) + 1
     this.eventBus.emit('multitable.record.updated', withAutomationEventId({
-      sheetId: bridge.sheetId,
-      recordId: bridge.recordId,
+      sheetId,
+      recordId,
       changes: patch,
-      actorId,
-      _automationDepth: automationDepth,
+      actorId: opts.chainActorId,
+      _automationDepth: opts.automationDepth,
     }))
     try {
       publishMultitableSheetRealtime({
-        spreadsheetId: bridge.sheetId,
+        spreadsheetId: sheetId,
         source: 'multitable',
         kind: 'record-updated',
-        recordId: bridge.recordId,
-        actorId: actorId ?? undefined,
+        recordId,
+        actorId: opts.realtimeActorId,
       })
     } catch {
       // publishMultitableSheetRealtime swallows its own errors; belt-and-suspenders.
     }
-    return patch
+    return true
   }
 
   private async assertResultWritebackFields(
@@ -2495,6 +2683,9 @@ export class AutomationService {
       if (action.type !== 'start_approval' || !isRecord(action.config)) continue
       const writeback = isRecord(action.config.resultWriteback) ? action.config.resultWriteback : null
       if (!writeback) continue
+      // T3-5: a cross-base target's fields live in the TARGET sheet, not this rule's source sheet — the
+      // source-sheet field-type check does not apply, so defer it to the runtime cross-base check (Q4).
+      if (isCrossBaseWriteback(writeback)) continue
       const mapped = RESULT_WRITEBACK_FIELDS
         .map((field) => ({ field, id: resultWritebackFieldId(writeback, field) }))
         .filter((entry): entry is { field: ResultWritebackField; id: string } => !!entry.id)
