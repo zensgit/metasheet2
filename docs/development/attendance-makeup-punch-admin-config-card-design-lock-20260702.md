@@ -1,8 +1,8 @@
-# Attendance MP-4 — makeup-punch admin config card design-lock
+# Attendance MP-4 — makeup-punch admin config card design-lock (RATIFIED)
 
-**Status:** PROPOSED (awaiting owner ratify) · **Date:** 2026-07-02 · **Slice:** MP-4 (admin config UI for `makeupPunchPolicy`)
+**Status:** RATIFIED (owner review, 2026-07-02) · **Date:** 2026-07-02 · **Slice:** MP-4 (admin config UI for `makeupPunchPolicy`)
 
-This design-lock writes **no runtime code**. It locks the shape of the makeup-punch admin config card so the follow-up implementation (Vue card + behavioral test) is a mechanical, separately-opt-in slice. The runtime slice does not begin until this lock is ratified.
+This design-lock writes **no runtime code**. It locks the shape of the makeup-punch admin config card so the follow-up implementation (Vue card + behavioral test) is a mechanical, separately-opt-in slice. The runtime slice remains separate and starts only after an explicit owner opt-in.
 
 ---
 
