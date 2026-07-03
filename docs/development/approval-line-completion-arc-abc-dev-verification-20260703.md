@@ -26,7 +26,15 @@ a separate later slice).
   without importing the projection service's `eventBus`/scheduler surface.
 - **Verify:** real-DB `approval-projection-visibility` **6/6** (non-admin denied single-read + listings; admin
   allowed; ordinary base unaffected); **RED-before** (neutralize lookup → 4 fail, leak returns); `tsc` 0;
-  T3-6 write/reconcile 14/14; **full unit 4169/4169** (fixed 3 button-route mock-pool builders — test-drift).
+  T3-6 write/reconcile 14/14; **full unit 4169/4169**.
+  - **Post-review correction:** the guard's new resolver lookup also broke **integration** mock-pools (the
+    same resolver-SQL drift class, one layer over — my initial "verified" claim covered unit but not the CI
+    integration suite). Swept the projection-lookup handler into the **10** affected integration files → the
+    full integration run has **zero** `base_id` projection errors. The 3 files with non-`base_id` residual
+    failures (attachments / record-form / sheet-permissions) were proven **pre-existing** — they fail
+    identically at true `origin/main` base locally and pass on main's green CI (local-env-only, not this PR).
+    #3537 verification is therefore complete only once its CI is green post-sweep; this MD should land **after**
+    #3537 is green (merge order below).
 
 ## B — analytics dashboard · #3535
 Grounding showed `ApprovalMetricsView.vue` (`/approvals/metrics`, `requiresAdmin`) + `/summary /report /people
