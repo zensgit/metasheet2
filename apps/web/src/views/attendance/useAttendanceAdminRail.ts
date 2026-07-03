@@ -16,6 +16,7 @@ export const ATTENDANCE_ADMIN_SECTION_IDS = {
   auditLogs: 'attendance-admin-audit-logs',
   notificationDeliveries: 'attendance-admin-notification-deliveries',
   reportDigestPolicy: 'attendance-admin-report-digest-policy',
+  makeupPunchPolicy: 'attendance-admin-makeup-punch-policy',
   holidaySync: 'attendance-admin-holiday-sync',
   defaultRule: 'attendance-admin-default-rule',
   ruleSets: 'attendance-admin-rule-sets',
@@ -171,6 +172,7 @@ export function useAttendanceAdminRail({
     { id: ATTENDANCE_ADMIN_SECTION_IDS.auditLogs, label: tr('Audit Logs', '审计日志') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries, label: tr('Notification deliveries', '通知投递') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.reportDigestPolicy, label: tr('Report digest subscription', '统计通知订阅') },
+    { id: ATTENDANCE_ADMIN_SECTION_IDS.makeupPunchPolicy, label: tr('Makeup punch policy', '补卡策略') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.holidaySync, label: tr('Holiday Sync', '节假日同步') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.defaultRule, label: tr('Default Rule', '默认规则') },
     { id: ATTENDANCE_ADMIN_SECTION_IDS.ruleSets, label: tr('Rule Sets', '规则集') },
@@ -210,6 +212,7 @@ export function useAttendanceAdminRail({
         ATTENDANCE_ADMIN_SECTION_IDS.auditLogs,
         ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries,
         ATTENDANCE_ADMIN_SECTION_IDS.reportDigestPolicy,
+        ATTENDANCE_ADMIN_SECTION_IDS.makeupPunchPolicy,
       ],
     },
     {
