@@ -73,6 +73,7 @@ import {
   type ApprovalCompletionEventV1,
   type ApprovalCompletionTransitionSnapshot,
 } from './ApprovalCompletionEvent'
+import { getApprovalRecordProjectionService } from '../multitable/approval-record-projection-service'
 import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
 
@@ -3546,6 +3547,14 @@ export class ApprovalProductService {
         })
       }
     })
+    // T3-6 create hook (design-lock §2): project the pending (or auto-approve terminal) row NOW.
+    // Completion events only fire on TERMINAL, so a create-only pending instance would never project
+    // without this explicit hook — this DOES add an approval-side create coupling (named, not hidden).
+    // Awaited + best-effort: a projection failure NEVER fails the approval flow, and awaiting BEFORE
+    // the emit makes auto-approve-at-create deterministic — the create hook writes the ONE terminal row
+    // and the subsequent completion-event reconcile is a version-guarded no-op (not a second row).
+    await this.projectApprovalOnCreate(instanceId)
+
     if (completionEvent) {
       emitApprovalCompletionEvent(completionEvent)
     }
@@ -3555,6 +3564,19 @@ export class ApprovalProductService {
       throw new ServiceError('Approval not found after creation', 500, 'APPROVAL_CREATE_FAILED')
     }
     return approval
+  }
+
+  /** T3-6: best-effort read-model projection at create — never throws into the approval flow. */
+  private async projectApprovalOnCreate(instanceId: string): Promise<void> {
+    try {
+      await getApprovalRecordProjectionService().reconcile(instanceId)
+    } catch (error) {
+      approvalProductLogger.warn(
+        `approval record projection (create hook) failed for ${instanceId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
   }
 
   async adminJump(
