@@ -2610,6 +2610,8 @@ export class AutomationService {
       return false // record gone — the caller's missing-record path already handled it
     }
     ensureRecordNotLocked(opts.lockActorId, lockRow, () => new Error(opts.lockedMessage))
+    // lock-guarded: resultWriteback patch — ensureRecordNotLocked (opts.lockActorId = the trigger actor for a
+    // cross-base target) is enforced immediately above, so a locked target record throws → backwriteSkipped.
     await this.queryFn(
       `UPDATE meta_records
        SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, version = version + 1, updated_at = NOW()

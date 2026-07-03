@@ -785,6 +785,31 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
     }
   })
 
+  test('T3-5: a cross-base target record LOCKED by ANOTHER actor → backwrite skipped (trigger actor governs the target lock); target + source unchanged', async () => {
+    const svc = makeAutomationService((async () => new Response('OK', { status: 200 })) as never)
+    try {
+      await seedCrossBaseTargets()
+      // XB_BASE_OK is owned by the trigger actor REQUESTER (base-write authorized), but the TARGET record is
+      // locked by ANOTHER actor (APPROVER). ensureRecordNotLocked is evaluated with the TRIGGER actor, so the
+      // lock holds → the cross-base backwrite skips, no partial write.
+      await q('UPDATE meta_records SET locked = TRUE, locked_by = $1 WHERE id = $2 AND sheet_id = $3', [APPROVER, XB_REC_NULL, XB_SHEET_OK])
+      const RW = { statusField: 'xb_status', targetBaseId: XB_BASE_OK, targetSheetId: XB_SHEET_OK, targetRecordId: XB_REC_NULL }
+      const executionId = await runCrossBaseBackwrite(svc, RW, { title: 'Locked plan', triggerActorId: REQUESTER })
+
+      const tgt = (await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [XB_REC_NULL, XB_SHEET_OK])).rows[0].data as Record<string, unknown>
+      expect(tgt).toEqual({}) // unchanged — locked, no partial write
+      const src = (await q('SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2', [RECORD, SHEET])).rows[0].data as Record<string, unknown>
+      expect(src).toEqual({ title: 'Locked plan' })
+      const resumed = (await svc.logs.getById(executionId))!
+      const startStep = resumed.steps.find((s) => s.actionType === 'start_approval')
+      expect(startStep?.output).toHaveProperty('backwriteSkipped')
+      expect(startStep?.output).not.toHaveProperty('crossBaseBackwrite')
+    } finally {
+      await q('UPDATE meta_records SET locked = FALSE, locked_by = NULL WHERE id = $1 AND sheet_id = $2', [XB_REC_NULL, XB_SHEET_OK]).catch(() => {})
+      svc.shutdown()
+    }
+  })
+
   test('T3-5: a cross-base target with a SOURCE-resident field id does NOT mutate the source record (anti-misroute)', async () => {
     const svc = makeAutomationService((async () => new Response('OK', { status: 200 })) as never)
     try {
