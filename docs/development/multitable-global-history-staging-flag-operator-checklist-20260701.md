@@ -140,18 +140,42 @@ deleted. The 2026-07-01 evidence confirmed this for the staging run.
 
 ### PIT_UNDELETE
 
-There is no committed operator harness equivalent to `reset-acceptance.mjs` yet. Until one exists, use a throwaway
-fixture equivalent to the 2026-07-01 evidence:
+Use the committed harness. It creates isolated throwaway DB fixtures, then drives the real `revert-preview` and
+`revert-execute` API routes with the supplied admin token:
 
-1. Create a deleted record `U` with create/delete revisions and no live row.
-2. Create a live record `L`.
-3. Ensure `U`'s T-snapshot links outbound to `L`.
-4. Run `revert-preview` at T and verify `visibleUndeleteCount=1`, `undeleteSupported=true`, and an executable identity.
-5. Run execute without confirm and expect `400 CONFIRM_REQUIRED`.
-6. Run execute with `confirm:"undelete"` and expect resurrection.
-7. Confirm the live row data, outbound `meta_links` rebuild, and `meta_record_revisions.source='restore'`.
+```bash
+CONFIRM_PIT_UNDELETE_SMOKE=1 \
+BASE_URL=http://127.0.0.1:18082 \
+ADMIN_TOKEN=<sheet-admin-jwt> \
+DATABASE_URL=<staging-postgres-url> \
+  node packages/core-backend/scripts/pit-undelete-acceptance.mjs
+```
 
-Clean the throwaway base/sheet/records/revisions/links immediately after the check.
+Optional:
+
+```bash
+PIT_UNDELETE_OUTPUT_FILE=/tmp/pit-undelete-acceptance.json
+PIT_UNDELETE_API_MOUNT=/api/multitable
+```
+
+Expected flag-off result:
+
+- `revert-preview` still classifies one undelete candidate with `undeleteSupported=false`;
+- `revert-execute` with `confirm:"undelete"` returns `403 UNDELETE_DISABLED`;
+- no live row is written.
+
+Expected flag-on result:
+
+- preview returns `visibleUndeleteCount=1`, `undeleteSupported=true`, the target record id, and a preview identity;
+- execute without confirm returns `400 CONFIRM_REQUIRED`;
+- execute with `confirm:"undelete"` resurrects the original id with the T-snapshot, rebuilds the outbound `meta_links`
+  edge, writes no inbound edge, and appends a `meta_record_revisions.source='restore'` create revision;
+- an original-id occupied-after-preview scenario returns `409` (`PREVIEW_IDENTITY_INVALID` or `UNDELETE_CONFLICT`,
+  depending on whether re-enumeration or the in-transaction collision guard catches it first) and does not overwrite the
+  occupied record.
+
+The harness cleans its own `PIT-UNDELETE-ACCEPT ...` fixtures. Stop if cleanup fails or if any fixture id collides with
+real user data.
 
 ## Rollback
 
@@ -173,7 +197,8 @@ Stop and do not broaden rollout if any of these occurs:
 - `MULTITABLE_ENABLE_PIT_RESET=true` and `MULTITABLE_META_REVISION_RETENTION_ENABLED=true`;
 - reset acceptance has any failure;
 - T9-W browser smoke cannot find the config-history entry on a verified web image;
-- PIT_UNDELETE smoke lacks `CONFIRM_REQUIRED`, `source='restore'`, or outbound link rebuild evidence;
+- PIT_UNDELETE acceptance lacks `CONFIRM_REQUIRED`, `source='restore'`, outbound link rebuild, or occupied-id `409`
+  evidence;
 - cleanup cannot isolate the throwaway fixture from real user data.
 
 ## Cleanup notes
