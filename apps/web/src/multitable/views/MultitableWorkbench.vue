@@ -491,6 +491,9 @@
       @update-field-permission="onFieldPermissionUpdated"
       @update-view-permission="onViewPermissionUpdated"
     />
+    <!-- B1-06: rule updates (toggle/delete/save all emit `updated`) must NOT dismiss the manager —
+         it maintains its own list state in place; only an explicit close does. Closing on every
+         update forced users to reopen the modal after each toggle/delete/save. -->
     <MetaAutomationManager
       :visible="showAutomationManager"
       :sheet-id="workbench.activeSheetId.value"
@@ -498,7 +501,6 @@
       :client="workbench.client"
       :views="workbench.views.value"
       @close="showAutomationManager = false"
-      @updated="showAutomationManager = false"
     />
     <MetaFormShareManager
       :visible="showFormShareManager"

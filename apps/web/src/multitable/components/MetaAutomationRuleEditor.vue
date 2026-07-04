@@ -1,9 +1,9 @@
 <template>
-  <div v-if="visible" class="meta-rule-editor__overlay" @click.self="$emit('close')">
+  <div v-if="visible" class="meta-rule-editor__overlay" @click.self="requestClose">
     <div class="meta-rule-editor">
       <div class="meta-rule-editor__header">
         <h4 class="meta-rule-editor__title">{{ rule ? automationLabel('editor.titleEdit', isZh) : automationLabel('editor.titleNew', isZh) }}</h4>
-        <button class="meta-rule-editor__close" type="button" @click="$emit('close')">&times;</button>
+        <button class="meta-rule-editor__close" type="button" @click="requestClose">&times;</button>
       </div>
 
       <div class="meta-rule-editor__body">
@@ -1206,7 +1206,7 @@
         >
           {{ props.testRunState?.status === 'running' ? automationLabel('testRun.running', isZh) : automationLabel('testRun.button', isZh) }}
         </button>
-        <button class="meta-rule-editor__btn" type="button" @click="$emit('close')">{{ automationLabel('editor.cancel', isZh) }}</button>
+        <button class="meta-rule-editor__btn" type="button" @click="requestClose">{{ automationLabel('editor.cancel', isZh) }}</button>
       </div>
     </div>
   </div>
@@ -2063,6 +2063,10 @@ function draftFromRule(rule: AutomationRule): Draft {
 }
 
 const draft = ref<Draft>(emptyDraft())
+// B1-07: serialized snapshot taken when the editor opens — the dirty check for close-path
+// discard protection. JSON.stringify is stable here: the draft is rebuilt from the same
+// builders on every open, so key order is deterministic.
+const draftSnapshot = ref('')
 const deleteRecordAcknowledgements = ref<Record<string, boolean>>({})
 const conditionEditorEntries = computed(() => collectConditionEditorEntries(draft.value.conditions.conditions))
 
@@ -2286,6 +2290,7 @@ watch(
   async (v) => {
     if (v) {
       draft.value = props.rule ? draftFromRule(props.rule) : emptyDraft()
+      draftSnapshot.value = JSON.stringify(draft.value) // B1-07: dirty baseline per open
       resetDeleteRecordAcknowledgements()
       error.value = ''
       saving.value = false
@@ -2315,6 +2320,14 @@ watch(
   },
   { immediate: true },
 )
+
+// B1-07: discard protection — all three close paths (overlay click, ×, cancel) route here.
+// A successful save is closed by the parent on the 'save' emit and never passes through this guard.
+function requestClose(): void {
+  const dirty = JSON.stringify(draft.value) !== draftSnapshot.value
+  if (dirty && !window.confirm(automationLabel('editor.discardConfirm', isZh.value))) return
+  emit('close')
+}
 
 function resetDeleteRecordAcknowledgements(): void {
   const next: Record<string, boolean> = {}

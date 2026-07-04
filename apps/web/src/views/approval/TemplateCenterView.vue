@@ -50,6 +50,26 @@
       </div>
     </header>
 
+    <!-- B1-08: 最近使用 — 发起热路径从「进模板全表找行」降到 1 击。localStorage per-user，
+         点击已删除/已归档模板时由填单页的加载错误 + 返回兜底。 -->
+    <div
+      v-if="canWrite && recentTemplates.length > 0"
+      class="template-center__recent"
+      data-testid="template-center-recent"
+    >
+      <span class="template-center__recent-label">最近使用</span>
+      <el-tag
+        v-for="entry in recentTemplates"
+        :key="entry.templateId"
+        class="template-center__recent-chip"
+        effect="plain"
+        :data-testid="`template-center-recent-${entry.templateId}`"
+        @click="startApproval(entry.templateId)"
+      >
+        {{ entry.name }}
+      </el-tag>
+    </div>
+
     <el-alert
       v-if="store.error"
       :title="store.error"
@@ -179,10 +199,13 @@ import type { ApprovalTemplateListItemDTO, ApprovalTemplateStatus } from '../../
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { cloneTemplate, listTemplateCategories } from '../../approvals/api'
+import { listRecentTemplates, type RecentTemplateEntry } from '../../approvals/recentTemplates'
+import { useAuth } from '../../composables/useAuth'
 
 const router = useRouter()
 const store = useApprovalTemplateStore()
 const { canWrite, canManageTemplates } = useApprovalPermissions()
+const recentTemplates = ref<RecentTemplateEntry[]>([])
 
 const statusTab = ref<'all' | ApprovalTemplateStatus>('all')
 const searchText = ref('')
@@ -302,6 +325,13 @@ async function handleClone(row: ApprovalTemplateListItemDTO) {
 onMounted(() => {
   loadData()
   loadCategories()
+  // B1-08: best-effort — a missing session just means no shortcut row.
+  void useAuth()
+    .getCurrentUserId()
+    .then((uid) => {
+      recentTemplates.value = listRecentTemplates(uid)
+    })
+    .catch(() => {})
 })
 </script>
 
@@ -347,5 +377,22 @@ onMounted(() => {
 .template-center__category-empty {
   color: var(--el-text-color-secondary, #909399);
   font-size: 12px;
+}
+
+.template-center__recent {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.template-center__recent-label {
+  color: var(--el-text-color-secondary, #909399);
+  font-size: 13px;
+}
+
+.template-center__recent-chip {
+  cursor: pointer;
 }
 </style>

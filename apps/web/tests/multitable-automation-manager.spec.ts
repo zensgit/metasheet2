@@ -921,7 +921,8 @@ describe('MetaAutomationManager', () => {
     expect(body.enabled).toBe(false)
   })
 
-  it('deletes rule', async () => {
+  it('deletes rule after confirmation naming the rule', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const { client, fetchFn } = mockClient([fakeRule()])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
@@ -930,9 +931,30 @@ describe('MetaAutomationManager', () => {
     deleteBtn.click()
     await flushPromises()
 
+    // B1-06: the confirm names the rule, states its run counts (stats already loaded), and irreversibility
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Notify on create'))
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('This cannot be undone'))
     const deleteCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'DELETE')
     expect(deleteCalls.length).toBe(1)
     expect(container.querySelectorAll('[data-automation-rule]').length).toBe(0)
+    confirmSpy.mockRestore()
+  })
+
+  it('B1-06: cancelling the delete confirmation keeps the rule and issues no DELETE', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { client, fetchFn } = mockClient([fakeRule()])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const deleteBtn = container.querySelector('[data-automation-delete]') as HTMLButtonElement
+    deleteBtn.click()
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    const deleteCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'DELETE')
+    expect(deleteCalls.length).toBe(0)
+    expect(container.querySelectorAll('[data-automation-rule]').length).toBe(1)
+    confirmSpy.mockRestore()
   })
 
   it('shows field picker for field.changed trigger', async () => {

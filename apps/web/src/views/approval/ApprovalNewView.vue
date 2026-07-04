@@ -341,6 +341,8 @@ import { useApprovalStore } from '../../approvals/store'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { getVisibleFormFields } from '../../approvals/fieldVisibility'
+import { recordRecentTemplate } from '../../approvals/recentTemplates'
+import { useAuth } from '../../composables/useAuth'
 import { useAutoSumTotal } from '../../approvals/useAutoSumTotal'
 import { isRowDerivationActive } from '../../approvals/lineDerivation'
 import {
@@ -457,6 +459,20 @@ async function handleSubmit() {
       formData: template.value ? pruneHiddenFormDataWithDetail(template.value.formSchema, formData) : { ...formData },
     })
     ElMessage.success('审批已提交')
+    // B1-08: best-effort 最近使用 record — must never delay or fail the navigation.
+    const submittedTemplate = template.value
+    if (submittedTemplate) {
+      void useAuth()
+        .getCurrentUserId()
+        .then((uid) =>
+          recordRecentTemplate(uid, {
+            templateId,
+            name: submittedTemplate.name,
+            category: submittedTemplate.category,
+          }),
+        )
+        .catch(() => {})
+    }
     router.push({ name: 'approval-detail', params: { id: result.id } })
   } catch {
     ElMessage.error('提交审批失败，请重试')

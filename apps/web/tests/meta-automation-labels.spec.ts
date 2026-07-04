@@ -11,6 +11,7 @@ import {
   automationConditionOperatorLabel,
   automationConditionValuePlaceholder,
   automationCronPresetLabel,
+  automationDeleteRuleConfirmMessage,
   automationDingTalkAllowlistSummary,
   automationDingTalkDestinationScopeLabel,
   automationDingTalkDestinationSubtitle,
@@ -162,6 +163,17 @@ describe('meta-automation-labels', () => {
 
     expect(automationCardStats(1, 'ok', false)).toBe('1 ok')
     expect(automationCardStats(3, 'fail', true)).toBe('3 失败')
+  })
+
+  it('B1-06: composes delete-rule confirm copy with optional run-count blast radius', () => {
+    expect(automationDeleteRuleConfirmMessage('通知规则', { success: 12, failed: 3 }, true))
+      .toBe('确定删除规则「通知规则」？\n该规则累计成功 12 次 / 失败 3 次。删除后不可恢复。')
+    expect(automationDeleteRuleConfirmMessage('通知规则', undefined, true))
+      .toBe('确定删除规则「通知规则」？\n删除后不可恢复。')
+    expect(automationDeleteRuleConfirmMessage('Notify', { success: 1, failed: 0 }, false))
+      .toBe('Delete rule "Notify"?\nThis rule has 1 succeeded / 0 failed runs. This cannot be undone.')
+    expect(automationDeleteRuleConfirmMessage('Notify', undefined, false))
+      .toBe('Delete rule "Notify"?\nThis cannot be undone.')
   })
 
   it('localizes manager test-run messages with raw details and empty fallbacks', () => {
