@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { createDelegation, listDelegations, disableDelegation, updateDelegation } from '../../src/services/ApprovalDelegationConfig'
+import {
+  createDelegation,
+  listDelegations,
+  disableDelegation,
+  updateDelegation,
+  disableOwnDelegation,
+  countDelegatedApprovals,
+} from '../../src/services/ApprovalDelegationConfig'
 
 const WINDOW = { startAt: '2026-06-22T00:00:00Z', endAt: '2026-06-23T00:00:00Z' }
 const okRow = {
@@ -58,6 +65,78 @@ describe('ApprovalDelegationConfig.listDelegations', () => {
     expect(list).toEqual([
       { id: 'd1', delegatorUserId: 'A', delegateeUserId: 'B', scope: 'template', scopeTemplateId: 't1', startAt: '2026-06-22T00:00:00.000Z', endAt: '2026-06-23T00:00:00.000Z', active: true },
     ])
+  })
+
+  it('default (active-only) filters WHERE active; delegator filter is parameterized', async () => {
+    let sql = ''
+    let params: unknown[] = []
+    const q = async <Row>(text: string, p?: unknown[]): Promise<{ rows: Row[] }> => {
+      sql = text
+      params = p ?? []
+      return { rows: [] as Row[] }
+    }
+    await listDelegations(q, { delegatorUserId: '  A  ' })
+    expect(sql).toMatch(/WHERE active AND delegator_user_id = \$1/)
+    expect(params).toEqual(['A'])
+  })
+
+  it('includeInactive drops the active predicate (history/audit view)', async () => {
+    let sql = ''
+    const q = async <Row>(text: string): Promise<{ rows: Row[] }> => {
+      sql = text
+      return { rows: [] as Row[] }
+    }
+    await listDelegations(q, { includeInactive: true })
+    expect(sql).not.toMatch(/WHERE/)
+    await listDelegations(q, { delegatorUserId: 'A', includeInactive: true })
+    expect(sql).toMatch(/WHERE delegator_user_id = \$1/)
+    expect(sql).not.toMatch(/active/)
+  })
+})
+
+describe('ApprovalDelegationConfig.disableOwnDelegation (self-service 403-vs-404 discriminator)', () => {
+  it('returns not_found for an unknown id (route → 404)', async () => {
+    expect(await disableOwnDelegation(rowsQuery([]), 'd1', 'A')).toEqual({ status: 'not_found' })
+  })
+  it("returns forbidden when the row is owned by someone else (route → 403, NOT a masking 404)", async () => {
+    expect(await disableOwnDelegation(rowsQuery([{ delegator_user_id: 'B' }]), 'd1', 'A')).toEqual({ status: 'forbidden' })
+  })
+  it('returns forbidden when no actor id is supplied', async () => {
+    expect(await disableOwnDelegation(rowsQuery([{ delegator_user_id: 'A' }]), 'd1', '   ')).toEqual({ status: 'forbidden' })
+  })
+  it('returns ok when the caller owns the row, and issues the disabling UPDATE', async () => {
+    const seen: string[] = []
+    const q = async <Row>(text: string): Promise<{ rows: Row[] }> => {
+      seen.push(text)
+      return { rows: (seen.length === 1 ? [{ delegator_user_id: 'A' }] : []) as Row[] }
+    }
+    expect(await disableOwnDelegation(q, 'd1', '  A  ')).toEqual({ status: 'ok' })
+    expect(seen[0]).toMatch(/SELECT delegator_user_id/)
+    expect(seen[1]).toMatch(/UPDATE approval_delegations SET active = FALSE/)
+  })
+})
+
+describe('ApprovalDelegationConfig.countDelegatedApprovals (audit derivation)', () => {
+  it('parses bigint COUNT strings into a delegator→count map', async () => {
+    const map = await countDelegatedApprovals(rowsQuery([
+      { delegator: 'A', cnt: '3' },
+      { delegator: 'C', cnt: 1 },
+    ]))
+    expect(map).toEqual({ A: 3, C: 1 })
+  })
+  it('scopes the query to one delegator when filtered', async () => {
+    let params: unknown[] = []
+    const q = async <Row>(_text: string, p?: unknown[]): Promise<{ rows: Row[] }> => {
+      params = p ?? []
+      return { rows: [{ delegator: 'A', cnt: '2' }] as Row[] }
+    }
+    const map = await countDelegatedApprovals(q, { delegatorUserId: '  A  ' })
+    expect(params).toEqual(['A'])
+    expect(map).toEqual({ A: 2 })
+  })
+  it('ignores rows with a null/blank delegator key', async () => {
+    const map = await countDelegatedApprovals(rowsQuery([{ delegator: null, cnt: '9' }]))
+    expect(map).toEqual({})
   })
 })
 

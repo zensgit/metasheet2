@@ -118,15 +118,96 @@ export async function createDelegation(query: QueryFn, input: CreateDelegationIn
 }
 
 /**
- * List active delegations (admin view), newest window first; optionally filtered to one
- * delegator. Admin-managed — returns all delegators' rows, not just one caller's.
+ * List delegations, newest window first; optionally filtered to one delegator.
+ *
+ * Default is active-only (the shipped admin/list behavior — unchanged). Pass
+ * `includeInactive: true` for the audit/history view (also returns disabled/expired rows);
+ * pass `delegatorUserId` to scope to one delegator (the self-service `/mine` list forces
+ * this to the actor). Admin-managed unless the caller scopes it to their own id.
  */
-export async function listDelegations(query: QueryFn, filter: { delegatorUserId?: string } = {}): Promise<DelegationRecord[]> {
+export async function listDelegations(
+  query: QueryFn,
+  filter: { delegatorUserId?: string; includeInactive?: boolean } = {},
+): Promise<DelegationRecord[]> {
+  const delegator = filter.delegatorUserId?.trim()
+  const conditions: string[] = []
+  const params: unknown[] = []
+  if (!filter.includeInactive) conditions.push('active')
+  if (delegator) {
+    params.push(delegator)
+    conditions.push(`delegator_user_id = $${params.length}`)
+  }
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+  const rows = (await query<DelegationRow>(`SELECT * FROM approval_delegations ${where} ORDER BY start_at DESC`, params)).rows
+  return rows.map(rowToRecord)
+}
+
+export type DisableOwnResult = { status: 'ok' } | { status: 'not_found' } | { status: 'forbidden' }
+
+/**
+ * Self-service disable (soft-delete) of the caller's OWN delegation. The route passes the
+ * authenticated actor's id as `delegatorUserId`; this SELECTs first so the outcome
+ * distinguishes:
+ *   - unknown id                              → `not_found` (route → 404)
+ *   - found but owned by someone else         → `forbidden` (route → 403, NOT a masking 404)
+ *   - found and owned by the caller           → `ok`        (route → 200; idempotent if already inactive)
+ *
+ * The SELECT-then-check is load-bearing: a scoped `UPDATE ... WHERE id AND delegator=actor`
+ * would affect 0 rows for another user's delegation and leak as a 404 — hiding the越权 attempt.
+ */
+export async function disableOwnDelegation(query: QueryFn, id: string, delegatorUserId: string): Promise<DisableOwnResult> {
+  const owner = delegatorUserId?.trim()
+  if (!owner) return { status: 'forbidden' }
+  const existing = (
+    await query<{ delegator_user_id: string }>(`SELECT delegator_user_id FROM approval_delegations WHERE id = $1`, [id])
+  ).rows[0]
+  if (!existing) return { status: 'not_found' }
+  if (existing.delegator_user_id !== owner) return { status: 'forbidden' }
+  await query(`UPDATE approval_delegations SET active = FALSE, updated_at = NOW() WHERE id = $1 AND active`, [id])
+  return { status: 'ok' }
+}
+
+/**
+ * Audit derivation (read-only): how many approvals were ROUTED via a delegation, keyed by
+ * the original delegator. Derived from the frozen `delegatedFrom` audit trail the resolver
+ * stamps on `approval_assignments.metadata` — counts DISTINCT approval instances (not
+ * assignment rows) per delegator. Optionally scoped to one delegator.
+ *
+ * Granularity note: the metadata records only the delegator id, not the specific delegation
+ * window, so the count is PER-DELEGATOR (every window row of a delegator shares the total),
+ * not per-delegation-row. Empty map when nothing was ever routed.
+ */
+export async function countDelegatedApprovals(
+  query: QueryFn,
+  filter: { delegatorUserId?: string } = {},
+): Promise<Record<string, number>> {
   const delegator = filter.delegatorUserId?.trim()
   const rows = delegator
-    ? (await query<DelegationRow>(`SELECT * FROM approval_delegations WHERE active AND delegator_user_id = $1 ORDER BY start_at DESC`, [delegator])).rows
-    : (await query<DelegationRow>(`SELECT * FROM approval_delegations WHERE active ORDER BY start_at DESC`)).rows
-  return rows.map(rowToRecord)
+    ? (
+        await query<{ delegator: string | null; cnt: string | number }>(
+          `SELECT metadata->>'delegatedFrom' AS delegator, COUNT(DISTINCT instance_id) AS cnt
+             FROM approval_assignments
+            WHERE metadata->>'delegatedFrom' = $1
+            GROUP BY metadata->>'delegatedFrom'`,
+          [delegator],
+        )
+      ).rows
+    : (
+        await query<{ delegator: string | null; cnt: string | number }>(
+          `SELECT metadata->>'delegatedFrom' AS delegator, COUNT(DISTINCT instance_id) AS cnt
+             FROM approval_assignments
+            WHERE metadata->>'delegatedFrom' IS NOT NULL
+            GROUP BY metadata->>'delegatedFrom'`,
+        )
+      ).rows
+  const map: Record<string, number> = {}
+  for (const row of rows) {
+    const key = typeof row.delegator === 'string' ? row.delegator.trim() : ''
+    if (!key) continue
+    const parsed = typeof row.cnt === 'number' ? row.cnt : Number.parseInt(String(row.cnt), 10)
+    map[key] = Number.isFinite(parsed) ? parsed : 0
+  }
+  return map
 }
 
 /**

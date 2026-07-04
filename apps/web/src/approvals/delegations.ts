@@ -14,6 +14,9 @@ export interface DelegationRecord {
   startAt: string
   endAt: string
   active: boolean
+  // Audit-only: approvals routed via this delegator (per-delegator, derived server-side).
+  // Present on the admin audit list + the self-service /mine list; absent otherwise.
+  routedApprovalCount?: number
 }
 
 export interface CreateDelegationPayload {
@@ -35,10 +38,21 @@ export interface UpdateDelegationPayload {
 }
 
 const mockDelegations: DelegationRecord[] = []
+// The self-service (我的委托) surface is scoped server-side to the actor; in mock/DEV mode
+// there is no auth context, so own rows are tagged with this sentinel delegator id.
+const MOCK_SELF = '__me__'
 
-export async function listDelegations(): Promise<DelegationRecord[]> {
-  if (USE_MOCK) return mockDelegations.filter((d) => d.active)
-  const res = await apiGet<{ data: DelegationRecord[] }>('/api/approval-delegations')
+export async function listDelegations(opts: { includeInactive?: boolean } = {}): Promise<DelegationRecord[]> {
+  if (USE_MOCK) return opts.includeInactive ? [...mockDelegations] : mockDelegations.filter((d) => d.active)
+  const qs = opts.includeInactive ? '?includeInactive=true' : ''
+  const res = await apiGet<{ data: DelegationRecord[] }>(`/api/approval-delegations${qs}`)
+  return res.data ?? []
+}
+
+/** Self-service: the caller's OWN delegations (active + history), scoped server-side to the actor. */
+export async function listOwnDelegations(): Promise<DelegationRecord[]> {
+  if (USE_MOCK) return mockDelegations.filter((d) => d.delegatorUserId === MOCK_SELF)
+  const res = await apiGet<{ data: DelegationRecord[] }>('/api/approval-delegations/mine')
   return res.data ?? []
 }
 
@@ -121,4 +135,63 @@ export function buildCreatePayload(form: DelegationForm): CreateDelegationPayloa
     startAt: new Date(form.startAt).toISOString(),
     endAt: new Date(form.endAt).toISOString(),
   }
+}
+
+// ── Self-service (我的委托) ──────────────────────────────────────────────────
+// The delegator is ALWAYS the caller (forced server-side), so the own form/payload omit it.
+export interface OwnDelegationForm {
+  delegateeUserId: string
+  scope: 'all' | 'template'
+  scopeTemplateId: string
+  startAt: string
+  endAt: string
+}
+
+export type OwnCreateDelegationPayload = Omit<CreateDelegationPayload, 'delegatorUserId'>
+
+export function validateOwnDelegationForm(form: OwnDelegationForm): string | null {
+  if (!form.delegateeUserId.trim()) return '请填写被委托人'
+  if (form.scope === 'template' && !form.scopeTemplateId.trim()) return '指定模板范围需要选择模板'
+  if (!form.startAt || !form.endAt) return '请填写时间窗'
+  if (new Date(form.endAt).getTime() <= new Date(form.startAt).getTime()) return '结束时间必须晚于开始时间'
+  return null
+}
+
+export function buildOwnCreatePayload(form: OwnDelegationForm): OwnCreateDelegationPayload {
+  return {
+    delegateeUserId: form.delegateeUserId.trim(),
+    scope: form.scope,
+    scopeTemplateId: form.scope === 'template' ? form.scopeTemplateId.trim() : null,
+    startAt: new Date(form.startAt).toISOString(),
+    endAt: new Date(form.endAt).toISOString(),
+  }
+}
+
+export async function createOwnDelegation(payload: OwnCreateDelegationPayload): Promise<DelegationRecord> {
+  if (USE_MOCK) {
+    const rec: DelegationRecord = {
+      id: `mock-mine-${mockDelegations.length + 1}`,
+      delegatorUserId: MOCK_SELF,
+      delegateeUserId: payload.delegateeUserId,
+      scope: payload.scope,
+      scopeTemplateId: payload.scope === 'template' ? payload.scopeTemplateId ?? null : null,
+      startAt: payload.startAt,
+      endAt: payload.endAt,
+      active: true,
+    }
+    mockDelegations.push(rec)
+    return rec
+  }
+  const res = await apiPost<{ data: DelegationRecord }>('/api/approval-delegations/mine', payload)
+  return res.data
+}
+
+export async function disableOwnDelegation(id: string): Promise<void> {
+  if (USE_MOCK) {
+    const d = mockDelegations.find((x) => x.id === id && x.delegatorUserId === MOCK_SELF)
+    if (d) d.active = false
+    return
+  }
+  const res = await apiFetch(`/api/approval-delegations/mine/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`Failed to disable delegation (${res.status})`)
 }
