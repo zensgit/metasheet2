@@ -1482,6 +1482,75 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('SQLSERVER_EXECUTOR_MISSING')
   })
 
+  it('blocks full source readiness when SQL Server connection test failed but K3 target is active', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'erp:k3-wise-sqlserver', label: 'K3 WISE SQL Server Channel', roles: ['source'], supports: ['read', 'listObjects', 'getSchema'], advanced: true },
+          { kind: 'erp:k3-wise-webapi', label: 'K3 WISE WebAPI', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          {
+            id: 'plm_sql',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'PLM SQL Source',
+            kind: 'erp:k3-wise-sqlserver',
+            role: 'source',
+            status: 'error',
+            lastError: 'SQLSERVER_TEST_FAILED: TLS/SSL unsupported protocol during SQL Server connection test',
+          },
+          {
+            id: 'k3_target',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'K3 Target',
+            kind: 'erp:k3-wise-webapi',
+            role: 'target',
+            status: 'active',
+            lastTestedAt: '2026-07-04T00:00:00Z',
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).click()
+    await flushUi()
+
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    const sqlOption = container.querySelector('[data-testid="source-system-option-plm_sql"]') as HTMLOptionElement | null
+    expect(sqlOption).not.toBeNull()
+    expect(sqlOption!.disabled).toBe(true)
+    expect(sqlOption!.getAttribute('data-disabled')).toBe('true')
+    expect(sourceSystemSelect.value).toBe('')
+    expect(container.querySelector('[data-testid="source-empty-state"]')?.textContent).toContain('还没有可读取的数据源')
+    expect(container.querySelector('[data-testid="dry-run-readiness-summary"]')?.textContent).toContain('选择可读取的数据源')
+
+    expect(container.textContent).toContain('SQLSERVER_TEST_FAILED')
+    expect(container.textContent).toContain('表内已有数据或对象元数据不等于 live source 已就绪')
+    expect(container.textContent).not.toContain('TLS/SSL unsupported protocol')
+  })
+
   it('surfaces staging-creation CTA in source-empty and staging-empty when no readable source exists', async () => {
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url === '/api/integration/adapters') {
