@@ -231,10 +231,54 @@ function testAccessorBearingHopData() {
   const evilPlan = { get stepCount() { throw new Error('PLAN-BOOM') }, steps: [], handoffs: [] }
   assert.equal(evaluateCompositionOutcome(evilPlan, []).evidence.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
   assert.equal(deriveCompositionStepInput(evilPlan, 1, null).errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
+  // Pass a (present) approval map so this still exercises the validate-throw catch, not the
+  // missing-approval-context guard (which testPlanRequiresApprovalContext owns).
   const evilComposition = { get version() { throw new Error('CFG-BOOM') } }
-  const planned = planReadSourceComposition(evilComposition, {})
+  const planned = planReadSourceComposition(evilComposition, { readConfigsById: {} })
   assert.equal(planned.ok, false)
   assert.equal(planned.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
+}
+
+// ── lock 1: approval is a plan-time gate — the executor seam fails closed without an approval map ─────
+function testPlanRequiresApprovalContext() {
+  // The C-R1 validator only vets approved/resolver_lookup/read-only when readConfigsById is supplied,
+  // returning early (unvetted) otherwise. The planner is the C-R3 executor seam, so a plan WITHOUT the
+  // approved-config map is a contract violation that fails closed — never an approval-unverified ok:true.
+  for (const options of [undefined, {}, { readConfigsById: undefined }, { readConfigsById: null }]) {
+    const planned = planReadSourceComposition(composition(), options)
+    assert.equal(planned.ok, false, `options ${JSON.stringify(options)} must fail closed`)
+    assert.equal(planned.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
+  }
+  // A supplied (even empty) map re-enables the validator's own approval verdict: an empty map means
+  // no referenced config resolves → STEP_NOT_APPROVED, not a silent pass.
+  const emptyMap = planReadSourceComposition(composition(), { readConfigsById: {} })
+  assert.equal(emptyMap.ok, false)
+  assert.ok(emptyMap.errors.some((e) => e.code === 'READ_SOURCE_COMPOSITION_STEP_NOT_APPROVED'))
+}
+
+// ── lock 4: a contradictory hop (evidence says FAIL, data looks resolved) is a failed hop, not success ─
+function testEvaluateContradictoryHopFailsClosed() {
+  const plan = plannedPlan()
+  // A buggy / evidence-trusting producer emits evidence.ok:false but ALSO resolver-shaped scalar data.
+  // Keying success on the data snapshot alone would certify the aborted value; the seam requires BOTH
+  // evidence.ok AND a chain-usable scalar, so this is a FAILED hop that honors its own coarse code and
+  // never exposes the value as chain data.
+  const outcome = evaluateCompositionOutcome(plan, [
+    { evidence: { ok: false, rule: 'exactly_one', errorCode: 'READ_SOURCE_RESOLVER_AMBIGUOUS' }, data: { resolver: { target: 'internal_id', value: 'STALE-ITEM-SECRET' } } },
+    hopOutcome('first_when_sorted', 'bom_number', 'BOM-SHOULD-BE-VOID'),
+  ])
+  assert.equal(outcome.evidence.ok, false)
+  assert.equal(outcome.evidence.failedStep, 0)
+  assert.deepEqual(outcome.evidence.steps[0], {
+    step: 0,
+    ok: false,
+    rule: 'exactly_one',
+    errorCode: 'READ_SOURCE_RESOLVER_AMBIGUOUS',
+  })
+  // L4 clamp: the post-failure hop is void, and NO value (intermediate or downstream) rides out.
+  assert.deepEqual(outcome.evidence.steps[1], { step: 1, ok: false, errorCode: 'READ_SOURCE_COMPOSITION_STEP_NOT_RUN' })
+  assert.equal(outcome.data, null)
+  assertValuesFree(outcome, ['STALE-ITEM-SECRET', 'BOM-SHOULD-BE-VOID'])
 }
 
 // ── L5 red test: chain data strips everything but target+value ─────────────────────────────────────
@@ -477,6 +521,8 @@ function testExportedVocabulary() {
 testPurity()
 testPlanValid()
 testPlanRejectsWriteShapedAndUnapproved()
+testPlanRequiresApprovalContext()
+testEvaluateContradictoryHopFailsClosed()
 testDeriveHappyPath()
 testDeriveFailClosed()
 testAccessorBearingHopData()
