@@ -8,7 +8,7 @@
 
 | # | Slice | PR | Honest as-built |
 |---|---|---|---|
-| **A** | T3-6 projection base visibility hardening (security prereq) | **#3537** | Full runtime — admin-only read guard at all **4** read chokes (incl. the collab/Yjs/api-token resolver, review P1), per-path RED-before. |
+| **A** | T3-6 projection base visibility hardening (security prereq) | **#3537** | Full runtime — admin-only **capability fence** (full non-admin read/write/manage downgrade, review P1 #2) at all **4** capability chokes (incl. the collab/Yjs/api-token resolver, review P1 #1), per-path RED-before. |
 | **B** | Approval analytics dashboard (differentiation payoff) | **#3535** | **Reorient:** SLA dashboard + endpoints already shipped; B *completes* it (adds requester/department sections — the only unsurfaced metric). |
 | **C** | Delegation UX enhancement | **#3536** | **Reorient:** 委托 runtime already shipped; C adds the genuine gaps (self-service + audit visibility), did not rebuild. |
 
@@ -19,12 +19,19 @@ first, scoped down honestly, filled only the real gaps. A was the one substantiv
 The projection base `base_apr_projection` (materialized approval outcomes) had no per-sheet share → any global
 `multitable:read` holder could read it. **Owner-default: admin-only** (per-row `visibility_scope` inheritance =
 a separate later slice).
-- **Guard at 4 read chokes** (admins bypass): `resolveSheetCapabilities` (single sheet + record read),
+- **Fence at 4 capability chokes** (admins bypass): `resolveSheetCapabilities` (single sheet + record read),
   `filterReadableSheetRowsForAccess` (base list + 3 sheet lists → also hides the base itself),
-  `resolveReadableSheetIds`, and — **review P1, initially missed** — `resolveSheetCapabilitiesForUser`
+  `resolveReadableSheetIds`, and — **review P1 #1, initially missed** — `resolveSheetCapabilitiesForUser`
   (`sheet-capabilities.ts`), which fronts the **collab room / Yjs record / api-token** auth paths (NOT
   REST-only; my earlier "no callers" claim was wrong — the leak survived via collab/Yjs). Now gated + locked by
   a resolver unit test, RED-before confirmed.
+- **Full capability fence, not a read-only downgrade** — **review P1 #2, initially missed**: the guard's first
+  cut downgraded only `canRead`/`canExport` (its `canWrite`/`canWriteOwn` keys don't exist on
+  `MultitableCapabilities`, so they were silent no-ops) — a non-admin holding `multitable:write`/workflow perms
+  kept `canEditRecord`/`canDeleteRecord`/`canManageViews`/`canManageAutomation`/… on the projection sheet, and
+  write paths gate on exactly those. `restrictApprovalProjectionCapabilities` now denies **all 11 sensitive
+  capability booleans** for a non-admin on a projection sheet; writer-fence tests on both resolvers,
+  RED-before confirmed (reverting to the read-only downgrade fails the writer tests).
 - **Side-effect-free constant module** so the permission hot path references `APPROVAL_PROJECTION_BASE_ID`
   without importing the projection service's `eventBus`/scheduler surface.
 - **Verify:** real-DB `approval-projection-visibility` **6/6** (non-admin denied single-read + listings; admin
