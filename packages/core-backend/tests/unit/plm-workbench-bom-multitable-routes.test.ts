@@ -290,6 +290,99 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
     expect(res.body.reason).toBe('provider-rejected')
   })
 
+  // ECO Phase 0: the provider 409 is discriminated by detail.code (lifecycle_locked vs
+  // idempotency_conflict); the relay surfaces the code as the reason instead of flattening.
+  // A bodyless or unknown-code 409 still flattens to 'provider-rejected' (test above).
+  it('write route surfaces a discriminated lifecycle_locked 409 reason', async () => {
+    const locked = Object.assign(new Error('Request failed with status code 409'), {
+      response: {
+        status: 409,
+        data: {
+          detail: {
+            code: 'lifecycle_locked',
+            message: "Item is locked in state 'Released'",
+            state: 'Released',
+            eco_required: true,
+          },
+        },
+      },
+    })
+    dsMocks.getDataSource.mockReturnValue({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest(
+          { supported: true, api_version: 'v1', entitled: true },
+          { bom_multitable_writeback: { supported: true, api_version: 'v1', entitled: true } },
+        ),
+      }),
+      getBomMultitableContext: vi.fn(),
+      updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: locked }),
+    })
+    const res = await request(app)
+      .patch(WRITE_URL)
+      .set('Idempotency-Key', 'submit-1')
+      .send({ quantity: 5 })
+    expect(res.status).toBe(409)
+    expect(res.body.reason).toBe('lifecycle_locked')
+  })
+
+  it('write route surfaces a discriminated idempotency_conflict 409 reason', async () => {
+    const burned = Object.assign(new Error('Request failed with status code 409'), {
+      response: {
+        status: 409,
+        data: {
+          detail: {
+            code: 'idempotency_conflict',
+            message: 'Idempotency-Key reused for a different write',
+          },
+        },
+      },
+    })
+    dsMocks.getDataSource.mockReturnValue({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest(
+          { supported: true, api_version: 'v1', entitled: true },
+          { bom_multitable_writeback: { supported: true, api_version: 'v1', entitled: true } },
+        ),
+      }),
+      getBomMultitableContext: vi.fn(),
+      updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: burned }),
+    })
+    const res = await request(app)
+      .patch(WRITE_URL)
+      .set('Idempotency-Key', 'submit-1')
+      .send({ quantity: 5 })
+    expect(res.status).toBe(409)
+    expect(res.body.reason).toBe('idempotency_conflict')
+  })
+
+  it('write route flattens an unknown discriminated 409 code to provider-rejected (forward-compat)', async () => {
+    const future = Object.assign(new Error('Request failed with status code 409'), {
+      response: {
+        status: 409,
+        data: { detail: { code: 'some_future_code', message: 'new provider semantics' } },
+      },
+    })
+    dsMocks.getDataSource.mockReturnValue({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest(
+          { supported: true, api_version: 'v1', entitled: true },
+          { bom_multitable_writeback: { supported: true, api_version: 'v1', entitled: true } },
+        ),
+      }),
+      getBomMultitableContext: vi.fn(),
+      updateBomMultitableLine: vi.fn().mockResolvedValue({ data: [], error: future }),
+    })
+    const res = await request(app)
+      .patch(WRITE_URL)
+      .set('Idempotency-Key', 'submit-1')
+      .send({ quantity: 5 })
+    expect(res.status).toBe(409)
+    expect(res.body.reason).toBe('provider-rejected')
+  })
+
   it('write route forwards the client If-Match header to the provider (optimistic concurrency)', async () => {
     const updateBomMultitableLine = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R1' }] })
     dsMocks.getDataSource.mockReturnValue({
