@@ -161,7 +161,7 @@
 | HMR-2 | owed-punch candidate read/filter | ✅ #3270 | records-backed `absent`/`partial` 候选 + pending request hint + scoped/central authority tests |
 | HMR-3 | manual reminder enqueue route | ✅ #3271 | `manual_missed_punch_reminder` delivery rows；replay no-op；payload conflict 409；out-of-scope 403；stale candidate 409；producer 不直接 send |
 | HMR-4 | admin UI | ✅ #3272 | admin notification-deliveries operation；candidate load + selected remind confirm/result；confirm snapshot authoritative；web regressions |
-| HMR-5 | staging smoke | 🟡 runbook prepared | scoped actor enqueue → worker delivery → repeat no duplicate → stale/out-of-scope guards → residue=0；runbook `attendance-manual-missed-punch-reminder-hmr5-staging-runbook-20260626.md` |
+| HMR-5 | staging smoke | 🟡 runbook + helper prepared | scoped actor enqueue → worker delivery → repeat no duplicate → stale/out-of-scope guards → residue=0；runbook `attendance-manual-missed-punch-reminder-hmr5-staging-runbook-20260626.md` + helper `scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs` |
 
 ---
 
