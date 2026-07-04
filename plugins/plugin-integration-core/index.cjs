@@ -20,6 +20,7 @@ const { createCredentialStore } = require('./lib/credential-store.cjs')
 const { createDb } = require('./lib/db.cjs')
 const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
 const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
+const { createReadSourceCompositionConfigStore } = require('./lib/read-source-composition-config-store.cjs')
 const { createAdapterRegistry } = require('./lib/contracts.cjs')
 const { createHttpAdapterFactory, HTTP_ADAPTER_METADATA } = require('./lib/adapters/http-adapter.cjs')
 const { createYuantusPlmWrapperAdapterFactory, YUANTUS_PLM_ADAPTER_METADATA } = require('./lib/adapters/plm-yuantus-wrapper.cjs')
@@ -49,6 +50,7 @@ let activeContext = null
 let credentialStore = null
 let externalSystemRegistry = null
 let readSourceConfigStore = null
+let readSourceCompositionConfigStore = null
 let adapterRegistry = null
 let pipelineRegistry = null
 let templateRegistry = null
@@ -214,6 +216,9 @@ module.exports = {
     })
     // S2-c (#1709): content-keyed read-source config versions + values-free audit.
     readSourceConfigStore = createReadSourceConfigStore({ db })
+    // C-R4-1 (#1709): the composition config store validates each step's read config is approved at
+    // save time via readSourceConfigStore.getForRuntime, and the run route re-loads them at runtime.
+    readSourceCompositionConfigStore = createReadSourceCompositionConfigStore({ db, readSourceConfigStore })
     adapterRegistry = createAdapterRegistry({ logger })
       .registerAdapter('http', createHttpAdapterFactory(), { metadata: HTTP_ADAPTER_METADATA })
       .registerAdapter('plm:yuantus-wrapper', createYuantusPlmWrapperAdapterFactory(), { metadata: YUANTUS_PLM_ADAPTER_METADATA })
@@ -267,6 +272,7 @@ module.exports = {
       services: {
         externalSystemRegistry,
         readSourceConfigStore,
+        readSourceCompositionConfigStore,
         adapterRegistry,
         pipelineRegistry,
         templateRegistry,
@@ -292,6 +298,7 @@ module.exports = {
     credentialStore = null
     externalSystemRegistry = null
     readSourceConfigStore = null
+    readSourceCompositionConfigStore = null
     adapterRegistry = null
     pipelineRegistry = null
     templateRegistry = null
