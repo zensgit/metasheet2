@@ -87,6 +87,8 @@ function buildQueryHandler(
     if (sql.includes('FROM meta_views') || sql.includes('from meta_views')) {
       return { rows: [view], rowCount: 1 }
     }
+    // A: approval-projection read-guard lookup — no projection sheet in this test
+    if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
     if (sql.includes('FROM meta_sheets') || sql.includes('from meta_sheets') || sql.includes('FROM spreadsheets')) {
       return { rows: [sheet], rowCount: 1 }
     }
@@ -427,6 +429,8 @@ describe('Public form flow', () => {
           storedConfig = JSON.parse(String(params?.[1] ?? '{}'))
           return { rows: [], rowCount: 1 }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -501,6 +505,8 @@ describe('Public form flow', () => {
           storedConfig = JSON.parse(String(params?.[1] ?? '{}'))
           return { rows: [], rowCount: 1 }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -566,6 +572,8 @@ describe('Public form flow', () => {
           storedConfig = JSON.parse(String(params?.[1] ?? '{}'))
           return { rows: [], rowCount: 1 }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -629,6 +637,8 @@ describe('Public form flow', () => {
           storedConfig = JSON.parse(String(params?.[1] ?? '{}'))
           return { rows: [], rowCount: 1 }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -670,6 +680,8 @@ describe('Public form flow', () => {
             }],
           }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -715,6 +727,8 @@ describe('Public form flow', () => {
             rowCount: ids.length,
           }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -759,6 +773,8 @@ describe('Public form flow', () => {
         if (sql.includes('SELECT id::text AS id FROM platform_member_groups WHERE id::text = ANY')) {
           return { rows: [] }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })

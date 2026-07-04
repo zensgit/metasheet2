@@ -157,6 +157,8 @@ describe('Multitable view config API', () => {
           insertParams = params
           return { rows: [], rowCount: 1 }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -233,6 +235,8 @@ describe('Multitable view config API', () => {
           updateParams = params
           return { rows: [], rowCount: 1 }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -310,6 +314,8 @@ describe('Multitable view config API', () => {
         if (sql.includes('UPDATE meta_views')) {
           throw new Error('UPDATE should not run for invalid Gantt dependency config')
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -377,6 +383,8 @@ describe('Multitable view config API', () => {
           updateParams = params
           return { rows: [], rowCount: 1 }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -432,6 +440,8 @@ describe('Multitable view config API', () => {
         if (sql.includes('INSERT INTO meta_views')) {
           throw new Error('INSERT should not run for invalid Gantt dependency config')
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -485,6 +495,8 @@ describe('Multitable view config API', () => {
           expect(params).toEqual(['view_kanban'])
           return { rows: [], rowCount: 1 }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -509,6 +521,8 @@ describe('Multitable view config API', () => {
           expect(params).toEqual(['view_missing'])
           return { rows: [], rowCount: 0 }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })

@@ -164,6 +164,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -269,6 +271,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -370,6 +374,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -435,6 +441,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -482,6 +490,8 @@ describe('Multitable record and form context API', () => {
           return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -531,6 +541,8 @@ describe('Multitable record and form context API', () => {
           return { rows: [{ id: 'sheet_public', base_id: 'base_public', name: 'Public', description: 'Public intake' }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -644,6 +656,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -786,6 +800,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -884,6 +900,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -970,6 +988,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1099,6 +1119,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1236,6 +1258,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1296,6 +1320,8 @@ describe('Multitable record and form context API', () => {
           return { rows: [] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1379,6 +1405,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1473,6 +1501,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1562,6 +1592,8 @@ describe('Multitable record and form context API', () => {
           return { rows: [] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1641,6 +1673,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1695,6 +1729,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1728,6 +1764,8 @@ describe('Multitable record and form context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })

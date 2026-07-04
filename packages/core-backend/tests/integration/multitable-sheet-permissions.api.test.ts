@@ -193,6 +193,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -292,6 +294,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -361,6 +365,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -409,6 +415,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -448,6 +456,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -509,6 +519,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -561,6 +573,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -612,6 +626,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [{ id: 'rec_1', sheet_id: 'sheet_ops' }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -703,6 +719,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -792,6 +810,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -992,6 +1012,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1087,6 +1109,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [{ id: 'view_grid', sheet_id: 'sheet_ops' }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1145,6 +1169,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1349,6 +1375,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1524,6 +1552,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [{ permission_code: 'multitable:write' }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1644,6 +1674,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1706,6 +1738,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1796,6 +1830,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           throw new Error(`Unexpected role permission lookup: ${params?.[0]}`)
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1912,6 +1948,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2014,6 +2052,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2099,6 +2139,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2206,6 +2248,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2265,6 +2309,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [{ id: 'role_ops_writer' }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2293,6 +2339,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write-own', subject_type: 'user' }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2325,6 +2373,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:write', subject_type: 'user' }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2385,6 +2435,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2447,6 +2499,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [], rowCount: 1 }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2476,6 +2530,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2520,6 +2576,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2570,6 +2628,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [{ id: 'sheet_target', base_id: 'base_ops', name: 'Vendors', description: null }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2634,6 +2694,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2716,6 +2778,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2795,6 +2859,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2853,6 +2919,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           throw new Error('field insert should not run when foreign sheet is unreadable')
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2896,6 +2964,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -2946,6 +3016,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3001,6 +3073,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3056,6 +3130,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3109,6 +3185,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3148,6 +3226,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           throw undefinedTableError('platform_member_groups')
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3179,6 +3259,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           throw undefinedColumnError('g.description')
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3210,6 +3292,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           throw undefinedColumnError('r.description')
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3242,6 +3326,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           throw undefinedTableError('platform_member_groups')
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3273,6 +3359,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           throw undefinedColumnError('g.description')
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3304,6 +3392,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           throw undefinedColumnError('r.description')
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3344,6 +3434,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3383,6 +3475,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -3423,6 +3517,8 @@ describe('Multitable sheet-scoped permissions API', () => {
           return { rows: [] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })

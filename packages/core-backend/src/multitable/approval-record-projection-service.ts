@@ -48,8 +48,11 @@ import type { ApprovalCompletionEventV1 } from '../services/ApprovalCompletionEv
 
 const logger = new Logger('ApprovalRecordProjection')
 
-/** The system-owned base that holds every per-template-family projection sheet (§5). */
-export const APPROVAL_PROJECTION_BASE_ID = 'base_apr_projection'
+/** The system-owned base that holds every per-template-family projection sheet (§5). Single source of
+ *  truth lives in the side-effect-free `approval-projection-constants` (imported by the permission path);
+ *  re-exported here for existing importers. */
+export { APPROVAL_PROJECTION_BASE_ID } from './approval-projection-constants'
+import { APPROVAL_PROJECTION_BASE_ID } from './approval-projection-constants'
 /** Reserved owner/actor for the system-managed base + record rows (not a real user). */
 export const APPROVAL_PROJECTION_SYSTEM_OWNER = 'system:approval-projection'
 
