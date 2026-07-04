@@ -131,7 +131,22 @@ const PARENT_HOST_PACT_PATHS = [
   { method: 'POST', path: '/api/v1/bom/multitable/01H000000000000000000000P1/embed-token' },
 ] as const
 
-const PACT_PATHS = [...PLM_ADAPTER_PACT_PATHS, ...PARENT_HOST_PACT_PATHS] as const
+const ERROR_CONTRACT_PACT_PATHS = [
+  // ECO Phase 0 (Yuantus taskbook plm-collab-eco-phase0-contract-taskbook-20260704.md, provider
+  // #969): the pact's FIRST error interactions — the write-back's two discriminated 409s,
+  // machine-distinguishable by detail.code ALONE (lifecycle_locked vs idempotency_conflict).
+  // They live on DEDICATED provider fixtures (W4/W6 locked parent, W7/W9 burned replay key) so the
+  // W1/W3 success-only pin above stays intact. Same PLMAdapter endpoint template as the 200
+  // write-back — no new consumer callsite.
+  { method: 'PATCH', path: '/api/v1/bom/multitable/01H000000000000000000000W4/lines/01H000000000000000000000W6' },
+  { method: 'PATCH', path: '/api/v1/bom/multitable/01H000000000000000000000W7/lines/01H000000000000000000000W9' },
+] as const
+
+const PACT_PATHS = [
+  ...PLM_ADAPTER_PACT_PATHS,
+  ...PARENT_HOST_PACT_PATHS,
+  ...ERROR_CONTRACT_PACT_PATHS,
+] as const
 
 function loadPact(): PactDocument {
   const raw = readFileSync(PACT_PATH, 'utf8')
@@ -272,6 +287,47 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       ok: true,
       bom_line_id: '01H000000000000000000000W3',
     })
+  })
+
+  // ECO Phase 0: the discriminated-409 error contract (Yuantus provider #968 taskbook + #969 impl).
+  // detail.code is the ONLY discriminator; eco_required is a boolean FIELD (not a third code);
+  // message keeps the legacy human-readable strings; unknown code ⇒ treat as generic 409.
+  it('ECO Phase 0: the two write-back 409s are machine-distinguishable by detail.code alone', () => {
+    const pact = loadPact()
+
+    const locked = pact.interactions.find(
+      i =>
+        i.request.path ===
+        '/api/v1/bom/multitable/01H000000000000000000000W4/lines/01H000000000000000000000W6',
+    )
+    expect(locked).toBeDefined()
+    expect(locked!.request.method).toBe('PATCH')
+    expect(locked!.response.status).toBe(409)
+    const lockedDetail = (locked!.response.body as { detail: Record<string, unknown> }).detail
+    expect(lockedDetail.code).toBe('lifecycle_locked')
+    expect(lockedDetail.eco_required).toBe(true)
+    expect(typeof lockedDetail.message).toBe('string')
+    expect(typeof lockedDetail.state).toBe('string')
+    // exact payload key-set: no eco_id / entitlement / ECO-existence leakage on the error path
+    expect(Object.keys(lockedDetail).sort()).toEqual(['code', 'eco_required', 'message', 'state'])
+    expect(locked!.providerStates![0].name).toContain('lifecycle-locked')
+
+    const conflict = pact.interactions.find(
+      i =>
+        i.request.path ===
+        '/api/v1/bom/multitable/01H000000000000000000000W7/lines/01H000000000000000000000W9',
+    )
+    expect(conflict).toBeDefined()
+    expect(conflict!.request.method).toBe('PATCH')
+    expect(conflict!.response.status).toBe(409)
+    const conflictDetail = (conflict!.response.body as { detail: Record<string, unknown> }).detail
+    expect(conflictDetail.code).toBe('idempotency_conflict')
+    expect(Object.keys(conflictDetail).sort()).toEqual(['code', 'message'])
+    // the Idempotency-Key is EXACT-match (the provider state pre-seeds the replay row on it)
+    expect(conflict!.request.headers).toHaveProperty(
+      'Idempotency-Key',
+      'pact-writeback-conflict-0001',
+    )
   })
 
   it('aml/apply request body documents the RPC envelope shape used by PLMAdapter', () => {

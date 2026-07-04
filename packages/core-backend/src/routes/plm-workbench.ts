@@ -866,13 +866,36 @@ function providerErrorStatus(error: unknown): number | null {
   return typeof status === 'number' ? status : null
 }
 
+// ECO Phase 0 (Yuantus provider contract, plm-collab-eco-phase0-contract-taskbook-20260704.md):
+// the provider's write-back 409 carries a discriminated body {detail: {code, ...}} with
+// code ∈ lifecycle_locked | idempotency_conflict. The AxiosError reaches this route with
+// response.data intact, so read the code here. Contract rule: an UNKNOWN or absent code must
+// degrade to the legacy flattened reason ('provider-rejected'), never leak through raw.
+const PROVIDER_409_REASON_CODES = new Set(['lifecycle_locked', 'idempotency_conflict'])
+
+function providerConflictReasonCode(error: unknown): string | null {
+  const candidate = error as { response?: { data?: unknown } } | null
+  const data = candidate?.response?.data
+  if (!data || typeof data !== 'object') return null
+  const detail = (data as { detail?: unknown }).detail
+  if (!detail || typeof detail !== 'object') return null
+  const code = (detail as { code?: unknown }).code
+  return typeof code === 'string' && PROVIDER_409_REASON_CODES.has(code) ? code : null
+}
+
 function relayProviderWritebackError(error: unknown): { status: number; reason: string } {
   const status = providerErrorStatus(error)
   // 412 = stale If-Match (optimistic-concurrency conflict): distinct reason so the UI reloads.
   if (status === 412) {
     return { status: 412, reason: 'precondition-failed' }
   }
-  if (status && [400, 403, 404, 409, 422].includes(status)) {
+  // 409 = discriminated by the provider since ECO Phase 0: surface the code as the reason so the
+  // UI can distinguish "lifecycle-locked, needs the ECO route" from "Idempotency-Key burned for a
+  // different write". Unknown/absent code falls back to the legacy flattened reason.
+  if (status === 409) {
+    return { status: 409, reason: providerConflictReasonCode(error) ?? 'provider-rejected' }
+  }
+  if (status && [400, 403, 404, 422].includes(status)) {
     return { status, reason: 'provider-rejected' }
   }
   return { status: 502, reason: 'provider-unavailable' }

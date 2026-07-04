@@ -11,7 +11,11 @@ vi.mock('../src/services/integration/workbench', () => ({
 import PlmBomReviewPanel from '../src/components/plm/PlmBomReviewPanel.vue'
 
 const CONTEXT = {
-  part: { part_id: 'P1', item_number: 'P-001', name: 'Assembly', state: 'Released', generation: 3 },
+  // Root part state 'Draft': the write specs below model the provider's Draft fast-path (200 on
+  // write). A locked root (Released/Suspended/Obsolete) now advisory-pre-gates editing entirely —
+  // covered by the dedicated ECO Phase 0 pre-gate specs, not the write-path specs. (The old
+  // 'Released' fixture value contradicted the provider, which 409s writes under a locked root.)
+  part: { part_id: 'P1', item_number: 'P-001', name: 'Assembly', state: 'Draft', generation: 3 },
   lines: [
     { bom_line_id: 'R1', part_id: 'C1', write_etag: '"bom-line:etag-r1"', item_number: 'C-001', name: 'Bracket', state: 'Draft', generation: 1, quantity: 2, uom: 'EA', find_num: '10', refdes: 'R1,R2', level: 1, path: ['P1'], path_labels: ['P-001'], source_version: 1, source_updated_at: '2026-06-05T00:00:00', sync_status: 'snapshot' },
     { bom_line_id: 'R2', part_id: 'D1', item_number: 'D-001', name: 'Screw', state: 'Released', generation: 2, quantity: 4, uom: 'EA', find_num: '20', refdes: 'R3', level: 2, path: ['P1', 'C1'], path_labels: ['P-001', 'C-001'], source_version: 2, source_updated_at: '2026-06-05T00:00:00', sync_status: 'snapshot' },
@@ -180,6 +184,101 @@ describe('PlmBomReviewPanel (P3-C BOM review + governed write-back)', () => {
     await flushUi()
     expect(updateLineMock).toHaveBeenNthCalledWith(2, 'plm-ds', 'P1', 'R1', { refdes: 'R9' }, 'submit-key-2', '"bom-line:etag-r1"')
     expect(container.textContent).toContain('写回成功。')
+  })
+
+  // --- ECO Phase 0: discriminated-409 handling + advisory locked pre-gate -----------------------
+
+  it('renders the distinct ECO guidance when the write is rejected with reason lifecycle_locked', async () => {
+    // The residual race: the advisory pre-gate saw an editable state, but the provider's
+    // authoritative lock rejected the write with the discriminated code.
+    vi.stubGlobal('crypto', { randomUUID: () => 'submit-key-1' })
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    updateLineMock.mockResolvedValue({
+      ok: false,
+      status: 409,
+      reason: 'lifecycle_locked',
+      message: "Item is locked in state 'Released'",
+    })
+    mountPanel()
+    await flushUi()
+    await setPartAndLoad('P1')
+
+    const refdes = container.querySelector('[data-testid="plm-bom-review-refdes-input"]') as HTMLInputElement
+    refdes.value = 'R9'
+    refdes.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="plm-bom-review-save"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container.textContent).toContain('ECO')
+    expect(container.textContent).toContain('生命周期锁定')
+    // NOT the generic conflated 409 copy
+    expect(container.textContent).not.toContain('提交键已用于不同写入')
+  })
+
+  it('on reason idempotency_conflict mints a FRESH key for the next submit (burned key never replayed)', async () => {
+    const randomUUID = vi.fn()
+      .mockReturnValueOnce('submit-key-1')
+      .mockReturnValueOnce('submit-key-2')
+    vi.stubGlobal('crypto', { randomUUID })
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    updateLineMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        reason: 'idempotency_conflict',
+        message: 'Idempotency-Key reused for a different write',
+      })
+      .mockResolvedValueOnce({ ok: true, bom_line_id: 'R1' })
+    mountPanel()
+    await flushUi()
+    await setPartAndLoad('P1')
+
+    const refdes = container.querySelector('[data-testid="plm-bom-review-refdes-input"]') as HTMLInputElement
+    refdes.value = 'R9'
+    refdes.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    const save = container.querySelector('[data-testid="plm-bom-review-save"]') as HTMLButtonElement
+    save.click()
+    await flushUi()
+    expect(container.textContent).toContain('更换新的提交键')
+    save.click()
+    await flushUi()
+
+    expect(updateLineMock).toHaveBeenNthCalledWith(1, 'plm-ds', 'P1', 'R1', { refdes: 'R9' }, 'submit-key-1', '"bom-line:etag-r1"')
+    // the burned key was dropped -> the retry minted submit-key-2 instead of replaying it
+    expect(updateLineMock).toHaveBeenNthCalledWith(2, 'plm-ds', 'P1', 'R1', { refdes: 'R9' }, 'submit-key-2', '"bom-line:etag-r1"')
+    expect(randomUUID).toHaveBeenCalledTimes(2)
+    expect(container.textContent).toContain('写回成功。')
+  })
+
+  it('advisory-pre-gates editing (banner + no inputs) when the ROOT part is in a locked state', async () => {
+    const locked = cloneContext()
+    locked.part.state = 'Released'
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: locked })
+    mountPanel()
+    await flushUi()
+    await setPartAndLoad('P1')
+
+    expect(stateOf()).toBe('table')
+    // rows still render (read-only review stays useful) ...
+    expect(container.querySelectorAll('[data-testid="plm-bom-review-row"]').length).toBe(2)
+    // ... but no cell is editable and the ECO guidance banner shows
+    expect(container.querySelector('[data-testid="plm-bom-review-quantity-input"]')).toBeNull()
+    expect(container.querySelector('[data-testid="plm-bom-review-locked-hint"]')).not.toBeNull()
+    expect(container.textContent).toContain('ECO')
+  })
+
+  it('does NOT pre-gate on a locked per-line CHILD state (the gate keys on the root part only)', async () => {
+    // line R2's child state is 'Released' in the shared fixture while the root is 'Draft' --
+    // per-line state is the CHILD part's state and must not disable editing.
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    mountPanel()
+    await flushUi()
+    await setPartAndLoad('P1')
+
+    expect(container.querySelector('[data-testid="plm-bom-review-locked-hint"]')).toBeNull()
+    expect(container.querySelector('[data-testid="plm-bom-review-quantity-input"]')).not.toBeNull()
   })
 
   it('shows the upgrade affordance (no table) when supported but not entitled', async () => {
