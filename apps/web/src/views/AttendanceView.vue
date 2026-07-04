@@ -1062,12 +1062,44 @@
             </button>
           </div>
           <small class="attendance__field-hint">{{ anomaliesTimezoneContextHint }}</small>
+          <div v-if="anomalies.length > 0" class="attendance__batch-toolbar" data-attendance-batch-toolbar>
+            <button
+              v-if="attendanceResultEditCapabilityUnknown"
+              class="attendance__btn"
+              data-attendance-batch-probe
+              @click="probeBatchAnomalyCapability"
+            >
+              {{ tr('Check edit access', '检查更正权限') }}
+            </button>
+            <template v-else>
+              <span class="attendance__field-hint" data-attendance-batch-selected-count>
+                {{ tr(`Selected anomaly rows: ${batchAnomalySelectedCount}`, `已选异常行：${batchAnomalySelectedCount}`) }}
+              </span>
+              <button
+                class="attendance__btn attendance__btn--primary"
+                :disabled="Boolean(batchAnomalySubmitDisabledReason)"
+                :title="batchAnomalySubmitDisabledReason || undefined"
+                data-attendance-batch-resolve
+                @click="openBatchAnomalyModal"
+              >
+                {{ tr('Batch resolve', '批量处理') }}
+              </button>
+              <small
+                v-if="batchAnomalySubmitDisabledReason"
+                class="attendance__field-hint"
+                data-attendance-batch-disabled-reason
+              >
+                {{ batchAnomalySubmitDisabledReason }}
+              </small>
+            </template>
+          </div>
           <div v-if="anomaliesLoading" class="attendance__empty">{{ tr('Loading anomalies...', '正在加载异常...') }}</div>
           <div v-else-if="anomalies.length === 0" class="attendance__empty">{{ tr('No anomalies.', '暂无异常。') }}</div>
           <div v-else class="attendance__table-wrapper">
             <table class="attendance__table">
               <thead>
                 <tr>
+                  <th class="attendance__batch-check-col"></th>
                   <th>{{ tr('Date', '日期') }}</th>
                   <th>{{ tr('Status', '状态') }}</th>
                   <th>{{ tr('Warnings', '警告') }}</th>
@@ -1077,6 +1109,16 @@
               </thead>
               <tbody>
                 <tr v-for="item in anomalies" :key="item.recordId">
+                  <td class="attendance__batch-check-col">
+                    <input
+                      type="checkbox"
+                      :checked="isBatchAnomalyRowSelected(item.recordId)"
+                      :disabled="!isBatchAnomalyRowSelectable(item)"
+                      :title="isBatchAnomalyRowSelectable(item) ? undefined : (attendanceResultEditDisabledReason(item) || tr('Check admin permission before editing.', '更正前需先检查管理员权限。'))"
+                      data-attendance-batch-select
+                      @change="toggleBatchAnomalyRow(item)"
+                    />
+                  </td>
                   <td>{{ item.workDate }}</td>
                   <td>{{ formatStatus(item.status) }}</td>
                   <td>{{ formatWarningsShort(item.warnings) }}</td>
@@ -9034,6 +9076,136 @@
         </div>
       </div>
     </div>
+
+    <div
+      v-if="batchAnomalyModal.open && batchAnomalyModal.snapshot"
+      class="attendance__modal"
+      role="dialog"
+      aria-modal="true"
+      data-attendance-batch-modal
+    >
+      <div class="attendance__modal-body attendance__result-edit-modal">
+        <div class="attendance__admin-section-header">
+          <div>
+            <h4>{{ tr('Batch resolve anomalies', '批量处理异常') }}</h4>
+            <small class="attendance__field-hint">
+              {{ tr(`Selected anomaly rows: ${batchAnomalyModal.snapshot.rows.length}`, `已选异常行：${batchAnomalyModal.snapshot.rows.length}`) }}
+              <template v-if="batchAnomalyModal.snapshot.rows[0] && batchAnomalyModal.snapshot.rows[0].targetUserId">
+                · {{ batchAnomalyModal.snapshot.rows[0].targetUserId }}
+              </template>
+            </small>
+          </div>
+          <button class="attendance__btn" type="button" @click="closeBatchAnomalyModal">
+            {{ tr('Close', '关闭') }}
+          </button>
+        </div>
+
+        <p class="attendance__field-hint" data-attendance-batch-individual-warning>
+          {{ tr('Rows are processed individually; failures are reported per row.', '各行逐条处理，失败按行分别报告。') }}
+        </p>
+
+        <div class="attendance__result-edit-summary" data-attendance-batch-preview>
+          <div
+            v-for="row in batchAnomalyModal.snapshot.rows"
+            :key="row.recordId"
+            data-attendance-batch-preview-row
+          >
+            <span>{{ row.workDate }} · {{ formatStatus(row.sourceStatus) }}</span>
+            <span
+              v-if="batchAnomalyRowResult(row.recordId)"
+              class="attendance__status-chip"
+              :data-attendance-batch-row-state="batchAnomalyRowResult(row.recordId)?.state"
+            >
+              <template v-if="batchAnomalyRowResult(row.recordId)?.state === 'ok'">
+                {{ batchAnomalyRowResult(row.recordId)?.alreadyApplied ? tr('Already applied', '已应用') : tr('Applied', '已更正') }}
+                <template v-if="batchAnomalyRowResult(row.recordId)?.editId"> · {{ batchAnomalyRowResult(row.recordId)?.editId }}</template>
+              </template>
+              <template v-else-if="batchAnomalyRowResult(row.recordId)?.state === 'error'">
+                {{ batchAnomalyRowResult(row.recordId)?.errorMessage }}
+              </template>
+              <template v-else>{{ tr('Submitting...', '提交中...') }}</template>
+            </span>
+          </div>
+        </div>
+
+        <div class="attendance__request-form attendance__result-edit-form">
+          <label class="attendance__field" for="attendance-batch-target">
+            <span>{{ tr('Target status', '目标状态') }}</span>
+            <select
+              id="attendance-batch-target"
+              v-model="batchAnomalyModal.targetStatus"
+              name="batchTargetStatus"
+              data-attendance-batch-target
+            >
+              <option v-for="status in ATTENDANCE_RESULT_EDIT_TARGET_STATUSES" :key="status" :value="status">
+                {{ attendanceResultEditTargetLabel(status) }}
+              </option>
+            </select>
+          </label>
+          <label class="attendance__field attendance__field--full" for="attendance-batch-reason">
+            <span>{{ tr('Reason', '原因') }}</span>
+            <textarea
+              id="attendance-batch-reason"
+              v-model="batchAnomalyModal.reason"
+              maxlength="500"
+              name="batchReason"
+              rows="3"
+              data-attendance-batch-reason
+            />
+            <small class="attendance__field-hint">
+              {{ attendanceResultEditReasonRequired ? tr('Required by policy.', '策略要求填写。') : tr('Optional by policy.', '策略未强制要求。') }}
+            </small>
+          </label>
+          <label class="attendance__field" for="attendance-batch-evidence-label">
+            <span>{{ tr('Evidence label', '证据标签') }}</span>
+            <input
+              id="attendance-batch-evidence-label"
+              v-model="batchAnomalyModal.evidenceLabel"
+              maxlength="240"
+              name="batchEvidenceLabel"
+              type="text"
+              data-attendance-batch-evidence-label
+            />
+          </label>
+          <label class="attendance__field" for="attendance-batch-evidence-url">
+            <span>{{ tr('Evidence URL', '证据链接') }}</span>
+            <input
+              id="attendance-batch-evidence-url"
+              v-model="batchAnomalyModal.evidenceUrl"
+              name="batchEvidenceUrl"
+              placeholder="https://"
+              type="url"
+              data-attendance-batch-evidence-url
+            />
+          </label>
+        </div>
+
+        <p
+          v-if="batchAnomalyOutcome === 'completed_with_errors'"
+          class="attendance__error"
+          data-attendance-batch-outcome-error
+        >
+          {{ tr('Some rows failed. Retry the failed rows, or close to refresh.', '部分行失败。请重试失败行，或关闭以刷新。') }}
+        </p>
+
+        <div class="attendance__admin-actions">
+          <button class="attendance__btn" type="button" @click="closeBatchAnomalyModal">
+            {{ tr('Close', '关闭') }}
+          </button>
+          <button
+            class="attendance__btn attendance__btn--primary"
+            :disabled="batchAnomalySubmitBlocked"
+            type="button"
+            data-attendance-batch-submit
+            @click="submitBatchAnomalyModal"
+          >
+            {{ batchAnomalyModal.submitting
+              ? tr('Submitting...', '提交中...')
+              : (batchAnomalyHasResults ? tr('Retry failed rows', '重试失败行') : tr('Submit batch', '提交批量')) }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -9059,6 +9231,14 @@ import {
 import { useAttendanceAdminImportBatches } from './attendance/useAttendanceAdminImportBatches'
 import { normalizeImportPayloadColumns } from './attendance/attendanceImportPayload'
 import { resolveMakeupPunchRequestStatusCopy } from './attendance/makeupPunchRequestStatus'
+import {
+  BATCH_ANOMALY_MAX_ROWS,
+  canRunBatchAnomalyResolution,
+  runBatchAnomalyResolution,
+  summarizeBatchAnomalyOutcome,
+  type BatchAnomalyRowResult,
+  type BatchAnomalyRowSnapshot,
+} from './attendance/batchAnomalyResolution'
 import {
   buildRuleSetPreviewRecommendations,
   summarizeRuleSetPreviewResult,
@@ -10638,6 +10818,20 @@ const attendanceResultEditModal = reactive({
   submitting: false,
   error: '',
   result: null as AttendanceResultEditResult | null,
+})
+// #3530 batch anomaly resolution — selection over the currently loaded anomaly rows,
+// plus a batch modal that mirrors the single-row modal but submits one AE-1 correction
+// per selected row. Kept separate from attendanceResultEditModal so the two never entangle.
+const batchAnomalySelectedRecordIds = reactive(new Set<string>())
+const batchAnomalyModal = reactive({
+  open: false,
+  snapshot: null as { batchClientId: string; rows: BatchAnomalyRowSnapshot[] } | null,
+  targetStatus: 'normal' as AttendanceResultEditTargetStatus,
+  reason: '',
+  evidenceLabel: '',
+  evidenceUrl: '',
+  submitting: false,
+  results: {} as Record<string, BatchAnomalyRowResult>,
 })
 const missedPunchReminderCandidates = ref<MissedPunchReminderCandidate[]>([])
 const missedPunchReminderLoading = ref(false)
@@ -15188,6 +15382,10 @@ function resetAttendanceResultEditModal(): void {
 
 function clearAttendanceResultEditTransientState(): void {
   resetAttendanceResultEditModal()
+  // #3530 §6.3 hard gate: batch selection + modal + per-row results are transient too.
+  // This function is already called at loadAnomalies() start and on org/date/user filter
+  // changes, so extending it here wires the batch stale-clear to every §6.3 trigger.
+  resetBatchAnomalyModal()
 }
 
 async function openResultEditModal(item: AttendanceAnomaly): Promise<void> {
@@ -15294,6 +15492,195 @@ async function submitResultEditModal(): Promise<void> {
     attendanceResultEditModal.error = attendanceResultEditErrorMessage(error)
   } finally {
     attendanceResultEditModal.submitting = false
+  }
+}
+
+// ===== #3530 batch anomaly resolution handlers =====
+function resetBatchAnomalyModal(): void {
+  batchAnomalyModal.open = false
+  batchAnomalyModal.snapshot = null
+  batchAnomalyModal.targetStatus = 'normal'
+  batchAnomalyModal.reason = ''
+  batchAnomalyModal.evidenceLabel = ''
+  batchAnomalyModal.evidenceUrl = ''
+  batchAnomalyModal.submitting = false
+  batchAnomalyModal.results = {}
+  batchAnomalySelectedRecordIds.clear()
+}
+
+// A row is selectable only when the admin capability is allowed and the same AE-3
+// eligibility that gates the single-row action passes (source status editable, not
+// pending, policy enabled, has recordId). Ineligible rows stay visible, unselectable.
+function isBatchAnomalyRowSelectable(item: AttendanceAnomaly): boolean {
+  return canEditAttendanceAnomalyResult.value && attendanceResultEditDisabledReason(item) === ''
+}
+
+function isBatchAnomalyRowSelected(recordId: string): boolean {
+  return batchAnomalySelectedRecordIds.has(recordId)
+}
+
+function toggleBatchAnomalyRow(item: AttendanceAnomaly): void {
+  if (!isBatchAnomalyRowSelectable(item)) return
+  if (batchAnomalySelectedRecordIds.has(item.recordId)) batchAnomalySelectedRecordIds.delete(item.recordId)
+  else batchAnomalySelectedRecordIds.add(item.recordId)
+}
+
+const batchAnomalySelectedCount = computed(() => batchAnomalySelectedRecordIds.size)
+
+// Toolbar-level gate: selection count + cap (design §4.3 / §7 gate-4).
+const batchAnomalySubmitDisabledReason = computed(() => {
+  if (batchAnomalyModal.submitting) return tr('Batch in progress...', '批量处理中...')
+  if (batchAnomalySelectedCount.value === 0) return tr('Select at least one eligible anomaly row.', '请至少选择一行可更正的异常。')
+  if (batchAnomalySelectedCount.value > BATCH_ANOMALY_MAX_ROWS) {
+    return tr(`Select at most ${BATCH_ANOMALY_MAX_ROWS} rows.`, `最多选择 ${BATCH_ANOMALY_MAX_ROWS} 行。`)
+  }
+  return ''
+})
+
+// Modal-level gate: policy + required reason (mirrors attendanceResultEditSubmitDisabled).
+const batchAnomalySubmitBlocked = computed(() =>
+  batchAnomalyModal.submitting
+  || !batchAnomalyModal.snapshot
+  || !attendanceResultEditPolicyEnabled.value
+  || (attendanceResultEditReasonRequired.value && batchAnomalyModal.reason.trim().length === 0),
+)
+
+const batchAnomalyOutcome = computed(() => summarizeBatchAnomalyOutcome(Object.values(batchAnomalyModal.results)))
+const batchAnomalyHasResults = computed(() => Object.keys(batchAnomalyModal.results).length > 0)
+
+function batchAnomalyRowResult(recordId: string): BatchAnomalyRowResult | null {
+  return batchAnomalyModal.results[recordId] ?? null
+}
+
+function buildBatchAnomalyEvidence(): Array<Record<string, string>> {
+  const label = batchAnomalyModal.evidenceLabel.trim()
+  const url = batchAnomalyModal.evidenceUrl.trim()
+  if (!label && !url) return []
+  const entry: Record<string, string> = {}
+  if (label) entry.label = label
+  if (url) entry.url = url
+  return [entry]
+}
+
+async function probeBatchAnomalyCapability(): Promise<void> {
+  const verified = await ensureAttendanceResultEditCapability()
+  if (!verified) {
+    const message = attendanceResultEditAdminCapability.value === 'forbidden'
+      ? tr('Admin permission required.', '需要管理员权限。')
+      : tr('Unable to verify admin permission.', '无法确认管理员权限。')
+    setStatus(appendStatusContext(message, anomaliesTimezoneContextHint.value), 'error')
+  }
+}
+
+async function openBatchAnomalyModal(): Promise<void> {
+  const capabilityVerified = await ensureAttendanceResultEditCapability()
+  if (!capabilityVerified) {
+    const message = attendanceResultEditAdminCapability.value === 'forbidden'
+      ? tr('Admin permission required.', '需要管理员权限。')
+      : tr('Unable to verify admin permission.', '无法确认管理员权限。')
+    setStatus(appendStatusContext(message, anomaliesTimezoneContextHint.value), 'error')
+    return
+  }
+  const rows = anomalies.value.filter(item => batchAnomalySelectedRecordIds.has(item.recordId) && isBatchAnomalyRowSelectable(item))
+  if (rows.length === 0) {
+    setStatus(appendStatusContext(tr('Select at least one eligible anomaly row.', '请至少选择一行可更正的异常。'), anomaliesTimezoneContextHint.value), 'error')
+    return
+  }
+  if (!canRunBatchAnomalyResolution(rows.length)) {
+    setStatus(appendStatusContext(tr(`Select at most ${BATCH_ANOMALY_MAX_ROWS} rows.`, `最多选择 ${BATCH_ANOMALY_MAX_ROWS} 行。`), anomaliesTimezoneContextHint.value), 'error')
+    return
+  }
+  batchAnomalyModal.open = true
+  batchAnomalyModal.snapshot = {
+    batchClientId: attendanceResultEditIdempotencyKey(),
+    rows: rows.map(item => ({
+      recordId: item.recordId,
+      workDate: item.workDate,
+      targetUserId: normalizedUserId() ?? currentUserId.value ?? '',
+      sourceStatus: normalizeAttendanceResultStatus(item.status),
+      request: item.request ? { ...item.request } : null,
+      warnings: [...(Array.isArray(item.warnings) ? item.warnings : [])],
+      idempotencyKey: attendanceResultEditIdempotencyKey(),
+    })),
+  }
+  batchAnomalyModal.targetStatus = 'normal'
+  batchAnomalyModal.reason = ''
+  batchAnomalyModal.evidenceLabel = ''
+  batchAnomalyModal.evidenceUrl = ''
+  batchAnomalyModal.submitting = false
+  batchAnomalyModal.results = {}
+}
+
+function closeBatchAnomalyModal(): void {
+  const hadResults = batchAnomalyHasResults.value
+  resetBatchAnomalyModal()
+  // Refresh the anomaly list only after a batch actually ran (corrected rows drop out).
+  // Deferring loadAnomalies() to close keeps per-row results visible during review; the
+  // stale-clear it triggers is a no-op now that state is already reset here.
+  if (hadResults) void Promise.all([loadAnomalies(), loadRecords(), loadSummary()])
+}
+
+async function submitBatchAnomalyModal(): Promise<void> {
+  const snapshot = batchAnomalyModal.snapshot
+  if (!snapshot) return
+  if (batchAnomalySubmitBlocked.value) return
+  batchAnomalyModal.submitting = true
+  const reason = batchAnomalyModal.reason.trim() || undefined
+  const evidence = buildBatchAnomalyEvidence()
+  const targetStatus = batchAnomalyModal.targetStatus
+  const current = new Map<string, BatchAnomalyRowResult>(Object.entries(batchAnomalyModal.results))
+  try {
+    const finalResults = await runBatchAnomalyResolution(
+      snapshot.rows,
+      current,
+      async (row) => {
+        try {
+          const body = {
+            orgId: normalizedOrgId(),
+            recordId: row.recordId,
+            targetStatus,
+            reason,
+            evidence,
+            idempotencyKey: row.idempotencyKey,
+          }
+          const response = await apiFetch('/api/attendance/anomaly-result-edits', {
+            method: 'POST',
+            body: JSON.stringify(body),
+          })
+          const data = await response.json().catch(() => null)
+          if (!response.ok || !data?.ok) {
+            throw createApiError(response, data, tr('Result edit failed', '考勤结果更正失败'))
+          }
+          const result = normalizeAttendanceResultEditResult(data.data)
+          return {
+            ok: true as const,
+            result: {
+              editId: result.id,
+              beforeStatus: result.beforeStatus,
+              afterStatus: result.afterStatus,
+              notificationDeliveryId: result.notificationDeliveryId,
+              notificationSkippedReason: result.notificationSkippedReason,
+              alreadyApplied: result.alreadyApplied,
+            },
+          }
+        } catch (error) {
+          return { ok: false as const, errorMessage: attendanceResultEditErrorMessage(error) }
+        }
+      },
+      (recordId, result) => {
+        batchAnomalyModal.results = { ...batchAnomalyModal.results, [recordId]: result }
+      },
+    )
+    batchAnomalyModal.results = Object.fromEntries(finalResults)
+    const values = [...finalResults.values()]
+    const okCount = values.filter(r => r.state === 'ok').length
+    const errCount = values.filter(r => r.state === 'error').length
+    const line = tr(`Batch resolve: ${okCount} applied, ${errCount} failed.`, `批量处理：${okCount} 成功，${errCount} 失败。`)
+    setStatus(appendStatusContext(line, anomaliesTimezoneContextHint.value), errCount > 0 ? 'error' : undefined)
+    // loadRecords/loadSummary do NOT clear batch state; the anomaly list refreshes on close.
+    await Promise.all([loadRecords(), loadSummary()])
+  } finally {
+    batchAnomalyModal.submitting = false
   }
 }
 
