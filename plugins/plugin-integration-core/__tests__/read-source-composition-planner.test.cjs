@@ -179,18 +179,118 @@ function testDeriveFailClosed() {
     assert.deepEqual(Object.keys(derived).sort(), ['errorCode', 'ok'])
     assertValuesFree(derived, ['SECRET-HANDOFF-VALUE-1', 'OTHER_TARGET_9', 'internal_id'])
   }
-  // Non-scalar values are invalid, not coerced.
+  // Resolved-but-non-scalar values are VALUE_INVALID exactly (resolved ≠ missing) — pinned vocabulary:
+  // MISSING = never resolved, MISMATCH = wrong declared target, INVALID = resolved but not key-usable.
   for (const value of [true, {}, ['12345'], Number.NaN]) {
     const derived = deriveCompositionStepInput(plan, 1, { resolver: { target: 'internal_id', value } })
     assert.equal(derived.ok, false)
-    assert.ok(
-      derived.errorCode === 'READ_SOURCE_COMPOSITION_HANDOFF_VALUE_INVALID' ||
-        derived.errorCode === 'READ_SOURCE_COMPOSITION_HANDOFF_VALUE_MISSING',
-    )
+    assert.equal(derived.errorCode, 'READ_SOURCE_COMPOSITION_HANDOFF_VALUE_INVALID')
   }
   // A malformed plan fails closed rather than deriving anything.
   const malformed = deriveCompositionStepInput({ steps: [] }, 1, { resolver: { target: 'internal_id', value: 'x' } })
   assert.equal(malformed.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
+}
+
+// ── never-throw + single-read snapshot (accessor-bearing hop data) ─────────────────────────────────
+function testAccessorBearingHopData() {
+  const plan = plannedPlan()
+
+  // A throwing value getter is a FAILED hop, not an escaped exception (and the exception message —
+  // a leak channel — never surfaces anywhere in the outcome).
+  const throwing = {
+    evidence: { ok: true, rule: 'exactly_one' },
+    data: { resolver: { target: 'internal_id', get value() { throw new Error('BOOM-SECRET-MSG') } } },
+  }
+  const thrownOutcome = evaluateCompositionOutcome(plan, [throwing])
+  assert.equal(thrownOutcome.evidence.ok, false)
+  assert.equal(thrownOutcome.evidence.failedStep, 0)
+  assert.equal(thrownOutcome.evidence.steps[0].ok, false)
+  assert.equal(thrownOutcome.data, null)
+  assertValuesFree(thrownOutcome, ['BOOM-SECRET-MSG'])
+
+  // TOCTOU getter (clean scalar on first read, smuggled object on the second) cannot defeat the
+  // gate: validation and projection share ONE read, so the projected value is the validated one.
+  let reads = 0
+  const toctou = {
+    evidence: { ok: true, rule: 'first_when_sorted' },
+    data: { resolver: { target: 'bom_number', get value() { return ++reads === 1 ? 'CLEAN' : { leak: 'SECRET-BLOB' } } } },
+  }
+  const first = { evidence: { ok: true, rule: 'exactly_one' }, data: { resolver: { target: 'internal_id', value: 'i1' } } }
+  const smuggled = evaluateCompositionOutcome(plan, [first, toctou])
+  assert.equal(smuggled.evidence.ok, true)
+  assert.deepEqual(smuggled.data, { resolver: { target: 'bom_number', value: 'CLEAN' } })
+  assertValuesFree(smuggled, ['SECRET-BLOB'])
+
+  // Same discipline on derive: a throwing prior getter is VALUE_MISSING, never an escaped throw.
+  const derived = deriveCompositionStepInput(plan, 1, {
+    resolver: { target: 'internal_id', get value() { throw new Error('DERIVE-BOOM') } },
+  })
+  assert.deepEqual(derived, { ok: false, errorCode: 'READ_SOURCE_COMPOSITION_HANDOFF_VALUE_MISSING' })
+
+  // Getter-bearing plan / composition inputs also fail closed instead of throwing.
+  const evilPlan = { get stepCount() { throw new Error('PLAN-BOOM') }, steps: [], handoffs: [] }
+  assert.equal(evaluateCompositionOutcome(evilPlan, []).evidence.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
+  assert.equal(deriveCompositionStepInput(evilPlan, 1, null).errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
+  const evilComposition = { get version() { throw new Error('CFG-BOOM') } }
+  const planned = planReadSourceComposition(evilComposition, {})
+  assert.equal(planned.ok, false)
+  assert.equal(planned.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
+}
+
+// ── L5 red test: chain data strips everything but target+value ─────────────────────────────────────
+function testChainDataStripsExtraFields() {
+  const plan = plannedPlan()
+  const outcome = evaluateCompositionOutcome(plan, [
+    hopOutcome('exactly_one', 'internal_id', 'i1'),
+    {
+      evidence: { ok: true, rule: 'first_when_sorted' },
+      data: {
+        resolver: { target: 'bom_number', value: 'BOM-OK', host: 'SECRET_HOST_X', candidateValues: ['SECRET-CAND-1'] },
+        rawRows: [{ FBOMNumber: 'SECRET-RAW-ROW' }],
+      },
+    },
+  ])
+  assert.equal(outcome.evidence.ok, true)
+  // deepEqual pins the EXACT shape: a `{ ...last.data.resolver }` spread regression fails here.
+  assert.deepEqual(outcome.data, { resolver: { target: 'bom_number', value: 'BOM-OK' } })
+  assertValuesFree(outcome, ['SECRET_HOST_X', 'SECRET-CAND-1', 'SECRET-RAW-ROW'])
+}
+
+// ── chain-only scalar narrowing: resolved non-scalar terminal hop ──────────────────────────────────
+function testNonScalarResolvedHopGetsDedicatedCode() {
+  const plan = plannedPlan()
+  // R1 CAN legitimately resolve a boolean (K3 flag field) standalone; a CHAIN is scalar-only, and the
+  // stitched entry must say so explicitly instead of contradicting the hop's ok evidence generically.
+  const outcome = evaluateCompositionOutcome(plan, [
+    hopOutcome('exactly_one', 'internal_id', 'i1'),
+    { evidence: { ok: true, rule: 'field_equals' }, data: { resolver: { target: 'bom_number', value: true } } },
+  ])
+  assert.equal(outcome.evidence.ok, false)
+  assert.equal(outcome.evidence.failedStep, 1)
+  assert.deepEqual(outcome.evidence.steps[1], {
+    step: 1,
+    ok: false,
+    rule: 'field_equals',
+    errorCode: 'READ_SOURCE_COMPOSITION_STEP_OUTPUT_NOT_SCALAR',
+  })
+  assert.equal(outcome.data, null)
+}
+
+// ── L4 clamp: nothing can be stitched as run after an abort ────────────────────────────────────────
+function testPostFailureOutcomesAreClamped() {
+  const plan = plannedPlan()
+  // A contract-violating (or evidence-trusting) executor supplies a SUCCESS outcome after hop 0
+  // failed. The vector must not certify it: post-failure entries are void (STEP_NOT_RUN).
+  const outcome = evaluateCompositionOutcome(plan, [
+    failedHopOutcome('exactly_one', 'READ_SOURCE_RESOLVER_AMBIGUOUS'),
+    hopOutcome('first_when_sorted', 'bom_number', 'SHOULD-BE-VOID'),
+  ])
+  assert.equal(outcome.evidence.ok, false)
+  assert.equal(outcome.evidence.failedStep, 0)
+  assert.deepEqual(outcome.evidence.steps[1], { step: 1, ok: false, errorCode: 'READ_SOURCE_COMPOSITION_STEP_NOT_RUN' })
+  assert.ok(!outcome.evidence.steps.some((s) => s.step > 0 && s.ok), 'no ok entry may follow the failed step')
+  assert.equal(outcome.data, null)
+  assertValuesFree(outcome, ['SHOULD-BE-VOID'])
 }
 
 // ── evaluate (locks 4 + 5) ─────────────────────────────────────────────────────────────────────────
@@ -254,6 +354,8 @@ function testEvaluateMalformedSuccessDataFailsClosed() {
   assert.equal(outcome.evidence.failedStep, 0)
   assert.equal(outcome.evidence.steps[0].ok, false)
   assert.equal(outcome.evidence.steps[0].errorCode, 'READ_SOURCE_COMPOSITION_STEP_FAILED')
+  // The provided hop-1 success outcome after the failure is void (L4 clamp).
+  assert.deepEqual(outcome.evidence.steps[1], { step: 1, ok: false, errorCode: 'READ_SOURCE_COMPOSITION_STEP_NOT_RUN' })
   assert.equal(outcome.data, null)
   assertValuesFree(outcome, ['RAW-ROW-SECRET', 'BOM-2026-X'])
 }
@@ -352,13 +454,18 @@ function testStepVectorKeyDiscipline() {
 
 // ── exported vocabulary ────────────────────────────────────────────────────────────────────────────
 function testExportedVocabulary() {
-  assert.equal(READ_SOURCE_COMPOSITION_PLAN_ERROR_CODES.length, 7)
+  assert.equal(READ_SOURCE_COMPOSITION_PLAN_ERROR_CODES.length, 8)
   assert.ok(Object.isFrozen(READ_SOURCE_COMPOSITION_PLAN_ERROR_CODES))
   for (const code of READ_SOURCE_COMPOSITION_PLAN_ERROR_CODES) {
     assert.match(code, /^READ_SOURCE_COMPOSITION_[A-Z_]+$/)
   }
   assert.equal(__internals.isResolverData({ resolver: { target: 't', value: 'v' } }), true)
   assert.equal(__internals.isResolverData({ resolver: { target: 't', value: '' } }), false)
+  // isResolverData is scalar-gated (chain-usable), snapshot distinguishes resolved-non-scalar.
+  assert.equal(__internals.isResolverData({ resolver: { target: 't', value: true } }), false)
+  assert.deepEqual(__internals.snapshotResolverData({ resolver: { target: 't', value: true } }), { target: 't', value: true, scalar: false })
+  assert.deepEqual(__internals.snapshotResolverData({ resolver: { target: 't', value: 9 } }), { target: 't', value: 9, scalar: true })
+  assert.equal(__internals.snapshotResolverData({ resolver: { target: 't', value: null } }), null)
   assert.equal(__internals.safeStepErrorCode('not a token!'), 'READ_SOURCE_COMPOSITION_STEP_FAILED')
   // Registered-set discipline, not token shape: registered passes, token-shaped-unregistered collapses.
   assert.equal(__internals.safeStepErrorCode('READ_SOURCE_RESOLVER_NOT_FOUND'), 'READ_SOURCE_COMPOSITION_STEP_FAILED')
@@ -372,6 +479,10 @@ testPlanValid()
 testPlanRejectsWriteShapedAndUnapproved()
 testDeriveHappyPath()
 testDeriveFailClosed()
+testAccessorBearingHopData()
+testChainDataStripsExtraFields()
+testNonScalarResolvedHopGetsDedicatedCode()
+testPostFailureOutcomesAreClamped()
 testEvaluateSuccess()
 testEvaluateHopFailureAborts()
 testEvaluateIncompleteChainFailsClosed()
