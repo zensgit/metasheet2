@@ -25,6 +25,13 @@ const ROUTES = [
   ['POST', '/api/integration/read-source-configs/:id/approve', 'readSourceConfigsApprove'],
   ['POST', '/api/integration/read-source-configs/:id/retire', 'readSourceConfigsRetire'],
   ['POST', '/api/integration/read-source-configs/:id/read', 'readSourceConfigsRead'],
+  ['POST', '/api/integration/read-source-compositions', 'readSourceCompositionsSave'],
+  ['GET', '/api/integration/read-source-compositions', 'readSourceCompositionsList'],
+  ['GET', '/api/integration/read-source-compositions/:id', 'readSourceCompositionsGet'],
+  ['GET', '/api/integration/read-source-compositions/:id/audit', 'readSourceCompositionsAudit'],
+  ['POST', '/api/integration/read-source-compositions/:id/approve', 'readSourceCompositionsApprove'],
+  ['POST', '/api/integration/read-source-compositions/:id/retire', 'readSourceCompositionsRetire'],
+  ['POST', '/api/integration/read-source-compositions/:id/run', 'readSourceCompositionsRun'],
   ['GET', '/api/integration/external-systems/:id/objects', 'externalSystemObjects'],
   ['GET', '/api/integration/external-systems/:id/schema', 'externalSystemSchema'],
   ['GET', '/api/integration/pipelines', 'pipelinesList'],
@@ -109,12 +116,27 @@ const {
   ReadSourceConfigConflictError,
   ReadSourceConfigNotApprovedError,
 } = require('./read-source-config-store.cjs')
+// C-R4-1 (#1709 composition): the composition config store error surface (mirrors the read-source-config
+// store) — for the composition authoring routes + the approved-only run route error mapping.
+const {
+  ReadSourceCompositionConfigValidationError,
+  ReadSourceCompositionConfigNotFoundError,
+  ReadSourceCompositionConfigConflictError,
+  ReadSourceCompositionConfigNotApprovedError,
+} = require('./read-source-composition-config-store.cjs')
 // S3-2 (#1709 self-service): runtime-tier configured read — consumes an APPROVED stored config version;
 // data plane (mapped values) flows to the authorized caller, evidence stays values-free.
 const {
   prepareConfiguredRead,
   executeConfiguredRead,
 } = require('./read-source-read-runtime.cjs')
+// C-R4-1 (#1709 composition): the chain runtime executor — orchestrates an approved two-hop composition
+// read-only. The run route loads the approved composition + each approved step config + system, then
+// hands them in; the executor throws only on a client-supplied runtime-request contract violation.
+const {
+  executeReadSourceComposition,
+  ReadSourceCompositionRuntimeError,
+} = require('./read-source-composition-runtime.cjs')
 const { K3_REFERENCE_MAPPING_TEMPLATES } = require('./reference-mapping-templates.cjs')
 const { listReferenceIntegrationTemplates } = require('./reference-integration-templates.cjs')
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
@@ -1492,6 +1514,27 @@ function mapReadSourceConfigError(error) {
   return error
 }
 
+// C-R4-1: map composition config store errors to HTTP, values-free — the C-R1 validator's
+// { code, field, reason } tuples ride through untouched; nothing echoes the submitted config, a step
+// config id, a host, or a key. Mirrors mapReadSourceConfigError.
+function mapReadSourceCompositionConfigError(error) {
+  if (error instanceof ReadSourceCompositionConfigValidationError) {
+    // The C-R1 validator uses fixed markers for unexpected keys ('(unexpected)' / 'steps.N.(unexpected)'),
+    // so no raw caller key rides in field — the tuples are already values-free; pass them through.
+    return new HttpRouteError(400, 'READ_SOURCE_COMPOSITION_CONFIG_INVALID', 'read-source composition config is invalid', error.details)
+  }
+  if (error instanceof ReadSourceCompositionConfigNotFoundError) {
+    return new HttpRouteError(404, 'READ_SOURCE_COMPOSITION_CONFIG_NOT_FOUND', 'read-source composition config not found')
+  }
+  if (error instanceof ReadSourceCompositionConfigNotApprovedError) {
+    return new HttpRouteError(409, 'READ_SOURCE_COMPOSITION_CONFIG_NOT_APPROVED', 'read-source composition config version is not approved', { status: error.details && error.details.status })
+  }
+  if (error instanceof ReadSourceCompositionConfigConflictError) {
+    return new HttpRouteError(409, 'READ_SOURCE_COMPOSITION_CONFIG_STATUS_CONFLICT', 'read-source composition config status transition is not allowed', error.details)
+  }
+  return error
+}
+
 function createHandlers(services, options = {}) {
   function requireService(name, methods) {
     const service = services[name]
@@ -1512,6 +1555,7 @@ function createHandlers(services, options = {}) {
   const stagingInstaller = requireService('stagingInstaller', ['installStaging', 'listStagingDescriptors'])
   const templateRegistry = requireService('templateRegistry', ['upsertTemplate', 'getTemplate', 'listTemplates', 'deleteTemplate', 'instantiateTemplate'])
   const readSourceConfigs = requireService('readSourceConfigStore', ['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime'])
+  const readSourceCompositions = requireService('readSourceCompositionConfigStore', ['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime'])
   const context = options.context || {}
   const configuredTableActions = context && context.config
     ? (context.config.stockPreparationTableActions || context.config.tableActions)
@@ -1886,6 +1930,155 @@ function createHandlers(services, options = {}) {
         // (same guard, second layer) is unreachable here unless the runtime module changes.
         if (error instanceof ReadSourceProbeRuntimeError) {
           throw new HttpRouteError(409, 'READ_SOURCE_READ_KIND_MISMATCH', 'external system kind does not match the approved config')
+        }
+        throw error
+      }
+    },
+
+    // C-R4-1 (#1709 composition): the composition HTTP surface. Authoring routes (save/list/get/audit/
+    // approve/retire) are config-time (write/read tier) mirrors of the read-source-config routes; the run
+    // route is the runtime tier — approved-only, key-only, values-free, read-only.
+    async readSourceCompositionsSave(req, res) {
+      // Consultant/admin tier: minting a persisted composition version is config-time trust.
+      requireAccess(req, 'write')
+      const body = requestBody(req)
+      try {
+        const saved = await readSourceCompositions.saveVersion(scopedInput(req, {
+          config: body.config,
+          actor: requestPrincipal(req),
+        }))
+        return sendOk(res, saved, saved.reused ? 200 : 201)
+      } catch (error) {
+        throw mapReadSourceCompositionConfigError(error)
+      }
+    },
+
+    async readSourceCompositionsList(req, res) {
+      requireAccess(req, 'read')
+      const query = requestQuery(req)
+      try {
+        return sendOk(res, await readSourceCompositions.list(scopedInput(req, {
+          status: query.status,
+          limit: asListLimit(query.limit),
+          offset: asListOffset(query.offset),
+        })))
+      } catch (error) {
+        throw mapReadSourceCompositionConfigError(error)
+      }
+    },
+
+    async readSourceCompositionsGet(req, res) {
+      requireAccess(req, 'read')
+      try {
+        return sendOk(res, await readSourceCompositions.get(scopedInput(req, { id: requestParams(req).id })))
+      } catch (error) {
+        throw mapReadSourceCompositionConfigError(error)
+      }
+    },
+
+    async readSourceCompositionsAudit(req, res) {
+      requireAccess(req, 'read')
+      const query = requestQuery(req)
+      try {
+        return sendOk(res, await readSourceCompositions.listAudit(scopedInput(req, {
+          configId: requestParams(req).id,
+          limit: asListLimit(query.limit),
+          offset: asListOffset(query.offset),
+        })))
+      } catch (error) {
+        throw mapReadSourceCompositionConfigError(error)
+      }
+    },
+
+    async readSourceCompositionsApprove(req, res) {
+      requireAccess(req, 'write')
+      try {
+        return sendOk(res, await readSourceCompositions.approve(scopedInput(req, {
+          id: requestParams(req).id,
+          actor: requestPrincipal(req),
+        })))
+      } catch (error) {
+        throw mapReadSourceCompositionConfigError(error)
+      }
+    },
+
+    async readSourceCompositionsRetire(req, res) {
+      requireAccess(req, 'write')
+      try {
+        return sendOk(res, await readSourceCompositions.retire(scopedInput(req, {
+          id: requestParams(req).id,
+          actor: requestPrincipal(req),
+        })))
+      } catch (error) {
+        throw mapReadSourceCompositionConfigError(error)
+      }
+    },
+
+    // C-R4-1 run route: the runtime tier for an approved composition chain. read-tier + key-only body
+    // ({ inputs: { key } }) — exactly the S3-2 single-read surface, extended to a chain. Approved-only is
+    // a DOUBLE gate: the composition config AND each referenced step read config are loaded via their
+    // stores' getForRuntime (throws NOT_APPROVED for a non-approved version), and the C-R2 planner
+    // re-validates the bundle inside the executor. Intermediate keys are derived by the platform; no raw
+    // endpoint/filter/body/response-path or per-hop key can enter. Evidence stays values-free; chain data
+    // is only the last hop's single resolver output.
+    async readSourceCompositionsRun(req, res) {
+      requireAccess(req, 'read')
+      const body = requestBody(req)
+      // Strict body allowlist BEFORE any store access: only { inputs } may ride in (the deep
+      // { inputs: { key } } bound is enforced by the executor's own normalizer below).
+      if (body !== undefined && body !== null) {
+        if (typeof body !== 'object' || Array.isArray(body)) {
+          throw new HttpRouteError(400, 'READ_SOURCE_COMPOSITION_RUN_CONTRACT_INVALID', 'composition run request is invalid', { reason: 'not_object' })
+        }
+        const unexpected = Object.keys(body).filter((key) => key !== 'inputs')
+        if (unexpected.length > 0) {
+          throw new HttpRouteError(400, 'READ_SOURCE_COMPOSITION_RUN_CONTRACT_INVALID', 'composition run request is invalid', { reason: 'unexpected_field' })
+        }
+      }
+
+      // Load the approved composition config (approved-only gate #1).
+      let composition
+      try {
+        composition = await readSourceCompositions.getForRuntime(scopedInput(req, { id: requestParams(req).id }))
+      } catch (error) {
+        throw mapReadSourceCompositionConfigError(error)
+      }
+
+      // Resolve each referenced step: its approved read config (approved-only gate #2 — getForRuntime
+      // throws NOT_APPROVED) + its backend system (dynamic credential context via the stored systemId
+      // reference). The bundle carries status:'approved' by construction (getForRuntime only returns
+      // approved rows); the C-R2 planner re-validates it as defense-in-depth.
+      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
+        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+        : externalSystems.getExternalSystem.bind(externalSystems)
+      const steps = composition && composition.config && Array.isArray(composition.config.steps)
+        ? composition.config.steps
+        : []
+      const stepConfigsById = {}
+      for (const step of steps) {
+        if (!step || typeof step.readSourceConfigId !== 'string' || Object.prototype.hasOwnProperty.call(stepConfigsById, step.readSourceConfigId)) {
+          continue
+        }
+        let row
+        try {
+          row = await readSourceConfigs.getForRuntime(scopedInput(req, { id: step.readSourceConfigId }))
+        } catch (error) {
+          throw mapReadSourceConfigError(error)
+        }
+        const system = await loadSystem(scopedInput(req, { id: row.systemId }))
+        stepConfigsById[step.readSourceConfigId] = { status: 'approved', config: row.config, system }
+      }
+
+      try {
+        const { evidence, data } = await executeReadSourceComposition(composition.config, body || {}, {
+          stepConfigsById,
+          createAdapter: (adapterSystem) => adapterRegistry.createAdapter(adapterSystem, { principal: requestPrincipal(req) }),
+        })
+        return sendOk(res, { evidence, data })
+      } catch (error) {
+        // Only a client-supplied runtime-request contract violation throws; coarse, values-free reason.
+        if (error instanceof ReadSourceCompositionRuntimeError) {
+          throw new HttpRouteError(400, 'READ_SOURCE_COMPOSITION_RUN_CONTRACT_INVALID', 'composition run request is invalid', { reason: error && typeof error.reason === 'string' ? error.reason : 'invalid' })
         }
         throw error
       }

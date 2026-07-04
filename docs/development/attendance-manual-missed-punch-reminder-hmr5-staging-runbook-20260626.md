@@ -5,6 +5,38 @@
 missed-punch reminder line complete by itself. The tracker flips only after a
 real staging PASS stamp with residue `0`.
 
+## Automated helper (added 2026-07-05)
+
+The manual SQL/HTTP steps below (Seed, Smoke Steps 1/2/4-9, Residue Check) are
+scripted by `scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs`
+(+ companion `.test.mjs` contract tests), modeled on the MP-6 / AE-4 / RD-4/5
+staging-smoke helper family: real HTTP for every business read/write, SQL only
+for synthetic seed and assertions the API has no read surface for, and stamped
+LIKE-free cleanup. Run it from a prepared metasheet2 checkout:
+
+```bash
+BASE_URL=http://127.0.0.1:8082 \
+DATABASE_URL=postgresql://USER@127.0.0.1:5432/metasheet \
+DEPLOY_SHA=<staging-main-sha> \
+node scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs
+```
+
+It prints `HMR5_API_DB_SMOKE_PASS deploy=<sha> stamp=hmr5-smoke-... org=<org> sendPosture=<...> residue=0`,
+which is **not** the final PASS stamp below — mirroring the same two-stage
+pattern as the MP-6/AE-4/RD-4/5 helpers. Two things it does **not** cover:
+
+- **Smoke Step 3 (admin-console UI confirm-snapshot probe)** has no automated
+  coverage and remains a required manual browser step;
+- **the real-channel delivery decision** (whether the worker's terminal state
+  counts as a genuine externally-routable PASS for the currently configured C5
+  channel) is still an operator judgment call, per this runbook's "Real-channel
+  run only" note above the Smoke Steps.
+
+The final `HMR5_MANUAL_MISSED_PUNCH_REMINDER_STAGING_SMOKE_PASS` stamp is
+recorded only after both the helper run and the manual UI step pass. The
+manual SQL/HTTP steps below remain the fallback path if the helper cannot run
+on a given host (e.g. no Node/`pg` access).
+
 ## What This Proves
 
 The smoke exercises the manual reminder chain added by HMR-1 through HMR-4:
@@ -257,7 +289,8 @@ Expected:
 - `created=1`, `existing=0`;
 - one `attendance_notification_deliveries` row for
   `source_type='manual_missed_punch_reminder'`;
-- `source_key='manual_missed_punch_reminder:<key>:recipient:<worker-id>'`;
+- `source_key='manual_missed_punch_reminder:<key>:recipient:<worker-id>:channel:<channel>'`
+  （shipped route 会追加 `:channel:<channel>` 后缀；helper 按该真实形状断言）;
 - `payload.actorUserId=$SCOPED_ID`;
 - `payload.body='HMR-5 API <stamp>'`;
 - row status starts as `pending` unless the worker claims it immediately.
