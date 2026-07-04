@@ -134,7 +134,7 @@ function sourceLabel(source: string): string {
   const map: Record<string, [string, string]> = {
     rest: ['手动', 'Manual'], multitable: ['手动', 'Manual'], button: ['按钮', 'Button'],
     automation: ['自动化', 'Automation'], import: ['导入', 'Import'], restore: ['恢复', 'Restore'],
-    admin: ['系统', 'System'], 'global-rbac': ['系统', 'System'],
+    admin: ['系统', 'System'], 'global-rbac': ['系统', 'System'], 'ai-shortcut': ['AI 填充', 'AI fill'],
   }
   const pair = map[source]
   return pair ? t(pair[0], pair[1]) : source
