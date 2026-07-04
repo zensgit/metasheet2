@@ -3516,7 +3516,7 @@ describe('IntegrationWorkbenchView', () => {
       if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
       if (url === '/api/integration/staging/descriptors') return jsonResponse([])
       if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
-      if (url === '/api/integration/stock-preparation/target/readiness?tenantId=default&baseId=base_stock_readiness') {
+      if (url === '/api/integration/stock-preparation/target/readiness?tenantId=default') {
         return jsonResponse({
           ready: false,
           mode: 'canonical_missing',
@@ -3554,7 +3554,9 @@ describe('IntegrationWorkbenchView', () => {
     ;(container.querySelector('[data-testid="stock-preparation-s1-readiness"]') as HTMLButtonElement).click()
     await flushUi(8)
 
-    expect(calls.some((call) => call.url === '/api/integration/stock-preparation/target/readiness?tenantId=default&baseId=base_stock_readiness')).toBe(true)
+    expect(calls.some((call) => call.url === '/api/integration/stock-preparation/target/readiness?tenantId=default')).toBe(true)
+    // baseId is create/bind-time input only: even with the input filled, readiness must not carry it.
+    expect(calls.some((call) => call.url.startsWith('/api/integration/stock-preparation/target/readiness') && call.url.includes('baseId'))).toBe(false)
     expect(calls.some((call) => call.url.includes('/dry-run'))).toBe(false)
     expect(calls.some((call) => call.url.includes('/apply'))).toBe(false)
     expect(calls.some((call) => call.url.includes('/options/sync'))).toBe(false)
@@ -3703,7 +3705,7 @@ describe('IntegrationWorkbenchView', () => {
       if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
       if (url === '/api/integration/staging/descriptors') return jsonResponse([])
       if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
-      if (url === '/api/integration/stock-preparation/target/readiness?tenantId=default&baseId=base_before') return readinessResponse.promise
+      if (url === '/api/integration/stock-preparation/target/readiness?tenantId=default') return readinessResponse.promise
       throw new Error(`unexpected URL ${url}`)
     })
 
