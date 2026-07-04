@@ -24,6 +24,7 @@ run time**, never from memory.
 | 2 | **RD-4/5** report-digest config card + producer/worker | `docs/development/attendance-rd45-report-digest-staging-smoke-runbook-20260702.md` | `scripts/ops/staging-attendance-report-digest-rd45-smoke.mjs` (`RD45_REPORT_DIGEST_API_DB_SMOKE_PASS`) | `RD45_REPORT_DIGEST_STAGING_SMOKE_PASS deploy=<sha> stamp=<rd45-smoke-...> org=<rd45-smoke-...-org> produced=<n> dedupOk=1 sendProof=<sent\|failed_recipient_not_bound\|failed_channel_not_configured> residue=0` |
 | 3 | **OT-bank v1-8** 三例验收 + settlement | `docs/development/attendance-overtime-bank-v18-staging-smoke-runbook-20260702.md` | `scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs` (`OTBANK_V18_API_DB_SMOKE_PASS`) | `OTBANK_V18_STAGING_SMOKE_PASS deploy=<sha> stamp=<otbank-v18-smoke-...> org=<org> cycle=<uuid> residue=0` |
 | 4 | **MP-6** makeup-punch (optional) | `docs/development/attendance-makeup-punch-mp6-staging-smoke-runbook-20260703.md` | `scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs` (`MP6_MAKEUP_PUNCH_API_DB_SMOKE_PASS`) | `MP6_MAKEUP_PUNCH_STAGING_SMOKE_PASS deploy=<sha> stamp=<mp6-smoke-...> org=<org> quota=1 approvals=1 residue=0` |
+| 5 | **HMR-5** manual missed-punch reminder (optional) | `docs/development/attendance-manual-missed-punch-reminder-hmr5-staging-runbook-20260626.md` | `scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs` (`HMR5_API_DB_SMOKE_PASS`) | `HMR5_MANUAL_MISSED_PUNCH_REMINDER_STAGING_SMOKE_PASS deploy=<sha> stamp=hmr5-... channel=<channel> residue=0` |
 
 Each helper prints an `*_API_DB_SMOKE_PASS` line that is **not** the final
 stamp; the final `*_STAGING_SMOKE_PASS` stamps are recorded by the operator in
@@ -40,6 +41,36 @@ the OT-bank settlement-population guard does not apply — but enabling
 single-tenant posture (its runbook OQ-3 records that decision). MP-6 writes NO
 notification deliveries.
 
+**Optional 5th smoke (HMR-5 manual missed-punch reminder).** Row 5 is an
+OPTIONAL addition to this window — it can run standalone OR as a 5th smoke on
+the SAME deploy SHA, in either order relative to MP-6. Their stamps are
+mutually exclusive (`mp6-smoke-` vs `hmr5-smoke-`), and MP-6 runs on the
+window's shared org while HMR-5 runs on its own disposable org (below), so no
+row-level collision is possible even though both touch the same
+`attendance_records` / `attendance_requests` tables.
+
+Unlike MP-6, HMR-5 **does write** `attendance_notification_deliveries` (with
+`source_type='manual_missed_punch_reminder'`) — the same shared table AE-4
+(`attendance_result_edit`) and RD-4/5 (`attendance_report_digest`) also write.
+Isolation from all three relies on the same discipline §5 already establishes
+for that table: every HMR-5 delivery query (assert, residue, cleanup) is
+scoped `org_id + source_type='manual_missed_punch_reminder'`. HMR-5 also runs
+its own users/records/requests/scopes on a disposable `hmr5-smoke-`-prefixed
+org (like RD-4/5's disposable org, and unlike AE-4/MP-6/OT-bank, which share
+the window's org), so its rows never share an `org_id` with the other three
+smokes' rows in the first place.
+
+**Suggested order: run HMR-5 LAST in the window** (after OT-bank v1-8 and
+MP-6, if both run). It is the only smoke of the five whose "worker delivery"
+proof polls the SAME shared, already-running C5 delivery worker that AE-4's
+and RD-4/5's own delivery rows are also live under — running it last means
+its worker-status poll never has to race a still-in-progress AE-4/RD-4/5
+assertion window for that shared worker's attention, and any leftover HMR-5
+rows from a failed run are the last thing the consolidated residue sweep (§7)
+needs to account for. HMR-5's own runbook records the final PASS stamp after
+both its helper run and the runbook's manual admin-console UI
+confirm-snapshot step (step 3) pass.
+
 ## 2. One deploy SHA for the whole window
 
 Deploy ONE main build to the staging stack and run all three smokes against
@@ -54,6 +85,11 @@ it. The single `DEPLOY_SHA` must include every per-smoke code gate:
 - **OT-bank v1-8**: v1-1..v1-6 plus the #3255 must-pay e2e and the #3303
   unconditional-settings-restore fix (per
   `docs/development/attendance-overtime-bank-design-verification-20260624.md`).
+- **HMR-5** (if run this window): HMR-1 scheduler-scope `remind` action (#3269),
+  HMR-2 owed-punch candidate read/filter route (#3270), HMR-3 manual reminder
+  enqueue route (#3271), HMR-4 admin UI (#3272) — per the HMR-5 runbook's
+  prerequisites and the design lock,
+  `docs/development/attendance-manual-missed-punch-reminder-design-lock-20260626.md`.
 
 Deploy-SHA verification (manual — no committed tool cross-checks the staging
 stack's build against an expected SHA, see §9):
