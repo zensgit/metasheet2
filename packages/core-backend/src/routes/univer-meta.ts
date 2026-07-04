@@ -1975,7 +1975,11 @@ function isUndefinedTableError(err: unknown, tableName: string): boolean {
   return msg.includes(`relation "${tableName}" does not exist`)
 }
 
-const OPTIONAL_MEMBER_GROUP_COLUMN_ERROR_HINTS = [
+const OPTIONAL_PERMISSION_SUBJECT_HYDRATION_COLUMN_ERROR_HINTS = [
+  'column r.description does not exist',
+  'column "r"."description" does not exist',
+  'column roles.description does not exist',
+  'column "roles"."description" does not exist',
   'column g.name does not exist',
   'column g.description does not exist',
   'column "g"."name" does not exist',
@@ -1986,12 +1990,12 @@ const OPTIONAL_MEMBER_GROUP_COLUMN_ERROR_HINTS = [
   'column "platform_member_groups"."description" does not exist',
 ]
 
-function isOptionalMemberGroupDirectoryError(err: unknown): boolean {
+function isOptionalPermissionSubjectHydrationError(err: unknown): boolean {
   if (isUndefinedTableError(err, 'platform_member_groups')) return true
   const code = typeof (err as any)?.code === 'string' ? (err as any).code : null
   if (code !== '42703') return false
   const msg = typeof (err as any)?.message === 'string' ? (err as any).message.toLowerCase() : ''
-  return OPTIONAL_MEMBER_GROUP_COLUMN_ERROR_HINTS.some((hint) => msg.includes(hint))
+  return OPTIONAL_PERMISSION_SUBJECT_HYDRATION_COLUMN_ERROR_HINTS.some((hint) => msg.includes(hint))
 }
 
 function mapFieldType(type: string): UniverMetaField['type'] {
@@ -7134,7 +7138,7 @@ export function univerMetaRouter(): Router {
           [viewId],
         )
       } catch (err) {
-        if (!isOptionalMemberGroupDirectoryError(err)) throw err
+        if (!isOptionalPermissionSubjectHydrationError(err)) throw err
         result = await pool.query(
           `SELECT
               vp.id,
@@ -7148,7 +7152,7 @@ export function univerMetaRouter(): Router {
               u.email AS user_email,
               u.is_active AS user_is_active,
               r.name AS role_name,
-              r.description AS role_description,
+              NULL::text AS role_description,
               NULL::text AS group_name,
               NULL::text AS group_description
            FROM meta_view_permissions vp
@@ -7349,7 +7353,7 @@ export function univerMetaRouter(): Router {
           [sheetId],
         )
       } catch (err) {
-        if (!isOptionalMemberGroupDirectoryError(err)) throw err
+        if (!isOptionalPermissionSubjectHydrationError(err)) throw err
         result = await pool.query(
           `SELECT
               fp.id,
@@ -7364,7 +7368,7 @@ export function univerMetaRouter(): Router {
               u.email AS user_email,
               u.is_active AS user_is_active,
               r.name AS role_name,
-              r.description AS role_description,
+              NULL::text AS role_description,
               NULL::text AS group_name,
               NULL::text AS group_description
            FROM field_permissions fp
@@ -7605,7 +7609,7 @@ export function univerMetaRouter(): Router {
           [sheetId, recordId],
         )
       } catch (err) {
-        if (!isOptionalMemberGroupDirectoryError(err)) throw err
+        if (!isOptionalPermissionSubjectHydrationError(err)) throw err
         result = await pool.query(
           `SELECT
               rp.id,
@@ -7620,7 +7624,7 @@ export function univerMetaRouter(): Router {
               u.email AS user_email,
               u.is_active AS user_is_active,
               r.name AS role_name,
-              r.description AS role_description,
+              NULL::text AS role_description,
               NULL::text AS group_name,
               NULL::text AS group_description
            FROM record_permissions rp
