@@ -51,12 +51,16 @@ treat the output as untrusted data at the sink and re-impose the full membrane.
 - **B — Domain validation is FAIL-CLOSED; reject, never coerce.** AI output entering a typed sink
   (`select`/`enum`/typed field/formula operand/automation parameter) MUST be validated against the target domain and
   **rejected** if invalid. Silently coercing an out-of-domain `classify`/`extract` result into a "nearest" valid value
-  is itself a silent-corruption vector and is forbidden. Reject → surface an explicit, uniform error; do not write.
+  is itself a silent-corruption vector and is forbidden. Reject → surface a stable, explicit, fail-closed error (e.g.
+  `AI_OUTPUT_DOMAIN_INVALID`) that does not reveal hidden domain details; do not write.
 - **C — injection→action is FAIL-CLOSED and NO-ORACLE, end to end.** When AI output enters an `automation`,
   `formula` execution, `cross-base` write, or the `plugin` SDK, it re-passes the SAME permission membrane as a
   human-originated write: authority (§A) → domain validation (§B) → per-record no-oracle mask → write under the
-  established lock family. No sink may auto-execute AI output. Any denial along the chain is uniform / non-distinguishing
-  (masked ≡ missing ≡ not-writable ≡ invalid-domain), so the sink leaks no existence/authority oracle.
+  established lock family. No sink may auto-execute AI output. **Availability / authority / visibility** denials along
+  the chain are uniform and non-distinguishing (masked ≡ missing ≡ not-writable), so the sink leaks no existence/authority
+  oracle. **Domain-validation** failures are a separate class: they use a stable, fail-closed error (§B) that must not
+  reveal hidden domain details, but need NOT be byte-identical to an availability/authority denial (over-uniforming them
+  buys no security and needlessly constrains UX).
 
 ## 3. Sink → membrane map (what each future sink MUST reuse)
 
@@ -76,7 +80,8 @@ not a bare green status):
 - **G-A (no laundered authority).** An actor who CANNOT perform write W directly also cannot perform W via an AI-output
   path. Reverting the actor-authority binding turns G-A RED.
 - **G-B (domain fail-closed).** An out-of-domain AI output (e.g. `classify` label ∉ option set) is REJECTED with a
-  uniform error and writes nothing; no coercion to a nearest option. Removing the domain gate → the write lands → RED.
+  stable fail-closed domain error (need not be byte-identical to an availability denial; must not leak hidden domain
+  details) and writes nothing; no coercion to a nearest option. Removing the domain gate → the write lands → RED.
 - **G-C (injection→action no-oracle).** A masked/absent/not-writable target reached via an AI-output sink yields a
   byte-identical uniform denial (status + body), and no edge/row is written or removed. Moving any mask after the
   existence/effect read → responses diverge → RED.
