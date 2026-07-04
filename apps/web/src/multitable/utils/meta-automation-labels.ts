@@ -84,6 +84,7 @@ export type AutomationLabelKey =
   | 'editor.save'
   | 'editor.saving'
   | 'editor.cancel'
+  | 'editor.discardConfirm'
   | 'editor.actions'
   | 'editor.actionStepHint'
   | 'editor.addField'
@@ -340,6 +341,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'editor.save',
   'editor.saving',
   'editor.cancel',
+  'editor.discardConfirm',
   'editor.actions',
   'editor.actionStepHint',
   'editor.addField',
@@ -593,6 +595,10 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'editor.save': { en: 'Save', zh: '保存' },
   'editor.saving': { en: 'Saving...', zh: '正在保存...' },
   'editor.cancel': { en: 'Cancel', zh: '取消' },
+  'editor.discardConfirm': {
+    en: 'You have unsaved changes; closing will discard them. Continue?',
+    zh: '有未保存的更改，关闭将丢弃这些更改。是否继续？',
+  },
   'editor.actions': { en: 'Actions', zh: '动作' },
   'editor.actionStepHint': { en: '(1-3 steps)', zh: '（1-3 步）' },
   'editor.addField': { en: '+ Field', zh: '+ 字段' },
@@ -1050,6 +1056,26 @@ export function automationCardLinkSummary(variant: AutomationCardLinkVariant, vi
 export function automationCardStats(count: number, status: AutomationCardStatType, isZh: boolean): string {
   const key = status === 'ok' ? 'manager.statOk' : 'manager.statFail'
   return `${count} ${automationLabel(key, isZh)}`
+}
+
+/**
+ * B1-06: delete-rule confirmation copy. Deleting a rule is irreversible and takes its execution
+ * history entry point with it, so the confirm names the rule and — when stats are already in
+ * memory — states its cumulative run counts as the blast radius.
+ */
+export function automationDeleteRuleConfirmMessage(
+  name: string,
+  stats: { success: number; failed: number } | undefined,
+  isZh: boolean,
+): string {
+  const title = isZh ? `确定删除规则「${name}」？` : `Delete rule "${name}"?`
+  const statsLine = stats
+    ? isZh
+      ? `该规则累计成功 ${stats.success} 次 / 失败 ${stats.failed} 次。`
+      : `This rule has ${stats.success} succeeded / ${stats.failed} failed runs. `
+    : ''
+  const tail = isZh ? '删除后不可恢复。' : 'This cannot be undone.'
+  return `${title}\n${statsLine}${tail}`
 }
 
 export function automationDingTalkPresetLabel(preset: AutomationDingTalkPreset | UnknownAutomationString, isZh: boolean): string {

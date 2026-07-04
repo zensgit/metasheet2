@@ -809,6 +809,7 @@ import {
   automationCardLinkSummary,
   automationCardStats,
   automationCardTriggerSummary,
+  automationDeleteRuleConfirmMessage,
   automationDingTalkDestinationScopeLabel,
   automationDingTalkDestinationSubtitle,
   automationDingTalkPersonAccessLabel,
@@ -1817,6 +1818,10 @@ async function onToggle(rule: AutomationRule) {
 }
 
 async function onDelete(rule: AutomationRule) {
+  // B1-06: irreversible + takes the rule's execution-history entry point with it — confirm first,
+  // with cumulative run counts as blast radius when stats are already loaded. window.confirm is the
+  // established pattern here (the rule editor's DingTalk test-run confirm uses the same).
+  if (!window.confirm(automationDeleteRuleConfirmMessage(rule.name, ruleStats.value[rule.id], isZh.value))) return
   try {
     await deleteRule(props.sheetId, rule.id)
     emit('updated')

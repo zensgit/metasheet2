@@ -1318,4 +1318,19 @@ describe('TemplateAuthoringView', () => {
     expect(mergeToggle).not.toBeNull()
     expect(mergeToggle.disabled).toBe(true)
   })
+
+  it('B1-07: dirty-draft tracking arms the browser leave protection, and only when dirty', async () => {
+    window.onbeforeunload = null
+    await mountView()
+    await flushUi()
+
+    // pristine draft → no protection
+    expect(window.onbeforeunload).toBeNull()
+
+    setInput('approval-template-name', '出差审批')
+    await flushUi()
+    // dirty → beforeunload armed (route-leaves confirm through the same isDraftDirty source)
+    expect(window.onbeforeunload).not.toBeNull()
+    window.onbeforeunload = null
+  })
 })
