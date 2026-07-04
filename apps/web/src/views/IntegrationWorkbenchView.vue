@@ -1707,6 +1707,7 @@ const deletingConnectionId = ref('')
 // C2b — read-only data-source bridge connection (kind 'data-source:sql-readonly'): a structured
 // picker that references an existing /data-sources connection by id (never copies credentials).
 const DATA_SOURCE_BRIDGE_KIND = 'data-source:sql-readonly'
+const K3_WISE_SQLSERVER_KIND = 'erp:k3-wise-sqlserver'
 const PLM_APPROVAL_AUTOMATION_FEATURE_KEY = 'approval_automation'
 const PLM_BOM_MULTITABLE_FEATURE_KEY = 'bom_multitable'
 const bridgeDataSources = ref<DataSourceListItem[]>([])
@@ -2010,7 +2011,7 @@ const selectedPlmBomMultitableCapabilityEntry = computed<PlmBomCapabilityEntry |
 })
 const sqlChannelDisabledHint = computed(() => {
   const sqlBlockers = systems.value
-    .filter((system) => system.kind === 'erp:k3-wise-sqlserver')
+    .filter((system) => system.kind === K3_WISE_SQLSERVER_KIND)
     .map((system) => runtimeBlockerForSystem(system))
     .filter(Boolean)
   if (sqlBlockers.some((blocker) => blocker.includes('SQLSERVER_EXECUTOR_MISSING'))) {
@@ -2692,6 +2693,17 @@ function friendlyConnectionErrorMessage(message: string): string {
   return '连接请求失败；请重试，或让管理员查看服务端日志中的对应错误。'
 }
 
+function sqlServerConnectionErrorSummary(message: string): string {
+  const text = message || ''
+  if (/SQLSERVER_EXECUTOR_MISSING|queryExecutor|executor|injected|注入|执行器/i.test(text)) {
+    return 'SQLSERVER_EXECUTOR_MISSING · SQL 执行器未配置'
+  }
+  if (/SQLSERVER_TEST_FAILED|TLS\/SSL unsupported protocol|unsupported protocol/i.test(text)) {
+    return 'SQLSERVER_TEST_FAILED · TLS/SSL/protocol compatibility'
+  }
+  return 'SQL 只读来源当前处于异常状态；请查看服务端日志中的对应错误。'
+}
+
 function workbenchConnectionErrorPrefix(context: WorkbenchConnectionErrorContext, side?: WorkbenchSide): string {
   const label = side === 'target' ? '目标' : '来源'
   if (context === 'bridge-data-sources') return '加载 /data-sources 连接失败'
@@ -2747,16 +2759,16 @@ function canUseSystemForSide(system: WorkbenchExternalSystem, side: WorkbenchSid
 function runtimeBlockerForSystem(system: WorkbenchExternalSystem | null): string {
   if (!system) return ''
   const errorText = system.lastError || ''
-  if (system.kind === 'erp:k3-wise-sqlserver' && /SQLSERVER_EXECUTOR_MISSING|queryExecutor|executor|injected|注入|执行器/i.test(errorText)) {
+  if (system.kind === K3_WISE_SQLSERVER_KIND && /SQLSERVER_EXECUTOR_MISSING|queryExecutor|executor|injected|注入|执行器/i.test(errorText)) {
     return 'SQL 连接已配置，但当前部署未注入 SQL 执行器（SQLSERVER_EXECUTOR_MISSING）；可保留为高级连接，暂不能作为可读 source 执行 dry-run。'
   }
-  if (system.kind === 'erp:k3-wise-sqlserver' && /SQLSERVER_TEST_FAILED|TLS\/SSL unsupported protocol|unsupported protocol/i.test(errorText)) {
+  if (system.kind === K3_WISE_SQLSERVER_KIND && /SQLSERVER_TEST_FAILED|TLS\/SSL unsupported protocol|unsupported protocol/i.test(errorText)) {
     return 'PLM SQL source 连接测试失败（SQLSERVER_TEST_FAILED）；对象列表或表内历史数据只能证明配置/数据存在，不能证明 live source 已连接。'
   }
-  if (system.kind === 'erp:k3-wise-sqlserver' && system.status === 'error' && !errorText) {
+  if (system.kind === K3_WISE_SQLSERVER_KIND && system.status === 'error' && !errorText) {
     return 'K3 SQL Server 只读通道需要部署 allowlist queryExecutor 后才能读取样本或作为 source。'
   }
-  if (system.kind === 'erp:k3-wise-sqlserver' && system.status === 'error') {
+  if (system.kind === K3_WISE_SQLSERVER_KIND && system.status === 'error') {
     return 'SQL 只读来源当前处于异常状态；请先通过连接测试和样本预览，再作为 source 执行 dry-run。'
   }
   return ''
@@ -3407,9 +3419,11 @@ function connectionStatusLabel(system: WorkbenchExternalSystem | null): string {
   if (system.status === 'active') return system.lastTestedAt ? '已连接' : '可用'
   if (system.status === 'error') {
     if (!system.lastError) return '异常（点击"测试连接"重新激活）'
-    const message = system.kind === DATA_SOURCE_BRIDGE_KIND
-      ? friendlyConnectionErrorMessage(system.lastError)
-      : system.lastError
+    const message = system.kind === K3_WISE_SQLSERVER_KIND
+      ? sqlServerConnectionErrorSummary(system.lastError)
+      : system.kind === DATA_SOURCE_BRIDGE_KIND
+        ? friendlyConnectionErrorMessage(system.lastError)
+        : system.lastError
     return `异常：${message}（点击"测试连接"重新激活）`
   }
   return '未启用'

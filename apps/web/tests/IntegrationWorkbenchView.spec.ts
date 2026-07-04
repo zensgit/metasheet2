@@ -459,6 +459,8 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('已配置连接')
     expect(container.textContent).toContain('可用适配器')
     expect(container.textContent).toContain('SQL 连接已配置，但当前部署未注入 SQL 执行器')
+    expect(container.textContent).toContain('SQLSERVER_EXECUTOR_MISSING · SQL 执行器未配置')
+    expect(container.textContent).not.toContain('inject queryExecutor')
 
     ;(container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).click()
     await flushUi()
@@ -1549,6 +1551,12 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('SQLSERVER_TEST_FAILED')
     expect(container.textContent).toContain('表内已有数据或对象元数据不等于 live source 已就绪')
     expect(container.textContent).not.toContain('TLS/SSL unsupported protocol')
+
+    ;(container.querySelector('[data-testid="toggle-inventory-overview"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container.querySelector('[data-testid="inventory-overview"]')?.textContent).toContain('SQLSERVER_TEST_FAILED · TLS/SSL/protocol compatibility')
+    expect(container.querySelector('[data-testid="inventory-overview"]')?.textContent).not.toContain('TLS/SSL unsupported protocol')
+    expect(container.querySelector('[data-testid="inventory-overview"]')?.textContent).not.toContain('during SQL Server connection test')
   })
 
   it('surfaces staging-creation CTA in source-empty and staging-empty when no readable source exists', async () => {
