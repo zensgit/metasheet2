@@ -640,6 +640,36 @@
             </button>
           </div>
         </div>
+
+        <div class="attendance__card" data-reports-insight="caliber-guide" data-attendance-caliber-guide>
+          <div class="attendance__requests-header">
+            <div>
+              <h3>{{ tr('Caliber guide', '口径说明') }}</h3>
+              <small class="attendance__field-hint">
+                {{
+                  tr(
+                    'Plain-language definitions for the headline attendance numbers above.',
+                    '对上方考勤关键数字做一句话口径说明。',
+                  )
+                }}
+              </small>
+            </div>
+          </div>
+          <ul class="attendance__status-guide">
+            <li
+              v-for="item in attendanceCaliberGuideItems"
+              :key="item.key"
+              class="attendance__status-guide-item"
+              :data-attendance-caliber-guide-item="item.key"
+            >
+              <div class="attendance__status-guide-header">
+                <strong>{{ item.label }}</strong>
+                <span class="attendance__field-hint">{{ item.code }}</span>
+              </div>
+              <p>{{ item.description }}</p>
+            </li>
+          </ul>
+        </div>
       </section>
 
       <section class="attendance__grid" v-if="showOverview || showReports">
@@ -1320,7 +1350,11 @@
           <table class="attendance__table attendance__table--records">
             <thead>
               <tr>
-                <th v-for="column in recordReportColumns" :key="column.code">
+                <th
+                  v-for="column in recordReportColumns"
+                  :key="column.code"
+                  :title="column.description || undefined"
+                >
                   {{ column.label }}
                 </th>
                 <th></th>
@@ -9487,6 +9521,11 @@ interface AttendanceRecordReportField {
   categoryLabel?: string
   unit?: string
   sortOrder?: number
+  // #3575 caliber-transparency lock (G1): field-catalog description, already present on the
+  // `/api/attendance/records` `reportFields` payload (resolveAttendanceRecordReportFields ->
+  // `description: field.description || ''`) — this only widens the client type to stop
+  // discarding data already on the wire; it is not a new backend field exposure.
+  description?: string
   formulaEnabled?: boolean
   formulaExpression?: string
   formulaScope?: string
@@ -9697,6 +9736,16 @@ interface AttendanceReportBreakdownItem {
 }
 
 interface AttendanceSelfServiceStatusGuideItem {
+  key: string
+  code: string
+  label: string
+  description: string
+}
+
+// #3575 caliber-transparency lock (G3): reports-insight "caliber guide" card — clones the
+// Status-guide list shape (label + code + one-sentence description), scoped to the reports
+// surface instead of the self-service overview surface.
+interface AttendanceCaliberGuideItem {
   key: string
   code: string
   label: string
@@ -11964,6 +12013,78 @@ const reportMetricItems = computed(() => {
     { key: 'overtime-minutes', label: tr('Overtime minutes', '加班分钟'), value: current?.overtime_minutes ?? 0 },
     { key: 'off-days', label: tr('Off days', '休息日'), value: current?.off_days ?? 0 },
   ]
+})
+
+// #3575 caliber-transparency lock (G3): one-sentence definitions for the headline attendance
+// numbers, reusing the same field codes + labels as the record-report column catalog
+// (formatRecordReportFieldLabel) so the wording never drifts from the records table (G1).
+// Descriptions mirror plugins/plugin-attendance/index.cjs ATTENDANCE_REPORT_FIELD_DEFINITIONS
+// (zh reused verbatim; en is a minimal new translation — no threshold values, no computation changes).
+const attendanceCaliberGuideItems = computed<AttendanceCaliberGuideItem[]>(() => {
+  const entries: Array<{ code: string; name: string; description: string }> = [
+    {
+      code: 'expected_attendance_days',
+      name: '应出勤天数',
+      description: tr(
+        'Expected attendance days, computed from the schedule plus workday/holiday rules.',
+        '按排班、工作日和节假日规则计算的应出勤天数。',
+      ),
+    },
+    {
+      code: 'attendance_days',
+      name: '出勤天数',
+      description: tr(
+        'Valid attendance days within the reporting period.',
+        '统计周期内有效出勤天数。',
+      ),
+    },
+    {
+      code: 'severe_late_count',
+      name: '严重迟到次数',
+      description: tr(
+        'Count of late arrivals beyond the severe-late threshold.',
+        '超过严重迟到阈值的迟到次数。',
+      ),
+    },
+    {
+      code: 'absence_late_count',
+      name: '旷工迟到次数',
+      description: tr(
+        'Count of late arrivals classified as absence-level lateness by the rules.',
+        '按规则被识别为旷工级迟到的次数。',
+      ),
+    },
+    {
+      code: 'workday_overtime_duration',
+      name: '工作日加班时长',
+      description: tr(
+        'Overtime minutes attributed under workday rules.',
+        '工作日规则下归集的加班分钟数。',
+      ),
+    },
+    {
+      code: 'restday_overtime_duration',
+      name: '休息日加班时长',
+      description: tr(
+        'Overtime minutes attributed under rest-day rules.',
+        '休息日规则下归集的加班分钟数。',
+      ),
+    },
+    {
+      code: 'holiday_overtime_duration',
+      name: '节假日加班时长',
+      description: tr(
+        'Overtime minutes attributed under statutory-holiday rules.',
+        '法定节假日或节假日规则下归集的加班分钟数。',
+      ),
+    },
+  ]
+  return entries.map(entry => ({
+    key: entry.code,
+    code: entry.code,
+    label: formatRecordReportFieldLabel({ code: entry.code, name: entry.name }),
+    description: entry.description,
+  }))
 })
 
 const todayWorkDateKey = computed(() => toDateInput(new Date()))
