@@ -1352,14 +1352,15 @@ export async function syncIntegrationStockPreparationOptions(
   return parseIntegrationResponse<IntegrationStockPreparationOptionSyncResult>(response)
 }
 
+// Readiness inspects the already-bound canonical target; the server only consumes baseId on
+// ensure (create/bind). The plain IntegrationScope parameter structurally forbids callers from
+// passing a baseId here, so the request always mirrors what the server evaluates.
 export async function getIntegrationStockPreparationTargetReadiness(
-  scope: IntegrationStockPreparationTargetScope = {},
+  scope: IntegrationScope = {},
 ): Promise<IntegrationStockPreparationTargetReadinessResult> {
   const query = buildQueryString({
     tenantId: scope.tenantId,
     workspaceId: scope.workspaceId,
-    projectId: scope.projectId,
-    baseId: scope.baseId,
   })
   const response = await apiFetch(`/api/integration/stock-preparation/target/readiness${query ? `?${query}` : ''}`)
   return parseIntegrationResponse<IntegrationStockPreparationTargetReadinessResult>(response)

@@ -805,7 +805,7 @@
         <div class="integration-workbench__grid integration-workbench__grid--compact">
           <label>
             <span>目标 baseId（可选，仅创建/绑定时使用）</span>
-            <input v-model="stockPreparationTargetBaseId" data-testid="stock-preparation-s1-base-id" placeholder="创建或绑定时可填写目标 baseId；readiness 检查针对已绑定目标，不受此输入影响" />
+            <input v-model="stockPreparationTargetBaseId" data-testid="stock-preparation-s1-base-id" :disabled="stockPreparationTargetRunning !== ''" placeholder="创建或绑定时可填写目标 baseId；readiness 检查针对已绑定目标，不受此输入影响" />
           </label>
         </div>
         <p class="integration-workbench__hint" data-testid="stock-preparation-s1-boundary">
@@ -4530,8 +4530,10 @@ async function checkStockPreparationTargetReadiness(): Promise<void> {
   stockPreparationTargetResult.value = null
   try {
     // Readiness inspects the already-bound canonical target; the server only consumes baseId on
-    // ensure (create/bind). Send the plain scope so the request mirrors what the server evaluates.
-    // The staleness signature still covers baseId: an in-flight edit conservatively drops the result.
+    // ensure (create/bind). Send the plain scope so the request mirrors what the server evaluates
+    // (the service signature now forbids baseId structurally). The baseId input is disabled while a
+    // request runs; the staleness signature keeping baseId is the belt behind that — a programmatic
+    // in-flight change still conservatively drops the result.
     const result = await getIntegrationStockPreparationTargetReadiness(currentScope())
     if (!isCurrentStockPreparationTargetRequest(requestId, signature)) return
     stockPreparationTargetResult.value = result
