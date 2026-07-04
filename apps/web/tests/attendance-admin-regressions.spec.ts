@@ -127,6 +127,7 @@ describe('Attendance admin regressions', () => {
   let scheduleDispatchRequestsData: Record<string, unknown> | null = null
   let attendanceRequestsData: unknown[] | null = null
   let attendanceAnomaliesData: unknown[] | null = null
+  let attendanceAnomaliesResponseQueue: Array<() => Promise<Response>> = []
   let attendanceResultEditPosts: Array<Record<string, unknown>> = []
   // #3530 batch: recordIds in this set get a 422 from the anomaly-result-edit route,
   // so partial-failure batches can be exercised without a real backend.
@@ -149,6 +150,7 @@ describe('Attendance admin regressions', () => {
     scheduleDispatchRequestsData = null
     attendanceRequestsData = null
     attendanceAnomaliesData = null
+    attendanceAnomaliesResponseQueue = []
     attendanceResultEditPosts = []
     attendanceResultEditFailRecordIds = new Set<string>()
     autoShiftPreviewStatus = 200
@@ -701,6 +703,8 @@ describe('Attendance admin regressions', () => {
         })
       }
       if (url.includes('/api/attendance/anomalies')) {
+        const queued = attendanceAnomaliesResponseQueue.shift()
+        if (queued) return queued()
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -1170,6 +1174,75 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
     expect(container!.querySelector('[data-attendance-batch-modal]')).toBeNull()
     expect(container!.querySelector('[data-attendance-batch-selected-count]')?.textContent).toContain('0')
+  })
+
+  it('#3531 owed-punch filter defaults to all anomalies without sending a filter', async () => {
+    attendanceAnomaliesData = [makeBatchAnomaly('record-a')]
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(12)
+
+    const anomalyUrls = vi.mocked(apiFetch).mock.calls
+      .map(call => String(call[0]))
+      .filter(url => url.includes('/api/attendance/anomalies'))
+    expect(anomalyUrls.length).toBeGreaterThan(0)
+    expect(anomalyUrls.every(url => !url.includes('filter='))).toBe(true)
+    expect(container!.querySelector('[data-attendance-anomaly-filter-value="all"]')?.className).toContain('attendance__filter-pill--active')
+  })
+
+  it('#3531 owed-punch filter clears stale rows while loading and preserves pending request chips', async () => {
+    attendanceAnomaliesData = [makeBatchAnomaly('record-late')]
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(12)
+
+    expect(container!.querySelectorAll('[data-attendance-batch-select]')).toHaveLength(1)
+
+    let resolveOwed!: (response: Response) => void
+    attendanceAnomaliesResponseQueue.push(() => new Promise<Response>((resolve) => { resolveOwed = resolve }))
+    container!.querySelector<HTMLButtonElement>('[data-attendance-anomaly-filter-value="owed_punch"]')!.click()
+    await flushUi(2)
+
+    const anomalyUrls = vi.mocked(apiFetch).mock.calls
+      .map(call => String(call[0]))
+      .filter(url => url.includes('/api/attendance/anomalies'))
+    expect(anomalyUrls.some(url => url.includes('filter=owed_punch'))).toBe(true)
+    expect(container!.querySelectorAll('[data-attendance-batch-select]')).toHaveLength(0)
+    expect(container!.textContent).toContain('Loading anomalies')
+
+    resolveOwed(jsonResponse(200, {
+      ok: true,
+      data: {
+        items: [
+          makeBatchAnomaly('record-owed', {
+            status: 'partial',
+            firstInAt: null,
+            lastOutAt: '2026-05-13T18:00:00.000Z',
+            owedPunch: true,
+            missingSide: 'check_in',
+            owedPunchReason: 'partial_missing_check_in',
+            state: 'pending',
+            request: { id: 'request-owed', status: 'pending', requestType: 'missed_check_in' },
+            suggestedRequestType: 'missed_check_in',
+          }),
+        ],
+        total: 1,
+        page: 1,
+        pageSize: 50,
+      },
+    }))
+    await flushUi(12)
+
+    expect(container!.querySelectorAll('[data-attendance-batch-select]')).toHaveLength(1)
+    expect(container!.textContent).toContain('Pending')
+    expect(
+      vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes('/api/attendance/manual-missed-punch-reminders/enqueue')),
+    ).toBe(false)
+    expect(
+      vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes('/api/attendance/notification-deliveries')),
+    ).toBe(false)
   })
 
   it('overview self-service — the annual leave card reads the token-locked /me balance (no userId param)', async () => {

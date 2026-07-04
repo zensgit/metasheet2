@@ -24623,17 +24623,43 @@ module.exports = {
 	      handleAttendanceRecordsGet
 	    )
 
+	    const buildOwedPunchRecordPredicateSql = (alias = '') => {
+		      const p = alias ? `${alias}.` : ''
+		      return `COALESCE(${p}is_workday, true) = true
+		               AND (
+		                 (${p}status = 'partial' AND (${p}first_in_at IS NULL OR ${p}last_out_at IS NULL))
+		                 OR ${p}status = 'absent'
+		               )`
+		    }
+
+	    const classifyOwedPunchRecord = (row) => {
+		      const status = String(row?.status ?? '')
+		      if (row?.is_workday === false) {
+		        return { owedPunch: false, missingSide: null, owedPunchReason: 'non_workday' }
+		      }
+		      if (status === 'absent') {
+		        return { owedPunch: true, missingSide: 'both', owedPunchReason: 'absent_workday' }
+		      }
+		      if (status !== 'partial') {
+		        return { owedPunch: false, missingSide: null, owedPunchReason: status ? `status_${status}` : 'status_unknown' }
+		      }
+		      const missingIn = !row.first_in_at
+		      const missingOut = !row.last_out_at
+		      if (missingIn && missingOut) {
+		        return { owedPunch: true, missingSide: 'both', owedPunchReason: 'partial_missing_both' }
+		      }
+		      if (missingIn) {
+		        return { owedPunch: true, missingSide: 'check_in', owedPunchReason: 'partial_missing_check_in' }
+		      }
+		      if (missingOut) {
+		        return { owedPunch: true, missingSide: 'check_out', owedPunchReason: 'partial_missing_check_out' }
+		      }
+		      return { owedPunch: false, missingSide: null, owedPunchReason: 'partial_complete' }
+		    }
+
 	    const resolveManualMissedPunchReminderMissingSide = (row) => {
-	      const status = String(row?.status ?? '')
-	      if (status === 'absent') return 'both'
-	      if (status !== 'partial') return null
-	      const missingIn = !row.first_in_at
-	      const missingOut = !row.last_out_at
-	      if (missingIn && missingOut) return 'both'
-	      if (missingIn) return 'check_in'
-	      if (missingOut) return 'check_out'
-	      return null
-	    }
+		      return classifyOwedPunchRecord(row).missingSide
+		    }
 
 	    const summarizeManualMissedPunchReminderRequest = (row) => row ? {
 	      id: row.id,
@@ -24753,18 +24779,14 @@ module.exports = {
 	          const params = [orgId, from, to]
 	          const userClause = parsed.data.userId ? `AND r.user_id = $${params.push(parsed.data.userId)}` : ''
 	          const candidateRows = await db.query(
-	            `SELECT r.*
-	             FROM attendance_records r
-	             WHERE r.org_id = $1
-	               AND r.work_date BETWEEN $2::date AND $3::date
-	               AND COALESCE(r.is_workday, true) = true
-	               AND (
-	                 (r.status = 'partial' AND (r.first_in_at IS NULL OR r.last_out_at IS NULL))
-	                 OR r.status = 'absent'
-	               )
-	               ${userClause}
+		            `SELECT r.*
+		             FROM attendance_records r
+		             WHERE r.org_id = $1
+		               AND r.work_date BETWEEN $2::date AND $3::date
+		               AND (${buildOwedPunchRecordPredicateSql('r')})
+		               ${userClause}
 	             ORDER BY r.work_date DESC, r.user_id ASC, r.id ASC`,
-	            params
+		            params
 	          )
 
 	          const scopedRows = await filterManualMissedPunchReminderCandidatesByScope(db, orgId, access, candidateRows)
@@ -25043,10 +25065,11 @@ module.exports = {
 	      '/api/attendance/anomalies',
 	      withPermission('attendance:read', async (req, res) => {
 	        const schema = z.object({
-	          userId: z.string().optional(),
+		          userId: z.string().optional(),
 	          orgId: z.string().optional(),
 	          from: z.string().optional(),
 	          to: z.string().optional(),
+	          filter: z.enum(['all', 'owed_punch']).optional(),
 	        })
 
 	        const parsed = schema.safeParse({
@@ -25054,6 +25077,7 @@ module.exports = {
 	          orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
 	          from: typeof req.query.from === 'string' ? req.query.from : undefined,
 	          to: typeof req.query.to === 'string' ? req.query.to : undefined,
+	          filter: typeof req.query.filter === 'string' ? req.query.filter : undefined,
 	        })
 
 	        if (!parsed.success) {
@@ -25086,6 +25110,10 @@ module.exports = {
 	        const { from, to } = dateRange
 
 	        const excludedStatuses = ['normal', 'off', 'adjusted']
+	        const anomalyFilter = parsed.data.filter ?? 'all'
+	        const owedPunchFilterClause = anomalyFilter === 'owed_punch'
+	          ? `AND (${buildOwedPunchRecordPredicateSql()})`
+	          : ''
 
 	        const extractWarnings = (snapshot) => {
 	          if (!snapshot || typeof snapshot !== 'object') return []
@@ -25119,7 +25147,8 @@ module.exports = {
 	               AND org_id = $2
 	               AND work_date BETWEEN $3 AND $4
 	               AND COALESCE(is_workday, true) = true
-	               AND COALESCE(status, '') <> ALL($5)`,
+	               AND COALESCE(status, '') <> ALL($5)
+	               ${owedPunchFilterClause}`,
 	            [targetUserId, orgId, from, to, excludedStatuses]
 	          )
 	          const total = Number(countRows[0]?.total ?? 0)
@@ -25132,6 +25161,7 @@ module.exports = {
 	               AND work_date BETWEEN $3 AND $4
 	               AND COALESCE(is_workday, true) = true
 	               AND COALESCE(status, '') <> ALL($5)
+	               ${owedPunchFilterClause}
 	             ORDER BY work_date DESC
 	             LIMIT $6 OFFSET $7`,
 	            [targetUserId, orgId, from, to, excludedStatuses, pageSize, offset]
@@ -25179,6 +25209,7 @@ module.exports = {
 	            const warnings = extractWarnings(meta)
 	            const requestSummary = requestByDate.get(workDate) ?? { hasPending: false, pending: null, latest: null }
 	            const suggestedRequestType = suggestRequestType(row)
+	            const owedPunch = classifyOwedPunchRecord(row)
 	            const state = requestSummary.hasPending ? 'pending' : 'open'
 	            const resolvedContext = resolveWorkContextFromPrefetch({
 	              orgId,
@@ -25201,6 +25232,9 @@ module.exports = {
 	              leaveMinutes: approved.leaveMinutes,
 	              overtimeMinutes: approved.overtimeMinutes,
 	              warnings,
+	              owedPunch: owedPunch.owedPunch,
+	              missingSide: owedPunch.missingSide,
+	              owedPunchReason: owedPunch.owedPunchReason,
 	              workdayContext: buildWorkdayContextSummary({
 	                workDate,
 	                storedIsWorkday: row.is_workday,
