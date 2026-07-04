@@ -10,6 +10,7 @@ const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(__dirname, '..', '
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 const { READ_SMOKE_LIST_REQUEST_MARKER } = require(path.join(__dirname, '..', 'lib', 'read-smoke-marker.cjs'))
 const { createReadSourceConfigStore, ReadSourceConfigNotApprovedError } = require(path.join(__dirname, '..', 'lib', 'read-source-config-store.cjs'))
+const { ReadSourceCompositionConfigNotApprovedError } = require(path.join(__dirname, '..', 'lib', 'read-source-composition-config-store.cjs'))
 // S4: adapter self-described metadata — the mock registry serves the REAL per-module metadata
 // so the /adapters route assertions verify the actual shipped values (no duplicated literal).
 const ADAPTER_METADATA_BY_KIND = {
@@ -287,6 +288,37 @@ function createMockServices(overrides = {}) {
       },
       async listAudit(input) {
         calls.push(['readSourceConfigListAudit', input])
+        return []
+      },
+    },
+    // C-R4-1: default mock so requireService('readSourceCompositionConfigStore', ...) mounts for every test.
+    readSourceCompositionConfigStore: {
+      async saveVersion(input) {
+        calls.push(['readSourceCompositionSaveVersion', input])
+        return { id: 'rscc_1', name: 'material-to-bom', version: 1, status: 'draft', contentKey: 'ck', reused: false, config: {} }
+      },
+      async list(input) {
+        calls.push(['readSourceCompositionList', input])
+        return []
+      },
+      async get(input) {
+        calls.push(['readSourceCompositionGet', input])
+        return { id: input.id, status: 'draft' }
+      },
+      async getForRuntime(input) {
+        calls.push(['readSourceCompositionGetForRuntime', input])
+        return { id: input.id, status: 'approved', name: 'material-to-bom', config: {} }
+      },
+      async approve(input) {
+        calls.push(['readSourceCompositionApprove', input])
+        return { id: input.id, status: 'approved' }
+      },
+      async retire(input) {
+        calls.push(['readSourceCompositionRetire', input])
+        return { id: input.id, status: 'retired' }
+      },
+      async listAudit(input) {
+        calls.push(['readSourceCompositionListAudit', input])
         return []
       },
     },
@@ -6531,6 +6563,202 @@ async function testReadSourceResolverReadRoute() {
   console.log('  testReadSourceResolverReadRoute OK')
 }
 
+// C-R4-1 (#1709 composition): the composition HTTP surface — authoring routes + the approved-only,
+// key-only, values-free, read-only RUN route wiring executeReadSourceComposition.
+async function testReadSourceCompositionRoutes() {
+  const ITEM_CONFIG = {
+    version: 1, systemId: 'sys_1', requiredKind: 'erp:k3-wise-webapi', object: 'material',
+    mode: 'resolver_lookup', readPath: '/K3API/Material/GetList', readMethod: 'POST', operations: ['read'],
+    keyField: 'FNumber', containerPaths: ['Data.Rows'], resolverRule: 'exactly_one',
+    fieldMap: [{ source: 'FItemID', target: 'internal_id' }],
+  }
+  const BOM_CONFIG = {
+    version: 1, systemId: 'sys_1', requiredKind: 'erp:k3-wise-webapi', object: 'bom',
+    mode: 'resolver_lookup', readPath: '/K3API/BOM/GetList', readMethod: 'POST', operations: ['read'],
+    keyField: 'FItemId', containerPaths: ['Data.Rows'], resolverRule: 'exactly_one',
+    fieldMap: [{ source: 'FBOMNumber', target: 'bom_number' }],
+  }
+  const COMPOSITION_CONFIG = {
+    version: 1, name: 'material-to-bom', operations: ['read'],
+    steps: [
+      { id: 'a', readSourceConfigId: 'cfg-item' },
+      { id: 'b', readSourceConfigId: 'cfg-bom', input: { fromStep: 'a', sourceTarget: 'internal_id', toInput: 'key' } },
+    ],
+  }
+
+  function compositionServices({ itemRows, bomRows, compositionStatus = 'approved', bomConfigStatus = 'approved' } = {}) {
+    const reads = []
+    const writes = []
+    const services = createMockServices({
+      externalSystemRegistry: {
+        async getExternalSystemForAdapter(input) {
+          return { id: input.id, kind: 'erp:k3-wise-webapi', credentials: { bearerToken: 'secret-token' }, config: { objects: {} } }
+        },
+      },
+      readSourceCompositionConfigStore: {
+        async saveVersion() { return {} }, async list() { return [] }, async get() { return {} },
+        async approve() { return {} }, async retire() { return {} }, async listAudit() { return [] },
+        async getForRuntime(input) {
+          if (compositionStatus !== 'approved') {
+            const error = new Error('composition not approved')
+            Object.setPrototypeOf(error, ReadSourceCompositionConfigNotApprovedError.prototype)
+            error.details = { status: compositionStatus }
+            throw error
+          }
+          return { id: input.id, status: 'approved', name: 'material-to-bom', config: COMPOSITION_CONFIG }
+        },
+      },
+      readSourceConfigStore: {
+        async saveVersion() { return {} }, async list() { return [] }, async get() { return {} },
+        async approve() { return {} }, async retire() { return {} }, async listAudit() { return [] },
+        async getForRuntime(input) {
+          if (input.id === 'cfg-bom' && bomConfigStatus !== 'approved') {
+            const error = new Error('read config not approved')
+            Object.setPrototypeOf(error, ReadSourceConfigNotApprovedError.prototype)
+            error.details = { id: input.id, status: bomConfigStatus }
+            throw error
+          }
+          const config = input.id === 'cfg-bom' ? BOM_CONFIG : ITEM_CONFIG
+          return { id: input.id, systemId: 'sys_1', status: 'approved', config }
+        },
+      },
+      adapterRegistry: {
+        createAdapter() {
+          return {
+            async read(req) {
+              reads.push({ object: req.object, filters: req.filters })
+              if (req.object === 'material') return { raw: { Data: { Rows: itemRows } } }
+              if (req.object === 'bom') return { raw: { Data: { Rows: bomRows } } }
+              throw new Error(`unexpected object ${req.object}`)
+            },
+            async upsert(b) { writes.push(['upsert', b]); return {} },
+            async save(b) { writes.push(['save', b]); return {} },
+          }
+        },
+      },
+    }).services
+    return { services, reads, writes }
+  }
+
+  // ── happy path: approved two-hop chain, read-tier, derived intermediate key, last-hop-only data ──
+  {
+    const { services, reads, writes } = compositionServices({
+      itemRows: [{ FItemID: 'ITEM-777' }], bomRows: [{ FBOMNumber: 'BOM-2026-X' }],
+    })
+    const { routes } = mountRoutes(services)
+    const ok = await invoke(routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+      user: READ_USER, params: { id: 'rscc_1' }, body: { inputs: { key: 'M-001' } },
+    })
+    assertOkResponse(ok, 200)
+    assert.equal(ok.body.data.evidence.ok, true)
+    assert.deepEqual(ok.body.data.data, { resolver: { target: 'bom_number', value: 'BOM-2026-X' } })
+    // Hop 0 filters on the business key; hop 1 filters on the DERIVED intermediate key.
+    assert.equal(reads.length, 2)
+    assert.deepEqual(reads[0], { object: 'material', filters: { FNumber: 'M-001' } })
+    assert.deepEqual(reads[1], { object: 'bom', filters: { FItemId: 'ITEM-777' } })
+    assert.equal(writes.length, 0, 'composition run is read-only')
+    // Evidence is values-free; the intermediate ITEM-777 appears nowhere in evidence.
+    const evStr = JSON.stringify(ok.body.data.evidence)
+    for (const leak of ['ITEM-777', 'internal_id', 'FItemID', 'FBOMNumber', 'M-001', 'secret-token', '/K3API', 'bom_number']) {
+      assert.ok(!evStr.includes(leak), `composition evidence must not leak ${leak}`)
+    }
+  }
+
+  // ── approved-only gate #1: composition not approved → 409 ──
+  {
+    const { services, reads } = compositionServices({ itemRows: [{ FItemID: 'I' }], bomRows: [{ FBOMNumber: 'B' }], compositionStatus: 'draft' })
+    const res = await invoke(mountRoutes(services).routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+      user: READ_USER, params: { id: 'rscc_draft' }, body: { inputs: { key: 'M-001' } },
+    })
+    assert.equal(res.statusCode, 409)
+    assert.equal(res.body.error.code, 'READ_SOURCE_COMPOSITION_CONFIG_NOT_APPROVED')
+    assert.equal(reads.length, 0, 'no hop runs when the composition is not approved')
+  }
+
+  // ── approved-only gate #2: a step read config not approved → 409, no chain execution ──
+  {
+    const { services, reads } = compositionServices({ itemRows: [{ FItemID: 'I' }], bomRows: [{ FBOMNumber: 'B' }], bomConfigStatus: 'draft' })
+    const res = await invoke(mountRoutes(services).routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+      user: READ_USER, params: { id: 'rscc_1' }, body: { inputs: { key: 'M-001' } },
+    })
+    assert.equal(res.statusCode, 409)
+    assert.equal(res.body.error.code, 'READ_SOURCE_CONFIG_NOT_APPROVED')
+    assert.equal(reads.length, 0, 'no hop runs when a step config is not approved')
+  }
+
+  // ── key-only allowlist: a config override / extra body field → 400, before any store access ──
+  {
+    const { services, reads } = compositionServices({ itemRows: [{ FItemID: 'I' }], bomRows: [{ FBOMNumber: 'B' }] })
+    const { routes } = mountRoutes(services)
+    for (const badBody of [{ inputs: { key: 'M-001' }, config: { steps: [] } }, { inputs: { key: 'M-001' }, sheetId: 'x' }]) {
+      const res = await invoke(routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+        user: READ_USER, params: { id: 'rscc_1' }, body: badBody,
+      })
+      assert.equal(res.statusCode, 400)
+      assert.equal(res.body.error.code, 'READ_SOURCE_COMPOSITION_RUN_CONTRACT_INVALID')
+    }
+    assert.equal(reads.length, 0, 'a config-override request must be rejected before any store/adapter access')
+    // A per-hop key inside inputs (only { key } allowed) → contract invalid from the executor's normalizer.
+    const perHopKey = await invoke(routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+      user: READ_USER, params: { id: 'rscc_1' }, body: { inputs: { key: 'M-001', key1: 'ITEM-777' } },
+    })
+    assert.equal(perHopKey.statusCode, 400)
+    assert.equal(perHopKey.body.error.code, 'READ_SOURCE_COMPOSITION_RUN_CONTRACT_INVALID')
+  }
+
+  // ── hop-0 abort: ambiguous → chain aborts, hop 1 never reads, 200 values-free ──
+  {
+    const { services, reads } = compositionServices({ itemRows: [{ FItemID: 'I1' }, { FItemID: 'I2' }], bomRows: [{ FBOMNumber: 'B' }] })
+    const res = await invoke(mountRoutes(services).routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+      user: READ_USER, params: { id: 'rscc_1' }, body: { inputs: { key: 'M-001' } },
+    })
+    assertOkResponse(res, 200)
+    assert.equal(res.body.data.evidence.ok, false)
+    assert.equal(res.body.data.evidence.failedStep, 0)
+    assert.equal(res.body.data.evidence.steps[0].errorCode, 'READ_SOURCE_RESOLVER_AMBIGUOUS')
+    assert.deepEqual(res.body.data.evidence.steps[1], { step: 1, ok: false, errorCode: 'READ_SOURCE_COMPOSITION_STEP_NOT_RUN' })
+    assert.equal(res.body.data.data, null)
+    assert.equal(reads.length, 1, 'hop 1 must not read after hop 0 aborts')
+  }
+
+  // ── authoring tier: run is read-tier; save/approve/retire are write-tier ──
+  {
+    const { services } = compositionServices({ itemRows: [{ FItemID: 'I' }], bomRows: [{ FBOMNumber: 'B' }] })
+    const { routes } = mountRoutes(services)
+    // Save requires write; a read-only principal is rejected.
+    const denied = await invoke(routes, 'POST', '/api/integration/read-source-compositions', {
+      user: READ_USER, body: { config: COMPOSITION_CONFIG },
+    })
+    assert.equal(denied.statusCode, 403, 'authoring a composition is write-tier')
+  }
+
+  // ── authoring lifecycle against the default mock store: methods called, tiers enforced ──
+  {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const saved = await invoke(routes, 'POST', '/api/integration/read-source-compositions', {
+      user: WRITE_USER, body: { config: COMPOSITION_CONFIG },
+    })
+    assert.equal(saved.statusCode, 201)
+    findCall(calls, 'readSourceCompositionSaveVersion')
+    const listed = await invoke(routes, 'GET', '/api/integration/read-source-compositions', { user: READ_USER, query: {} })
+    assertOkResponse(listed, 200)
+    findCall(calls, 'readSourceCompositionList')
+    const approved = await invoke(routes, 'POST', '/api/integration/read-source-compositions/:id/approve', {
+      user: WRITE_USER, params: { id: 'rscc_1' },
+    })
+    assertOkResponse(approved, 200)
+    findCall(calls, 'readSourceCompositionApprove')
+    const audited = await invoke(routes, 'GET', '/api/integration/read-source-compositions/:id/audit', {
+      user: READ_USER, params: { id: 'rscc_1' }, query: {},
+    })
+    assertOkResponse(audited, 200)
+    findCall(calls, 'readSourceCompositionListAudit')
+  }
+
+  console.log('  testReadSourceCompositionRoutes OK')
+}
+
 async function main() {
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
@@ -6556,6 +6784,7 @@ async function main() {
   await testReadSourceConfigRoutes()
   await testReadSourceConfiguredReadRoute()
   await testReadSourceResolverReadRoute()
+  await testReadSourceCompositionRoutes()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()
