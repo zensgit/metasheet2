@@ -45,6 +45,10 @@ import {
 } from './permission-derivation'
 import { filterPermissionCodesByNamespaceAdmission } from '../rbac/namespace-admission'
 import {
+  APPROVAL_PROJECTION_BASE_ID,
+  restrictApprovalProjectionCapabilities,
+} from './approval-projection-constants'
+import {
   parseConditionalRules,
   parseConditionalRulesCached,
   evaluateRecordDenied,
@@ -1438,13 +1442,31 @@ export async function filterReadableSheetRowsForAccess<T extends { id: string }>
     sheetRows.map((row) => String(row.id)),
     access.userId,
   )
+  // A: exclude approval projection sheets from a non-admin's readable/listing set (admins returned above).
+  // This is the shared sheet-listing gate (base list + sheet lists), so it also hides the projection BASE
+  // from a non-admin's base list (a base surfaces only if it has ≥1 readable sheet).
+  const projectionSheetIds = await loadApprovalProjectionSheetIds(query, sheetRows.map((row) => String(row.id)))
   return sheetRows.filter((row) =>
+    !projectionSheetIds.has(String(row.id)) &&
     canReadWithSheetGrant(
       effectiveCapabilities,
       scopeMap.get(String(row.id)),
       access.isAdminRole,
     ),
   )
+}
+
+/**
+ * A (2026-07-03): of the given sheet ids, which belong to the admin-only approval projection base. Only
+ * queried for non-admins (admins bypass the guard), so the extra lookup never touches the admin hot path.
+ */
+export async function loadApprovalProjectionSheetIds(query: QueryFn, sheetIds: string[]): Promise<Set<string>> {
+  if (sheetIds.length === 0) return new Set()
+  const result = await query(
+    `SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) AND base_id = $2`,
+    [sheetIds, APPROVAL_PROJECTION_BASE_ID],
+  )
+  return new Set((result.rows as Array<{ id: string }>).map((row) => row.id))
 }
 
 export async function resolveSheetCapabilities(
@@ -1461,7 +1483,12 @@ export async function resolveSheetCapabilities(
   const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
   const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
   const sheetScope = scopeMap.get(sheetId)
-  const capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, access.isAdminRole)
+  let capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, access.isAdminRole)
+  // A: the approval projection base is admin-only — a non-admin with global `multitable:read` is denied
+  // read/export/write on its sheets + records (fail-closed at this shared read choke).
+  if (!access.isAdminRole && (await loadApprovalProjectionSheetIds(query, [sheetId])).has(sheetId)) {
+    capabilities = restrictApprovalProjectionCapabilities(capabilities, true, false)
+  }
   return {
     access,
     capabilities,
@@ -1504,6 +1531,9 @@ export async function resolveReadableSheetIds(
       readableSheetIds.add(sheetId)
     }
   }
+  // A: filter approval projection sheets out of a non-admin's readable/listing set (admins returned above).
+  const projectionSheetIds = await loadApprovalProjectionSheetIds(query, Array.from(readableSheetIds))
+  for (const id of projectionSheetIds) readableSheetIds.delete(id)
   return readableSheetIds
 }
 

@@ -5,6 +5,7 @@
  */
 
 import { listUserPermissions, isAdmin } from '../rbac/service'
+import { APPROVAL_PROJECTION_BASE_ID, restrictApprovalProjectionCapabilities } from './approval-projection-constants'
 
 // ── Permission code sets ────────────────────────────────────────────
 
@@ -243,7 +244,19 @@ export async function resolveSheetCapabilitiesForUser(
   const baseCapabilities = deriveCapabilities(permissions, isAdminRole)
   const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], userId)
   const sheetScope = scopeMap.get(sheetId)
-  const capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, isAdminRole)
+  let capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, isAdminRole)
+  // A: this resolver ALSO fronts the collab sheet-room auth + Yjs record auth + api-token capability paths
+  // (index.ts / routes/api-tokens.ts), NOT just REST. The approval projection base is admin-only, so a
+  // non-admin with global multitable:read must be denied here too (same guard + query shape as the REST chokes).
+  if (!isAdminRole) {
+    const proj = await query(
+      `SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) AND base_id = $2`,
+      [[sheetId], APPROVAL_PROJECTION_BASE_ID],
+    )
+    if ((proj.rows as Array<{ id: string }>).length > 0) {
+      capabilities = restrictApprovalProjectionCapabilities(capabilities, true, false)
+    }
+  }
   return {
     capabilities,
     ...(sheetScope ? { sheetScope } : {}),

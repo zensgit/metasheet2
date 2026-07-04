@@ -137,6 +137,8 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         ) {
           return { rows: [{ id: 'rec_1', version: 8, data: { fld_title: 'Updated title' } }] }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -203,6 +205,8 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
             ],
           }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -241,6 +245,8 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
             ],
           }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -276,6 +282,8 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         if (sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
           return { rows: [{ id: 'rec_1', version: 11, data: { fld_title: 'Current' }, created_by: 'user_patch_1' }] }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -372,6 +380,8 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
             { field_id: 'fld_customer', record_id: 'rec_1', foreign_record_id: 'rec_c3' },
           ] }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -467,6 +477,8 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
         ) {
           return { rows: [{ id: 'rec_1', version: 3, data: { fld_files: ['att_new_1'] } }] }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })

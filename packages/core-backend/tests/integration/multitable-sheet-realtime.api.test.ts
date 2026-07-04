@@ -99,6 +99,8 @@ describe('Multitable sheet realtime events', () => {
         if (sql.includes('field_permissions')) {
           return { rows: [] }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -191,6 +193,8 @@ describe('Multitable sheet realtime events', () => {
         if (sql.includes('field_permissions')) {
           return { rows: [] }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -264,6 +268,8 @@ describe('Multitable sheet realtime events', () => {
         if (sql.includes('INSERT INTO meta_record_subscription_notifications')) {
           return { rows: [], rowCount: 0 }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })

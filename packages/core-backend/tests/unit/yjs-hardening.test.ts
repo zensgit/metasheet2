@@ -78,12 +78,17 @@ describe('Write-own e2e through capability chain', () => {
     vi.spyOn(rbac, 'listUserPermissions').mockResolvedValue(['multitable:read'])
     vi.spyOn(rbac, 'isAdmin').mockResolvedValue(false)
 
-    // Mock query for sheet permission scope: write-own only
-    const mockQuery = vi.fn().mockResolvedValue({
-      rows: [
-        { sheet_id: 'sheet-1', perm_code: 'multitable:read', subject_type: 'user' },
-        { sheet_id: 'sheet-1', perm_code: 'multitable:write-own', subject_type: 'user' },
-      ],
+    // Mock query for sheet permission scope: write-own only.
+    // The approval-projection guard also probes `meta_sheets … base_id` through this pool —
+    // answer it with no rows (sheet-1 is an ordinary sheet, not a projection sheet).
+    const mockQuery = vi.fn(async (sql: string) => {
+      if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+      return {
+        rows: [
+          { sheet_id: 'sheet-1', perm_code: 'multitable:read', subject_type: 'user' },
+          { sheet_id: 'sheet-1', perm_code: 'multitable:write-own', subject_type: 'user' },
+        ],
+      }
     })
 
     const result = await resolveSheetCapabilitiesForUser(mockQuery as any, 'sheet-1', 'user-b')

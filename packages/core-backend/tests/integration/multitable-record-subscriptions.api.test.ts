@@ -83,6 +83,8 @@ describe('Multitable record subscription routes', () => {
             }],
           }
         }
+        // A: approval-projection read-guard lookup — no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })

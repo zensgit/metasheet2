@@ -3563,7 +3563,7 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.querySelector('[data-testid="stock-preparation-s1-result"]')?.textContent).toContain('target not_ready · canonical_missing')
     expect(container.querySelector('[data-testid="stock-preparation-s1-metrics"]')?.textContent).toContain('missing 2')
     expect(container.querySelector('[data-testid="stock-preparation-s1-evidence"]')?.textContent).toContain('projectNo')
-    expect(container.querySelector('[data-testid="stock-preparation-s1-evidence"]')?.textContent).not.toContain('sheet_stock_private')
+    expect(container.querySelector('[data-testid="stock-preparation-s1-result"]')?.textContent).not.toContain('sheet_stock_private')
   })
 
   it('S1: creates or binds the standard stock-preparation target without client-supplied sheet scope', async () => {
@@ -3625,9 +3625,12 @@ describe('IntegrationWorkbenchView', () => {
     expect(ensureBodies[0]).not.toHaveProperty('source')
     expect(ensureBodies[0]).not.toHaveProperty('target')
     expect(ensureBodies[0]).not.toHaveProperty('plan')
-    expect(container.querySelector('[data-testid="stock-preparation-s1-result"]')?.textContent).toContain('target ready · canonical_create')
-    expect(container.querySelector('[data-testid="stock-preparation-s1-evidence"]')?.textContent).not.toContain('sheet_stock_private')
-    expect(container.querySelector('[data-testid="stock-preparation-s1-evidence"]')?.textContent).not.toContain('fld_project_no_private')
+    const boundResultText = container.querySelector('[data-testid="stock-preparation-s1-result"]')?.textContent || ''
+    expect(boundResultText).toContain('target ready · canonical_create')
+    // Leak lock covers the WHOLE result panel (summary + metrics + hint + evidence), not just the
+    // evidence <pre>: the mock's targetBinding carries realistic private ids and none may render.
+    expect(boundResultText).not.toContain('sheet_stock_private')
+    expect(boundResultText).not.toContain('fld_project_no_private')
   })
 
   it('S1: ignores stale standard stock-preparation target responses', async () => {
@@ -3723,6 +3726,10 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi()
     ;(container.querySelector('[data-testid="stock-preparation-s1-readiness"]') as HTMLButtonElement).click()
     await flushUi()
+    // In-flight lock: the baseId input is disabled while a request runs. The programmatic edit
+    // below still lands (dispatchEvent bypasses the disabled attribute), which is exactly what the
+    // signature guard exists to catch — it is the belt behind the disabled input.
+    expect(baseInput.disabled).toBe(true)
     baseInput.value = 'base_after'
     baseInput.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
@@ -3746,6 +3753,34 @@ describe('IntegrationWorkbenchView', () => {
 
     expect(container.querySelector('[data-testid="stock-preparation-s1-result"]')).toBeNull()
     expect((container.querySelector('[data-testid="stock-preparation-s1-readiness"]') as HTMLButtonElement).disabled).toBe(false)
+    expect(baseInput.disabled).toBe(false)
+  })
+
+  it('S1: hides the standard stock-preparation panel and its wire without integration:admin', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    const calls: string[] = []
+    apiFetchMock.mockImplementation(async (url: string) => {
+      calls.push(url)
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi(8)
+
+    // Mount anchor: an ungated sibling panel proves the view rendered — the absence below is the
+    // permission gate at work, not a render failure false-passing the test.
+    expect(container.querySelector('[data-testid="external-write-panel"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="stock-preparation-s1-panel"]')).toBeNull()
+    expect(calls.some((url) => url.includes('/stock-preparation/target/'))).toBe(false)
   })
 
   it('C5-2: runs a configured table action via dry-run token without client-supplied plan or sheet scope', async () => {

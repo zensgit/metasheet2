@@ -137,6 +137,8 @@ describe('Multitable attachment API', () => {
               }],
             }
           }
+          // A: approval-projection read-guard lookup — no projection sheet in this test
+          if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
           throw new Error(`Unhandled SQL in test: ${sql}`)
         },
       })
@@ -205,6 +207,8 @@ describe('Multitable attachment API', () => {
               }],
             }
           }
+          // A: approval-projection read-guard lookup — no projection sheet in this test
+          if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
           throw new Error(`Unhandled SQL in test: ${sql}`)
         },
       })
@@ -267,6 +271,8 @@ describe('Multitable attachment API', () => {
               }],
             }
           }
+          // A: approval-projection read-guard lookup — no projection sheet in this test
+          if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
           throw new Error(`Unhandled SQL in test: ${sql}`)
         },
       })
@@ -312,6 +318,8 @@ describe('Multitable attachment API', () => {
               rows: [{ sheet_id: 'sheet_acl', perm_code: 'spreadsheet:read', subject_type: 'user' }],
             }
           }
+          // A: approval-projection read-guard lookup — no projection sheet in this test
+          if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
           throw new Error(`Unhandled SQL in test: ${sql}`)
         },
       })
@@ -359,6 +367,8 @@ describe('Multitable attachment API', () => {
               }],
             }
           }
+          // A: approval-projection read-guard lookup — no projection sheet in this test
+          if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
           throw new Error(`Unhandled SQL in test: ${sql}`)
         },
       })
@@ -402,6 +412,8 @@ describe('Multitable attachment API', () => {
               rows: [{ sheet_id: 'sheet_acl', perm_code: 'spreadsheet:comment', subject_type: 'user' }],
             }
           }
+          // A: approval-projection read-guard lookup — no projection sheet in this test
+          if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
           throw new Error(`Unhandled SQL in test: ${sql}`)
         },
       })
@@ -503,6 +515,8 @@ describe('Multitable attachment API', () => {
             expect(params).toEqual([uploadedAttachmentId])
             return { rows: [] }
           }
+          // A: approval-projection read-guard lookup — no projection sheet in this test
+          if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
           throw new Error(`Unhandled SQL in test: ${sql}`)
         },
       })
@@ -598,6 +612,8 @@ describe('Multitable attachment API', () => {
             expect(params).toEqual(['att_sheet_write'])
             return { rows: [] }
           }
+          // A: approval-projection read-guard lookup — no projection sheet in this test
+          if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
           throw new Error(`Unhandled SQL in test: ${sql}`)
         },
       })
@@ -661,6 +677,8 @@ describe('Multitable attachment API', () => {
             expect(params).toEqual(['att_draft_own'])
             return { rows: [] }
           }
+          // A: approval-projection read-guard lookup — no projection sheet in this test
+          if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
           throw new Error(`Unhandled SQL in test: ${sql}`)
         },
       })
@@ -708,6 +726,8 @@ describe('Multitable attachment API', () => {
               }],
             }
           }
+          // A: approval-projection read-guard lookup — no projection sheet in this test
+          if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
           throw new Error(`Unhandled SQL in test: ${sql}`)
         },
       })
