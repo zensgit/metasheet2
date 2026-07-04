@@ -143,6 +143,16 @@ function planInvalidOutcome() {
 // the ordered execution plan. The plan carries config identifiers only — never endpoints, filters,
 // credentials, or values.
 function planReadSourceComposition(composition, options = {}) {
+  // Approval is a plan-time gate (design-lock lock 1). The C-R1 validator only verifies that each
+  // referenced step config is APPROVED / resolver_lookup / read-only WHEN an approved-config map is
+  // supplied (validateReferencedReadConfigs returns early when options.readConfigsById is absent) —
+  // so a plan produced without that map is approval-UNVERIFIED. This planner is the C-R3 executor
+  // seam: it fails closed rather than emit an unvetted plan. A caller (the C-R3 runtime) MUST pass
+  // options.readConfigsById (the approved-status read-config map); omission is a contract violation,
+  // never a valid "preview" plan.
+  if (!isPlainObject(options) || options.readConfigsById === undefined || options.readConfigsById === null) {
+    return freezeDeep({ ok: false, errorCode: 'READ_SOURCE_COMPOSITION_PLAN_INVALID', errors: [] })
+  }
   let result
   try {
     result = validateReadSourceCompositionConfig(composition, options)
@@ -241,14 +251,22 @@ function evaluateCompositionOutcome(plan, hopOutcomes) {
         const evidence = isPlainObject(hop) && isPlainObject(hop.evidence) ? hop.evidence : {}
         const rule = safeResolverRule(evidence.rule)
         const snapshot = isPlainObject(hop) ? snapshotResolverData(hop.data) : null
-        const hopOk = snapshot !== null && snapshot.scalar === true
+        // A hop is a success ONLY when it BOTH claims success (evidence.ok === true) AND carries a
+        // chain-usable scalar. Keying on the data snapshot alone would trust a contradictory hop
+        // (evidence.ok === false but resolver-shaped data) and certify a stale/aborted value as chain
+        // success — a fail-OPEN the real R1 producer never emits (it nulls data on failure), but the
+        // module's threat model is a buggy / evidence-trusting non-R1 producer, so the seam requires
+        // both to agree. The mirror direction (ok evidence + non-resolver data = failed) was already
+        // enforced; this closes the other direction.
+        const hopOk = evidence.ok === true && snapshot !== null && snapshot.scalar === true
         entry = { step: ordinal, ok: hopOk }
         if (rule !== null) entry.rule = rule
         if (!hopOk) {
-          // A hop that RESOLVED but to a non-scalar gets the dedicated chain-only code (see the
-          // narrowing note in the header) instead of contradicting its own ok evidence generically.
+          // A hop that CLAIMED success but RESOLVED to a non-scalar gets the dedicated chain-only code
+          // (see the narrowing note in the header) instead of contradicting its own ok evidence
+          // generically. A hop that claimed FAILURE keeps its own coarse code (via safeStepErrorCode).
           entry.errorCode =
-            snapshot !== null && snapshot.scalar !== true
+            evidence.ok === true && snapshot !== null && snapshot.scalar !== true
               ? 'READ_SOURCE_COMPOSITION_STEP_OUTPUT_NOT_SCALAR'
               : safeStepErrorCode(evidence.errorCode)
         } else {
