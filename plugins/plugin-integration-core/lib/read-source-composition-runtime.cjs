@@ -129,12 +129,24 @@ async function executeReadSourceComposition(compositionConfig, runtimeInput, dep
 
   // Build the approved-read-config map from the resolved per-step bundle so the planner re-validates
   // approved-only / resolver-only / read-only / handoff-target as defense-in-depth over the route load.
+  //
+  // Fail-closed status coercion (defense-in-depth must not fail OPEN): the C-R1 validator's status
+  // check is deliberately OPTIONAL at save-time (`ref.status !== undefined && ref.status !== 'approved'`
+  // → an absent status is skipped). At RUNTIME approved-only is a HARD gate, so a bundle that lacks a
+  // status — the exact route-side mistake this layer exists to catch — must NOT slip through as
+  // approved. Only a literal 'approved' is forwarded as approved; every other value (missing / undefined
+  // / draft / null / anything) is forwarded as an explicit not-approved marker so the planner rejects it.
   const readConfigsById = {}
   if (isPlainObject(compositionConfig) && Array.isArray(compositionConfig.steps)) {
     for (const step of compositionConfig.steps) {
       if (!isPlainObject(step) || typeof step.readSourceConfigId !== 'string') continue
       const bundle = stepBundleById(stepConfigsById, step.readSourceConfigId)
-      if (bundle) readConfigsById[step.readSourceConfigId] = { status: bundle.status, config: bundle.config }
+      if (bundle) {
+        readConfigsById[step.readSourceConfigId] = {
+          status: bundle.status === 'approved' ? 'approved' : 'not_approved',
+          config: bundle.config,
+        }
+      }
     }
   }
 

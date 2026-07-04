@@ -200,6 +200,41 @@ async function testPlanGate() {
   // A malformed composition config fails closed too.
   const badShape = await executeReadSourceComposition({ steps: 'nope' }, { inputs: { key: 'M-001' } }, mockDeps({}).deps)
   assert.equal(badShape.evidence.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
+
+  // Defense-in-depth must FAIL CLOSED: a bundle that LACKS a status property (the exact route-side
+  // mistake this layer catches) must NOT slip through as approved — the C-R1 validator's status check
+  // is optional at save-time, so the runtime coerces missing/non-'approved' status to not-approved.
+  const noStatusDeps = mockDeps({ itemRows: [{ FItemID: 'ITEM-777' }], bomRows: [{ FBOMNumber: 'BOM-2026-X' }] })
+  const statusless = bundle()
+  delete statusless['cfg-bom'].status
+  noStatusDeps.deps.stepConfigsById = statusless
+  const noStatusOut = await executeReadSourceComposition(comp, { inputs: { key: 'M-001' } }, noStatusDeps.deps)
+  assert.equal(noStatusOut.evidence.ok, false, 'statusless bundle must be rejected, not treated as approved')
+  assert.equal(noStatusOut.evidence.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
+  assert.ok(noStatusOut.evidence.planErrors.some((e) => e.code === 'READ_SOURCE_COMPOSITION_STEP_NOT_APPROVED'))
+  assert.equal(noStatusDeps.state.reads.length, 0, 'no hop may run for a statusless (unapproved) bundle')
+
+  // An unexpected status string is likewise not-approved.
+  const weirdStatusDeps = mockDeps({ itemRows: [{ FItemID: 'ITEM-777' }], bomRows: [{ FBOMNumber: 'BOM-2026-X' }] })
+  weirdStatusDeps.deps.stepConfigsById = bundle({ bomStatus: 'pending_review' })
+  const weirdOut = await executeReadSourceComposition(comp, { inputs: { key: 'M-001' } }, weirdStatusDeps.deps)
+  assert.equal(weirdOut.evidence.ok, false)
+  assert.equal(weirdStatusDeps.state.reads.length, 0)
+}
+
+// ── L4 chain-only scalar narrowing: hop-0 resolves NON-scalar → handoff aborts, hop 1 never reads ──
+async function testNonScalarHandoffAborts() {
+  // R1 can legitimately resolve a K3 boolean/object flag standalone; a CHAIN is scalar-only (lock 2).
+  const { deps, state } = mockDeps({ itemRows: [{ FItemID: true }], bomRows: [{ FBOMNumber: 'BOM-2026-X' }] })
+  const out = await executeReadSourceComposition(normalizedComposition(), { inputs: { key: 'M-001' } }, deps)
+  assert.equal(out.evidence.ok, false)
+  assert.equal(out.evidence.failedStep, 0)
+  assert.equal(out.evidence.steps[0].errorCode, 'READ_SOURCE_COMPOSITION_STEP_OUTPUT_NOT_SCALAR')
+  assert.deepEqual(out.evidence.steps[1], { step: 1, ok: false, errorCode: 'READ_SOURCE_COMPOSITION_STEP_NOT_RUN' })
+  assert.equal(out.data, null)
+  assert.equal(state.reads.length, 1, 'hop 1 must not read after a non-scalar handoff')
+  assert.equal(state.writes.length, 0)
+  assertValuesFree(out.evidence)
 }
 
 // ── L4: hop-0 failure aborts, hop 1 never runs ─────────────────────────────────────────────────────
@@ -278,6 +313,32 @@ async function testCreateAdapterRequired() {
   )
 }
 
+// ── L3 named request-shape vectors (design-lock enumerated) ────────────────────────────────────────
+async function testL3NamedVectors() {
+  const n = __internals.normalizeCompositionRuntimeRequest
+  // A JSON-parsed __proto__ own-key (exactly what the route's JSON.parse produces) is rejected at BOTH
+  // body and inputs levels — never silently merged as a prototype override.
+  assert.throws(() => n(JSON.parse('{"__proto__":{"x":1},"inputs":{"key":"M"}}')), (e) => e.reason === 'unexpected_field')
+  assert.throws(() => n(JSON.parse('{"inputs":{"key":"M","__proto__":{"k":1}}}')), (e) => e.reason === 'inputs_unexpected_field')
+
+  // A getter on `key` is read EXACTLY once (TOCTOU-safe: no re-read reaches the getter).
+  let reads = 0
+  const captured = n({ inputs: { get key() { reads += 1; return 'M-001' } } })
+  assert.deepEqual(captured, { key: 'M-001' })
+  assert.equal(reads, 1)
+
+  // An object/array-valued key passes THIS allowlist (shape-level) but fails closed at hop 0 with NO
+  // outbound read — the client key never reaches a request.
+  for (const key of [{ FExtra: 'SMUGGLE' }, ['SMUGGLE']]) {
+    const dep = mockDeps({ itemRows: [{ FItemID: 'ITEM-777' }], bomRows: [{ FBOMNumber: 'B' }] })
+    const out = await executeReadSourceComposition(normalizedComposition(), { inputs: { key } }, dep.deps)
+    assert.equal(out.evidence.ok, false)
+    assert.equal(out.evidence.failedStep, 0)
+    assert.equal(dep.state.reads.length, 0, 'a non-scalar client key must not reach an outbound read')
+    assert.ok(!JSON.stringify(out).includes('SMUGGLE'))
+  }
+}
+
 // ── internals ──────────────────────────────────────────────────────────────────────────────────────
 function testInternals() {
   assert.deepEqual(__internals.normalizeCompositionRuntimeRequest({ inputs: { key: 'M-001' } }), { key: 'M-001' })
@@ -292,12 +353,14 @@ async function main() {
   await testHappyPathTwoHop()
   await testRuntimeRequestKeyOnly()
   await testPlanGate()
+  await testNonScalarHandoffAborts()
   await testHopFailureAborts()
   await testHopNotFoundAborts()
   await testSecondHopFailure()
   await testAdapterThrowFailsClosed()
   await testKindMismatchFailsClosed()
   await testCreateAdapterRequired()
+  await testL3NamedVectors()
   testInternals()
   console.log('read-source-composition-runtime.test.cjs OK')
 }
