@@ -89,5 +89,6 @@ S2 设计锁 10 条 × 实际落点:
 
 ### 8.3 后续边界更新
 
-- `resolver_lookup` 运行时设计锁已合并(#3479 → 5f48dadeb,修订版含 R0 契约/证据面扩展切片、multiplicityRuleField 对账、demand gate);R0–R3 仍为各自独立 opt-in,启动前置 = #1709 的 material→FBillNo GATE-front 形状回传(#3415 规范)。
+- `resolver_lookup` 后续线已推进到 standalone read 完成:R0 契约/证据面、R1 纯评估器、R2 runtime 接线、R3 配置 UI 均已合并,并在 2026-07-04 用 `17688041f` on-prem 包完成实体机 standalone resolver smoke PASS。详见 `integration-read-source-resolver-remaining-scope-dev-verification-20260703.md` §7。
+- 仍 gated:material→FBillNo composition、递归 BOM、Save/Submit/Audit、外部写、生产写;这些没有被 standalone resolver PASS 解锁。
 - #1709 保持 OPEN/on-hold;§6 的其余 OUT 项不变。
