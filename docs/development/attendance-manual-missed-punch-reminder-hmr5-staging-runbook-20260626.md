@@ -289,7 +289,8 @@ Expected:
 - `created=1`, `existing=0`;
 - one `attendance_notification_deliveries` row for
   `source_type='manual_missed_punch_reminder'`;
-- `source_key='manual_missed_punch_reminder:<key>:recipient:<worker-id>'`;
+- `source_key='manual_missed_punch_reminder:<key>:recipient:<worker-id>:channel:<channel>'`
+  （shipped route 会追加 `:channel:<channel>` 后缀；helper 按该真实形状断言）;
 - `payload.actorUserId=$SCOPED_ID`;
 - `payload.body='HMR-5 API <stamp>'`;
 - row status starts as `pending` unless the worker claims it immediately.
