@@ -172,7 +172,14 @@ Expected markers:
 [bridge-agent-readonly-task] Task start requested.
 [bridge-agent-readonly-task] State: Running
 [bridge-agent-readonly-task] Local TCP listener: 127.0.0.1:19091 reachable
+[bridge-agent-readonly-task] Health: healthy
 ```
+
+The helper installs the listener task with an unlimited execution time
+(`ExecutionTimeLimit = 0`). This is intentional: the readonly Bridge Agent is a
+long-running localhost listener, not a bounded batch job. A repaired or
+reinstalled task must not inherit Windows Scheduled Task's default 72-hour
+execution limit.
 
 Useful management commands:
 
@@ -186,7 +193,9 @@ powershell -ExecutionPolicy Bypass -File C:\metasheet\scripts\ops\bridge-agent-r
 `Status` deliberately checks only the Scheduled Task state, `LastTaskResult`,
 and the local TCP listener. It does not call `/health`, because `/health`
 requires `X-MetaSheet-Bridge-Secret` and the helper must not read or print the
-shared secret. Use the smoke commands below for authenticated protocol checks.
+shared secret. `Status` exits unhealthy when the task is not `Running` or when
+`127.0.0.1:19091` is not reachable. Use the smoke commands below for
+authenticated protocol checks.
 
 ## Smoke Commands
 

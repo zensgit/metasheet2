@@ -137,6 +137,23 @@ function Test-LocalTcpPort {
   }
 }
 
+function Test-BridgeTaskHealthy {
+  $task = Get-BridgeTask
+  if (-not $task) { return $false }
+  $state = [string]$task.State
+  return $state -eq 'Running' -and (Test-LocalTcpPort -TargetPort $Port)
+}
+
+function Wait-BridgeTaskHealthy {
+  param([int]$TimeoutSeconds = 15)
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    if (Test-BridgeTaskHealthy) { return $true }
+    Start-Sleep -Seconds 1
+  }
+  return (Test-BridgeTaskHealthy)
+}
+
 function Get-BridgeTask {
   return Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
 }
@@ -157,6 +174,7 @@ function Install-BridgeTask {
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
+    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
     -RestartCount 3 `
     -RestartInterval (New-TimeSpan -Minutes 1)
   $task = New-ScheduledTask -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Settings $taskSettings
@@ -180,8 +198,8 @@ function Start-BridgeTask {
   if ($PSCmdlet.ShouldProcess("$TaskPath$TaskName", 'Start readonly Bridge Agent task')) {
     Start-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath
     Write-BridgeTaskInfo 'Task start requested.'
-    Start-Sleep -Seconds 2
-    Show-BridgeTaskStatus
+    Wait-BridgeTaskHealthy -TimeoutSeconds 15 | Out-Null
+    Show-BridgeTaskStatus -RequireHealthy
   }
 }
 
@@ -211,10 +229,14 @@ function Uninstall-BridgeTask {
 }
 
 function Show-BridgeTaskStatus {
+  param([switch]$RequireHealthy)
   Ensure-ScheduledTaskModule
   $task = Get-BridgeTask
   if (-not $task) {
     Write-BridgeTaskInfo "Task not found: $TaskPath$TaskName"
+    if ($RequireHealthy) {
+      Throw-BridgeTaskError "Task not found: $TaskPath$TaskName"
+    }
     return
   }
 
@@ -225,10 +247,23 @@ function Show-BridgeTaskStatus {
   Write-BridgeTaskInfo "LastTaskResult: $($info.LastTaskResult)"
   Write-BridgeTaskInfo "NextRunTime: $($info.NextRunTime)"
 
-  if (Test-LocalTcpPort -TargetPort $Port) {
+  $state = [string]$task.State
+  $listenerReachable = Test-LocalTcpPort -TargetPort $Port
+
+  if ($listenerReachable) {
     Write-BridgeTaskInfo "Local TCP listener: 127.0.0.1:$Port reachable"
   } else {
     Write-BridgeTaskInfo "Local TCP listener: 127.0.0.1:$Port not reachable"
+  }
+
+  if ($state -eq 'Running' -and $listenerReachable) {
+    Write-BridgeTaskInfo 'Health: healthy'
+    return
+  }
+
+  Write-BridgeTaskInfo 'Health: unhealthy'
+  if ($RequireHealthy) {
+    Throw-BridgeTaskError "Task is not healthy (state=$state, listenerReachable=$listenerReachable)."
   }
 }
 
@@ -238,7 +273,7 @@ switch ($Action) {
   'Install' { Install-BridgeTask }
   'Start' { Start-BridgeTask }
   'Stop' { Stop-BridgeTask }
-  'Status' { Show-BridgeTaskStatus }
+  'Status' { Show-BridgeTaskStatus -RequireHealthy }
   'Uninstall' { Uninstall-BridgeTask }
   default { Throw-BridgeTaskError "Unknown action: $Action" }
 }

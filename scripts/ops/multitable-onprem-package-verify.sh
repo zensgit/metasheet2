@@ -507,9 +507,11 @@ function verify_bridge_agent_tooling_contract() {
   search_fixed_string 'MetaSheetReadonlyBridgeAgent' "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must use a stable task name"
   search_fixed_string 'Register-ScheduledTask' "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must register a Windows Scheduled Task"
   search_fixed_string "New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest" "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must run as SYSTEM"
+  search_fixed_string '-ExecutionTimeLimit (New-TimeSpan -Seconds 0)' "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must disable the default 72h task execution limit"
   search_fixed_string 'bridge-agent-readonly.ps1' "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must launch the readonly agent script"
   search_fixed_string 'Get-ScheduledTaskInfo' "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must report LastTaskResult"
   search_fixed_string 'System.Net.Sockets.TcpClient' "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must include a secret-free local listener check"
+  search_fixed_string 'Health: unhealthy' "$readonly_task_script" || die "readonly Bridge Agent scheduled task helper must flag unhealthy task/listener status"
 
   search_fixed_string '"host": "127.0.0.1"' "$readonly_config" || die "readonly Bridge Agent example config must bind to localhost"
   search_fixed_string 'METASHEET_BRIDGE_SQL_USERNAME' "$readonly_config" || die "readonly Bridge Agent config must keep SQL username in an env var"
