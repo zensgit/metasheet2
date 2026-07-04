@@ -273,6 +273,21 @@ function testEvaluateSanitizesForeignTokens() {
     errorCode: 'READ_SOURCE_COMPOSITION_STEP_FAILED',
   })
   assertValuesFree(outcome, ['SECRET-INJ', 'made_up_rule'])
+
+  // P2 red test: TOKEN-SHAPED but UNREGISTERED codes must collapse too — the guard is the exact
+  // registered probe/resolver code set, not a token-shape regex. A leaked business identifier that
+  // happens to look like A_CODE (e.g. MAT_001_SECRET) must never ride into stitched evidence.
+  const tokenShaped = evaluateCompositionOutcome(plan, [
+    { evidence: { ok: false, rule: 'exactly_one', errorCode: 'MAT_001_SECRET' }, data: null },
+  ])
+  assert.equal(tokenShaped.evidence.steps[0].errorCode, 'READ_SOURCE_COMPOSITION_STEP_FAILED')
+  assertValuesFree(tokenShaped, ['MAT_001_SECRET'])
+
+  // Registered probe codes (non-resolver) pass through exactly.
+  const probeCode = evaluateCompositionOutcome(plan, [
+    { evidence: { ok: false, rule: 'exactly_one', errorCode: 'READ_SOURCE_PROBE_AUTH_FAILED' }, data: null },
+  ])
+  assert.equal(probeCode.evidence.steps[0].errorCode, 'READ_SOURCE_PROBE_AUTH_FAILED')
 }
 
 function testEvaluateStructuralMisuseFailsClosed() {
@@ -293,6 +308,22 @@ function testEvaluateStructuralMisuseFailsClosed() {
   // A malformed plan fails closed too.
   const badPlan = evaluateCompositionOutcome({ stepCount: 2, steps: [{}], handoffs: [] }, [])
   assert.equal(badPlan.evidence.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
+
+  // P1 red test: a ZERO-STEP shaped plan must fail closed (PLAN_INVALID), never read hopOutcomes[-1]
+  // and crash. Same for derive, and for shapes outside the C-R1 step bounds / handoff arity.
+  const zeroStep = { stepCount: 0, steps: [], handoffs: [] }
+  const zeroEval = evaluateCompositionOutcome(zeroStep, [])
+  assert.equal(zeroEval.evidence.ok, false)
+  assert.equal(zeroEval.evidence.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
+  assert.equal(zeroEval.data, null)
+  assert.equal(
+    deriveCompositionStepInput(zeroStep, 1, { resolver: { target: 'internal_id', value: 'x' } }).errorCode,
+    'READ_SOURCE_COMPOSITION_PLAN_INVALID',
+  )
+  const oneStep = { stepCount: 1, steps: [{ ordinal: 0 }], handoffs: [] }
+  assert.equal(evaluateCompositionOutcome(oneStep, []).evidence.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
+  const wrongHandoffArity = { stepCount: 2, steps: [{ ordinal: 0 }, { ordinal: 1 }], handoffs: [] }
+  assert.equal(evaluateCompositionOutcome(wrongHandoffArity, []).evidence.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
 }
 
 // ── vector key discipline (lock 5) ─────────────────────────────────────────────────────────────────
@@ -329,6 +360,11 @@ function testExportedVocabulary() {
   assert.equal(__internals.isResolverData({ resolver: { target: 't', value: 'v' } }), true)
   assert.equal(__internals.isResolverData({ resolver: { target: 't', value: '' } }), false)
   assert.equal(__internals.safeStepErrorCode('not a token!'), 'READ_SOURCE_COMPOSITION_STEP_FAILED')
+  // Registered-set discipline, not token shape: registered passes, token-shaped-unregistered collapses.
+  assert.equal(__internals.safeStepErrorCode('READ_SOURCE_RESOLVER_NOT_FOUND'), 'READ_SOURCE_COMPOSITION_STEP_FAILED')
+  assert.equal(__internals.safeStepErrorCode('READ_SOURCE_RESOLVER_NO_MATCH'), 'READ_SOURCE_RESOLVER_NO_MATCH')
+  assert.equal(__internals.safeStepErrorCode('READ_SOURCE_PROBE_TIMEOUT'), 'READ_SOURCE_PROBE_TIMEOUT')
+  assert.equal(__internals.safeStepErrorCode('MAT_001_SECRET'), 'READ_SOURCE_COMPOSITION_STEP_FAILED')
 }
 
 testPurity()

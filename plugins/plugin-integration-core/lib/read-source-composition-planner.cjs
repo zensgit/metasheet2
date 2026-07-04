@@ -16,9 +16,13 @@
 // Final chain data carries ONLY the last hop's single resolver output (target + value); intermediate
 // resolved values (e.g. the FItemID between materialNumber and FBOMNumber) are never exposed (lock 5).
 
-const { validateReadSourceCompositionConfig } = require('./read-source-composition-config.cjs')
+const {
+  COMPOSITION_MAX_STEPS,
+  COMPOSITION_MIN_STEPS,
+  validateReadSourceCompositionConfig,
+} = require('./read-source-composition-config.cjs')
 const { normalizeReadSourceProbeInputs } = require('./read-source-probe-runtime.cjs')
-const { safeResolverRule } = require('./read-source-probe-contract.cjs')
+const { READ_SOURCE_PROBE_ERROR_CODES, safeResolverRule } = require('./read-source-probe-contract.cjs')
 
 // Chain-level coarse codes. Per-hop resolver failures keep their own READ_SOURCE_RESOLVER_* /
 // READ_SOURCE_PROBE_* codes inside the step vector; these codes cover what only the CHAIN can fail on.
@@ -48,11 +52,16 @@ function freezeDeep(value) {
   return value
 }
 
-// Coarse-code token guard for values copied out of hop evidence. Hop evidence is already sanitized by
-// readSourceProbeEvidence, but the evaluator fails closed anyway: a non-token errorCode collapses to
-// the chain-level STEP_FAILED code instead of riding into the stitched vector.
+// Registered-code guard for values copied out of hop evidence. Hop evidence is already sanitized by
+// readSourceProbeEvidence, but the evaluator fails closed anyway — and against the EXACT registered
+// probe/resolver code set (READ_SOURCE_PROBE_ERROR_CODES includes the resolver codes), never a
+// token-shape regex: a token-shaped-but-unregistered value (e.g. a leaked business identifier that
+// happens to look like A_CODE) collapses to the chain-level STEP_FAILED code instead of riding into
+// the stitched vector.
+const REGISTERED_STEP_ERROR_CODES = new Set(READ_SOURCE_PROBE_ERROR_CODES)
+
 function safeStepErrorCode(value) {
-  if (typeof value === 'string' && /^[A-Z0-9_]{1,64}$/.test(value)) return value
+  if (typeof value === 'string' && REGISTERED_STEP_ERROR_CODES.has(value)) return value
   return 'READ_SOURCE_COMPOSITION_STEP_FAILED'
 }
 
@@ -67,13 +76,19 @@ function isResolverData(data) {
   return false
 }
 
+// A consumable plan must carry the C-R1 step bounds (2..2 in v1): a zero-step or over-long shape is
+// structural misuse and fails closed BEFORE any evaluate/derive arithmetic can touch it (a zero-step
+// plan would otherwise read hopOutcomes[-1] and crash instead of returning PLAN_INVALID).
 function isPlanShaped(plan) {
   return (
     isPlainObject(plan) &&
     Number.isInteger(plan.stepCount) &&
+    plan.stepCount >= COMPOSITION_MIN_STEPS &&
+    plan.stepCount <= COMPOSITION_MAX_STEPS &&
     Array.isArray(plan.steps) &&
     plan.steps.length === plan.stepCount &&
-    Array.isArray(plan.handoffs)
+    Array.isArray(plan.handoffs) &&
+    plan.handoffs.length === plan.stepCount - 1
   )
 }
 
