@@ -594,6 +594,22 @@ export interface ApprovalMetricsReport {
   breachedTemplates: ApprovalMetricsTopTemplateRow[]
 }
 
+// Mirrors backend `MetricsDimensionRow` — one aggregation bucket keyed by the
+// requester (person) or the requester's frozen department (team). `key` is the
+// requester id / department string (`null` = the unattributed bucket); `name`
+// is a representative display name. Note: the backend surfaces `slaBreachRate`
+// (a ratio) here, NOT the raw breach/candidate counts.
+export interface ApprovalMetricsDimensionRow {
+  key: string | null
+  name: string | null
+  total: number
+  approved: number
+  rejected: number
+  revoked: number
+  avgDurationSeconds: number | null
+  slaBreachRate: number
+}
+
 export interface ApprovalMetricsNodeBreakdownEntry {
   nodeKey: string
   activatedAt: string | null
@@ -698,6 +714,52 @@ export async function fetchApprovalMetricsReport(query?: {
 export async function fetchApprovalMetricsBreaches(): Promise<ApprovalMetricsRow[]> {
   if (USE_MOCK) return []
   const data = await apiGet<{ ok: boolean; data: ApprovalMetricsRow[] }>('/api/approvals/metrics/breaches')
+  return data?.data ?? []
+}
+
+// Per-department aggregation (`approvals:admin`). Read-only.
+export async function fetchApprovalMetricsTeams(query?: {
+  since?: string
+  until?: string
+  limit?: number
+}): Promise<ApprovalMetricsDimensionRow[]> {
+  if (USE_MOCK) {
+    return [
+      { key: 'Engineering', name: 'Engineering', total: 24, approved: 20, rejected: 3, revoked: 1, avgDurationSeconds: 6800, slaBreachRate: 0.12 },
+      { key: 'Sales', name: 'Sales', total: 15, approved: 12, rejected: 2, revoked: 1, avgDurationSeconds: 10200, slaBreachRate: 0.27 },
+    ]
+  }
+  const params = new URLSearchParams()
+  if (query?.since) params.set('since', query.since)
+  if (query?.until) params.set('until', query.until)
+  if (query?.limit) params.set('limit', String(query.limit))
+  const qs = params.toString()
+  const data = await apiGet<{ ok: boolean; data: ApprovalMetricsDimensionRow[] }>(
+    `/api/approvals/metrics/teams${qs ? `?${qs}` : ''}`,
+  )
+  return data?.data ?? []
+}
+
+// Per-requester (person) aggregation (`approvals:analytics`). Read-only.
+export async function fetchApprovalMetricsPeople(query?: {
+  since?: string
+  until?: string
+  limit?: number
+}): Promise<ApprovalMetricsDimensionRow[]> {
+  if (USE_MOCK) {
+    return [
+      { key: 'u-1', name: 'Alice', total: 9, approved: 8, rejected: 1, revoked: 0, avgDurationSeconds: 5400, slaBreachRate: 0.11 },
+      { key: 'u-2', name: 'Bob', total: 6, approved: 4, rejected: 1, revoked: 1, avgDurationSeconds: 12600, slaBreachRate: 0.33 },
+    ]
+  }
+  const params = new URLSearchParams()
+  if (query?.since) params.set('since', query.since)
+  if (query?.until) params.set('until', query.until)
+  if (query?.limit) params.set('limit', String(query.limit))
+  const qs = params.toString()
+  const data = await apiGet<{ ok: boolean; data: ApprovalMetricsDimensionRow[] }>(
+    `/api/approvals/metrics/people${qs ? `?${qs}` : ''}`,
+  )
   return data?.data ?? []
 }
 

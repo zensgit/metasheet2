@@ -88,6 +88,74 @@
       </el-table>
     </el-card>
 
+    <el-card class="approval-metrics__section" data-testid="metrics-section-teams">
+      <template #header>
+        <span>按部门汇总</span>
+      </template>
+      <div data-testid="metrics-table-teams">
+        <el-table :data="teams" stripe v-loading="teamsLoading" empty-text="暂无部门数据">
+          <el-table-column label="部门" min-width="220">
+            <template #default="{ row }">
+              <span>{{ row.name || row.key || '未归属部门' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="total" label="总量" width="90" />
+          <el-table-column prop="approved" label="通过" width="90" />
+          <el-table-column prop="rejected" label="驳回" width="90" />
+          <el-table-column prop="revoked" label="撤回" width="90" />
+          <el-table-column label="平均耗时" width="130">
+            <template #default="{ row }">{{ formatDuration(row.avgDurationSeconds) }}</template>
+          </el-table-column>
+          <el-table-column label="SLA 超时率" min-width="180">
+            <template #default="{ row }">
+              <div class="metric-bar">
+                <div class="metric-bar__track">
+                  <div class="metric-bar__fill" :style="{ width: barWidth(row.slaBreachRate) }"></div>
+                </div>
+                <span class="metric-bar__label">{{ formatPercent(row.slaBreachRate) }}</span>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+    </el-card>
+
+    <el-card
+      v-if="canViewPeople"
+      class="approval-metrics__section"
+      data-testid="metrics-section-people"
+    >
+      <template #header>
+        <span>按发起人汇总</span>
+      </template>
+      <div data-testid="metrics-table-people">
+        <el-table :data="people" stripe v-loading="peopleLoading" empty-text="暂无发起人数据">
+          <el-table-column label="发起人" min-width="220">
+            <template #default="{ row }">
+              <span>{{ row.name || row.key || '未归属发起人' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="total" label="总量" width="90" />
+          <el-table-column prop="approved" label="通过" width="90" />
+          <el-table-column prop="rejected" label="驳回" width="90" />
+          <el-table-column prop="revoked" label="撤回" width="90" />
+          <el-table-column label="平均耗时" width="130">
+            <template #default="{ row }">{{ formatDuration(row.avgDurationSeconds) }}</template>
+          </el-table-column>
+          <el-table-column label="SLA 超时率" min-width="180">
+            <template #default="{ row }">
+              <div class="metric-bar">
+                <div class="metric-bar__track">
+                  <div class="metric-bar__fill" :style="{ width: barWidth(row.slaBreachRate) }"></div>
+                </div>
+                <span class="metric-bar__label">{{ formatPercent(row.slaBreachRate) }}</span>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+    </el-card>
+
     <el-card class="approval-metrics__section">
       <template #header>
         <span>运行中且已超时实例</span>
@@ -178,10 +246,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { useAuth } from '../../composables/useAuth'
 import {
   fetchApprovalMetricsBreaches,
+  fetchApprovalMetricsPeople,
   fetchApprovalMetricsReport,
   fetchApprovalMetricsSummary,
+  fetchApprovalMetricsTeams,
+  type ApprovalMetricsDimensionRow,
   type ApprovalMetricsRow,
   type ApprovalMetricsSummary,
   type ApprovalMetricsTopInstanceRow,
@@ -189,6 +261,14 @@ import {
 } from '../../approvals/api'
 
 const router = useRouter()
+const { hasPermission } = useAuth()
+
+// Person-level analytics (/people) is gated behind a SEPARATE `approvals:analytics`
+// permission on the backend (a who-is-slowest ranking is more sensitive than
+// approval administration). Mirror that gate here as defense-in-depth: hide the
+// requester section (and skip its fetch) when the actor lacks the permission.
+// The hard gate remains the backend rbacGuard — a 403 is caught gracefully below.
+const canViewPeople = computed(() => hasPermission('approvals:analytics'))
 
 const summary = ref<ApprovalMetricsSummary>({
   total: 0, approved: 0, rejected: 0, revoked: 0, returned: 0, running: 0,
@@ -198,11 +278,17 @@ const summary = ref<ApprovalMetricsSummary>({
 const breaches = ref<ApprovalMetricsRow[]>([])
 const slowestInstances = ref<ApprovalMetricsTopInstanceRow[]>([])
 const breachedTemplates = ref<ApprovalMetricsTopTemplateRow[]>([])
+const teams = ref<ApprovalMetricsDimensionRow[]>([])
+const people = ref<ApprovalMetricsDimensionRow[]>([])
 const dateRange = ref<[string, string] | null>(null)
 const loading = ref(false)
 const breachLoading = ref(false)
 const reportLoading = ref(false)
+const teamsLoading = ref(false)
+const peopleLoading = ref(false)
 const errorMessage = ref('')
+
+const BREAKDOWN_LIMIT = 20
 
 const approvalRatePercent = computed(() => {
   const decided = summary.value.approved + summary.value.rejected + summary.value.revoked + summary.value.returned
@@ -256,8 +342,51 @@ async function loadReport(): Promise<void> {
   }
 }
 
+function rangeQuery(base: { limit?: number } = {}): { since?: string; until?: string; limit?: number } {
+  const query: { since?: string; until?: string; limit?: number } = { ...base }
+  if (dateRange.value && dateRange.value[0]) query.since = `${dateRange.value[0]}T00:00:00Z`
+  if (dateRange.value && dateRange.value[1]) query.until = `${dateRange.value[1]}T23:59:59Z`
+  return query
+}
+
+async function loadTeams(): Promise<void> {
+  teamsLoading.value = true
+  try {
+    teams.value = await fetchApprovalMetricsTeams(rangeQuery({ limit: BREAKDOWN_LIMIT }))
+  } catch (error) {
+    errorMessage.value = `加载部门汇总失败: ${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    teamsLoading.value = false
+  }
+}
+
+async function loadPeople(): Promise<void> {
+  // Skip entirely without the analytics permission — the section is hidden and
+  // the backend would answer 403.
+  if (!canViewPeople.value) {
+    people.value = []
+    return
+  }
+  peopleLoading.value = true
+  try {
+    people.value = await fetchApprovalMetricsPeople(rangeQuery({ limit: BREAKDOWN_LIMIT }))
+  } catch (error) {
+    // Graceful degrade: an unexpected 403 (permission drift) must not blank the
+    // whole dashboard — surface a note and leave the other sections intact.
+    people.value = []
+    errorMessage.value = `加载发起人汇总失败: ${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    peopleLoading.value = false
+  }
+}
+
 async function loadAll(): Promise<void> {
-  await Promise.all([loadSummary(), loadBreaches(), loadReport()])
+  await Promise.all([loadSummary(), loadBreaches(), loadReport(), loadTeams(), loadPeople()])
+}
+
+function barWidth(rate: number | null | undefined): string {
+  const pct = typeof rate === 'number' && Number.isFinite(rate) ? rate * 100 : 0
+  return `${Math.min(100, Math.max(0, pct))}%`
 }
 
 function formatDuration(seconds: number | null | undefined): string {
@@ -341,5 +470,29 @@ onMounted(() => { void loadAll() })
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
   gap: 16px;
+}
+.metric-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.metric-bar__track {
+  flex: 1;
+  min-width: 48px;
+  height: 8px;
+  border-radius: 4px;
+  background: #f0f0f0;
+  overflow: hidden;
+}
+.metric-bar__fill {
+  height: 100%;
+  border-radius: 4px;
+  background: #f59e0b;
+}
+.metric-bar__label {
+  font-size: 12px;
+  color: #4b5563;
+  min-width: 44px;
+  text-align: right;
 }
 </style>
