@@ -44,14 +44,23 @@
         未找到该 Part 的 BOM 数据。
       </p>
 
-      <PlmBomReviewTable
-        v-else-if="reviewState === 'table' && context"
-        :context="context"
-        editable
-        :submitting-line-id="submittingLineId"
-        :line-messages="lineMessages"
-        @submit-line="submitLinePatch"
-      />
+      <template v-else-if="reviewState === 'table' && context">
+        <p
+          v-if="advisoryLocked"
+          class="bom-review__hint bom-review__hint--strong"
+          data-testid="plm-bom-review-locked-hint"
+        >
+          该 Part 处于锁定状态（{{ context.part.state }}），已暂停行内编辑；修改需通过 PLM 的 ECO
+          变更流程。
+        </p>
+        <PlmBomReviewTable
+          :context="context"
+          :editable="!advisoryLocked"
+          :submitting-line-id="submittingLineId"
+          :line-messages="lineMessages"
+          @submit-line="submitLinePatch"
+        />
+      </template>
     </div>
   </section>
 </template>
@@ -79,6 +88,20 @@ const retryKeys = ref<Record<string, string>>({})
 const context = computed(() =>
   result.value && result.value.available ? result.value.context : null,
 )
+
+// ECO Phase 0 advisory pre-gate (ratified C2): the provider's lock set is DATA-DRIVEN
+// (version_lock on lifecycle states), so the consumer cannot enumerate it authoritatively.
+// This is the provider's default-seed locked set, used ONLY to pause inline editing up front
+// for the common case; the discriminated 409 (reason 'lifecycle_locked') stays the
+// authoritative gate for the residual race or a tenant-customized lock set. The gate keys on
+// the ROOT part's state -- the provider evaluates the lock on the PARENT part, and per-line
+// `state` is the CHILD part's state (display-only, wrong semantics for the write gate).
+const ADVISORY_LOCKED_STATES = new Set(['Released', 'Suspended', 'Obsolete'])
+
+const advisoryLocked = computed(() => {
+  const state = context.value?.part.state
+  return typeof state === 'string' && ADVISORY_LOCKED_STATES.has(state)
+})
 
 // idle (nothing loaded) -> loading -> one of: unavailable (no support / degraded), upgrade
 // (supported but not entitled), error (entitled but the provider fetch failed transiently),
@@ -119,7 +142,13 @@ function makeIdempotencyKey(): string {
   return `bom-write-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
-function writebackMessage(status: number): string {
+function writebackMessage(status: number, reason?: string): string {
+  // ECO Phase 0: the provider's two write-back 409s are discriminated by the relayed reason
+  // (detail.code). An unknown/absent reason degrades to the legacy status-keyed copy.
+  if (reason === 'lifecycle_locked')
+    return '该 Part 处于生命周期锁定状态，写回被拒；修改需通过 PLM 的 ECO 变更流程。'
+  if (reason === 'idempotency_conflict')
+    return '提交键已用于另一次不同的写入；已为该行更换新的提交键，请确认单元格后重试。'
   if (status === 412) return '此行已被他人修改，已重新载入最新值，请确认后重试。'
   if (status === 403) return '无写回授权或权限不足。'
   if (status === 404) return '该 BOM 行不存在或不属于当前 Part。'
@@ -169,7 +198,22 @@ async function submitLinePatch(payload: { line: PlmBomMultitableLine; patch: Plm
       lineMessages.value = { ...lineMessages.value, [lineId]: writebackMessage(412) }
       return
     }
-    lineMessages.value = { ...lineMessages.value, [lineId]: writebackMessage(outcome.status) }
+    if (outcome.status === 409 && outcome.reason === 'idempotency_conflict') {
+      // ECO Phase 0: the key is burned for a DIFFERENT write intent -- replaying it can never
+      // succeed. Drop this line's retry key so the next submit mints a fresh Idempotency-Key
+      // (the 412 flow's key rotation, minus the reload: the server state did not change).
+      const { [lineId]: _burnedKey, ...rest } = retryKeys.value
+      retryKeys.value = rest
+      lineMessages.value = {
+        ...lineMessages.value,
+        [lineId]: writebackMessage(outcome.status, outcome.reason),
+      }
+      return
+    }
+    lineMessages.value = {
+      ...lineMessages.value,
+      [lineId]: writebackMessage(outcome.status, outcome.reason),
+    }
   } catch {
     lineMessages.value = { ...lineMessages.value, [lineId]: '写回暂时失败，请稍后重试。' }
   } finally {
