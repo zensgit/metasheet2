@@ -30,6 +30,8 @@ const PROJ_RECORD = `rec_proj_${Date.now()}`
 // Non-admin actor holding global multitable:read; and an admin actor.
 const readerReq = { user: { id: 'A-reader', perms: ['multitable:read'] } } as unknown as Request
 const adminReq = { user: { id: 'A-admin', roles: ['admin'] } } as unknown as Request
+// A non-admin WRITER (multitable:write + workflow:write) — has write/manage caps that the fence must also deny.
+const writerReq = { user: { id: 'A-writer', perms: ['multitable:write', 'workflow:write'] } } as unknown as Request
 
 describeIfDb('A — approval projection base admin-only read guard', () => {
   beforeAll(async () => {
@@ -73,6 +75,18 @@ describeIfDb('A — approval projection base admin-only read guard', () => {
   it('single sheet/record read: an admin CAN read the projection sheet', async () => {
     const proj = await resolveSheetCapabilities(adminReq, q, PROJ_SHEET)
     expect(proj.capabilities.canRead).toBe(true)
+  })
+
+  it('admin-only capability fence: a non-admin WRITER is denied read AND write/manage on the projection sheet', async () => {
+    const proj = await resolveSheetCapabilities(writerReq, q, PROJ_SHEET)
+    for (const cap of ['canRead', 'canExport', 'canCreateRecord', 'canEditRecord', 'canDeleteRecord', 'canManageFields', 'canManageSheetAccess', 'canManageViews', 'canManageAutomation', 'canSendNotification'] as const) {
+      expect(proj.capabilities[cap]).toBe(false)
+    }
+    // control: the SAME writer keeps write/manage caps on an ordinary sheet
+    const normal = await resolveSheetCapabilities(writerReq, q, NORMAL_SHEET)
+    expect(normal.capabilities.canEditRecord).toBe(true)
+    expect(normal.capabilities.canDeleteRecord).toBe(true)
+    expect(normal.capabilities.canManageAutomation).toBe(true)
   })
 
   it('listing (base list + sheet lists): projection sheet filtered out for a non-admin, kept for admin', async () => {

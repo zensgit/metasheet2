@@ -17,8 +17,8 @@ byte-identical.
 Grounded the multitable read-authorization flow; content read funnels through three shared resolvers, now
 each gated (admins bypass, so the extra lookup never touches the admin hot path):
 1. **`resolveSheetCapabilities`** (`permission-service.ts`) — the single-sheet + record read choke (record
-   read goes through `resolveSheetReadableCapabilities` → this). Downgrades caps to `canRead:false` for a
-   non-admin on a projection sheet.
+   read goes through `resolveSheetReadableCapabilities` → this). Applies the full non-admin capability fence
+   (see Mechanism) on a projection sheet.
 2. **`filterReadableSheetRowsForAccess`** (`permission-service.ts`) — the shared sheet-listing gate used by
    the base list + 3 sheet-list routes. Filters projection sheets out for non-admins; since a base surfaces
    in the base list only if it has ≥1 readable sheet, this also **hides the projection base itself**.
@@ -29,7 +29,7 @@ each gated (admins bypass, so the extra lookup never touches the admin hot path)
    that it had "no callers" was wrong — a non-admin with global `multitable:read` would have gotten
    `canRead:true` on a projection sheet via collab/Yjs. Now gated with the same guard + query shape; locked by
    a resolver-level unit test (non-admin `multitable:read` → `canRead:false`; ordinary sheet + admin →
-   `canRead:true`), RED-before confirmed.
+   `canRead:true`; non-admin writer → all write/manage caps `false`), RED-before confirmed.
 
 ## Mechanism
 - **`approval-projection-constants.ts`** (new, **import-side-effect-free**): the single source of truth for
@@ -37,19 +37,32 @@ each gated (admins bypass, so the extra lookup never touches the admin hot path)
   `restrictApprovalProjectionCapabilities`. The projection service re-exports the id from here — so the id is
   reachable from the permission hot path **without** dragging the service's `eventBus`/scheduler subscription
   surface into it (the concern that must not be imported into permission resolution).
+- **Full capability fence** (**review P1 #2 correction**): the guard originally downgraded only
+  `canRead`/`canExport` (its `canWrite`/`canWriteOwn` keys don't exist on `MultitableCapabilities`, so they
+  were no-ops) — a non-admin holding `multitable:write`/workflow perms kept `canEditRecord`/`canDeleteRecord`/
+  `canManageViews`/`canManageAutomation`/… on the projection sheet, and write paths gate on exactly those.
+  `restrictApprovalProjectionCapabilities` now denies **every sensitive capability boolean** for a non-admin on
+  a projection sheet: `canRead`, `canExport`, `canCreateRecord`, `canEditRecord`, `canDeleteRecord`,
+  `canManageFields`, `canManageSheetAccess`, `canManageViews`, `canComment`, `canManageAutomation`,
+  `canSendNotification`. Admin capabilities are untouched.
 - **`loadApprovalProjectionSheetIds(query, sheetIds)`**: one lightweight `SELECT id FROM meta_sheets WHERE
   id = ANY($1) AND base_id = $2` — only invoked for **non-admins** (admins bypass), so no admin-path cost.
 
 ## Verification (fail-first, real-DB)
-`approval-projection-visibility.db.test.ts` — **6/6**: the projection-sheet lookup identifies projection vs
+`approval-projection-visibility.db.test.ts` — **7/7**: the projection-sheet lookup identifies projection vs
 ordinary sheets; a non-admin (`multitable:read`) is **denied** single sheet/record read while the SAME
-non-admin **can** read an ordinary sheet; an **admin can** read the projection sheet; listing filters the
+non-admin **can** read an ordinary sheet; an **admin can** read the projection sheet; a non-admin **writer**
+(`multitable:write` + `workflow:write`) has **all** read/write/manage caps `false` on the projection sheet
+while keeping `canEditRecord`/`canDeleteRecord`/`canManageAutomation` on an ordinary sheet; listing filters the
 projection sheet for a non-admin (→ base absent from base list) and keeps it for admin; `resolveReadableSheetIds`
-excludes it. **RED-before confirmed**: neutralizing `loadApprovalProjectionSheetIds` → 4 tests fail (the leak
-returns across all chokes). `tsc` 0. **T3-6 write/reconcile regression** `approval-record-projection` 14/14
-(the constant re-export is inert to the write path). **Full unit suite 4169/4169** — the gated resolvers added
-a DB lookup that three mock-pool button-route builders had to answer (test-drift fixed: a projection-sheet
-lookup on a non-projection sheet returns empty).
+excludes it. `approval-projection-capabilities-for-user.test.ts` — **4/4** (the collab/Yjs/api-token resolver:
+reader denied / ordinary allowed / admin allowed / writer fully fenced). **RED-before confirmed** twice:
+neutralizing `loadApprovalProjectionSheetIds` → 4 tests fail (the read leak returns across all chokes);
+reverting the fence to read-only downgrade → the writer tests fail (the write leak returns). `tsc` 0.
+**T3-6 write/reconcile regression** `approval-record-projection` 14/14 (the constant re-export is inert to the
+write path). **Full unit + integration suites** — the gated resolvers added a DB lookup that mock-pool
+tests had to answer (test-drift swept across 10 integration mock-pools + 3 unit button-route builders +
+`yjs-hardening`'s resolver mock: a projection-sheet lookup on a non-projection sheet returns empty).
 
 ## Out of scope (explicit follow-ups)
 - **Per-row `visibility_scope` inheritance** (each projected row inheriting the source approval's visibility) —

@@ -41,4 +41,17 @@ describe('A — resolveSheetCapabilitiesForUser projection guard (collab/Yjs/api
     const res = await resolveSheetCapabilitiesForUser(mkQuery(true), 'S', 'u1')
     expect(res.capabilities.canRead).toBe(true)
   })
+
+  it('DENIES write/manage caps for a non-admin WRITER (multitable:write + workflow) on a projection sheet', async () => {
+    vi.mocked(isAdmin).mockResolvedValue(false)
+    vi.mocked(listUserPermissions).mockResolvedValue(['multitable:write', 'workflow:write'])
+    const res = await resolveSheetCapabilitiesForUser(mkQuery(true), 'S', 'u1')
+    for (const cap of ['canRead', 'canExport', 'canCreateRecord', 'canEditRecord', 'canDeleteRecord', 'canManageFields', 'canManageSheetAccess', 'canManageViews', 'canManageAutomation', 'canSendNotification'] as const) {
+      expect(res.capabilities[cap]).toBe(false)
+    }
+    // control: ordinary sheet keeps them
+    const ok = await resolveSheetCapabilitiesForUser(mkQuery(false), 'S', 'u1')
+    expect(ok.capabilities.canEditRecord).toBe(true)
+    expect(ok.capabilities.canManageAutomation).toBe(true)
+  })
 })

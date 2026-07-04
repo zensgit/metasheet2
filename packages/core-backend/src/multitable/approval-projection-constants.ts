@@ -22,21 +22,37 @@ export function isApprovalProjectionBaseId(baseId: string | null | undefined): b
 }
 
 /**
- * Read-guard: given resolved capabilities for a sheet that belongs to the projection base, downgrade every
- * read/export/write capability to false for a non-admin actor. Admins (and the system owner, which resolves
- * as admin-equivalent at the route layer) are unaffected. Pure — the caller decides `isProjectionSheet`
- * (via `loadApprovalProjectionSheetIds` or a base-id compare) and `isAdminRole`.
+ * Admin-only capability fence: for a non-admin actor on a projection-base sheet, downgrade EVERY sensitive
+ * `MultitableCapabilities` boolean to false — not just read. The projection base is a system read-model; a
+ * non-admin (even with `multitable:write`/workflow perms) must get zero read/write/manage capability on it, or
+ * write paths that gate on `canEditRecord`/`canDeleteRecord`/`canManageViews`/`canManageAutomation`/… would
+ * still let them mutate it. Admins (and the system owner, admin-equivalent at the route layer) are unaffected.
+ * Pure — the caller decides `isProjectionSheet` (via `loadApprovalProjectionSheetIds`) and `isAdminRole`.
+ * Keyed by name so it only touches capability booleans that exist on the passed object.
  */
-export function restrictApprovalProjectionCapabilities<
-  T extends { canRead: boolean; canExport?: boolean; canWrite?: boolean; canWriteOwn?: boolean; canManageSheetAccess?: boolean },
->(capabilities: T, isProjectionSheet: boolean, isAdminRole: boolean): T {
+const PROJECTION_DENY_CAPABILITY_KEYS = [
+  'canRead',
+  'canExport',
+  'canCreateRecord',
+  'canEditRecord',
+  'canDeleteRecord',
+  'canManageFields',
+  'canManageSheetAccess',
+  'canManageViews',
+  'canComment',
+  'canManageAutomation',
+  'canSendNotification',
+] as const
+
+export function restrictApprovalProjectionCapabilities<T extends { canRead: boolean }>(
+  capabilities: T,
+  isProjectionSheet: boolean,
+  isAdminRole: boolean,
+): T {
   if (!isProjectionSheet || isAdminRole) return capabilities
-  return {
-    ...capabilities,
-    canRead: false,
-    ...(capabilities.canExport !== undefined ? { canExport: false } : {}),
-    ...(capabilities.canWrite !== undefined ? { canWrite: false } : {}),
-    ...(capabilities.canWriteOwn !== undefined ? { canWriteOwn: false } : {}),
-    ...(capabilities.canManageSheetAccess !== undefined ? { canManageSheetAccess: false } : {}),
+  const denied: Record<string, unknown> = { ...capabilities }
+  for (const key of PROJECTION_DENY_CAPABILITY_KEYS) {
+    if (key in denied) denied[key] = false
   }
+  return denied as T
 }
