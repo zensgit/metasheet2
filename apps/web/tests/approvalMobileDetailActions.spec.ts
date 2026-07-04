@@ -42,6 +42,15 @@ vi.mock('../src/approvals/api', () => ({
   remindApproval: vi.fn().mockResolvedValue({ ok: true, data: {} }),
 }))
 
+// B1-01: mutable session identity — per-test control over requester/my-turn affordances.
+const mockCurrentUserId = ref<string | null>(null)
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({
+    getCurrentUser: () => (mockCurrentUserId.value ? { id: mockCurrentUserId.value } : null),
+    getCurrentUserId: vi.fn().mockImplementation(async () => mockCurrentUserId.value),
+  }),
+}))
+
 vi.mock('../src/approvals/templateStore', () => ({
   useApprovalTemplateStore: () => ({
     activeTemplate: null,
@@ -172,6 +181,7 @@ describe('ApprovalDetailView — T3-1 mobile action-set restriction', () => {
     loadDetailSpy.mockClear()
     loadHistorySpy.mockClear()
     pushSpy.mockClear()
+    mockCurrentUserId.value = null
     setViewport(false)
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -272,5 +282,36 @@ describe('ApprovalDetailView — T3-1 mobile action-set restriction', () => {
     expect(executeActionSpy).toHaveBeenCalled()
     expect(loadDetailSpy).toHaveBeenCalledWith('apv_1')
     expect(loadHistorySpy).toHaveBeenCalledWith('apv_1')
+  })
+
+  it('B1-01: requester-only actions key off the REAL session identity (RED-before: user_1 mock)', async () => {
+    // the reader IS the requester → 催一下 + 撤回 visible on desktop
+    mockCurrentUserId.value = 'user_99'
+    await mountView()
+    let texts = buttonTexts(container!)
+    expect(texts.some((t) => t.includes('催一下'))).toBe(true)
+    expect(texts).toContain('撤回')
+    app!.unmount()
+    container!.innerHTML = ''
+
+    // a different reader → requester-only actions hidden
+    mockCurrentUserId.value = 'user_someone_else'
+    await mountView()
+    texts = buttonTexts(container!)
+    expect(texts.some((t) => t.includes('催一下'))).toBe(false)
+    expect(texts).not.toContain('撤回')
+  })
+
+  it('B1-01: 等待你处理 badge shows only for an active assignee at the current node', async () => {
+    // fixture assignment: user_add active at approval_1 (the current node)
+    mockCurrentUserId.value = 'user_add'
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-my-turn-badge"]')).not.toBeNull()
+    app!.unmount()
+    container!.innerHTML = ''
+
+    mockCurrentUserId.value = 'user_uninvolved'
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-my-turn-badge"]')).toBeNull()
   })
 })
