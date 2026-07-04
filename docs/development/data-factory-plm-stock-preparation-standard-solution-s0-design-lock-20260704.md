@@ -47,6 +47,55 @@ Implementation slices may rename UI labels, add guided screens, and improve
 operator workflow. They must not fork the underlying write, source, or evidence
 semantics.
 
+## Entity-machine baseline addendum (2026-07-04)
+
+After S0 merged, the current on-prem business setup produced values-free
+baseline evidence for #3551:
+
+```text
+stockPreparationTableVisible=true
+stockPreparationRowsObserved=9
+stockPreparationFieldCoverage=projectNo,parent/child component fields,totalQuantity,materialId,rawMaterialTypeId,blankTypeId,stockPrepStatusId,legacySystemId,plmObjectId
+bridgeSource=BA-M2 PLM Bridge Agent 74c5e998d
+bridgeSourceConnection=PASS
+bridgeReadableObjects=material,bom,bom_child
+directPlmSqlSource=SQLSERVER_TEST_FAILED
+k3WebApiTarget=PASS
+```
+
+Existing Bridge refresh pipelines also proved the PLM Bridge -> Data Factory
+dry-run lane is alive for small samples:
+
+```text
+bridge_refresh_material_to_plm_raw_items: status=succeeded rowsRead=3 rowsCleaned=3 rowsWritten=0 rowsFailed=0
+bridge_refresh_bom_to_plm_raw_items: status=succeeded rowsRead=3 rowsCleaned=3 rowsWritten=0 rowsFailed=0
+bridge_refresh_bom_child_to_plm_raw_items: status=succeeded rowsRead=3 rowsCleaned=3 rowsWritten=0 rowsFailed=0
+```
+
+However, those existing refresh pipelines do not yet expose the business action
+shape:
+
+```text
+existingBridgeRefreshPipelinesHaveSourceOptions=false
+existingBridgeRefreshPipelinesHaveFilters=false
+existingBridgeRefreshPipelinesHaveParameters=false
+```
+
+So S1 remains create/bind/readiness only. S2 must add the parameterized action
+surface for `projectNo` rather than treating the existing refresh pipelines as
+the final business action. S2 acceptance must include:
+
+```text
+projectNoInputSupported=true
+projectNoSelectFromPlmSupported=true_or_followup
+browserSubmitsOnlyAllowlistedParams=true
+sourceOptionsOrActionParamsContainProjectNo=true
+rawSqlOrSourcePayloadFromBrowser=false
+plmBridgeDryRunWithProjectNoReturnsCounts=true
+applyRequiresFreshDryRunToken=true
+k3SaveSubmitAuditBomWrite=false
+```
+
 ## Scope boundary
 
 In scope:
@@ -219,6 +268,41 @@ policy handles the branch.
 Large BOMs must use completed authoritative artifacts and checkpointed apply
 routes. Bounded previews are not authoritative plans.
 
+## Synchronization strategy lock
+
+The standard solution must not hard-code one synchronization behavior for all
+customers. A later policy slice may expose one of these modes:
+
+```text
+mode=manual
+behavior=user enters/selects projectNo -> dry-run -> explicit Apply
+
+mode=auto_discover_manual_confirm
+behavior=system periodically detects new PLM orders/BOM/BOM changes -> creates review task -> user confirms -> Apply to stock-preparation table
+recommendedDefault=true
+
+mode=auto_insert_confirm_changes
+behavior=new project/new BOM rows may be inserted automatically if customer enables it; existing-row changes, duplicates, hierarchy changes, missing child BOM, and inactive/deleted source rows still require review/confirmation
+```
+
+All modes must keep these guardrails:
+
+```text
+humanFieldsPreserved=true
+neverAutoOverwriteHumanFields=true
+missingChildBom=held
+sourceDeletedRows=markInactive_notDelete
+duplicates=review_or_customerDefaultPolicy
+auditLogRequired=true
+sourceSnapshotRequired=true
+dryRunReviewRequiredForChanges=true
+k3SaveSubmitAuditBomWrite=false
+```
+
+S0 does not authorize background polling, automatic inserts, automatic Apply, or
+production/batch rollout. Those behaviors belong to later S3/S4/S5 policy and
+operator-run slices after the parameterized `projectNo` action exists.
+
 ## Snapshot and diff lock
 
 Every PLM pull in this standard solution should be tied to a source snapshot
@@ -324,8 +408,8 @@ Each rung is a separate opt-in. S0 does not authorize later rungs.
 | S0 | Standard solution design-lock + UI information architecture. | Docs only. No runtime/UI/migration/write. |
 | S1 | Create/bind/readiness wizard for the stock-preparation table. | Metadata only until dry-run. No PLM read or business-row write. |
 | S2 | Project-number action UI. Manual input first; search/select later if backed by an approved readonly source. | Browser sends only allowlisted business parameters. |
-| S3 | Dry-run review panel + conflict/default policy UI. | Review/evidence first; held rows remain held unless an existing policy explicitly permits otherwise. |
-| S4 | Source snapshot + diff UI. | Private values stay in tenant runtime; public evidence values-free. |
+| S3 | Dry-run review panel + conflict/default policy UI, including the selected synchronization strategy. | Review/evidence first; held rows remain held unless an existing policy explicitly permits otherwise. |
+| S4 | Source snapshot + diff UI, including auto-discovery review tasks if separately authorized. | Private values stay in tenant runtime; public evidence values-free. |
 | S5 | Apply-only entity-machine runbook for MetaSheet stock-preparation writes. | Package-from-main, values-free evidence, idempotency/re-pull proof. No K3/external write. |
 | S6 | Procurement/warehouse/approval/notification workflow mapping. | Separate workflow/integration gates; no implicit PLM apply widening. |
 
@@ -346,6 +430,9 @@ manualConfirmRowsHeld=true
 missingChildBomHeld=true
 largeBomRequiresAuthoritativeArtifact=true
 sourceSnapshotDiffPosture=true
+syncStrategyConfigurable=true
+neverAutoOverwriteHumanFields=true
+sourceDeletedRowsMarkInactiveNotDelete=true
 fieldOptionSyncIsGenericCapability=true
 plmWrite=false
 externalDbWrite=false
@@ -365,6 +452,9 @@ Stop the slice and do not proceed to merge if an implementation:
 - writes or previews writes outside the MetaSheet stock-preparation target;
 - writes a `manual_confirm` or `missing_child_bom` held row;
 - overwrites a human-owned field without an explicit field-ownership contract;
+- hard-codes one customer synchronization mode as the only supported behavior;
+- auto-applies source changes without the selected strategy, source snapshot,
+  audit, and review/dry-run posture required for that mode;
 - treats a bounded large-BOM preview as authoritative;
 - exposes forbidden values in public evidence, issue comments, fixtures, or
   logs;
