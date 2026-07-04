@@ -2110,6 +2110,19 @@ describe('attendance UUID route validation', () => {
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_records r'))).toBe(false)
   })
 
+  it('rejects invalid owed-punch anomaly filters before querying records', async () => {
+    const { db, routes } = await createHarness()
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/anomalies', {
+      query: { from: '2026-06-10', to: '2026-06-10', filter: 'late' },
+      user: { id: 'worker-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'VALIDATION_ERROR' } })
+    expect(db.query).not.toHaveBeenCalled()
+  })
+
   it('enqueues missed-punch reminders idempotently through the C5 outbox', async () => {
     const { db, routes } = await createHarness('false')
     let insertCalls = 0

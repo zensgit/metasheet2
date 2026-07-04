@@ -100,8 +100,23 @@ describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', 
     requestJson(`${baseUrl}/api/attendance/requests/${id}/approve`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify({ comment: 'ok' }) })
   const reject = (token: string, id: string) =>
     requestJson(`${baseUrl}/api/attendance/requests/${id}/reject`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify({ comment: 'no' }) })
-  const anomalies = (token: string, userId: string, from: string, to: string) =>
-    requestJson(`${baseUrl}/api/attendance/anomalies?userId=${encodeURIComponent(userId)}&from=${from}&to=${to}`, { headers: authHeaders(token) })
+  const anomalies = (
+    token: string,
+    userId: string,
+    from: string,
+    to: string,
+    options: { filter?: string; page?: number; pageSize?: number } = {},
+  ) => {
+    const params = new URLSearchParams({
+      userId,
+      from,
+      to,
+    })
+    if (options.filter) params.set('filter', options.filter)
+    if (options.page) params.set('page', String(options.page))
+    if (options.pageSize) params.set('pageSize', String(options.pageSize))
+    return requestJson(`${baseUrl}/api/attendance/anomalies?${params.toString()}`, { headers: authHeaders(token) })
+  }
 
   // Date helpers in UTC so the test's date math matches the policy (timezone:'UTC' below).
   const dayKey = (offset: number): string => {
@@ -418,6 +433,42 @@ describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', 
       expect(created.status).toBe(201)
       const snap = (await reqRow(requestIdOf(created)))?.metadata?.makeupPunchPolicySnapshot as Record<string, unknown> | undefined
       expect(snap?.matchedAnomalyTypes).toEqual(['missing_check_out'])
+    } finally {
+      await cleanupUser(u)
+    }
+  })
+
+  it('owed-punch anomaly filter uses the missed-punch predicate and paginates after filtering', async () => {
+    const u = uid('owed')
+    const tU = await mintToken(u, 'attendance:read,attendance:write')
+    const wdIn = dayKey(-4)
+    const wdOut = dayKey(-3)
+    const wdBoth = dayKey(-2)
+    const wdLate = dayKey(-1)
+    try {
+      await seedMissingCheckIn(u, wdIn)
+      await seedMissingCheckOut(u, wdOut)
+      await seedRecord(u, wdBoth, { status: 'absent', firstIn: null, lastOut: null })
+      await seedLate(u, wdLate)
+
+      const all = await anomalies(tU, u, wdIn, wdLate)
+      expect(all.status).toBe(200)
+      const allData = (all.body as { data?: { items?: Array<Record<string, unknown>>; total?: number } } | undefined)?.data
+      expect(allData?.total).toBe(4)
+      expect(allData?.items?.some(item => item.status === 'late')).toBe(true)
+
+      const owedPage = await anomalies(tU, u, wdIn, wdLate, { filter: 'owed_punch', pageSize: 2 })
+      expect(owedPage.status).toBe(200)
+      const owedData = (owedPage.body as { data?: { items?: Array<Record<string, unknown>>; total?: number; pageSize?: number } } | undefined)?.data
+      expect(owedData?.total).toBe(3)
+      expect(owedData?.pageSize).toBe(2)
+      expect(owedData?.items).toHaveLength(2)
+      expect(owedData?.items?.every(item => item.owedPunch === true)).toBe(true)
+
+      const owedAll = await anomalies(tU, u, wdIn, wdLate, { filter: 'owed_punch' })
+      const owedItems = ((owedAll.body as { data?: { items?: Array<Record<string, unknown>> } } | undefined)?.data?.items ?? [])
+      expect(owedItems.map(item => item.missingSide).sort()).toEqual(['both', 'check_in', 'check_out'])
+      expect(owedItems.some(item => item.status === 'late')).toBe(false)
     } finally {
       await cleanupUser(u)
     }

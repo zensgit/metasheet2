@@ -1062,6 +1062,28 @@
             </button>
           </div>
           <small class="attendance__field-hint">{{ anomaliesTimezoneContextHint }}</small>
+          <div class="attendance__filter-pills" data-attendance-anomaly-filter>
+            <button
+              type="button"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': anomalyFilter === 'all' }"
+              data-attendance-anomaly-filter-value="all"
+              :disabled="anomaliesLoading"
+              @click="setAnomalyFilter('all')"
+            >
+              {{ tr('All anomalies', '全部异常') }}
+            </button>
+            <button
+              type="button"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': anomalyFilter === 'owed_punch' }"
+              data-attendance-anomaly-filter-value="owed_punch"
+              :disabled="anomaliesLoading"
+              @click="setAnomalyFilter('owed_punch')"
+            >
+              {{ tr('Owed punch only', '仅欠卡') }}
+            </button>
+          </div>
           <div v-if="anomalies.length > 0" class="attendance__batch-toolbar" data-attendance-batch-toolbar>
             <button
               v-if="attendanceResultEditCapabilityUnknown"
@@ -9539,6 +9561,9 @@ interface AttendanceAnomaly {
   overtimeMinutes?: number
   warnings: string[]
   state: 'open' | 'pending'
+  owedPunch?: boolean
+  missingSide?: 'check_in' | 'check_out' | 'both' | null
+  owedPunchReason?: string | null
   request?: {
     id: string
     status: string
@@ -9549,6 +9574,7 @@ interface AttendanceAnomaly {
 
 const ATTENDANCE_RESULT_EDIT_SOURCE_STATUSES = new Set(['late', 'early_leave', 'late_early', 'partial', 'absent'])
 const ATTENDANCE_RESULT_EDIT_TARGET_STATUSES = ['normal', 'late', 'early_leave', 'late_early', 'partial', 'absent', 'adjusted'] as const
+type AttendanceAnomalyFilter = 'all' | 'owed_punch'
 type AttendanceResultEditTargetStatus = typeof ATTENDANCE_RESULT_EDIT_TARGET_STATUSES[number]
 type AttendanceResultEditAdminCapability = 'unknown' | 'checking' | 'allowed' | 'forbidden'
 
@@ -10807,6 +10833,7 @@ const scheduleDispatchSaving = ref(false)
 const focusedAttendanceRequestId = computed(() => props.initialRequestId.trim())
 const anomalies = ref<AttendanceAnomaly[]>([])
 const anomaliesLoading = ref(false)
+const anomalyFilter = ref<AttendanceAnomalyFilter>('all')
 const attendanceResultEditAdminCapability = ref<AttendanceResultEditAdminCapability>('unknown')
 const attendanceResultEditModal = reactive({
   open: false,
@@ -11045,6 +11072,11 @@ const summaryTimezoneContextHint = computed(() =>
 const anomaliesTimezoneContextHint = computed(() =>
   `${tr('Anomalies timezone context', '异常时区上下文')}: ${overviewTimezoneLabel.value}`
 )
+function anomalyFilterLabel(filter: AttendanceAnomalyFilter = anomalyFilter.value): string {
+  return filter === 'owed_punch'
+    ? tr('Owed punch only', '仅欠卡')
+    : tr('All anomalies', '全部异常')
+}
 const missedPunchReminderSelectedItems = computed(() => {
   const selected = new Set(missedPunchReminderSelectedIds.value)
   return missedPunchReminderCandidates.value.filter(item => selected.has(item.recordId))
@@ -19848,6 +19880,7 @@ async function confirmMissedPunchReminder(): Promise<void> {
 
 async function loadAnomalies() {
   clearAttendanceResultEditTransientState()
+  anomalies.value = []
   anomaliesLoading.value = true
   try {
     const query = buildQuery({
@@ -19857,6 +19890,7 @@ async function loadAnomalies() {
       pageSize: '50',
       orgId: normalizedOrgId(),
       userId: normalizedUserId(),
+      filter: anomalyFilter.value === 'owed_punch' ? 'owed_punch' : undefined,
     })
     const response = await apiFetch(`/api/attendance/anomalies?${query.toString()}`)
     const data = await response.json()
@@ -19866,6 +19900,30 @@ async function loadAnomalies() {
     anomalies.value = data.data?.items ?? []
   } finally {
     anomaliesLoading.value = false
+  }
+}
+
+async function setAnomalyFilter(filter: AttendanceAnomalyFilter): Promise<void> {
+  if (anomalyFilter.value === filter || anomaliesLoading.value) return
+  anomalyFilter.value = filter
+  try {
+    await loadAnomalies()
+    setStatus(
+      appendStatusContext(
+        tr(
+          `Anomalies loaded (${anomalyFilterLabel(filter)}: ${anomalies.value.length}).`,
+          `异常已加载（${anomalyFilterLabel(filter)}：${anomalies.value.length} 条）。`,
+        ),
+        anomaliesTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load anomalies', '加载异常失败'),
+      anomaliesTimezoneContextHint.value,
+      'refresh',
+    )
   }
 }
 
@@ -19985,7 +20043,10 @@ async function reloadAnomaliesWithStatus() {
     await loadAnomalies()
     setStatus(
       appendStatusContext(
-        tr(`Anomalies loaded (${anomalies.value.length}).`, `异常已加载（${anomalies.value.length} 条）。`),
+        tr(
+          `Anomalies loaded (${anomalyFilterLabel()}: ${anomalies.value.length}).`,
+          `异常已加载（${anomalyFilterLabel()}：${anomalies.value.length} 条）。`,
+        ),
         anomaliesTimezoneContextHint.value,
       ),
     )
