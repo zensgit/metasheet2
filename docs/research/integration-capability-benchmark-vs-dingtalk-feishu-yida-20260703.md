@@ -14,7 +14,7 @@
 
 | 维度 | 落地 | 成熟度 |
 | --- | --- | --- |
-| 连接器/适配器 | K3 WISE(WebAPI + SQLServer channel/executor)、PLM/Yuantus wrapper、通用 SQL(只读源 `data-source-sql-readonly` + `write-gated` 目标)、HTTP、metasheet multitable 目标、bridge readonly | ERP 深、SaaS 广度缺 |
+| 连接器/适配器 | K3 WISE(WebAPI + SQLServer channel/executor)、PLM/Yuantus wrapper、通用 SQL(只读源 `data-source-sql-readonly` + `write-gated` 目标)、HTTP、metasheet staging 源、metasheet multitable 目标、bridge readonly | ERP 深、SaaS 广度缺 |
 | READ 自助化 | 顾问配置→校验→审批→运行层(S0–S3,#1709);`isSafeRelativeReadPath` SSRF 守卫;values-free 证据;resolver_lookup(R0–R3);dry-run probe | **strong** |
 | WRITE | C6 `external-write-dry-run`(dry-run→apply,sandbox-first);write-gated 目标(latent);K3 upsert(pipeline 级) | 通用写**仅 W0 方向锁**;partial |
 | 数据工厂/管道 | `pipelines`/`pipeline-runner`、transform、sync、field-option-sync、integration-templates | partial→strong |
@@ -56,7 +56,7 @@ provenance / 运行监控 / dead-letter / replay / cross-base 写穿——企业
 
 **把「安全强」的窄切片转成广度而不丢治理:**
 
-1. **完成写阶梯 W1→W4** — 把 W0 方向锁变成已交付的受治理写(闭合读→读写),保住 sandbox-first 差异化。standing refresh 排 #1。**生产写段客户 2026-07-03 显式禁(SaveSubmitAuditK3Write/externalWrite/productionWrite=false),需显式授权 + sandbox-first,不由泛指令解封。**
+1. **完成写阶梯 W1→W4** — 把 W0 方向锁变成已交付的受治理写(闭合读→读写),保住 sandbox-first 差异化。standing refresh 排 #1。**生产写对客户 2026-07-03 显式禁(SaveSubmitAuditK3Write/externalWrite/productionWrite=false),需显式授权 + sandbox-first,不由泛指令解封。**
 2. **连接器模板目录** — 扩现有模板机制,接新系统=配置非代码,用现有机制攻广度。
 3. **事件驱动入站同步** — 补拉取之外的推送/webhook→multitable。
 4. **可视化数据准备** — multitable-as-hub 上的清洗/transform 授权面(宜搭 parity)。
