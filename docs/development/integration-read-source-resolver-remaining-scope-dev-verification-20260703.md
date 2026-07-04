@@ -39,3 +39,75 @@ IntegrationReadSourceConfigPanel.vue + readSourceConfigs.ts:mode=resolver_lookup
 ## 6. 当前基线(canonical)
 
 resolver:R0+R1+R2 运行时闭合(standalone read)+ R3 配置 UI。composition/递归 BOM = 设计锁已备、build gated。写路径 = W0 方向锁已备、build gated(客户禁 + sandbox-first 前置)。**没有任何不可逆的生产写被本轮建出或解封。**
+
+## 7. 实体机 standalone resolver smoke addendum(2026-07-04,#1709)
+
+本节固化 #1709 operator 回传的 values-free 实体机证据。它验证的是**当前 R2 standalone resolver_lookup 运行时**,
+不是后续 material→FBillNo composition 链,也不是 C3 LIST marker/list 语义。
+
+### 7.1 部署包
+
+| 项 | 证据 |
+| --- | --- |
+| package | `metasheet-multitable-onprem-v2.5.0-resolver-standalone-20260703-17688041f.zip` |
+| packageContainsMainSha | `17688041f` |
+| zipChecksum | PASS |
+| deployApplyExit | 0 |
+| healthcheck | PASS |
+
+### 7.2 Smoke config shape(values-free)
+
+```text
+mode=resolver_lookup
+readPath=/K3API/Material/GetDetail
+keyField=FNumber
+containerPaths=Data
+resolverRule=exactly_one
+fieldMap.source=Data.FItemID
+fieldMap.target=resolved_item_id
+getDetailContainerShape=Data array length 1; row.Data contains FItemID:number
+```
+
+### 7.3 PASS evidence(values-free)
+
+```text
+resolverStandaloneSmoke=PASS
+loginHttp=200
+externalSystemsHttp=200
+k3SystemLocated=true
+saveConfigHttp=201
+approveHttp=200
+runtimeHttp=200
+evidenceOk=true
+rule=exactly_one
+containerLocated=true
+candidateCount=1
+resolved=true
+resolverDataPresent=true
+sampleKeyEchoed=false
+resolvedValueEchoed=false
+rawPayloadIncluded=false
+postRetireRead=409_READ_SOURCE_CONFIG_NOT_APPROVED
+valuesFreeEvidence=true
+```
+
+Boundary held:
+
+```text
+compositionExecuted=false
+bomExecuted=false
+recursiveBomExpansionExecuted=false
+writeExecuted=false
+thisSmokeAuthorizesComposition=false
+thisSmokeAuthorizesListResolverSemantics=false
+thisSmokeAuthorizesRecursiveBom=false
+thisSmokeAuthorizesSaveSubmitAudit=false
+thisSmokeAuthorizesExternalWrite=false
+thisSmokeAuthorizesProductionWrite=false
+```
+
+### 7.4 Updated disposition
+
+R0+R1+R2+R3 现在是 **built + entity-machine verified for standalone resolver_lookup**。
+剩余 gate 不变:material→FBillNo composition、递归 BOM、Save/Submit/Audit、外部写、生产写,
+均需要各自单独 owner opt-in。
