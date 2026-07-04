@@ -1353,8 +1353,9 @@ export async function syncIntegrationStockPreparationOptions(
 }
 
 // Readiness inspects the already-bound canonical target; the server only consumes baseId on
-// ensure (create/bind). The plain IntegrationScope parameter structurally forbids callers from
-// passing a baseId here, so the request always mirrors what the server evaluates.
+// ensure (create/bind). The plain IntegrationScope parameter keeps callers from passing a baseId
+// here, and the query builder no longer reads one at all, so the request always mirrors what the
+// server evaluates.
 export async function getIntegrationStockPreparationTargetReadiness(
   scope: IntegrationScope = {},
 ): Promise<IntegrationStockPreparationTargetReadinessResult> {

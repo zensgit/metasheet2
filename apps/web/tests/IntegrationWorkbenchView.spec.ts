@@ -3776,6 +3776,9 @@ describe('IntegrationWorkbenchView', () => {
     app.mount(container)
     await flushUi(8)
 
+    // Mount anchor: an ungated sibling panel proves the view rendered — the absence below is the
+    // permission gate at work, not a render failure false-passing the test.
+    expect(container.querySelector('[data-testid="external-write-panel"]')).not.toBeNull()
     expect(container.querySelector('[data-testid="stock-preparation-s1-panel"]')).toBeNull()
     expect(calls.some((url) => url.includes('/stock-preparation/target/'))).toBe(false)
   })

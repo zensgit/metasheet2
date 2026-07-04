@@ -4531,7 +4531,7 @@ async function checkStockPreparationTargetReadiness(): Promise<void> {
   try {
     // Readiness inspects the already-bound canonical target; the server only consumes baseId on
     // ensure (create/bind). Send the plain scope so the request mirrors what the server evaluates
-    // (the service signature now forbids baseId structurally). The baseId input is disabled while a
+    // (the service no longer accepts or serializes baseId). The baseId input is disabled while a
     // request runs; the staleness signature keeping baseId is the belt behind that — a programmatic
     // in-flight change still conservatively drops the result.
     const result = await getIntegrationStockPreparationTargetReadiness(currentScope())
