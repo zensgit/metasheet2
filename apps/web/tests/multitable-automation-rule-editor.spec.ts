@@ -212,6 +212,49 @@ describe('MetaAutomationRuleEditor', () => {
     useLocale().setLocale('en')
   })
 
+  it('B1-07: closes without confirm when the draft is untouched', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm')
+    const onClose = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onClose })
+    await flushPromises()
+
+    const cancelBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Cancel') as HTMLButtonElement
+    cancelBtn.click()
+    await flushPromises()
+
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('B1-07: a dirty draft asks before discarding — cancel keeps the editor, confirm closes it', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const onClose = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onClose })
+    await flushPromises()
+
+    const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+    nameInput.value = 'My edited rule'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    const cancelBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Cancel') as HTMLButtonElement
+    cancelBtn.click()
+    await flushPromises()
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('unsaved changes'))
+    expect(onClose).not.toHaveBeenCalled()
+
+    // the × close path is guarded too
+    const xBtn = container.querySelector('.meta-rule-editor__close') as HTMLButtonElement
+    xBtn.click()
+    await flushPromises()
+    expect(onClose).not.toHaveBeenCalled()
+
+    confirmSpy.mockReturnValue(true)
+    cancelBtn.click()
+    await flushPromises()
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('renders trigger type selector when visible', async () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()

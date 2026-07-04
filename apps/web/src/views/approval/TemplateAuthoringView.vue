@@ -1112,8 +1112,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
@@ -1200,6 +1200,14 @@ const unsupportedReason = ref<string | null>(null)
 // unsupported — the form/metadata stay editable and save preserves the graph verbatim.
 const graphReadOnlyMessage = ref<string | null>(null)
 const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
+// B1-07: dirty baseline for discard protection — refreshed on every load/save so only real
+// unsaved edits trigger the leave confirm. Serialized compare; the draft is rebuilt from the
+// same builders on load/save, so key order is deterministic.
+const draftBaseline = ref(JSON.stringify(draft.value))
+const isDraftDirty = computed(() => JSON.stringify(draft.value) !== draftBaseline.value)
+function snapshotDraft() {
+  draftBaseline.value = JSON.stringify(draft.value)
+}
 const conditionFormulaDryRunSamples = ref<Record<string, string>>({})
 const conditionFormulaDryRunResults = ref<Record<string, string>>({})
 const conditionFormulaDryRunBusy = ref<Record<string, boolean>>({})
@@ -1788,6 +1796,7 @@ async function loadTemplateForEdit() {
     draft.value = createEmptyTemplateDraft()
     unsupportedReason.value = null
     graphReadOnlyMessage.value = null
+    snapshotDraft()
     return
   }
   loading.value = true
@@ -1798,6 +1807,7 @@ async function loadTemplateForEdit() {
     graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
     syncAllStepOptions()
+    snapshotDraft()
   } catch (error: any) {
     loadError.value = error?.message ?? '加载审批模板失败'
   } finally {
@@ -1823,12 +1833,14 @@ async function persistDraft() {
       draft.value = draftFromTemplate(updated)
       unsupportedReason.value = unsupportedTemplateAuthoringReason(updated)
       graphReadOnlyMessage.value = graphReadOnlyReason(updated)
+      snapshotDraft()
       return updated
     }
     const created = await createTemplate(buildCreateTemplatePayload(draft.value))
     draft.value = draftFromTemplate(created)
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
+    snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
   } catch (error: any) {
@@ -1849,6 +1861,7 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
     syncAllStepOptions()
+    snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     ElMessage.success('模板草稿已创建')
   } catch (error: any) {
@@ -1896,6 +1909,31 @@ onMounted(() => {
   void directory.loadRoles()
   void directory.loadFormulaRoles()
   void loadTemplateForEdit()
+})
+
+// B1-07: discard protection — the editor is the longest-lived form in the approval admin
+// surface and previously lost all edits on a stray back-click. Route leaves confirm when
+// dirty; hard reloads/closures get the browser-native prompt (same pattern as WorkflowDesigner).
+onBeforeRouteLeave(async () => {
+  if (!isDraftDirty.value) return true
+  try {
+    await ElMessageBox.confirm('有未保存的更改，离开将丢失编辑内容。确定离开吗？', '未保存的更改', {
+      confirmButtonText: '离开',
+      cancelButtonText: '留下',
+      type: 'warning',
+    })
+    return true
+  } catch {
+    return false
+  }
+})
+
+watch(isDraftDirty, (dirty) => {
+  window.onbeforeunload = dirty ? () => '有未保存的更改' : null
+})
+
+onUnmounted(() => {
+  window.onbeforeunload = null
 })
 </script>
 
