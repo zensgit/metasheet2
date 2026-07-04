@@ -2,6 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { apiFetch } from '../src/utils/api'
+import {
+  canRunBatchAnomalyResolution,
+  runBatchAnomalyResolution,
+  summarizeBatchAnomalyOutcome,
+  type BatchAnomalyRowResult,
+  type BatchAnomalyRowSnapshot,
+} from '../src/views/attendance/batchAnomalyResolution'
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -121,6 +128,9 @@ describe('Attendance admin regressions', () => {
   let attendanceRequestsData: unknown[] | null = null
   let attendanceAnomaliesData: unknown[] | null = null
   let attendanceResultEditPosts: Array<Record<string, unknown>> = []
+  // #3530 batch: recordIds in this set get a 422 from the anomaly-result-edit route,
+  // so partial-failure batches can be exercised without a real backend.
+  let attendanceResultEditFailRecordIds = new Set<string>()
   let autoShiftPreviewStatus = 200
   let autoShiftPreviewData: Record<string, unknown> | null = null
   let autoShiftApplyStatus = 200
@@ -140,6 +150,7 @@ describe('Attendance admin regressions', () => {
     attendanceRequestsData = null
     attendanceAnomaliesData = null
     attendanceResultEditPosts = []
+    attendanceResultEditFailRecordIds = new Set<string>()
     autoShiftPreviewStatus = 200
     autoShiftPreviewData = null
     autoShiftApplyStatus = 200
@@ -703,12 +714,18 @@ describe('Attendance admin regressions', () => {
       if (url.includes('/api/attendance/anomaly-result-edits')) {
         const body = JSON.parse(String((init as { body?: string } | undefined)?.body || '{}')) as Record<string, unknown>
         attendanceResultEditPosts.push(body)
+        if (attendanceResultEditFailRecordIds.has(String(body.recordId))) {
+          return jsonResponse(422, {
+            ok: false,
+            error: { code: 'ATTENDANCE_RESULT_EDIT_SOURCE_NOT_EDITABLE', message: 'source not editable' },
+          })
+        }
         return jsonResponse(200, {
           ok: true,
           data: {
             alreadyApplied: false,
             edit: {
-              id: 'edit-1',
+              id: `edit-${String(body.recordId)}`,
               beforeStatus: 'late',
               afterStatus: body.targetStatus,
               notificationDeliveryId: 'delivery-1',
@@ -1048,6 +1065,111 @@ describe('Attendance admin regressions', () => {
     await flushUi(2)
 
     expect(container!.querySelector('[data-attendance-result-edit-modal]')).toBeNull()
+  })
+
+  // ===== #3530 batch anomaly resolution =====
+  function makeBatchAnomaly(recordId: string, over: Record<string, unknown> = {}) {
+    return {
+      recordId,
+      workDate: '2026-05-13',
+      status: 'late',
+      firstInAt: '2026-05-13T09:12:00.000Z',
+      lastOutAt: '2026-05-13T18:00:00.000Z',
+      workMinutes: 480,
+      lateMinutes: 12,
+      earlyLeaveMinutes: 0,
+      warnings: ['late'],
+      state: 'open',
+      request: null,
+      suggestedRequestType: 'time_correction',
+      ...over,
+    }
+  }
+  async function mountBatchAdmin(
+    rows: unknown[],
+    settings: Record<string, unknown> = { attendanceResultEditPolicy: { enabled: true, requireReason: false } },
+  ) {
+    attendanceSettingsData = settings
+    attendanceAnomaliesData = rows
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(12)
+    // Probe admin capability through the batch toolbar → checkboxes become enabled.
+    container!.querySelector<HTMLButtonElement>('[data-attendance-batch-probe]')!.click()
+    await flushUi(12)
+  }
+  const batchCheckboxes = () =>
+    Array.from(container!.querySelectorAll<HTMLInputElement>('[data-attendance-batch-select]'))
+
+  it('#3530 batch: only eligible anomaly rows are selectable', async () => {
+    await mountBatchAdmin([
+      makeBatchAnomaly('record-a'),
+      makeBatchAnomaly('record-pending', { state: 'pending' }),
+      makeBatchAnomaly('record-nonedit', { status: 'normal' }),
+    ])
+    const boxes = batchCheckboxes()
+    expect(boxes).toHaveLength(3)
+    expect(boxes[0].disabled).toBe(false)
+    expect(boxes[1].disabled).toBe(true)
+    expect(boxes[2].disabled).toBe(true)
+  })
+
+  it('#3530 batch: selecting more than 50 rows disables the batch submit', async () => {
+    await mountBatchAdmin(Array.from({ length: 51 }, (_, i) => makeBatchAnomaly(`record-${i}`)))
+    for (const box of batchCheckboxes()) box.click()
+    await flushUi(3)
+    const submit = container!.querySelector<HTMLButtonElement>('[data-attendance-batch-resolve]')!
+    expect(submit.disabled).toBe(true)
+    expect(container!.querySelector('[data-attendance-batch-disabled-reason]')?.textContent).toContain('at most 50')
+  })
+
+  it('#3530 batch: N selected rows produce N POSTs with frozen recordIds + distinct keys, no overrideMetrics', async () => {
+    await mountBatchAdmin([makeBatchAnomaly('record-a'), makeBatchAnomaly('record-b'), makeBatchAnomaly('record-c')])
+    const boxes = batchCheckboxes()
+    boxes[0].click()
+    boxes[2].click()
+    await flushUi(3)
+    container!.querySelector<HTMLButtonElement>('[data-attendance-batch-resolve]')!.click()
+    await flushUi(4)
+    expect(container!.querySelector('[data-attendance-batch-modal]')).toBeTruthy()
+    container!.querySelector<HTMLButtonElement>('[data-attendance-batch-submit]')!.click()
+    await flushUi(16)
+    expect(attendanceResultEditPosts).toHaveLength(2)
+    expect(attendanceResultEditPosts.map(p => p.recordId).sort()).toEqual(['record-a', 'record-c'])
+    expect(new Set(attendanceResultEditPosts.map(p => p.idempotencyKey)).size).toBe(2)
+    expect(attendanceResultEditPosts[0]).not.toHaveProperty('overrideMetrics')
+  })
+
+  it('#3530 batch: partial failure renders mixed per-row results and never claims full success', async () => {
+    attendanceResultEditFailRecordIds = new Set(['record-b'])
+    await mountBatchAdmin([makeBatchAnomaly('record-a'), makeBatchAnomaly('record-b')])
+    const boxes = batchCheckboxes()
+    boxes[0].click()
+    boxes[1].click()
+    await flushUi(3)
+    container!.querySelector<HTMLButtonElement>('[data-attendance-batch-resolve]')!.click()
+    await flushUi(4)
+    container!.querySelector<HTMLButtonElement>('[data-attendance-batch-submit]')!.click()
+    await flushUi(16)
+    expect(attendanceResultEditPosts).toHaveLength(2)
+    expect(container!.querySelector('[data-attendance-batch-row-state="ok"]')).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-batch-row-state="error"]')).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-batch-outcome-error]')).toBeTruthy()
+  })
+
+  it('#3530 batch: selection + modal clear when anomalies reload (stale-state gate)', async () => {
+    await mountBatchAdmin([makeBatchAnomaly('record-a'), makeBatchAnomaly('record-b')])
+    batchCheckboxes()[0].click()
+    await flushUi(3)
+    container!.querySelector<HTMLButtonElement>('[data-attendance-batch-resolve]')!.click()
+    await flushUi(4)
+    expect(container!.querySelector('[data-attendance-batch-modal]')).toBeTruthy()
+    const reloadButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Reload anomalies'))
+    reloadButton!.click()
+    await flushUi(4)
+    expect(container!.querySelector('[data-attendance-batch-modal]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-batch-selected-count]')?.textContent).toContain('0')
   })
 
   it('overview self-service — the annual leave card reads the token-locked /me balance (no userId param)', async () => {
@@ -7410,5 +7532,55 @@ describe('Attendance admin regressions', () => {
     expect(importBatchesSection!.textContent).toContain('Mapping viewer')
     expect(importBatchesSection!.textContent).toContain('Selected item detail')
     expect(importBatchesSection!.textContent).toContain('Engine: bulk')
+  })
+})
+
+describe('#3530 batch anomaly resolution (pure)', () => {
+  const snap = (recordId: string): BatchAnomalyRowSnapshot => ({
+    recordId,
+    workDate: '2026-05-13',
+    targetUserId: 'user-1',
+    sourceStatus: 'late',
+    request: null,
+    warnings: [],
+    idempotencyKey: `key-${recordId}`,
+  })
+
+  it('canRunBatchAnomalyResolution enforces the 1..50 cap', () => {
+    expect(canRunBatchAnomalyResolution(0)).toBe(false)
+    expect(canRunBatchAnomalyResolution(1)).toBe(true)
+    expect(canRunBatchAnomalyResolution(50)).toBe(true)
+    expect(canRunBatchAnomalyResolution(51)).toBe(false)
+  })
+
+  it('summarizeBatchAnomalyOutcome: all ok => completed; any error => completed_with_errors', () => {
+    expect(summarizeBatchAnomalyOutcome([])).toBe('idle')
+    expect(summarizeBatchAnomalyOutcome([{ recordId: 'a', state: 'submitting' }])).toBe('running')
+    expect(summarizeBatchAnomalyOutcome([{ recordId: 'a', state: 'ok' }])).toBe('completed')
+    expect(
+      summarizeBatchAnomalyOutcome([{ recordId: 'a', state: 'ok' }, { recordId: 'b', state: 'error' }]),
+    ).toBe('completed_with_errors')
+  })
+
+  it('runBatchAnomalyResolution: sequential, skips already-ok rows, records each per-row outcome', async () => {
+    const calls: string[] = []
+    const current = new Map<string, BatchAnomalyRowResult>([['a', { recordId: 'a', state: 'ok' }]])
+    const results = await runBatchAnomalyResolution(
+      [snap('a'), snap('b'), snap('c')],
+      current,
+      async (row) => {
+        calls.push(row.recordId)
+        return row.recordId === 'b'
+          ? { ok: false as const, errorMessage: 'boom' }
+          : { ok: true as const, result: { editId: `e-${row.recordId}` } }
+      },
+    )
+    // 'a' was already ok → not re-submitted; b then c in order.
+    expect(calls).toEqual(['b', 'c'])
+    expect(results.get('a')?.state).toBe('ok')
+    expect(results.get('b')?.state).toBe('error')
+    expect(results.get('b')?.errorMessage).toBe('boom')
+    expect(results.get('c')?.state).toBe('ok')
+    expect(results.get('c')?.editId).toBe('e-c')
   })
 })
