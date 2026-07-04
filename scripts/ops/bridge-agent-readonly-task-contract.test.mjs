@@ -22,6 +22,7 @@ test('scheduled task helper installs the readonly bridge as a SYSTEM startup tas
     "New-ScheduledTaskTrigger -AtStartup",
     "New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest",
     "New-ScheduledTaskAction",
+    "-ExecutionTimeLimit (New-TimeSpan -Seconds 0)",
     "-NoProfile",
     "-ExecutionPolicy Bypass",
     "bridge-agent-readonly.ps1",
@@ -40,11 +41,23 @@ test('scheduled task helper surfaces status without needing bridge secrets', asy
     'System.Net.Sockets.TcpClient',
     '127.0.0.1:$Port reachable',
     '127.0.0.1:$Port not reachable',
+    'Health: healthy',
+    'Health: unhealthy',
+    'Wait-BridgeTaskHealthy -TimeoutSeconds 15',
+    'Show-BridgeTaskStatus -RequireHealthy',
   ]) {
     assert.match(script, escaped(marker));
   }
 
   assert.doesNotMatch(script, /Invoke-RestMethod[\s\S]+X-MetaSheet-Bridge-Secret/i);
+});
+
+test('scheduled task helper does not keep the Windows default 72h execution limit', async () => {
+  const script = await readTaskScript();
+
+  assert.match(script, escaped('-ExecutionTimeLimit (New-TimeSpan -Seconds 0)'));
+  assert.doesNotMatch(script, /ExecutionTimeLimit\s+['"]?PT72H/i);
+  assert.doesNotMatch(script, /New-TimeSpan\s+-Hours\s+72/i);
 });
 
 test('scheduled task helper does not print or embed Bridge Agent secrets', async () => {
