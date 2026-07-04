@@ -1236,6 +1236,18 @@ export interface IntegrationStockPreparationOptionSyncResult {
   evidence?: Record<string, unknown>
 }
 
+export interface IntegrationStockPreparationTargetScope extends IntegrationScope {
+  projectId?: string | null
+  baseId?: string | null
+}
+
+export interface IntegrationStockPreparationTargetReadinessResult {
+  ready: boolean
+  mode?: string
+  targetBinding?: Record<string, unknown> | null
+  evidence?: Record<string, unknown>
+}
+
 export async function listIntegrationTableActions(scope: IntegrationScope = {}): Promise<IntegrationTableActionMetadata[]> {
   const query = buildQueryString({
     tenantId: scope.tenantId,
@@ -1338,6 +1350,34 @@ export async function syncIntegrationStockPreparationOptions(
     body: JSON.stringify(payload),
   })
   return parseIntegrationResponse<IntegrationStockPreparationOptionSyncResult>(response)
+}
+
+export async function getIntegrationStockPreparationTargetReadiness(
+  scope: IntegrationStockPreparationTargetScope = {},
+): Promise<IntegrationStockPreparationTargetReadinessResult> {
+  const query = buildQueryString({
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+    projectId: scope.projectId,
+    baseId: scope.baseId,
+  })
+  const response = await apiFetch(`/api/integration/stock-preparation/target/readiness${query ? `?${query}` : ''}`)
+  return parseIntegrationResponse<IntegrationStockPreparationTargetReadinessResult>(response)
+}
+
+export async function ensureIntegrationStockPreparationTarget(
+  payload: IntegrationStockPreparationTargetScope = {},
+): Promise<IntegrationStockPreparationTargetReadinessResult> {
+  const response = await apiFetch('/api/integration/stock-preparation/target/ensure', {
+    method: 'POST',
+    body: JSON.stringify({
+      tenantId: payload.tenantId,
+      workspaceId: payload.workspaceId,
+      projectId: payload.projectId,
+      baseId: payload.baseId,
+    }),
+  })
+  return parseIntegrationResponse<IntegrationStockPreparationTargetReadinessResult>(response)
 }
 
 // FOS-2/FOS-3: generic, preset-driven field-option-sync. Resolves a FOS-1 preset by presetId and

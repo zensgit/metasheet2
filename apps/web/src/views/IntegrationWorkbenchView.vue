@@ -794,6 +794,55 @@
         {{ dryRunEmptyPreviewNotice }}
       </div>
 
+      <div v-if="auth.hasPermission('integration:admin')" class="integration-workbench__table-action" data-testid="stock-preparation-s1-panel">
+        <div class="integration-workbench__panel-head">
+          <div>
+            <h3>标准备料表 S1</h3>
+            <p>创建或绑定 `plm.stock-preparation.main.v1` 标准备料表，并检查目标 readiness；本步骤只处理元数据。</p>
+          </div>
+          <span class="integration-workbench__badge">admin · metadata-only</span>
+        </div>
+        <div class="integration-workbench__grid integration-workbench__grid--compact">
+          <label>
+            <span>目标 baseId（可选，仅创建/绑定时使用）</span>
+            <input v-model="stockPreparationTargetBaseId" data-testid="stock-preparation-s1-base-id" placeholder="创建或绑定时可填写目标 baseId；readiness 检查针对已绑定目标，不受此输入影响" />
+          </label>
+        </div>
+        <p class="integration-workbench__hint" data-testid="stock-preparation-s1-boundary">
+          只调用 target readiness / ensure；不读取 PLM，不写业务行，不执行 table action，不触发 Apply，不调用 K3 Save / Submit / Audit / BOM write。
+        </p>
+        <div class="integration-workbench__actions">
+          <button
+            type="button"
+            class="integration-workbench__button"
+            data-testid="stock-preparation-s1-readiness"
+            :disabled="stockPreparationTargetRunning !== ''"
+            @click="checkStockPreparationTargetReadiness"
+          >
+            {{ stockPreparationTargetRunning === 'readiness' ? '检查中' : '检查 readiness' }}
+          </button>
+          <button
+            type="button"
+            class="integration-workbench__button"
+            data-testid="stock-preparation-s1-ensure"
+            :disabled="stockPreparationTargetRunning !== ''"
+            @click="ensureStockPreparationTarget"
+          >
+            {{ stockPreparationTargetRunning === 'ensure' ? '处理中' : '创建或绑定标准表' }}
+          </button>
+        </div>
+        <div v-if="stockPreparationTargetResult" class="integration-workbench__table-action-review" data-testid="stock-preparation-s1-result">
+          <strong>{{ stockPreparationTargetSummary }}</strong>
+          <div class="integration-workbench__metric-row" data-testid="stock-preparation-s1-metrics">
+            <span v-for="metric in stockPreparationTargetMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
+          </div>
+          <p class="integration-workbench__hint" data-testid="stock-preparation-s1-token-state">
+            target binding 仅用于当前租户运行时；公开证据只贴 readiness status / mode / counts / missingFields。
+          </p>
+          <pre v-if="stockPreparationTargetEvidenceText" data-testid="stock-preparation-s1-evidence">{{ stockPreparationTargetEvidenceText }}</pre>
+        </div>
+      </div>
+
       <div class="integration-workbench__table-action" data-testid="external-write-panel">
         <div class="integration-workbench__panel-head">
           <div>
@@ -1353,7 +1402,9 @@ import {
   deleteWorkbenchExternalSystem,
   dryRunIntegrationExternalWrite,
   dryRunIntegrationTableAction,
+  ensureIntegrationStockPreparationTarget,
   getDefaultIntegrationScope,
+  getIntegrationStockPreparationTargetReadiness,
   isIntegrationScopedProjectId,
   normalizeIntegrationProjectId,
   getExternalSystemSchema,
@@ -1401,6 +1452,7 @@ import {
   type IntegrationSystemObject,
   type IntegrationFieldRule,
   type IntegrationReferenceMappingSource,
+  type IntegrationStockPreparationTargetReadinessResult,
   type IntegrationTableActionApplyResult,
   type IntegrationTableActionConflictPolicyResult,
   type IntegrationTableActionDryRunResult,
@@ -1636,6 +1688,10 @@ const tableActionDuplicateRunPolicies = ref<Record<string, string>>({})
 const tableActionTableScopePolicies = ref<IntegrationTableActionConflictPolicyResult | null>(null)
 const tableActionConflictPolicySaving = ref('')
 const tableActionConflictPolicyDirty = ref(false)
+const stockPreparationTargetBaseId = ref('')
+const stockPreparationTargetRunning = ref<'readiness' | 'ensure' | ''>('')
+const stockPreparationTargetResult = ref<IntegrationStockPreparationTargetReadinessResult | null>(null)
+let stockPreparationTargetRequestId = 0
 const stockPreparationOptionSyncText = ref('')
 const stockPreparationOptionSyncResult = ref<IntegrationStockPreparationOptionSyncResult | null>(null)
 const syncingStockPreparationOptions = ref(false)
@@ -2586,6 +2642,35 @@ const tableActionDuplicateGroups = computed<DuplicateExpandedGroupView[]>(() => 
 })
 const tableActionEvidenceText = computed(() => {
   const evidence = tableActionApplyResult.value?.evidence || tableActionDryRunResult.value?.evidence
+  return evidence ? JSON.stringify(evidence, null, 2) : ''
+})
+const stockPreparationTargetEvidence = computed(() => {
+  const evidence = stockPreparationTargetResult.value?.evidence
+  return isRecord(evidence) ? evidence : null
+})
+const stockPreparationTargetSummary = computed(() => {
+  const result = stockPreparationTargetResult.value
+  if (!result) return '尚未检查标准备料表 readiness。'
+  const status = result.ready ? 'ready' : 'not_ready'
+  const mode = result.mode || String(stockPreparationTargetEvidence.value?.mode || 'unknown')
+  return `target ${status} · ${mode}`
+})
+const stockPreparationTargetMetrics = computed(() => {
+  const evidence = stockPreparationTargetEvidence.value
+  if (!evidence) return []
+  const metrics: Array<{ id: string, label: string, value: string }> = []
+  const fieldCounts = isRecord(evidence.fieldCounts) ? evidence.fieldCounts : null
+  const missingFields = Array.isArray(evidence.missingFields) ? evidence.missingFields : []
+  if (fieldCounts && typeof fieldCounts.total === 'number') metrics.push({ id: 'fields', label: 'fields', value: String(fieldCounts.total) })
+  if (fieldCounts && typeof fieldCounts.plmSystem === 'number') metrics.push({ id: 'system', label: 'system', value: String(fieldCounts.plmSystem) })
+  if (fieldCounts && typeof fieldCounts.humanPreserved === 'number') metrics.push({ id: 'human', label: 'human', value: String(fieldCounts.humanPreserved) })
+  metrics.push({ id: 'missing', label: 'missing', value: String(missingFields.length) })
+  const optionSources = Array.isArray(evidence.optionSources) ? evidence.optionSources : []
+  metrics.push({ id: 'optionSources', label: 'optionSources', value: String(optionSources.length) })
+  return metrics
+})
+const stockPreparationTargetEvidenceText = computed(() => {
+  const evidence = stockPreparationTargetEvidence.value
   return evidence ? JSON.stringify(evidence, null, 2) : ''
 })
 // FOS-3: the field-option-sync presets resolve a FOS-1 preset on the generic
@@ -4416,6 +4501,70 @@ function payloadCarriesActionBindings(payload: Record<string, unknown>): boolean
     }
   }
   return false
+}
+
+function stockPreparationTargetScope() {
+  return {
+    ...currentScope(),
+    baseId: stockPreparationTargetBaseId.value.trim() || null,
+  }
+}
+
+function stockPreparationTargetSignature(scope = stockPreparationTargetScope()): string {
+  return JSON.stringify(scope)
+}
+
+function isCurrentStockPreparationTargetRequest(requestId: number, signature: string): boolean {
+  return requestId === stockPreparationTargetRequestId && stockPreparationTargetSignature() === signature
+}
+
+async function checkStockPreparationTargetReadiness(): Promise<void> {
+  if (!auth.hasPermission('integration:admin')) {
+    setStatus('只有管理员可以检查标准备料表 readiness。', 'error')
+    return
+  }
+  const scope = stockPreparationTargetScope()
+  const signature = stockPreparationTargetSignature(scope)
+  const requestId = ++stockPreparationTargetRequestId
+  stockPreparationTargetRunning.value = 'readiness'
+  stockPreparationTargetResult.value = null
+  try {
+    // Readiness inspects the already-bound canonical target; the server only consumes baseId on
+    // ensure (create/bind). Send the plain scope so the request mirrors what the server evaluates.
+    // The staleness signature still covers baseId: an in-flight edit conservatively drops the result.
+    const result = await getIntegrationStockPreparationTargetReadiness(currentScope())
+    if (!isCurrentStockPreparationTargetRequest(requestId, signature)) return
+    stockPreparationTargetResult.value = result
+    setStatus(result.ready ? '标准备料表 readiness 已满足。' : '标准备料表尚未 ready；请查看 missing fields。', result.ready ? 'success' : 'idle')
+  } catch (error) {
+    if (!isCurrentStockPreparationTargetRequest(requestId, signature)) return
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    if (requestId === stockPreparationTargetRequestId) stockPreparationTargetRunning.value = ''
+  }
+}
+
+async function ensureStockPreparationTarget(): Promise<void> {
+  if (!auth.hasPermission('integration:admin')) {
+    setStatus('只有管理员可以创建或绑定标准备料表。', 'error')
+    return
+  }
+  const scope = stockPreparationTargetScope()
+  const signature = stockPreparationTargetSignature(scope)
+  const requestId = ++stockPreparationTargetRequestId
+  stockPreparationTargetRunning.value = 'ensure'
+  stockPreparationTargetResult.value = null
+  try {
+    const result = await ensureIntegrationStockPreparationTarget(scope)
+    if (!isCurrentStockPreparationTargetRequest(requestId, signature)) return
+    stockPreparationTargetResult.value = result
+    setStatus(result.ready ? '标准备料表已创建或绑定。' : '标准备料表未 ready；请查看 readiness evidence。', result.ready ? 'success' : 'idle')
+  } catch (error) {
+    if (!isCurrentStockPreparationTargetRequest(requestId, signature)) return
+    setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    if (requestId === stockPreparationTargetRequestId) stockPreparationTargetRunning.value = ''
+  }
 }
 
 async function syncFieldOptions(): Promise<void> {

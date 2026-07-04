@@ -16,6 +16,17 @@ function jsonResponse(data: unknown): Response {
   })
 }
 
+function deferredResponse(): { promise: Promise<Response>; resolve: (data: unknown) => void } {
+  let resolvePromise: (response: Response) => void = () => undefined
+  const promise = new Promise<Response>((resolve) => {
+    resolvePromise = resolve
+  })
+  return {
+    promise,
+    resolve: (data: unknown) => resolvePromise(jsonResponse(data)),
+  }
+}
+
 function rawJsonResponse(data: unknown): Response {
   return new Response(JSON.stringify(data), {
     status: 200,
@@ -3492,6 +3503,249 @@ describe('IntegrationWorkbenchView', () => {
     sourceSystemSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(8)
     expect(container.querySelector('[data-testid="plm-approval-capability-entry"]')).toBeNull()
+  })
+
+  it('S1: checks standard stock-preparation target readiness without source reads or writes', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:admin']))
+    const calls: Array<{ url: string, method: string, body?: Record<string, unknown> }> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method || 'GET')
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined
+      calls.push({ url, method, body })
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/stock-preparation/target/readiness?tenantId=default') {
+        return jsonResponse({
+          ready: false,
+          mode: 'canonical_missing',
+          targetBinding: null,
+          evidence: {
+            status: 'missing',
+            mode: 'canonical_missing',
+            objectId: 'plm_stock_preparation_main',
+            fieldMapMode: 'canonical',
+            keyField: 'idempotencyKey',
+            fieldCounts: { total: 23, plmSystem: 15, humanPreserved: 8, required: 12 },
+            missingFields: ['projectNo', 'idempotencyKey'],
+            optionSources: [{ field: 'materialType', type: 'config_info', key: 'material_type' }],
+            target: { objectId: 'plm_stock_preparation_main', keyField: 'idempotencyKey', fieldIdMapEmpty: true },
+          },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi(8)
+
+    expect(container.querySelector('[data-testid="stock-preparation-s1-panel"]')?.textContent).toContain('metadata-only')
+    expect(container.querySelector('[data-testid="stock-preparation-s1-boundary"]')?.textContent).toContain('不读取 PLM')
+    const baseInput = container.querySelector('[data-testid="stock-preparation-s1-base-id"]') as HTMLInputElement
+    baseInput.value = 'base_stock_readiness'
+    baseInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="stock-preparation-s1-readiness"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    expect(calls.some((call) => call.url === '/api/integration/stock-preparation/target/readiness?tenantId=default')).toBe(true)
+    // baseId is create/bind-time input only: even with the input filled, readiness must not carry it.
+    expect(calls.some((call) => call.url.startsWith('/api/integration/stock-preparation/target/readiness') && call.url.includes('baseId'))).toBe(false)
+    expect(calls.some((call) => call.url.includes('/dry-run'))).toBe(false)
+    expect(calls.some((call) => call.url.includes('/apply'))).toBe(false)
+    expect(calls.some((call) => call.url.includes('/options/sync'))).toBe(false)
+    expect(container.querySelector('[data-testid="stock-preparation-s1-result"]')?.textContent).toContain('target not_ready · canonical_missing')
+    expect(container.querySelector('[data-testid="stock-preparation-s1-metrics"]')?.textContent).toContain('missing 2')
+    expect(container.querySelector('[data-testid="stock-preparation-s1-evidence"]')?.textContent).toContain('projectNo')
+    expect(container.querySelector('[data-testid="stock-preparation-s1-evidence"]')?.textContent).not.toContain('sheet_stock_private')
+  })
+
+  it('S1: creates or binds the standard stock-preparation target without client-supplied sheet scope', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:admin']))
+    const ensureBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/stock-preparation/target/ensure') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        ensureBodies.push(body)
+        return jsonResponse({
+          ready: true,
+          mode: 'canonical_create',
+          targetBinding: {
+            sheetId: 'sheet_stock_private',
+            objectId: 'plm_stock_preparation_main',
+            keyField: 'idempotencyKey',
+            fieldIdMap: { projectNo: 'fld_project_no_private' },
+          },
+          evidence: {
+            status: 'ready',
+            mode: 'canonical_create',
+            objectId: 'plm_stock_preparation_main',
+            fieldMapMode: 'canonical',
+            keyField: 'idempotencyKey',
+            fieldCounts: { total: 23, plmSystem: 15, humanPreserved: 8, required: 12 },
+            missingFields: [],
+            optionSources: [],
+            target: { objectId: 'plm_stock_preparation_main', keyField: 'idempotencyKey', fieldIdMapEmpty: false },
+          },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi(8)
+
+    const baseInput = container.querySelector('[data-testid="stock-preparation-s1-base-id"]') as HTMLInputElement
+    baseInput.value = 'base_stock'
+    baseInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="stock-preparation-s1-ensure"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    expect(ensureBodies).toEqual([{ tenantId: 'default', workspaceId: null, baseId: 'base_stock' }])
+    expect(ensureBodies[0]).not.toHaveProperty('projectId')
+    expect(ensureBodies[0]).not.toHaveProperty('sheetId')
+    expect(ensureBodies[0]).not.toHaveProperty('fieldIdMap')
+    expect(ensureBodies[0]).not.toHaveProperty('source')
+    expect(ensureBodies[0]).not.toHaveProperty('target')
+    expect(ensureBodies[0]).not.toHaveProperty('plan')
+    expect(container.querySelector('[data-testid="stock-preparation-s1-result"]')?.textContent).toContain('target ready · canonical_create')
+    expect(container.querySelector('[data-testid="stock-preparation-s1-evidence"]')?.textContent).not.toContain('sheet_stock_private')
+    expect(container.querySelector('[data-testid="stock-preparation-s1-evidence"]')?.textContent).not.toContain('fld_project_no_private')
+  })
+
+  it('S1: ignores stale standard stock-preparation target responses', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:admin']))
+    const readinessResponse = deferredResponse()
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/stock-preparation/target/readiness?tenantId=default') return readinessResponse.promise
+      if (url === '/api/integration/stock-preparation/target/ensure') {
+        const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        expect(body).toEqual({ tenantId: 'default', workspaceId: null, baseId: null })
+        return jsonResponse({
+          ready: true,
+          mode: 'canonical_create',
+          evidence: {
+            status: 'ready',
+            mode: 'canonical_create',
+            objectId: 'plm_stock_preparation_main',
+            fieldMapMode: 'canonical',
+            keyField: 'idempotencyKey',
+            fieldCounts: { total: 23, plmSystem: 15, humanPreserved: 8, required: 12 },
+            missingFields: [],
+            optionSources: [],
+            target: { objectId: 'plm_stock_preparation_main', keyField: 'idempotencyKey', fieldIdMapEmpty: false },
+          },
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi(8)
+
+    ;(container.querySelector('[data-testid="stock-preparation-s1-readiness"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="stock-preparation-s1-ensure"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    expect(container.querySelector('[data-testid="stock-preparation-s1-result"]')?.textContent).toContain('target ready · canonical_create')
+    readinessResponse.resolve({
+      ready: false,
+      mode: 'canonical_missing',
+      evidence: {
+        status: 'missing',
+        mode: 'canonical_missing',
+        objectId: 'plm_stock_preparation_main',
+        fieldMapMode: 'canonical',
+        keyField: 'idempotencyKey',
+        fieldCounts: { total: 23, plmSystem: 15, humanPreserved: 8, required: 12 },
+        missingFields: ['projectNo'],
+        optionSources: [],
+        target: { objectId: 'plm_stock_preparation_main', keyField: 'idempotencyKey', fieldIdMapEmpty: true },
+      },
+    })
+    await flushUi(8)
+
+    expect(container.querySelector('[data-testid="stock-preparation-s1-result"]')?.textContent).toContain('target ready · canonical_create')
+    expect(container.querySelector('[data-testid="stock-preparation-s1-result"]')?.textContent).not.toContain('canonical_missing')
+    expect(container.querySelector('[data-testid="stock-preparation-s1-evidence"]')?.textContent).not.toContain('projectNo')
+  })
+
+  it('S1: ignores standard stock-preparation target readiness when scope changes in flight', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:admin']))
+    const readinessResponse = deferredResponse()
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/stock-preparation/target/readiness?tenantId=default') return readinessResponse.promise
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi(8)
+
+    const baseInput = container.querySelector('[data-testid="stock-preparation-s1-base-id"]') as HTMLInputElement
+    baseInput.value = 'base_before'
+    baseInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="stock-preparation-s1-readiness"]') as HTMLButtonElement).click()
+    await flushUi()
+    baseInput.value = 'base_after'
+    baseInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    readinessResponse.resolve({
+      ready: false,
+      mode: 'canonical_missing',
+      evidence: {
+        status: 'missing',
+        mode: 'canonical_missing',
+        objectId: 'plm_stock_preparation_main',
+        fieldMapMode: 'canonical',
+        keyField: 'idempotencyKey',
+        fieldCounts: { total: 23, plmSystem: 15, humanPreserved: 8, required: 12 },
+        missingFields: ['projectNo'],
+        optionSources: [],
+        target: { objectId: 'plm_stock_preparation_main', keyField: 'idempotencyKey', fieldIdMapEmpty: true },
+      },
+    })
+    await flushUi(8)
+
+    expect(container.querySelector('[data-testid="stock-preparation-s1-result"]')).toBeNull()
+    expect((container.querySelector('[data-testid="stock-preparation-s1-readiness"]') as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('C5-2: runs a configured table action via dry-run token without client-supplied plan or sheet scope', async () => {
