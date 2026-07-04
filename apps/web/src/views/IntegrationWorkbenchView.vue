@@ -2009,8 +2009,17 @@ const selectedPlmBomMultitableCapabilityEntry = computed<PlmBomCapabilityEntry |
   }
 })
 const sqlChannelDisabledHint = computed(() => {
-  const hasDisabledSql = systems.value.some((system) => system.kind === 'erp:k3-wise-sqlserver' && runtimeBlockerForSystem(system) !== '')
-  return hasDisabledSql ? '高级 SQL 通道未启用 / SQLSERVER_EXECUTOR_MISSING / 需要部署侧注入 queryExecutor。已有 SQL 连接配置会保留但暂不能作为 Dry-run 来源。' : ''
+  const sqlBlockers = systems.value
+    .filter((system) => system.kind === 'erp:k3-wise-sqlserver')
+    .map((system) => runtimeBlockerForSystem(system))
+    .filter(Boolean)
+  if (sqlBlockers.some((blocker) => blocker.includes('SQLSERVER_EXECUTOR_MISSING'))) {
+    return '高级 SQL 通道未启用 / SQLSERVER_EXECUTOR_MISSING / 需要部署侧注入 queryExecutor。已有 SQL 连接配置会保留但暂不能作为 Dry-run 来源。'
+  }
+  if (sqlBlockers.some((blocker) => blocker.includes('SQLSERVER_TEST_FAILED'))) {
+    return 'PLM SQL source 连接测试失败（SQLSERVER_TEST_FAILED）；表内已有数据或对象元数据不等于 live source 已就绪，暂不能作为 Dry-run 来源。'
+  }
+  return sqlBlockers.length > 0 ? 'SQL 只读来源当前未就绪；请先通过连接测试与样本预览，再作为 Dry-run 来源。' : ''
 })
 const connectionDraftTitle = computed(() => {
   if (connectionDraftMode.value === 'edit') return `编辑连接${connectionDraft.id ? `：${connectionDraft.id}` : ''}`
@@ -2741,8 +2750,14 @@ function runtimeBlockerForSystem(system: WorkbenchExternalSystem | null): string
   if (system.kind === 'erp:k3-wise-sqlserver' && /SQLSERVER_EXECUTOR_MISSING|queryExecutor|executor|injected|注入|执行器/i.test(errorText)) {
     return 'SQL 连接已配置，但当前部署未注入 SQL 执行器（SQLSERVER_EXECUTOR_MISSING）；可保留为高级连接，暂不能作为可读 source 执行 dry-run。'
   }
+  if (system.kind === 'erp:k3-wise-sqlserver' && /SQLSERVER_TEST_FAILED|TLS\/SSL unsupported protocol|unsupported protocol/i.test(errorText)) {
+    return 'PLM SQL source 连接测试失败（SQLSERVER_TEST_FAILED）；对象列表或表内历史数据只能证明配置/数据存在，不能证明 live source 已连接。'
+  }
   if (system.kind === 'erp:k3-wise-sqlserver' && system.status === 'error' && !errorText) {
     return 'K3 SQL Server 只读通道需要部署 allowlist queryExecutor 后才能读取样本或作为 source。'
+  }
+  if (system.kind === 'erp:k3-wise-sqlserver' && system.status === 'error') {
+    return 'SQL 只读来源当前处于异常状态；请先通过连接测试和样本预览，再作为 source 执行 dry-run。'
   }
   return ''
 }
