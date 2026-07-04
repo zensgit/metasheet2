@@ -1975,6 +1975,25 @@ function isUndefinedTableError(err: unknown, tableName: string): boolean {
   return msg.includes(`relation "${tableName}" does not exist`)
 }
 
+const OPTIONAL_MEMBER_GROUP_COLUMN_ERROR_HINTS = [
+  'column g.name does not exist',
+  'column g.description does not exist',
+  'column "g"."name" does not exist',
+  'column "g"."description" does not exist',
+  'column platform_member_groups.name does not exist',
+  'column platform_member_groups.description does not exist',
+  'column "platform_member_groups"."name" does not exist',
+  'column "platform_member_groups"."description" does not exist',
+]
+
+function isOptionalMemberGroupDirectoryError(err: unknown): boolean {
+  if (isUndefinedTableError(err, 'platform_member_groups')) return true
+  const code = typeof (err as any)?.code === 'string' ? (err as any).code : null
+  if (code !== '42703') return false
+  const msg = typeof (err as any)?.message === 'string' ? (err as any).message.toLowerCase() : ''
+  return OPTIONAL_MEMBER_GROUP_COLUMN_ERROR_HINTS.some((hint) => msg.includes(hint))
+}
+
 function mapFieldType(type: string): UniverMetaField['type'] {
   const normalized = type.trim().toLowerCase()
   if (normalized === 'number') return 'number'
@@ -7115,7 +7134,7 @@ export function univerMetaRouter(): Router {
           [viewId],
         )
       } catch (err) {
-        if (!isUndefinedTableError(err, 'platform_member_groups')) throw err
+        if (!isOptionalMemberGroupDirectoryError(err)) throw err
         result = await pool.query(
           `SELECT
               vp.id,
@@ -7330,7 +7349,7 @@ export function univerMetaRouter(): Router {
           [sheetId],
         )
       } catch (err) {
-        if (!isUndefinedTableError(err, 'platform_member_groups')) throw err
+        if (!isOptionalMemberGroupDirectoryError(err)) throw err
         result = await pool.query(
           `SELECT
               fp.id,
@@ -7586,7 +7605,7 @@ export function univerMetaRouter(): Router {
           [sheetId, recordId],
         )
       } catch (err) {
-        if (!isUndefinedTableError(err, 'platform_member_groups')) throw err
+        if (!isOptionalMemberGroupDirectoryError(err)) throw err
         result = await pool.query(
           `SELECT
               rp.id,

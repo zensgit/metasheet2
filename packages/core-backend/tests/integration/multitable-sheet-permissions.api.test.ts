@@ -130,6 +130,10 @@ function undefinedTableError(tableName: string) {
   return Object.assign(new Error(`relation "${tableName}" does not exist`), { code: '42P01' })
 }
 
+function undefinedColumnError(columnName: string) {
+  return Object.assign(new Error(`column ${columnName} does not exist`), { code: '42703' })
+}
+
 describe('Multitable sheet-scoped permissions API', () => {
   afterEach(() => {
     vi.restoreAllMocks()
@@ -3159,6 +3163,37 @@ describe('Multitable sheet-scoped permissions API', () => {
     expect(String(fieldPermissionCalls[1]?.[0])).not.toContain('LEFT JOIN platform_member_groups g')
   })
 
+  test('lists field permissions when the optional member-group directory schema is older', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('FROM field_permissions fp') && sql.includes('LEFT JOIN platform_member_groups g')) {
+          throw undefinedColumnError('g.description')
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/field-permissions')
+      .expect(200)
+
+    expect(response.body.data.items).toEqual([])
+    const fieldPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM field_permissions fp'))
+    expect(fieldPermissionCalls).toHaveLength(2)
+    expect(String(fieldPermissionCalls[0]?.[0])).toContain('LEFT JOIN platform_member_groups g')
+    expect(String(fieldPermissionCalls[1]?.[0])).not.toContain('LEFT JOIN platform_member_groups g')
+  })
+
   test('lists view permissions when the optional member-group directory table is absent', async () => {
     const { app, mockPool } = await createApp({
       tokenPerms: ['multitable:read'],
@@ -3173,6 +3208,37 @@ describe('Multitable sheet-scoped permissions API', () => {
         }
         if (sql.includes('FROM meta_view_permissions vp') && sql.includes('LEFT JOIN platform_member_groups g')) {
           throw undefinedTableError('platform_member_groups')
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/views/view_ops/permissions')
+      .expect(200)
+
+    expect(response.body.data.items).toEqual([])
+    const viewPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM meta_view_permissions vp'))
+    expect(viewPermissionCalls).toHaveLength(2)
+    expect(String(viewPermissionCalls[0]?.[0])).toContain('LEFT JOIN platform_member_groups g')
+    expect(String(viewPermissionCalls[1]?.[0])).not.toContain('LEFT JOIN platform_member_groups g')
+  })
+
+  test('lists view permissions when the optional member-group directory schema is older', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_ops'])
+          return { rows: [{ id: 'view_ops', sheet_id: 'sheet_ops' }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('FROM meta_view_permissions vp') && sql.includes('LEFT JOIN platform_member_groups g')) {
+          throw undefinedColumnError('g.description')
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         throw new Error(`Unhandled SQL in test: ${sql}`)
@@ -3208,6 +3274,45 @@ describe('Multitable sheet-scoped permissions API', () => {
         }
         if (sql.includes('FROM record_permissions rp') && sql.includes('LEFT JOIN platform_member_groups g')) {
           throw undefinedTableError('platform_member_groups')
+        }
+        if (sql.includes('FROM record_permissions rp') && !sql.includes('LEFT JOIN platform_member_groups g')) {
+          expect(params).toEqual(['sheet_ops', 'record_1'])
+          return { rows: [] }
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/records/record_1/permissions')
+      .expect(200)
+
+    expect(response.body.data.items).toEqual([])
+    const recordPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM record_permissions rp'))
+    expect(recordPermissionCalls).toHaveLength(2)
+    expect(String(recordPermissionCalls[0]?.[0])).toContain('LEFT JOIN platform_member_groups g')
+    expect(String(recordPermissionCalls[1]?.[0])).not.toContain('LEFT JOIN platform_member_groups g')
+  })
+
+  test('lists record permissions when the optional member-group directory schema is older', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          expect(params).toEqual(['record_1', 'sheet_ops'])
+          return { rows: [{ id: 'record_1' }] }
+        }
+        if (sql.includes('FROM record_permissions rp') && sql.includes('LEFT JOIN platform_member_groups g')) {
+          throw undefinedColumnError('g.description')
         }
         if (sql.includes('FROM record_permissions rp') && !sql.includes('LEFT JOIN platform_member_groups g')) {
           expect(params).toEqual(['sheet_ops', 'record_1'])
