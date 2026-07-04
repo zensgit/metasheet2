@@ -22,6 +22,16 @@
       >
         并行中 · {{ parallelBranchNodeKeys.map(nodeLabel).join(' / ') }}
       </el-tag>
+      <!-- B1-01: my-turn cue — the reader is an active assignee at the current node(s). -->
+      <el-tag
+        v-if="approval && isMyTurn"
+        type="success"
+        size="large"
+        effect="light"
+        data-testid="approval-my-turn-badge"
+      >
+        等待你处理
+      </el-tag>
     </header>
 
     <el-alert
@@ -561,6 +571,7 @@ import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { markApprovalRead, remindApproval } from '../../approvals/api'
+import { useAuth } from '../../composables/useAuth'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
 import {
@@ -606,9 +617,39 @@ const detailTables = computed<Record<string, DetailDisplayTable>>(() => {
   return result
 })
 
+// B1-01: real session identity — the previous `=== 'user_1'` mock meant production requesters
+// NEVER saw the requester-only actions (撤回/催办) this view already ships. Seeded SYNCHRONOUSLY
+// from the session cache so the first paint is already correct (no requester-actions pop-in);
+// a cold cache falls back to the async lookup in onMounted. Until either resolves the requester
+// affordances simply stay hidden (fail-closed).
+const auth = useAuth()
+const currentUserId = ref<string | null>(((): string | null => {
+  const user = auth.getCurrentUser?.()
+  const id = user && typeof user === 'object' ? (user as { id?: unknown }).id : null
+  return typeof id === 'string' && id.length > 0 ? id : null
+})())
+
 const isRequester = computed(() => {
-  // Simple heuristic: mock current user as 'user_1'
-  return approval.value?.requester?.id === 'user_1'
+  return !!currentUserId.value && approval.value?.requester?.id === currentUserId.value
+})
+
+// B1-01: "等待你处理" cue — the reader holds a still-active user assignment at the current
+// node (or any branch of a parallel region). Mirrors, not replaces, the server-side action gate.
+const isMyTurn = computed(() => {
+  const me = currentUserId.value
+  const detail = approval.value
+  if (!me || !detail || detail.status !== 'pending') return false
+  const currentKeys = new Set(
+    parallelBranchNodeKeys.value.length > 0
+      ? parallelBranchNodeKeys.value
+      : detail.currentNodeKey
+        ? [detail.currentNodeKey]
+        : [],
+  )
+  if (currentKeys.size === 0) return false
+  return detail.assignments.some(
+    (a) => a.isActive && a.type === 'user' && a.assigneeId === me && !!a.nodeKey && currentKeys.has(a.nodeKey),
+  )
 })
 
 // Parallel gateway (并行分支) — the instance is inside a parallel region when
@@ -1067,6 +1108,16 @@ onMounted(async () => {
     // eslint-disable-next-line no-console
     console.warn('[approval-detail] mark-read failed', error)
   })
+  // B1-01: cold-cache fallback for the session identity — fire-and-forget in parallel with
+  // the detail load; a failed session lookup just leaves requester-only actions hidden.
+  if (!currentUserId.value) {
+    void auth
+      .getCurrentUserId()
+      .then((uid) => {
+        currentUserId.value = uid
+      })
+      .catch(() => {})
+  }
   await Promise.all([store.loadDetail(id), store.loadHistory(id)])
   if (store.activeApproval?.templateId) {
     await templateStore.loadTemplate(store.activeApproval.templateId).catch(() => undefined)

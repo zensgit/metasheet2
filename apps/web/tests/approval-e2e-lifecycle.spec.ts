@@ -122,6 +122,15 @@ vi.mock('../src/approvals/templateStore', () => ({
 
 // ---------------------------------------------------------------------------
 // Approval permissions mock
+// B1-01: detail-view requester affordances (撤回/催一下) now key off the real session
+// identity — pin it to the shared fixtures' requester so the lifecycle assertions hold.
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({
+    getCurrentUser: () => ({ id: 'user_1' }),
+    getCurrentUserId: vi.fn().mockResolvedValue('user_1'),
+  }),
+}))
+
 // ---------------------------------------------------------------------------
 const mockPermissionState = ref({
   canRead: true,

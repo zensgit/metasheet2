@@ -108,6 +108,15 @@ vi.mock('../src/approvals/templateStore', () => ({
   }),
 }))
 
+// B1-01: the detail view now resolves the real session identity for requester-only
+// affordances (催一下/撤回) — pin it to the fixture requester.
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({
+    getCurrentUser: () => ({ id: 'user_1' }),
+    getCurrentUserId: vi.fn().mockResolvedValue('user_1'),
+  }),
+}))
+
 vi.mock('../src/approvals/api', () => ({
   dispatchAction: vi.fn().mockResolvedValue({}),
   getPendingCount: (sourceSystem?: 'all' | 'platform' | 'plm') => getPendingCountSpy(sourceSystem),
