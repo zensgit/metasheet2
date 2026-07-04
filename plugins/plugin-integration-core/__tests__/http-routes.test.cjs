@@ -6586,7 +6586,7 @@ async function testReadSourceCompositionRoutes() {
     ],
   }
 
-  function compositionServices({ itemRows, bomRows, compositionStatus = 'approved', bomConfigStatus = 'approved' } = {}) {
+  function compositionServices({ itemRows, bomRows, compositionStatus = 'approved', bomConfigStatus = 'approved', bomConfigMode = 'resolver_lookup' } = {}) {
     const reads = []
     const writes = []
     const services = createMockServices({
@@ -6618,7 +6618,9 @@ async function testReadSourceCompositionRoutes() {
             error.details = { id: input.id, status: bomConfigStatus }
             throw error
           }
-          const config = input.id === 'cfg-bom' ? BOM_CONFIG : ITEM_CONFIG
+          // bomConfigMode lets a test return an APPROVED (getForRuntime passes) but WRONG-SHAPE step
+          // config, so the C-R2 planner's defense-in-depth re-validation is exercised at the route level.
+          const config = input.id === 'cfg-bom' ? { ...BOM_CONFIG, mode: bomConfigMode } : ITEM_CONFIG
           return { id: input.id, systemId: 'sys_1', status: 'approved', config }
         },
       },
@@ -6684,6 +6686,27 @@ async function testReadSourceCompositionRoutes() {
     assert.equal(res.statusCode, 409)
     assert.equal(res.body.error.code, 'READ_SOURCE_CONFIG_NOT_APPROVED')
     assert.equal(reads.length, 0, 'no hop runs when a step config is not approved')
+  }
+
+  // ── approved-only gate #2b (planner defense-in-depth): a step config that is APPROVED (getForRuntime
+  //    passes) but WRONG-SHAPE (not resolver_lookup) is rejected by the C-R2 planner inside the executor —
+  //    values-free PLAN_INVALID, no hop runs. This is the "planner re-validates the bundle" layer the
+  //    design-lock requires; without it, gate #2 (approval) alone would let a wrong-mode config through. ──
+  {
+    const { services, reads } = compositionServices({ itemRows: [{ FItemID: 'I' }], bomRows: [{ FBOMNumber: 'B' }], bomConfigMode: 'single_record' })
+    const res = await invoke(mountRoutes(services).routes, 'POST', '/api/integration/read-source-compositions/:id/run', {
+      user: READ_USER, params: { id: 'rscc_1' }, body: { inputs: { key: 'M-001' } },
+    })
+    assertOkResponse(res, 200)
+    assert.equal(res.body.data.evidence.ok, false)
+    assert.equal(res.body.data.evidence.errorCode, 'READ_SOURCE_COMPOSITION_PLAN_INVALID')
+    assert.ok(Array.isArray(res.body.data.evidence.planErrors) && res.body.data.evidence.planErrors.length > 0)
+    assert.equal(res.body.data.data, null)
+    assert.equal(reads.length, 0, 'an approved-but-wrong-shape step config must be rejected by the planner before any hop runs')
+    const evStr = JSON.stringify(res.body.data.evidence)
+    for (const leak of ['secret-token', '/K3API', 'FBOMNumber', 'FItemId']) {
+      assert.ok(!evStr.includes(leak), `planner-rejection evidence must not leak ${leak}`)
+    }
   }
 
   // ── key-only allowlist: a config override / extra body field → 400, before any store access ──
