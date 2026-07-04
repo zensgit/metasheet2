@@ -43,6 +43,27 @@
             {{ tr('Minutes', '分钟') }} {{ requestReportMinutesTotal }}
           </span>
         </div>
+        <div v-if="showOverview && punchOutdoorNoteRequired" class="attendance__punch-note" data-attendance-punch-note-form>
+          <label class="attendance__field" for="attendance-punch-outdoor-note">
+            <span>{{ tr('Outdoor punch note', '外勤打卡备注') }}</span>
+            <input
+              id="attendance-punch-outdoor-note"
+              v-model="punchOutdoorNoteDraft"
+              type="text"
+              :placeholder="tr('Required to submit an outdoor punch', '提交外勤打卡需填写')"
+              @keydown.enter.prevent="retryPunchWithOutdoorNote"
+            />
+          </label>
+          <button
+            class="attendance__btn attendance__btn--inline"
+            type="button"
+            data-attendance-punch-note-retry
+            :disabled="punching || !punchOutdoorNoteDraft.trim()"
+            @click="retryPunchWithOutdoorNote"
+          >
+            {{ punching ? tr('Working...', '处理中...') : tr('Retry punch with note', '补充备注后重试打卡') }}
+          </button>
+        </div>
       </header>
 
       <section class="attendance__filters" v-if="showOverview || showReports">
@@ -9254,6 +9275,14 @@ import { useAttendanceAdminImportBatches } from './attendance/useAttendanceAdmin
 import { normalizeImportPayloadColumns } from './attendance/attendanceImportPayload'
 import { resolveMakeupPunchRequestStatusCopy } from './attendance/makeupPunchRequestStatus'
 import {
+  buildPunchRetryWithNotePayload,
+  classifyPunchErrorOutcome,
+  classifyPunchSuccessOutcome,
+  type PunchEventType,
+  type PunchRetryBasePayload,
+  type PunchRetryWithNotePayload,
+} from './attendance/punchOutcome'
+import {
   BATCH_ANOMALY_MAX_ROWS,
   canRunBatchAnomalyResolution,
   runBatchAnomalyResolution,
@@ -10812,6 +10841,12 @@ function readImportDebugOptions(): AttendanceImportDebugOptions {
 
 const loading = ref(false)
 const punching = ref(false)
+// Punch outcome clarity (frontend-only, 2026-07-05 design-lock, G2): inline
+// outdoor-punch note retry state. See
+// docs/development/attendance-punch-outcome-clarity-design-lock-20260705.md.
+const punchOutdoorNoteRequired = ref(false)
+const punchOutdoorNoteEventType = ref<PunchEventType | null>(null)
+const punchOutdoorNoteDraft = ref('')
 const requestSubmitting = ref(false)
 const summary = ref<AttendanceSummary | null>(null)
 const records = ref<AttendanceRecord[]>([])
@@ -19388,13 +19423,34 @@ async function loadAuditLogs(page: number) {
   }
 }
 
-async function punch(eventType: 'check_in' | 'check_out') {
+// Punch outcome clarity (frontend-only, 2026-07-05 design-lock): resets the
+// G2 inline outdoor-note retry UI. Called whenever a punch attempt lands on
+// anything other than "still needs a note" — success (either kind) or a
+// different error — so a stale note form never lingers across attempts.
+function resetPunchOutdoorNote() {
+  punchOutdoorNoteRequired.value = false
+  punchOutdoorNoteEventType.value = null
+  punchOutdoorNoteDraft.value = ''
+}
+
+async function punch(eventType: PunchEventType, retryNote?: string) {
   punching.value = true
+  // A fresh direct punch (not a G2 note retry) starts clean; the retry call
+  // itself (retryNote set) must NOT clear the form it is trying to resolve.
+  if (typeof retryNote !== 'string') {
+    resetPunchOutdoorNote()
+  }
   try {
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-    const payload: Record<string, string> = { eventType, timezone }
     const orgValue = normalizedOrgId()
-    if (orgValue) payload.orgId = orgValue
+    const basePayload: PunchRetryBasePayload = orgValue
+      ? { eventType, timezone, orgId: orgValue }
+      : { eventType, timezone }
+    // Hard boundary (design-lock §4): no geolocation collected, no injected
+    // meta.outdoor — the only extra field ever sent is the backend-accepted
+    // meta.note string, and only as part of a G2 user-initiated retry.
+    const payload: PunchRetryBasePayload | PunchRetryWithNotePayload =
+      typeof retryNote === 'string' ? buildPunchRetryWithNotePayload(basePayload, retryNote) : basePayload
     const response = await apiFetch('/api/attendance/punch', {
       method: 'POST',
       body: JSON.stringify(payload)
@@ -19403,13 +19459,52 @@ async function punch(eventType: 'check_in' | 'check_out') {
     if (!response.ok || !data.ok) {
       throw createApiError(response, data, tr('Punch failed', '打卡失败'))
     }
-    setStatus(tr(`${eventType === 'check_in' ? 'Check in' : 'Check out'} recorded.`, `${eventType === 'check_in' ? '上班打卡' : '下班打卡'}已记录。`))
-    await refreshAll()
+    const outcome = classifyPunchSuccessOutcome(eventType, data.data, tr)
+    resetPunchOutdoorNote()
+    setStatus(outcome.message)
+    if (outcome.shouldRefreshRequests) {
+      // G1: an outdoor pending-approval punch writes NO attendance fact —
+      // only the requests list changed. Refresh just that (best-effort; a
+      // hiccup here must not turn the "submitted for approval" success
+      // message into an unrelated "refresh failed" error), instead of the
+      // full refreshAll() a normal recorded punch still triggers below.
+      if (showOverview.value) {
+        await loadRequests().catch(() => {})
+      }
+    } else {
+      await refreshAll()
+    }
   } catch (error: any) {
-    setStatusFromError(error, tr('Punch failed', '打卡失败'), 'refresh')
+    const apiError = error as { status?: number; code?: string } | null
+    const errorOutcome = classifyPunchErrorOutcome({ status: apiError?.status, code: apiError?.code }, tr)
+    if (errorOutcome?.kind === 'noteRequired') {
+      // G2: enum-strict — only this exact code opens the inline note form.
+      punchOutdoorNoteRequired.value = true
+      punchOutdoorNoteEventType.value = eventType
+      setStatus(errorOutcome.message, 'error', { code: errorOutcome.code })
+    } else if (errorOutcome?.kind === 'locationRestricted') {
+      // G3: a calibrated dead-end — no retry action (a retry would fail the
+      // same way every time under the current org configuration).
+      resetPunchOutdoorNote()
+      setStatus(errorOutcome.message, 'error', { code: errorOutcome.code })
+    } else {
+      // Unknown/other codes: unchanged existing generic path.
+      resetPunchOutdoorNote()
+      setStatusFromError(error, tr('Punch failed', '打卡失败'), 'refresh')
+    }
   } finally {
     punching.value = false
   }
+}
+
+// G2: user-initiated retry only (never automatic) — fires exactly once per
+// click, carrying the original payload plus the backend-accepted meta.note.
+async function retryPunchWithOutdoorNote() {
+  const eventType = punchOutdoorNoteEventType.value
+  if (!eventType) return
+  const note = punchOutdoorNoteDraft.value.trim()
+  if (!note) return
+  await punch(eventType, note)
 }
 
 async function loadSummary() {
@@ -26460,6 +26555,14 @@ const holidaySectionBindings = {
 .attendance__actions {
   display: flex;
   gap: 12px;
+}
+
+.attendance__punch-note {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
 }
 
 .attendance__filters {
