@@ -16,11 +16,12 @@
 ## W0 — 审阅批次(等 owner 动作,非开发)
 
 - ✅ **#3584 S1 runtime** — MERGED `4640f3662`(2026-07-05T02:26Z;head 含 post-review G7b)。S1 线(lock+runtime)全落地。
-- ⬜ **#3593 S1 验证 MD** — 已刷新到 runtime 终态(`11094e324`:head/计数/G7b/非空转 7-red + #3584 squash `4640f3662` 合并态),fresh CI 重跑中。
-- ⬜ **#3591 GW design-lock** — PROPOSED 待 ratify(顺带裁定:`VIRTUALIZE_MIN_ROWS=60` 是否复用于 grouped items 阈值);文档引用已校准到真实 pager/load-more 代码,合并顺序要求:#3582 先落地。
-- ⬜ **#3574 OAPI allowlist⟺guard tripwire** — P2 route-file scope tripwire 已补(`600e47e6d`),fresh CI 重跑中。
-- ⬜ **#3582 grid 性能基线** — 完工待审(docs+test;含"flat 路径已解决、真缺口=grouped 视图"的战略修正);内容已审,作为 #3591 前置应先合。
+- ✅ **#3593 S1 验证 MD** — MERGED `efbf85f9`;S1 设计+runtime+验证台账闭合。
+- ✅ **#3582 grid 性能基线** — MERGED `b891780bd`;结论固化为 flat 路径已解决,真缺口=grouped 视图。
+- ✅ **#3591 GW design-lock** — MERGED `b061d4166`;grouped-path grid row windowing 已 ratify,`VIRTUALIZE_MIN_ROWS=60` 复用与 Playwright 验收条款进入 W2-4 runtime 前置。
+- ✅ **#3574 OAPI allowlist⟺guard tripwire** — MERGED `c69c65a1`;route-file scope tripwire 已在主干。
 - ✅ **S2 design-lock** — MERGED `9f08a4bf9`(#3618),prompt-config history render-only lock ratified; runtime tracked below.
+- ✅ **S2 verification MD** — MERGED `912b18fb`(#3644),S2 runtime #3643 的 dev/verification 台账已落主干。
 
 ## W1 — 起草车道(W0 批次清空后启动;docs-only 零碰撞)
 
@@ -37,7 +38,7 @@
 ## W2 — build 车道(各自 lock ratify 后解锁)
 
 - ✅ **W2-3 S2 runtime**(prompt-config-history UI)— runtime MERGED `6e844cf89`(#3643); verification MD added in `multitable-ai-shortcut-prompt-config-history-s2-dev-verification-20260705.md`。
-- 🔒 **W2-4 GW runtime**(grouped 视图窗口化)— 前置:#3591 ratify。Fable 5 build(offset-table + 不变量;难度高);占 grid 互斥锁;验收含 Playwright 真浏览器前后数字(lock 硬性条款);交付 verification MD。
+- ⬜ **W2-4 GW runtime**(grouped 视图窗口化)— 前置已达:#3582 baseline + #3591 ratified design-lock。Fable 5 build(offset-table + 不变量;难度高);占 grid 互斥锁;验收含 Playwright 真浏览器前后数字(lock 硬性条款);交付 verification MD。
   W2-3 与 W2-4 文件面不重叠,可并行(不超并发上限)。
 
 ## W3 — 顺手批(单项 ≤半天;排在 W0 清空之后)
