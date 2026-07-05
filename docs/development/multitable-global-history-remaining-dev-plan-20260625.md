@@ -1,5 +1,13 @@
 # Global History / point-in-time-restore line — remaining-dev plan, design & verification
 
+> **STATUS UPDATE (2026-07-03) — §4a partly OVERTAKEN BY EVENTS; see the current state map.**
+> Since this 2026-06-25 plan, **PIT undelete-execute (§4a) was BUILT** (#3307, behind default-off
+> `MULTITABLE_ENABLE_PIT_UNDELETE`) — only its *enablement* is still gated, not the code. §4b (T9-W lossy
+> value-transform / field-undelete data recovery) remains genuinely un-built + gated (and value-level field
+> undelete is *impossible* under the current hard-delete cascade — recorded as such). The authoritative
+> current-reality view is **`multitable-global-history-verified-state-map-and-decision-menu-20260703.md`**;
+> read that for "还差哪些". This plan is preserved as the historical sign-off vehicle.
+
 Grounding: `origin/main` 2026-06-25, after the non-destructive line + the debrand/runbook closeout. This doc answers
 "what dev remains, planned for parallel work, with design + verification" — and is the **sign-off vehicle** for the two
 items that stay gated.

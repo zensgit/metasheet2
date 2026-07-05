@@ -91,6 +91,16 @@
         <span class="attendance-ta__chip attendance-ta__chip--provisional ta-state--pending-leave" :title="pendingTooltip">{{ tr('Pending leave', '待审批请假') }}</span>
         {{ tr('= pending approval, not yet effective (shown distinct from approved leave).', '= 待审批，未生效（与已批请假明确区分）。') }}
       </p>
+      <!-- #3575 caliber-transparency lock (G2): spells out the availableFormal equation so the
+           summary table's headline number is never a bare, unexplained figure. -->
+      <p class="attendance__hint attendance-ta__legend" data-attendance-team-availability-caliber-equation>
+        {{
+          tr(
+            'Available (formal) = Scheduled + Pending (tentative, not deducted). Excluded = Approved leave / Rest / Unscheduled.',
+            '可用(正式) = 已排班 + 待审批（暂定，不扣减）；排除项 = 已批请假/休息/未排班。',
+          )
+        }}
+      </p>
     </template>
   </div>
 </template>

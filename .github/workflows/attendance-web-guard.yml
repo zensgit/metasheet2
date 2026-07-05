@@ -8,11 +8,21 @@
 # Scope (deliberately TARGETED): run the green attendance admin-surface guard specs —
 # attendance-admin-regressions.spec.ts (overview admin-only-preload guard + AE-3
 # result-edit modal matrix), attendance-admin-anchor-nav.spec.ts (member resolve / nav
-# guards), and AttendanceRequestCenterSection.result-edit.spec.ts (request-center parity
-# for the shared AE-3 result-edit callback). The full `@metasheet/web` vitest suite still
-# has historical/flaky failures, so wiring the whole suite as a required gate now would
-# be red on arrival. Keep expanding the `vitest run` filter (or move to the full web
-# suite) as more web specs are cleaned up.
+# guards), AttendanceRequestCenterSection.result-edit.spec.ts (request-center parity
+# for the shared AE-3 result-edit callback), attendance-selfservice-dashboard.spec.ts,
+# attendance-caliber-transparency.spec.ts (display-only 口径透明 slice — #3575 design-lock:
+# G1 records-header title, G2 team-availability legend equation, G3 caliber-guide card),
+# attendance-punch-outcome.spec.ts (punch outcome clarity: 202 pendingApproval /
+# OUTDOOR_NOTE_REQUIRED / LOCATION_RESTRICTED — see
+# docs/development/attendance-punch-outcome-clarity-design-lock-20260705.md), and
+# attendance-import-override-guard.spec.ts (override-import confirm gate: forced-preview
+# submit-disable, in-DOM confirm with rowCount/date-range/user-count lines + generic
+# irreversible warning (never a precise overwrite count), export-backup wire shape, merge
+# one-click, G3 manual-adjustment ledger note — see
+# docs/development/attendance-override-import-guard-design-lock-20260705.md, PR #3597). The full
+# `@metasheet/web` vitest suite still has historical/flaky failures, so wiring the whole
+# suite as a required gate now would be red on arrival. Keep expanding the `vitest run`
+# filter (or move to the full web suite) as more web specs are cleaned up.
 name: Attendance Web Guard
 
 on:
@@ -24,6 +34,9 @@ on:
       - 'apps/web/tests/attendance-admin-anchor-nav.spec.ts'
       - 'apps/web/tests/AttendanceRequestCenterSection.result-edit.spec.ts'
       - 'apps/web/tests/attendance-selfservice-dashboard.spec.ts'
+      - 'apps/web/tests/attendance-caliber-transparency.spec.ts'
+      - 'apps/web/tests/attendance-punch-outcome.spec.ts'
+      - 'apps/web/tests/attendance-import-override-guard.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
   push:
     branches: [main]
@@ -34,6 +47,9 @@ on:
       - 'apps/web/tests/attendance-admin-anchor-nav.spec.ts'
       - 'apps/web/tests/AttendanceRequestCenterSection.result-edit.spec.ts'
       - 'apps/web/tests/attendance-selfservice-dashboard.spec.ts'
+      - 'apps/web/tests/attendance-caliber-transparency.spec.ts'
+      - 'apps/web/tests/attendance-punch-outcome.spec.ts'
+      - 'apps/web/tests/attendance-import-override-guard.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
 
 jobs:
@@ -76,4 +92,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run attendance web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard --reporter=dot

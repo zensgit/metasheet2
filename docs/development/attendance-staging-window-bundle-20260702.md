@@ -1,10 +1,11 @@
-# Attendance staging window bundle — AE-4 + RD-4/5 + OT-bank v1-8
+# Attendance staging window bundle — AE-4 + RD-4/5 + OT-bank v1-8 (+ optional MP-6 · HMR-5)
 
 **Date:** 2026-07-02
 
 **Status:** PREPARED. This plan does **not** claim any staging PASS. It is the
-single operating plan for one staging window that runs three independent
-attendance smokes back-to-back on ONE deployed SHA. Each smoke's PASS is
+single operating plan for one staging window that runs the three core
+attendance smokes — plus up to two optional smokes (MP-6, HMR-5) — back-to-back
+on ONE deployed SHA. Each smoke's PASS is
 recorded in its own runbook; this document coordinates deploy, ordering,
 isolation, and the consolidated closeout.
 
@@ -16,7 +17,7 @@ precedent smokes did NOT land on one SHA and one stamp lost its exact deploy
 SHA — so in this window, **capture the exact deploy SHA into every stamp at
 run time**, never from memory.
 
-## 1. The three smokes
+## 1. The five smokes (three core + two optional)
 
 | # | Smoke | Runbook | Helper | Final stamp shape |
 |---|---|---|---|---|
@@ -24,6 +25,7 @@ run time**, never from memory.
 | 2 | **RD-4/5** report-digest config card + producer/worker | `docs/development/attendance-rd45-report-digest-staging-smoke-runbook-20260702.md` | `scripts/ops/staging-attendance-report-digest-rd45-smoke.mjs` (`RD45_REPORT_DIGEST_API_DB_SMOKE_PASS`) | `RD45_REPORT_DIGEST_STAGING_SMOKE_PASS deploy=<sha> stamp=<rd45-smoke-...> org=<rd45-smoke-...-org> produced=<n> dedupOk=1 sendProof=<sent\|failed_recipient_not_bound\|failed_channel_not_configured> residue=0` |
 | 3 | **OT-bank v1-8** 三例验收 + settlement | `docs/development/attendance-overtime-bank-v18-staging-smoke-runbook-20260702.md` | `scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs` (`OTBANK_V18_API_DB_SMOKE_PASS`) | `OTBANK_V18_STAGING_SMOKE_PASS deploy=<sha> stamp=<otbank-v18-smoke-...> org=<org> cycle=<uuid> residue=0` |
 | 4 | **MP-6** makeup-punch (optional) | `docs/development/attendance-makeup-punch-mp6-staging-smoke-runbook-20260703.md` | `scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs` (`MP6_MAKEUP_PUNCH_API_DB_SMOKE_PASS`) | `MP6_MAKEUP_PUNCH_STAGING_SMOKE_PASS deploy=<sha> stamp=<mp6-smoke-...> org=<org> quota=1 approvals=1 residue=0` |
+| 5 | **HMR-5** manual missed-punch reminder (optional) | `docs/development/attendance-manual-missed-punch-reminder-hmr5-staging-runbook-20260626.md` | `scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs` (`HMR5_API_DB_SMOKE_PASS`) | `HMR5_MANUAL_MISSED_PUNCH_REMINDER_STAGING_SMOKE_PASS deploy=<sha> stamp=hmr5-... channel=<channel> residue=0` |
 
 Each helper prints an `*_API_DB_SMOKE_PASS` line that is **not** the final
 stamp; the final `*_STAGING_SMOKE_PASS` stamps are recorded by the operator in
@@ -33,17 +35,47 @@ the respective runbooks after the manual/decision steps there.
 this window — it can run standalone OR as the 4th smoke on the SAME deploy SHA.
 Run it AFTER OT-bank v1-8, since it also touches `attendance_requests` /
 `attendance_records` and the approval-engine tables; its distinct `mp6-smoke-`
-stamp keeps it fully isolated from the three smokes above (which are not
+stamp keeps it fully isolated from the three core smokes above (which are not
 rewritten here). MP-6 enforcement is subject-scoped — no org-wide enumeration, so
 the OT-bank settlement-population guard does not apply — but enabling
 `makeupPunchPolicy` flips a GLOBAL settings row, so run it under the window's
 single-tenant posture (its runbook OQ-3 records that decision). MP-6 writes NO
 notification deliveries.
 
+**Optional 5th smoke (HMR-5 manual missed-punch reminder).** Row 5 is an
+OPTIONAL addition to this window — it can run standalone OR as a 5th smoke on
+the SAME deploy SHA, in either order relative to MP-6. Their stamps are
+mutually exclusive (`mp6-smoke-` vs `hmr5-smoke-`), and MP-6 runs on the
+window's shared org while HMR-5 runs on its own disposable org (below), so no
+row-level collision is possible even though both touch the same
+`attendance_records` / `attendance_requests` tables.
+
+Unlike MP-6, HMR-5 **does write** `attendance_notification_deliveries` (with
+`source_type='manual_missed_punch_reminder'`) — the same shared table AE-4
+(`attendance_result_edit`) and RD-4/5 (`attendance_report_digest`) also write.
+Isolation from the other smokes relies on the same discipline §5 already establishes
+for that table: every HMR-5 delivery query (assert, residue, cleanup) is
+scoped `org_id + source_type='manual_missed_punch_reminder'`. HMR-5 also runs
+its own users/records/requests/scopes on a disposable `hmr5-smoke-`-prefixed
+org (like RD-4/5's disposable org, and unlike AE-4/MP-6/OT-bank, which share
+the window's org), so its rows never share an `org_id` with the window-org
+smokes' (AE-4 / OT-bank / MP-6) rows in the first place.
+
+**Suggested order: run HMR-5 LAST in the window** (after OT-bank v1-8 and
+MP-6, if both run). It is the only smoke of the five whose "worker delivery"
+proof polls the SAME shared, already-running C5 delivery worker that AE-4's
+and RD-4/5's own delivery rows are also live under — running it last means
+its worker-status poll never has to race a still-in-progress AE-4/RD-4/5
+assertion window for that shared worker's attention, and any leftover HMR-5
+rows from a failed run are the last thing the consolidated residue sweep (§7)
+needs to account for. HMR-5's own runbook records the final PASS stamp after
+both its helper run and the runbook's manual admin-console UI
+confirm-snapshot step (step 3) pass.
+
 ## 2. One deploy SHA for the whole window
 
-Deploy ONE main build to the staging stack and run all three smokes against
-it. The single `DEPLOY_SHA` must include every per-smoke code gate:
+Deploy ONE main build to the staging stack and run every smoke in the window
+against it. The single `DEPLOY_SHA` must include every per-smoke code gate:
 
 - **AE-4**: AE-1 result-edit route + audit table, AE-1b marker durability,
   AE-2/2.1 affected-employee notification + toggle, AE-3 admin modal (per the
@@ -54,6 +86,11 @@ it. The single `DEPLOY_SHA` must include every per-smoke code gate:
 - **OT-bank v1-8**: v1-1..v1-6 plus the #3255 must-pay e2e and the #3303
   unconditional-settings-restore fix (per
   `docs/development/attendance-overtime-bank-design-verification-20260624.md`).
+- **HMR-5** (if run this window): HMR-1 scheduler-scope `remind` action (#3269),
+  HMR-2 owed-punch candidate read/filter route (#3270), HMR-3 manual reminder
+  enqueue route (#3271), HMR-4 admin UI (#3272) — per the HMR-5 runbook's
+  prerequisites and the design lock,
+  `docs/development/attendance-manual-missed-punch-reminder-design-lock-20260626.md`.
 
 Deploy-SHA verification (manual — no committed tool cross-checks the staging
 stack's build against an expected SHA, see §9):
@@ -133,19 +170,31 @@ Run strictly sequentially, never in parallel:
 1. **AE-4 first.** It is the only smoke with a mandatory manual browser step
    (the AE-3 modal probe), so it runs while the operator's attention and the
    freshly-verified deploy are at their best. Its settings key
-   (`attendanceResultEditPolicy`) is disjoint from the other two smokes.
+   (`attendanceResultEditPolicy`) is disjoint from every other smoke in the window.
 2. **RD-4/5 second.** It is the only smoke that depends on the window's env
    flags (scheduler / delivery worker / digest producer) and on a disposable
    org; running it in the middle keeps the flag-dependent assertions well
    inside the window, after AE-4 has already restored its settings.
-3. **OT-bank v1-8 last.** It touches the most settings keys
+3. **OT-bank v1-8 third (last of the core three).** It touches the most settings keys
    (`overtimeSegmentation`, `compTimeFromOvertime`, `overtimeBankPolicy`,
    `leaveBalanceDeductionPolicy`, `attendanceBonusPolicy`) and closes a
    payroll cycle whose settlement population is org-wide — running it last
    means the other smokes never execute under partially-flipped money-path
    policies, and its population guard sees the quietest possible org state.
+4. **MP-6 fourth (optional).** Runs AFTER OT-bank v1-8 because it also touches
+   `attendance_requests` / `attendance_records` and the approval-engine tables
+   (§1's MP-6 note); enabling `makeupPunchPolicy` flips a GLOBAL settings row,
+   so it runs under the window's single-tenant posture (runbook OQ-3) and
+   restores + verifies that key before HMR-5 starts. Skip cleanly if not run.
+5. **HMR-5 fifth (optional, LAST in the window).** §1's ordering rationale:
+   it is the only smoke whose worker-delivery proof polls the SAME shared C5
+   delivery worker that AE-4's and RD-4/5's rows are live under — running it
+   last avoids racing their assertion windows, and any leftover HMR-5 rows are
+   the final thing the §7 sweep accounts for. Skip cleanly if not run.
 
-Settings mutations across the three smokes are key-disjoint, and each smoke
+Settings mutations across the five smokes are key-disjoint (MP-6 owns the
+GLOBAL `makeupPunchPolicy` row; HMR-5 PUTs no settings keys at all — its
+channel resolves from env, not attendance settings), and each smoke
 snapshots + restores its own keys before the next starts — but ordering still
 matters for blast-radius: a mid-run abort leaves that smoke's policies live
 until its cleanup is completed, so finish (or fully clean up) one smoke before
@@ -163,6 +212,7 @@ residue query is anchored on the stamp — never on broad text or types:
 | RD-4/5 | `rd45-smoke-<suffix>-…` | `rd45-smoke:<STAMP>:…` (no occupant — digest source keys are deterministic; see the RD runbook's known-family-deviation section) |
 | OT-bank v1-8 | `otbank-v18-smoke-<suffix>-…` | `otbank-v18-smoke:<STAMP>:…` |
 | MP-6 (optional) | `mp6-smoke-<suffix>-…` | `mp6-smoke:<STAMP>:…` (attachment key only) |
+| HMR-5 (optional) | `hmr5-smoke-<suffix>-…` (stamp regex-locked `^hmr5-smoke-[A-Za-z0-9-]+$`) | org-scoped: disposable `hmr5-smoke-`-prefixed org (default `<STAMP>-org`) + `source_type='manual_missed_punch_reminder'` |
 
 The prefixes are mutually exclusive by construction, so residue queries cannot
 collide. Helpers regex-lock their stamps and refuse unstamped ids.
@@ -170,18 +220,22 @@ collide. Helpers regex-lock their stamps and refuse unstamped ids.
 **Settings.** `PUT /api/attendance/settings` merges per policy key, so each
 smoke PUTs ONLY its own keys and siblings survive: AE-4 owns
 `attendanceResultEditPolicy`; RD-4/5 owns `attendanceReportDigestPolicy`;
-v1-8 owns the five overtime-bank keys listed in §4. Because of the merge
+v1-8 owns the five overtime-bank keys listed in §4; MP-6 owns
+`makeupPunchPolicy` (a GLOBAL settings row — single-tenant posture per its
+runbook OQ-3); HMR-5 owns none (no settings PUT/restore in its helper). Because of the merge
 semantics, restores must explicitly re-assert every touched key (PUT-ing an
 empty snapshot is a NO-OP — the #3303 lesson); each smoke restores and
 VERIFIES (re-GET + compare) before the next smoke begins.
 
-**The shared deliveries table.** Two of three smokes write
+**The shared deliveries table.** Three of the five smokes write
 `attendance_notification_deliveries`: AE-4 with
 `source_type='attendance_result_edit'` (source keys
 `attendance_result_edit:<org>:<recordId>:%`), RD-4/5 with
 `source_type='attendance_report_digest'` (unique idempotent source keys per
-org/cadence/period/recipient/channel). The OT-bank smoke writes none and
-asserts zero. Rules:
+org/cadence/period/recipient/channel), and HMR-5 with
+`source_type='manual_missed_punch_reminder'` (source keys
+`…:recipient:<user>:channel:<channel>`, scoped to its disposable org). The
+OT-bank smoke and MP-6 write none and assert zero. Rules:
 
 - every delivery query (assert, residue, cleanup) is scoped
   `org + source_type + stamped source key` — never delete by `source_type`
@@ -196,7 +250,9 @@ asserts zero. Rules:
 
 **Org scope.** AE-4 runs on the default org with stamped synthetic users.
 RD-4/5 MUST use a disposable single-member smoke org, because the digest
-producer fans out per active org member. OT-bank v1-8 defaults to the shared
+producer fans out per active org member. HMR-5 likewise runs on its own
+disposable `hmr5-smoke-`-prefixed org (the candidates route returns an
+org-wide pool with no per-run filter — §1). OT-bank v1-8 defaults to the shared
 org but fails closed if the settlement population would include any
 non-synthetic user (its runbook OQ-2 records the operator decision; the
 override env is explicit and dangerous).
@@ -222,14 +278,14 @@ Each smoke is independently PASS/FAIL:
 
 ## 7. Consolidated final residue sweep (window close)
 
-After all three smokes (and before rolling back env flags), run each
+After every smoke that ran (and before rolling back env flags), run each
 runbook's own residue block once more, then this cross-smoke sweep. Every
-count must be `0`. Substitute the three run stamps; the per-run captured id
+count must be `0`. Substitute the run stamps of every executed smoke; the per-run captured id
 lists (request/approval/cycle/import ids) come from each helper's output and
 runbook worksheet.
 
 ```sql
--- synthetic users and memberships, all three families
+-- synthetic users and memberships, core families (optional MP-6/HMR-5 blocks below)
 SELECT count(*) AS users FROM users
  WHERE left(id, 10) = 'ae4-smoke-' OR left(id, 11) = 'rd45-smoke-' OR left(id, 17) = 'otbank-v18-smoke-';
 SELECT count(*) AS user_orgs FROM user_orgs
@@ -282,12 +338,26 @@ SELECT count(*) AS mp6_user_orgs FROM user_orgs WHERE left(user_id, 10) = 'mp6-s
 SELECT count(*) AS mp6_deliveries FROM attendance_notification_deliveries
  WHERE org_id = :org_id AND left(recipient_user_id, 10) = 'mp6-smoke-';
 
+-- HMR-5 manual missed-punch reminder (optional 5th smoke) — disposable-org scoped.
+-- 'hmr5-smoke-' is 11 chars; :hmr5_org is the run's disposable org id (default <STAMP>-org).
+SELECT count(*) AS hmr5_deliveries FROM attendance_notification_deliveries
+ WHERE org_id = :hmr5_org AND source_type = 'manual_missed_punch_reminder';
+SELECT count(*) AS hmr5_stray_deliveries FROM attendance_notification_deliveries
+ WHERE left(recipient_user_id, 11) = 'hmr5-smoke-';
+SELECT count(*) AS hmr5_requests FROM attendance_requests WHERE org_id = :hmr5_org;
+SELECT count(*) AS hmr5_records FROM attendance_records WHERE org_id = :hmr5_org;
+SELECT count(*) AS hmr5_scopes FROM attendance_scheduler_scopes WHERE org_id = :hmr5_org;
+SELECT count(*) AS hmr5_user_orgs FROM user_orgs WHERE org_id = :hmr5_org;
+SELECT count(*) AS hmr5_user_roles FROM user_roles WHERE left(user_id, 11) = 'hmr5-smoke-';
+SELECT count(*) AS hmr5_users FROM users WHERE left(id, 11) = 'hmr5-smoke-';
+
 -- settings: compare the live document to the window baseline
 -- (GET /api/attendance/settings vs /tmp/window-settings-before.json — policy keys equal)
 ```
 
 The RD-4/5 runbook's own residue block (its digest/org tables) is part of this
-sweep by reference. A stray row anywhere is a failed window close, not a
+sweep by reference; so is the HMR-5 runbook's (its disposable org mirrors
+RD-4/5's). A stray row anywhere is a failed window close, not a
 harmless warning — inspect before deleting anything by hand, and only delete
 via the owning runbook's stamped cleanup.
 
@@ -316,6 +386,12 @@ the window baseline.
       and OQ-3 (single-tenant / org) decisions recorded; final
       `MP6_MAKEUP_PUNCH_STAGING_SMOKE_PASS` recorded in the MP-6 runbook with
       deploy SHA + residue 0. Skip cleanly if MP-6 is not run this window.
+- [ ] HMR-5 (optional): helper `HMR5_API_DB_SMOKE_PASS`; manual admin-console
+      confirm-snapshot step (runbook step 3) done; final
+      `HMR5_MANUAL_MISSED_PUNCH_REMINDER_STAGING_SMOKE_PASS` recorded in the
+      HMR-5 runbook with deploy SHA + channel + residue 0; disposable org torn
+      down; tracker §0.6 HMR-5 row flips ✅ in a follow-up docs PR. Skip
+      cleanly if HMR-5 is not run this window.
 - [ ] Consolidated residue sweep (§7) all-zero; env flags rolled back;
       settings equal the window baseline.
 - [ ] Each stamp names the exact deployed SHA (the precedent window's missing
@@ -343,8 +419,8 @@ the window baseline.
 5. **Token mint path**: dev-token is expected to 404 on staging
    (production node-env); which mint path (host-side token generator script vs
    in-container mint script) counts as the approved smoke-token path is
-   unstated in the family docs — operator picks one and uses it for all three
-   smokes (see the v1-8 runbook OQ-3).
+   unstated in the family docs — operator picks one and uses it for every smoke
+   in the window (see the v1-8 runbook OQ-3).
 6. **Deploy-SHA cross-check tooling**: no committed helper asserts
    `/health build.commit == DEPLOY_SHA` for the staging stack; §2's manual
    curl check is mandatory in this window and the per-helper `DEPLOY_SHA` env

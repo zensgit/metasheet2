@@ -5,14 +5,14 @@
       class="approval-mobile-list__loading"
       data-testid="approval-mobile-loading"
     >
-      加载中…
+      {{ t.loading }}
     </div>
     <div
       v-else-if="approvals.length === 0"
       class="approval-mobile-list__empty"
       data-testid="approval-mobile-empty"
     >
-      {{ emptyText }}
+      {{ resolvedEmptyText }}
     </div>
     <button
       v-for="row in approvals"
@@ -25,7 +25,7 @@
       @click="$emit('select', row)"
     >
       <div class="approval-mobile-list__card-top">
-        <span class="approval-mobile-list__title">{{ row.title ?? '审批申请' }}</span>
+        <span class="approval-mobile-list__title">{{ row.title ?? t.titleFallback }}</span>
         <span
           class="approval-mobile-list__status"
           :class="`approval-mobile-list__status--${statusTagType(row.status)}`"
@@ -44,14 +44,21 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { UnifiedApprovalDTO } from '../../types/approval'
+import { useLocale } from '../../composables/useLocale'
 
 // T3-1 v0 — dedicated touch-first list card (ballot Q10). Replaces the desktop
 // `el-table` (fixed column widths + horizontal scroll + tiny row-click targets)
 // with full-width tappable cards. Kept free of Element Plus so it stays touch
-// sized and trivially mountable in tests. Labels reuse the module's existing
-// Chinese status/format vocabulary verbatim — no new user-facing copy.
-withDefaults(
+// sized and trivially mountable in tests.
+//
+// i18n follow-up (ballot T3-1 build-contract must-fix — "all user-facing
+// labels via i18n"): the shipped v0 (#3517) hardcoded these as Chinese-only
+// literals. This mirrors the app's established `useLocale()` / `isZh` pattern
+// (see ApprovalInboxView.vue, useNotificationInbox.ts) instead of introducing
+// a new i18n mechanism.
+const props = withDefaults(
   defineProps<{
     approvals: UnifiedApprovalDTO[]
     loading?: boolean
@@ -59,13 +66,49 @@ withDefaults(
   }>(),
   {
     loading: false,
-    emptyText: '暂无审批',
+    emptyText: undefined,
   },
 )
 
 defineEmits<{
   (event: 'select', row: UnifiedApprovalDTO): void
 }>()
+
+const { isZh } = useLocale()
+
+const t = computed(() => (isZh.value
+  ? {
+      loading: '加载中…',
+      empty: '暂无审批',
+      titleFallback: '审批申请',
+      status: {
+        pending: '待处理',
+        approved: '已通过',
+        rejected: '已驳回',
+        revoked: '已撤回',
+        cancelled: '已取消',
+      } as Record<string, string>,
+      dateLocale: 'zh-CN',
+    }
+  : {
+      loading: 'Loading…',
+      empty: 'No approvals',
+      titleFallback: 'Approval request',
+      status: {
+        pending: 'Pending',
+        approved: 'Approved',
+        rejected: 'Rejected',
+        revoked: 'Revoked',
+        cancelled: 'Cancelled',
+      } as Record<string, string>,
+      dateLocale: 'en-US',
+    }
+))
+
+// `emptyText` stays an explicit override from the caller (e.g. a "no search
+// matches" message); when the caller does not supply one, fall back to the
+// localized default rather than a hardcoded literal.
+const resolvedEmptyText = computed(() => props.emptyText ?? t.value.empty)
 
 function statusTagType(status: string): string {
   const map: Record<string, string> = {
@@ -79,19 +122,12 @@ function statusTagType(status: string): string {
 }
 
 function statusLabel(status: string): string {
-  const map: Record<string, string> = {
-    pending: '待处理',
-    approved: '已通过',
-    rejected: '已驳回',
-    revoked: '已撤回',
-    cancelled: '已取消',
-  }
-  return map[status] ?? status
+  return t.value.status[status] ?? status
 }
 
 function formatDate(dateStr: string): string {
   if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString('zh-CN')
+  return new Date(dateStr).toLocaleString(t.value.dateLocale)
 }
 </script>
 

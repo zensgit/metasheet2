@@ -537,7 +537,7 @@ describeIfDatabase('B-2 AI bulk-commit (real DB)', () => {
     expect(emptyIds.body.error.code).toBe('VALIDATION_ERROR')
   })
 
-  test('response shape is pinned (fixture-drift discipline): top-level { outcomes, counts } + count keys', async () => {
+  test('response shape is pinned (fixture-drift discipline): top-level { outcomes, counts, batchId } + count keys', async () => {
     await grantOwnWrite()
     const runId = `aibulk_b2_shape_${TS}`
     const R = `rec_b2_shape_${TS}`
@@ -546,7 +546,9 @@ describeIfDatabase('B-2 AI bulk-commit (real DB)', () => {
 
     const res = await commitReq({ runId, recordIds: [R] })
     expect(res.status).toBe(200)
-    expect(Object.keys(res.body).sort()).toEqual(['counts', 'outcomes'])
+    // AI-fields S1 LOCK-B6: batchId joined the pinned shape (server-minted, truthy when written > 0).
+    expect(Object.keys(res.body).sort()).toEqual(['batchId', 'counts', 'outcomes'])
+    expect(res.body.batchId).toEqual(expect.any(String))
     expect(Object.keys(res.body.counts).sort()).toEqual(['not_in_cache', 'skipped_no_perm', 'stale_reprev', 'write_conflict', 'written'])
     expect(res.body.outcomes).toEqual([{ recordId: R, outcome: 'written' }])
   })

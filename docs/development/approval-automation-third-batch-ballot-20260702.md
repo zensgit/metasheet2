@@ -25,10 +25,16 @@ authorization decision.
 
 | # | Decision | Proposed default | Vote |
 |---|---|---|---|
-| A1 | First destination scope | Authorize exactly one named staging destination first; production destination requires a separate follow-up approval after staging evidence. | ⬜ |
-| A2 | Host entry shape | Exact ASCII DNS host only, no scheme/path/port/wildcard/CIDR/IP literal; values supplied through `BPMN_HTTP_TASK_EGRESS_POLICY`, never request/BPMN variables. | ⬜ |
-| A3 | Evidence and smoke | Values-free smoke proving allowed host reaches mocked/approved transport and disallowed/private/redirect cases still deny; no full URL, headers, body, response, or secrets in evidence. | ⬜ |
-| A4 | Rollback | Removing or blanking the env policy returns the engine to deny-all with no DB migration or tenant data rewrite. | ⬜ |
+| A1 | First destination scope | Authorize exactly one named staging destination first; production destination requires a separate follow-up approval after staging evidence. | ✅ |
+| A2 | Host entry shape | Exact ASCII DNS host only, no scheme/path/port/wildcard/CIDR/IP literal; values supplied through `BPMN_HTTP_TASK_EGRESS_POLICY`, never request/BPMN variables. | ✅ |
+| A3 | Evidence and smoke | Values-free smoke proving allowed host reaches mocked/approved transport and disallowed/private/redirect cases still deny; no full URL, headers, body, response, or secrets in evidence. | ✅ |
+| A4 | Rollback | Removing or blanking the env policy returns the engine to deny-all with no DB migration or tenant data rewrite. | ✅ |
+
+**A3 — RATIFIED 2026-07-05 (owner vote): A1–A4 all ✅ adopt-default.** The governance shape is locked: staging-first
+single named destination, exact-ASCII-DNS-host-only via `BPMN_HTTP_TASK_EGRESS_POLICY`, values-free smoke evidence,
+env-blank rollback to deny-all. **This vote authorizes the framework, not any egress:** the engine stays **deny-all**
+until a named staging host is supplied AND the policy is enabled — naming that first staging host is a separate,
+explicit follow-up input. Production destinations remain a distinct later approval (A1).
 
 **Build/ops contract**
 
@@ -61,15 +67,20 @@ authorization decision.
 
 | # | Decision | Proposed default | Vote |
 |---|---|---|---|
-| Q1 | Signature kind | Contract supports an open `kind`, but v1 ships typed/click attestation only; handwritten image capture is separate. | ⬜ |
-| Q2 | Enforcement timing | First rung is declared-inert: persist/round-trip `signaturePolicy`, but do not block approve/reject until enforcement is ratified. | ⬜ |
-| Q3 | Image storage | When image capture is later approved, store bytes through `StorageService`; persist only opaque ref + sha256, never inline base64 JSONB. | ⬜ |
-| Q4 | Integrity binding | Compute/store sha256 bound to actorId, instanceId, version, nodeKey, capturedAt; `to_version` is the audit anchor. | ⬜ |
-| Q5 | Retention/legal hold | Retain artifacts for instance lifetime plus configurable compliance horizon; exclude from generic erasure as legal record. | ⬜ |
-| Q6 | PII echo | Ordinary readers see only redacted descriptor; raw artifact/ref requires compliance-export permission. | ⬜ |
-| Q7 | Applies-to and exemptions | Default applies to approve only; approve+reject available. System auto records/add-sign system records are exempt. | ⬜ |
-| Q8 | Audit shape | Store signature reference in existing approve/reject record metadata; no new audit action or CHECK migration in the floor. | ⬜ |
-| Q9 | Authoring UI | Add a thin checkbox only if clearly labelled enforcement-pending until runtime enforcement ships. | ⬜ |
+| Q1 | Signature kind | Contract supports an open `kind`, but v1 ships typed/click attestation only; handwritten image capture is separate. | ✅ |
+| Q2 | Enforcement timing | First rung is declared-inert: persist/round-trip `signaturePolicy`, but do not block approve/reject until enforcement is ratified. | ✅ |
+| Q3 | Image storage | When image capture is later approved, store bytes through `StorageService`; persist only opaque ref + sha256, never inline base64 JSONB. | ✅ |
+| Q4 | Integrity binding | Compute/store sha256 bound to actorId, instanceId, version, nodeKey, capturedAt; `to_version` is the audit anchor. | ✅ |
+| Q5 | Retention/legal hold | Retain artifacts for instance lifetime plus configurable compliance horizon; exclude from generic erasure as legal record. | ✅ |
+| Q6 | PII echo | Ordinary readers see only redacted descriptor; raw artifact/ref requires compliance-export permission. | ✅ |
+| Q7 | Applies-to and exemptions | Default applies to approve only; approve+reject available. System auto records/add-sign system records are exempt. | ✅ |
+| Q8 | Audit shape | Store signature reference in existing approve/reject record metadata; no new audit action or CHECK migration in the floor. | ✅ |
+| Q9 | Authoring UI | Add a thin checkbox only if clearly labelled enforcement-pending until runtime enforcement ships. | ✅ |
+
+**T3-3 — RATIFIED 2026-07-05 (owner vote): Q1–Q9 all ✅ adopt-default.** First rung is **declared-inert** — persist /
+round-trip `signaturePolicy` only; it does NOT block approve/reject, and runtime enforcement is a SEPARATE later
+ratification. Image capture (Q3) and any enforcement remain gated. Low-risk: this locks the contract shape without
+turning anything on.
 
 **Build contract / reviewer-note must-fixes**
 
@@ -103,16 +114,20 @@ authorization decision.
 
 | # | Decision | Proposed default | Vote |
 |---|---|---|---|
-| Q1 | System-of-record | Approval engine stays authoritative; multitable receives one-way materialized read-model projection. | ⬜ |
-| Q2 | Projection trigger | Project create + terminal events only. In-flight node progress waits for a separate intermediate event. | ⬜ |
-| Q3 | Visibility precedence | First slice creates admin/owner-scoped system-managed sheet; per-row approval visibility inheritance is separate. | ⬜ |
-| Q4 | PII/form data | Project allowlisted system/value-constrained columns only; full `form_snapshot` projection is a separate redaction review. | ⬜ |
-| Q5 | Instance-record link | Use side mapping table keyed unique approval instance id -> meta record id; do not add a column to all `meta_records`. | ⬜ |
-| Q6 | User representation | Store raw requester/approver id strings in first slice; person/link cells are follow-up. | ⬜ |
-| Q7 | Deletion/erasure | Retain terminal rows as audit/analytics read-model, but PII erasure/legal-hold policy must be decided before any full-form projection. | ⬜ |
-| Q8 | Approval form record-reference fields | Defer. Projection does not add a new record-reference `FormFieldType`. | ⬜ |
-| Q9 | Non-approved outcomes | Project all terminal outcomes to the neutral read-model; source-record W7 semantics stay separate. | ⬜ |
-| Q10 | Base placement | One system-owned base/sheet per template family, provisioned lazily; cross-base projection is a non-goal in the first slice. | ⬜ |
+| Q1 | System-of-record | Approval engine stays authoritative; multitable receives one-way materialized read-model projection. | ⏸ |
+| Q2 | Projection trigger | Project create + terminal events only. In-flight node progress waits for a separate intermediate event. | ⏸ |
+| Q3 | Visibility precedence | First slice creates admin/owner-scoped system-managed sheet; per-row approval visibility inheritance is separate. | ⏸ |
+| Q4 | PII/form data | Project allowlisted system/value-constrained columns only; full `form_snapshot` projection is a separate redaction review. | ⏸ |
+| Q5 | Instance-record link | Use side mapping table keyed unique approval instance id -> meta record id; do not add a column to all `meta_records`. | ⏸ |
+| Q6 | User representation | Store raw requester/approver id strings in first slice; person/link cells are follow-up. | ⏸ |
+| Q7 | Deletion/erasure | Retain terminal rows as audit/analytics read-model, but PII erasure/legal-hold policy must be decided before any full-form projection. | ⏸ |
+| Q8 | Approval form record-reference fields | Defer. Projection does not add a new record-reference `FormFieldType`. | ⏸ |
+| Q9 | Non-approved outcomes | Project all terminal outcomes to the neutral read-model; source-record W7 semantics stay separate. | ⏸ |
+| Q10 | Base placement | One system-owned base/sheet per template family, provisioned lazily; cross-base projection is a non-goal in the first slice. | ⏸ |
+
+**T3-6 — HELD 2026-07-05 (owner vote): all lines ⏸ hold.** The S-band "approval as first-class multitable records"
+strategic line is deliberately NOT started — no projection work begins until the owner explicitly un-holds. Held to
+keep the broadest data-model line from being opened prematurely by an autonomous loop or a session.
 
 **Build contract / reviewer-note must-fixes**
 
