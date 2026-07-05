@@ -28,7 +28,7 @@ composition orchestrates hops, it does not fork a second read/resolver path.
 | **C-R0** | (docs) | `integration-read-source-resolver-composition-design-lock-20260703.md` | Direction lock: bounded ordered approved-config chain, typed single-value handoff, per-hop + chain fail-closed, values-free stitched evidence, read-only; recursion excluded | Docs only — authorizes no runtime |
 | **C-R1** | #3553 | `665504041` | Chain **config model + save-time validator**: migration `063_create_integration_read_source_composition_configs.sql`, content-keyed versioned store + approve/retire, depth-bounded (exactly two steps in v1), acyclic, write-shaped-step rejected | No runtime, no chaining execution |
 | **C-R2** | #3563 | `7e9c844d4` | **Pure planner/evaluator**: `planReadSourceComposition` (reuses the C-R1 validator verbatim), `deriveCompositionStepInput` (typed single-scalar handoff via the runtime's own key predicate), `evaluateCompositionOutcome` (values-free per-step vector + last-hop-only data projection) | No route, no outbound, no adapter, no persistence, no write, no recursion |
-| **C-R2 hardening** | #3568 | *(in-flight, parallel session)* | Two seam fail-closes: (1) `planReadSourceComposition` requires an approval-config map (omission = PLAN_INVALID, not a preview); (2) a hop is a success only when `evidence.ok === true` **and** it carries a chain-usable scalar | Same scope fence; pure lib |
+| **C-R2 hardening** | #3568 | `cfd3dcd0` (MERGED) | Two seam fail-closes: (1) `planReadSourceComposition` requires an approval-config map (omission = PLAN_INVALID, not a preview); (2) a hop is a success only when `evidence.ok === true` **and** it carries a chain-usable scalar | Same scope fence; pure lib |
 | **C-R3** | #3565 | `e68fe39ce` | **Chain runtime executor**: `executeReadSourceComposition` — orchestrates approved step configs in order, per-hop fail-closed, values-free stitched evidence, read-only; reuses S3-1 `executeConfiguredRead` + R1 resolver per hop | No route, no persistence lookup inside, no write, no recursion, no new credential path |
 
 ## 2. The locks, and where each is enforced
@@ -84,8 +84,8 @@ module's own stated defense-in-depth invariant hold):
 - L3 named request-shape vectors got red tests (JSON `__proto__` own-key rejected at body+inputs,
   getter-on-key read exactly once, object/array key fails closed at hop 0 with no outbound read).
 
-**C-R2 hardening (#3568, in-flight)** — cross-verified against merged C-R3: after rebasing #3568 onto
-main-with-C-R3, the full composition suite (planner + runtime + neighbors) is green; guard 2's
+**C-R2 hardening (#3568, merged `cfd3dcd0`)** — cross-verified against merged C-R3: after rebasing #3568
+onto main-with-C-R3, the full composition suite (planner + runtime + neighbors) is green; guard 2's
 `evidence.ok` requirement is satisfied by C-R3's real-producer hops, and the non-scalar handoff test
 still yields `STEP_OUTPUT_NOT_SCALAR`. The hardening does not regress C-R3.
 
@@ -135,6 +135,24 @@ authorized by this document:
 
 C-R1 / C-R2 / C-R3 merged and adversarially verified; the read-only composition chain
 (materialNumber → FItemID → FBOMNumber shape) executes end-to-end behind approved-only / key-only /
-values-free / fail-closed locks. C-R2 hardening (#3568) is in-flight and cross-verified compatible.
-The arc rests at its opt-in boundary: **C-R4 (route/UI/mirror) is the next rung and awaits an explicit
-opt-in.**
+values-free / fail-closed locks. C-R2 hardening (#3568, `cfd3dcd0`) merged.
+
+## 8. C-R4 addendum — read-only composition arc feature-complete (2026-07-05)
+
+C-R4 was opted in (owner, 2026-07-05) and delivered in staged rungs, each verified and merged:
+
+| Rung | PR | Merged SHA | Scope |
+| --- | --- | --- | --- |
+| **C-R4-1** | #3573 | `7821f776` | Composition HTTP surface — authoring routes + the approved-only / key-only / values-free / read-only **run route** (`POST /read-source-compositions/:id/run`); approved-only **double gate** (composition config + each step read config via `getForRuntime`, planner re-validation); adversarial `confirmed:[]` + planner defense-in-depth coverage (gate #2b). |
+| **C-R4-2** | #3576 | `3779121f` | Client **vocab mirror** of the 8 `READ_SOURCE_COMPOSITION_PLAN_ERROR_CODES` + CI parity tripwire (fail-first verified). |
+| **C-R4-3a** | #3583 | `4899c608` | Client **runtime service layer** — `listReadSourceCompositions` / `runReadSourceComposition` (strict `{ inputs: { key } }`) + a values-free response normalizer. |
+| **C-R4-3b** | #3585 | `8c6ddaa3` | Advisor/operator **run panel UI** (dedicated component) — select an approved composition, enter the first business key, run, render values-free evidence + last-hop output; read-tier, no authoring. |
+
+Post-merge review hardened the C-R4-3a client error path to be values-free **by construction** (the raw
+server `error.message` is dropped; only a clamped code + reason is surfaced) and exact-allowlisted the
+per-step `errorCode` against the composition ∪ probe/resolver code union (unknown → dropped).
+
+**The read-only composition arc is feature-complete end-to-end** (design-lock → config → planner →
+runtime → route → client mirror → service → UI). Still gated, each a separate explicit opt-in:
+**recursive / unbounded BOM expansion** (its own design-lock) and **all write paths** (Save / Submit /
+Audit / external / production write — production write customer-barred).

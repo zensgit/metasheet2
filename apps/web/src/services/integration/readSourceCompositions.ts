@@ -20,6 +20,7 @@
 // readSourceConfigs.ts + multitable-resolver-vocab-mirror.spec.ts.
 
 import { apiFetch } from '../../utils/api'
+import { READ_SOURCE_PROBE_ERROR_CODES } from './readSourceConfigs'
 import type { IntegrationScope } from './workbench'
 
 export const COMPOSITION_PLAN_ERROR_CODES = [
@@ -36,6 +37,14 @@ export const COMPOSITION_PLAN_ERROR_CODES = [
 export type CompositionPlanErrorCode = typeof COMPOSITION_PLAN_ERROR_CODES[number]
 
 const COMPOSITION_PLAN_ERROR_CODE_SET: ReadonlySet<string> = new Set(COMPOSITION_PLAN_ERROR_CODES)
+
+// Exact registered union for a stitched-vector per-step errorCode: the composition coarse codes (this
+// mirror) PLUS the per-hop probe/resolver codes (READ_SOURCE_PROBE_ERROR_CODES already includes the
+// resolver codes). Anything outside this union is dropped by normalizeRunStep.
+const STEP_ERROR_CODE_SET: ReadonlySet<string> = new Set<string>([
+  ...COMPOSITION_PLAN_ERROR_CODES,
+  ...READ_SOURCE_PROBE_ERROR_CODES,
+])
 
 // Narrow a raw evidence errorCode string to the mirrored closed vocabulary; null for an unknown code so a
 // caller (the C-R4-3 UI) shows the raw code verbatim rather than mislabeling it as a known one.
@@ -99,13 +108,40 @@ function buildQuery(input: Record<string, unknown>): string {
   return query ? `?${query}` : ''
 }
 
+// Coarse-code / reason clamps (mirror readSourceConfigs.ts ReadSourceApiError). The raw server
+// error.message is NEVER surfaced — only a clamped code + optional clamped reason — so the error path is
+// values-free BY CONSTRUCTION, not by trusting the server to keep messages coarse (a future server bug
+// echoing a business value into message can never reach the client render).
+const COMPOSITION_ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/
+const COMPOSITION_ERROR_REASON_PATTERN = /^[a-z0-9_:-]{1,80}$/
+
+export class ReadSourceCompositionApiError extends Error {
+  status: number
+  code: string
+  reason: string
+  constructor(status: number, code: string, reason: string) {
+    // .message is built from the clamped code (+reason) only — the panel renders error.message, so this
+    // is the values-free string it shows.
+    super(reason ? `${code}: ${reason}` : code)
+    this.name = 'ReadSourceCompositionApiError'
+    this.status = status
+    this.code = code
+    this.reason = reason
+  }
+}
+
 async function parseCompositionResponse<T>(response: Response): Promise<T> {
   const payload = await response.json().catch(() => null)
-  if (!response.ok) {
+  if (!response.ok || (isPlainObject(payload) && payload.ok === false)) {
     const error = isPlainObject(payload) && isPlainObject(payload.error) ? payload.error : {}
-    const code = typeof error.code === 'string' ? error.code : `HTTP_${response.status}`
-    const message = typeof error.message === 'string' ? error.message : `request failed (${response.status})`
-    throw new Error(`${code}: ${message}`)
+    const details = isPlainObject(error.details) ? error.details : {}
+    const code = typeof error.code === 'string' && COMPOSITION_ERROR_CODE_PATTERN.test(error.code)
+      ? error.code
+      : 'READ_SOURCE_COMPOSITION_REQUEST_FAILED'
+    const reason = typeof details.reason === 'string' && COMPOSITION_ERROR_REASON_PATTERN.test(details.reason)
+      ? details.reason
+      : ''
+    throw new ReadSourceCompositionApiError(response.status, code, reason)
   }
   return (isPlainObject(payload) && 'data' in payload ? payload.data : payload) as T
 }
@@ -132,10 +168,11 @@ function normalizeRunStep(value: unknown): CompositionRunStep | null {
   if (value.rule === 'exactly_one' || value.rule === 'first_when_sorted' || value.rule === 'field_equals') {
     step.rule = value.rule
   }
-  // errorCode may be a composition coarse code (mirror) OR a per-hop probe/resolver code; surface a
-  // string verbatim (all server codes are values-free), preferring the mirror-narrowed form when it matches.
-  if (typeof value.errorCode === 'string' && value.errorCode) {
-    step.errorCode = asCompositionPlanErrorCode(value.errorCode) ?? value.errorCode
+  // errorCode may be a composition coarse code (the mirror) OR a per-hop probe/resolver code — surface it
+  // ONLY when it is in the EXACT registered union (never a verbatim fallthrough): an unknown string (e.g.
+  // a future server bug leaking a business identifier that looks like A_CODE) is DROPPED, not rendered.
+  if (typeof value.errorCode === 'string' && STEP_ERROR_CODE_SET.has(value.errorCode)) {
+    step.errorCode = value.errorCode
   }
   return step
 }
