@@ -111,8 +111,8 @@ describe('grid perf baseline — flat (windowed) path', () => {
   })
 })
 
-describe('grid perf baseline — grouped path (NOT windowed — confirms the code-level finding)', () => {
-  it('grouped mode renders EVERY row into the DOM regardless of scale (no windowing on this path)', () => {
+describe('grid perf baseline — grouped path (windowed after GW runtime)', () => {
+  it('grouped mode renders a bounded row window at scale', () => {
     const N = 3_000
     const rows = makeRows(N, 30) // 30 groups, ~100 rows/group
     const groupField = FIELDS.find((f) => f.id === 'group')!
@@ -121,10 +121,9 @@ describe('grid perf baseline — grouped path (NOT windowed — confirms the cod
     const mountMs = performance.now() - t0
     const rendered = domRowCount(root)
     // eslint-disable-next-line no-console
-    console.log(`[grid-perf] GROUPED ${N} rows / 30 groups: mount=${mountMs.toFixed(1)}ms, DOM rows=${rendered} (expect ≈${N}, i.e. unwindowed)`)
-    // The component's own code comment says windowing is "active only on the flat path... otherwise the
-    // template renders every row exactly as before" — this assertion proves that in a REAL render, not
-    // just from reading the comment.
-    expect(rendered).toBeGreaterThan(N * 0.9)
+    console.log(`[grid-perf] GROUPED ${N} rows / 30 groups: mount=${mountMs.toFixed(1)}ms, DOM rows=${rendered} (windowed)`)
+    expect(rendered).toBeGreaterThan(0)
+    expect(rendered).toBeLessThan(200)
+    expect(root.querySelector('[data-test="grid-bottom-spacer"]')).toBeTruthy()
   })
 })

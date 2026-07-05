@@ -38,7 +38,7 @@
 ## W2 — build 车道(各自 lock ratify 后解锁)
 
 - ✅ **W2-3 S2 runtime**(prompt-config-history UI)— runtime MERGED `6e844cf89`(#3643); verification MD added in `multitable-ai-shortcut-prompt-config-history-s2-dev-verification-20260705.md`。
-- ⬜ **W2-4 GW runtime**(grouped 视图窗口化)— 前置已达:#3582 baseline + #3591 ratified design-lock。Fable 5 build(offset-table + 不变量;难度高);占 grid 互斥锁;验收含 Playwright 真浏览器前后数字(lock 硬性条款);交付 verification MD。
+- ✅ **W2-4 GW runtime**(grouped 视图窗口化)— runtime PR #3648 已开:offset-table grouped windowing + jsdom goldens + Playwright 真浏览器前后数字 + verification MD。仍不含 grouped infinite-scroll / 跨页分组 / server-side grouping。
   W2-3 与 W2-4 文件面不重叠,可并行(不超并发上限)。
 
 ## W3 — 顺手批(单项 ≤半天;排在 W0 清空之后)
