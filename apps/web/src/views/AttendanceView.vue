@@ -8981,6 +8981,159 @@
                   </button>
                 </div>
               </div>
+              <div class="attendance__admin-subsection" data-attendance-bulk-apply-card>
+                <h4>{{ tr('Bulk apply (draft)', '批量套用（草稿）') }}</h4>
+                <p class="attendance__field-hint">
+                  {{ tr('Pick one or more users and a date range, then choose which (user, date) targets to apply a shift to as drafts. Publish the drafts below once ready.', '选择一个或多个用户和日期范围，再勾选要套用班次的（用户，日期）目标，写入为草稿。准备好后在下方发布草稿。') }}
+                </p>
+                <div class="attendance__admin-grid">
+                  <AttendanceUserPickerField
+                    v-model="bulkApplyUserPickerValue"
+                    :tr="tr"
+                    :label="tr('Add user', '添加用户')"
+                    name="bulkApplyUserPicker"
+                    :help-text="tr('Search and pick a user, then click Add.', '搜索并选择用户，然后点击添加。')"
+                    :search-placeholder="tr('Search users for bulk apply', '搜索批量套用用户')"
+                    :full-width="false"
+                    input-id="attendance-bulk-apply-user-picker"
+                  />
+                  <div class="attendance__field">
+                    <span>&nbsp;</span>
+                    <button
+                      class="attendance__btn"
+                      type="button"
+                      data-attendance-bulk-apply-add-user
+                      @click="addBulkApplyUser"
+                    >
+                      {{ tr('Add to targets', '添加到目标') }}
+                    </button>
+                  </div>
+                  <label class="attendance__field" for="attendance-bulk-apply-shift">
+                    <span>{{ tr('Shift', '班次') }}</span>
+                    <select
+                      id="attendance-bulk-apply-shift"
+                      v-model="bulkApplyForm.shiftId"
+                      name="bulkApplyShiftId"
+                      :disabled="shifts.length === 0"
+                      data-attendance-bulk-apply-shift
+                    >
+                      <option value="" disabled>{{ tr('Select shift', '选择班次') }}</option>
+                      <option v-for="shift in shifts" :key="shift.id" :value="shift.id">
+                        {{ shift.name }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="attendance__field" for="attendance-bulk-apply-start-date">
+                    <span>{{ tr('Start date', '开始日期') }}</span>
+                    <input
+                      id="attendance-bulk-apply-start-date"
+                      v-model="bulkApplyForm.startDate"
+                      name="bulkApplyStartDate"
+                      type="date"
+                      data-attendance-bulk-apply-start-date
+                    />
+                  </label>
+                  <label class="attendance__field" for="attendance-bulk-apply-end-date">
+                    <span>{{ tr('End date', '结束日期') }}</span>
+                    <input
+                      id="attendance-bulk-apply-end-date"
+                      v-model="bulkApplyForm.endDate"
+                      name="bulkApplyEndDate"
+                      type="date"
+                      data-attendance-bulk-apply-end-date
+                    />
+                  </label>
+                </div>
+                <div
+                  v-if="bulkApplyUserIds.length > 0"
+                  class="attendance__bulk-apply-user-chips"
+                  data-attendance-bulk-apply-user-chips
+                >
+                  <span
+                    v-for="userId in bulkApplyUserIds"
+                    :key="userId"
+                    class="attendance__scheduler-scope-chip"
+                    data-attendance-bulk-apply-user-chip
+                  >
+                    {{ userId }}
+                    <button
+                      class="attendance__btn attendance__btn--inline"
+                      type="button"
+                      :aria-label="tr(`Remove ${userId}`, `移除 ${userId}`)"
+                      @click="removeBulkApplyUser(userId)"
+                    >
+                      &times;
+                    </button>
+                  </span>
+                </div>
+                <div v-if="bulkApplyCandidateCells.length > 0">
+                  <div class="attendance__admin-actions" data-attendance-bulk-apply-selection-actions>
+                    <span class="attendance__field-hint" data-attendance-bulk-apply-selected-count>
+                      {{ tr(`Selected targets: ${bulkApplySelectedCount} / ${bulkApplyCandidateCells.length}`, `已选目标：${bulkApplySelectedCount} / ${bulkApplyCandidateCells.length}`) }}
+                    </span>
+                    <button
+                      class="attendance__btn"
+                      type="button"
+                      data-attendance-bulk-apply-select-all
+                      @click="selectAllBulkApplyCandidateCells"
+                    >
+                      {{ tr('Select all', '全选') }}
+                    </button>
+                    <button
+                      class="attendance__btn"
+                      type="button"
+                      data-attendance-bulk-apply-clear-selection
+                      @click="clearBulkApplyCellSelection"
+                    >
+                      {{ tr('Clear', '清空') }}
+                    </button>
+                  </div>
+                  <div class="attendance__table-wrapper">
+                    <table class="attendance__table">
+                      <thead>
+                        <tr>
+                          <th class="attendance__batch-check-col"></th>
+                          <th>{{ tr('User', '用户') }}</th>
+                          <th>{{ tr('Date', '日期') }}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="cell in bulkApplyCandidateCells" :key="`${cell.userId}::${cell.date}`">
+                          <td class="attendance__batch-check-col">
+                            <input
+                              type="checkbox"
+                              :checked="isBulkApplyCellSelected(cell)"
+                              data-attendance-bulk-apply-cell-select
+                              @change="toggleBulkApplyCell(cell)"
+                            />
+                          </td>
+                          <td>{{ cell.userId }}</td>
+                          <td>{{ cell.date }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                <div class="attendance__admin-actions">
+                  <button
+                    class="attendance__btn attendance__btn--primary"
+                    :disabled="Boolean(bulkApplySubmitDisabledReason)"
+                    :title="bulkApplySubmitDisabledReason || undefined"
+                    data-attendance-bulk-apply-open
+                    type="button"
+                    @click="openBulkApplyModal"
+                  >
+                    {{ tr('Bulk apply (draft)', '批量套用（草稿）') }}
+                  </button>
+                  <small
+                    v-if="bulkApplySubmitDisabledReason"
+                    class="attendance__field-hint"
+                    data-attendance-bulk-apply-disabled-reason
+                  >
+                    {{ bulkApplySubmitDisabledReason }}
+                  </small>
+                </div>
+              </div>
               <div class="attendance__admin-actions attendance__admin-actions--wrap" data-attendance-schedule-publication-controls>
                 <span class="attendance__field-hint">
                   {{ tr(`Selected drafts: ${selectedScheduleDraftCount}`, `已选草稿：${selectedScheduleDraftCount}`) }}
@@ -9372,6 +9525,81 @@
         </div>
       </div>
     </div>
+
+    <div
+      v-if="bulkApplyModal.open && bulkApplyModal.snapshot"
+      class="attendance__modal"
+      role="dialog"
+      aria-modal="true"
+      data-attendance-bulk-apply-modal
+    >
+      <div class="attendance__modal-body attendance__result-edit-modal">
+        <div class="attendance__admin-section-header">
+          <div>
+            <h4>{{ tr('Bulk apply schedule (draft)', '批量套用排班（草稿）') }}</h4>
+            <small class="attendance__field-hint" data-attendance-bulk-apply-modal-summary>
+              {{ tr(
+                `Targets: ${bulkApplyModal.snapshot.cells.length} · Shift: ${shifts.find(s => s.id === bulkApplyModal.snapshot?.shiftId)?.name || bulkApplyModal.snapshot.shiftId}`,
+                `目标数：${bulkApplyModal.snapshot.cells.length} · 班次：${shifts.find(s => s.id === bulkApplyModal.snapshot?.shiftId)?.name || bulkApplyModal.snapshot.shiftId}`,
+              ) }}
+            </small>
+          </div>
+          <button class="attendance__btn" type="button" @click="closeBulkApplyModal">
+            {{ tr('Close', '关闭') }}
+          </button>
+        </div>
+
+        <p class="attendance__field-hint" data-attendance-bulk-apply-individual-warning>
+          {{ tr(
+            'Each target is written individually as a draft; any conflict, cap, edit-window, or scope issue is reported per target, and the rest continue.',
+            '逐条写入草稿，任一冲突/超限/越权将逐格标错，其余继续。',
+          ) }}
+        </p>
+
+        <div class="attendance__result-edit-summary" data-attendance-bulk-apply-preview>
+          <div
+            v-for="cell in bulkApplyModal.snapshot.cells"
+            :key="`${cell.userId}::${cell.date}`"
+            data-attendance-bulk-apply-preview-row
+          >
+            <span>{{ cell.userId }} · {{ cell.date }}</span>
+            <span
+              v-if="bulkApplyCellResult(cell)"
+              class="attendance__status-chip"
+              :data-attendance-bulk-apply-cell-state="bulkApplyCellResult(cell)?.state"
+              :data-attendance-bulk-apply-cell-error-kind="bulkApplyCellResult(cell)?.errorKind"
+            >
+              {{ bulkApplyCellResultText(cell) }}
+            </span>
+          </div>
+        </div>
+
+        <p
+          v-if="bulkApplyOutcome === 'completed_with_errors'"
+          class="attendance__error"
+          data-attendance-bulk-apply-outcome-error
+        >
+          {{ tr('Some targets failed. Retry the failed targets, or close to refresh.', '部分目标失败。请重试失败项，或关闭以刷新。') }}
+        </p>
+
+        <div class="attendance__admin-actions">
+          <button class="attendance__btn" type="button" @click="closeBulkApplyModal">
+            {{ tr('Close', '关闭') }}
+          </button>
+          <button
+            class="attendance__btn attendance__btn--primary"
+            :disabled="bulkApplyModal.submitting"
+            type="button"
+            data-attendance-bulk-apply-submit
+            @click="submitBulkApplyModal"
+          >
+            {{ bulkApplyModal.submitting
+              ? tr('Submitting...', '提交中...')
+              : (bulkApplyHasResults ? tr('Retry failed targets', '重试失败项') : tr('Submit bulk apply', '提交批量套用')) }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -9419,6 +9647,19 @@ import {
   type PunchRetryBasePayload,
   type PunchRetryWithNotePayload,
 } from './attendance/punchOutcome'
+import {
+  BULK_APPLY_MAX_CELLS,
+  bulkApplyCellErrorText,
+  bulkApplyCellKey,
+  buildBulkApplyAssignmentPayload,
+  canRunBulkApply,
+  expandTargets,
+  runBulkApply,
+  summarizeBulkApplyOutcome,
+  type BulkApplyCell,
+  type BulkApplyCellResult,
+  type BulkApplySubmitOutcome,
+} from './attendance/scheduleBulkApply'
 import {
   BATCH_ANOMALY_MAX_ROWS,
   canRunBatchAnomalyResolution,
@@ -12699,6 +12940,25 @@ const assignmentEditingId = ref<string | null>(null)
 const assignmentEditingPublishStatus = ref<AttendanceSchedulePublishStatus | null>(null)
 const assignmentPublishStatusFilter = ref<AttendanceSchedulePublishStatusFilter>('all')
 const selectedDraftAssignmentIds = ref<string[]>([])
+// #3616 bulk-apply schedule assignment — D1-A checkbox-list target selection over a user
+// multi-select x date-range expansion, plus a confirm-then-submit modal that mirrors
+// batchAnomalyModal but writes each (user, date) cell as a draft shift assignment (D2-A).
+// Kept separate from the single-row assignmentForm/temporary-shift state so they never
+// entangle.
+const bulkApplyUserPickerValue = ref('')
+const bulkApplyUserIds = ref<string[]>([])
+const bulkApplyForm = reactive({
+  shiftId: '',
+  startDate: '',
+  endDate: '',
+})
+const bulkApplySelectedCellKeys = reactive(new Set<string>())
+const bulkApplyModal = reactive({
+  open: false,
+  submitting: false,
+  snapshot: null as { cells: BulkApplyCell[]; shiftId: string } | null,
+  results: {} as Record<string, BulkApplyCellResult>,
+})
 const advancedSchedulingWorkbenchLoading = ref(false)
 const scheduleGroupAdminLoading = ref(false)
 const scheduleGroupSaving = ref(false)
@@ -24866,6 +25126,184 @@ async function publishSelectedScheduleDrafts(preflightOnly: boolean) {
   }
 }
 
+// ===== #3616 bulk-apply schedule assignment (D1-A checkbox-list + D2-A draft-then-publish) =====
+// Design lock: docs/development/attendance-schedule-bulk-apply-design-lock-20260705.md
+const bulkApplyCandidateCells = computed(() => expandTargets(
+  bulkApplyUserIds.value,
+  bulkApplyForm.startDate,
+  bulkApplyForm.endDate,
+))
+
+const bulkApplySelectedCells = computed(() =>
+  bulkApplyCandidateCells.value.filter(cell => bulkApplySelectedCellKeys.has(bulkApplyCellKey(cell)))
+)
+
+const bulkApplySelectedCount = computed(() => bulkApplySelectedCells.value.length)
+
+const bulkApplyOverCap = computed(() => bulkApplySelectedCount.value > BULK_APPLY_MAX_CELLS)
+
+function addBulkApplyUser() {
+  const userId = bulkApplyUserPickerValue.value.trim()
+  if (!userId) return
+  if (!bulkApplyUserIds.value.includes(userId)) {
+    bulkApplyUserIds.value = [...bulkApplyUserIds.value, userId]
+  }
+  bulkApplyUserPickerValue.value = ''
+}
+
+function removeBulkApplyUser(userId: string) {
+  bulkApplyUserIds.value = bulkApplyUserIds.value.filter(id => id !== userId)
+}
+
+function isBulkApplyCellSelected(cell: BulkApplyCell): boolean {
+  return bulkApplySelectedCellKeys.has(bulkApplyCellKey(cell))
+}
+
+function toggleBulkApplyCell(cell: BulkApplyCell) {
+  const key = bulkApplyCellKey(cell)
+  if (bulkApplySelectedCellKeys.has(key)) bulkApplySelectedCellKeys.delete(key)
+  else bulkApplySelectedCellKeys.add(key)
+}
+
+function selectAllBulkApplyCandidateCells() {
+  for (const cell of bulkApplyCandidateCells.value) bulkApplySelectedCellKeys.add(bulkApplyCellKey(cell))
+}
+
+function clearBulkApplyCellSelection() {
+  bulkApplySelectedCellKeys.clear()
+}
+
+const bulkApplySubmitDisabledReason = computed(() => {
+  if (bulkApplyModal.submitting) return tr('Bulk apply in progress...', '批量套用处理中...')
+  if (!bulkApplyForm.shiftId) return tr('Select a shift.', '请选择班次。')
+  if (bulkApplySelectedCount.value === 0) {
+    return tr('Select at least one (user, date) target.', '请至少选择一个（用户，日期）目标。')
+  }
+  if (bulkApplyOverCap.value) {
+    return tr(
+      `Select at most ${BULK_APPLY_MAX_CELLS} targets; narrow the date range or users.`,
+      `最多选择 ${BULK_APPLY_MAX_CELLS} 个目标；请缩小日期范围或用户数。`,
+    )
+  }
+  return ''
+})
+
+const bulkApplyOutcome = computed(() => summarizeBulkApplyOutcome(Object.values(bulkApplyModal.results)))
+const bulkApplyHasResults = computed(() => Object.keys(bulkApplyModal.results).length > 0)
+
+function bulkApplyCellResult(cell: BulkApplyCell): BulkApplyCellResult | null {
+  return bulkApplyModal.results[bulkApplyCellKey(cell)] ?? null
+}
+
+function bulkApplyCellResultText(cell: BulkApplyCell): string {
+  const result = bulkApplyCellResult(cell)
+  if (!result) return ''
+  if (result.state === 'ok') return tr('Applied', '已套用')
+  if (result.state === 'error') return bulkApplyCellErrorText(result.errorKind ?? 'generic', tr)
+  return tr('Submitting...', '提交中...')
+}
+
+// Same generic UUID/fallback generator as the AE-3 / batch-anomaly modals; a thin
+// call-site-clarity wrapper so a schedule-bulk-apply reader isn't confused by the
+// "resultEdit"-named helper it delegates to.
+function scheduleBulkApplyIdempotencyKey(): string {
+  return attendanceResultEditIdempotencyKey()
+}
+
+// Phase 1 (selection -> confirm): builds the modal snapshot only. This function must never
+// call runBulkApply/apiFetch directly — submitBulkApplyModal (phase 2, below) is the sole
+// path to the network (design §G2 confirm gate: "套用前弹确认...逐条写入草稿").
+function openBulkApplyModal(): void {
+  const shiftId = bulkApplyForm.shiftId
+  if (!shiftId) {
+    setStatus(tr('Select a shift.', '请选择班次。'), 'error')
+    return
+  }
+  const cells = [...bulkApplySelectedCells.value]
+  if (cells.length === 0) {
+    setStatus(tr('Select at least one (user, date) target.', '请至少选择一个（用户，日期）目标。'), 'error')
+    return
+  }
+  if (!canRunBulkApply(cells.length)) {
+    setStatus(
+      tr(
+        `Select at most ${BULK_APPLY_MAX_CELLS} targets; narrow the date range or users.`,
+        `最多选择 ${BULK_APPLY_MAX_CELLS} 个目标；请缩小日期范围或用户数。`,
+      ),
+      'error',
+    )
+    return
+  }
+  bulkApplyModal.snapshot = { cells, shiftId }
+  bulkApplyModal.results = {}
+  bulkApplyModal.submitting = false
+  bulkApplyModal.open = true
+}
+
+function closeBulkApplyModal(): void {
+  const hadResults = bulkApplyHasResults.value
+  bulkApplyModal.open = false
+  bulkApplyModal.snapshot = null
+  bulkApplyModal.submitting = false
+  bulkApplyModal.results = {}
+  // Refresh only after a bulk apply actually ran, mirroring closeBatchAnomalyModal.
+  if (hadResults) void loadAssignments()
+}
+
+// Phase 2 (confirm -> submit): the ONLY function that calls runBulkApply / hits the network.
+async function submitBulkApplyModal(): Promise<void> {
+  const snapshot = bulkApplyModal.snapshot
+  if (!snapshot) return
+  if (bulkApplyModal.submitting) return
+  bulkApplyModal.submitting = true
+  const shiftId = snapshot.shiftId
+  const current = new Map<string, BulkApplyCellResult>(Object.entries(bulkApplyModal.results))
+  try {
+    const finalResults = await runBulkApply(
+      snapshot.cells,
+      current,
+      async (cell): Promise<BulkApplySubmitOutcome> => {
+        try {
+          const idempotencyKey = scheduleBulkApplyIdempotencyKey()
+          const body = buildBulkApplyAssignmentPayload(cell, {
+            shiftId,
+            orgId: normalizedOrgId(),
+            idempotencyKey,
+          })
+          const response = await apiFetch('/api/attendance/schedule-drafts/assignments', {
+            method: 'POST',
+            body: JSON.stringify(body),
+          })
+          const data = await response.json().catch(() => null)
+          if (!response.ok || !data?.ok) {
+            throw createApiError(response, data, tr('Bulk apply failed', '批量套用失败'))
+          }
+          return { ok: true as const, result: { assignmentId: data.data?.assignment?.id } }
+        } catch (error) {
+          // A per-cell 403 is a per-target scope result, not a global admin-forbidden state:
+          // scoped sub-admins may legitimately apply to SOME targets but not others, so this
+          // never sets adminForbidden (unlike the single-row saveAssignment path).
+          return { ok: false as const, errorCode: (error as AttendanceApiError)?.code }
+        }
+      },
+      (key, result) => {
+        bulkApplyModal.results = { ...bulkApplyModal.results, [key]: result }
+      },
+    )
+    bulkApplyModal.results = Object.fromEntries(finalResults)
+    const values = [...finalResults.values()]
+    const okCount = values.filter(r => r.state === 'ok').length
+    const errCount = values.filter(r => r.state === 'error').length
+    setStatus(
+      tr(`Bulk apply: ${okCount} applied, ${errCount} failed.`, `批量套用：${okCount} 成功，${errCount} 失败。`),
+      errCount > 0 ? 'error' : undefined,
+    )
+    await loadAssignments()
+  } finally {
+    bulkApplyModal.submitting = false
+  }
+}
+
 function resetHolidayForm() {
   holidayEditingId.value = null
   holidayForm.date = toDateInput(today)
@@ -29628,6 +30066,12 @@ const holidaySectionBindings = {
 .attendance__scheduler-scope-form-actions {
   display: flex;
   gap: 8px;
+}
+.attendance__bulk-apply-user-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 24px;
 }
 .attendance__scheduler-scope-row-actions {
   display: flex;

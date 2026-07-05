@@ -6299,6 +6299,216 @@ describe('Attendance admin regressions', () => {
     expect(container!.textContent).toContain('Assignment draft saved.')
   })
 
+  // ===== #3616 bulk-apply schedule assignment (D1-A checkbox-list + D2-A draft-then-publish) =====
+  function bulkApplyShiftCatalogResponse() {
+    return jsonResponse(200, {
+      ok: true,
+      data: {
+        items: [
+          {
+            id: 'shift-bulk',
+            name: 'Bulk shift',
+            timezone: 'UTC',
+            workStartTime: '09:00',
+            workEndTime: '18:00',
+            isOvernight: false,
+            lateGraceMinutes: 10,
+            earlyGraceMinutes: 10,
+            roundingMinutes: 5,
+            workingDays: [1, 2, 3, 4, 5],
+          },
+        ],
+      },
+    })
+  }
+
+  async function mountBulkApplyAdmin() {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')!.click()
+    await flushUi(2)
+    return container!.querySelector<HTMLElement>('#attendance-admin-assignments')!
+  }
+
+  function addBulkApplyTargetUser(section: HTMLElement, userId: string) {
+    selectUserPicker(section, '#attendance-bulk-apply-user-picker', userId)
+    section.querySelector<HTMLButtonElement>('[data-attendance-bulk-apply-add-user]')!.click()
+  }
+
+  function setBulkApplyRange(section: HTMLElement, startDate: string, endDate: string, shiftId: string) {
+    setInput(section, '#attendance-bulk-apply-start-date', startDate)
+    setInput(section, '#attendance-bulk-apply-end-date', endDate)
+    const shiftSelect = section.querySelector<HTMLSelectElement>('#attendance-bulk-apply-shift')!
+    shiftSelect.value = shiftId
+    shiftSelect.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+
+  it('bulk-apply: confirm gate — opening the modal never posts; only the modal submit does', async () => {
+    const draftBodies: Array<Record<string, unknown>> = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/shifts')) return bulkApplyShiftCatalogResponse()
+      if (url === '/api/attendance/schedule-drafts/assignments' && method === 'POST') {
+        draftBodies.push(JSON.parse(String(init?.body || '{}')))
+        return jsonResponse(201, { ok: true, data: { assignment: { id: `assignment-${draftBodies.length}`, publishStatus: 'draft' } } })
+      }
+      if (url.includes('/api/attendance/assignments')) return jsonResponse(200, { ok: true, data: { items: [] } })
+      return emptyAttendanceResponse()
+    })
+
+    const section = await mountBulkApplyAdmin()
+    addBulkApplyTargetUser(section, 'user-bulk-1')
+    await flushUi(2)
+    setBulkApplyRange(section, '2026-07-06', '2026-07-07', 'shift-bulk')
+    await flushUi(2)
+
+    const cellBoxes = Array.from(section.querySelectorAll<HTMLInputElement>('[data-attendance-bulk-apply-cell-select]'))
+    expect(cellBoxes).toHaveLength(2)
+    cellBoxes.forEach(box => box.click())
+    await flushUi(2)
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-bulk-apply-open]')!.click()
+    await flushUi(4)
+
+    expect(container!.querySelector('[data-attendance-bulk-apply-modal]')).toBeTruthy()
+    // The confirm gate: building the snapshot must never itself write anything.
+    expect(draftBodies).toHaveLength(0)
+
+    container!.querySelector<HTMLButtonElement>('[data-attendance-bulk-apply-submit]')!.click()
+    await flushUi(8)
+
+    expect(draftBodies).toHaveLength(2)
+  })
+
+  it('bulk-apply: N selected (user,date) cells produce N schedule-drafts POSTs with the exact draft body and distinct idempotencyKeys, never the immediate-save route', async () => {
+    const draftBodies: Array<Record<string, unknown>> = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/shifts')) return bulkApplyShiftCatalogResponse()
+      if (url === '/api/attendance/schedule-drafts/assignments' && method === 'POST') {
+        draftBodies.push(JSON.parse(String(init?.body || '{}')))
+        return jsonResponse(201, { ok: true, data: { assignment: { id: `assignment-${draftBodies.length}`, publishStatus: 'draft' } } })
+      }
+      if (url === '/api/attendance/assignments' && method === 'POST') {
+        return jsonResponse(500, { ok: false, error: { code: 'UNEXPECTED_IMMEDIATE_SAVE', message: 'bulk apply must never call the immediate-save route' } })
+      }
+      if (url.includes('/api/attendance/assignments')) return jsonResponse(200, { ok: true, data: { items: [] } })
+      return emptyAttendanceResponse()
+    })
+
+    const section = await mountBulkApplyAdmin()
+    addBulkApplyTargetUser(section, 'user-bulk-a')
+    await flushUi(2)
+    addBulkApplyTargetUser(section, 'user-bulk-b')
+    await flushUi(2)
+    setBulkApplyRange(section, '2026-07-06', '2026-07-06', 'shift-bulk')
+    await flushUi(2)
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-bulk-apply-select-all]')!.click()
+    await flushUi(2)
+    section.querySelector<HTMLButtonElement>('[data-attendance-bulk-apply-open]')!.click()
+    await flushUi(4)
+    container!.querySelector<HTMLButtonElement>('[data-attendance-bulk-apply-submit]')!.click()
+    await flushUi(8)
+
+    expect(draftBodies).toEqual([
+      { userId: 'user-bulk-a', shiftId: 'shift-bulk', startDate: '2026-07-06', endDate: '2026-07-06', isActive: true, idempotencyKey: expect.any(String) },
+      { userId: 'user-bulk-b', shiftId: 'shift-bulk', startDate: '2026-07-06', endDate: '2026-07-06', isActive: true, idempotencyKey: expect.any(String) },
+    ])
+    expect(new Set(draftBodies.map(b => b.idempotencyKey)).size).toBe(2)
+    expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
+      String(input) === '/api/attendance/assignments' && init?.method === 'POST'
+    )).toBe(false)
+  })
+
+  it('bulk-apply: a >50-cell candidate selection disables the open-modal button, never silently truncating', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/shifts')) return bulkApplyShiftCatalogResponse()
+      if (url.includes('/api/attendance/assignments')) return jsonResponse(200, { ok: true, data: { items: [] } })
+      return emptyAttendanceResponse()
+    })
+
+    const section = await mountBulkApplyAdmin()
+    addBulkApplyTargetUser(section, 'user-cap')
+    await flushUi(2)
+    // 2026-01-01 .. 2026-02-20 inclusive = 31 + 20 = 51 days x 1 user = 51 candidate cells.
+    setBulkApplyRange(section, '2026-01-01', '2026-02-20', 'shift-bulk')
+    await flushUi(2)
+
+    expect(section.querySelectorAll('[data-attendance-bulk-apply-cell-select]')).toHaveLength(51)
+    section.querySelector<HTMLButtonElement>('[data-attendance-bulk-apply-select-all]')!.click()
+    await flushUi(2)
+
+    const openButton = section.querySelector<HTMLButtonElement>('[data-attendance-bulk-apply-open]')!
+    expect(openButton.disabled).toBe(true)
+    expect(section.querySelector('[data-attendance-bulk-apply-disabled-reason]')?.textContent).toContain('at most 50')
+  })
+
+  it('bulk-apply: partial failure shows distinct per-cell state/error-kind and never claims full success; retry only resubmits the failed cell', async () => {
+    const draftBodies: Array<Record<string, unknown>> = []
+    let failUserAttempts = 0
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (url.includes('/api/attendance/shifts')) return bulkApplyShiftCatalogResponse()
+      if (url === '/api/attendance/schedule-drafts/assignments' && method === 'POST') {
+        const body = JSON.parse(String(init?.body || '{}'))
+        draftBodies.push(body)
+        if (body.userId === 'user-fail') {
+          failUserAttempts += 1
+          if (failUserAttempts === 1) {
+            return jsonResponse(409, { ok: false, error: { code: 'ATTENDANCE_SCHEDULE_ASSIGNMENT_CONFLICT', message: 'conflict' } })
+          }
+        }
+        return jsonResponse(201, { ok: true, data: { assignment: { id: `assignment-${draftBodies.length}`, publishStatus: 'draft' } } })
+      }
+      if (url.includes('/api/attendance/assignments')) return jsonResponse(200, { ok: true, data: { items: [] } })
+      return emptyAttendanceResponse()
+    })
+
+    const section = await mountBulkApplyAdmin()
+    addBulkApplyTargetUser(section, 'user-fail')
+    await flushUi(2)
+    addBulkApplyTargetUser(section, 'user-ok')
+    await flushUi(2)
+    setBulkApplyRange(section, '2026-07-06', '2026-07-06', 'shift-bulk')
+    await flushUi(2)
+
+    section.querySelector<HTMLButtonElement>('[data-attendance-bulk-apply-select-all]')!.click()
+    await flushUi(2)
+    section.querySelector<HTMLButtonElement>('[data-attendance-bulk-apply-open]')!.click()
+    await flushUi(4)
+    container!.querySelector<HTMLButtonElement>('[data-attendance-bulk-apply-submit]')!.click()
+    // submitBulkApplyModal keeps `submitting` true until the post-run loadAssignments() also
+    // resolves (mirrors submitBatchAnomalyModal's Promise.all([loadRecords(), loadSummary()])
+    // precedent) — flush enough cycles for that follow-up GET to settle before asserting/retrying.
+    await flushUi(16)
+
+    expect(draftBodies).toHaveLength(2)
+    expect(container!.querySelector('[data-attendance-bulk-apply-cell-state="ok"]')).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-bulk-apply-cell-state="error"]')).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-bulk-apply-cell-error-kind="conflict"]')).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-bulk-apply-outcome-error]')).toBeTruthy()
+    expect(container!.textContent).toContain('Bulk apply: 1 applied, 1 failed.')
+    expect(container!.textContent).not.toContain('Bulk apply: 2 applied, 0 failed.')
+
+    const retryButton = container!.querySelector<HTMLButtonElement>('[data-attendance-bulk-apply-submit]')!
+    expect(retryButton.disabled).toBe(false)
+
+    // Retry from the same modal: user-ok (already ok) must be skipped; only user-fail resubmits.
+    retryButton.click()
+    await flushUi(16)
+
+    expect(draftBodies).toHaveLength(3)
+    expect(draftBodies.filter(b => b.userId === 'user-ok')).toHaveLength(1)
+    expect(draftBodies.filter(b => b.userId === 'user-fail')).toHaveLength(2)
+    expect(container!.querySelector('[data-attendance-bulk-apply-outcome-error]')).toBeNull()
+  })
+
   it('saves a temporary shift replacement draft from a published regular assignment', async () => {
     const draftBodies: unknown[] = []
     const baseShift = {
