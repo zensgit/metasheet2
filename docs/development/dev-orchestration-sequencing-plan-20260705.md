@@ -70,7 +70,7 @@ Each built item ships, matching repo convention:
 2. **Name a staging ASCII-DNS host** for A3 → moves Lane A from idle to an L3 egress-enable slice.
 3. **Un-hold T3-6** (optional) → the broadest data-model line.
 
-Until then: **one** build-ready item (T3-3), so serial; the machinery is ready to fan to 3 lanes the moment votes land.
+Until then: **zero** build-ready approval items (T3-3 already shipped, #3512); the machinery fans out only after T3-1/T3-2 votes or A3 host input.
 
 ## 7. Proposed next executors
 
