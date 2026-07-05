@@ -82,6 +82,7 @@
               :placeholder="field.placeholder"
               :disabled="isAutoSummedTotal(field.id)"
               :controls="!isAutoSummedTotal(field.id)"
+              v-bind="numberFieldProps(field)"
               style="width: 100%"
             />
 
@@ -192,6 +193,7 @@
                       v-model="row[column.id]"
                       :controls="false"
                       :disabled="isDetailDerivedColumnReadOnly(field, column, row)"
+                      v-bind="numberFieldProps(column)"
                       style="width: 100%"
                     />
                     <el-date-picker
@@ -282,20 +284,22 @@
               </div>
             </div>
 
-            <!-- attachment (drag upload) -->
-            <el-upload
+            <!-- attachment: B2-28 honest-disable STOPGAP until the real upload pipeline lands (audit
+                 follow-up B3-07). The previous el-upload (action="#" + auto-upload=false) was fully
+                 interactive but never actually uploaded anything: the raw File a user dropped landed in
+                 formData, and JSON.stringify-ing that for the request body silently turned it into `{}`
+                 — a success toast over quietly-dropped data. An honest disabled placeholder beats a fake
+                 uploader. The field label + required marker (rendered by the surrounding el-form-item)
+                 stay visible; `formRules` (below) excludes attachment fields so a `required` attachment
+                 can never block submission — there being no working way to satisfy it yet. handleSubmit
+                 additionally strips attachment-typed keys defensively (see stripAttachmentFields). -->
+            <div
               v-else-if="field.type === 'attachment'"
-              action="#"
-              :auto-upload="false"
-              drag
-              :on-change="(file: any) => handleFileChange(field.id, file)"
+              class="approval-new__attachment-disabled"
+              data-testid="approval-attachment-disabled"
             >
-              <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
-              <div class="el-upload__text">将文件拖到此处，或<em>点击上传</em></div>
-              <template #tip>
-                <div class="el-upload__tip">支持常见文件格式，单个文件不超过 10MB</div>
-              </template>
-            </el-upload>
+              附件上传功能即将支持，请先在其他字段中注明附件信息。
+            </div>
 
             <!-- fallback -->
             <el-input
@@ -335,8 +339,8 @@ import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
-import { ArrowLeft, Search, UploadFilled } from '@element-plus/icons-vue'
-import type { FormField } from '../../types/approval'
+import { ArrowLeft, Search } from '@element-plus/icons-vue'
+import type { FormField, FormSchema } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
@@ -345,6 +349,7 @@ import { recordRecentTemplate } from '../../approvals/recentTemplates'
 import { useAuth } from '../../composables/useAuth'
 import { useAutoSumTotal } from '../../approvals/useAutoSumTotal'
 import { isRowDerivationActive } from '../../approvals/lineDerivation'
+import { numberFieldProps } from '../../approvals/numberFieldProps'
 import {
   createEmptyDetailRow,
   isDetailCellVisible,
@@ -374,7 +379,10 @@ const { isAutoSummedTotal } = useAutoSumTotal(template, formData)
 const formRules = computed<FormRules>(() => {
   const rules: FormRules = {}
   for (const field of visibleFields.value) {
-    if (field.required) {
+    // B2-28: attachment fields render a disabled stopgap block (no working uploader yet — see the
+    // template comment above), so a `required` attachment must never make the form unsubmittable;
+    // there is no way for the user to satisfy it. Excluded from validation entirely.
+    if (field.required && field.type !== 'attachment') {
       rules[field.id] = [
         { required: true, message: `请填写${field.label}`, trigger: 'blur' },
       ]
@@ -383,8 +391,29 @@ const formRules = computed<FormRules>(() => {
   return rules
 })
 
-function handleFileChange(fieldId: string, file: any) {
-  formData[fieldId] = file?.raw ?? null
+/**
+ * B2-28: defensive submit-time exclusion of attachment-typed fields. The disabled placeholder never
+ * populates `formData` for these ids, but this strips them anyway — belt-and-suspenders so a future
+ * edit to the fill view (e.g. reintroducing a real uploader before the B3-07 pipeline lands) can't
+ * silently reach the create-approval payload without an explicit decision here. Kept local to this
+ * view's submit composition rather than folded into the shared `detailField` prune utils, which are
+ * also used by the read-only detail-view snapshot rendering (a different concern: displaying
+ * already-submitted data, not gating what a NEW submission may contain).
+ */
+function stripAttachmentFields(
+  formSchema: FormSchema,
+  data: Record<string, unknown>,
+): Record<string, unknown> {
+  const attachmentFieldIds = new Set(
+    formSchema.fields.filter((field) => field.type === 'attachment').map((field) => field.id),
+  )
+  if (attachmentFieldIds.size === 0) return data
+  const result: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(data)) {
+    if (attachmentFieldIds.has(key)) continue
+    result[key] = value
+  }
+  return result
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +471,15 @@ function retryLoad() {
   templateStore.loadTemplate(templateId)
 }
 
+// Submit-time formData composition: prune hidden fields/detail-cells (existing contract), THEN
+// strip attachment-typed fields (B2-28 — see stripAttachmentFields) so the create-approval payload
+// never carries an attachment key while the fill UI can't legitimately populate one.
+function buildSubmitFormData(): Record<string, unknown> {
+  if (!template.value) return { ...formData }
+  const pruned = pruneHiddenFormDataWithDetail(template.value.formSchema, formData)
+  return stripAttachmentFields(template.value.formSchema, pruned)
+}
+
 async function handleSubmit() {
   if (formRef.value) {
     try {
@@ -456,7 +494,7 @@ async function handleSubmit() {
   try {
     const result = await approvalStore.submitApproval({
       templateId,
-      formData: template.value ? pruneHiddenFormDataWithDetail(template.value.formSchema, formData) : { ...formData },
+      formData: buildSubmitFormData(),
     })
     ElMessage.success('审批已提交')
     // B1-08: best-effort 最近使用 record — must never delay or fail the navigation.
@@ -589,6 +627,18 @@ watch([visibleFieldIds, template], () => {
   border: 1px solid var(--el-border-color-lighter, #e4e7ed);
   border-radius: 8px;
   padding: 24px;
+}
+
+.approval-new__attachment-disabled {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border: 1px dashed var(--el-border-color, #dcdfe6);
+  border-radius: 6px;
+  background: var(--el-fill-color-lighter, #f5f7fa);
+  color: var(--el-text-color-secondary, #909399);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .approval-new__submit {
