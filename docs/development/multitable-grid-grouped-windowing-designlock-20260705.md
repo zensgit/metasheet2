@@ -1,7 +1,7 @@
 # Multitable grid — GROUPED-path row windowing — DESIGN LOCK (PROPOSED)
 
 - **Status**: PROPOSED — awaiting owner ratification. Docs-only PR; no runtime code ships here.
-- **Provenance**: this is the design-lock the measure-first baseline (`docs/development/multitable-grid-perf-baseline-20260705.md`, PR #3582, branch head `f709acb9b` — baseline PR still open at lock-writing time) called for. The flat-path half of audit gap Tier-B #4 shipped long ago (PR #3008, `085ce92be`, 2026-06-22); this lock covers the remaining half the baseline isolated: **the grouped rendering path has no windowing at all**.
+- **Provenance**: this is the design-lock the measure-first baseline (`docs/development/multitable-grid-perf-baseline-20260705.md`, PR #3582, squash `b891780bd`, merged 2026-07-05) called for. The flat-path half of audit gap Tier-B #4 shipped long ago (PR #3008, `085ce92be`, 2026-06-22); this lock covers the remaining half the baseline isolated: **the grouped rendering path has no windowing at all**.
 - **Change surface when implemented** (single runtime PR after ratification): `apps/web/src/multitable/components/MetaGridTable.vue` only (grouped `<tbody>` branch + new windowing computeds + two spacer rows), plus tests. **No backend change, no API change, no data-shape change, no new env flag.**
 
 ## §1 Problem — verified against code, with one honest reframing of the baseline
