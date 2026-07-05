@@ -593,14 +593,21 @@ async function assertMainFlowCreateAndPatch() {
     'stale user\'s pre-seeded row was genuinely PATCHED away from its stale dual-fingerprint markers',
     staleRec,
   )
-  ok(fake.store.length === 2, 'exactly 2 report-record rows exist after tick 1 (no extras)', fake.store.length)
+  // review P2: count only THIS (main) org's rows. The gate-open tick fans out to every org with an
+  // attendance_rules row (resolveAttendanceReportSyncScheduledTriggerOrgIds has no per-org filter), so
+  // the gate org's own same-day record also lands in the shared fake.store — an absolute ===2 would
+  // false-FAIL on real staging. Scope by the main org's rowKey prefix (scenario 3's idiom).
+  const mainOrgRowCount = () => fake.store.filter(
+    (row) => String(row.data[fake.rowKeyFieldId] ?? '').startsWith(`${orgId}:`),
+  ).length
+  ok(mainOrgRowCount() === 2, 'exactly 2 main-org report-record rows exist after tick 1 (no extras)', mainOrgRowCount())
 
   resetSettingsCache()
   const tick2 = await runTick()
   const mine2 = findOrgResult(tick2, orgId)
   ok(isIdempotentNoOpRepeat(mine2, mine1?.jobId), 'main flow tick 2 (same period): idempotent no-op, same jobId, reason=already_completed', mine2)
   ok(await jobRowCount(orgId) === 1, 'main flow: still exactly 1 job row after the repeat tick (no duplicate job)')
-  ok(fake.store.length === 2, 'main flow: still exactly 2 report-record rows after the repeat tick (no duplicate/second write)', fake.store.length)
+  ok(mainOrgRowCount() === 2, 'main flow: still exactly 2 main-org report-record rows after the repeat tick (no duplicate/second write)', mainOrgRowCount())
 
   return { totalsTick1: mine1?.totals ?? null }
 }
