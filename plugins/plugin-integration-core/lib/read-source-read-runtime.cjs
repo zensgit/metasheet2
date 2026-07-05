@@ -38,9 +38,10 @@ const CONFIGURED_READ_BODY_KEYS = Object.freeze(['config', 'inputs'])
 
 // R2 (#1709, owner-authorized 2026-07-03): resolver_lookup is now a supported runtime mode — its multiplicity
 // selection semantics were designed (resolver design-lock) and implemented as the R1 pure evaluator, which
-// this executor invokes. STANDALONE ONLY: the resolver resolves one key to one value and returns it; its
-// output is NEVER fed into a second read / BOM lookup / any chained call (no composition — a separate,
-// still-ungated slice). The other three modes keep the generic field-map data plane below.
+// this executor invokes. STANDALONE: called directly, the resolver resolves one key to one value and
+// returns it to the caller, with no chaining here. The composition path (C-R3, merged) lives in
+// read-source-composition-runtime.cjs and orchestrates this executor per hop, feeding one hop's resolved
+// value into the next hop's key input. The other three modes keep the generic field-map data plane below.
 const CONFIGURED_READ_SUPPORTED_MODES = Object.freeze(['single_record', 'list_page', 'detail_with_lines', 'resolver_lookup'])
 
 function isPlainObject(value) {
@@ -176,8 +177,9 @@ async function executeConfiguredRead(prepared, { system, createAdapter, timeoutM
   // R2 (#1709): resolver_lookup BYPASSES the generic field-map data plane below. The R1 evaluator locates the
   // candidate container, applies the config's multiplicity rule (exactly_one / first_when_sorted /
   // field_equals — each with its own fail-closed detail), and returns { evidence, data } where data carries
-  // ONLY the one resolver output target+value. STANDALONE: that value is returned to the caller and NEVER
-  // fed into a second read / BOM lookup / chained call (composition is a separate, still-ungated slice).
+  // ONLY the one resolver output target+value. STANDALONE: called directly here, that value is returned to
+  // the caller with no further chaining. The composition path (C-R3, merged, read-source-composition-runtime.cjs)
+  // orchestrates this executor per hop instead of calling it standalone.
   if (plan.mode === 'resolver_lookup') {
     return evaluateResolver(config, raw, { rowCap: plan.rowCap })
   }

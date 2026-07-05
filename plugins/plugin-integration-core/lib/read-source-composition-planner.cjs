@@ -4,7 +4,9 @@
 // docs/development/integration-read-source-resolver-composition-design-lock-20260703.md).
 //
 // Scope fence: pure functions only. NO route, NO outbound call, NO adapter, NO persistence, NO write,
-// NO recursion. The C-R3 chain runtime executor is a separate, later, gated opt-in. This module only:
+// NO recursion. The C-R3 chain runtime executor has since shipped and lives in
+// read-source-composition-runtime.cjs, which consumes this planner's output; later rungs (recursive
+// expansion) remain a separate, gated opt-in. This module only:
 //   1. plans an approved two-hop composition (reusing the C-R1 save-time validator verbatim, so
 //      approved-only / resolver_lookup-only / write-shaped-step-rejected all hold at plan time),
 //   2. derives hop N+1's key-only input from hop N's resolved single value — a typed scalar handoff
