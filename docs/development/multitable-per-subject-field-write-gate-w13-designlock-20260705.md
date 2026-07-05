@@ -1,7 +1,7 @@
 # Multitable per-subject field-write gate — close the two write paths that skip it (Yjs bridge + single-record PATCH) — W1-3 DESIGN LOCK (PROPOSED)
 
 - **Status**: PROPOSED — awaiting owner ratification. Docs-only; no runtime ships here.
-- **Slice**: W1-3 of the multitable-window goal pool (`docs/development/multitable-window-goal-pool-todo-20260705.md`). Third angle of the **Yjs-bridge side-door theme** already in flight: freshness = **W1-1** (`multitable-formula-freshness-designlock-20260705.md`, merged `26af7a560`); capability enforcement = **W1-2 B1** (PR #3649); **per-subject field-write enforcement = this**. Origin: the runtime finding surfaced during the #3649 build (`/tmp/finding-yjs-bridge-fieldperm-writegate-20260705.md`), re-grounded at origin/main below.
+- **Slice**: W1-3 of the multitable-window goal pool (`docs/development/multitable-window-goal-pool-todo-20260705.md`). Third angle of the **Yjs-bridge side-door theme** already in flight: freshness = **W1-1** (`multitable-formula-freshness-designlock-20260705.md`, merged `26af7a560`); capability enforcement = **W1-2 B1** (merged `e79e4788e`, #3649); **per-subject field-write enforcement = this**. Origin: the runtime finding surfaced during the #3649 build (`/tmp/finding-yjs-bridge-fieldperm-writegate-20260705.md`), re-grounded at origin/main below.
 - **What W1-3 is NOT**: not a `field_permissions` model change; not a change to `RecordWriteService.patchRecords` / `RecordService.patchRecord` (they stay **property-level only** — that is the documented, intentional design contract, see §1); not a refactor of the ~6 working route gates' behavior (only an OPTIONAL shared-predicate extraction, §2 LOCK-F2); not Yjs GA; not the W1-1 recompute or W1-2 capability concerns (sibling slices).
 
 ## §1 Problem (verified at line level, origin/main)
@@ -50,6 +50,6 @@ No new env flag, no migration, no schema change. Two runtime touch points (bridg
 
 ## §6 Arc placement
 - ✅ **W1-1** formula freshness (Yjs-bridge recompute + expression-change bulk recompute) — merged `26af7a560`
-- ⬜ **W1-2 B1** side-door capability goldens — PR #3649 (open)
+- ✅ **W1-2 B1** side-door capability goldens — merged `e79e4788e` (#3649)
 - ⬜ **W1-3** per-subject field-write gate on the two uncovered paths — **this lock**
 - 🔒 W1-2 B2–B4 (rest of the permission matrix) · 🔒 GW runtime · 🔒 S3/S4/S5 (owner-gated)
