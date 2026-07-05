@@ -55,6 +55,7 @@ const JOB_COMMIT_WIRE: AiBulkJobCommitData = {
   state: 'resolved',
   counts: { committed: 1, stale_reprev: 1, write_conflict: 0, skipped_no_perm: 0 },
   attempted: 2,
+  batchId: 'batch_job_1',
 }
 
 function jsonResponse(body: unknown, init?: { status?: number; headers?: Record<string, string> }): Response {

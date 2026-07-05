@@ -198,7 +198,8 @@ export interface MetaRevisionRetentionSchedulerOptions {
 }
 
 /**
- * Runtime entry: start the periodic retention sweep. **No-op (returns immediately) when retention is
+ * Runtime entry: start the periodic retention sweep of BOTH `meta_record_revisions` and
+ * `meta_config_revisions` (T9 D4 — one knob ages both). **No-op (returns immediately) when retention is
  * disabled** — which is the default — so wiring this into bootstrap changes nothing until the owner
  * sets `MULTITABLE_META_REVISION_RETENTION_ENABLED=1`. Mirrors `startMultitableAttachmentCleanup`
  * (setInterval + returned stop fn; errors are logged, never crash the process). Returns a stop fn.
@@ -214,10 +215,18 @@ export function startMetaRevisionRetention(options: MetaRevisionRetentionSchedul
   const queryFn = options.query ?? (dbQuery as unknown as RetentionQueryFn)
   const intervalMs = options.intervalMs ?? resolveIntervalMs(env.MULTITABLE_META_REVISION_RETENTION_INTERVAL_MS)
   const runSweep = () => {
+    // T9 D4: one knob ages BOTH append-only logs. Sweep record revisions AND config/schema
+    // revisions each tick, under the same policy/flag/interval (#3168 "same policy as records").
+    // The two are isolated: a failure of one never blocks the other, and each keeps the
+    // never-delete-latest floor inside its own sweep fn.
     void Promise.resolve()
       .then(() => sweepMetaRevisionRetention(queryFn, config))
-      .then((deleted) => { if (deleted > 0) logger.info(`Meta-revision retention pruned ${deleted} revision(s)`) })
+      .then((deleted) => { if (deleted > 0) logger.info(`Meta-revision retention pruned ${deleted} record revision(s)`) })
       .catch((error) => logger.warn('Meta-revision retention sweep failed', error as Error))
+    void Promise.resolve()
+      .then(() => sweepConfigRevisionRetention(queryFn, config))
+      .then((deleted) => { if (deleted > 0) logger.info(`Meta-revision retention pruned ${deleted} config revision(s)`) })
+      .catch((error) => logger.warn('Config-revision retention sweep failed', error as Error))
   }
   const timer = setInterval(runSweep, intervalMs)
   if (typeof timer === 'object' && 'unref' in timer) (timer as { unref: () => void }).unref()
