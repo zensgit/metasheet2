@@ -259,6 +259,16 @@
     <section class="integration-workbench__panel">
       <div class="integration-workbench__panel-head">
         <div>
+          <h2>读取源组合配置(顾问/管理员自助)</h2>
+          <p>选择两个已审批的 resolver_lookup 读取源,组装成两跳组合:保存版本(内容寻址,幂等)→ 审批后运行时才可选用。本面板不含写入外部系统的能力。</p>
+        </div>
+      </div>
+      <IntegrationReadSourceCompositionAuthoringPanel :scope="currentScope()" />
+    </section>
+
+    <section class="integration-workbench__panel">
+      <div class="integration-workbench__panel-head">
+        <div>
           <h2>读取源组合运行(顾问/操作员自助)</h2>
           <p>选择已审批的组合链,提供首个业务 key 后运行:中间键由平台派生,证据 values-free,数据仅末跳输出。本面板不含配置编写或写入。</p>
         </div>
@@ -1474,6 +1484,7 @@ import {
 import MetaIntegrationFieldRuleAuthoring from '../components/integration/MetaIntegrationFieldRuleAuthoring.vue'
 import IntegrationReadSourceConfigPanel from '../components/integration/IntegrationReadSourceConfigPanel.vue'
 import IntegrationReadSourceCompositionPanel from '../components/integration/IntegrationReadSourceCompositionPanel.vue'
+import IntegrationReadSourceCompositionAuthoringPanel from '../components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
 import PlmBomReviewPanel from '../components/plm/PlmBomReviewPanel.vue'
 
 type WorkbenchSide = 'source' | 'target'

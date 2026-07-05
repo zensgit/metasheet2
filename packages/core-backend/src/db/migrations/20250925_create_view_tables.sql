@@ -15,9 +15,36 @@ CREATE TABLE IF NOT EXISTS tables (
   UNIQUE(name, workspace_id, deleted_at)
 );
 
--- Add FK constraint only if users table exists
+-- Add FK constraint only if users table exists AND users.id's type is
+-- compatible with tables.owner_id (integer). This migration historically ran
+-- before the users table existed (fresh installs create users later, in
+-- zzzz20260119100000_create_users_table.ts, whose id column is TEXT), so the
+-- table-existence-only guard below never fired the ALTER on that path and the
+-- FK was simply (silently) never added -- that is today's real end state on
+-- every environment where this migration succeeded. But this migrator runs
+-- with allowUnorderedMigrations: true (see migrate.ts), so a drifted/stale
+-- environment can apply this migration AFTER users already exists with its
+-- TEXT id, and PL/pgSQL's `EXCEPTION WHEN duplicate_object` does not catch a
+-- 42804 datatype mismatch -- it propagates and aborts the whole migration
+-- transaction (reproduced: "foreign key constraint \"tables_owner_id_fkey\"
+-- cannot be implemented ... Key columns \"owner_id\" and \"id\" are of
+-- incompatible types: integer and text"). Adding the type check makes this
+-- migration a no-op-equivalent everywhere it used to succeed (types never
+-- matched there either -- the FK genuinely never gets added on any current
+-- schema) while turning the crash on the drifted path into the same safe
+-- skip, so it is safe in-place for both worlds: already-applied environments
+-- never re-run this migration (kysely skips by name), and not-yet-applied
+-- environments now converge on the same end state the working path already
+-- produces.
 DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users') THEN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users')
+     AND EXISTS (
+       SELECT 1
+       FROM information_schema.columns u
+       JOIN information_schema.columns t ON t.data_type = u.data_type
+       WHERE u.table_schema = 'public' AND u.table_name = 'users' AND u.column_name = 'id'
+         AND t.table_schema = 'public' AND t.table_name = 'tables' AND t.column_name = 'owner_id'
+     ) THEN
     BEGIN
       ALTER TABLE tables ADD CONSTRAINT tables_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES users(id);
     EXCEPTION WHEN duplicate_object THEN NULL; END;
@@ -45,9 +72,18 @@ CREATE TABLE IF NOT EXISTS views (
   CONSTRAINT unique_default_view EXCLUDE (table_id WITH =) WHERE (is_default = TRUE AND deleted_at IS NULL)
 );
 
--- Add FK constraint only if users table exists
+-- Add FK constraint only if users table exists AND its id type matches
+-- views.created_by (integer) -- see the tables_owner_id_fkey comment above
+-- for the full both-worlds-safety rationale; same pattern applied here.
 DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users') THEN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users')
+     AND EXISTS (
+       SELECT 1
+       FROM information_schema.columns u
+       JOIN information_schema.columns t ON t.data_type = u.data_type
+       WHERE u.table_schema = 'public' AND u.table_name = 'users' AND u.column_name = 'id'
+         AND t.table_schema = 'public' AND t.table_name = 'views' AND t.column_name = 'created_by'
+     ) THEN
     BEGIN
       ALTER TABLE views ADD CONSTRAINT views_created_by_fkey FOREIGN KEY (created_by) REFERENCES users(id);
     EXCEPTION WHEN duplicate_object THEN NULL; END;
@@ -65,9 +101,18 @@ CREATE TABLE IF NOT EXISTS view_states (
   UNIQUE(view_id, user_id)
 );
 
--- Add FK constraint only if users table exists
+-- Add FK constraint only if users table exists AND its id type matches
+-- view_states.user_id (integer) -- see the tables_owner_id_fkey comment
+-- above for the full both-worlds-safety rationale; same pattern applied here.
 DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users') THEN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users')
+     AND EXISTS (
+       SELECT 1
+       FROM information_schema.columns u
+       JOIN information_schema.columns t ON t.data_type = u.data_type
+       WHERE u.table_schema = 'public' AND u.table_name = 'users' AND u.column_name = 'id'
+         AND t.table_schema = 'public' AND t.table_name = 'view_states' AND t.column_name = 'user_id'
+     ) THEN
     BEGIN
       ALTER TABLE view_states ADD CONSTRAINT view_states_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
     EXCEPTION WHEN duplicate_object THEN NULL; END;
@@ -142,9 +187,19 @@ CREATE TABLE IF NOT EXISTS form_responses (
   status VARCHAR(20) DEFAULT 'submitted' CHECK (status IN ('submitted', 'processed', 'archived'))
 );
 
--- Add FK constraint only if users table exists
+-- Add FK constraint only if users table exists AND its id type matches
+-- form_responses.submitted_by (integer) -- see the tables_owner_id_fkey
+-- comment above for the full both-worlds-safety rationale; same pattern
+-- applied here.
 DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users') THEN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users')
+     AND EXISTS (
+       SELECT 1
+       FROM information_schema.columns u
+       JOIN information_schema.columns t ON t.data_type = u.data_type
+       WHERE u.table_schema = 'public' AND u.table_name = 'users' AND u.column_name = 'id'
+         AND t.table_schema = 'public' AND t.table_name = 'form_responses' AND t.column_name = 'submitted_by'
+     ) THEN
     BEGIN
       ALTER TABLE form_responses ADD CONSTRAINT form_responses_submitted_by_fkey FOREIGN KEY (submitted_by) REFERENCES users(id);
     EXCEPTION WHEN duplicate_object THEN NULL; END;
@@ -169,12 +224,30 @@ CREATE TABLE IF NOT EXISTS view_permissions (
   )
 );
 
--- Add FK constraints only if referenced tables exist with matching types
+-- Add FK constraints only if referenced tables exist with matching types --
+-- see the tables_owner_id_fkey comment above for the full both-worlds-safety
+-- rationale; same pattern applied here for user_id/created_by (integer).
 DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users') THEN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users')
+     AND EXISTS (
+       SELECT 1
+       FROM information_schema.columns u
+       JOIN information_schema.columns t ON t.data_type = u.data_type
+       WHERE u.table_schema = 'public' AND u.table_name = 'users' AND u.column_name = 'id'
+         AND t.table_schema = 'public' AND t.table_name = 'view_permissions' AND t.column_name = 'user_id'
+     ) THEN
     BEGIN
       ALTER TABLE view_permissions ADD CONSTRAINT view_permissions_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id);
     EXCEPTION WHEN duplicate_object THEN NULL; END;
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users')
+     AND EXISTS (
+       SELECT 1
+       FROM information_schema.columns u
+       JOIN information_schema.columns t ON t.data_type = u.data_type
+       WHERE u.table_schema = 'public' AND u.table_name = 'users' AND u.column_name = 'id'
+         AND t.table_schema = 'public' AND t.table_name = 'view_permissions' AND t.column_name = 'created_by'
+     ) THEN
     BEGIN
       ALTER TABLE view_permissions ADD CONSTRAINT view_permissions_created_by_fkey FOREIGN KEY (created_by) REFERENCES users(id);
     EXCEPTION WHEN duplicate_object THEN NULL; END;
@@ -202,9 +275,18 @@ CREATE TABLE IF NOT EXISTS view_activity (
   PRIMARY KEY (id, created_at)  -- Must include partition key created_at
 ) PARTITION BY RANGE (created_at);
 
--- Add FK constraint only if users table exists
+-- Add FK constraint only if users table exists AND its id type matches
+-- view_activity.user_id (integer) -- see the tables_owner_id_fkey comment
+-- above for the full both-worlds-safety rationale; same pattern applied here.
 DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users') THEN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users')
+     AND EXISTS (
+       SELECT 1
+       FROM information_schema.columns u
+       JOIN information_schema.columns t ON t.data_type = u.data_type
+       WHERE u.table_schema = 'public' AND u.table_name = 'users' AND u.column_name = 'id'
+         AND t.table_schema = 'public' AND t.table_name = 'view_activity' AND t.column_name = 'user_id'
+     ) THEN
     BEGIN
       ALTER TABLE view_activity ADD CONSTRAINT view_activity_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id);
     EXCEPTION WHEN duplicate_object THEN NULL; END;
