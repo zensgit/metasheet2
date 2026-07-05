@@ -22818,6 +22818,10 @@ const leaveQuickFillShiftWindow = computed<AttendanceLeaveQuickFillShiftWindow |
 const canQuickFillLeave = computed(() =>
   isLeaveRequest.value
   && Boolean(requestForm.leaveTypeId)
+  // workDate is a clearable `type=date` input; without it buildLeaveQuickFill() no-ops (review
+  // P3) — gate the buttons + rounding note on it too so a cleared date hides them consistently
+  // rather than showing dead buttons.
+  && Boolean(requestForm.workDate)
   && hasValidLeaveQuickFillShiftWindow(leaveQuickFillShiftWindow.value),
 )
 

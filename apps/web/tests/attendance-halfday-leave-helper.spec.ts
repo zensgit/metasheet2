@@ -451,6 +451,22 @@ describe('Attendance half-day leave helper — inline request form (component)',
 
       expect(container!.querySelector('[data-leave-quickfill-group]')).toBeNull()
     })
+
+    it('review P3: clearing the (clearable) work date hides the buttons + rounding note, not dead no-op buttons', async () => {
+      installOverviewMock()
+      await mountAndSelectLeave()
+      // buttons present with a valid work date + leave type + shift window
+      expect(container!.querySelector('[data-leave-quickfill-group]')).not.toBeNull()
+
+      const workDate = container!.querySelector<HTMLInputElement>('#attendance-request-work-date')!
+      workDate.value = ''
+      workDate.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+
+      // cleared date -> buttons AND the half-day note both hidden (consistent), never visible-but-no-op
+      expect(container!.querySelector('[data-leave-quickfill-group]')).toBeNull()
+      expect(container!.querySelector('[data-leave-quickfill-half-note]')).toBeNull()
+    })
   })
 
   describe('G2 — minutes-to-days conversion hint', () => {
