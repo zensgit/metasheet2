@@ -136,7 +136,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useAuth } from '../../composables/useAuth'
 import type { IntegrationScope } from '../../services/integration/workbench'
-import { listReadSourceConfigs, type ReadSourceConfigRow } from '../../services/integration/readSourceConfigs'
+import { listReadSourceConfigs, ReadSourceApiError, type ReadSourceConfigRow } from '../../services/integration/readSourceConfigs'
 import {
   approveReadSourceComposition,
   createReadSourceCompositionDraft,
@@ -213,8 +213,8 @@ function auditActionLabel(action: ReadSourceCompositionAuditRow['action']): stri
 }
 
 function coarseErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message
-  return '组合接口请求失败'
+  if (error instanceof ReadSourceCompositionApiError || error instanceof ReadSourceApiError) return error.message
+  return '组合配置请求失败'
 }
 
 async function refreshPickers(): Promise<void> {
