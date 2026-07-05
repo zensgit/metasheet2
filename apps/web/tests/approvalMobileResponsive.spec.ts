@@ -169,14 +169,14 @@ async function flushUi(cycles = 4): Promise<void> {
   }
 }
 
-function pendingRow(id: string, title: string): any {
+function pendingRow(id: string, title: string, createdAt = '2026-04-10T08:00:00Z'): any {
   return {
     id,
     requestNo: `AP-${id}`,
     title,
     status: 'pending',
     requester: { name: '张三' },
-    createdAt: '2026-04-10T08:00:00Z',
+    createdAt,
     assignments: [],
   }
 }
@@ -289,5 +289,26 @@ describe('ApprovalCenterView — T3-1 mobile responsive gate', () => {
     await flushUi()
 
     expect(pushSpy).toHaveBeenCalledWith({ name: 'approval-detail', params: { id: '42' } })
+  })
+
+  // ---------------------------------------------------------------------------
+  // B1-03 (审批中心列表热路径包) — the mobile card's date line switches to 已等待 aging with
+  // severity coloring; the absolute date is preserved as a `:title` tooltip rather than lost.
+  // ---------------------------------------------------------------------------
+  it('flag ON + narrow → mobile card shows 已等待 aging with severity coloring (absolute date kept as a tooltip)', async () => {
+    mockApprovalMobileFlag.value = true
+    setViewport(true)
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString()
+    mockPendingApprovals.value = [pendingRow('1', '出差报销', eightDaysAgo)]
+    await mountView()
+
+    const card = container!.querySelector('[data-testid="approval-mobile-card"]')
+    expect(card).toBeTruthy()
+    const dateEl = card!.querySelector('.approval-mobile-list__date')
+    expect(dateEl).toBeTruthy()
+    expect(dateEl!.textContent).toContain('已等待')
+    expect(dateEl!.textContent).toContain('8 天')
+    expect(dateEl!.classList.contains('approval-mobile-list__date--urgent')).toBe(true)
+    expect(dateEl!.getAttribute('title')).toBeTruthy()
   })
 })

@@ -38,7 +38,13 @@
         <span class="approval-mobile-list__request-no">{{ row.requestNo ?? '-' }}</span>
         <span class="approval-mobile-list__requester">{{ row.requester?.name ?? '-' }}</span>
       </div>
-      <div class="approval-mobile-list__date">{{ formatDate(row.createdAt) }}</div>
+      <div
+        class="approval-mobile-list__date"
+        :class="`approval-mobile-list__date--${waitSeverity(row.createdAt)}`"
+        :title="formatDate(row.createdAt)"
+      >
+        已等待 {{ formatRelativeWait(row.createdAt) }}
+      </div>
     </button>
   </div>
 </template>
@@ -47,6 +53,7 @@
 import { computed } from 'vue'
 import type { UnifiedApprovalDTO } from '../../types/approval'
 import { useLocale } from '../../composables/useLocale'
+import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 
 // T3-1 v0 — dedicated touch-first list card (ballot Q10). Replaces the desktop
 // `el-table` (fixed column widths + horizontal scroll + tiny row-click targets)
@@ -215,5 +222,14 @@ function formatDate(dateStr: string): string {
 .approval-mobile-list__date {
   font-size: 12px;
   color: var(--el-text-color-secondary, #909399);
+}
+
+/* B1-03: 已等待 aging severity — same warn/urgent palette as the desktop table. */
+.approval-mobile-list__date--warn {
+  color: #e6a23c;
+}
+
+.approval-mobile-list__date--urgent {
+  color: #f56c6c;
 }
 </style>

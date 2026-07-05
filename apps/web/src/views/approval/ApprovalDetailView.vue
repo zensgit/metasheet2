@@ -13,6 +13,16 @@
       >
         {{ statusLabel(approval.status) }}
       </el-tag>
+      <!-- B1-03: 已等待 aging — glanceable next to the status tag, only while still pending. -->
+      <el-tag
+        v-if="approval && approval.status === 'pending'"
+        :type="waitChipType"
+        size="large"
+        effect="plain"
+        data-testid="approval-wait-chip"
+      >
+        已等待 {{ waitChipLabel }}
+      </el-tag>
       <el-tag
         v-if="approval && isInParallelRegion"
         type="warning"
@@ -642,6 +652,7 @@ import {
   type DisplayField,
 } from '../../approvals/detailField'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
+import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 
 const route = useRoute()
 const router = useRouter()
@@ -661,6 +672,17 @@ const { isMobile } = useMobileViewport()
 const isMobileLayout = computed(() => hasFeature('approvalMobile') && isMobile.value)
 
 const approval = computed(() => store.activeApproval)
+
+// B1-03: 已等待 chip — a glanceable "how long has this been sitting" cue next to the status tag,
+// only meaningful while the instance is still pending (once resolved, `updatedAt`/the history
+// timeline already tell that story). Severity mirrors the list view's warn/urgent bands.
+const waitChipLabel = computed(() => (approval.value ? formatRelativeWait(approval.value.createdAt) : ''))
+const waitChipType = computed(() => {
+  const severity = approval.value ? waitSeverity(approval.value.createdAt) : 'normal'
+  if (severity === 'urgent') return 'danger'
+  if (severity === 'warn') return 'warning'
+  return 'info'
+})
 
 // Read-only detail (明细) tables, keyed by snapshot field id. Built from the instance's FROZEN
 // formSchema (C-3a read-path) so a later column rename/reorder on the live template never

@@ -191,6 +191,58 @@
               {{ formatDate(row.createdAt) }}
             </template>
           </el-table-column>
+          <!-- B1-03 (part 2): 已等待 aging — glanceable severity (>3d warn / >7d urgent) so a
+               reviewer can triage the oldest requests first. The 第 X/Y 步 sub-line only renders
+               when both numbers are present (mirrors ApprovalDetailView's "进度" meta item). -->
+          <el-table-column label="已等待" width="140">
+            <template #default="{ row }">
+              <span :class="waitClass(row.createdAt)">{{ formatRelativeWait(row.createdAt) }}</span>
+              <div
+                v-if="row.currentStep != null && row.totalSteps != null"
+                class="approval-center__wait-progress"
+              >
+                第 {{ row.currentStep }}/{{ row.totalSteps }} 步
+              </div>
+            </template>
+          </el-table-column>
+          <!-- B1-03 (part 1): inline approve/reject hot path — only for platform-native pending
+               rows (reuses `isRowBatchSelectable`; attendance-bridged rows keep routing to the
+               attendance module via row-click and never show these). @click.stop on every
+               reference so opening the popconfirm / reject dialog never also navigates the row. -->
+          <el-table-column label="操作" width="150" fixed="right">
+            <template #default="{ row }">
+              <template v-if="isRowBatchSelectable(row)">
+                <el-popconfirm
+                  :title="`确认通过「${row.title}」？`"
+                  confirm-button-text="确认"
+                  cancel-button-text="取消"
+                  @confirm="handleInlineApprove(row)"
+                >
+                  <template #reference>
+                    <el-button
+                      type="primary"
+                      link
+                      :loading="inlineApprovingId === row.id"
+                      :disabled="inlineApprovingId !== null"
+                      :data-testid="`approval-row-approve-${row.id}`"
+                      @click.stop
+                    >
+                      通过
+                    </el-button>
+                  </template>
+                </el-popconfirm>
+                <el-button
+                  type="danger"
+                  link
+                  :disabled="inlineApprovingId !== null"
+                  :data-testid="`approval-row-reject-${row.id}`"
+                  @click.stop="openRowReject(row)"
+                >
+                  驳回
+                </el-button>
+              </template>
+            </template>
+          </el-table-column>
           <template #empty>
             <el-empty
               :description="searchText ? '未找到匹配的审批' : '暂无待处理审批'"
@@ -247,9 +299,14 @@
             </template>
           </el-table-column>
           <!-- 催办: a requester nudge to the current approver, only meaningful while the instance is
-               still pending. Server-side rate-limited (1/instance/user/hour); 429 surfaces gracefully. -->
-          <el-table-column label="操作" width="100" fixed="right">
+               still pending. Server-side rate-limited (1/instance/user/hour); 429 surfaces gracefully.
+               B1-03: 已等待 sits right next to it — the longer a request has waited, the more it
+               motivates the requester to actually click 催办. -->
+          <el-table-column label="操作" width="170" fixed="right">
             <template #default="{ row }">
+              <span v-if="row.status === 'pending'" :class="waitClass(row.createdAt)">
+                已等待 {{ formatRelativeWait(row.createdAt) }}
+              </span>
               <el-button
                 v-if="row.status === 'pending'"
                 type="primary"
@@ -423,6 +480,84 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- B1-03 (part 1): per-row reject dialog — mirrors the batch-reject dialog's comment/policy
+         gating but targets a single row (`rowRejectTarget`); kept fully separate from the batch
+         dialog's own state so the two flows never cross-contaminate each other's comment/error. -->
+    <el-dialog
+      v-model="rowRejectDialogVisible"
+      title="驳回审批"
+      width="440px"
+      data-testid="approval-row-reject-dialog"
+    >
+      <el-alert
+        v-if="rowRejectError"
+        type="error"
+        show-icon
+        :closable="false"
+        :title="rowRejectError"
+        data-testid="approval-row-reject-error"
+        class="approval-center__row-reject-error"
+      />
+      <p v-if="rowRejectTarget" class="approval-center__row-reject-summary">
+        确认驳回「{{ rowRejectTarget.title }}」？
+      </p>
+      <el-input
+        v-model="rowRejectComment"
+        type="textarea"
+        :rows="3"
+        :placeholder="rowRejectCommentRequired ? '驳回原因（必填）' : '驳回意见（选填）'"
+        data-testid="approval-row-reject-comment"
+      />
+      <template #footer>
+        <el-button data-testid="approval-row-reject-cancel" @click="rowRejectDialogVisible = false">取消</el-button>
+        <el-button
+          type="danger"
+          :loading="rowRejectSubmitting"
+          :disabled="rowRejectConfirmDisabled"
+          data-testid="approval-row-reject-confirm"
+          @click="submitRowReject"
+        >
+          确认驳回
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- B1-03 (part 3): batch failure manifest — replaces the old collapsed toast whenever at
+         least one row fails, so the operator sees WHICH rows failed and WHY, then can retry just
+         the failed subset (same action + comment) without re-selecting anything. -->
+    <el-dialog
+      v-model="batchResultDialogVisible"
+      title="批量处理结果"
+      width="480px"
+      data-testid="approval-batch-result-dialog"
+    >
+      <p class="approval-center__batch-result-summary">
+        <template v-if="batchSucceededCount > 0">成功 {{ batchSucceededCount }} 项，失败 {{ batchFailureRows.length }} 项：</template>
+        <template v-else>全部 {{ batchFailureRows.length }} 项处理失败：</template>
+      </p>
+      <ul class="approval-center__batch-result-list">
+        <li
+          v-for="row in batchFailureRows"
+          :key="row.id"
+          class="approval-center__batch-result-item"
+        >
+          <div class="approval-center__batch-result-item-title">{{ row.requestNo }} · {{ row.title }}</div>
+          <div class="approval-center__batch-result-item-message">{{ row.message }}</div>
+        </li>
+      </ul>
+      <template #footer>
+        <el-button data-testid="approval-batch-result-close" @click="batchResultDialogVisible = false">关闭</el-button>
+        <el-button
+          type="primary"
+          :loading="batchRunning"
+          data-testid="approval-batch-retry"
+          @click="retryBatchFailures"
+        >
+          重试失败项
+        </el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
@@ -435,11 +570,12 @@ import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { dispatchAction, getPendingCount, markAllApprovalsRead, remindApproval } from '../../approvals/api'
-import { runApprovalBatchAction } from '../../approvals/useApprovalBatchActions'
+import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
 import { useLocale } from '../../composables/useLocale'
+import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import ApprovalMobileList from './ApprovalMobileList.vue'
 
 const router = useRouter()
@@ -487,6 +623,12 @@ const batchRejectDialogVisible = ref(false)
 const batchRejectComment = ref('')
 const remindingId = ref<string | null>(null)
 
+// B1-03: 已等待 aging severity class — shared by the pending table's column and the 我发起的
+// tab's inline hint next to 催办 (same warn/urgent palette everywhere it appears).
+function waitClass(createdAt: string): string {
+  return `approval-center__wait approval-center__wait--${waitSeverity(createdAt)}`
+}
+
 function rowKey(row: UnifiedApprovalDTO): string {
   return row.id
 }
@@ -510,28 +652,91 @@ function clearPendingSelection(): void {
   }
 }
 
+// B1-03 (part 3): batch failure manifest. A collapsed toast used to be the ceiling of feedback
+// for a partial/total batch failure — the operator could see a COUNT but not which rows or why.
+// `batchFailureRows` carries each failure's title/requestNo (looked up from a snapshot of the
+// selected rows taken at launch, since `loadCurrentTab()` reloads the list out from under the
+// original selection before the operator gets to read the dialog) plus the server's own message.
+interface ApprovalBatchFailureRow {
+  id: string
+  title: string
+  requestNo: string
+  message: string
+}
+const batchResultDialogVisible = ref(false)
+const batchFailureRows = ref<ApprovalBatchFailureRow[]>([])
+const batchSucceededCount = ref(0)
+const lastBatchAction = ref<'approve' | 'reject'>('approve')
+const lastBatchComment = ref('')
+let batchRowSnapshot = new Map<string, UnifiedApprovalDTO>()
+
+function buildFailureRows(failed: ApprovalBatchActionResult['failed']): ApprovalBatchFailureRow[] {
+  return failed.map(({ id, message }) => {
+    const row = batchRowSnapshot.get(id)
+    return {
+      id,
+      title: row?.title ?? id,
+      requestNo: row?.requestNo ?? '-',
+      message,
+    }
+  })
+}
+
+async function dispatchBatchAndHandleResult(
+  ids: string[],
+  action: 'approve' | 'reject',
+  comment: string,
+): Promise<void> {
+  const trimmed = comment.trim()
+  const result = await runApprovalBatchAction(
+    ids,
+    () => (trimmed ? { action, comment: trimmed } : { action }),
+    (id, req) => dispatchAction(id, req),
+  )
+  if (result.failed.length === 0) {
+    ElMessage.success(`已${action === 'approve' ? '通过' : '驳回'} ${result.succeeded.length} 项`)
+    batchResultDialogVisible.value = false
+    batchFailureRows.value = []
+  } else {
+    // B1-03: any failure now opens the manifest dialog instead of a toast (whether partial or
+    // total); only the all-success path above keeps today's light toast.
+    lastBatchAction.value = action
+    lastBatchComment.value = comment
+    batchSucceededCount.value = result.succeeded.length
+    batchFailureRows.value = buildFailureRows(result.failed)
+    batchResultDialogVisible.value = true
+  }
+  clearPendingSelection()
+  loadCurrentTab()
+  void refreshPendingBadgeCount()
+}
+
 async function runBatch(action: 'approve' | 'reject', comment: string): Promise<void> {
-  const ids = selectedPending.value.map((row) => row.id)
-  if (ids.length === 0 || batchRunning.value) return
+  const rows = selectedPending.value
+  if (rows.length === 0 || batchRunning.value) return
+  batchRowSnapshot = new Map(rows.map((row) => [row.id, row]))
   batchRunning.value = true
   batchAction.value = action
   try {
-    const trimmed = comment.trim()
-    const result = await runApprovalBatchAction(
-      ids,
-      () => (trimmed ? { action, comment: trimmed } : { action }),
-      (id, req) => dispatchAction(id, req),
-    )
-    if (result.failed.length === 0) {
-      ElMessage.success(`已${action === 'approve' ? '通过' : '驳回'} ${result.succeeded.length} 项`)
-    } else if (result.succeeded.length === 0) {
-      ElMessage.error(`全部 ${result.failed.length} 项处理失败：${result.failed[0]?.message ?? ''}`)
-    } else {
-      ElMessage.warning(`成功 ${result.succeeded.length} 项，失败 ${result.failed.length} 项（失败项仍在列表中）`)
-    }
-    clearPendingSelection()
-    loadCurrentTab()
-    void refreshPendingBadgeCount()
+    await dispatchBatchAndHandleResult(rows.map((row) => row.id), action, comment)
+  } finally {
+    batchRunning.value = false
+    batchAction.value = null
+  }
+}
+
+// 「重试失败项」— re-runs the SAME action + comment over just the ids still in the manifest.
+// `batchRowSnapshot` already carries these rows' title/requestNo from the original launch, so a
+// still-failing row keeps its label; `dispatchBatchAndHandleResult` overwrites `batchFailureRows`
+// in place with whatever is left (or closes the dialog on full success).
+async function retryBatchFailures(): Promise<void> {
+  if (batchRunning.value) return
+  const ids = batchFailureRows.value.map((row) => row.id)
+  if (ids.length === 0) return
+  batchRunning.value = true
+  batchAction.value = lastBatchAction.value
+  try {
+    await dispatchBatchAndHandleResult(ids, lastBatchAction.value, lastBatchComment.value)
   } finally {
     batchRunning.value = false
     batchAction.value = null
@@ -562,6 +767,68 @@ async function handleBatchReject(): Promise<void> {
   if (batchRejectConfirmDisabled.value) return
   await runBatch('reject', batchRejectComment.value)
   batchRejectDialogVisible.value = false
+}
+
+// ── B1-03 (part 1): inline approve/reject hot path on the pending list ─────
+// `inlineApprovingId` gates every row's approve button (not just the clicked row) while a
+// request is in flight — mirrors the existing `remindingId`-gates-every-催办-button convention
+// below, so a slow request can't be raced by mashing a different row.
+const inlineApprovingId = ref<string | null>(null)
+
+async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
+  if (inlineApprovingId.value) return
+  inlineApprovingId.value = row.id
+  try {
+    await dispatchAction(row.id, { action: 'approve' })
+    ElMessage.success('审批已通过')
+    loadCurrentTab()
+    void refreshPendingBadgeCount()
+  } catch (error) {
+    ElMessage.error(error instanceof Error && error.message ? error.message : '操作失败，请重试')
+  } finally {
+    inlineApprovingId.value = null
+  }
+}
+
+// Per-row reject dialog — deliberately its OWN state (`rowRejectTarget`/`rowRejectComment`/
+// `rowRejectError`), never overloading the batch-reject dialog's refs above, so the two flows
+// can never cross-contaminate each other's comment or error message.
+const rowRejectDialogVisible = ref(false)
+const rowRejectTarget = ref<UnifiedApprovalDTO | null>(null)
+const rowRejectComment = ref('')
+const rowRejectError = ref<string | null>(null)
+const rowRejectSubmitting = ref(false)
+
+function openRowReject(row: UnifiedApprovalDTO): void {
+  rowRejectTarget.value = row
+  rowRejectComment.value = ''
+  rowRejectError.value = null
+  rowRejectDialogVisible.value = true
+}
+
+// B1-04-style conservative default: required unless THIS row's policy explicitly opts out.
+const rowRejectCommentRequired = computed(() => rowRejectTarget.value?.policy?.rejectCommentRequired !== false)
+const rowRejectConfirmDisabled = computed(() => rowRejectCommentRequired.value && !rowRejectComment.value.trim())
+
+async function submitRowReject(): Promise<void> {
+  if (rowRejectConfirmDisabled.value || !rowRejectTarget.value) return
+  const target = rowRejectTarget.value
+  const trimmed = rowRejectComment.value.trim()
+  rowRejectSubmitting.value = true
+  rowRejectError.value = null
+  try {
+    await dispatchAction(target.id, trimmed ? { action: 'reject', comment: trimmed } : { action: 'reject' })
+    ElMessage.success('审批已驳回')
+    rowRejectDialogVisible.value = false
+    loadCurrentTab()
+    void refreshPendingBadgeCount()
+  } catch (error) {
+    // Mirrors B1-04's dialog-scoped inline error: keep the dialog open with the server's own
+    // reason instead of a toast, so the typed comment is never lost on a retry-in-place.
+    rowRejectError.value = error instanceof Error && error.message ? error.message : '操作失败，请重试'
+  } finally {
+    rowRejectSubmitting.value = false
+  }
 }
 
 async function handleUrge(row: UnifiedApprovalDTO): Promise<void> {
@@ -836,6 +1103,72 @@ onMounted(() => {
   margin: 0 0 12px;
   color: #4b5563;
   font-size: 14px;
+}
+
+/* B1-03: 已等待 aging severity — normal inherits the surrounding text color; warn/urgent escalate. */
+.approval-center__wait {
+  display: inline-block;
+  margin-right: 8px;
+  font-size: 13px;
+  color: #606266;
+}
+
+.approval-center__wait--warn {
+  color: #e6a23c;
+}
+
+.approval-center__wait--urgent {
+  color: #f56c6c;
+}
+
+.approval-center__wait-progress {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.approval-center__row-reject-summary {
+  margin: 0 0 12px;
+  color: #4b5563;
+  font-size: 14px;
+}
+
+.approval-center__row-reject-error {
+  margin-bottom: 12px;
+}
+
+.approval-center__batch-result-summary {
+  margin: 0 0 12px;
+  color: #4b5563;
+  font-size: 14px;
+}
+
+.approval-center__batch-result-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.approval-center__batch-result-item {
+  padding: 8px 0;
+  border-bottom: 1px solid #ebeef5;
+}
+
+.approval-center__batch-result-item:last-child {
+  border-bottom: none;
+}
+
+.approval-center__batch-result-item-title {
+  font-size: 14px;
+  color: #303133;
+}
+
+.approval-center__batch-result-item-message {
+  margin-top: 2px;
+  font-size: 13px;
+  color: #f56c6c;
 }
 
 .approval-center__attendance-entry {
