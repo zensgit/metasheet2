@@ -7,7 +7,7 @@ curl**。本轮固定节奏关掉该缺口——纯 client、config-time、走�
 
 ```text
 N1 authoring service 层(save/approve/retire/audit + clamp)   → #3617 4c7665752
-N2 authoring 面板(独立组件 + workbench 挂载 + 测试)          → #3621 9e77045a5
+N2 authoring 面板(独立组件 + workbench 挂载 + 测试)          → #3621 9e77045a5 + #3625
 ```
 
 写路径 / 递归 build 未触碰(各自 gated;生产写客户显式禁)。
@@ -39,13 +39,16 @@ N2 authoring 面板(独立组件 + workbench 挂载 + 测试)          → #3621
   而非面板隐藏——精确对齐 server 路由分层(save/approve/retire=write-tier;list/get/audit/run=
   read-tier),picker/审计对 read-tier 可见,变更动作被门。admin-hide 模式被有意不用(该路由族
   要求 write 非 admin)。
+- **generic error clamp**(#3625):面板只渲染已知 service error class 的 clamped message
+  (`ReadSourceCompositionApiError` / `ReadSourceApiError`);generic/transport `Error.message`
+  统一降级为固定 fallback,避免最后一层 client render 回显业务值。
 
 ## 2. 验证汇总
 
 | 件 | 验证 |
 | --- | --- |
 | N1 | 33/33(service 24 + mirror 3 + run 面板 6);vue-tsc 净;仅 2 文件;独立干净 worktree 复验 |
-| N2 | **87/87**(authoring 6 + run 6 + service 24 + mirror 3 + workbench 全量 48);vue-tsc 净;`git diff --check` 净;独立复验 |
+| N2 | **88/88**(authoring 7 + run 6 + service 24 + mirror 3 + workbench 全量 48);vue-tsc 净;`git diff --check` 净;独立复验 |
 | 哨兵纪律 | N1/N2 测试合计 10+ 处 `not.toContain` 哨兵扫描(业务值三元组渲染丢弃、409 粗码不回显、消息不回显原值) |
 
 ## 3. 模型分派实录(按难度自动选择)
@@ -72,5 +75,5 @@ values-free 证据,实体机验收 Phase 1-4 全程可面板+API 混合执行,�
 
 ## 5. 边界纪律(本轮零跨越)
 
-零 server 改动;写路径未碰;递归未 build;未与并行 session worktree 冲突(两 agent 各自隔离
-worktree,#3548/#3574 未扰)。
+零 server 改动;#3625 同面 client hardening,不新增 route/runtime;写路径未碰;递归未 build;
+未与并行 session worktree 冲突(两 agent 各自隔离 worktree,#3548/#3574 未扰)。
