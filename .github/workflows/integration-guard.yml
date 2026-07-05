@@ -1,0 +1,93 @@
+# Integration Guard (closure-plan B1): the 数据库及系统连接 line (#1709) had its full
+# plugin-integration-core CJS test chain AND its web mirror-tripwire / panel / service vitest specs
+# running in NO CI workflow — every "test-locked" / "tripwire fails RED in CI" claim on this line
+# rested on local runs only. This lane closes that gap, following the same targeted pattern as
+# attendance-web-guard.yml / approval-web-guard.yml (a curated spec list, NOT the whole apps/web
+# vitest suite, which still has historical/flaky failures and would be red on arrival).
+#
+# Two hermetic checks, no database required:
+#   1. the plugin's own CJS test chain (`pnpm --filter plugin-integration-core test`) — 35 pure suites
+#      covering read-source config/probe/resolver/composition/write-target;
+#   2. the integration web specs that carry the values-free / mirror-parity guarantees: the two vocab
+#      mirror tripwires, the read-source config / composition run / composition authoring panels, and
+#      the composition service layer.
+# Expand the spec list as more integration web specs are added.
+name: Integration Guard
+
+on:
+  pull_request:
+    paths:
+      - 'plugins/plugin-integration-core/**'
+      - 'apps/web/src/services/integration/readSourceConfigs.ts'
+      - 'apps/web/src/services/integration/readSourceCompositions.ts'
+      - 'apps/web/src/components/integration/IntegrationReadSourceConfigPanel.vue'
+      - 'apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue'
+      - 'apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
+      - 'apps/web/tests/composition-vocab-mirror.spec.ts'
+      - 'apps/web/tests/multitable-resolver-vocab-mirror.spec.ts'
+      - 'apps/web/tests/IntegrationReadSourceConfigPanel.spec.ts'
+      - 'apps/web/tests/IntegrationReadSourceCompositionPanel.spec.ts'
+      - 'apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts'
+      - 'apps/web/tests/readSourceCompositions.service.spec.ts'
+      - '.github/workflows/integration-guard.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/plugin-integration-core/**'
+      - 'apps/web/src/services/integration/readSourceConfigs.ts'
+      - 'apps/web/src/services/integration/readSourceCompositions.ts'
+      - 'apps/web/src/components/integration/IntegrationReadSourceConfigPanel.vue'
+      - 'apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue'
+      - 'apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
+      - 'apps/web/tests/composition-vocab-mirror.spec.ts'
+      - 'apps/web/tests/multitable-resolver-vocab-mirror.spec.ts'
+      - 'apps/web/tests/IntegrationReadSourceConfigPanel.spec.ts'
+      - 'apps/web/tests/IntegrationReadSourceCompositionPanel.spec.ts'
+      - 'apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts'
+      - 'apps/web/tests/readSourceCompositions.service.spec.ts'
+      - '.github/workflows/integration-guard.yml'
+
+jobs:
+  integration-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run plugin-integration-core CJS test chain (hermetic, no DB)
+        run: pnpm --filter plugin-integration-core test
+
+      - name: Run integration web guard specs (targeted)
+        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service --reporter=dot
