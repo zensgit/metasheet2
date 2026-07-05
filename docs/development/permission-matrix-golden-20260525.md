@@ -66,10 +66,17 @@ Everything else is annotation/grant-additive (non-gates, §2).
 | **view-access** (`canAccess`) | whitelist annotation, NOT enforced — `canAccess` can be `false` (view has assignments, user ungranted) yet data is never blocked | **live assertion** (D3d-2): `canAccess===false` AND rows returned |
 | **sheet-read** | per-user grant-additive; unmatched user reads via base capability | documented (no deny path exists) |
 | **record-read** | grant-only `access_level`; no deny | documented (D3d-1 + D3d-2) |
+| **row-level read-deny (`record_permissions` 'none') / conditional rule-deny (`effect: 'deny_read'`) on WRITE** | READ-only constructs — `ensureRecordWriteAllowed` (sheet-capabilities.ts AND permission-service.ts) and `RecordWriteService.patchRecords` never load `record_permissions` or evaluate conditional rules; a capable writer may PATCH a row-denied or rule-denied record via REST, an OAPI token, or the Yjs bridge alike | **live assertion** (B1-G1/G2, 2026-07-05): capable-writer flush/PATCH on an annotated target succeeds identically on all three entry points |
+
+> **#2015-style reconciliation is NOT needed here** — unlike gate #1's export-vs-interactive-read asymmetry, row-level read-deny (#18, `loadRowLevelReadDenyEnabled` + `record_permissions`) and conditional rule-deny (2b-S1/S2) shipped **after** this ledger's 2026-05-25 baseline as pure READ-surface features (see §3 below, now superseded on the read side); the finding above is that neither was ever wired into the WRITE gate — by original design (the flag/rule vocabulary is `deny_READ` only; there is no `deny_write` variant), not a regression from this doc's original text.
 
 ## 3. Open model questions (out of scope — would be product changes)
 
-- Per-record / per-sheet **read-deny** (whitelist or deny `access_level`).
+- ~~Per-record / per-sheet **read-deny** (whitelist or deny `access_level`).~~ **Shipped since this baseline** as
+  #18 (`record_permissions` 'none', per-sheet flag) + 2b-S1/S2 (conditional `deny_read` rules) — read-surface
+  golden-locked in `multitable-rowlevel-readdeny-{enforce,xrec,flag-endpoint}` and
+  `multitable-conditional-rule-{enforce,trash}-realdb`. The WRITE side was **never part of that shape** (see
+  §2's new non-gate row) — not a follow-up gap, a documented boundary.
 - **View-access data gating** (block view data when `canAccess=false`).
 
 These are NOT bugs or test gaps; they are absences in the current model. Any future work adding them
@@ -82,3 +89,72 @@ is a deliberate product-model proposal, not a "fix."
 - **D3d-2** (this PR): member-group field + sheet write-intersection + record write-own + view-access
   non-gate — **15 passed / 0 skipped** (combined with D3d-1), real DB (run 26408342198).
 - Both run via the dedicated `plugin-tests.yml` step (DATABASE_URL hard guard); non-skip proven in CI.
+
+## 5. B1 — side-door & write-modifier goldens (2026-07-05)
+
+Spec: `docs/development/multitable-w1-2-permission-matrix-spec-20260705.md` (§3 gaps G-1/G-2/G-3,
+batch B1 — "highest risk, first"). Test-only; zero runtime changes. Extends the golden matrix along
+two axes §0 didn't cover: **non-interactive write entry points** (Yjs collab bridge, OAPI `mst_`
+token) and **base-vs-sheet write-code non-intersection**.
+
+### 5.1 G-1 — Yjs bridge scalar flush × actor tiers + write modifiers (real DB)
+
+`multitable-permmatrix-b1-yjs-bridge-flush-realdb.test.ts` — the bridge's write input now resolves
+capabilities via the REAL `resolveSheetCapabilitiesForUser` (DB-backed RBAC + sheet scope + admin
+role), replacing the hardcoded grant the pre-existing yjs-scalar-*-realdb suites use (those suites
+isolate value fidelity, not permissions — see their own file comments).
+
+| actor / target | expected | golden |
+|---|---|---|
+| A3 global `multitable:read` only | flush DENIED, zero side effects | ✅ |
+| A4 sheet-scoped `spreadsheet:write` only (no global write) | flush ALLOWED (proves real per-sheet grant resolution) | ✅ |
+| A5 sheet-scoped `spreadsheet:write-own` — own record | flush ALLOWED | ✅ |
+| A5 sheet-scoped `spreadsheet:write-own` — not-own record | flush DENIED, zero side effects | ✅ |
+| A6 no permissions at all | flush DENIED, zero side effects | ✅ |
+| M3 record lock, write-capable actor (not locker/owner) | flush DENIED, zero side effects — TRUE gate, applies on the bridge same as REST (LR-T1 parity) | ✅ |
+| M2 row-level read-deny target, non-writer actor | flush DENIED, zero side effects (defense-in-depth) | ✅ |
+| M2 row-level read-deny target, write-capable actor | flush SUCCEEDS — **documented non-gate** (§2 row above) | ✅ |
+| M4 conditional-rule-denied target, non-writer actor | flush DENIED, zero side effects (defense-in-depth) | ✅ |
+| M4 conditional-rule-denied target, write-capable actor | flush SUCCEEDS — **documented non-gate** (§2 row above) | ✅ |
+
+"Zero side effects" = stored `data`/`version` unchanged AND no new `meta_record_revisions` row (a
+thrown `RecordValidationError` aborts the whole `patchRecords` transaction before the revision insert
+is ever reached) — plus the bridge's own `getMetrics().flushFailureCount`/`flushSuccessCount` as the
+"outcome vocabulary" signal on an entry point with no HTTP status code.
+
+### 5.2 G-2 — OAPI token write × M2/M3/M4 (real DB)
+
+`multitable-permmatrix-b1-oapi-token-write-realdb.test.ts` — the token PATCH route is the IDENTICAL
+handler the interactive session hits (`apiTokenAuth` only substitutes `req.user`); these goldens pin
+that parity explicitly rather than relying on "it's the same code" as an implicit guarantee.
+
+| modifier | expected | golden |
+|---|---|---|
+| M3 record lock | token PATCH 403, zero side effects, a `denied` audit row | ✅ |
+| M4 conditional-rule-denied target | token PATCH 200 (write succeeds) — parity with interactive's documented non-gate | ✅ |
+| M2 row-level read-deny target (scoped to the token's creator) | token PATCH 200 (write succeeds) — parity with interactive's documented non-gate | ✅ |
+
+### 5.3 G-3 — base-write codes do not intersect sheet record-write (real DB)
+
+`multitable-permmatrix-b1-basewrite-no-sheet-write-realdb.test.ts` — `resolveBaseWritable`
+(`multitable:base:write` / `multitable:base:admin` / base ownership) is consulted ONLY by the
+cross-base automation executor; `deriveCapabilities` (the interactive PATCH gate) has no knowledge of
+`multitable:base:*` codes or of `meta_bases.owner_id` at all. Locks the "M6 crux" documented in the
+spec but never previously golden-pinned.
+
+| actor | expected | golden |
+|---|---|---|
+| holds ONLY `multitable:base:write` (no sheet grant, no global write) | interactive record PATCH 403, zero side effects | ✅ |
+| IS the base owner (`meta_bases.owner_id`), zero permission codes | interactive record PATCH 403, zero side effects | ✅ |
+
+### 5.4 Evidence
+
+- **B1** (docs/development/multitable-w1-2-permission-matrix-spec-20260705.md, this PR): 3 new
+  real-DB suites — **18 passed / 0 skipped** (11 G-1 + 4 G-2 + 3 G-3, incl. sentinels), local run
+  against a migrated Postgres 15 instance; **106 passed / 0 skipped** combined with the 11
+  pre-existing suites they're grounded in/adjacent to (yjs-scalar-{seed,flush}-realdb, oapi2a-token-
+  write-realdb, record-lock(-bypass), rowlevel-readdeny-enforce, conditional-rule-{enforce,trash}-
+  realdb, permission-golden-{d3d1,d3d2}, base-writable-resolver) — zero regressions.
+- Wired into the `plugin-tests.yml` real-DB step (DATABASE_URL hard guard) alongside the suites above.
+- B2 (oracle/leak, G-4/G-5), B3 (admin-surface 403 matrix, G-6), and B4 (export⊆read + comments, G-7/
+  G-8) remain separate, not-yet-started batches per the spec — each its own gated follow-up.
