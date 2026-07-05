@@ -12,7 +12,7 @@
 
 From `approval-automation-third-batch-ballot-20260702.md` — tally **13 ✅ · 10 ⏸ · 21 ⬜**:
 - **A3** egress destination authorization — ✅ RATIFIED (#3589), but **governance-only, no code**; deny-all until a named staging host is supplied (deliberately withheld).
-- **T3-3** node signature/compliance — ✅ RATIFIED (#3590), **first rung declared-inert = BUILD-READY**.
+- **T3-3** node signature/compliance — first rung declared-inert **ALREADY SHIPPED** (#3512, 2026-07-03) + votes ratified (#3590); design/verification MDs added (#3601). **DONE — not a build target.** *(NOTE: #3512 shipped two days BEFORE the formal ballot vote landed — a build-before-vote inversion; the code matches the ratified Q1–Q9 decisions, so it's retroactively consistent, but the vote did not gate the build.)*
 - **T3-6** S-band approval-as-records — ⏸ HELD (#3590); no work until un-held.
 - **T3-2** business-calendar SLA (Q1–Q10) & **T3-1** mobile surface (Q1–Q11) — ⬜ **awaiting owner vote**.
 
@@ -20,13 +20,13 @@ From `approval-automation-third-batch-ballot-20260702.md` — tally **13 ✅ · 
 
 | Item | Lane | Readiness | Blocker |
 |---|---|---|---|
-| **T3-3 declared-inert rung** | B (approval engine, HOT) | **BUILD-READY** | none — GO |
+| ~~T3-3 declared-inert rung~~ | B (approval engine, HOT) | **DONE** (runtime #3512 · docs #3601) | — |
 | T3-2 business-calendar SLA | D | VOTE-GATED | owner vote (⬜) |
 | T3-1 mobile surface | D | VOTE-GATED | owner vote (⬜) |
 | A3 egress destination auth | A | INPUT-GATED | a named staging ASCII-DNS host (withheld) |
 | T3-6 S-band records | D | HELD | owner un-hold |
 
-**Actionable-now = exactly one: T3-3 declared-inert rung.** Everything else is owner-gated (vote / host / un-hold).
+**Actionable-now BUILD items = ZERO.** T3-3 — the only apparent build-ready item — was already shipped (#3512); the L2 build agent caught this on grounding and produced the missing docs (#3601) instead of duplicating. **Every remaining pool item is owner-gated (vote / host / un-hold) — the bottleneck is OWNER DECISIONS, not build capacity.**
 
 ## 2. Parallel lanes + collision rules (from the ratified plan §3)
 
@@ -34,7 +34,7 @@ From `approval-automation-third-batch-ballot-20260702.md` — tally **13 ✅ · 
 - **Lane D — product surfaces** (separate files): T3-1, T3-2 are **parallelizable with Lane B and with each other** once voted (distinct surfaces).
 - **Lane A — BPMN/egress**: idle until a host is named.
 - **Cross-lane collision:** Lane B ↔ Lane C W7 both touch approval-completion — keep W7 in Lane C (both mostly shipped).
-- **Max parallelism NOW = 1** (only T3-3 unblocked). Widens to **3** (T3-3 ∥ T3-1 ∥ T3-2) once T3-1/T3-2 are voted.
+- **Max parallelism NOW = 0 build items** (T3-3 already shipped; everything else owner-gated). Widens to **2** (T3-1 ∥ T3-2, distinct Lane-D surfaces) once they are voted.
 
 ## 3. Difficulty → model tiering (the auto-select rule)
 
@@ -61,7 +61,7 @@ Each built item ships, matching repo convention:
 ## 5. Fixed-cadence execution
 
 - **L1 cadence (live):** the fable5 6h routine (propose-lane owner-decision prep + doc). Currently **mostly drained on approval** (A3/T3-3/T3-6 voted; T3-2/T3-1 await owner votes → Gate-3 no-op). It surfaces other genuinely-open lanes or no-ops **with a report** (never a silent black box).
-- **L2 cadence (proposed — needs owner go):** a Sonnet5 build-routine that builds **one** build-ready L2 item per run behind **default-off + fail-first golden + banner + never-merge**. First target: **T3-3 declared-inert rung**.
+- **L2 cadence (proposed — needs owner go):** a Sonnet5 build-routine that builds **one** build-ready L2 item per run behind **default-off + fail-first golden + banner + never-merge**. **No L2 target exists right now** — T3-3 (the apparent first target) is already shipped; first real target is **T3-1 post-vote**.
 - **L3 (not unattended):** flagged for **in-session Opus + human** adversarial review. First candidates: **T3-2** (post-vote), **A3** (post-host).
 
 ## 6. What unblocks more parallelism (owner actions)
@@ -75,7 +75,7 @@ Until then: **one** build-ready item (T3-3), so serial; the machinery is ready t
 ## 7. Proposed next executors
 
 - **Keep** the L1 fable5 propose-routine (running).
-- **Add** an L2 Sonnet5 build-routine → first job the T3-3 declared-inert rung, gated (never-merge, banner, fail-first golden + observed-RED, design+verification MDs). **Needs owner go** — per the standing acceptance bar, a new autonomous *runtime writer* is gated on explicit approval.
+- **Add** an L2 Sonnet5 build-routine **when an L2 item is voted GO** (T3-1 post-vote); gated (never-merge, banner, fail-first golden + observed-RED, design+verification MDs). **Needs owner go** — per the standing acceptance bar, a new autonomous *runtime writer* is gated on explicit approval. *(No L2 target exists right now — T3-3 already shipped.)*
 - **L3** (T3-2 post-vote, A3 post-host) → in-session Opus + human, when the owner is ready.
 
 ## 8. Scope / non-goals
