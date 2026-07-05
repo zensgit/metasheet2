@@ -227,6 +227,26 @@ describe('IntegrationReadSourceCompositionAuthoringPanel', () => {
     expect(root.querySelector('[data-testid="rscauth-saved"]')).toBeNull()
   })
 
+  it('generic transport errors render a fixed fallback instead of raw Error.message', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    apiFetchMock.mockImplementation(routeApiFetch({
+      save: () => {
+        throw new Error('transport failed near MAT-001 SECRET')
+      },
+    }))
+    const root = mountPanel()
+    await fillValidDraft(root)
+
+    q<HTMLButtonElement>(root, 'rscauth-save').click()
+    await waitUntil(() => root.querySelector('[data-testid="rscauth-error"]') !== null, 'generic error appears')
+
+    const text = root.innerHTML
+    expect(text).toContain('组合配置请求失败')
+    expect(text).not.toContain('transport failed')
+    expect(text).not.toContain('MAT-001 SECRET')
+    expect(root.querySelector('[data-testid="rscauth-saved"]')).toBeNull()
+  })
+
   it('approve/retire happy path transitions the saved row; a 409 renders a coarse message with no value echo', async () => {
     localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
     let status = 'draft'
