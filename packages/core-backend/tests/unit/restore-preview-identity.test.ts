@@ -8,12 +8,35 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  hashDeleteSet,
+  hashPermissionGrant,
   hashPreviewChanges,
+  hashResurrectSet,
   hashScope,
+  hashUncreatePlan,
+  hashUndeletePlan,
+  mintConfigPermissionRevertPreviewIdentity,
+  mintConfigRestorePreviewIdentity,
+  mintConfigUncreatePreviewIdentity,
+  mintConfigUndeletePreviewIdentity,
+  mintPitResetPreviewIdentity,
+  mintPitRevertPreviewIdentity,
   mintRestorePreviewIdentity,
   mintScopedRestorePreviewIdentity,
+  verifyConfigPermissionRevertPreviewIdentity,
+  verifyConfigRestorePreviewIdentity,
+  verifyConfigUncreatePreviewIdentity,
+  verifyConfigUndeletePreviewIdentity,
+  verifyPitResetPreviewIdentity,
+  verifyPitRevertPreviewIdentity,
   verifyRestorePreviewIdentity,
   verifyScopedRestorePreviewIdentity,
+  type ConfigPermissionRevertPreviewIdentityClaims,
+  type ConfigRestorePreviewIdentityClaims,
+  type ConfigUncreatePreviewIdentityClaims,
+  type ConfigUndeletePreviewIdentityClaims,
+  type PitResetPreviewIdentityClaims,
+  type PitRevertPreviewIdentityClaims,
   type RestorePreviewIdentityClaims,
   type ScopedRestorePreviewIdentityClaims,
 } from '../../src/multitable/restore-preview-identity'
@@ -146,5 +169,80 @@ describe('restore preview identity — BS-1 scoped (multi-record) contract', () 
     const token = mintScopedRestorePreviewIdentity(claims)
     const tampered = token.slice(0, -3) + (token.slice(-3) === 'AAA' ? 'BBB' : 'AAA')
     expect(verifyScopedRestorePreviewIdentity(tampered, claims).valid).toBe(false)
+  })
+})
+
+// ── cross-strategy disjointness matrix: every `type`-discriminated preview-identity family that exists in the
+// module, exhaustively pairwise. All families share ONE secret (getSecret()), so a wrong-family token STILL has a
+// valid JWT signature — only the `type` claim / wrong_type check stands between "signed by us" and "authorizes THIS
+// strategy's execute". D6 disjointness above only covered single<->scoped; this closes the remaining families
+// (pit-revert / pit-reset / config-restore / config-uncreate / config-undelete / config-permission-revert), so a
+// token minted for family X is proven REJECTED when verified as family Y for EVERY ordered pair (X, Y), X !== Y.
+interface StrategyEntry {
+  name: string
+  mintOwn: () => string
+  /** verify an arbitrary token against THIS family's own (self-consistent) expected claims. */
+  verifyAsSelf: (token: string) => { valid: boolean; reason?: string }
+}
+
+const strategyPitRevertClaims = (): PitRevertPreviewIdentityClaims => ({
+  sheetId: 'sheet_x', asOf: '2026-01-01T00:00:00.000Z', strategy: 'revert',
+  scopeHash: hashScope([]), resurrectScopeHash: hashResurrectSet([]), actorId: 'user_x',
+})
+const strategyPitResetClaims = (): PitResetPreviewIdentityClaims => ({
+  sheetId: 'sheet_x', asOf: '2026-01-01T00:00:00.000Z', strategy: 'reset',
+  revertScopeHash: hashScope([]), deleteScopeHash: hashDeleteSet([]), actorId: 'user_x',
+})
+const strategyConfigRestoreClaims = (): ConfigRestorePreviewIdentityClaims => ({
+  sheetId: 'sheet_x', revisionId: 'rev_x', entityType: 'field', entityId: 'f_x', baselineHash: 'deadbeef', actorId: 'user_x',
+})
+const strategyConfigUncreateClaims = (): ConfigUncreatePreviewIdentityClaims => ({
+  sheetId: 'sheet_x', revisionId: 'rev_x', entityType: 'field', entityId: 'f_x',
+  planHash: hashUncreatePlan({ entityAlive: true, cascadeViewIds: [], orderShiftIds: [], columnDataPresent: false }),
+  actorId: 'user_x',
+})
+const strategyConfigUndeleteClaims = (): ConfigUndeletePreviewIdentityClaims => ({
+  sheetId: 'sheet_x', revisionId: 'rev_x', entityType: 'field', entityId: 'f_x',
+  undeleteHash: hashUndeletePlan({ idFree: true, insertOrder: 0, trailingShiftIds: [], targetConfigHash: 'abc' }),
+  actorId: 'user_x',
+})
+const strategyConfigPermissionRevertClaims = (): ConfigPermissionRevertPreviewIdentityClaims => ({
+  sheetId: 'sheet_x', revisionId: 'rev_x', entityId: 'f_x', currentGrantHash: hashPermissionGrant(null), actorId: 'user_x',
+})
+
+const strategyEntries: StrategyEntry[] = [
+  { name: 'single-record restore', mintOwn: () => mintRestorePreviewIdentity(singleClaims()), verifyAsSelf: (t) => verifyRestorePreviewIdentity(t, singleClaims()) },
+  { name: 'scoped (multi-record) restore', mintOwn: () => mintScopedRestorePreviewIdentity(scopedClaims(['A', 'B'])), verifyAsSelf: (t) => verifyScopedRestorePreviewIdentity(t, scopedClaims(['A', 'B'])) },
+  { name: 'PIT revert', mintOwn: () => mintPitRevertPreviewIdentity(strategyPitRevertClaims()), verifyAsSelf: (t) => verifyPitRevertPreviewIdentity(t, strategyPitRevertClaims()) },
+  { name: 'PIT reset', mintOwn: () => mintPitResetPreviewIdentity(strategyPitResetClaims()), verifyAsSelf: (t) => verifyPitResetPreviewIdentity(t, strategyPitResetClaims()) },
+  { name: 'config-restore', mintOwn: () => mintConfigRestorePreviewIdentity(strategyConfigRestoreClaims()), verifyAsSelf: (t) => verifyConfigRestorePreviewIdentity(t, strategyConfigRestoreClaims()) },
+  { name: 'config-uncreate', mintOwn: () => mintConfigUncreatePreviewIdentity(strategyConfigUncreateClaims()), verifyAsSelf: (t) => verifyConfigUncreatePreviewIdentity(t, strategyConfigUncreateClaims()) },
+  { name: 'config-undelete', mintOwn: () => mintConfigUndeletePreviewIdentity(strategyConfigUndeleteClaims()), verifyAsSelf: (t) => verifyConfigUndeletePreviewIdentity(t, strategyConfigUndeleteClaims()) },
+  { name: 'config-permission-revert', mintOwn: () => mintConfigPermissionRevertPreviewIdentity(strategyConfigPermissionRevertClaims()), verifyAsSelf: (t) => verifyConfigPermissionRevertPreviewIdentity(t, strategyConfigPermissionRevertClaims()) },
+]
+
+describe('restore preview identity — cross-strategy disjointness (all discriminated `type` families)', () => {
+  it('sanity: each family round-trips valid against its OWN mint + own expected claims', () => {
+    for (const entry of strategyEntries) {
+      expect(entry.verifyAsSelf(entry.mintOwn())).toEqual({ valid: true })
+    }
+  })
+
+  const crossPairs = strategyEntries.flatMap((minter) =>
+    strategyEntries.filter((verifier) => verifier.name !== minter.name).map((verifier) => ({ minterName: minter.name, verifierName: verifier.name }))
+  )
+
+  it('the matrix covers every ORDERED pair (X, Y), X !== Y — no family silently excluded', () => {
+    expect(crossPairs.length).toBe(strategyEntries.length * (strategyEntries.length - 1))
+    expect(strategyEntries.length).toBe(8) // pins the enumerated family count itself (catches a silently-dropped entry)
+  })
+
+  it.each(crossPairs)('a token minted for $minterName is rejected wrong_type when verified as $verifierName', ({ minterName, verifierName }) => {
+    const minter = strategyEntries.find((e) => e.name === minterName)!
+    const verifier = strategyEntries.find((e) => e.name === verifierName)!
+    const token = minter.mintOwn()
+    const result = verifier.verifyAsSelf(token)
+    expect(result.valid).toBe(false)
+    expect(result.reason).toBe('wrong_type')
   })
 })
