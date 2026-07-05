@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 // A2 report-sync scheduled trigger (design-lock #3623, RATIFIED owner-delegated 2026-07-05). Pure-logic
 // coverage only — no database, no live server. Real-DB claim/idempotency/throttle/PUT-round-trip coverage
@@ -27,6 +27,7 @@ const helpers = attendancePlugin.__attendanceReportFieldCatalogForTests as {
   resolveAttendanceReportSyncScheduledTriggerOrgIds: (
     db: { query: (sql: string, params?: unknown[]) => Promise<Array<{ org_id?: string | null }>> },
     maxOrgsPerRun: number,
+    logger?: { warn?: (message: string, meta?: unknown) => void },
   ) => Promise<string[]>
   mergeSettings: (base: Record<string, unknown>, update: Record<string, unknown>) => Record<string, unknown>
 }
@@ -161,6 +162,29 @@ describe('#A2 report-sync scheduled trigger — org fan-out throttle (pure, fake
     const db = { query: async () => [{ org_id: 'a' }, { org_id: 'b' }, { org_id: 'c' }] }
     await expect(helpers.resolveAttendanceReportSyncScheduledTriggerOrgIds(db, 2)).resolves.toEqual(['a', 'b'])
     await expect(helpers.resolveAttendanceReportSyncScheduledTriggerOrgIds(db, 10)).resolves.toEqual(['a', 'b', 'c'])
+  })
+
+  it('review P2-1: orders the DISTINCT scan (deterministic which orgs a capped tick covers)', async () => {
+    const seen: string[] = []
+    const db = { query: async (sql: string) => { seen.push(sql); return [{ org_id: 'a' }] } }
+    await helpers.resolveAttendanceReportSyncScheduledTriggerOrgIds(db, 1)
+    expect(seen[0]).toMatch(/ORDER BY org_id/)
+  })
+
+  it('review P2-1: warns with exact coverage numbers when active orgs exceed the per-tick cap (observable, not silent)', async () => {
+    const db = { query: async () => [{ org_id: 'a' }, { org_id: 'b' }, { org_id: 'c' }] }
+    const warn = vi.fn()
+    const result = await helpers.resolveAttendanceReportSyncScheduledTriggerOrgIds(db, 2, { warn })
+    expect(result).toEqual(['a', 'b']) // still deterministic first-N
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0][1]).toEqual({ totalOrgs: 3, maxOrgsPerRun: 2, syncedOrgs: 2, uncoveredOrgs: 1 })
+  })
+
+  it('review P2-1: does NOT warn when the org count is within the cap', async () => {
+    const db = { query: async () => [{ org_id: 'a' }, { org_id: 'b' }] }
+    const warn = vi.fn()
+    await helpers.resolveAttendanceReportSyncScheduledTriggerOrgIds(db, 5, { warn })
+    expect(warn).not.toHaveBeenCalled()
   })
 
   it('falls back to [DEFAULT_ORG_ID] when attendance_rules has no rows at all', async () => {

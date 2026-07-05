@@ -3565,12 +3565,29 @@ const ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_IDEMPOTENCY_PREFIX = 'scheduled-r
 // DISTINCT org_id FROM attendance_rules`, falling back to [DEFAULT_ORG_ID] when the table has no rows) —
 // not a new pattern. Factored out (and given its own db param) so maxOrgsPerRun throttling is unit-testable
 // against a fake org list without depending on the real, shared, cross-test attendance_rules table.
-async function resolveAttendanceReportSyncScheduledTriggerOrgIds(db, maxOrgsPerRun) {
-  const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules')
+async function resolveAttendanceReportSyncScheduledTriggerOrgIds(db, maxOrgsPerRun, logger) {
+  // ORDER BY org_id: which orgs a capped tick covers must be DETERMINISTIC (review P2-1). Without
+  // it, `SELECT DISTINCT` returns an arbitrary order and the (org, day)-idempotent job then treats
+  // the uncovered orgs as already-done no-ops on later ticks, so orgs beyond the cap could be
+  // silently, nondeterministically starved of report sync.
+  const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules ORDER BY org_id')
   const orgIds = orgRows.length > 0
     ? orgRows.map(row => row.org_id || DEFAULT_ORG_ID)
     : [DEFAULT_ORG_ID]
-  return orgIds.slice(0, Math.max(1, Math.floor(Number(maxOrgsPerRun) || 1)))
+  const cap = Math.max(1, Math.floor(Number(maxOrgsPerRun) || 1))
+  // v1 = deterministic first-N (no cross-tick rotation yet — fairness rotation is a deferred
+  // follow-up per the A2 lock's throttle-not-fairness framing). But make the shortfall OBSERVABLE
+  // rather than silent: when there are more active orgs than the per-tick cap, the tail is not
+  // synced this tick, so warn with the exact coverage numbers instead of failing invisibly.
+  if (orgIds.length > cap) {
+    logger?.warn?.('attendance report sync scheduled trigger: org fan-out capped this tick — tail not synced (no rotation yet)', {
+      totalOrgs: orgIds.length,
+      maxOrgsPerRun: cap,
+      syncedOrgs: cap,
+      uncoveredOrgs: orgIds.length - cap,
+    })
+  }
+  return orgIds.slice(0, cap)
 }
 
 // Idempotency-key period grain: 'daily' mints (at most) one job per (org, calendar day) so
@@ -3691,7 +3708,7 @@ async function runAttendanceReportSyncScheduledTriggerOnce(context, db, logger =
     return { ran: false, reason: 'disabled', orgs: [] }
   }
 
-  const orgIds = await resolveAttendanceReportSyncScheduledTriggerOrgIds(db, trigger.maxOrgsPerRun)
+  const orgIds = await resolveAttendanceReportSyncScheduledTriggerOrgIds(db, trigger.maxOrgsPerRun, logger)
   const orgs = []
   for (const orgId of orgIds) {
     try {
