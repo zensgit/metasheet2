@@ -72,13 +72,13 @@ A 能力关键路径
 B 质量收尾
   ⬜ B1 integration CI guard lane(我;最高优先)
   ⬜ B2 W1 处置(owner 二选一 → 我执行)
-  ⬜ B3 stale 注释清理(我)
-  ⬜ B4 冒烟姿态声明(我 docs / owner 可改链入)
+  ✅ B3 stale 注释清理(我)
+  ✅ B4 冒烟姿态声明(我 docs / owner 可改链入)
   ⬜ B5 :id/read 无 UI 声明(owner 一句话)
 C 治理收尾
   ⬜ C1 #1709 关闭重组(owner)
   ⬜ C2 卫星 issue 处置(owner+我)
-  ⬜ C3 gated 池冻结声明表(我,并入收尾文档)
+  ✅ C3 gated 池冻结声明表(我,并入收尾文档)
 ```
 
 **建议起手序**(并行三轨):A1(owner 实体机)∥ B1+B3(我,今天可完)∥ B2/C1 两个 owner 决定
@@ -97,3 +97,39 @@ C 治理收尾
 
 递归/写执行/K3 Save-Submit-Audit/delete/生产写全维持冻结;BL1+ 仍待 opt-in;本文档 authorizes
 nothing。
+
+## 8. 姿态声明与冻结清单(B4/C3 落实,2026-07-05)
+
+### 8.1 冒烟姿态声明(B4)
+
+读自助化(#3481/#3484)与组合(#3600)的 postdeploy 冒烟均为 `workflow_dispatch`-only 独立 lane,
+**不**链入 docker-build 部署 job——当前仅 K3 冒烟以 `continue-on-error` 链入该部署 job。这是**有意
+姿态**,而非遗漏:
+
+- 这两条冒烟都需要实体机(entity-machine)K3 凭证 + owner 提供的样例 key 才能跑出有意义的结果;
+  没有这些,冒烟要么被跳过、要么只能验证纯 mock 路径,起不到部署门禁的作用。
+- 因此它们的定位是 **owner 手动验收通道**,不是部署 gate:owner 在具备凭证/样例 key 的窗口内按需
+  `workflow_dispatch` 触发,把结果作为实体机验证证据的一部分(参见 §2 A 层 BL 链)。
+- 若未来要把它们改链入部署 job(例如补齐了可在 CI 中安全使用的凭证注入机制),那是一个**独立的
+  owner 决定**,不在本次收尾范围内,也不由本文档隐含授权。
+
+### 8.2 gated 池冻结清单(C3)
+
+以下每一项均处于其各自设计锁/门禁下的冻结态。**冻结即完成**——这些项不计入本线("数据库及系统
+连接线 #1709")的未完成项;解锁需要各自标注的门(named demand / opt-in / owner 显式再决定),本文档
+不解锁其中任何一项。
+
+| 项 | 门 | 说明 |
+| --- | --- | --- |
+| REC-R1 / REC-R2 / REC-R3(递归展开) | 双门:named demand + opt-in | 参见 `integration-read-source-recursive-expansion-direction-design-lock-20260705.md`;二跳以上的递归组合链仍待具名需求 + 显式 opt-in |
+| connector 模板目录 | 各自 design-lock 先行 + opt-in | 属于对标基准(benchmark §4)中列出的待办能力,尚无设计锁 |
+| 事件驱动入站(event-driven inbound) | 各自 design-lock 先行 + opt-in | 同上,benchmark §4 |
+| 可视化数据清洗(visual data prep) | 各自 design-lock 先行 + opt-in | 同上,benchmark §4 |
+| OAuth / SaaS 连接器 | 各自 design-lock 先行 + opt-in | 同上,benchmark §4 |
+| marker-gating enforcement | 已在 S1 递延(deferred at S1) | 非本线当前范围;沿用 S1 阶段的递延决定 |
+| delete 轨道 | W0 锁中硬排除(hard-excluded),无解锁路径 | 当前无 unlock path 定义,不在任何 opt-in 序列中 |
+| K3 Save / Submit / Audit + 外部/生产写 | 客户明令禁止(customer-barred);需显式授权 + sandbox-first | 与 BOM→stock-prep 轨的 C4 同口径:仅当获得显式授权且完成 sandbox 验证后才可能重新评估 |
+| 永久边界锁:host-allowlist 放宽 | 需显式再决定 | 现状为永久锁,非"待办",重开需专门决策 |
+| 永久边界锁:终端用户自由表单连接器(end-user free-form connector) | 需显式再决定 | 同上 |
+| 永久边界锁:按系统凭证路径(per-system credential path) | 需显式再决定 | 同上 |
+| 永久边界锁:组合深度 > 2(composition depth > 2) | 需显式再决定 | 现有组合链锁定为两跳(C-R1→C-R4);超过两跳属于永久边界锁范畴,与上面的递归展开条目(REC-R1..R3)共享同一物理限制但走独立的再决定路径 |
