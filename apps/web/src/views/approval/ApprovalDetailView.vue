@@ -244,6 +244,43 @@
             </el-timeline>
           </template>
           <el-empty v-else description="暂无审批历史" :image-size="80" />
+
+          <!-- UX B2-08: current handler + upcoming nodes — synthesized (NOT real history rows),
+               appended at the END of the timeline so a requester can see who it's stuck with and
+               what's next, not just what already happened. Deliberately NOT built from
+               `<el-timeline-item>` — its own lightweight dot+line rail instead — so it stays
+               visually distinct (upcoming = greyed) and never perturbs the real history item
+               count above. -->
+          <div
+            v-if="currentHandlerEntries.length > 0 || upcomingTimelineNodes.length > 0"
+            class="approval-detail__timeline-upcoming"
+            data-testid="approval-timeline-upcoming-section"
+          >
+            <div
+              v-for="entry in currentHandlerEntries"
+              :key="`current-${entry.assignmentId}`"
+              class="approval-detail__timeline-upcoming-item approval-detail__timeline-upcoming-item--current"
+              data-testid="approval-current-handler-item"
+            >
+              <span class="approval-detail__timeline-upcoming-dot" />
+              <span class="approval-detail__timeline-upcoming-text">
+                当前处理人：{{ entry.label }} · 已等待 {{ entry.wait }}
+              </span>
+            </div>
+            <div
+              v-for="node in upcomingTimelineNodes"
+              :key="`upcoming-${node.key}`"
+              class="approval-detail__timeline-upcoming-item approval-detail__timeline-upcoming-item--future"
+              :class="{ 'approval-detail__timeline-upcoming-item--conditional': node.isConditional }"
+              data-testid="approval-upcoming-node-item"
+            >
+              <span class="approval-detail__timeline-upcoming-dot" />
+              <span class="approval-detail__timeline-upcoming-text">
+                <strong>{{ node.name }}</strong>
+                <span class="approval-detail__timeline-upcoming-summary">{{ node.assigneeSummary }}</span>
+              </span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -636,7 +673,7 @@ import {
   CirclePlus,
   Remove,
 } from '@element-plus/icons-vue'
-import type { ApprovalActionType } from '../../types/approval'
+import type { ApprovalActionType, ApprovalAssignmentDTO, ApprovalGraph } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
@@ -653,6 +690,7 @@ import {
 } from '../../approvals/detailField'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
+import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
 
 const route = useRoute()
 const router = useRouter()
@@ -731,13 +769,7 @@ const isMyTurn = computed(() => {
   const me = currentUserId.value
   const detail = approval.value
   if (!me || !detail || detail.status !== 'pending') return false
-  const currentKeys = new Set(
-    parallelBranchNodeKeys.value.length > 0
-      ? parallelBranchNodeKeys.value
-      : detail.currentNodeKey
-        ? [detail.currentNodeKey]
-        : [],
-  )
+  const currentKeys = new Set(currentActiveNodeKeys.value)
   if (currentKeys.size === 0) return false
   return detail.assignments.some(
     (a) => a.isActive && a.type === 'user' && a.assigneeId === me && !!a.nodeKey && currentKeys.has(a.nodeKey),
@@ -785,6 +817,80 @@ const timelineBranchGroups = computed<TimelineGroup[]>(() => {
     buckets.get(bucketKey)!.items.push(item)
   }
   return order.map((key) => buckets.get(key)!)
+})
+
+// ---------------------------------------------------------------------------
+// UX B2-08: current handler + upcoming nodes ("卡在谁那里 / 接下来到谁")
+// ---------------------------------------------------------------------------
+// The history timeline above only ever has PAST actions — there is no history row for the
+// CURRENTLY open step — so a requester can't tell who it's stuck with or what comes next. This
+// synthesizes that (NOT real history rows) and is rendered at the very end of the timeline, only
+// while the instance is still `pending`.
+
+// Every node key with an active pending assignment right now. Single source of truth for both
+// `isMyTurn` (above) and `currentHandlerEntries` (below) — mirrors the same parallel-vs-linear
+// resolution `isMyTurn` used inline before this slice.
+const currentActiveNodeKeys = computed<string[]>(() => {
+  if (!approval.value) return []
+  if (parallelBranchNodeKeys.value.length > 0) return parallelBranchNodeKeys.value
+  return approval.value.currentNodeKey ? [approval.value.currentNodeKey] : []
+})
+
+interface CurrentHandlerEntry {
+  assignmentId: string
+  label: string
+  wait: string
+}
+
+// `assignment.metadata` carries no display name today — only `assigneeId` (see
+// `ApprovalAssignmentDTO`). This defensively prefers a future `metadata.assigneeName` if the
+// backend ever adds one, else falls back to the raw id — same "don't fetch, just display"
+// convention `reducibleAssignees` already uses above.
+function assignmentDisplayLabel(assignment: ApprovalAssignmentDTO): string {
+  const metaName = assignment.metadata.assigneeName
+  return typeof metaName === 'string' && metaName.trim() ? metaName : assignment.assigneeId
+}
+
+// One entry per ACTIVE assignment at the current node(s) — every currently-pending handler, not
+// just "is it me" (that's `isMyTurn`). `wait` reuses `formatRelativeWait` (B1-03) against
+// `updatedAt` rather than `createdAt`: an assignment row carries no timestamp of its own, and
+// `updatedAt` — bumped whenever an action actually moves/changes the instance, but NOT by a plain
+// comment (see backend `ApprovalProductService`) — approximates "since this step became current"
+// far better than the header chip's `createdAt` (since the whole approval was first created).
+const currentHandlerEntries = computed<CurrentHandlerEntry[]>(() => {
+  const detail = approval.value
+  if (!detail || detail.status !== 'pending') return []
+  const keys = new Set(currentActiveNodeKeys.value)
+  if (keys.size === 0) return []
+  const wait = formatRelativeWait(detail.updatedAt)
+  return detail.assignments
+    .filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
+    .map((a) => ({ assignmentId: a.id, label: assignmentDisplayLabel(a), wait }))
+})
+
+// Prefer the instance's FROZEN template version (pinned at creation) over the LIVE template
+// loaded below for `nodeLabel` — the live template may have been edited (renamed/reordered/
+// removed nodes) since this instance started, which would silently mis-render the "upcoming
+// nodes" preview against a graph the instance will never actually traverse. Falls back to the
+// live template when no pinned version was reachable (see `onMounted`) — DRIFT RISK: that
+// fallback path can render upcoming nodes that no longer match this instance's real remaining
+// path.
+const pinnedGraph = computed<ApprovalGraph | null>(() => {
+  return templateStore.activeVersion?.approvalGraph ?? templateStore.activeTemplate?.approvalGraph ?? null
+})
+
+// Parallel regions have no single unambiguous "current node" to walk forward from until the
+// branches rejoin at their `joinNodeKey` — skip rather than fabricate a merged/guessed path (the
+// "并行中" badge in the header already communicates the parallel state itself).
+const upcomingTimelineNodes = computed<UpcomingApprovalNode[]>(() => {
+  const detail = approval.value
+  if (!detail || detail.status !== 'pending') return []
+  if (isInParallelRegion.value) return []
+  const currentNodeKey = detail.currentNodeKey
+  if (!currentNodeKey) return []
+  const graph = pinnedGraph.value
+  if (!graph) return []
+  return buildUpcomingNodes(graph, currentNodeKey)
 })
 
 const actionDialogVisible = ref(false)
@@ -1281,8 +1387,19 @@ onMounted(async () => {
       .catch(() => {})
   }
   await Promise.all([store.loadDetail(id), store.loadHistory(id)])
-  if (store.activeApproval?.templateId) {
-    await templateStore.loadTemplate(store.activeApproval.templateId).catch(() => undefined)
+  const detail = store.activeApproval
+  if (detail?.templateId) {
+    const templateFetches: Array<Promise<unknown>> = [
+      templateStore.loadTemplate(detail.templateId).catch(() => undefined),
+    ]
+    // B2-08: ALSO fetch the instance's pinned template version (if the DTO exposes one) so
+    // `pinnedGraph`/the current+upcoming synthesis can walk the FROZEN graph. Kept as an
+    // ADDITIONAL fetch (not a replacement) so `nodeLabel`'s existing history lookups keep using
+    // the live template exactly as before.
+    if (detail.templateVersionId) {
+      templateFetches.push(templateStore.loadVersion(detail.templateId, detail.templateVersionId).catch(() => undefined))
+    }
+    await Promise.all(templateFetches)
   }
 })
 </script>
@@ -1465,6 +1582,53 @@ onMounted(async () => {
 .approval-detail__timeline-group-count {
   font-size: 12px;
   color: var(--el-text-color-secondary, #606266);
+}
+
+/* UX B2-08: synthesized "current handler + upcoming nodes" rail, appended after the real
+   history entries. A lightweight dot+line rail of its own (not `<el-timeline-item>`) so the
+   upcoming (future/uncertain) entries can render visibly greyed without touching the styling
+   of real history rows above. */
+.approval-detail__timeline-upcoming {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--el-border-color-lighter, #e4e7ed);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.approval-detail__timeline-upcoming-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.approval-detail__timeline-upcoming-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--el-color-primary, #409eff);
+}
+
+.approval-detail__timeline-upcoming-item--future .approval-detail__timeline-upcoming-dot {
+  background: var(--el-text-color-placeholder, #c0c4cc);
+}
+
+.approval-detail__timeline-upcoming-item--current .approval-detail__timeline-upcoming-text {
+  color: var(--el-text-color-primary, #303133);
+  font-weight: 500;
+}
+
+.approval-detail__timeline-upcoming-item--future .approval-detail__timeline-upcoming-text {
+  color: var(--el-text-color-placeholder, #909399);
+}
+
+.approval-detail__timeline-upcoming-summary {
+  margin-left: 6px;
 }
 
 /* B1-05: sticky at the viewport bottom so approve/reject/... stay reachable while the form

@@ -97,6 +97,11 @@ vi.mock('../src/approvals/store', () => ({
 // Template store mock
 // ---------------------------------------------------------------------------
 const mockActiveTemplate = ref<any>(null)
+// UX B2-08 — settable (was hardcoded `null`) so tests can simulate the instance's PINNED
+// template version having already loaded (mirrors how `mockActiveTemplate` above simulates a
+// pre-loaded live template). Defaults to `null`, so every pre-existing test (which never touches
+// this) is byte-identical to before.
+const mockActiveVersion = ref<any>(null)
 const mockTemplates = ref<any[]>([])
 const mockTemplateLoading = ref(false)
 const mockTemplateError = ref<string | null>(null)
@@ -110,7 +115,7 @@ vi.mock('../src/approvals/templateStore', () => ({
   useApprovalTemplateStore: () => ({
     get templates() { return mockTemplates.value },
     get activeTemplate() { return mockActiveTemplate.value },
-    get activeVersion() { return null },
+    get activeVersion() { return mockActiveVersion.value },
     get loading() { return mockTemplateLoading.value },
     get error() { return mockTemplateError.value },
     get total() { return mockTemplateTotal.value },
@@ -501,6 +506,7 @@ describe('Approval E2E Lifecycle', () => {
     mockCcApprovals.value = []
     mockCompletedApprovals.value = []
     mockActiveTemplate.value = null
+    mockActiveVersion.value = null
     mockTemplates.value = []
     mockTemplateLoading.value = false
     mockTemplateError.value = null
@@ -1409,6 +1415,128 @@ describe('Approval E2E Lifecycle', () => {
 
       const empty = container!.querySelector('.approval-detail__form [data-el-empty]')
       expect(empty?.textContent).toContain('暂无表单数据')
+    })
+  })
+
+  // =========================================================================
+  // UX B2-08: current handler + upcoming nodes
+  // =========================================================================
+  describe('UX B2-08: current handler + upcoming nodes', () => {
+    it('a pending instance renders 当前处理人 with the active assignee + 已等待', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const section = container!.querySelector('[data-testid="approval-timeline-upcoming-section"]')
+      expect(section).toBeTruthy()
+
+      const item = container!.querySelector('[data-testid="approval-current-handler-item"]')
+      expect(item).toBeTruthy()
+      expect(item!.textContent).toContain('当前处理人')
+      expect(item!.textContent).toContain('user_current') // the fixture's active assigneeId
+      expect(item!.textContent).toContain('已等待')
+    })
+
+    it('a non-pending instance renders NO current/upcoming section', async () => {
+      routeParams = { id: 'apv_approved_1' }
+      mockActiveApproval.value = mockApprovedApproval()
+      mockActiveTemplate.value = mockPublishedTemplate()
+      await mountDetailView()
+
+      expect(container!.querySelector('[data-testid="approval-timeline-upcoming-section"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-current-handler-item"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-upcoming-node-item"]')).toBeNull()
+    })
+
+    it('renders upcoming nodes greyed with assignee summaries, via the live-template fallback when no pinned version is loaded', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval() // currentNodeKey: 'approval_1'
+      mockActiveTemplate.value = mockPublishedTemplate() // start -> approval_1 -> approval_2 -> end
+      // activeVersion stays null (default) — exercises the live-template FALLBACK path.
+      await mountDetailView()
+
+      const items = Array.from(container!.querySelectorAll('[data-testid="approval-upcoming-node-item"]'))
+      expect(items.map((el) => el.textContent)).toEqual([
+        expect.stringContaining('财务审批'),
+        expect.stringContaining('结束'),
+      ])
+      // legacy assigneeType/assigneeIds shape (the fixture graph predates assigneeSources) still
+      // resolves to a real summary, not "unconfigured".
+      expect(items[0].textContent).toContain('指定成员：user_finance')
+      expect(items[1].textContent).toContain('流程结束')
+      // Greyed via the dedicated CSS class (--future), not the current/highlighted one.
+      expect(items[0].classList.contains('approval-detail__timeline-upcoming-item--future')).toBe(true)
+    })
+
+    it('prefers the PINNED template version over a drifted LIVE template', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      const pinned = mockPublishedTemplate()
+      const driftedLive = mockPublishedTemplate({
+        approvalGraph: {
+          nodes: pinned.approvalGraph.nodes.map((n) =>
+            n.key === 'approval_2' ? { ...n, name: 'LIVE_DRIFTED_STALE_NODE_NAME' } : n),
+          edges: pinned.approvalGraph.edges,
+        },
+      })
+      mockActiveTemplate.value = driftedLive // the LIVE (drifted) template
+      mockActiveVersion.value = { approvalGraph: pinned.approvalGraph } // the PINNED (frozen) version
+      await mountDetailView()
+
+      const text = container!.textContent ?? ''
+      expect(text).toContain('财务审批') // pinned name
+      expect(text).not.toContain('LIVE_DRIFTED_STALE_NODE_NAME') // drifted live name never leaks in
+    })
+
+    it('a condition branch ahead renders "按条件进入后续分支" honestly, without fabricating a branch', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_1' })
+      mockActiveTemplate.value = mockPublishedTemplate({
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', name: '发起', config: {} },
+            { key: 'approval_1', type: 'approval', name: '部门主管审批', config: { assigneeType: 'role', assigneeIds: ['role_manager'] } },
+            { key: 'cond_amount', type: 'condition', name: '金额分支', config: { branches: [{ edgeKey: 'e-high', rules: [] }], defaultEdgeKey: 'e-low' } },
+            { key: 'high', type: 'approval', name: '高额审批', config: { assigneeType: 'role', assigneeIds: ['role_finance_director'] } },
+            { key: 'low', type: 'approval', name: '低额审批', config: { assigneeType: 'user', assigneeIds: ['user_finance'] } },
+            { key: 'end', type: 'end', name: '结束', config: {} },
+          ],
+          edges: [
+            { key: 'e1', source: 'start', target: 'approval_1' },
+            { key: 'e2', source: 'approval_1', target: 'cond_amount' },
+            { key: 'e-high', source: 'cond_amount', target: 'high' },
+            { key: 'e-low', source: 'cond_amount', target: 'low' },
+            { key: 'e3', source: 'high', target: 'end' },
+            { key: 'e4', source: 'low', target: 'end' },
+          ],
+        },
+      })
+      await mountDetailView()
+
+      const items = Array.from(container!.querySelectorAll('[data-testid="approval-upcoming-node-item"]'))
+      expect(items).toHaveLength(1)
+      expect(items[0].textContent).toContain('金额分支')
+      expect(items[0].textContent).toContain('按条件进入后续分支')
+      expect(items[0].classList.contains('approval-detail__timeline-upcoming-item--conditional')).toBe(true)
+      // Neither branch is fabricated.
+      const text = container!.textContent ?? ''
+      expect(text).not.toContain('高额审批')
+      expect(text).not.toContain('低额审批')
+    })
+
+    it('does NOT add extra .el-timeline-item entries (history-item count assertions elsewhere stay accurate)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      mockHistory.value = mockHistoryItems() // 2 history rows
+      mockActiveTemplate.value = mockPublishedTemplate()
+      await mountDetailView()
+
+      // The synthesized section renders (current handler + 2 upcoming nodes)...
+      expect(container!.querySelector('[data-testid="approval-current-handler-item"]')).toBeTruthy()
+      expect(container!.querySelectorAll('[data-testid="approval-upcoming-node-item"]').length).toBeGreaterThan(0)
+      // ...yet the real history item count (what `queryHistoryItems` / several OTHER guard
+      // specs rely on) is untouched.
+      expect(container!.querySelectorAll('.el-timeline-item').length).toBe(2)
     })
   })
 })

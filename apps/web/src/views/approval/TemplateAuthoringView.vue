@@ -1223,6 +1223,7 @@ import type {
   ParallelNodeConfig,
 } from '../../types/approval'
 import { useApprovalDirectory } from '../../approvals/useApprovalDirectory'
+import { assigneeSourceSummary } from '../../approvals/assigneeSource'
 
 const route = useRoute()
 const router = useRouter()
@@ -1278,19 +1279,9 @@ function nodeTypeLabel(type: string): string {
   return NODE_TYPE_LABELS[type] ?? type
 }
 
-function assigneeSourceSummary(source: ApprovalAssigneeSource): string {
-  switch (source.kind) {
-    case 'static_user': return `指定用户：${source.userIds.join('、') || '（无）'}`
-    case 'static_role': return `指定角色：${source.roleIds.join('、') || '（无）'}`
-    case 'requester': return '发起人'
-    case 'form_field_user': return `表单用户字段：${source.fieldId}`
-    case 'direct_manager': return '直属上级'
-    case 'dept_head': return '部门主管'
-    case 'continuous_managers': return `连续多级上级（${source.levels} 级）`
-    case 'manager_at_level': return `指定层级上级（第 ${source.level} 级）`
-    default: return JSON.stringify(source)
-  }
-}
+// `assigneeSourceSummary` (single-source label) now lives in `../../approvals/assigneeSource` —
+// UX B2-08 reuses it from the approval detail view's "upcoming nodes" preview, so it moved to a
+// shared module instead of staying private here. Imported above; behavior is unchanged.
 
 // One read-only descriptor per node config, covering ALL three complex types (condition / parallel
 // / cc) plus approval — so no type silently renders as "unsupported". Returns `[]` for nodes
