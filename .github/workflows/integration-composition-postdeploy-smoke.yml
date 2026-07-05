@@ -1,0 +1,120 @@
+name: Integration Composition Postdeploy Smoke
+
+# Read-source resolver composition (#1709 composition line) — post-deploy E2E smoke lane.
+# Values-free by construction: the smoke script prints only statuses/booleans/counts/coarse codes.
+# Mirrors the read self-service postdeploy smoke lane (same token resolver, secrets, and vars).
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Deployed backend base URL (defaults to repo var / entity host)
+        required: false
+      tenant_id:
+        description: Tenant scope (defaults to repo var)
+        required: false
+      workspace_id:
+        description: Workspace scope (optional)
+        required: false
+      system_id:
+        description: Registered external system id (required for the composition chain)
+        required: true
+      sample_key:
+        description: Private sample key (material key) for the chain run (never echoed)
+        required: true
+      step1_read_path:
+        description: Hop 1 (material) relative read path override
+        required: false
+        default: /K3API/Material/GetList
+      step2_read_path:
+        description: Hop 2 (bom) relative read path override
+        required: false
+        default: /K3API/BOM/GetList
+      container_paths:
+        description: Comma-separated container paths shared by both hops (default Data.Rows)
+        required: false
+        default: Data.Rows
+      timeout_ms:
+        description: Per-request timeout in ms
+        required: false
+        default: '15000'
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Resolve smoke token
+        id: token
+        env:
+          METASHEET_K3WISE_SMOKE_TOKEN_SECRET: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}
+          K3_WISE_TOKEN_RESOLVE_REQUIRED: 'true'
+          K3_WISE_TOKEN_AUTO_DISCOVER_TENANT: ${{ vars.K3_WISE_TOKEN_AUTO_DISCOVER_TENANT || 'false' }}
+          METASHEET_TENANT_ID: ${{ github.event.inputs.tenant_id || vars.METASHEET_TENANT_ID || '' }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+        run: |
+          set -euo pipefail
+          scripts/ops/resolve-k3wise-smoke-token.sh
+
+      - name: Run composition postdeploy smoke
+        id: smoke
+        env:
+          METASHEET_BASE_URL: ${{ github.event.inputs.base_url || vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || 'http://23.254.236.11:8081' }}
+          METASHEET_TENANT_ID: ${{ github.event.inputs.tenant_id || vars.METASHEET_TENANT_ID || '' }}
+          METASHEET_WORKSPACE_ID: ${{ github.event.inputs.workspace_id || '' }}
+          SMOKE_SYSTEM_ID: ${{ github.event.inputs.system_id }}
+          SMOKE_SAMPLE_KEY: ${{ github.event.inputs.sample_key }}
+          SMOKE_STEP1_READ_PATH: ${{ github.event.inputs.step1_read_path || '/K3API/Material/GetList' }}
+          SMOKE_STEP2_READ_PATH: ${{ github.event.inputs.step2_read_path || '/K3API/BOM/GetList' }}
+          SMOKE_CONTAINER_PATHS: ${{ github.event.inputs.container_paths || 'Data.Rows' }}
+          TIMEOUT_MS: ${{ github.event.inputs.timeout_ms || '15000' }}
+        run: |
+          set -euo pipefail
+          out_dir="output/integration-composition-postdeploy-smoke/manual"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir"
+
+          args=(
+            --base-url "$METASHEET_BASE_URL"
+            --system-id "$SMOKE_SYSTEM_ID"
+            --sample-key "$SMOKE_SAMPLE_KEY"
+            --step1-read-path "$SMOKE_STEP1_READ_PATH"
+            --step2-read-path "$SMOKE_STEP2_READ_PATH"
+            --container-paths "$SMOKE_CONTAINER_PATHS"
+            --timeout-ms "$TIMEOUT_MS"
+            --out-dir "$out_dir"
+          )
+          if [[ -n "${METASHEET_TENANT_ID:-}" ]]; then args+=(--tenant-id "$METASHEET_TENANT_ID"); fi
+          if [[ -n "${METASHEET_WORKSPACE_ID:-}" ]]; then args+=(--workspace-id "$METASHEET_WORKSPACE_ID"); fi
+          if [[ -n "${K3_WISE_SMOKE_TOKEN:-}" ]]; then
+            export METASHEET_AUTH_TOKEN="$K3_WISE_SMOKE_TOKEN"
+          fi
+
+          node scripts/ops/integration-composition-postdeploy-smoke.mjs "${args[@]}"
+
+      - name: Write summary
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "## Composition Postdeploy Smoke" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat output/integration-composition-postdeploy-smoke/manual/summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || echo "no summary produced" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: composition-postdeploy-smoke
+          path: output/integration-composition-postdeploy-smoke/manual
+          if-no-files-found: ignore
