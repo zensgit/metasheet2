@@ -57,14 +57,17 @@ Lands **default-OFF** (`MULTITABLE_ENABLE_PERSONAL_VIEWS`). Flag-on is NOT autho
 - **Executed / verified by review:** the code is complete and self-consistent (Opus read the module, the wiring, the
   migration, and the goldens end-to-end); arg orders, `effectiveViews` handling, route closure, and the actor-scoping
   are correct.
-- **NOT executed locally:** the build agent **stalled during its own real-DB self-check before running the suite**,
-  so neither the golden run nor the **observed-RED** (revert the actor-scoping → G-A/G-C go red) was captured here.
-  The goldens are **structurally fail-first** (sound discriminators, traced above) and are now wired into the required
-  Node-20 real-DB CI step, so the PR's CI is the first real execution.
+- **CI GREEN with the guard:** this PR's `test (20.x)` ran the new goldens **green** (first real execution — the build
+  agent had stalled before its own self-check).
+- **observed-RED CONFIRMED (2026-07-05):** a throwaway branch deliberately breaking the actor keying (dropped
+  `user_id` from the read queries + made the PUT route honor `body.userId`) was run through CI — its `test (20.x)`
+  **FAILED** on the personal-views goldens (job `85215174961`), while `test (18.x)` (no real-DB step) passed. The
+  goldens are thus **bidirectionally proven**: GREEN with correct actor-scoping, RED without it. The throwaway
+  PR/branch was closed and deleted. This satisfies the flag-on observed-RED precondition.
 - **Executed during adversarial re-review:** `pnpm --filter @metasheet/core-backend type-check` and `git diff --check`
   passed. The targeted real-DB spec command was run from a clean review worktree, but the local environment had no
   `DATABASE_URL`, so Vitest skipped the file; CI remains the required real-DB execution surface for the new goldens.
-- **Human reviewer MUST:** (a) confirm the PR's `test (20.x)` runs the new golden GREEN; (b) run the observed-RED once
-  (revert the `user_id = actorUserId` keying → confirm G-A/G-C fail) to convert structural-fail-first into
-  observed-fail-first before any flag-on; (c) sanity-check that `resolveSheetCapabilities().access.userId` is the
-  fully-authenticated identity in this deployment (no upstream shim populates it from a header).
+- **Human reviewer MUST:** (a) confirm the PR's `test (20.x)` is GREEN — **done** (green); (b) observed-RED — **done**,
+  confirmed via the throwaway CI run above (green-with-guard + red-without-guard); (c) sanity-check that
+  `resolveSheetCapabilities().access.userId` is the fully-authenticated identity in this deployment (no upstream shim
+  populates it from a header) — the one remaining item, a deployment-config check.
