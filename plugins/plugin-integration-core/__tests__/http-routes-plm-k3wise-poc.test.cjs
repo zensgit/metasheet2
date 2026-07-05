@@ -519,6 +519,17 @@ function createHarness() {
         async listAudit() { return [] },
         async getForRuntime() { return {} },
       },
+      // C-R4-1: satisfy requireService('readSourceCompositionConfigStore', ...) — this
+      // K3 PoC harness never exercises composition routes.
+      readSourceCompositionConfigStore: {
+        async saveVersion() { return {} },
+        async list() { return [] },
+        async get() { return {} },
+        async approve() { return {} },
+        async retire() { return {} },
+        async listAudit() { return [] },
+        async getForRuntime() { return {} },
+      },
     },
     logger: {
       warn() {},
