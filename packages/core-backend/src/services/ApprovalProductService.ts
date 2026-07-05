@@ -4808,7 +4808,11 @@ export class ApprovalProductService {
           toStatus: 'rejected',
           fromVersion: instance.version,
           toVersion: nextVersion,
-          metadata: { nodeKey: currentNodeKey },
+          metadata: {
+            nodeKey: currentNodeKey,
+            // A-4: server-side channel attribution (card wrapper only; never request-sourced over HTTP).
+            ...(request.channelOrigin ? { channel: request.channelOrigin.channel, cardDeliveryId: request.channelOrigin.cardDeliveryId } : {}),
+          },
         }, actor)
         const completionEvent = this.buildCompletionEvent(
           instance,
@@ -5179,6 +5183,8 @@ export class ApprovalProductService {
         nextNodeKey: resolution.currentNodeKey,
         approvalMode,
         aggregateComplete: true,
+        // A-4: server-side channel attribution (card wrapper only; never request-sourced over HTTP).
+        ...(request.channelOrigin ? { channel: request.channelOrigin.channel, cardDeliveryId: request.channelOrigin.cardDeliveryId } : {}),
         ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
       }
       if (isInParallelRegion) {

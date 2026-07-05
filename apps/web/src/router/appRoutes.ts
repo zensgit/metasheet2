@@ -259,6 +259,18 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'New Approval', titleZh: '发起审批', requiresAuth: true }
   },
   {
+    // A-3 (one-tap lock #3594 §5): the card deep-link decision page. Query carries ONLY
+    // d=<deliveryId> + t=<HMAC token>; everything else resolves server-side via the
+    // card-delivery endpoints — this page never calls raw /api/approvals/:id/actions.
+    path: '/m/approval-decision',
+    name: 'approval-card-decision',
+    component: () => import('../views/approval/ApprovalCardDecisionView.vue'),
+    // requiresAuth is deliberately FALSE: the generic guard would bounce to /login, but lock §5
+    // requires the card deep link to drive the DingTalk launch flow directly — the view detects
+    // the missing session itself and redirects to /api/auth/dingtalk/launch?redirect=<self>.
+    meta: { title: 'Approval Decision', titleZh: '审批处理', hideNavbar: true, requiresAuth: false }
+  },
+  {
     path: '/approvals/:id',
     name: 'approval-detail',
     component: () => import('../views/approval/ApprovalDetailView.vue'),

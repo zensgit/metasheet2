@@ -16,6 +16,10 @@ import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../services/AfterSalesApprovalBridgeService'
 import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
 import {
+  executeApprovalActionFromCardDelivery,
+  getApprovalCardDeliverySummary,
+} from '../services/ApprovalCardDeliveryAction'
+import {
   ApprovalProductService,
   resolveApprovalListPaging,
   type ApprovalTemplateVisibilityActor,
@@ -1555,6 +1559,85 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         'APPROVAL_BULK_REASSIGN_FAILED',
         'Failed to bulk reassign approvals',
       )
+    }
+  })
+
+  // ── A-3/A-4 core (one-tap lock #3594 §4/§5): card-delivery decision surface ──────────────
+  // The mobile decision page's ONLY api. Resolution is ledger-only (deliveryId + HMAC token);
+  // instance ids never ride the wire here. Raw /api/approvals/:id/actions stays untouched — and the
+  // page is FORBIDDEN from calling it (tripwire in the FE spec).
+  r.get('/api/approval-card-deliveries/:deliveryId', authenticate, rbacGuard('approvals', 'act'), async (req: Request, res: Response) => {
+    try {
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'))
+      }
+      const token = typeof req.query?.t === 'string' ? req.query.t : ''
+      const result = await getApprovalCardDeliverySummary(
+        { query: (sql, params) => pool.query(sql, params) },
+        { deliveryId: String(req.params.deliveryId ?? ''), token, viewerUserId: userId },
+      )
+      if (result.status === 'not_found') {
+        // Invalid token and unknown id are indistinguishable on purpose (no existence oracle).
+        return res.status(404).json(approvalErrorResponse('APPROVAL_CARD_DELIVERY_NOT_FOUND', 'Card delivery not found'))
+      }
+      return res.json({ ok: true, data: result.summary })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_CARD_DELIVERY_SUMMARY_FAILED', 'Failed to load card delivery')
+    }
+  })
+
+  r.post('/api/approval-card-deliveries/:deliveryId/actions', authenticate, rbacGuard('approvals', 'act'), async (req: Request, res: Response) => {
+    try {
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'))
+      }
+      const decision = req.body?.decision
+      if (decision !== 'approve' && decision !== 'reject') {
+        return res.status(400).json({
+          error: { code: 'VALIDATION_ERROR', message: 'decision must be approve or reject' },
+        })
+      }
+      const token = typeof req.body?.t === 'string' ? req.body.t : ''
+      const comment = typeof req.body?.comment === 'string' ? req.body.comment : undefined
+      const outcome = await executeApprovalActionFromCardDelivery(
+        {
+          query: (sql, params) => pool.query(sql, params),
+          approvals: getProductService(),
+        },
+        {
+          deliveryId: String(req.params.deliveryId ?? ''),
+          token,
+          decision,
+          comment,
+          actor: {
+            userId,
+            userName: resolveApprovalActorName(req, userId),
+            roles: resolveApprovalActorRoles(req),
+            ip: req.ip || null,
+            userAgent: req.get('user-agent') || null,
+          },
+        },
+      )
+      if (outcome.status === 'not_found') {
+        return res.status(404).json(approvalErrorResponse('APPROVAL_CARD_DELIVERY_NOT_FOUND', 'Card delivery not found'))
+      }
+      if (outcome.status === 'stale') {
+        return res.status(409).json({
+          error: { code: 'APPROVAL_CARD_DELIVERY_STALE', message: 'This card is no longer actionable' },
+          data: outcome.summary,
+        })
+      }
+      if (outcome.status === 'engine_rejected') {
+        return res.status(outcome.httpStatus >= 400 && outcome.httpStatus < 600 ? outcome.httpStatus : 400).json({
+          error: { code: outcome.code, message: outcome.message },
+          data: outcome.summary,
+        })
+      }
+      return res.json({ ok: true, data: outcome.summary })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_CARD_ACTION_FAILED', 'Failed to submit card decision')
     }
   })
 

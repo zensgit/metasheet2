@@ -308,6 +308,7 @@ jobs:
             tests/integration/automation-approval-completed-trigger.test.ts \
             tests/integration/automation-approval-task-created-trigger.test.ts \
             tests/integration/automation-dingtalk-approval-card-action.test.ts \
+            tests/integration/approval-card-delivery-wrapper.db.test.ts \
             tests/integration/multitable-date-reminder-trigger.test.ts \
             tests/integration/multitable-webhook-event-bridge.test.ts \
             tests/integration/multitable-webhook-retry-tick.test.ts \

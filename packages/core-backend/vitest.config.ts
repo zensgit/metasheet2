@@ -68,6 +68,8 @@ export default defineConfig({
       'tests/integration/automation-approval-task-created-trigger.test.ts',
       // A-2b approval-card action chain: DATABASE_URL-gated. Same two-point wiring (no skip-green).
       'tests/integration/automation-dingtalk-approval-card-action.test.ts',
+      // A-4 card-delivery wrapper: DATABASE_URL-gated. Same two-point wiring (no skip-green).
+      'tests/integration/approval-card-delivery-wrapper.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

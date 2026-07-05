@@ -93,10 +93,11 @@ export async function findDingTalkApprovalCardDeliveryById(
 }
 
 /**
- * Atomic acted-claim: succeeds for exactly one caller while the card is still `sent`.
- * Returns the updated row for the winner, `null` for everyone else (duplicate callback, double
- * tap, or a card already superseded/expired) — losers re-read via `find…ById` to render the
- * real terminal state.
+ * Atomic acted-claim: succeeds for exactly one caller while the card is still `sent` AND was
+ * actually delivered (`send_status='sent'` — review P2: a pending/failed send never produced a
+ * live button, so nothing may claim it). Returns the updated row for the winner, `null` for
+ * everyone else (duplicate callback, double tap, undelivered card, or a card already
+ * superseded/expired) — losers re-read via `find…ById` to render the real terminal state.
  */
 export async function claimDingTalkApprovalCardDeliveryActed(
   query: QueryFn,
@@ -106,7 +107,7 @@ export async function claimDingTalkApprovalCardDeliveryActed(
   const result = await query(
     `UPDATE dingtalk_approval_card_deliveries
      SET card_state = 'acted', acted_action = $2, acted_by = $3, acted_at = NOW(), updated_at = NOW()
-     WHERE id = $1 AND card_state = 'sent'
+     WHERE id = $1 AND card_state = 'sent' AND send_status = 'sent'
      RETURNING ${RETURNING_COLUMNS}`,
     [id, input.action, input.actedBy],
   )
