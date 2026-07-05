@@ -45,17 +45,24 @@ vi.mock('element-plus', async () => {
 // (single-instance and, via `runApprovalBatchAction`'s `dispatch` callback, per-row in a batch),
 // so this needs to be independently resolvable/rejectable per test rather than the real module's
 // always-succeeds mock-mode fixture.
+//
+// B2-01: `getTemplate` backs the list row key-field summary (`useApprovalListFieldSummary`).
+// Defaults to an empty-fields schema so any row that happens to carry a templateId in a test that
+// isn't specifically about the summary still resolves harmlessly (no unhandled rejection, no
+// summary rendered since there is nothing eligible in an empty `fields` array).
 // ---------------------------------------------------------------------------
 const dispatchActionSpy = vi.fn<[string, unknown], Promise<unknown>>().mockResolvedValue({})
 const getPendingCountSpy = vi.fn().mockResolvedValue({ count: 0, unreadCount: 0 })
 const markAllApprovalsReadSpy = vi.fn().mockResolvedValue({ markedCount: 0 })
 const remindApprovalSpy = vi.fn().mockResolvedValue({ ok: true, data: {} })
+const getTemplateSpy = vi.fn().mockResolvedValue({ formSchema: { fields: [] } })
 
 vi.mock('../src/approvals/api', () => ({
   dispatchAction: (...args: [string, unknown]) => dispatchActionSpy(...args),
   getPendingCount: (...args: unknown[]) => getPendingCountSpy(...args),
   markAllApprovalsRead: (...args: unknown[]) => markAllApprovalsReadSpy(...args),
   remindApproval: (...args: unknown[]) => remindApprovalSpy(...args),
+  getTemplate: (...args: [string]) => getTemplateSpy(...args),
 }))
 
 vi.mock('vue-router', async () => {
@@ -396,6 +403,8 @@ describe('ApprovalCenterView', () => {
     markAllApprovalsReadSpy.mockResolvedValue({ markedCount: 0 })
     remindApprovalSpy.mockClear()
     remindApprovalSpy.mockResolvedValue({ ok: true, data: {} })
+    getTemplateSpy.mockClear()
+    getTemplateSpy.mockResolvedValue({ formSchema: { fields: [] } })
 
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -807,5 +816,87 @@ describe('ApprovalCenterView', () => {
     expect(dispatchActionSpy).toHaveBeenNthCalledWith(3, 'apv_b', { action: 'approve' })
     // Full success on retry closes the dialog.
     expect(container!.querySelector('[data-testid="approval-batch-result-dialog"]')).toBeNull()
+  })
+
+  // ---------------------------------------------------------------------------
+  // B2-01 (待办列表关键字段摘要) — list row key-field summary line. The list DTO never carries
+  // the frozen per-instance formSchema (only the detail endpoint does), so the summary is built
+  // from the LIVE template schema fetched via `getTemplate` and cached per templateId.
+  // ---------------------------------------------------------------------------
+  describe('B2-01: list row key-field summary', () => {
+    const leaveTemplateSchema = {
+      fields: [
+        {
+          id: 'fld_leave_type',
+          type: 'select',
+          label: '请假类型',
+          options: [{ label: '年假', value: 'annual' }, { label: '事假', value: 'personal' }],
+        },
+        { id: 'fld_duration', type: 'number', label: '时长' },
+        { id: 'fld_reason', type: 'textarea', label: '事由' },
+        { id: 'fld_attachment', type: 'attachment', label: '附件' },
+      ],
+    }
+
+    it('a row whose template has fields renders the summary line with mapped labels/values', async () => {
+      getTemplateSpy.mockResolvedValue({ formSchema: leaveTemplateSchema })
+      mockPendingApprovals.value = [
+        pendingRow({
+          id: 'apv_1',
+          templateId: 'tpl_leave',
+          formSnapshot: {
+            fld_leave_type: 'annual',
+            fld_duration: 2,
+            fld_reason: '家里有事',
+            fld_attachment: ['file_1'],
+          },
+        }),
+      ]
+      await mountView()
+      await flushUi(6)
+
+      expect(getTemplateSpy).toHaveBeenCalledWith('tpl_leave')
+      expect(getTemplateSpy).toHaveBeenCalledTimes(1)
+
+      const cell = container!.querySelector('[data-el-row="apv_1"] [data-el-cell="标题"]')
+      expect(cell).toBeTruthy()
+      expect(cell!.textContent).toContain('出差报销')
+      const summary = cell!.querySelector('.approval-center__row-summary')
+      expect(summary).toBeTruthy()
+      expect(summary!.textContent?.trim()).toBe('请假类型：年假 · 时长：2 · 事由：家里有事')
+      // The attachment field is a schema field but never part of the summary.
+      expect(summary!.textContent).not.toContain('附件')
+    })
+
+    it('a row without templateId renders no summary and never calls getTemplate', async () => {
+      mockPendingApprovals.value = [
+        pendingRow({ id: 'apv_1', templateId: null, formSnapshot: { fld_reason: '出差' } }),
+      ]
+      await mountView()
+      await flushUi(6)
+
+      expect(getTemplateSpy).not.toHaveBeenCalled()
+      const cell = container!.querySelector('[data-el-row="apv_1"] [data-el-cell="标题"]')
+      expect(cell).toBeTruthy()
+      expect(cell!.textContent).toContain('出差报销')
+      expect(cell!.querySelector('.approval-center__row-summary')).toBeNull()
+    })
+
+    it('a template-fetch failure leaves the row summary-less, without throwing', async () => {
+      getTemplateSpy.mockRejectedValueOnce(new Error('模板不存在'))
+      mockPendingApprovals.value = [
+        pendingRow({ id: 'apv_1', templateId: 'tpl_missing', formSnapshot: { fld_reason: '出差' } }),
+      ]
+      await mountView()
+      await flushUi(6)
+
+      expect(getTemplateSpy).toHaveBeenCalledWith('tpl_missing')
+      const cell = container!.querySelector('[data-el-row="apv_1"] [data-el-cell="标题"]')
+      expect(cell).toBeTruthy()
+      expect(cell!.textContent).toContain('出差报销')
+      expect(cell!.querySelector('.approval-center__row-summary')).toBeNull()
+      // Silent by design — no toast, no console-visible rejection reaching the view layer.
+      expect(elErrorSpy).not.toHaveBeenCalled()
+    })
   })
 })

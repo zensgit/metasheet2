@@ -449,3 +449,45 @@ export function buildDisplayFields(
 
   return result
 }
+
+/**
+ * B2-01 (待办列表关键字段摘要) — the first `limit` NON-attachment, NON-detail leaf fields, in
+ * schema order, that are actually present in the snapshot. Reuses `buildDisplayFields` for every
+ * bit of VALUE formatting (option labels, localized numbers, formatted dates) so that logic lives
+ * exactly once; this function only narrows WHICH of its entries qualify for a glanceable summary.
+ *
+ * Deliberately does NOT inherit `buildDisplayFields`'s "snapshot keys absent from the schema" tail
+ * (see that function's own doc comment) — those are raw/legacy data with no real label, and a
+ * caller with no schema at all (e.g. a list row whose templateId has no live template, or none)
+ * must degrade to NO summary rather than a raw-key dump of unrelated snapshot data. Returns `[]`
+ * whenever `formSchema` is missing/empty or has no eligible leaf field.
+ */
+export function summaryFields(
+  formSchema: FormSchema | null | undefined,
+  formSnapshot: Record<string, unknown> | null | undefined,
+  limit = 3,
+): DisplayField[] {
+  const fields = formSchema?.fields
+  if (!Array.isArray(fields) || fields.length === 0) return []
+
+  const eligibleFieldIds = new Set(
+    fields
+      .filter((field) => field.type !== 'attachment' && field.type !== 'detail')
+      .map((field) => field.id),
+  )
+  if (eligibleFieldIds.size === 0) return []
+
+  return buildDisplayFields(formSchema, formSnapshot)
+    .filter((field) => eligibleFieldIds.has(field.key))
+    .slice(0, limit)
+}
+
+/**
+ * Joins `summaryFields`' output into the list-row glance line, e.g.
+ * `请假类型：年假 · 时长：2 · 事由：出差`. A pure string join — the caller renders it inside a
+ * single-line container with CSS `text-overflow: ellipsis`, so truncation stays purely visual
+ * (never a substring cut here that could clip mid-character).
+ */
+export function formatSummaryLine(fields: DisplayField[]): string {
+  return fields.map((field) => `${field.label}：${field.value}`).join(' · ')
+}

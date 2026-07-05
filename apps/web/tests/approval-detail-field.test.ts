@@ -9,12 +9,14 @@ import {
   detailColumnDraftsFromField,
   DETAIL_LEAF_FIELD_TYPES,
   findDetailFieldInSchema,
+  formatSummaryLine,
   isDetailCellVisible,
   isDetailField,
   isDetailLeafFieldType,
   parseRowBound,
   pruneHiddenDetailRow,
   pruneHiddenFormDataWithDetail,
+  summaryFields,
   validateDetailColumnsDraft,
   visibleDetailColumnsForRow,
   type DetailColumnDraft,
@@ -440,5 +442,106 @@ describe('detailField — buildDisplayFields (B1-02 humanized scalar snapshot)',
     expect(buildDisplayFields(null, { a: 'b' })).toEqual([{ key: 'a', label: 'a', value: 'b' }])
     expect(buildDisplayFields(displaySchema, null)).toEqual([])
     expect(buildDisplayFields(undefined, undefined)).toEqual([])
+  })
+})
+
+describe('summaryFields (B2-01 list row key-field summary)', () => {
+  const summarySchema: FormSchema = {
+    fields: [
+      {
+        id: 'fld_leave_type',
+        type: 'select',
+        label: '请假类型',
+        options: [{ label: '年假', value: 'annual' }, { label: '事假', value: 'personal' }],
+      },
+      { id: 'fld_duration', type: 'number', label: '时长' },
+      { id: 'fld_reason', type: 'textarea', label: '事由' },
+      { id: 'fld_attachment', type: 'attachment', label: '附件' },
+      { id: 'items', type: 'detail', label: '明细', columns: [{ id: 'x', type: 'text', label: 'X' }] },
+    ],
+  }
+
+  it('returns the first `limit` eligible fields in schema order, formatted like buildDisplayFields', () => {
+    const snapshot = {
+      fld_leave_type: 'annual',
+      fld_duration: 2,
+      fld_reason: '出差',
+      fld_attachment: ['f1'],
+      items: [{ x: '1' }],
+    }
+    const fields = summaryFields(summarySchema, snapshot, 3)
+    expect(fields.map((f) => f.key)).toEqual(['fld_leave_type', 'fld_duration', 'fld_reason'])
+    // Option-label mapping is reused verbatim from buildDisplayFields, not re-derived here.
+    expect(fields[0]).toEqual({ key: 'fld_leave_type', label: '请假类型', value: '年假' })
+  })
+
+  it('excludes attachment fields even when present in the snapshot and earlier in schema order', () => {
+    const schemaAttachmentFirst: FormSchema = {
+      fields: [
+        { id: 'fld_attachment', type: 'attachment', label: '附件' },
+        { id: 'fld_reason', type: 'textarea', label: '事由' },
+      ],
+    }
+    const fields = summaryFields(schemaAttachmentFirst, { fld_attachment: ['f1'], fld_reason: '出差' }, 3)
+    expect(fields.map((f) => f.key)).toEqual(['fld_reason'])
+  })
+
+  it('excludes detail fields (mirrors buildDisplayFields, which never surfaces them as raw/unknown either)', () => {
+    const fields = summaryFields(summarySchema, { items: [{ x: '1' }], fld_reason: '出差' }, 3)
+    expect(fields.map((f) => f.key)).toEqual(['fld_reason'])
+  })
+
+  it('never falls back to snapshot keys absent from the schema (unlike buildDisplayFields\'s own tail)', () => {
+    const fields = summaryFields(summarySchema, { legacy_field: 'x', fld_reason: '出差' }, 3)
+    expect(fields.map((f) => f.key)).toEqual(['fld_reason'])
+  })
+
+  it('honors the limit: 0 returns none, and a limit above the eligible count returns all available', () => {
+    const snapshot = { fld_leave_type: 'annual', fld_duration: 2, fld_reason: '出差' }
+    expect(summaryFields(summarySchema, snapshot, 0)).toEqual([])
+    expect(summaryFields(summarySchema, snapshot, 1).map((f) => f.key)).toEqual(['fld_leave_type'])
+    expect(summaryFields(summarySchema, snapshot, 50).map((f) => f.key)).toEqual([
+      'fld_leave_type', 'fld_duration', 'fld_reason',
+    ])
+  })
+
+  it('defaults the limit to 3 when omitted', () => {
+    const snapshot = { fld_leave_type: 'annual', fld_duration: 2, fld_reason: '出差' }
+    expect(summaryFields(summarySchema, snapshot).map((f) => f.key)).toEqual([
+      'fld_leave_type', 'fld_duration', 'fld_reason',
+    ])
+  })
+
+  it('returns [] for a missing/empty schema, a schema with no eligible field, or no matching snapshot data', () => {
+    expect(summaryFields(null, { a: 'b' })).toEqual([])
+    expect(summaryFields(undefined, undefined)).toEqual([])
+    expect(summaryFields({ fields: [] }, { a: 'b' })).toEqual([])
+
+    const onlyAttachmentAndDetail: FormSchema = {
+      fields: [
+        { id: 'fld_attachment', type: 'attachment', label: '附件' },
+        { id: 'items', type: 'detail', label: '明细', columns: [{ id: 'x', type: 'text', label: 'X' }] },
+      ],
+    }
+    expect(summaryFields(onlyAttachmentAndDetail, { fld_attachment: ['f1'], items: [] })).toEqual([])
+    expect(summaryFields(summarySchema, {})).toEqual([])
+  })
+})
+
+describe('formatSummaryLine (B2-01)', () => {
+  it('joins label：value pairs with " · "', () => {
+    const line = formatSummaryLine([
+      { key: 'a', label: '请假类型', value: '年假' },
+      { key: 'b', label: '时长', value: '2' },
+    ])
+    expect(line).toBe('请假类型：年假 · 时长：2')
+  })
+
+  it('returns a single entry without a separator', () => {
+    expect(formatSummaryLine([{ key: 'a', label: '事由', value: '出差' }])).toBe('事由：出差')
+  })
+
+  it('returns an empty string for an empty array', () => {
+    expect(formatSummaryLine([])).toBe('')
   })
 })

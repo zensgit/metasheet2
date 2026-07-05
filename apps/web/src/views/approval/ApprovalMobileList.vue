@@ -38,6 +38,17 @@
         <span class="approval-mobile-list__request-no">{{ row.requestNo ?? '-' }}</span>
         <span class="approval-mobile-list__requester">{{ row.requester?.name ?? '-' }}</span>
       </div>
+      <!-- B2-01: key-field summary — same muted glance line as the desktop table's title column,
+           built from the LIVE template schema cache the parent passes down (see
+           useApprovalListFieldSummary.ts for the live-label drift caveat). Absent for rows with no
+           templateId or no cached schema yet. -->
+      <div
+        v-if="rowSummaryLine(row)"
+        class="approval-mobile-list__summary"
+        :title="rowSummaryLine(row)"
+      >
+        {{ rowSummaryLine(row) }}
+      </div>
       <div
         class="approval-mobile-list__date"
         :class="`approval-mobile-list__date--${waitSeverity(row.createdAt)}`"
@@ -51,9 +62,10 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { UnifiedApprovalDTO } from '../../types/approval'
+import type { FormSchema, UnifiedApprovalDTO } from '../../types/approval'
 import { useLocale } from '../../composables/useLocale'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
+import { resolveRowSummaryLine } from '../../approvals/useApprovalListFieldSummary'
 
 // T3-1 v0 — dedicated touch-first list card (ballot Q10). Replaces the desktop
 // `el-table` (fixed column widths + horizontal scroll + tiny row-click targets)
@@ -70,10 +82,16 @@ const props = withDefaults(
     approvals: UnifiedApprovalDTO[]
     loading?: boolean
     emptyText?: string
+    // B2-01 (待办列表关键字段摘要) — live-template schema cache keyed by templateId, owned by the
+    // parent (ApprovalCenterView's useApprovalListFieldSummary). This component never fetches, it
+    // only formats whatever is already cached; a templateId with no entry yet (not fetched / still
+    // in flight / fetch failed) or a row with no templateId simply renders no summary line.
+    templateSchemas?: Map<string, FormSchema>
   }>(),
   {
     loading: false,
     emptyText: undefined,
+    templateSchemas: () => new Map(),
   },
 )
 
@@ -135,6 +153,12 @@ function statusLabel(status: string): string {
 function formatDate(dateStr: string): string {
   if (!dateStr) return '-'
   return new Date(dateStr).toLocaleString(t.value.dateLocale)
+}
+
+// B2-01: same row-summary glue the desktop table uses, resolved against the `templateSchemas`
+// cache the parent owns and passes down as a prop.
+function rowSummaryLine(row: UnifiedApprovalDTO): string {
+  return resolveRowSummaryLine(props.templateSchemas, row)
 }
 </script>
 
@@ -217,6 +241,17 @@ function formatDate(dateStr: string): string {
   gap: 12px;
   font-size: 13px;
   color: var(--el-text-color-regular, #606266);
+}
+
+/* B2-01: key-field summary line — muted, single-line, ellipsis-truncated (mirrors the desktop
+   table's `.approval-center__row-summary`); the full text stays reachable via the native `:title`
+   tooltip. */
+.approval-mobile-list__summary {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #909399);
 }
 
 .approval-mobile-list__date {
