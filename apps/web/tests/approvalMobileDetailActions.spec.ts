@@ -123,6 +123,34 @@ const ElPopconfirm = defineComponent({
   props: { title: String },
   render() { return h('div', { 'data-el-popconfirm': this.title }, this.$slots.reference?.()) },
 })
+// B1-05: quick-phrase chips are `<el-tag @click="...">`; the generic `stub()` helper declares
+// 'click' under `emits` but never wires a native listener, so a real click would silently no-op.
+// A minimal dedicated stub that forwards the click keeps the chip-click test honest.
+const ElTag = defineComponent({
+  name: 'ElTag',
+  props: { type: String, size: String, effect: String },
+  emits: ['click'],
+  render() {
+    return h('span', {
+      'data-el-tag': this.type || 'default',
+      onClick: (e: Event) => this.$emit('click', e),
+    }, this.$slots.default?.())
+  },
+})
+// B1-05: the comment/quick-phrase test needs a real v-model round-trip (fill via ref assignment,
+// read back via `.value`); the generic `stub()` helper renders a static div with no such wiring.
+const ElInput = defineComponent({
+  name: 'ElInput',
+  props: { modelValue: [String, Number], type: String, rows: Number, placeholder: String },
+  emits: ['update:modelValue'],
+  render() {
+    return h('input', {
+      'data-el-input': 'true',
+      value: this.modelValue ?? '',
+      onInput: (e: Event) => this.$emit('update:modelValue', (e.target as HTMLInputElement).value),
+    })
+  },
+})
 
 const stubDirective = { mounted() {}, updated() {} }
 
@@ -200,13 +228,15 @@ describe('ApprovalDetailView — T3-1 mobile action-set restriction', () => {
     const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
     app = createApp(Host)
     // Broad Element Plus stubs; the action buttons are the assertion surface.
-    for (const name of ['ElTag', 'ElAlert', 'ElDivider', 'ElEmpty', 'ElTable', 'ElTimeline', 'ElTimelineItem', 'ElForm', 'ElFormItem', 'ElInput', 'ElSelect', 'ElOption', 'ElRadioGroup', 'ElRadio', 'ElIcon']) {
+    for (const name of ['ElAlert', 'ElDivider', 'ElEmpty', 'ElTable', 'ElTimeline', 'ElTimelineItem', 'ElForm', 'ElFormItem', 'ElSelect', 'ElOption', 'ElRadioGroup', 'ElRadio', 'ElIcon']) {
       app.component(name, stub(name))
     }
     app.component('ElTableColumn', ElTableColumn)
     app.component('ElButton', ElButton)
     app.component('ElDialog', ElDialog)
     app.component('ElPopconfirm', ElPopconfirm)
+    app.component('ElTag', ElTag)
+    app.component('ElInput', ElInput)
     app.directive('loading', stubDirective)
     app.mount(container!)
     await flushUi()
@@ -313,5 +343,28 @@ describe('ApprovalDetailView — T3-1 mobile action-set restriction', () => {
     mockCurrentUserId.value = 'user_uninvolved'
     await mountView()
     expect(container!.querySelector('[data-testid="approval-my-turn-badge"]')).toBeNull()
+  })
+
+  it('B1-05: opening 通过 dialog shows quick-phrase chips; clicking one fills the comment input', async () => {
+    await mountView()
+
+    const approveBtn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.includes('通过'))
+    expect(approveBtn).toBeTruthy()
+    approveBtn!.click()
+    await flushUi()
+
+    const dialog = container!.querySelector('[data-el-dialog]')
+    expect(dialog).toBeTruthy()
+
+    // Preset chips for 'approve' (no recent phrases yet for this — unresolved — user).
+    const chip = dialog!.querySelector('[data-testid="approval-quick-phrase-0"]') as HTMLElement
+    expect(chip).toBeTruthy()
+    expect(chip.textContent?.trim()).toBe('同意')
+
+    chip.click()
+    await flushUi()
+
+    const textarea = dialog!.querySelector('[data-el-input]') as HTMLInputElement
+    expect(textarea.value).toBe('同意')
   })
 })
