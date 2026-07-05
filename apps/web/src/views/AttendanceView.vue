@@ -6278,7 +6278,7 @@
                     <span class="attendance__field-hint" data-import-override-backup-status>{{ importOverrideBackupStatusLabel }}</span>
                   </div>
                   <small v-if="!importOverrideConfirm.backupTargetUserId" class="attendance__field-hint" data-import-override-backup-hint>
-                    {{ tr('Backup export needs a single target user — set User ID above, or the preview must resolve to exactly one user.', '一键导出备份需要单一目标用户——请在上方填写用户 ID，或预览结果需恰好命中一个用户。') }}
+                    {{ tr('Backup export needs a single target user — set User ID above, or the preview must resolve to exactly one user (a truncated preview sample never auto-resolves).', '一键导出备份需要单一目标用户——请在上方填写用户 ID，或预览结果需恰好命中一个用户（预览为截断样本时不做自动判定）。') }}
                   </small>
                   <div class="attendance__admin-actions">
                     <button class="attendance__btn" type="button" @click="() => closeImportOverrideConfirm()">{{ tr('Cancel', '取消') }}</button>
@@ -9356,6 +9356,7 @@ import { normalizeImportPayloadColumns } from './attendance/attendanceImportPayl
 import {
   buildImportBackupExportQuery,
   buildImportOverrideConfirmLines,
+  importModeRequiresConfirm,
   buildImportOverrideConfirmCheckboxLabel,
   buildImportOverrideWarningText,
   buildManualAdjustDeductionLedgerLine,
@@ -13580,6 +13581,9 @@ const importPreviewTotalRows = computed(() => {
   if (taskRows > 0) return taskRows
   return importPreviewShownRows.value
 })
+// Review P3-1: the loaded rows can be a truncated sample of the full import (same
+// predicate the shown/total scorecard uses) — the override confirm modal must say so.
+const importPreviewSampleTruncated = computed(() => importPreviewTotalRows.value > importPreviewShownRows.value)
 const importPreviewUserCount = computed(() =>
   new Set(importPreview.value.map(item => item.userId).filter(Boolean)).size
 )
@@ -18540,18 +18544,24 @@ function confirmImportOverride(): void {
 // snapshot-not-live-form discipline as requestAnnualAdjust()/requestAnnualAccrualCommit()
 // above — so editing the form while the modal is open cannot change what gets submitted.
 function requestRunImport(): void {
-  if (importMode.value !== 'override') {
+  if (!importModeRequiresConfirm(importMode.value)) {
     void runImport()
     return
   }
   if (isOverrideSubmitBlocked(importMode.value, importOverridePreviewFresh.value)) return
   const range = summarizeImportPreviewRange(importPreview.value)
-  importOverrideConfirm.lines = buildImportOverrideConfirmLines({ rowCount: importPreviewTotalRows.value, range }, tr)
+  importOverrideConfirm.lines = buildImportOverrideConfirmLines({
+    rowCount: importPreviewTotalRows.value,
+    range,
+    sampleTruncated: importPreviewSampleTruncated.value
+      ? { shown: importPreviewShownRows.value, total: importPreviewTotalRows.value }
+      : null,
+  }, tr)
   importOverrideConfirm.warning = buildImportOverrideWarningText(tr)
   importOverrideConfirm.confirmLabel = buildImportOverrideConfirmCheckboxLabel(tr)
   importOverrideConfirm.confirmChecked = false
   importOverrideConfirm.backupRange = range
-  importOverrideConfirm.backupTargetUserId = resolveImportBackupTargetUserId(importForm.userId, range.userIds)
+  importOverrideConfirm.backupTargetUserId = resolveImportBackupTargetUserId(importForm.userId, range.userIds, importPreviewSampleTruncated.value)
   importOverrideConfirm.backupStatus = 'idle'
   importOverrideConfirm.open = true
   importOverrideConfirm.onConfirm = () => { void runImport() }
@@ -18955,6 +18965,14 @@ async function runStatusAction() {
     if (canResumeImportJobFromStatus.value) {
       await refreshImportAsyncJob({ silent: true })
       await resumeImportAsyncJobPolling()
+      return
+    }
+    // Review P2-1 fix: the retry action must pass the SAME override confirm/preview gate
+    // as the Import button — a direct runImport() here was a gate bypass (e.g. a merge
+    // import fails, the operator switches the selector to override, clicks Retry, and a
+    // never-confirmed override would have committed). Merge keeps its awaited one-click.
+    if (importModeRequiresConfirm(importMode.value)) {
+      requestRunImport()
       return
     }
     await runImport()

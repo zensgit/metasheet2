@@ -99,6 +99,9 @@ export interface BuildImportOverrideConfirmLinesInput {
    *  view) — NOT an overwrite count. */
   rowCount: number
   range: ImportPreviewRangeSummary
+  /** Set when the loaded preview rows are a truncated sample (shown < total): the modal
+   *  must say so, since the date-range/user-count lines are sample-derived (review P3-1). */
+  sampleTruncated?: { shown: number; total: number } | null
 }
 
 /** G1 lines: mode + Preview's rowCount + date range / distinct-user set. Deliberately
@@ -111,12 +114,23 @@ export function buildImportOverrideConfirmLines(
   const dateRangeValue = range.from && range.to
     ? (range.from === range.to ? range.from : `${range.from} ~ ${range.to}`)
     : tr('unknown (no preview rows loaded)', '未知（无预览行）')
-  return [
+  const lines: ImportOverrideConfirmLine[] = [
     { label: tr('Mode', '模式'), value: tr('override (overwrite same user/date)', '覆盖（同用户同日期）') },
     { label: tr('Parsed rows (preview)', '解析行数（预览）'), value: String(rowCount) },
     { label: tr('Date range (preview)', '日期范围（预览）'), value: dateRangeValue },
     { label: tr('Distinct users (preview)', '涉及用户数（预览）'), value: String(range.userIds.length) },
   ]
+  if (input.sampleTruncated) {
+    const { shown, total } = input.sampleTruncated
+    lines.push({
+      label: tr('Sample truncated', '样本已截断'),
+      value: tr(
+        `${shown}/${total} rows loaded — the date-range/user figures above reflect the loaded sample only`,
+        `已加载 ${shown}/${total} 行——上方日期范围/用户数仅基于已加载样本`,
+      ),
+    })
+  }
+  return lines
 }
 
 /** G1 generic, honest irreversible-warning text — never a precise overwrite count. */
@@ -155,10 +169,18 @@ export function buildManualAdjustDeductionLedgerLine(tr: TranslateFn): ImportOve
  *  single-call target (falling back to "no userId" would silently back up the acting
  *  admin's own records, not the imported employees' — worse than no backup button at all),
  *  so callers should disable the backup action instead. */
-export function resolveImportBackupTargetUserId(formUserId: string, previewUserIds: string[]): string | null {
+export function resolveImportBackupTargetUserId(
+  formUserId: string,
+  previewUserIds: string[],
+  sampleTruncated = false,
+): string | null {
   const trimmed = formUserId.trim()
   if (trimmed) return trimmed
-  if (previewUserIds.length === 1) return previewUserIds[0]
+  // Review P3-1: when the loaded preview is a truncated sample, "exactly one distinct
+  // user in the sample" says nothing about the full import — auto-resolving would offer a
+  // confident-looking backup that may cover only part of the affected users. Only an
+  // explicit form userId counts then.
+  if (!sampleTruncated && previewUserIds.length === 1) return previewUserIds[0]
   return null
 }
 

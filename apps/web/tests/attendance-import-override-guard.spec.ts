@@ -133,6 +133,7 @@ interface PreviewFixture { items: Array<{ userId: string; workDate: string }>; r
 function baseApiFetchRouter(overrides: {
   preview?: PreviewFixture
   commitImported?: number
+  commitStatus?: number
   exportText?: string
   exportFilename?: string
 } = {}) {
@@ -149,6 +150,9 @@ function baseApiFetchRouter(overrides: {
       })
     }
     if (url.startsWith('/api/attendance/import/commit')) {
+      if (overrides.commitStatus && overrides.commitStatus >= 400) {
+        return jsonResponse(overrides.commitStatus, { ok: false, error: { code: 'IMPORT_COMMIT_FAILED', message: 'boom' } })
+      }
       return jsonResponse(200, { ok: true, data: { imported: overrides.commitImported ?? 0, meta: {} } })
     }
     if (url.startsWith('/api/attendance/export')) {
@@ -180,7 +184,21 @@ describe('Attendance override-import guard (pure module)', () => {
     ])).toEqual({ from: '2026-04-04', to: '2026-04-06', userIds: ['user-2', 'user-1'] })
   })
 
-  it('buildImportOverrideConfirmLines: exactly 4 lines (mode/rowCount/date-range/user-count) — never a 5th overwrite-count line', () => {
+  it('buildImportOverrideConfirmLines: 4 base lines (mode/rowCount/date-range/user-count) + a sample-truncated line ONLY when flagged — never an overwrite-count line', () => {
+    const truncatedLines = buildImportOverrideConfirmLines(
+      {
+        rowCount: 5,
+        range: { from: '2026-04-04', to: '2026-04-06', userIds: ['a', 'b'] },
+        sampleTruncated: { shown: 2, total: 5 },
+      },
+      tr,
+    )
+    expect(truncatedLines).toHaveLength(5)
+    expect(truncatedLines[4].label).toBe('Sample truncated')
+    expect(truncatedLines[4].value).toContain('2/5 rows loaded')
+    // the truncated line talks about the SAMPLE, never about overwritten/existing rows
+    expect(truncatedLines[4].value).not.toMatch(/overwrit|existing/i)
+
     const lines = buildImportOverrideConfirmLines(
       { rowCount: 5, range: { from: '2026-04-04', to: '2026-04-06', userIds: ['a', 'b'] } },
       tr,
@@ -217,7 +235,10 @@ describe('Attendance override-import guard (pure module)', () => {
     expect(line.value).toContain('cannot be undone directly')
   })
 
-  it('resolveImportBackupTargetUserId: prefers the form userId, falls back to a single distinct preview user, else null', () => {
+  it('resolveImportBackupTargetUserId: form userId wins; single-sample auto-resolve only when NOT truncated (review P3-1)', () => {
+    expect(resolveImportBackupTargetUserId('', ['only-user'], true)).toBe(null) // truncated sample: never auto-resolve
+    expect(resolveImportBackupTargetUserId(' explicit ', ['a', 'b'], true)).toBe('explicit') // explicit form intent still wins
+
     expect(resolveImportBackupTargetUserId('user-1', [])).toBe('user-1')
     expect(resolveImportBackupTargetUserId('  ', ['solo-user'])).toBe('solo-user')
     expect(resolveImportBackupTargetUserId('', ['user-a', 'user-b'])).toBeNull()
@@ -325,6 +346,8 @@ describe('Attendance override-import guard (wired UI)', () => {
       { label: 'Parsed rows (preview)', value: '5' },
       { label: 'Date range (preview)', value: '2026-04-04 ~ 2026-04-06' },
       { label: 'Distinct users (preview)', value: '2' },
+      // rowCount(5) > loaded items(2) → the modal must disclose the truncated sample (P3-1)
+      { label: 'Sample truncated', value: '2/5 rows loaded — the date-range/user figures above reflect the loaded sample only' },
     ])
 
     const warningEl = modal!.querySelector('[data-import-override-warning]')
@@ -506,6 +529,120 @@ describe('Attendance override-import guard (wired UI)', () => {
     const backupBtn = modal.querySelector<HTMLButtonElement>('[data-import-override-export-backup]')!
     expect(backupBtn.disabled).toBe(true)
     expect(modal.querySelector('[data-import-override-backup-hint]')?.textContent).toContain('needs a single target user')
+  })
+
+  it('P2-1 fix: a failed merge import switched to override cannot commit via Retry — the retry action passes the same gate', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(baseApiFetchRouter({ commitStatus: 500 }))
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const importSection = findImportSection(container!)
+    const modeSelect = importSection.querySelector<HTMLSelectElement>('#attendance-import-mode')!
+    modeSelect.value = 'merge'
+    modeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    // merge is one-click; the commit fails → the status area offers "Retry import"
+    importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.click()
+    await flushUi(8)
+    const commitCallsAfterMerge = apiFetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/attendance/import/commit')).length
+    expect(commitCallsAfterMerge).toBe(1)
+    const retryBtn = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(btn => btn.textContent?.trim() === 'Retry import')
+    expect(retryBtn, 'expected the failed import to surface a Retry action').toBeTruthy()
+
+    // operator flips the selector to override, then clicks Retry: the OLD code committed
+    // directly (never-confirmed override submit); the gate must block it instead —
+    // no fresh Preview exists, so no modal, no commit, and the preview-required hint shows.
+    modeSelect.value = 'override'
+    modeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    retryBtn!.click()
+    await flushUi(6)
+
+    const commitCallsAfterRetry = apiFetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/attendance/import/commit')).length
+    expect(commitCallsAfterRetry).toBe(1) // unchanged — the bypass is closed
+    expect(container!.querySelector('[data-import-override-confirm]')).toBeFalsy()
+    expect(importSection.textContent).toContain('override mode requires a fresh Preview')
+  })
+
+  it('P2-1 fix: a failed override import re-opens the confirm modal on Retry instead of re-committing directly', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(baseApiFetchRouter({
+      preview: { items: [{ userId: 'user-1', workDate: '2026-04-04' }], rowCount: 1 },
+      commitStatus: 500,
+    }))
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const importSection = findImportSection(container!)
+    findButton(importSection, 'Preview').click()
+    await flushUi(8)
+    importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.click()
+    await flushUi(4)
+    const modal = container!.querySelector('[data-import-override-confirm]')!
+    const checkbox = modal.querySelector<HTMLInputElement>('[data-import-override-extra-confirm] input[type="checkbox"]')!
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    modal.querySelector<HTMLButtonElement>('[data-import-override-confirm-submit]')!.click()
+    await flushUi(8)
+
+    const commitCalls = () => apiFetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/attendance/import/commit')).length
+    expect(commitCalls()).toBe(1) // the confirmed submit failed server-side
+
+    const retryBtn = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(btn => btn.textContent?.trim() === 'Retry import')
+    expect(retryBtn, 'expected the failed import to surface a Retry action').toBeTruthy()
+    retryBtn!.click()
+    await flushUi(6)
+
+    // Security invariant (the whole point of P2-1): Retry must NOT silently re-commit an
+    // override. It routes through requestRunImport(), so the operator faces the gate again —
+    // either the confirm modal re-opens (if the preview is still fresh) or the
+    // preview-required hint (if the failed commit invalidated the payload fingerprint). In
+    // NEITHER case does a commit fire without a fresh, re-confirmed submit.
+    expect(commitCalls()).toBe(1) // no bypass commit
+    const gateSection = findImportSection(container!)
+    const modalReopened = container!.querySelector('[data-import-override-confirm]') !== null
+    const previewGateShown = gateSection.textContent!.includes('override mode requires a fresh Preview')
+    expect(modalReopened || previewGateShown, 'retry must re-present the override gate, never a silent commit').toBe(true)
+  })
+
+  it('P3-1 fix: a truncated preview sample suppresses single-user backup auto-resolution until User ID is explicit', async () => {
+    vi.mocked(apiFetch).mockImplementation(baseApiFetchRouter({
+      // single distinct user in the LOADED sample, but rowCount says there are more rows
+      preview: { items: [{ userId: 'user-1', workDate: '2026-04-04' }], rowCount: 9 },
+    }))
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const importSection = findImportSection(container!)
+    findButton(importSection, 'Preview').click()
+    await flushUi(6)
+    importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.click()
+    await flushUi(4)
+
+    const modal = container!.querySelector('[data-import-override-confirm]')!
+    expect(modal.textContent).toContain('Sample truncated')
+    const backupBtn = modal.querySelector<HTMLButtonElement>('[data-import-override-export-backup]')!
+    expect(backupBtn.disabled).toBe(true) // sample-derived single user is NOT trusted
+    expect(modal.querySelector('[data-import-override-backup-hint]')?.textContent).toContain('truncated preview sample')
+
+    // explicit operator intent still enables the backup
+    ;(container!.querySelector('[data-import-override-confirm] .attendance__admin-actions button') as HTMLButtonElement).click() // cancel
+    await flushUi(2)
+    setInput(importSection, '#attendance-import-user', 'user-1')
+    findButton(importSection, 'Preview').click()
+    await flushUi(6)
+    importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.click()
+    await flushUi(4)
+    const modal2 = container!.querySelector('[data-import-override-confirm]')!
+    expect(modal2.querySelector<HTMLButtonElement>('[data-import-override-export-backup]')!.disabled).toBe(false)
   })
 
   it('G2: the mode-selector hint states the override/merge tradeoff (overwrite+non-recoverable vs. non-destructive union)', async () => {
