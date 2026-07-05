@@ -12,6 +12,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { hashPreviewChanges, mintRestorePreviewIdentity } from '../../src/multitable/restore-preview-identity'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -248,5 +249,23 @@ describeIfDatabase('multitable T8-1 PIT undelete-execute (real DB)', () => {
       await q(`DROP TRIGGER IF EXISTS ${TRG} ON meta_records`, []).catch(() => {})
       await q(`DROP FUNCTION IF EXISTS ${FN}()`, []).catch(() => {})
     }
+  })
+
+  test('(n) cross-strategy token rejection: a SINGLE-record restore-preview token (wrong `type`) is rejected at the route, not just in the unit contract', async () => {
+    process.env[FLAG] = 'true'
+    // A token minted by a DIFFERENT strategy (T6-1 single-record restore-preview, `type: 'restore-preview'`) is
+    // signed with the same secret, so JWT signature/expiry verification alone would pass it — only the
+    // discriminated `type` check in verifyPitRevertPreviewIdentity rejects it (`wrong_type`). This proves the
+    // guard is wired at THIS route's execute path, not merely exercised in the pure-unit contract test.
+    const wrongStrategyToken = mintRestorePreviewIdentity({
+      sheetId: SHEET, recordId: U, targetVersion: 1, strategy: 'revert',
+      changesHash: hashPreviewChanges([{ fieldId: NAME, op: 'set', value: 'irrelevant' }]),
+      actorId: ACTOR,
+    })
+    const x = await execute(T1, wrongStrategyToken, 'undelete')
+    expect(x.status).toBe(409)
+    expect(x.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
+    expect(x.body?.error?.message).toContain('wrong_type')
+    expect(await liveRow(U)).toBeUndefined() // rejected before any write — nothing resurrected
   })
 })
