@@ -94,6 +94,25 @@ describe('AttendanceScheduler (④ C4)', () => {
     expect(calls).toEqual(['expiry', 'first', 'bad', 'second'])
   })
 
+  // A2 report-sync scheduled trigger (design-lock #3623 §3 composite-registry discipline): named exactly
+  // like the real job so a future regression that accidentally moves this job's invocation outside the
+  // per-job try/catch (e.g. a hand-rolled Promise.all) fails THIS test, not just the generic one above.
+  it('a throwing attendance-report-sync-scheduled job does not block sibling scheduler jobs', async () => {
+    const calls: string[] = []
+    const scheduler = new AttendanceScheduler({
+      expiryService: fakeExpiryService([], () => { calls.push('expiry') }),
+      jobs: [
+        { name: 'attendance-auto-shift-auto-write', async run() { calls.push('auto-write') } },
+        { name: 'attendance-report-sync-scheduled', async run() { calls.push('report-sync-scheduled'); throw new Error('report sync scheduled trigger boom') } },
+        { name: 'attendance-report-digest', async run() { calls.push('report-digest') } },
+      ],
+    })
+
+    await scheduler.runCycle()
+
+    expect(calls).toEqual(['expiry', 'auto-write', 'report-sync-scheduled', 'report-digest'])
+  })
+
   it('supports dynamic shared-scheduler job registration and unregistering', async () => {
     process.env.ATTENDANCE_SCHEDULER_ENABLED = 'true'
     const calls: string[] = []
