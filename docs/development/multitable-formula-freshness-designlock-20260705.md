@@ -1,0 +1,65 @@
+# Multitable formula freshness — Yjs-bridge recompute + expression-change bulk recompute — W1-1 DESIGN LOCK (PROPOSED)
+
+- **Status**: PROPOSED — awaiting owner ratification. Docs-only PR; no runtime code ships here.
+- **Slice**: W1-1 of the multitable-window goal pool (`docs/development/multitable-window-goal-pool-todo-20260705.md`). Input: the owner-passed formula-freshness audit (Q1 GAP / Q2-c connected find). Sibling slice: W1-2 **B1 side-door goldens** locks the PERMISSION angle of the same Yjs-bridge side-door — cross-referenced, deliberately a **separate PR** (this lock = freshness/recompute semantics only).
+- **Grounded on** origin/main @ `f06d0eb70` (every anchor below re-read at this SHA, not carried from the audit).
+- **What W1-1 is NOT**: not Yjs GA/productionize, not multi-hop cascade, not typing-time preview, not a PIT-semantics change, not a bridge cross-record fan-out slice — see §5. No new tables, no migrations, no schema change, no restore-surface change.
+
+## §1 Problem (verified)
+
+1. **Yjs-bridge writes skip formula recompute by stub.** The bridge flush goes through the canonical spine (`collab/yjs-record-bridge.ts:226` → `RecordWriteService.patchRecords`) with real capabilities ("Resolve real user capabilities — same path as REST", `index.ts:2471`) — but the bridge-side service is constructed with stub helpers (`index.ts:2384-2414`): `recalculateFormulaFields: async () => []` (`:2405`), comment self-declaring the park: *"formula recalc stays scoped to the REST PATCH path **for now**"* (`:2402-2404`). Because formula values are **write-time materialized** (Step 4c, `record-write-service.ts:1260-1269`), a collaborative edit of a formula's source field leaves the materialized value stale until that record's next REST write. No read-path recompute, no sweep — no mitigation exists.
+2. **Changing a formula's expression recomputes nothing.** `PATCH /fields/:fieldId` (`univer-meta.ts:10481`) with a `property.expression` change performs validation + reverse-dependency guarding only (`:10615`, `:10619-10621`); `recalculateFormulaFields` has exactly 3 call sites repo-wide (def `:2766`, fan-out `:3688`, helpers factory `:4231-4232`) — **no bulk entry point exists**. Every existing record keeps the OLD expression's materialized value until its own next write. The config-revert path cannot compensate: `'formula'` is in `FIELD_RETYPE_EXCLUDED_TYPES` (`config-restore.ts:78-81`) and property-only reverts are gated by `classifyRevert` — the PATCH route is the ONLY live trigger, so this lock binds it there.
+
+## §2 LOCK-F — Yjs-bridge formula recompute
+
+- **F1 (wiring)**: the bridge stub is replaced by a **real implementation resident in `univer-meta.ts`** and exported to the bridge wiring in `index.ts`. Mechanism: `RecordWriteHelpers.recalculateFormulaFields` gains an optional trailing `actorId?: string | null`; Step 4c passes `input.actorId` through (`record-write-service.ts:1269` call site). The REST helper ignores the new param (its `req` closure remains authoritative, zero behavior change); the bridge helper is a new exported `univer-meta.ts` function that uses the actorId. Rationale: the recompute's two `req` consumers — the write-side taint skip (`resolveTaintedFormulaFieldIds(req, …)`, def comment `:2767-2769`: "req is the WRITING actor — needed to resolve write-side formula taint") and relation-aggregation resolution (`resolveRelationAggregation(req, …)`) — are guarded by the stored-data-taint structural test (**resolver callable only from `univer-meta.ts`**), so the actor-based variant MUST live in that file; the bridge (in `index.ts`) receives a closed helper, never raw resolver access.
+- **F2 (writer-taint context, one value two constructors)**: introduce an internal `WriterTaintContext` derived either from `req` (REST path, unchanged semantics) or from `(query, actorId)` (bridge path), consumed by BOTH req-consumers above. The bridge recompute must reproduce the REST taint skip EXACTLY: a writer denied read on a formula's lookup-source foreign field gets that formula's recompute skipped (old value preserved), never a permission-degraded value materialized into shared `meta_records.data`. **No system/full-access bypass is introduced anywhere in this slice.**
+- **F3 (scope = same-record Step 4c parity)**: the bridge gains the SAME-RECORD formula recompute that REST Step 4c performs, including relation-aggregation-backed formulas (both req consumers are covered by F2's context — one refactor, no second-class formulas). Failure semantics = REST parity: the recompute runs at the same call position with the same error propagation as Step 4c today; no bridge-specific catch-and-drop.
+- **F4 (what stays stubbed, deliberately)**: `applyLookupRollup` / `computeDependentLookupRollupRecords` remain stubs on the bridge path. Lookup/rollup are computed-on-read (no persistent stale value; audit Q1); cross-record Step-4 fan-out (`record-write-service.ts:1165-1182`) therefore still does not run on bridge writes — a collaborative edit of a link/source field leaves FOREIGN dependent formulas stale until a REST write touches them. This is a **named residual** (§5-N5), not silently absorbed: the fan-out machinery + FOL invalidation broadcast is a separate slice if demand names it.
+- **F5 (no flag)**: no new env flag. This is a correctness restoration to spine parity — the recomputed values are byte-identical to what the same edit via REST produces; exposure is bounded by the bridge path that already ships. The only knob in this lock is §3-B2's bulk bound.
+- **F6 (client freshness channel)**: recomputed values must reach collaborating clients through the SAME channel REST recompute uses (the Step 4c `formulaRecords` → response/realtime patch flow). The runtime PR must verify no `yjs-bridge`-source suppression exists on that publish path (the post-commit Yjs invalidator's documented skip of `'yjs-bridge'` writes concerns doc re-seeding, not the formula publish) — golden GF1 asserts end-visible freshness, not merely a DB write.
+
+## §3 LOCK-B — expression-change bulk recompute (v1, bounded, fail-closed)
+
+- **B1 (trigger)**: `PATCH /fields/:fieldId` where the field is `type === 'formula'` and normalized `property.expression` actually changed. No other trigger in v1 (revert paths structurally cannot fire it — §1.2).
+- **B2 (bound, fail-closed)**: BEFORE committing the config change, count the sheet's live records. Over `MULTITABLE_FORMULA_BULK_RECOMPUTE_MAX_ROWS` (env, default **1000**) → **422 `FORMULA_EXPRESSION_BULK_OVER_CAP`, config NOT saved** — no silent partial, no truncation (BS-6 posture). An async over-cap path is a separate gated follow-up (§5-N6), not smuggled in.
+- **B3 (execution)**: after the config transaction commits, in the same request, chunked recompute (pages of 200 record ids) via the SAME `recalculateFormulaFields` with `changedFieldIds = [fieldId]`. Config save is never hostage to data volume within the cap; a recompute failure cannot roll back the config (§3-B6).
+- **B4 (writer context = the config editor, taint verbatim)**: the bulk recompute runs under the EDITING ACTOR's own context (the route's `req`), so the write-side taint skip applies verbatim — formulas whose dependencies the editor cannot read are SKIPPED (old value preserved) and **counted** in the response. Rationale: a "system full-access" recompute would let a fields-manager launder values derived from data they cannot read into visible formula outputs — exactly what the taint chokepoint forbids. No bypass.
+- **B5 (write posture = derived materialization)**: recompute writes use the helper's existing raw posture (`UPDATE meta_records SET data = data || … , updated_at = now()`, `univer-meta.ts:2884` — no version bump) — **no `meta_record_revisions` rows, no history batch** (matching the fan-out's "derived value, no user actor" lock-exempt posture, `:3723-3724`, and Step 4c's own materialization today). The CONFIG change itself is already fully audited by `meta_config_revisions` — that is the auditable event; the cell-value convergence is derived state.
+- **B6 (failure semantics + idempotency)**: unexpected mid-chunk error → abort remaining chunks; response reports `{ recomputed, taintSkipped, failed: true, error: <coarse code> }`; the committed config stands; un-recomputed rows remain on the pre-slice lazy-refresh behavior (strictly no worse than today). Re-saving the same expression re-runs the bulk recompute (deterministic → idempotent convergence). No values, no expressions, no row data in the error payload (values-free discipline).
+- **B7 (client freshness)**: after recompute, fire the existing Yjs invalidation / realtime publish seam for the recomputed record ids so open grids refresh without reload.
+
+## §4 Golden matrix (fail-first; real-DB where marked)
+
+| # | Scenario | Locked outcome |
+|---|---|---|
+| GF1 (real-DB) | collab (bridge) edit of a formula's source field | formula's materialized value FRESH after flush (read API shows new value; realtime emission observed) — flips today's stub behavior |
+| GF2 (real-DB) | bridge writer DENIED read on the formula's lookup-source foreign field | recompute skipped, old value preserved — byte-parity with the REST taint skip for the same actor (no degraded value, no system bypass) |
+| GF3 (real-DB) | relation-aggregation-backed formula, source edited via bridge | recomputes same as REST (F3 covers both req-consumers) |
+| GF4 (real-DB) | non-formula bridge write (no formula deps touched) | byte-identical behavior to today (early-return parity; no extra UPDATEs, no latency regression assertion at suite level) |
+| GF5 (real-DB) | expression change on a sheet ≤ cap | ALL live records' values reflect the new expression; response counts match |
+| GF6 (real-DB) | expression change on a sheet > cap | 422 `FORMULA_EXPRESSION_BULK_OVER_CAP`; config UNCHANGED (re-read proves old expression); zero rows touched |
+| GF7 (real-DB) | bulk recompute where editor is masked on some dependencies | those rows/formulas skipped + `taintSkipped` count exact; unmasked rows recomputed |
+| GF8 (real-DB) | injected mid-chunk failure | config stays committed; partial progress persisted; response `{failed:true, …counts}`; re-save converges to full freshness |
+| GF9 | bridge cross-record fan-out residual pin | collab edit of a link source does NOT refresh foreign dependent formulas (documents §2-F4 residual; flips when the follow-up slice lands) |
+| GF10 | REST regression | existing formula suites (formula-dryrun, FOL views, fol1-related-invalidation) stay green — Step 4c behavior unchanged for REST callers |
+| GF11 | revisions posture | bulk + bridge recompute produce ZERO `meta_record_revisions` rows and no version bumps (B5/F-posture pin) |
+
+## §5 Explicit non-goals (owner-fixed + audit-derived)
+
+- **N1** Yjs GA/productionize — untouched.
+- **N2** Multi-hop cascade — the 1-hop + config-time cycle-ban posture stands as the formal contract (audit Q3); ≥2-hop chains stay lazily refreshed.
+- **N3** Typing-time live preview — remains a product question for the owner (client-side engine licensing note: HyperFormula is GPL/commercial dual-licensed); nothing in this slice.
+- **N4** PIT undelete / Reset-to-T raw writes — their T-consistent values and the two inherent stale edges are PIT semantics, documented in the audit; no recompute is added to those paths.
+- **N5** Bridge cross-record fan-out (Step 4) + lookup/rollup echo stubs — stay stubbed (§2-F4); named residual with its own follow-up gate.
+- **N6** Async over-cap bulk recompute — separate gated follow-up; v1 is bounded-sync-or-422 only.
+
+## §6 Rollout
+
+No new feature flag (F5); one env bound (`MULTITABLE_FORMULA_BULK_RECOMPUTE_MAX_ROWS`, default 1000). Single runtime PR after ratification: `univer-meta.ts` (actor-context refactor + exported bridge helper + field-route bulk hook), `record-write-service.ts` (optional actorId pass-through), `index.ts` (stub → real helper), plus the §4 goldens (real-DB suite + regression runs). Verification MD follows the house pattern on completion.
+
+## §7 Arc placement
+
+- W1-1 (this lock) — formula freshness: bridge recompute + expression-change bulk recompute.
+- Sibling: W1-2 **B1 side-door goldens** (permission angle of the same bridge side-door; separate PR, cross-referenced).
+- 🔒 follow-ups seeded here, each its own gate: bridge cross-record fan-out (N5); async over-cap recompute (N6); multi-hop propagation (N2, not recommended).
