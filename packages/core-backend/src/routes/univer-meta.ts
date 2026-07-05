@@ -418,6 +418,9 @@ type UniverMetaViewConfig = {
   sortInfo?: Record<string, unknown>
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
+  // slice 2: per-user personal field order, served only when the personal-views flag is on and this
+  // actor has a fieldOrder override (via applyPersonalViewOverlay). Absent otherwise — sheet-global order stands.
+  fieldOrder?: string[]
   config?: Record<string, unknown>
 }
 
