@@ -96,10 +96,16 @@ export interface BulkApplyAssignmentPayload {
  * schedule-drafts POST 的精确 body"). A cell is always a single-day assignment: startDate ===
  * endDate === the cell's date. `orgId` is passed through as-is (undefined is dropped by
  * JSON.stringify, matching the existing single-row save path's shape). `idempotencyKey` is
- * included per design-lock G2 for per-cell retry tracking and forward-compat with the
- * backend adding real write-dedup later; the current `schedule-drafts/assignments` schema
- * does not read or persist it (zod strips unknown keys) — see the design-lock addendum notes
- * for why this is still the correct frontend-only shape today.
+ * included per design-lock G2, but it is INERT today (review P3, stated honestly): the current
+ * `schedule-drafts/assignments` zod schema does not declare it, so the server strips it (no
+ * read, no persist, no write-dedup). It is also NOT the client-side retry key — the confirm
+ * modal tracks per-cell success by (userId, date) and re-submits only not-yet-ok cells — and it
+ * is regenerated per attempt, so it is not even retry-stable. What actually prevents a duplicate
+ * draft on retry is the double defense the server already has: this frontend's skip-ok loop plus
+ * the route's own `findAttendanceScheduleAssignmentConflict` (a re-submit of an already-created
+ * (user,date) draft → 409). Real server-side idempotent write-dedup (a stable key + a bulk/
+ * idempotent endpoint) is a separate deferred backend slice (design-lock §6); until then this
+ * field is sent only for literal G2 compliance and forward-shape, not for any behavior today.
  */
 export function buildBulkApplyAssignmentPayload(
   cell: BulkApplyCell,
