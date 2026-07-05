@@ -37,6 +37,12 @@
 - **G-C write isolation + forged-identity (LOAD-BEARING):** A writing with forged `body.userId=B` (and the harness
   also injects forged `query.userId` / `x-user-id`) does NOT touch B's row. RED if any client-supplied id alters the
   write/read target.
+- **G-A drift redaction:** GET personal-config reuses the same field-permission-aware filter-literal redaction as the
+  shared view serializers. A stored personal filter literal is omitted after that field becomes unreadable to the
+  actor, so the actor-scoped endpoint cannot become a stale-literal bypass.
+- **G-C bounded save:** personal `filterInfo` is rejected when it exceeds the shared view-config filter nesting limit,
+  before persistence. This keeps stored overlays bounded so later read/merge redaction cannot recurse over an abusive
+  blob.
 - **G-B shared byte-identical:** flag-off with an override row present ⇒ shared unchanged; flag-on, no override ⇒
   shared byte-identical. RED if the overlay perturbs the shared path.
 - **flag-off inert:** the three new routes 404 (not no-op) when the flag is off.
@@ -55,6 +61,9 @@ Lands **default-OFF** (`MULTITABLE_ENABLE_PERSONAL_VIEWS`). Flag-on is NOT autho
   so neither the golden run nor the **observed-RED** (revert the actor-scoping → G-A/G-C go red) was captured here.
   The goldens are **structurally fail-first** (sound discriminators, traced above) and are now wired into the required
   Node-20 real-DB CI step, so the PR's CI is the first real execution.
+- **Executed during adversarial re-review:** `pnpm --filter @metasheet/core-backend type-check` and `git diff --check`
+  passed. The targeted real-DB spec command was run from a clean review worktree, but the local environment had no
+  `DATABASE_URL`, so Vitest skipped the file; CI remains the required real-DB execution surface for the new goldens.
 - **Human reviewer MUST:** (a) confirm the PR's `test (20.x)` runs the new golden GREEN; (b) run the observed-RED once
   (revert the `user_id = actorUserId` keying → confirm G-A/G-C fail) to convert structural-fail-first into
   observed-fail-first before any flag-on; (c) sanity-check that `resolveSheetCapabilities().access.userId` is the
