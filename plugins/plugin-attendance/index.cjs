@@ -331,6 +331,22 @@ const DEFAULT_SETTINGS = {
       minConfidence: 'high',
     },
   },
+  // 考勤报表同步 A2 调度触发 (report-sync scheduled trigger) — LATENT config (design-lock
+  // attendance-report-sync-a2-scheduled-trigger-design-lock-20260705, #3623, RATIFIED owner-delegated).
+  // Default OFF. The AttendanceScheduler job 'attendance-report-sync-scheduled' additionally requires the
+  // ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED env flag — env flag AND this enabled must BOTH be
+  // true, missing either is a byte-exact no-op (zero claims, zero writes). This config only decides WHEN
+  // to auto-claim/advance a plugin_attendance_report_sync_jobs mode:'enqueue' row; every write still goes
+  // through the existing syncAttendanceReportRecordsForUsers writer via the existing job-page runner —
+  // zero write-semantics change (design-lock §3).
+  reportSync: {
+    scheduledTrigger: {
+      enabled: false,
+      cadence: 'daily',
+      maxOrgsPerRun: 5,
+      maxUsersPerRun: 100,
+    },
+  },
 }
 
 const allowRbacDegradation = process.env.RBAC_OPTIONAL === '1'
@@ -343,6 +359,7 @@ let autoHolidaySyncInterval = null
 let importUploadCleanupInterval = null
 let autoShiftAutoWriteSchedulerUnregister = null
 let attendanceReportDigestSchedulerUnregister = null
+let reportSyncScheduledTriggerSchedulerUnregister = null
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
@@ -3531,6 +3548,161 @@ async function cancelAttendanceReportSyncJob(db, orgId, jobId, now = new Date())
     return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Attendance report sync job not found' }
   }
   return { ok: true, job: mapAttendanceReportSyncJobRow(rows[0]) }
+}
+
+// ── A2 report-sync scheduled trigger (design-lock #3623) — the missing 'enqueue' worker ──
+// S1 registers this job DORMANT on the AttendanceScheduler (env flag + settings double-gate, §3). S2: on
+// each tick where BOTH gates are open, claim-or-continue ONE mode:'enqueue' job per org in scope (bounded
+// by maxOrgsPerRun), advance it one page (bounded by maxUsersPerRun via the job's own pageSize cursor),
+// and delegate every write to the EXISTING runAttendanceReportSyncJobNextPage → syncAttendanceReportRecordsForUsers
+// path above — zero write-semantics change. Repeat ticks are no-ops via the job table's
+// (org_id, idempotency_key) partial unique index (the durable idempotency backstop) plus the writer's own
+// dual source-fingerprint skip/create/patch.
+const ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_CREATED_BY = 'system:attendance-report-sync-scheduled-trigger'
+const ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_IDEMPOTENCY_PREFIX = 'scheduled-report-sync:daily_records'
+
+// Org fan-out: mirrors the EXISTING scheduleAutoAbsence/scheduleHolidaySync org-listing idiom (`SELECT
+// DISTINCT org_id FROM attendance_rules`, falling back to [DEFAULT_ORG_ID] when the table has no rows) —
+// not a new pattern. Factored out (and given its own db param) so maxOrgsPerRun throttling is unit-testable
+// against a fake org list without depending on the real, shared, cross-test attendance_rules table.
+async function resolveAttendanceReportSyncScheduledTriggerOrgIds(db, maxOrgsPerRun) {
+  const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules')
+  const orgIds = orgRows.length > 0
+    ? orgRows.map(row => row.org_id || DEFAULT_ORG_ID)
+    : [DEFAULT_ORG_ID]
+  return orgIds.slice(0, Math.max(1, Math.floor(Number(maxOrgsPerRun) || 1)))
+}
+
+// Idempotency-key period grain: 'daily' mints (at most) one job per (org, calendar day) so
+// maxUsersPerRun-bounded pagination can resume across many ticks WITHIN the same day until the whole
+// roster is drained. 'hourly' mints a fresh job per (org, calendar hour) — finer re-attempt cadence, at
+// the cost of resetting pagination every hour (a deliberate, documented tradeoff — see PR body).
+function buildAttendanceReportSyncScheduledTriggerIdempotencyKey(cadence, workDate, now, timezone) {
+  if (cadence === 'hourly') {
+    const hour = getZonedParts(now, timezone).hour
+    return `${ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_IDEMPOTENCY_PREFIX}:${workDate}:h${String(hour).padStart(2, '0')}`
+  }
+  return `${ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_IDEMPOTENCY_PREFIX}:${workDate}`
+}
+
+async function loadAttendanceReportSyncJobByIdempotencyKey(db, orgId, idempotencyKey) {
+  const key = normalizeCatalogString(idempotencyKey)
+  if (!key) return { ok: false, status: 400, code: 'VALIDATION_ERROR', message: 'Invalid idempotency key' }
+  const rows = await db.query(
+    `SELECT * FROM ${ATTENDANCE_REPORT_SYNC_JOB_TABLE}
+     WHERE org_id = $1 AND idempotency_key = $2
+     LIMIT 1`,
+    [normalizeAttendanceReportFieldOrgId(orgId), key],
+  )
+  if (!rows.length) {
+    return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Attendance report sync job not found' }
+  }
+  return { ok: true, job: mapAttendanceReportSyncJobRow(rows[0]) }
+}
+
+// Create-or-reuse: the (org_id, idempotency_key) partial unique index (migration
+// zzzz20260519070000_create_plugin_attendance_report_sync_jobs) is the durable idempotency backstop.
+// createAttendanceReportSyncJob does a plain INSERT (no ON CONFLICT), so a race — this tick losing to
+// another leader/tick that just inserted the SAME key — surfaces as a 23505, mirroring the EXISTING
+// insertAutoShiftAutoWriteRun claim idiom above. Unlike that one-shot run claim, we do not simply give up
+// on 23505: we look the existing row back up and either keep paging it (not yet terminal) or report it as
+// already-done — because THIS job is resumable/paginated across ticks, not single-shot.
+async function claimOrCreateAttendanceReportSyncScheduledJob(db, orgId, idempotencyKey, createInput) {
+  try {
+    const created = await createAttendanceReportSyncJob(db, orgId, ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_CREATED_BY, createInput)
+    if (!created.ok) return created
+    return { ok: true, job: created.job, freshlyCreated: true }
+  } catch (error) {
+    if (error?.code !== '23505') throw error
+    const existing = await loadAttendanceReportSyncJobByIdempotencyKey(db, orgId, idempotencyKey)
+    if (!existing.ok) throw error
+    return { ok: true, job: existing.job, freshlyCreated: false }
+  }
+}
+
+// Per-org worker: exported standalone (in addition to the top-level runAttendanceReportSyncScheduledTriggerOnce)
+// so tests can exercise claim/page/idempotency/throttle against ONE known org without depending on
+// resolveAttendanceReportSyncScheduledTriggerOrgIds's cross-test-shared attendance_rules scan.
+async function runAttendanceReportSyncScheduledTriggerForOrg(context, db, orgId, logger, trigger, now, emitEvent) {
+  const rule = await loadDefaultRule(db, orgId)
+  const workDate = toWorkDate(now, rule.timezone)
+  const idempotencyKey = buildAttendanceReportSyncScheduledTriggerIdempotencyKey(trigger.cadence, workDate, now, rule.timezone)
+
+  const claim = await claimOrCreateAttendanceReportSyncScheduledJob(db, orgId, idempotencyKey, {
+    kind: 'daily_records',
+    mode: 'enqueue',
+    periodSource: { from: workDate, to: workDate },
+    userSelection: { allUsers: true },
+    pageSize: trigger.maxUsersPerRun,
+    idempotencyKey,
+  })
+  if (!claim.ok) {
+    return { orgId, claimed: false, reason: claim.code || 'CLAIM_FAILED', workDate, idempotencyKey }
+  }
+  if (claim.freshlyCreated) {
+    emitEvent?.('attendance.report_sync_job.created', {
+      orgId,
+      jobId: claim.job.id,
+      kind: claim.job.kind,
+      status: claim.job.status,
+      createdAt: claim.job.createdAt,
+      source: 'scheduled_trigger',
+    })
+  }
+
+  // lockAttendanceReportSyncJobForRun (inside runAttendanceReportSyncJobNextPage) is the single source of
+  // truth for "is this job runnable right now": JOB_TERMINAL (already completed/canceled this period) and
+  // JOB_LOCKED (raced by a concurrent tick/leader) are both benign skips here, not errors.
+  const pageRun = await runAttendanceReportSyncJobNextPage(context, db, orgId, logger, claim.job.id, { now })
+  if (!pageRun.ok) {
+    const reason = pageRun.code === 'JOB_TERMINAL' ? 'already_completed' : (pageRun.code || 'RUN_FAILED')
+    return { orgId, claimed: false, reason, jobId: claim.job.id, workDate, idempotencyKey }
+  }
+  emitEvent?.('attendance.report_sync_job.page_ran', {
+    orgId,
+    jobId: pageRun.job.id,
+    kind: pageRun.job.kind,
+    status: pageRun.job.status,
+    totals: pageRun.job.totals,
+    updatedAt: pageRun.job.updatedAt,
+    source: 'scheduled_trigger',
+  })
+  return {
+    orgId,
+    claimed: true,
+    jobId: pageRun.job.id,
+    status: pageRun.job.status,
+    freshlyCreated: claim.freshlyCreated,
+    totals: pageRun.job.totals,
+    error: pageRun.pageResult?.error ?? null,
+    workDate,
+    idempotencyKey,
+  }
+}
+
+// The scheduler job entrypoint — registered on AttendanceScheduler as 'attendance-report-sync-scheduled'.
+// Double-gate (§3): the env flag AND settings.reportSync.scheduledTrigger.enabled must BOTH be true, else
+// this is a byte-exact no-op — zero org lookups, zero job claims, zero writes.
+async function runAttendanceReportSyncScheduledTriggerOnce(context, db, logger = console, options = {}) {
+  const now = options.now instanceof Date ? options.now : new Date()
+  const settings = await getSettings(db)
+  const trigger = normalizeAttendanceReportSyncScheduledTriggerSetting(settings.reportSync?.scheduledTrigger)
+  if (!isAttendanceReportSyncScheduledTriggerRuntimeEnabled() || trigger.enabled !== true) {
+    return { ran: false, reason: 'disabled', orgs: [] }
+  }
+
+  const orgIds = await resolveAttendanceReportSyncScheduledTriggerOrgIds(db, trigger.maxOrgsPerRun)
+  const orgs = []
+  for (const orgId of orgIds) {
+    try {
+      orgs.push(await runAttendanceReportSyncScheduledTriggerForOrg(context, db, orgId, logger, trigger, now, options.emitEvent))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger?.warn?.('attendance report sync scheduled trigger failed for org', { orgId, error: message })
+      orgs.push({ orgId, claimed: false, reason: 'error', error: message })
+    }
+  }
+  return { ran: true, cadence: trigger.cadence, orgs }
 }
 
 function resolveAttendanceReportPeriodSummaryManagedFormulaFields(items) {
@@ -12165,6 +12337,7 @@ function normalizeSettings(raw) {
     makeupPunchPolicy: normalizeMakeupPunchPolicySetting(raw.makeupPunchPolicy),
     attendanceResultEditPolicy: normalizeAttendanceResultEditPolicySetting(raw.attendanceResultEditPolicy),
     autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
+    reportSync: normalizeAttendanceReportSyncSetting(raw.reportSync),
   }
 }
 
@@ -12206,6 +12379,48 @@ function normalizeAutoShiftMatchingSetting(raw) {
         ? autoWriteMinConfidenceRaw
         : DEFAULT_SETTINGS.autoShiftMatching.autoWrite.minConfidence,
     },
+  }
+}
+
+// A2 report-sync scheduled trigger enum vocab (design-lock #3623 §2 S1). 'daily' mints (at most) one
+// plugin_attendance_report_sync_jobs row per (org, calendar day) so maxUsersPerRun pagination can resume
+// across many ticks the SAME day until the whole roster drains. 'hourly' mints a fresh row per (org,
+// calendar hour) — a finer re-attempt cadence that resets pagination every hour; an org that wants
+// same-day-guaranteed completion for a large roster should stay on 'daily' (the default).
+const ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_CADENCES = Object.freeze(['hourly', 'daily'])
+
+// LATENT normalizer (design-lock #3623 §2 S1). Default OFF; nothing claims or advances a report-sync job
+// until this AND the ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED env flag are both true (double-gate,
+// §3). maxOrgsPerRun / maxUsersPerRun are the per-tick throttle so a misconfigured org/roster can never
+// turn one scheduler tick into an unbounded scan. maxUsersPerRun's valid range is capped at 100 (not just
+// documentation — it is passed straight through as the report-sync job's pageSize, which
+// normalizeAttendanceReportRecordsSyncPage separately hard-clamps to
+// ATTENDANCE_REPORT_RECORDS_SYNC_MAX_PAGE_SIZE=100; keeping the validated range in sync with that real
+// ceiling avoids a configured value silently doing less than it claims).
+function normalizeAttendanceReportSyncScheduledTriggerSetting(raw) {
+  const config = raw && typeof raw === 'object' ? raw : {}
+  const fallback = DEFAULT_SETTINGS.reportSync.scheduledTrigger
+  const cadenceRaw = typeof config.cadence === 'string' ? config.cadence.trim() : ''
+  const maxOrgsPerRunRaw = Number(config.maxOrgsPerRun)
+  const maxUsersPerRunRaw = Number(config.maxUsersPerRun)
+  return {
+    enabled: typeof config.enabled === 'boolean' ? config.enabled : fallback.enabled,
+    cadence: ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_CADENCES.includes(cadenceRaw)
+      ? cadenceRaw
+      : fallback.cadence,
+    maxOrgsPerRun: Number.isInteger(maxOrgsPerRunRaw) && maxOrgsPerRunRaw >= 1 && maxOrgsPerRunRaw <= 50
+      ? maxOrgsPerRunRaw
+      : fallback.maxOrgsPerRun,
+    maxUsersPerRun: Number.isInteger(maxUsersPerRunRaw) && maxUsersPerRunRaw >= 1 && maxUsersPerRunRaw <= 100
+      ? maxUsersPerRunRaw
+      : fallback.maxUsersPerRun,
+  }
+}
+
+function normalizeAttendanceReportSyncSetting(raw) {
+  const config = raw && typeof raw === 'object' ? raw : {}
+  return {
+    scheduledTrigger: normalizeAttendanceReportSyncScheduledTriggerSetting(config.scheduledTrigger),
   }
 }
 
@@ -13140,6 +13355,14 @@ function mergeSettings(base, update) {
       autoWrite: {
         ...(base?.autoShiftMatching?.autoWrite || {}),
         ...(update?.autoShiftMatching?.autoWrite || {}),
+      },
+    },
+    // Nested 2-level merge so a partial update (e.g. only { enabled }) does not clear the sibling
+    // scheduledTrigger fields (cadence / maxOrgsPerRun / maxUsersPerRun).
+    reportSync: {
+      scheduledTrigger: {
+        ...(base?.reportSync?.scheduledTrigger || {}),
+        ...(update?.reportSync?.scheduledTrigger || {}),
       },
     },
   })
@@ -14191,6 +14414,14 @@ function isAutoShiftAutoWriteRuntimeEnabled() {
 // until an admin explicitly opts in AND the policy/cadence are enabled.
 function isAttendanceReportDigestRuntimeEnabled() {
   return parseBoolean(process.env.ATTENDANCE_REPORT_DIGEST_ENABLED, false)
+}
+
+// A2 report-sync scheduled trigger (design-lock #3623): dedicated env gate for the
+// 'attendance-report-sync-scheduled' job. Distinct from ATTENDANCE_SCHEDULER_ENABLED (process gate).
+// Default OFF — missing this OR settings.reportSync.scheduledTrigger.enabled=false is a byte-exact
+// no-op (zero org lookups, zero job claims, zero writes); BOTH gates must be true.
+function isAttendanceReportSyncScheduledTriggerRuntimeEnabled() {
+  return parseBoolean(process.env.ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED, false)
 }
 
 function confidenceRank(value) {
@@ -20366,6 +20597,16 @@ module.exports = {
     ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_VALUE_COLUMNS,
     resetAttendanceSettingsCacheForTests,
     mergeSettings,
+    ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_CADENCES,
+    isAttendanceReportSyncScheduledTriggerRuntimeEnabled,
+    normalizeAttendanceReportSyncScheduledTriggerSetting,
+    normalizeAttendanceReportSyncSetting,
+    buildAttendanceReportSyncScheduledTriggerIdempotencyKey,
+    loadAttendanceReportSyncJobByIdempotencyKey,
+    resolveAttendanceReportSyncScheduledTriggerOrgIds,
+    claimOrCreateAttendanceReportSyncScheduledJob,
+    runAttendanceReportSyncScheduledTriggerForOrg,
+    runAttendanceReportSyncScheduledTriggerOnce,
     normalizeAttendanceResultEditPolicySetting,
     applyAttendanceResultEdit,
     applyResultEditMetricNormalization,
@@ -21517,6 +21758,22 @@ module.exports = {
           lookaheadDays: z.number().int().min(1).max(3).optional(),
           maxAssignmentsPerRun: z.number().int().positive().max(100).optional(),
           minConfidence: z.literal('high').optional(),
+        }).optional(),
+      }).optional(),
+      // 考勤报表同步 A2 调度触发 config (design-lock #3623, RATIFIED owner-delegated 2026-07-05). Round-trips
+      // through PUT/GET; the 'attendance-report-sync-scheduled' scheduler job additionally requires the
+      // ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED env flag (double-gate — missing either is a
+      // byte-exact no-op). Kept in this SAME schema (not a separate one) so a PUT omitting reportSync
+      // never strips it — see #1829 (a settings key added to the normalizer but not this zod schema is
+      // silently stripped on the next PUT round-trip).
+      reportSync: z.object({
+        scheduledTrigger: z.object({
+          enabled: z.boolean().optional(),
+          cadence: z.enum(['hourly', 'daily']).optional(),
+          maxOrgsPerRun: z.number().int().min(1).max(50).optional(),
+          // Capped at 100 (not 2000) to match ATTENDANCE_REPORT_RECORDS_SYNC_MAX_PAGE_SIZE, the real
+          // per-page ceiling the runner's pageSize is clamped to — see normalizer comment.
+          maxUsersPerRun: z.number().int().min(1).max(100).optional(),
         }).optional(),
       }).optional(),
     })
@@ -41702,6 +41959,19 @@ module.exports = {
 	        name: 'attendance-report-digest',
 	        run: () => runAttendanceReportDigestOnce(db, { logger, emitEvent }),
 	      }) ?? null
+	      // A2 report-sync scheduled trigger (design-lock #3623). Registration is harmless — the job is
+	      // dormant until BOTH ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED=true (env) AND
+	      // settings.reportSync.scheduledTrigger.enabled=true (org policy) — missing either is a byte-exact
+	      // no-op. Independently registered (own name, own try/catch inside AttendanceScheduler.runCycle) so
+	      // a failure here never skips expiry / the unscheduled reminder / delivery / auto-write / digest.
+	      if (reportSyncScheduledTriggerSchedulerUnregister) {
+	        reportSyncScheduledTriggerSchedulerUnregister()
+	        reportSyncScheduledTriggerSchedulerUnregister = null
+	      }
+	      reportSyncScheduledTriggerSchedulerUnregister = context.services?.attendanceScheduler?.registerJob?.({
+	        name: 'attendance-report-sync-scheduled',
+	        run: () => runAttendanceReportSyncScheduledTriggerOnce(context, db, logger, { emitEvent }),
+	      }) ?? null
 	    } catch (error) {
 	      logger.warn('Attendance settings preload failed', error)
 	    }
@@ -41727,6 +41997,10 @@ module.exports = {
 	    if (attendanceReportDigestSchedulerUnregister) {
 	      attendanceReportDigestSchedulerUnregister()
 	      attendanceReportDigestSchedulerUnregister = null
+	    }
+	    if (reportSyncScheduledTriggerSchedulerUnregister) {
+	      reportSyncScheduledTriggerSchedulerUnregister()
+	      reportSyncScheduledTriggerSchedulerUnregister = null
 	    }
 	  }
 }

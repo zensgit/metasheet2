@@ -16752,6 +16752,402 @@ attendanceIntegrationDescribe(
     })
   })
 
+  describe('attendance report sync scheduled trigger (A2, design-lock #3623, RATIFIED owner-delegated 2026-07-05)', () => {
+    // The "missing 'enqueue' worker" for plugin_attendance_report_sync_jobs. This block covers ONLY the
+    // scheduling layer (double-gate no-op / claim+one-page-per-call / resumable pagination / same-period
+    // idempotency / PUT round-trip) — every write is delegated to the EXISTING
+    // syncAttendanceReportRecordsForUsers writer (already covered by
+    // tests/unit/attendance-report-field-catalog.test.ts), so a fake in-memory multitable store stands in
+    // for context.api.multitable here (mirrors that unit file's fake shape exactly). Job-isolation coverage
+    // (a throwing 'attendance-report-sync-scheduled' job never blocks siblings) lives in
+    // tests/unit/attendance-scheduler.test.ts; pure normalizer/idempotency-key/throttle coverage lives in
+    // tests/unit/attendance-report-sync-scheduled-trigger.test.ts.
+    const schedSeam = () => (getAttendancePluginForTest() as any).__attendanceReportFieldCatalogForTests
+
+    async function schedAdminToken(uid: string): Promise<string | undefined> {
+      const res = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`,
+      )
+      return (res.body as { token?: string } | undefined)?.token
+    }
+
+    async function putSchedPolicy(token: string, policy: Record<string, unknown>): Promise<number> {
+      const res = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reportSync: { scheduledTrigger: policy } }),
+      })
+      return res.status
+    }
+
+    function schedPolicy(opts: {
+      enabled?: boolean
+      cadence?: 'hourly' | 'daily'
+      maxOrgsPerRun?: number
+      maxUsersPerRun?: number
+    } = {}): Record<string, unknown> {
+      return {
+        enabled: opts.enabled ?? true,
+        cadence: opts.cadence ?? 'daily',
+        // 50/100 are each schema's real max (zod caps maxOrgsPerRun<=50, maxUsersPerRun<=100 — the latter
+        // mirrors ATTENDANCE_REPORT_RECORDS_SYNC_MAX_PAGE_SIZE); generous relative to the 0-2 other org
+        // rows this file's other tests ever leave behind, without tripping PUT validation (both would
+        // 400 above their max — see the round-trip test below for the actual rejection assertion).
+        maxOrgsPerRun: opts.maxOrgsPerRun ?? 50,
+        maxUsersPerRun: opts.maxUsersPerRun ?? 100,
+      }
+    }
+
+    function withSchedTriggerEnv<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+      const prev = process.env.ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED
+      if (value === undefined) delete process.env.ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED
+      else process.env.ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED = value
+      return fn().finally(() => {
+        if (prev === undefined) delete process.env.ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED
+        else process.env.ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED = prev
+      })
+    }
+
+    // Mirrors the fake records/provisioning shape from
+    // tests/unit/attendance-report-field-catalog.test.ts's 'syncAttendanceReportRecordsForUsers' coverage —
+    // an in-memory record store standing in for a real multitable base.
+    function createFakeReportRecordsMultitable() {
+      const store: Array<{ id: string; data: Record<string, unknown> }> = []
+      let seq = 0
+      const rowKeyFieldId = 'fld_row_key'
+      const records = {
+        queryRecords: async ({ filters }: { filters?: Record<string, unknown> }) => {
+          const want = filters?.[rowKeyFieldId]
+          return store.filter((r) => r.data[rowKeyFieldId] === want)
+        },
+        createRecord: async ({ data }: { data: Record<string, unknown> }) => {
+          const rec = { id: `rec-${++seq}`, data: { ...data } }
+          store.push(rec)
+          return rec
+        },
+        patchRecord: async ({ recordId, changes }: { recordId: string; changes: Record<string, unknown> }) => {
+          const rec = store.find((r) => r.id === recordId)
+          if (rec) rec.data = { ...rec.data, ...changes }
+          return rec
+        },
+      }
+      const provisioning = {
+        ensureObject: async () => ({ baseId: 'base_rr', sheet: { id: 'sheet_rr' } }),
+        resolveFieldIds: async ({ fieldIds }: { fieldIds: string[] }) =>
+          Object.fromEntries(fieldIds.map((fieldId: string) => [fieldId, `fld_${fieldId}`])),
+      }
+      return { store, records, provisioning, rowKeyFieldId }
+    }
+
+    async function seedSchedOrgRule(pool: Pool, orgId: string, timezone = 'UTC'): Promise<void> {
+      await pool.query(
+        `INSERT INTO attendance_rules
+           (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes,
+            severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default)
+         VALUES ($1, $2, $3, $4, '09:00', '18:00', 5, 5, 30, 60, 1, '[1,2,3,4,5]'::jsonb, true)`,
+        [randomUUID(), orgId, `A2 sched trigger rule ${orgId}`, timezone],
+      )
+    }
+
+    async function seedSchedUser(pool: Pool, id: string, org: string): Promise<void> {
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, is_active) VALUES ($1, $2, 'no-login', true)
+         ON CONFLICT (id) DO UPDATE SET is_active = true`,
+        [id, `${id}@example.com`],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [id, org],
+      )
+    }
+
+    async function seedSchedAttendanceRecord(pool: Pool, orgId: string, userId: string, workDate: string): Promise<void> {
+      await pool.query(
+        `INSERT INTO attendance_records
+         (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'UTC', $5, $6, 480, 0, 0, 'normal', true, '{}'::jsonb, now(), now())
+         ON CONFLICT DO NOTHING`,
+        [randomUuidV4(), userId, orgId, workDate, new Date(`${workDate}T09:00:00Z`), new Date(`${workDate}T18:00:00Z`)],
+      )
+    }
+
+    async function jobRowCount(pool: Pool, org: string): Promise<number> {
+      return Number(
+        (await pool.query('SELECT count(*)::int AS n FROM plugin_attendance_report_sync_jobs WHERE org_id = $1', [org])).rows[0].n,
+      )
+    }
+
+    async function cleanupSchedOrg(pool: Pool, org: string, userIds: string[]): Promise<void> {
+      await pool.query('DELETE FROM plugin_attendance_report_sync_jobs WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_records WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_rules WHERE org_id = $1', [org]).catch(() => undefined)
+      if (userIds.length) {
+        await pool.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [userIds]).catch(() => undefined)
+        await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [userIds]).catch(() => undefined)
+      }
+    }
+
+    it('double-gate: env unset, then settings.enabled left at its off default — zero job rows, zero writes either way', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `a2rt-gate-${runSuffix}`
+      const uid = `a2rt-gate-u-${runSuffix}`
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-07-05T12:00:00.000Z')
+      try {
+        await seedSchedOrgRule(pool, org)
+        await seedSchedUser(pool, uid, org)
+        await seedSchedAttendanceRecord(pool, org, uid, '2026-07-05')
+
+        const seam = schedSeam()
+        const pluginDb = createPluginDbForTest(pool)
+        const fake = createFakeReportRecordsMultitable()
+        const context = { api: { multitable: { provisioning: fake.provisioning, records: fake.records }, database: pluginDb } }
+        const logger = { warn() {}, error() {}, info() {} }
+
+        // (a) env flag unset (settings default enabled=false too, never PUT in this test) → byte-exact no-op.
+        const resEnvOff = await withSchedTriggerEnv(undefined, () =>
+          seam.runAttendanceReportSyncScheduledTriggerOnce(context, pluginDb, logger, { now }))
+        expect(resEnvOff).toEqual({ ran: false, reason: 'disabled', orgs: [] })
+        expect(await jobRowCount(pool, org)).toBe(0)
+        expect(fake.store).toHaveLength(0)
+
+        // (b) env on, but settings.enabled is still at its off default → still ran=false, still zero rows.
+        const resSettingsOff = await withSchedTriggerEnv('true', () =>
+          seam.runAttendanceReportSyncScheduledTriggerOnce(context, pluginDb, logger, { now }))
+        expect(resSettingsOff).toEqual({ ran: false, reason: 'disabled', orgs: [] })
+        expect(await jobRowCount(pool, org)).toBe(0)
+        expect(fake.store).toHaveLength(0)
+      } finally {
+        await cleanupSchedOrg(pool, org, [uid])
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('double-gate: settings.enabled=true but env flag unset — still zero job rows, zero writes (the env-half of the gate, tested independently of the settings-half above)', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `a2rt-gate-env-${runSuffix}`
+      const uid = `a2rt-gate-env-u-${runSuffix}`
+      const adminToken = await schedAdminToken(`a2rt-gate-env-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-07-05T12:00:00.000Z')
+      try {
+        await seedSchedOrgRule(pool, org)
+        await seedSchedUser(pool, uid, org)
+        await seedSchedAttendanceRecord(pool, org, uid, '2026-07-05')
+        expect(await putSchedPolicy(adminToken, schedPolicy())).toBe(200)
+
+        const seam = schedSeam()
+        const pluginDb = createPluginDbForTest(pool)
+        const fake = createFakeReportRecordsMultitable()
+        const context = { api: { multitable: { provisioning: fake.provisioning, records: fake.records }, database: pluginDb } }
+        const logger = { warn() {}, error() {}, info() {} }
+
+        // settings.enabled=true (just PUT above) but the env flag is unset → still a byte-exact no-op.
+        // Isolates the ENV half of the double-gate: the settings-off scenarios above would still no-op
+        // even if the env check were deleted entirely, so this scenario is the one that actually proves
+        // the env flag independently gates the runner (not just settings).
+        const res = await withSchedTriggerEnv(undefined, () =>
+          seam.runAttendanceReportSyncScheduledTriggerOnce(context, pluginDb, logger, { now }))
+        expect(res).toEqual({ ran: false, reason: 'disabled', orgs: [] })
+        expect(await jobRowCount(pool, org)).toBe(0)
+        expect(fake.store).toHaveLength(0)
+      } finally {
+        await putSchedPolicy(adminToken, schedPolicy({ enabled: false })).catch(() => undefined)
+        await cleanupSchedOrg(pool, org, [uid])
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('gate open: claims + completes a job in one page, delegates the write to the real writer, and a repeat tick is a zero-write no-op', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `a2rt-open-${runSuffix}`
+      const uid = `a2rt-open-u-${runSuffix}`
+      const adminToken = await schedAdminToken(`a2rt-open-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-07-05T12:00:00.000Z')
+      try {
+        await seedSchedOrgRule(pool, org)
+        await seedSchedUser(pool, uid, org)
+        await seedSchedAttendanceRecord(pool, org, uid, '2026-07-05')
+        expect(await putSchedPolicy(adminToken, schedPolicy())).toBe(200)
+
+        const seam = schedSeam()
+        const pluginDb = createPluginDbForTest(pool)
+        const fake = createFakeReportRecordsMultitable()
+        const context = { api: { multitable: { provisioning: fake.provisioning, records: fake.records }, database: pluginDb } }
+        const logger = { warn() {}, error() {}, info() {} }
+
+        const first = await withSchedTriggerEnv('true', () =>
+          seam.runAttendanceReportSyncScheduledTriggerOnce(context, pluginDb, logger, { now }))
+        expect(first.ran).toBe(true)
+        expect(first.cadence).toBe('daily')
+        const mine = first.orgs.find((o: { orgId: string }) => o.orgId === org)
+        expect(mine).toMatchObject({ claimed: true, status: 'completed', freshlyCreated: true, workDate: '2026-07-05' })
+        expect(mine.totals).toMatchObject({ usersScanned: 1, usersSynced: 1, created: 1 })
+        expect(await jobRowCount(pool, org)).toBe(1)
+        const jobRow = (await pool.query(
+          `SELECT status, mode, kind, idempotency_key FROM plugin_attendance_report_sync_jobs WHERE org_id = $1`, [org],
+        )).rows[0]
+        expect(jobRow).toMatchObject({ status: 'completed', mode: 'enqueue', kind: 'daily_records', idempotency_key: mine.idempotencyKey })
+        expect(fake.store).toHaveLength(1)
+        expect(fake.store[0].data[fake.rowKeyFieldId]).toBe(`${org}:${uid}:2026-07-05`)
+
+        // Repeat tick within the SAME period → the job is already terminal, so this is a claimed:false
+        // no-op (zero new job rows, zero additional multitable writes) — idempotency via the job's own
+        // (org_id, idempotency_key) partial unique index PLUS the writer's dual source-fingerprint compare.
+        const second = await withSchedTriggerEnv('true', () =>
+          seam.runAttendanceReportSyncScheduledTriggerOnce(context, pluginDb, logger, { now }))
+        const mineAgain = second.orgs.find((o: { orgId: string }) => o.orgId === org)
+        expect(mineAgain).toMatchObject({ claimed: false, reason: 'already_completed', jobId: mine.jobId, idempotencyKey: mine.idempotencyKey })
+        expect(await jobRowCount(pool, org)).toBe(1)
+        expect(fake.store).toHaveLength(1)
+      } finally {
+        await putSchedPolicy(adminToken, schedPolicy({ enabled: false })).catch(() => undefined)
+        await cleanupSchedOrg(pool, org, [uid])
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('maxUsersPerRun throttles each page and the SAME job resumes across ticks until the roster drains', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `a2rt-throttle-${runSuffix}`
+      const u1 = `a2rt-thr-u-${runSuffix}-1`
+      const u2 = `a2rt-thr-u-${runSuffix}-2`
+      const u3 = `a2rt-thr-u-${runSuffix}-3`
+      const userIds = [u1, u2, u3]
+      const adminToken = await schedAdminToken(`a2rt-throttle-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-07-05T12:00:00.000Z')
+      try {
+        await seedSchedOrgRule(pool, org)
+        for (const uid of userIds) {
+          await seedSchedUser(pool, uid, org)
+          await seedSchedAttendanceRecord(pool, org, uid, '2026-07-05')
+        }
+        expect(await putSchedPolicy(adminToken, schedPolicy({ maxUsersPerRun: 1 }))).toBe(200)
+
+        const seam = schedSeam()
+        const pluginDb = createPluginDbForTest(pool)
+        const fake = createFakeReportRecordsMultitable()
+        const context = { api: { multitable: { provisioning: fake.provisioning, records: fake.records }, database: pluginDb } }
+        const logger = { warn() {}, error() {}, info() {} }
+        const tick = () => withSchedTriggerEnv('true', () => seam.runAttendanceReportSyncScheduledTriggerOnce(context, pluginDb, logger, { now }))
+        const mineOf = (res: { orgs: Array<{ orgId: string }> }) => res.orgs.find((o) => o.orgId === org)
+
+        const t1 = mineOf(await tick())
+        expect(t1).toMatchObject({ claimed: true, status: 'queued', freshlyCreated: true })
+        expect(fake.store).toHaveLength(1)
+        expect(await jobRowCount(pool, org)).toBe(1)
+
+        const t2 = mineOf(await tick())
+        expect(t2).toMatchObject({ claimed: true, status: 'queued', freshlyCreated: false, jobId: t1.jobId })
+        expect(fake.store).toHaveLength(2)
+        expect(await jobRowCount(pool, org)).toBe(1) // SAME job row throughout — resumed, not recreated.
+
+        const t3 = mineOf(await tick())
+        expect(t3).toMatchObject({ claimed: true, status: 'completed', freshlyCreated: false, jobId: t1.jobId })
+        expect(fake.store).toHaveLength(3)
+        expect(new Set(fake.store.map((r) => r.data[fake.rowKeyFieldId]))).toEqual(
+          new Set(userIds.map((uid) => `${org}:${uid}:2026-07-05`)),
+        )
+
+        // A 4th tick after completion is a no-op — the throttle drained the roster in exactly 3 pages.
+        const t4 = mineOf(await tick())
+        expect(t4).toMatchObject({ claimed: false, reason: 'already_completed', jobId: t1.jobId })
+        expect(fake.store).toHaveLength(3)
+        expect(await jobRowCount(pool, org)).toBe(1)
+      } finally {
+        await putSchedPolicy(adminToken, schedPolicy({ enabled: false })).catch(() => undefined)
+        await cleanupSchedOrg(pool, org, userIds)
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('PUT /api/attendance/settings round-trips reportSync.scheduledTrigger without the zod schema silently stripping it (#1829)', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await schedAdminToken(`a2rt-roundtrip-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+      // Capture-and-restore is scoped to JUST the reportSync sub-key (not the whole settings blob): a
+      // full-blob PUT-back is the wider convention elsewhere in this file, but it couples this test's
+      // teardown to unrelated sibling schema quirks (e.g. holidaySync.lastRun.error round-trips as `null`
+      // from GET yet the zod schema demands a string on PUT, 400-ing a whole-blob restore attempt whenever
+      // an earlier test in the same run left that shape behind) — out of scope for A2 to fix. A partial
+      // `{ reportSync }`-only PUT below never touches holidaySync (every top-level key is independently
+      // `.optional()`), so it restores exactly what this test mutated without inheriting that fragility.
+      let originalReportSync: unknown
+      try {
+        const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        originalReportSync = (origRes.body as { data?: { reportSync?: unknown } } | undefined)?.data?.reportSync
+
+        const putRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({ reportSync: { scheduledTrigger: { enabled: true, cadence: 'hourly', maxOrgsPerRun: 11, maxUsersPerRun: 77 } } }),
+        })
+        expect(putRes.status).toBe(200)
+        expect((putRes.body as { data?: { reportSync?: unknown } } | undefined)?.data?.reportSync).toEqual({
+          scheduledTrigger: { enabled: true, cadence: 'hourly', maxOrgsPerRun: 11, maxUsersPerRun: 77 },
+        })
+
+        // Re-GET (a fresh read, not just the PUT echo) proves it actually persisted, not just validated.
+        const rt = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        expect((rt.body as { data?: { reportSync?: unknown } } | undefined)?.data?.reportSync).toEqual({
+          scheduledTrigger: { enabled: true, cadence: 'hourly', maxOrgsPerRun: 11, maxUsersPerRun: 77 },
+        })
+
+        // A sibling-only partial update (untouched key) preserves reportSync — proves mergeSettings' nested
+        // 2-level merge, not just the zod schema, keeps the whole block from getting clobbered/dropped.
+        const siblingPut = await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({ minPunchIntervalMinutes: 2 }),
+        })
+        expect(siblingPut.status).toBe(200)
+        expect((siblingPut.body as { data?: { reportSync?: unknown } } | undefined)?.data?.reportSync).toEqual({
+          scheduledTrigger: { enabled: true, cadence: 'hourly', maxOrgsPerRun: 11, maxUsersPerRun: 77 },
+        })
+
+        // An invalid cadence value is REJECTED (400), not silently coerced/dropped.
+        const badCadence = await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({ reportSync: { scheduledTrigger: { cadence: 'weekly' } } }),
+        })
+        expect(badCadence.status).toBe(400)
+      } finally {
+        await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({ reportSync: originalReportSync ?? { scheduledTrigger: { enabled: false } } }),
+        }).catch(() => undefined)
+      }
+    })
+  })
+
   it('C5-4: lists notification deliveries with counters, pagination, filtering, and admin-only access', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
