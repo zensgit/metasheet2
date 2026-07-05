@@ -256,6 +256,19 @@ export interface RecordPatchInput {
    */
   source?: RecordPostCommitContext['source']
   /**
+   * AI-fields S1 (LOCK-B1, design-lock `multitable-ai-write-provenance-batch-grouping-s1-designlock-20260705.md`):
+   * OPTIONAL commit-action batch grouping seam. Absent (every existing caller) → behavior is
+   * BYTE-IDENTICAL to before this seam existed: a fresh `randomUUID()` per `patchRecords` call (LOCK-12,
+   * "one bulk patchRecords call = one user action = one batch"). Present → used as the shared batch id
+   * for every row this call writes, so a caller that spans MULTIPLE per-row `patchRecords` calls (e.g. an
+   * AI bulk/job commit request confirming N rows via N separate calls) can group them into ONE history
+   * batch (LOCK-B2: "one COMMIT ACTION = one batch"). Server-minted only by design — this is an internal
+   * service input, never an API field; a route must never forward a client-supplied value here (LOCK-B4).
+   * Attribution-only grouping: sharing a batchId must not change any per-row commit/outcome semantics
+   * (LOCK-B5).
+   */
+  batchId?: string
+  /**
    * OAPI-2a (§6): present only for an `mst_` token write. When set, a `committed` audit row is inserted
    * INSIDE this patch's mutation transaction, so a failed audit insert rolls the write back (fail-closed).
    * Absent for session writes → strict no-op (the session write path is unchanged).
@@ -623,6 +636,7 @@ export class RecordWriteService {
       sheetScope,
       access,
       source,
+      batchId,
       authorizationPreValidated,
     } = input
 
@@ -749,8 +763,10 @@ export class RecordWriteService {
 
       // Global-history T1 (LOCK-12): one bulk patchRecords call = ONE user action = ONE batch. Share a
       // single batch_id across every record's revision so the history projection groups them as one batch,
-      // not many unrelated ones.
-      const bulkBatchId = randomUUID()
+      // not many unrelated ones. AI-fields S1 (LOCK-B1/B2): a caller MAY supply its own batchId to group
+      // MULTIPLE patchRecords calls into one commit-action batch — absent, this is the same fresh
+      // randomUUID() as before the seam existed (byte-identical default for every non-AI caller).
+      const bulkBatchId = batchId ?? randomUUID()
       for (const [recordId, changes] of changesByRecord.entries()) {
         const expectedVersion = Array.from(
           new Set(changes.map((c) => c.expectedVersion).filter((v): v is number => typeof v === 'number')),

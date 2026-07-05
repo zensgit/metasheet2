@@ -534,6 +534,9 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
               capabilities,
               sheetScope,
               access,
+              // AI-fields S1 LOCK-A2: attribute this write. LOCK-B3: the inline single-cell run passes NO
+              // batchId — a single-row action stays its own batch (patchRecords mints one, as always).
+              source: 'ai-shortcut',
             })
 
             res.json({
@@ -1141,6 +1144,10 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       // ── PER-ROW commit over the CONFIRMED set (deduped, order preserved) ───────
       // Each confirmed recordId gets EXACTLY ONE outcome (criterion 5). Precedence:
       // not_in_cache → skipped_no_perm (commit-time re-gate) → patchRecords outcome.
+      // AI-fields S1 LOCK-B3: ONE batch id per COMMIT REQUEST, shared across every row this request
+      // commits (even though each row lands via its own patchRecords call) — the grouping unit is the
+      // commit action, not the individual per-row write.
+      const commitBatchId = randomUUID()
       const seen = new Set<string>()
       for (const recordId of recordIds) {
         if (seen.has(recordId)) continue
@@ -1171,6 +1178,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
           fieldId: cached.fieldId,
           value: cached.proposedValue,
           expectedVersion: cached.previewVersion,
+          batchId: commitBatchId,
         })
         outcomes.push({ recordId, outcome })
       }
@@ -1183,7 +1191,11 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         { written: 0, stale_reprev: 0, write_conflict: 0, not_in_cache: 0, skipped_no_perm: 0 },
       )
 
-      return res.json({ outcomes, counts })
+      // AI-fields S1 LOCK-B6: expose the server-minted batch id so the caller can map this run to its
+      // history batch ephemerally (no persistence — meta_record_revisions stays frozen). null when
+      // nothing was actually written (no revision exists, so there is no batch to point at).
+      const batchId = counts.written > 0 ? commitBatchId : null
+      return res.json({ outcomes, counts, batchId })
     } catch (err) {
       console.error('[multitable-ai] bulk-commit failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to commit AI bulk preview' } })
@@ -1399,6 +1411,10 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         })
       }
 
+      // AI-fields S1 LOCK-B3: ONE batch id for this WHOLE commit request, shared across every chunk and
+      // every row it writes — BJ-10's backend-owned chunking is a pagination detail (avoids one oversized
+      // in-memory pass), not a separate user action; the commit action is the request, not the chunk.
+      const commitBatchId = randomUUID()
       for (let i = 0; i < generatedRows.length; i += chunkSize) {
         const chunk = generatedRows.slice(i, i + chunkSize)
         for (const row of chunk) {
@@ -1414,6 +1430,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
             recordId: row.recordId,
             fieldId: header.fieldId,
             value: row.proposedValue ?? '',
+            batchId: commitBatchId,
             expectedVersion: row.previewVersion ?? 0,
           })
           // Map the B-2 vocabulary `written` → the job-rows terminal `committed`.
@@ -1428,7 +1445,10 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       const aggregate = { confirmed: parsed.data.recordIds.length, attempted: generatedRows.length, counts }
       await setHeaderAggregate(ledgerQuery, jobId, aggregate, 'resolved')
 
-      return res.json({ jobId, state: 'resolved', counts, attempted: generatedRows.length })
+      // AI-fields S1 LOCK-B6: same ephemeral run→batch mapping as bulk-commit — null when nothing in
+      // this request actually committed (no revision, no batch to point at).
+      const batchId = counts.committed > 0 ? commitBatchId : null
+      return res.json({ jobId, state: 'resolved', counts, attempted: generatedRows.length, batchId })
     } catch (err) {
       console.error('[multitable-ai] bulk-job commit failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to commit bulk job' } })
@@ -1576,8 +1596,15 @@ async function commitOneRecord(args: {
   fieldId: string
   value: string
   expectedVersion: number
+  /**
+   * AI-fields S1 LOCK-B3: the caller (bulk-commit / job-commit ROUTE, never commitOneRecord itself)
+   * mints ONE randomUUID() per commit REQUEST and passes it here so every row committed in that request
+   * shares one history batch. Optional so existing single-record call shapes stay valid; absent →
+   * patchRecords mints its own per-call id (a one-row batch), matching prior behavior.
+   */
+  batchId?: string
 }): Promise<RecordCommitOutcome> {
-  const { req, query, pool, patchContext, capabilities, sheetScope, access, sheetId, recordId, fieldId, value, expectedVersion } = args
+  const { req, query, pool, patchContext, capabilities, sheetScope, access, sheetId, recordId, fieldId, value, expectedVersion, batchId } = args
 
   // 6a) Row-level read gate.
   const readable = await requireRecordReadable(req, query, sheetId, recordId)
@@ -1616,6 +1643,10 @@ async function commitOneRecord(args: {
       capabilities,
       sheetScope,
       access,
+      // AI-fields S1 LOCK-A2/B3: attribute this write and (when supplied by the caller) group it into
+      // the enclosing commit request's shared batch.
+      source: 'ai-shortcut',
+      batchId,
     })
     return 'written'
   } catch (err) {
