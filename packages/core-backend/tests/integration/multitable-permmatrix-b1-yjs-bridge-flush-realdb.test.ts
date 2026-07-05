@@ -1,17 +1,19 @@
 /**
  * B1-G1 — permission golden matrix: Yjs bridge scalar FLUSH × actor tiers + write modifiers (real DB).
  * Spec: W1-2 permission-matrix (docs/development/multitable-w1-2-permission-matrix-spec-20260705.md)
- * §3 gap G-1 / §2 axes A(3-6)×S11×M(2,3,4).
+ * §3 gap G-1 / §2 axes A(3-6)×S11×M(2,3,4). Sibling: #3646 (W1-1 formula-freshness design-lock) locks
+ * the FRESHNESS angle of this same Yjs-bridge side-door; this batch locks the PERMISSION angle.
  *
  * IMPORTANT CALIBRATION (owner-corrected — this is the point of the batch): the bridge's write input
- * is built via the REAL `resolveSheetCapabilitiesForUser` ("same path as REST", index.ts:2471-2473)
- * and flushed through `RecordWriteService.patchRecords` (yjs-record-bridge.ts:222-227) — authorization
- * machinery IS already in place on this path. This is a **test blind spot, not a runtime hole**: the
- * existing yjs-scalar-{flush,seed}-realdb.test.ts suites isolate VALUE FIDELITY (their own
- * `makeGetWriteInput` grants `multitable:write` unconditionally, "since this test isolates value
- * fidelity, not permissions" — see their file comments). Nobody had yet pinned that a non-writer's
- * flush is actually rejected, with zero side effects, via a REAL DB-backed capability resolution
- * instead of a hardcoded grant. These goldens PIN that it stays effective — they do not change it.
+ * is built via the REAL `resolveSheetCapabilitiesForUser` ("Resolve real user capabilities — same path
+ * as REST", index.ts:2471-2473) and flushed through `RecordWriteService.patchRecords`
+ * (yjs-record-bridge.ts:222-226) — authorization machinery IS already in place on this path. This is a
+ * **test blind spot, not a runtime hole**: the existing yjs-scalar-{flush,seed}-realdb.test.ts suites
+ * isolate VALUE FIDELITY (their own `makeGetWriteInput` grants `multitable:write` unconditionally,
+ * "since this test isolates value fidelity, not permissions" — see their file comments). Nobody had yet
+ * pinned that a non-writer's flush is actually rejected, with zero side effects, via a REAL DB-backed
+ * capability resolution instead of a hardcoded grant. These goldens PIN that it stays effective — they
+ * do not change it, and they do not claim to close a bypass.
  *
  * Harness is grounded in yjs-scalar-flush-realdb.test.ts / yjs-scalar-seed-realdb.test.ts (bridge +
  * YjsSyncService + RecordWriteService wiring, debounce-then-assert style). The ONE substantive change:
@@ -19,8 +21,10 @@
  * scope + admin-role), exactly mirroring the production resolver at index.ts:2416-2498, instead of a
  * hardcoded `deriveCapabilities(['multitable:write'])` grant.
  *
- * Actor tiers exercised (permission-service.ts:65-108 code table; sheet-capabilities.ts:74-97 derive,
- * :105-116 sheet-scope override, :289-313 write-own condition):
+ * Actor tiers exercised (permission-service.ts / sheet-capabilities.ts code tables; derive at
+ * sheet-capabilities.ts:75-100, sheet-scope override composition at :139-158 (schema grant, which itself
+ * composes the record-write grant at :122-137), write-own condition at :291-309 `ensureRecordWriteAllowed`
+ * + :280-285 `requiresOwnWriteRowPolicy`):
  *  - A3 global multitable:read only (no write)              → flush DENIED
  *  - A4 sheet-scoped FULL write (`spreadsheet:write` row), no global write → flush ALLOWED (positive
  *    control: proves the bridge honors a REAL per-sheet grant, not just global permissions — a bridge
@@ -30,26 +34,51 @@
  *
  * Write modifiers exercised:
  *  - M3 record lock (`locked`/`locked_by`, unconditional `ensureRecordNotLocked` — record-write-
- *    service.ts:806): a TRUE independent gate — a globally write-capable actor is STILL denied when
- *    the record is locked by someone else. Mirrors LR-T1 (multitable-record-lock.test.ts) via the
- *    bridge instead of REST.
+ *    service.ts:806, called inside the SAME `SELECT ... FOR UPDATE` transaction as the write at :776):
+ *    a TRUE independent gate — a globally write-capable actor is STILL denied when the record is locked
+ *    by someone else. Mirrors LR-T1 (multitable-record-lock.test.ts) via the bridge instead of REST.
  *  - M2 row-level read-deny (`record_permissions` 'none') and M4 conditional rule-deny (`effect:
- *    'deny_read'`) are, by exhaustive grep of the write spine (`ensureRecordWriteAllowed` in both
- *    sheet-capabilities.ts and permission-service.ts, `RecordWriteService.patchRecords`), READ-ONLY
- *    constructs — neither is ever consulted to DENY a write. So each gets TWO goldens: (a) a
- *    NON-WRITER actor's flush against the annotated target is still denied with zero side effects
- *    (defense-in-depth — the annotation creates no capability-check bypass), and (b) a globally
- *    write-capable actor's flush against the SAME annotated target SUCCEEDS — a documented non-gate,
- *    parity with the interactive REST route, in the same spirit as the permission-matrix ledger's
- *    existing non-gate documentation (docs/development/permission-matrix-golden-20260525.md §2)
- *    rather than a claim that M2/M4 independently gate write.
+ *    'deny_read'`) are, by exhaustive grep of every write-path file (record-write-service.ts,
+ *    record-service.ts, permission-rule-evaluator.ts's `RuleEffect` type is LITERALLY `'deny_read'` only
+ *    — there is no write variant to even express), READ-ONLY constructs — neither is ever consulted to
+ *    DENY a write, anywhere in the codebase. So each gets TWO goldens: (a) a NON-WRITER actor's flush
+ *    against the annotated target is still denied with zero side effects (defense-in-depth — the
+ *    annotation creates no capability-check bypass), and (b) a globally write-capable actor's flush
+ *    against the SAME annotated target SUCCEEDS — a documented non-gate, parity with the interactive
+ *    REST route, in the same spirit as the permission-matrix ledger's existing non-gate documentation
+ *    (docs/development/permission-matrix-golden-20260525.md §2) rather than a claim that M2/M4
+ *    independently gate write.
+ *  - Property-level (schema) field mask — the "masked-target" case: `RecordWriteService.validateChanges`
+ *    (record-write-service.ts:471-512, called at Step 0 of `patchRecords` BEFORE any transaction opens)
+ *    throws `RecordFieldForbiddenError` for any field that is `hidden`, `readOnly === true`, or of type
+ *    `formula`/`lookup`/`rollup`/`button` — atomically, for the WHOLE flush, not a silent per-field drop.
+ *    This is the SAME guard every `patchRecords` caller hits (REST bulk `/patch`, and — independently,
+ *    via its own `buildFieldMutationGuardMap` — the REST single-record `PATCH /records/:recordId`, which
+ *    throws `RecordPatchFieldValidationError` for the identical field classes). A writer whose flush
+ *    touches a masked field alongside a normal field gets BOTH fields rejected — proving the bridge
+ *    respects this field-mask exactly the way REST does, not merely "the capability gate happens to be
+ *    on."
+ *
+ * Adjacent finding (OUT OF SCOPE for this batch, not golden-locked here, flagged in the PR body): unlike
+ * the property-level guard above, the PER-SUBJECT `field_permissions.read_only` gate (layer-2/3
+ * depending on which doc's numbering) is enforced ONLY by three route-level call sites — the bulk
+ * `/patch` route's own pre-check (univer-meta.ts ~15723-15739, whose own comment says
+ * "RecordWriteService.patchRecords enforces only PROPERTY-level guards ... it does NOT enforce
+ * per-subject field_permissions.read_only"), record-copy, and revision-restore. Neither
+ * `RecordWriteService.patchRecords` nor `RecordService.patchRecord` (the single-record REST handler)
+ * consults `field_permissions` for a write decision at all (verified by reading both). So the bridge is
+ * at PARITY with the single-record REST route here (both bypass a per-subject field lock), but that
+ * parity is with a route that itself looks like an incomplete rollout rather than M2/M4's confirmed
+ * intentional non-gate — this is why it is reported as an adjacent finding rather than asserted as a
+ * "documented non-gate" golden the way M2/M4 are.
  *
  * "Zero side effects" = stored `data`/`version` unchanged AND no new `meta_record_revisions` row
  * (patchRecords writes the revision in the SAME transaction as the UPDATE — a thrown
- * RecordValidationError aborts the whole transaction, so a denied write can never partially land).
- * The bridge's own flushNow swallows write errors (fire-and-forget), so `getMetrics()`
- * flushSuccessCount/flushFailureCount is the direct "outcome vocabulary" signal on this entry point
- * (there is no HTTP status code on the bridge path) — asserted alongside the DB state.
+ * RecordValidationError/RecordFieldForbiddenError aborts the whole transaction, and `validateChanges`
+ * runs BEFORE the transaction even opens, so a denied write can never partially land). The bridge's own
+ * flushNow swallows write errors (fire-and-forget), so `getMetrics()` flushSuccessCount/flushFailureCount
+ * is the direct "outcome vocabulary" signal on this entry point (there is no HTTP status code on the
+ * bridge path) — asserted alongside the DB state.
  *
  * Runs only with DATABASE_URL (sentinel fails-not-skips in CI per the suite convention).
  */
@@ -71,6 +100,7 @@ const TS = Date.now()
 const BASE_ID = `base_b1g1_${TS}`
 const SHEET_ID = `sheet_b1g1_${TS}`
 const F_NAME = `fld_b1g1_name_${TS}`
+const F_FORMULA = `fld_b1g1_formula_${TS}`
 
 // Actor tiers (each globally unique — never reused with a different permission shape, so the
 // in-process RBAC cache in rbac/service.ts never serves a stale result across tests).
@@ -91,6 +121,7 @@ const REC_A6 = `rec_b1g1_a6_${TS}`
 const REC_LOCK = `rec_b1g1_lock_${TS}`
 const REC_ROWDENY = `rec_b1g1_rowdeny_${TS}`
 const REC_RULEDENY = `rec_b1g1_ruledeny_${TS}`
+const REC_MASKED = `rec_b1g1_masked_${TS}`
 
 function makeGetWriteInput() {
   return async (recordId: string, patch: Record<string, unknown>, actorId: string): Promise<RecordPatchInput | null> => {
@@ -209,6 +240,13 @@ describeIfDatabase('B1-G1 permission golden — Yjs bridge flush × actor tiers 
       'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
       [F_NAME, SHEET_ID, 'Name', 'string', '{}', 1],
     )
+    // A formula field is `isFieldAlwaysReadOnly` by TYPE alone (permission-derivation.ts:59) — the
+    // universal static-axis guard every patchRecords caller enforces (record-write-service.ts:510
+    // rejects type==='formula' unconditionally, regardless of the readOnly flag).
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [F_FORMULA, SHEET_ID, 'Formula', 'formula', JSON.stringify({ expression: '=1+1' }), 2],
+    )
 
     // A3 — global read-only (legacy users.permissions JSONB path, same as multitable-oapi2a-token-
     // write-realdb.test.ts's WRITER/RO fixtures; no FK, no permissions-table pre-seed needed).
@@ -217,7 +255,7 @@ describeIfDatabase('B1-G1 permission golden — Yjs bridge flush × actor tiers 
        VALUES ($1,$2,$1,'x','member',$3::jsonb, TRUE, FALSE) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions`,
       [A3_ID, `${A3_ID}@t.local`, JSON.stringify(['multitable:read'])],
     )
-    // WRITER — global write-capable control actor for the M3/M2/M4 modifier goldens.
+    // WRITER — global write-capable control actor for the M3/M2/M4/masked-field modifier goldens.
     await q(
       `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
        VALUES ($1,$2,$1,'x','member',$3::jsonb, TRUE, FALSE) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions`,
@@ -240,10 +278,11 @@ describeIfDatabase('B1-G1 permission golden — Yjs bridge flush × actor tiers 
     await seed(REC_A5_OTHER, OTHER_ID, 'before-a5other')
     await seed(REC_A6, OTHER_ID, 'before-a6')
     await seed(REC_LOCK, OTHER_ID, 'before-lock')
-    await q('UPDATE meta_records SET locked = true, locked_by = $2 WHERE id = $1', [REC_LOCK, OTHER_ID]) // NOT WRITER_ID — WRITER is neither locker nor owner
+    await q('UPDATE meta_records SET locked = true, locked_by = $2, locked_at = now() WHERE id = $1', [REC_LOCK, OTHER_ID]) // NOT WRITER_ID — WRITER is neither locker nor owner
 
     await seed(REC_ROWDENY, OTHER_ID, 'before-rowdeny')
     await seed(REC_RULEDENY, OTHER_ID, 'secret') // matches the deny_read rule below on F_NAME='secret'
+    await seed(REC_MASKED, OTHER_ID, 'before-masked')
 
     // M2 fixture — row-level read-deny 'none', scoped to BOTH A6 (non-writer sub-test) and WRITER
     // (documented-non-gate control sub-test). Flag ON so the deny is genuinely "live" for reads.
@@ -356,5 +395,15 @@ describeIfDatabase('B1-G1 permission golden — Yjs bridge flush × actor tiers 
     const stored = await readRecord(REC_RULEDENY)
     expect(stored.data[F_NAME]).toBe('writer-ruledeny-write')
     expect(stored.version).toBe(2)
+  })
+
+  test('masked-target (property-level field mask) + globally write-capable actor: a flush touching a formula (isFieldAlwaysReadOnly) field alongside a normal field is REJECTED ATOMICALLY — zero side effects on EITHER field, matching REST (both the bulk /patch route\'s RecordWriteService.patchRecords and the single-record PATCH route\'s RecordService.patchRecord throw for the identical field classes)', async () => {
+    const bridge = await driveFlush(REC_MASKED, WRITER_ID, { [F_NAME]: 'writer-masked-attempt', [F_FORMULA]: 'malicious-formula-write' })
+    expect(bridge.getMetrics().flushFailureCount).toBeGreaterThanOrEqual(1)
+    const stored = await readRecord(REC_MASKED)
+    expect(stored.data[F_NAME]).toBe('before-masked') // the NORMAL field did NOT sneak through
+    expect(stored.data[F_FORMULA]).toBeUndefined()
+    expect(stored.version).toBe(1)
+    expect(await revisionCount(REC_MASKED)).toBe(0)
   })
 })

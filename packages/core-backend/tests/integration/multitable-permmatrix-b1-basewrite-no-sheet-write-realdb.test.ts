@@ -1,15 +1,22 @@
 /**
  * B1-G3 — permission golden matrix: base-level write codes do NOT intersect the sheet/record
  * write axis (real DB). Spec: W1-2 permission-matrix (docs/development/multitable-w1-2-permission-
- * matrix-spec-20260705.md) §3 gap G-3 / §2 axis M6.
+ * matrix-spec-20260705.md) §3 gap G-3 / §2 axis M6. Sibling: #3646 (W1-1 formula-freshness
+ * design-lock) locks the FRESHNESS angle of the Yjs-bridge side-door; this B1 batch (G-1/G-2/G-3)
+ * locks the PERMISSION angle across the side-door / write-modifier surface more broadly — this
+ * cluster in particular pins the C2 crux fact rather than a bridge/token entry point.
  *
- * `resolveBaseWritable` (permission-service.ts) is a SEPARATE, kernel-internal primitive introduced
- * for the ②b cross-base automation slice: it grants base-level write authority via
- * `BASE_WRITE_PERMISSION_CODES` (`multitable:base:write` / `multitable:base:admin` / `multitable:admin`)
- * OR via `meta_bases.owner_id` ownership. It is consulted ONLY by the automation executor's base-scoped
- * write path — it is NEVER called by the interactive record PATCH route. `deriveCapabilities`
- * (sheet-capabilities.ts / access.ts), which DOES gate interactive PATCH, has no knowledge of
- * `multitable:base:*` codes or of `meta_bases.owner_id` at all.
+ * `resolveBaseWritable` (permission-service.ts:1599-1645) is a SEPARATE, kernel-internal primitive
+ * introduced for the (b) cross-base automation slice: it grants base-level write authority via
+ * `BASE_WRITE_PERMISSION_CODES` (`multitable:base:write` / `multitable:base:admin` / `multitable:admin`,
+ * permission-service.ts:145-148) OR via `meta_bases.owner_id` ownership. It is consulted ONLY by the
+ * automation executor's base-scoped write path — it is NEVER called by the interactive record PATCH
+ * route. `deriveCapabilities` (sheet-capabilities.ts:75-100 + the sheet-scope composition at :122-158),
+ * which DOES gate interactive PATCH via `capabilities.canEditRecord`, has no knowledge of
+ * `multitable:base:*` codes or of `meta_bases.owner_id` at all — verified directly: `hasPermission`
+ * (sheet-capabilities.ts:69-73) does an exact/wildcard string match against the QUERIED code
+ * (`'multitable:write'`), and the literal string `'multitable:base:write'` satisfies neither that nor
+ * any `SHEET_*_PERMISSION_CODES` set membership.
  *
  * This is the "M6 crux" documented in the spec but never golden-locked: an actor who holds ONLY a
  * base-level write grant (§1) or IS the base's owner (§2) — with NO sheet-scope grant and NO global

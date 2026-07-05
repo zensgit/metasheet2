@@ -1,34 +1,49 @@
 /**
  * B1-G2 — permission golden matrix: OAPI `mst_` token WRITE re-gates the SAME modifiers as the
  * interactive PATCH route (real DB). Spec: W1-2 permission-matrix (docs/development/multitable-w1-2-
- * permission-matrix-spec-20260705.md) §3 gap G-2 / §2 axis A7×S2×M2/M3/M4.
+ * permission-matrix-spec-20260705.md) §3 gap G-2 / §2 axis A7×S2×M2/M3/M4. Sibling: #3646 (W1-1
+ * formula-freshness design-lock) locks the FRESHNESS angle of the Yjs-bridge side-door; this B1 batch
+ * (G-1/G-2/G-3) locks the PERMISSION angle across the OTHER non-interactive/side-door write entries.
  *
  * The token PATCH route (`router.patch('/records/:recordId', apiTokenAuth, ..., requireScope
- * ('records:write'), ...)`, univer-meta.ts) is the IDENTICAL handler the interactive session hits —
- * `apiTokenAuth` only substitutes `req.user` with the token's creator before the SAME
- * `resolveSheetCapabilities` → `RecordService.patchRecord` → `RecordWriteService.patchRecords` spine
- * runs. There is no second, token-specific authorization implementation to drift out of sync — but a
- * regression (e.g. a future direct-DB fast path for tokens) could silently reintroduce one, so this
- * batch pins parity explicitly rather than relying on "it's the same code" as an implicit guarantee.
+ * ('records:write'), ...)`, univer-meta.ts:13851) is the IDENTICAL handler the interactive session hits
+ * — `apiTokenAuth` (src/middleware/api-token-auth.ts) only substitutes `req.user` with the token's
+ * creator when a valid `mst_`-prefixed Bearer token is present; with no such token it simply calls
+ * `next()` and falls through to whatever `req.user` a session middleware already set. So this route is
+ * NOT token-exclusive — it is the general single-record PATCH handler, reached by REST session PATCH,
+ * this token PATCH, AND (structurally, via RecordService vs RecordWriteService — see G-1's file for the
+ * distinction) the pattern the Yjs bridge itself follows. The SAME `resolveSheetCapabilities` →
+ * `RecordService.patchRecord` spine runs regardless of which auth path populated `req.user` — there is
+ * no second, token-specific authorization implementation to drift out of sync — but a regression (e.g.
+ * a future direct-DB fast path for tokens) could silently reintroduce one, so this batch pins parity
+ * explicitly rather than relying on "it's the same code" as an implicit guarantee.
  *
  * Grounded in multitable-oapi2a-token-write-realdb.test.ts (harness + token setup) and
  * multitable-record-lock.test.ts (LR-T1 lock semantics).
  *
- * Modifier-by-modifier disposition (verified against the write spine, not assumed):
- *  - M3 (record lock, `ensureRecordNotLocked` — record-write-service.ts:806): a TRUE, unconditional
- *    gate — reached by every `patchRecords` caller regardless of entry point. G2-1 pins TOKEN PATCH
- *    denies exactly like interactive LR-T1, with zero side effects.
+ * Modifier-by-modifier disposition (verified against the write spine, not assumed — the spec's own
+ * framing of this gap ("targeting a locked record / a conditional-rule-denied write / a row-deny target
+ * — each blocked") is CORRECTED here by re-grounding, per the task's re-anchor instruction: only M3 is a
+ * true write gate; M2/M4 are read-only constructs everywhere in the codebase, so "re-gates exactly like
+ * interactive" for THEM means reproducing the SAME non-gate, not inventing a stronger block that isn't
+ * actually enforced by the interactive route either):
+ *  - M3 (record lock, `ensureRecordNotLocked` — record-write-service.ts:806 / record-service.ts:1249):
+ *    a TRUE, unconditional gate — reached by every write-path caller regardless of entry point. G2-1
+ *    pins TOKEN PATCH denies exactly like interactive LR-T1, with zero side effects.
  *  - M2 (row-level read-deny, `record_permissions` 'none') and M4 (conditional rule, `effect:
  *    'deny_read'`) are READ-ONLY constructs: `ensureRecordWriteAllowed` (both the sheet-capabilities.ts
  *    and permission-service.ts implementations) takes a `SheetPermissionScope`/optional per-record
- *    ADDITIVE-grant map — never a denial input — and `RecordWriteService.patchRecords` never loads
- *    `record_permissions` or evaluates conditional rules at all. So a capable writer's PATCH of a
- *    row-denied or rule-denied record is NOT a gate anywhere (REST, bridge, or token) — confirmed by
- *    exhaustive grep of the write spine. G2-2/G2-3 pin that the TOKEN path exhibits this SAME
- *    documented non-gate (parity with interactive), which is the literal "re-gate exactly like
- *    interactive" bar for a modifier interactive itself never gates on write. This mirrors the
- *    permission-matrix ledger's existing non-gate-documentation convention (docs/development/
- *    permission-matrix-golden-20260525.md §2) rather than asserting a stronger property that isn't true.
+ *    ADDITIVE-grant map — never a denial input — and neither `RecordWriteService.patchRecords` nor
+ *    `RecordService.patchRecord` ever loads `record_permissions` or evaluates conditional rules at all
+ *    (confirmed by grepping every non-test consumer of both constructs repo-wide: only read-path files —
+ *    permission-service.ts + univer-meta.ts's READ routes + config-restore.ts — ever reference them;
+ *    `RuleEffect` is typed as literally `'deny_read'`, no write variant exists to express). So a capable
+ *    writer's PATCH of a row-denied or rule-denied record is NOT a gate anywhere (REST, bridge, or
+ *    token) — G2-2/G2-3 pin that the TOKEN path exhibits this SAME documented non-gate (parity with
+ *    interactive), which is the literal "re-gate exactly like interactive" bar for a modifier interactive
+ *    itself never gates on write. This mirrors the permission-matrix ledger's existing non-gate-
+ *    documentation convention (docs/development/permission-matrix-golden-20260525.md §2) rather than
+ *    asserting a stronger property that isn't true.
  *
  * Runs only with DATABASE_URL (sentinel fails-not-skips in CI).
  */
@@ -102,7 +117,7 @@ describeIfDatabase('B1-G2 permission golden — OAPI token write re-gates M2/M3/
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
       REC_LOCKED, SHEET_ID, JSON.stringify({ [STATUS]: 'before-lock' }),
     ])
-    await q('UPDATE meta_records SET locked = true, locked_by = $2 WHERE id = $1', [REC_LOCKED, STRANGER])
+    await q('UPDATE meta_records SET locked = true, locked_by = $2, locked_at = now() WHERE id = $1', [REC_LOCKED, STRANGER])
 
     // M4 fixture — sheet-level conditional deny_read rule matches this record's Status='secret'.
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
