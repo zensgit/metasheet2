@@ -973,6 +973,7 @@ export type AutomationTriggerType =
   | 'webhook.received'
   | 'form.submitted'
   | 'approval.completed'
+  | 'approval.task_created'
   // Legacy aliases
   | 'field.changed'
 

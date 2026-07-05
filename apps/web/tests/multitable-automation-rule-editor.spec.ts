@@ -255,6 +255,28 @@ describe('MetaAutomationRuleEditor', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it('A-2a: approval.task_created config requires a template and blocks disallowed actions', async () => {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
+    triggerSelect.value = 'approval.task_created'
+    triggerSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+
+    // templateId input rendered (text fallback without loaded templates) + block reason asks for a template
+    expect(container.querySelector('[data-field="approvalTaskCreatedTemplateId"]')).toBeTruthy()
+    const reason = container.querySelector('[data-field="approvalTaskCreatedBlockReason"]')
+    expect(reason?.textContent).toContain('Select an approval template')
+
+    const templateInput = container.querySelector('[data-field="approvalTaskCreatedTemplateId"]') as HTMLInputElement
+    templateInput.value = 'a4b1c2d3-0000-4111-8222-333344445555'
+    templateInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+    // default draft action is update_record — not notification-family → still blocked, names the action
+    expect(container.querySelector('[data-field="approvalTaskCreatedBlockReason"]')?.textContent).toContain('not allowed')
+  })
+
   it('renders trigger type selector when visible', async () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()
@@ -263,11 +285,13 @@ describe('MetaAutomationRuleEditor', () => {
     expect(triggerSelect).toBeTruthy()
     // record.created/updated/deleted + field.value_changed + form.submitted + schedule.cron/interval/date_field
     // + webhook.received (selectable since the signed inbound endpoint shipped, T1-2 #3489)
-    // + approval.completed (T1-3 #3467 template-routed trigger).
-    expect(triggerSelect.options.length).toBe(10)
+    // + approval.completed (T1-3 #3467 template-routed trigger)
+    // + approval.task_created (A-2a one-tap lock #3594 pending-task trigger).
+    expect(triggerSelect.options.length).toBe(11)
     const triggerValues = Array.from(triggerSelect.options).map((option) => option.value)
     expect(triggerValues).toContain('webhook.received')
     expect(triggerValues).toContain('approval.completed')
+    expect(triggerValues).toContain('approval.task_created')
   })
 
   it('localizes core rule editor chrome in zh-CN while keeping raw select values', async () => {

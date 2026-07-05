@@ -939,6 +939,8 @@ export function automationTriggerTypeLabel(type: AutomationTriggerType | Unknown
       return isZh ? '当表单提交时' : 'When form submitted'
     case 'approval.completed':
       return isZh ? '当审批完成时' : 'When approval completes'
+    case 'approval.task_created':
+      return isZh ? '当产生新审批待办时' : 'When an approval task is created'
     case 'field.changed':
       return isZh ? '当字段变化时' : 'When field changed'
     default:

@@ -14,6 +14,7 @@ export type AutomationTriggerType =
   | 'webhook.received'
   | 'form.submitted'
   | 'approval.completed'
+  | 'approval.task_created'
 
 export const ALL_TRIGGER_TYPES: AutomationTriggerType[] = [
   'record.created',
@@ -26,6 +27,7 @@ export const ALL_TRIGGER_TYPES: AutomationTriggerType[] = [
   'webhook.received',
   'form.submitted',
   'approval.completed',
+  'approval.task_created',
 ]
 
 /** Config shape for field.value_changed */
@@ -62,6 +64,16 @@ export interface WebhookReceivedConfig {
 export interface ApprovalCompletedConfig {
   templateId: string
   outcomes?: Array<'approved' | 'rejected' | 'revoked' | 'cancelled'>
+}
+
+/**
+ * Config shape for approval.task_created (A-2a, one-tap lock #3594 implementation decision).
+ * Same template-keyed dedicated dispatch path as approval.completed — one event per NEW actionable
+ * assignment/recipient; NOT a multitable record event. templateId is REQUIRED; a pending event whose
+ * instance carries no templateId is v1 out-of-contract (debug log, no match).
+ */
+export interface ApprovalTaskCreatedConfig {
+  templateId: string
 }
 
 export interface AutomationTrigger {

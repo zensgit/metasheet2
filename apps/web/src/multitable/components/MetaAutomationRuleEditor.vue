@@ -47,6 +47,7 @@
             -->
             <option value="webhook.received">{{ automationTriggerTypeLabel('webhook.received', isZh) }}</option>
             <option value="approval.completed">{{ automationTriggerTypeLabel('approval.completed', isZh) }}</option>
+            <option value="approval.task_created">{{ automationTriggerTypeLabel('approval.task_created', isZh) }}</option>
           </select>
 
           <!-- field.value_changed config -->
@@ -149,6 +150,24 @@
             </div>
             <div v-if="approvalCompletedBlockReason" class="meta-rule-editor__hint" data-field="approvalCompletedBlockReason" style="color: var(--ms-color-danger, #d03050);">
               {{ approvalCompletedBlockReason }}
+            </div>
+          </template>
+
+          <!-- approval.task_created (A-2a template-routed) config -->
+          <template v-if="draft.triggerType === 'approval.task_created'">
+            <label class="meta-rule-editor__label">{{ isZh ? '审批模板' : 'Approval template' }}</label>
+            <select v-if="approvalTemplates.length > 0" v-model="draft.triggerConfig.templateId" class="meta-rule-editor__select" data-field="approvalTaskCreatedTemplateId">
+              <option value="">{{ isZh ? '请选择审批模板' : 'Select an approval template' }}</option>
+              <option v-for="t in approvalTemplates" :key="t.id" :value="t.id">{{ t.name || t.id }}</option>
+            </select>
+            <input v-else v-model="draft.triggerConfig.templateId" class="meta-rule-editor__input" type="text" :placeholder="isZh ? '审批模板 ID' : 'Approval template ID'" data-field="approvalTaskCreatedTemplateId" />
+            <div class="meta-rule-editor__hint" data-field="approvalTaskCreatedHint">
+              {{ isZh
+                ? '该模板产生新的审批待办（每位受理人一条）时触发。退回/跳转形成的新一轮待办会再次触发；同一轮重复投递自动去重。无记录上下文：动作仅支持通知类，不支持记录读写与发起审批，且不支持触发条件；创建者需持有审批读取权限并对该模板可见（保存与触发时均校验）。'
+                : 'Fires when this template produces a NEW pending approval task (one per recipient). A returned/jumped node fires again for its fresh round; duplicate deliveries of the same round dedupe. Record-less: only notification-family actions — no record actions, no start-approval, no conditions; the rule creator must hold approvals read permission and template visibility (checked at save AND at fire).' }}
+            </div>
+            <div v-if="approvalTaskCreatedBlockReason" class="meta-rule-editor__hint" data-field="approvalTaskCreatedBlockReason" style="color: var(--ms-color-danger, #d03050);">
+              {{ approvalTaskCreatedBlockReason }}
             </div>
           </template>
         </section>
@@ -1440,6 +1459,26 @@ const approvalCompletedOutcomes = computed<string[]>({
   },
 })
 
+// A-2a: same structural gates as approval.completed (templateId required, no conditions,
+// notification-family actions only) — mirrored so the reason names the right trigger.
+const approvalTaskCreatedBlockReason = computed<string>(() => {
+  if (draft.value.triggerType !== 'approval.task_created') return ''
+  const zh = isZh.value
+  const templateId = typeof draft.value.triggerConfig.templateId === 'string' ? draft.value.triggerConfig.templateId.trim() : ''
+  if (!templateId) return zh ? '请选择审批模板。' : 'Select an approval template.'
+  if (draft.value.conditions.conditions.length > 0) {
+    return zh ? '审批待办触发器不支持触发条件，请先移除所有条件。' : 'The approval-task trigger does not support conditions — remove them first.'
+  }
+  const disallowed = draft.value.actions.find((action) => !APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES.has(action.type))
+  if (disallowed) {
+    const label = automationActionTypeLabel(disallowed.type, zh)
+    return zh
+      ? `动作「${label}」不可用于审批待办触发器（仅支持通知类动作）。`
+      : `Action "${label}" is not allowed on the approval-task trigger (notification-family actions only).`
+  }
+  return ''
+})
+
 const approvalCompletedBlockReason = computed<string>(() => {
   if (draft.value.triggerType !== 'approval.completed') return ''
   const zh = isZh.value
@@ -2353,6 +2392,7 @@ const canSave = computed(() => {
   if (draft.value.actions.length < 1) return false
   // T1-3: mirror the backend save gate (templateId / no-conditions / notification-only actions).
   if (draft.value.triggerType === 'approval.completed' && approvalCompletedBlockReason.value) return false
+  if (draft.value.triggerType === 'approval.task_created' && approvalTaskCreatedBlockReason.value) return false
   // T1-2: a signing secret is required; an existing rule with a stored (redacted-on-read) secret may
   // leave the field blank to keep it.
   if (draft.value.triggerType === 'webhook.received') {
@@ -3118,6 +3158,10 @@ function buildPayload(): Partial<AutomationRule> {
     // Normalize the date-reminder config so an unset/garbage direction or offset can't persist a no-op rule.
     triggerConfig.direction = triggerConfig.direction === 'after' ? 'after' : 'before'
     triggerConfig.offsetDays = Number(triggerConfig.offsetDays) || 0
+  }
+  if (d.triggerType === 'approval.task_created') {
+    // A-2a: trimmed templateId is the only config key.
+    triggerConfig.templateId = typeof triggerConfig.templateId === 'string' ? triggerConfig.templateId.trim() : ''
   }
   if (d.triggerType === 'approval.completed') {
     // T1-3: trimmed templateId; outcomes only when a valid non-empty selection exists (omitted =
