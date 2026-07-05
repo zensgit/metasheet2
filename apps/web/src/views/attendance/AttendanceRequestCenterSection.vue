@@ -1,3 +1,4 @@
+<!-- Half-day leave quick-fill (design-lock 20260705, PR #3605) is inline-form-only -- this unmounted twin was intentionally left out of that slice; add parity here first if this component is ever mounted. -->
 <template>
   <div class="attendance__card">
     <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
