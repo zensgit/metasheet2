@@ -223,21 +223,23 @@ describe('HistoryCenterModal — inline masked per-field diff (detail expansion)
     }
   })
 
-  // loadHistoryBatchDetail (packages/core-backend/src/multitable/history-projection.ts, ~line 560) currently
-  // ALWAYS sends `before: null` for every change — "T1b: before/after diff hydration is a detail
-  // refinement" is not yet implemented server-side; `after` is the permission-masked snapshot. This test
-  // pins the FE against TODAY's real wire shape (not just a hypothetical future one): a wholly-null
-  // `before` must render every field as "set" (never crash, never re-fetch), not as a false "masked" or
-  // a false empty-string "before" value.
-  it('matches the CURRENT real backend shape (`before` wholly null) — renders every field as "set"', async () => {
-    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+  // T1b (packages/core-backend/src/multitable/history-projection.ts `loadHistoryBatchDetail`) hydrates
+  // `before` from the immediately-previous revision's masked snapshot for `update` actions, and from the
+  // delete revision's own masked snapshot for `delete` actions — it is no longer unconditionally null.
+  // A wholly-null `before` is still a REAL wire shape, though: a `create` action has no prior state (there
+  // is nothing to hydrate), so `before` stays null there. The FE diff renderer (`changeFieldDiffs`) is
+  // action-agnostic — it only inspects `before`/`after` object membership — so this fixture locks that
+  // still-current null-before shape (create) rendering every field as "set" (never crash, never re-fetch),
+  // not as a false "masked" or a false empty-string "before" value.
+  it('a create-action change (`before` wholly null, no prior state) renders every field as "set"', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch({ action: 'create' })], total: 1, nextCursor: null, searchTruncated: false })
     const detail: HistoryBatchDetail = {
       batchId: 'batch_1', actorId: 'user_1', source: 'rest', createdAt: new Date().toISOString(),
       visibleAffectedRecordCount: 1, visibleAffectedFieldCount: 1,
       changes: [{
-        sheetId: 'sheet_1', recordId: 'rec_1', action: 'update', version: 2,
+        sheetId: 'sheet_1', recordId: 'rec_1', action: 'create', version: 1,
         changedFieldIds: ['fld_name'],
-        before: null, // real current wire value, always
+        before: null, // real wire value for a create — no prior revision exists to hydrate from
         after: { fld_name: 'New Name' },
       }],
     }

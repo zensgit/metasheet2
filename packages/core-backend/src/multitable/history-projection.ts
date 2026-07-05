@@ -14,6 +14,12 @@
  *
  * LOCK-11: deterministic ordering `created_at DESC, version DESC, id DESC` (the existing table has a uuid
  * PK and no sequence).
+ *
+ * T1b before-image hydration (`loadHistoryBatchDetail`): `before` is populated per action — null for
+ * `create` (no prior state), the immediately-previous revision's snapshot for `update` (ONE extra batched
+ * query for the whole detail, never per-change), and the revision's own snapshot column for `delete` (it
+ * already captures the pre-delete state — see `loadPreviousSnapshots` for the full schema evidence).
+ * `before` is masked through the EXACT SAME allow-set as `after` (masking parity).
  */
 import type { QueryFn } from './permission-service'
 import { loadDeniedRecordIds, loadRowLevelReadDenyEnabled } from './permission-service'
@@ -514,6 +520,66 @@ export interface HistoryBatchDetail {
 }
 
 /**
+ * T1b before-image lookup key: `${sheetId}::${recordId}::${version}` (the CURRENT change's own version,
+ * not the previous one) so the hydration result maps back onto the exact row it was fetched for.
+ */
+function beforeLookupKey(sheetId: string, recordId: string, version: number): string {
+  return `${sheetId}::${recordId}::${version}`
+}
+
+/**
+ * T1b: batched previous-revision-snapshot lookup, ONE extra query for the whole batch (never N+1).
+ *
+ * Schema evidence for the source of the before-image (read from the capture writer, not guessed):
+ *   - `update` (record-service.ts patchRecord / record-write-service.ts bulk patch): the revision's OWN
+ *     `patch` column carries only the NEW values of changed fields (old values are never written), and its
+ *     `snapshot` column is `{ ...previousData, ...patch }` — the POST-update full state (`after`). Neither
+ *     column on the row itself carries a pre-update value, so the only place the prior state exists is the
+ *     immediately-preceding revision's `snapshot` for the SAME record — hence this lookup.
+ *   - `create` needs no lookup (no prior state; the caller leaves `before` null).
+ *   - `delete` (record-service.ts deleteRecord) needs no lookup either: its own `snapshot` column is
+ *     `normalizeJson(currentRow.data)` captured BEFORE the DELETE — i.e. the delete revision's own snapshot
+ *     column already IS the pre-delete state, so the caller reads it directly (no join needed).
+ *
+ * `targets` is deliberately restricted by the caller to `update` rows only. For each target we want the
+ * revision with the LARGEST version strictly less than the target's version for the same (sheet_id,
+ * record_id) — the nearest surviving prior revision, not `version - 1` (a `meta_revision_retention` sweep
+ * can thin the middle of the log, leaving gaps — LOCK-11/retention doc). A `JOIN LATERAL ... LIMIT 1` per
+ * target, batched via `unnest`, does this in one round trip using the existing
+ * `(sheet_id, record_id, version DESC)` index — no per-change N+1 query.
+ */
+async function loadPreviousSnapshots(
+  query: QueryFn,
+  targets: Array<{ sheetId: string; recordId: string; version: number }>,
+): Promise<Map<string, Record<string, unknown> | null>> {
+  const result = new Map<string, Record<string, unknown> | null>()
+  if (targets.length === 0) return result
+  const res = await query(
+    `SELECT t.sheet_id, t.record_id, t.version AS target_version, r.snapshot AS prev_snapshot
+     FROM unnest($1::text[], $2::text[], $3::int[]) AS t(sheet_id, record_id, version)
+     JOIN LATERAL (
+       SELECT snapshot
+       FROM meta_record_revisions
+       WHERE sheet_id = t.sheet_id AND record_id = t.record_id AND version < t.version
+       ORDER BY version DESC
+       LIMIT 1
+     ) r ON true`,
+    [targets.map((t) => t.sheetId), targets.map((t) => t.recordId), targets.map((t) => t.version)],
+  )
+  for (const row of res.rows as Array<Record<string, unknown>>) {
+    const sheetId = String(row.sheet_id)
+    const recordId = String(row.record_id)
+    const version = Number(row.target_version)
+    const snap = row.prev_snapshot
+    result.set(
+      beforeLookupKey(sheetId, recordId, version),
+      snap && typeof snap === 'object' && !Array.isArray(snap) ? (snap as Record<string, unknown>) : null,
+    )
+  }
+  return result
+}
+
+/**
  * Batch detail, permission-filtered. Returns null when the batch is unknown OR fully denied — the SAME
  * shape for missing and denied (LOCK-3: no existence oracle). The caller maps null → 404 not-found.
  */
@@ -536,14 +602,35 @@ export async function loadHistoryBatchDetail(
   if (rows.length === 0) return null
   const deniedBySheet = await loadDeniedBySheet(query, [...new Set(rows.map((r) => String(r.sheet_id)))], access)
 
-  const changes: HistoryChange[] = []
-  const visibleRecords = new Set<string>()
-  const visibleFields = new Set<string>()
-  let head: Record<string, unknown> | null = null
+  // Pass 1: drop denied rows (LOCK-3 row layer) BEFORE deciding which changes need a before-image lookup,
+  // so a denied record's version never appears in the batched query (nothing to hide there, just no waste).
+  const visible: Array<{ row: Record<string, unknown>; sheetId: string; recordId: string; action: string; version: number }> = []
   for (const r of rows) {
     const sheetId = String(r.sheet_id)
     const recordId = String(r.record_id)
     if (isDenied(deniedBySheet, sheetId, recordId)) continue // LOCK-3: row layer
+    visible.push({
+      row: r,
+      sheetId,
+      recordId,
+      action: typeof r.action === 'string' ? r.action : 'update',
+      version: Number(r.version ?? 0),
+    })
+  }
+  if (visible.length === 0) return null // fully denied → same as missing (LOCK-3, no oracle)
+
+  // ONE extra query for the whole batch (not per-change): only `update` rows need a previous-revision
+  // lookup (see loadPreviousSnapshots doc for why `create`/`delete` don't).
+  const prevSnapshotByKey = await loadPreviousSnapshots(
+    query,
+    visible.filter((v) => v.action === 'update').map((v) => ({ sheetId: v.sheetId, recordId: v.recordId, version: v.version })),
+  )
+
+  const changes: HistoryChange[] = []
+  const visibleRecords = new Set<string>()
+  const visibleFields = new Set<string>()
+  let head: Record<string, unknown> | null = null
+  for (const { row: r, sheetId, recordId, action, version } of visible) {
     if (!head) head = r
     visibleRecords.add(recordId)
     // LOCK-3 field layer: drop field ids / snapshot values / counts for fields this actor cannot read, so a
@@ -551,13 +638,23 @@ export async function loadHistoryBatchDetail(
     const allowed = allowedFieldsFor(allowedFieldsBySheet, sheetId)
     const fields = (Array.isArray(r.changed_field_ids) ? r.changed_field_ids.map(String) : []).filter((f) => allowed.has(f))
     for (const f of fields) visibleFields.add(f)
+    // T1b before-image, sourced per action semantics (see loadPreviousSnapshots doc):
+    //   create → null (no prior state); update → the immediately-previous revision's snapshot (looked up
+    //   above); delete → this revision's OWN snapshot column (the pre-delete state it captured).
+    // MASKING PARITY: `before` is filtered through the EXACT SAME `allowed` set as `after` — a field this
+    // actor cannot read never appears on either side, and `changedFieldIds` stays post-mask (unwidened).
+    const beforeSource = action === 'update'
+      ? prevSnapshotByKey.get(beforeLookupKey(sheetId, recordId, version)) ?? null
+      : action === 'delete'
+        ? r.snapshot
+        : null
     changes.push({
       sheetId,
       recordId,
-      action: typeof r.action === 'string' ? r.action : 'update',
-      version: Number(r.version ?? 0),
+      action,
+      version,
       changedFieldIds: fields,
-      before: null, // T1b: before/after diff hydration is a detail refinement; after = snapshot
+      before: filterDataByAllowedFields(beforeSource, allowed),
       after: filterDataByAllowedFields(r.snapshot, allowed),
     })
   }
