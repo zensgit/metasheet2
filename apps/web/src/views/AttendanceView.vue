@@ -5905,9 +5905,9 @@
                     <option value="override">{{ tr('override', '覆盖') }}</option>
                     <option value="merge">{{ tr('merge', '合并') }}</option>
                   </select>
-                  <small class="attendance__field-hint">
-                    <code>{{ tr('override', '覆盖') }}</code>: {{ tr('overwrite same user/date.', '覆盖同用户同日期记录。') }}
-                    <code>{{ tr('merge', '合并') }}</code>: {{ tr('keep existing fields when present.', '存在字段时保留已有值。') }}
+                  <small class="attendance__field-hint" data-import-mode-compare-hint>
+                    <code>{{ tr('override', '覆盖') }}</code>: {{ tr('overwrites same user/date rows and cannot be restored via rollback.', '覆盖同用户同日期记录，且无法通过 rollback 恢复。') }}
+                    <code>{{ tr('merge', '合并') }}</code>: {{ tr('keeps existing punches — only fills fields that are missing (non-destructive).', '保留已有打卡记录——仅补充缺失字段（不具破坏性）。') }}
                   </small>
                 </label>
                 <label class="attendance__field" for="attendance-import-profile">
@@ -6081,10 +6081,18 @@
                 <button class="attendance__btn" :disabled="importLoading" @click="previewImport">
                   {{ importLoading ? tr('Working...', '处理中...') : tr('Preview', '预览') }}
                 </button>
-                <button class="attendance__btn attendance__btn--primary" :disabled="importLoading" @click="runImport">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  :disabled="importLoading || importOverrideSubmitBlocked"
+                  data-import-run
+                  @click="requestRunImport"
+                >
                   {{ importLoading ? tr('Importing...', '导入中...') : tr('Import', '导入') }}
                 </button>
               </div>
+              <small v-if="importOverrideSubmitBlocked" class="attendance__field-hint" data-import-override-preview-required-hint>
+                {{ tr('override mode requires a fresh Preview of the current file/mode/settings before Import is enabled.', '覆盖模式需要先对当前文件/模式/设置执行一次预览，才能启用导入。') }}
+              </small>
               <div v-if="importPlanVisible" class="attendance__template-version-panel attendance__template-version-panel--full">
                 <div class="attendance__subheading-row">
                   <div>
@@ -6246,6 +6254,44 @@
                     </tr>
                   </tbody>
                 </table>
+              </div>
+              <div v-if="importOverrideConfirm.open" class="attendance__modal" role="dialog" aria-modal="true" data-import-override-confirm>
+                <div class="attendance__modal-body">
+                  <h5>{{ tr('Confirm override import', '确认覆盖导入') }}</h5>
+                  <table class="attendance__table">
+                    <tbody><tr v-for="(line, i) in importOverrideConfirm.lines" :key="i"><th>{{ line.label }}</th><td>{{ line.value }}</td></tr></tbody>
+                  </table>
+                  <p class="attendance__hint" data-import-override-warning>⚠ {{ importOverrideConfirm.warning }}</p>
+                  <label class="attendance__field" data-import-override-extra-confirm>
+                    <input type="checkbox" v-model="importOverrideConfirm.confirmChecked" /> <span>{{ importOverrideConfirm.confirmLabel }}</span>
+                  </label>
+                  <div class="attendance__admin-actions">
+                    <button
+                      class="attendance__btn"
+                      type="button"
+                      :disabled="!importOverrideConfirm.backupTargetUserId || importOverrideConfirm.backupStatus === 'exporting'"
+                      data-import-override-export-backup
+                      @click="() => exportImportOverrideBackup()"
+                    >
+                      {{ tr('Export backup first', '先导出备份') }}
+                    </button>
+                    <span class="attendance__field-hint" data-import-override-backup-status>{{ importOverrideBackupStatusLabel }}</span>
+                  </div>
+                  <small v-if="!importOverrideConfirm.backupTargetUserId" class="attendance__field-hint" data-import-override-backup-hint>
+                    {{ tr('Backup export needs a single target user — set User ID above, or the preview must resolve to exactly one user (a truncated preview sample never auto-resolves).', '一键导出备份需要单一目标用户——请在上方填写用户 ID，或预览结果需恰好命中一个用户（预览为截断样本时不做自动判定）。') }}
+                  </small>
+                  <div class="attendance__admin-actions">
+                    <button class="attendance__btn" type="button" @click="() => closeImportOverrideConfirm()">{{ tr('Cancel', '取消') }}</button>
+                    <button
+                      class="attendance__btn attendance__btn--primary"
+                      :disabled="!importOverrideConfirm.confirmChecked"
+                      data-import-override-confirm-submit
+                      @click="() => confirmImportOverride()"
+                    >
+                      {{ tr('Confirm', '确认') }}
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -9307,6 +9353,20 @@ import {
 } from './attendance/attendanceCalendarPolicyOverrides'
 import { useAttendanceAdminImportBatches } from './attendance/useAttendanceAdminImportBatches'
 import { normalizeImportPayloadColumns } from './attendance/attendanceImportPayload'
+import {
+  buildImportBackupExportQuery,
+  buildImportOverrideConfirmLines,
+  importModeRequiresConfirm,
+  buildImportOverrideConfirmCheckboxLabel,
+  buildImportOverrideWarningText,
+  buildManualAdjustDeductionLedgerLine,
+  isOverrideSubmitBlocked,
+  resolveImportBackupTargetUserId,
+  summarizeImportPreviewRange,
+  type ImportBackupExportStatus,
+  type ImportOverrideConfirmLine,
+  type ImportPreviewRangeSummary,
+} from './attendance/importOverrideGuard'
 import { resolveMakeupPunchRequestStatusCopy } from './attendance/makeupPunchRequestStatus'
 import {
   buildPunchRetryWithNotePayload,
@@ -13521,6 +13581,9 @@ const importPreviewTotalRows = computed(() => {
   if (taskRows > 0) return taskRows
   return importPreviewShownRows.value
 })
+// Review P3-1: the loaded rows can be a truncated sample of the full import (same
+// predicate the shown/total scorecard uses) — the override confirm modal must say so.
+const importPreviewSampleTruncated = computed(() => importPreviewTotalRows.value > importPreviewShownRows.value)
 const importPreviewUserCount = computed(() =>
   new Set(importPreview.value.map(item => item.userId).filter(Boolean)).size
 )
@@ -18398,6 +18461,173 @@ async function runImport() {
   }
 }
 
+// ===== Override import guard (frontend-only, 2026-07-05 design-lock, posture A) =====
+// See docs/development/attendance-override-import-guard-design-lock-20260705.md (PR #3597,
+// RATIFIED). G1: override submits are gated behind a forced-fresh-Preview + an in-DOM
+// two-step confirm mirroring annualOpsConfirm's shape (kept as its OWN state object here
+// since this one also carries the "export backup first" action, which annualOpsConfirm has
+// no use for). G2 (merge stays one-click) is enforced simply by requestRunImport() never
+// opening this modal for merge mode. G3 (manual-adjustment ledger note) is wired into
+// requestAnnualAdjust() below.
+
+// -- freshness: a captured fingerprint of the fully-resolved payload (mirrors what
+// buildImportPayload() returns) at the moment the last preview task actually completed.
+// Comparing it against the LIVE current draft (importPayloadDraft is a computed, so this
+// re-evaluates on every relevant edit) means ANY change to file/mode/rule-set/profile/
+// user-map/group-sync/timezone/payload text invalidates freshness immediately, with no
+// need to hunt down every individual mutation site across applyImportCsvFile/
+// applyImportProfile/etc. — same reasoning as accrual's
+// `watch(() => [period, asOf], () => dry.value = null)` (~L23007-ish) but expressed as a
+// fingerprint comparison instead of a null-out, since we don't want editing an unrelated
+// field to also blank the visible preview table (only the override submit gate). --
+const importOverridePreviewFreshFingerprint = ref<string | null>(null)
+watch(
+  () => importPreviewTask.value?.status,
+  (status) => {
+    importOverridePreviewFreshFingerprint.value = status === 'completed'
+      ? JSON.stringify(importPayloadDraft.value)
+      : null
+  },
+)
+const importOverridePreviewFresh = computed(() =>
+  importOverridePreviewFreshFingerprint.value !== null
+  && importOverridePreviewFreshFingerprint.value === JSON.stringify(importPayloadDraft.value)
+)
+const importOverrideSubmitBlocked = computed(() => isOverrideSubmitBlocked(importMode.value, importOverridePreviewFresh.value))
+
+interface ImportOverrideConfirmState {
+  open: boolean
+  lines: ImportOverrideConfirmLine[]
+  warning: string
+  confirmLabel: string
+  confirmChecked: boolean
+  backupRange: ImportPreviewRangeSummary
+  backupTargetUserId: string | null
+  backupStatus: ImportBackupExportStatus
+  onConfirm: (() => void) | null
+}
+const importOverrideConfirm = reactive<ImportOverrideConfirmState>({
+  open: false,
+  lines: [],
+  warning: '',
+  confirmLabel: '',
+  confirmChecked: false,
+  backupRange: { from: null, to: null, userIds: [] },
+  backupTargetUserId: null,
+  backupStatus: 'idle',
+  onConfirm: null,
+})
+
+const importOverrideBackupStatusLabel = computed(() => {
+  switch (importOverrideConfirm.backupStatus) {
+    case 'exporting': return tr('Exporting...', '导出中...')
+    case 'exported': return tr('Backup exported', '已导出备份')
+    case 'failed': return tr('Backup export failed', '备份导出失败')
+    default: return tr('Not exported yet', '尚未导出')
+  }
+})
+
+function closeImportOverrideConfirm(): void {
+  importOverrideConfirm.open = false
+  importOverrideConfirm.onConfirm = null
+}
+
+function confirmImportOverride(): void {
+  if (!importOverrideConfirm.confirmChecked) return
+  // [P1 TOCTOU fix] onConfirm funnels into runImport(), which rebuilds the payload from
+  // the LIVE form via buildImportPayload() — so G1 freshness must hold at CONFIRM time,
+  // not only when the modal opened (requestRunImport). If ANYTHING that feeds the payload
+  // was edited while the modal sat open (fingerprint drift ⇒ importOverridePreviewFresh
+  // flips false — this includes flipping the mode selector), refuse to submit: close the
+  // modal, never call runImport(), and require a fresh Preview. Without this re-check,
+  // Preview → open modal → edit form → Confirm would commit a never-previewed payload.
+  if (!importOverridePreviewFresh.value) {
+    closeImportOverrideConfirm()
+    setStatus(appendStatusContext(
+      tr(
+        'Import settings changed after Preview — run Preview again before an override import.',
+        '预览后导入设置已被修改——请重新预览后再执行覆盖导入。',
+      ),
+      importPreviewTimezoneHint.value,
+    ), 'error', {
+      hint: tr('The confirm dialog was closed without importing anything.', '确认弹窗已关闭，本次未执行任何导入。'),
+      action: 'retry-preview-import',
+    })
+    return
+  }
+  const cb = importOverrideConfirm.onConfirm
+  closeImportOverrideConfirm()
+  if (cb) cb()
+}
+
+// Entry point wired to the Import button (replaces a direct @click="runImport"). Merge
+// stays one-click (G2); override snapshots the Preview's resolved scope NOW for the
+// modal's DISPLAY lines (same display-snapshot discipline as requestAnnualAdjust()/
+// requestAnnualAccrualCommit() above). The SUBMITTED payload, however, is rebuilt from
+// the live form inside runImport() — its integrity is enforced by the confirm-time
+// freshness re-check in confirmImportOverride() (a drifted form closes the modal and
+// requires a fresh Preview), not by this snapshot.
+function requestRunImport(): void {
+  if (!importModeRequiresConfirm(importMode.value)) {
+    void runImport()
+    return
+  }
+  if (isOverrideSubmitBlocked(importMode.value, importOverridePreviewFresh.value)) return
+  const range = summarizeImportPreviewRange(importPreview.value)
+  importOverrideConfirm.lines = buildImportOverrideConfirmLines({
+    rowCount: importPreviewTotalRows.value,
+    range,
+    sampleTruncated: importPreviewSampleTruncated.value
+      ? { shown: importPreviewShownRows.value, total: importPreviewTotalRows.value }
+      : null,
+  }, tr)
+  importOverrideConfirm.warning = buildImportOverrideWarningText(tr)
+  importOverrideConfirm.confirmLabel = buildImportOverrideConfirmCheckboxLabel(tr)
+  importOverrideConfirm.confirmChecked = false
+  importOverrideConfirm.backupRange = range
+  importOverrideConfirm.backupTargetUserId = resolveImportBackupTargetUserId(importForm.userId, range.userIds, importPreviewSampleTruncated.value)
+  importOverrideConfirm.backupStatus = 'idle'
+  importOverrideConfirm.open = true
+  importOverrideConfirm.onConfirm = () => { void runImport() }
+}
+
+// One-click "export backup first" (design-lock §2/§4): calls the EXISTING read-only
+// GET /api/attendance/export route (zero backend changes) scoped to the Preview's
+// resolved date range + a single target user. Does not block/gate the confirm submit —
+// only the checkbox does; this only updates the status indicator (design-lock: "下载与否
+// 不阻塞提交，但按钮点过与否显示状态").
+async function exportImportOverrideBackup(): Promise<void> {
+  const targetUserId = importOverrideConfirm.backupTargetUserId
+  if (!targetUserId) return
+  importOverrideConfirm.backupStatus = 'exporting'
+  try {
+    const queryParams = buildImportBackupExportQuery({
+      orgId: normalizedOrgId() || '',
+      targetUserId,
+      range: importOverrideConfirm.backupRange,
+    })
+    const search = buildQuery(queryParams)
+    const response = await apiFetch(`/api/attendance/export?${search.toString()}`)
+    const text = await response.text()
+    if (!response.ok) {
+      let message = tr('Backup export failed', '备份导出失败')
+      try {
+        message = readErrorMessage(JSON.parse(text), message)
+      } catch {
+        message = text || message
+      }
+      throw new Error(message)
+    }
+    const disposition = response.headers.get('content-disposition')
+    const match = disposition?.match(/filename="?([^";]+)"?/)
+    downloadCsvText(match?.[1] || `attendance-override-backup-${targetUserId}.csv`, text)
+    importOverrideConfirm.backupStatus = 'exported'
+  } catch (error) {
+    importOverrideConfirm.backupStatus = 'failed'
+    setStatus(readErrorMessage(error, tr('Backup export failed', '备份导出失败')), 'error')
+  }
+}
+
 function downloadCsvText(filename: string, csvText: string) {
   const blob = new Blob([csvText], { type: 'text/csv' })
   const url = URL.createObjectURL(blob)
@@ -18759,6 +18989,14 @@ async function runStatusAction() {
     if (canResumeImportJobFromStatus.value) {
       await refreshImportAsyncJob({ silent: true })
       await resumeImportAsyncJobPolling()
+      return
+    }
+    // Review P2-1 fix: the retry action must pass the SAME override confirm/preview gate
+    // as the Import button — a direct runImport() here was a gate bypass (e.g. a merge
+    // import fails, the operator switches the selector to override, clicks Retry, and a
+    // never-confirmed override would have committed). Merge keeps its awaited one-click.
+    if (importModeRequiresConfirm(importMode.value)) {
+      requestRunImport()
       return
     }
     await runImport()
@@ -22893,6 +23131,9 @@ function requestAnnualAdjust(): void {
       ...(preview && preview.user === userId ? [{ label: tr('Remaining (preview)', '剩余(预览)'), value: `${preview.before} → ${preview.after}` }] : []),
       { label: tr('Reason', '原因'), value: reason },
       { label: tr('Idempotency key', '幂等键'), value: annualAdjustIdemKey.value },
+      // G3 (override-import-guard design-lock, 2026-07-05): negative adjustments (deductions)
+      // get an extra irreversibility note — pure copy, no behavior change.
+      ...(delta < 0 ? [buildManualAdjustDeductionLedgerLine(tr)] : []),
     ],
     onConfirm: () => { void submitAnnualAdjust(snapshot) },
   })

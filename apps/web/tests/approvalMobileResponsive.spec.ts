@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 
 // ---------------------------------------------------------------------------
 // T3-1 v0 — mobile approval CENTER responsive adaptation (ballot Q10/Q11).
@@ -185,6 +186,13 @@ describe('ApprovalCenterView — T3-1 mobile responsive gate', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // This suite's fixtures/assertions are Chinese (e.g. '待处理', '张三');
+    // pin the locale explicitly rather than depend on jsdom's default
+    // navigator.language, matching the existing zh-locked spec convention
+    // (see attendance-experience-mobile-zh.spec.ts). The i18n retrofit
+    // (approvalMobileI18n.spec.ts) separately proves the English path.
+    window.localStorage.setItem('metasheet_locale', 'zh-CN')
+    useLocale().setLocale('zh-CN')
     mockApprovalMobileFlag.value = false
     mockPendingApprovals.value = []
     mockMyApprovals.value = []

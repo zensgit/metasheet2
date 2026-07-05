@@ -139,11 +139,34 @@ const COMPOSITION_REQUEST_ERROR_CODES: ReadonlySet<string> = new Set([
   'FORBIDDEN',
 ])
 
+// Authoring-tier (save/approve/retire/audit) validation-error surface: the C-R1 validator's
+// details.errors triples (save-time CONFIG_INVALID). Clamped with the SAME three patterns as the
+// run-route planErrors triples above — a triple failing ANY clamp is dropped whole (fail-closed),
+// mirroring #3588's planErrors clamp discipline.
+export interface ReadSourceCompositionFieldError {
+  code: string
+  field: string
+  reason: string
+}
+
+function clampCompositionFieldErrors(value: unknown): ReadSourceCompositionFieldError[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((entry) => {
+    if (!isPlainObject(entry)) return []
+    const { code, field, reason } = entry
+    if (typeof code !== 'string' || !COMPOSITION_VALIDATOR_CODE_PATTERN.test(code)) return []
+    if (typeof field !== 'string' || !COMPOSITION_ERROR_FIELD_PATTERN.test(field)) return []
+    if (typeof reason !== 'string' || !COMPOSITION_ERROR_REASON_PATTERN.test(reason)) return []
+    return [{ code, field, reason }]
+  })
+}
+
 export class ReadSourceCompositionApiError extends Error {
   status: number
   code: string
   reason: string
-  constructor(status: number, code: string, reason: string) {
+  fieldErrors: ReadSourceCompositionFieldError[]
+  constructor(status: number, code: string, reason: string, fieldErrors: ReadSourceCompositionFieldError[] = []) {
     // .message is built from the clamped code (+reason) only — the panel renders error.message, so this
     // is the values-free string it shows.
     super(reason ? `${code}: ${reason}` : code)
@@ -151,6 +174,7 @@ export class ReadSourceCompositionApiError extends Error {
     this.status = status
     this.code = code
     this.reason = reason
+    this.fieldErrors = fieldErrors
   }
 }
 
@@ -165,7 +189,7 @@ async function parseCompositionResponse<T>(response: Response): Promise<T> {
     const reason = typeof details.reason === 'string' && COMPOSITION_ERROR_REASON_PATTERN.test(details.reason)
       ? details.reason
       : ''
-    throw new ReadSourceCompositionApiError(response.status, code, reason)
+    throw new ReadSourceCompositionApiError(response.status, code, reason, clampCompositionFieldErrors(details.errors))
   }
   return (isPlainObject(payload) && 'data' in payload ? payload.data : payload) as T
 }
@@ -271,4 +295,178 @@ export async function runReadSourceComposition(
     body: JSON.stringify({ inputs: { key } }),
   })
   return normalizeCompositionRunResult(await parseCompositionResponse<unknown>(response))
+}
+
+// --- authoring-tier service layer (consultant/admin, config-time) ----------
+//
+// Config-time mirrors of the readSourceConfigs.ts save/approve/retire/audit calls — for a future
+// authoring panel over the C-R4-1 composition routes. Read-only line honored: operations is pinned
+// to ['read'] and is never caller-suppliable; step ids / toInput / fromStep are likewise pinned by
+// buildReadSourceCompositionPayload, not by the draft. Values-free line honored: the audit
+// normalizer keeps ONLY the coarse {from,to} status pair from `detail` (never a version number or
+// any other field a response might carry), and the API error surface adds clamped fieldErrors on
+// top of the existing clamped code+reason (never the raw server message).
+
+// Coarse client-side mirrors of the server's isBoundedIdentifier / isBoundedConfigId
+// (read-source-composition-config.cjs). Client hint only — the server re-validates authoritatively.
+const COMPOSITION_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/
+const COMPOSITION_CONFIG_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/
+const COMPOSITION_SOURCE_TARGET_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/
+
+// Authoring draft: the v1 two-hop shape reduced to what a form actually edits. Everything else
+// (version, operations, step ids, fromStep, toInput) is fixed by the builder below — never editable.
+export interface ReadSourceCompositionDraft {
+  name: string
+  step1ConfigId: string
+  step2ConfigId: string
+  sourceTarget: string
+}
+
+export interface ReadSourceCompositionStepInput {
+  fromStep: 'step-1'
+  sourceTarget: string
+  toInput: 'key'
+}
+
+export interface ReadSourceCompositionPayload {
+  version: 1
+  name: string
+  operations: ['read']
+  steps: [
+    { id: 'step-1', readSourceConfigId: string },
+    { id: 'step-2', readSourceConfigId: string, input: ReadSourceCompositionStepInput },
+  ]
+}
+
+export function createReadSourceCompositionDraft(): ReadSourceCompositionDraft {
+  return { name: '', step1ConfigId: '', step2ConfigId: '', sourceTarget: '' }
+}
+
+// Pure builder: assembles the EXACT server config shape (read-source-composition-config.cjs v1).
+// version/operations/step ids/toInput/fromStep are pinned constants — a draft can never smuggle an
+// extra field into the payload, since only the four named draft properties are ever read here.
+export function buildReadSourceCompositionPayload(draft: ReadSourceCompositionDraft): ReadSourceCompositionPayload {
+  return {
+    version: 1,
+    name: draft.name.trim(),
+    operations: ['read'],
+    steps: [
+      { id: 'step-1', readSourceConfigId: draft.step1ConfigId.trim() },
+      {
+        id: 'step-2',
+        readSourceConfigId: draft.step2ConfigId.trim(),
+        input: { fromStep: 'step-1', sourceTarget: draft.sourceTarget.trim(), toInput: 'key' },
+      },
+    ],
+  }
+}
+
+// Coarse client-side pre-checks (field-name-keyed messages only; values are never echoed — mirrors
+// validateReadSourceDraft in readSourceConfigs.ts). The server (read-source-composition-config.cjs)
+// stays authoritative; this only gives a future authoring panel instant, values-free feedback.
+export function validateReadSourceCompositionDraft(draft: ReadSourceCompositionDraft): string[] {
+  const problems: string[] = []
+  if (!COMPOSITION_NAME_PATTERN.test(draft.name.trim())) {
+    problems.push('name 必须是合法标识符(字母/数字开头,长度不超过 64)')
+  }
+  const step1Valid = COMPOSITION_CONFIG_ID_PATTERN.test(draft.step1ConfigId.trim())
+  if (!step1Valid) problems.push('step1ConfigId 必须是合法引用标识符(长度不超过 128)')
+  const step2Valid = COMPOSITION_CONFIG_ID_PATTERN.test(draft.step2ConfigId.trim())
+  if (!step2Valid) problems.push('step2ConfigId 必须是合法引用标识符(长度不超过 128)')
+  if (step1Valid && step2Valid && draft.step1ConfigId.trim() === draft.step2ConfigId.trim()) {
+    problems.push('step1ConfigId 与 step2ConfigId 不能相同')
+  }
+  if (!COMPOSITION_SOURCE_TARGET_PATTERN.test(draft.sourceTarget.trim())) {
+    problems.push('sourceTarget 必须是合法标识符(字母/数字开头,长度不超过 64)')
+  }
+  return problems
+}
+
+export interface ReadSourceCompositionSaveResult extends ReadSourceCompositionRow {
+  reused: boolean
+}
+
+export async function saveReadSourceCompositionVersion(
+  draft: ReadSourceCompositionDraft,
+  scope: IntegrationScope,
+): Promise<ReadSourceCompositionSaveResult> {
+  const config = buildReadSourceCompositionPayload(draft)
+  const query = buildQuery({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
+  const response = await apiFetch(`/api/integration/read-source-compositions${query}`, {
+    method: 'POST',
+    body: JSON.stringify({ config }),
+  })
+  const data = await parseCompositionResponse<unknown>(response)
+  const row = normalizeCompositionRow(data)
+  return {
+    id: row?.id ?? '',
+    name: row?.name ?? '',
+    version: row?.version ?? 0,
+    status: row?.status ?? 'draft',
+    contentKey: row?.contentKey ?? '',
+    updatedAt: row?.updatedAt ?? null,
+    reused: isPlainObject(data) && data.reused === true,
+  }
+}
+
+export async function approveReadSourceComposition(id: string, scope: IntegrationScope): Promise<ReadSourceCompositionRow | null> {
+  const query = buildQuery({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
+  const response = await apiFetch(`/api/integration/read-source-compositions/${encodeURIComponent(id)}/approve${query}`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+  return normalizeCompositionRow(await parseCompositionResponse<unknown>(response))
+}
+
+export async function retireReadSourceComposition(id: string, scope: IntegrationScope): Promise<ReadSourceCompositionRow | null> {
+  const query = buildQuery({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
+  const response = await apiFetch(`/api/integration/read-source-compositions/${encodeURIComponent(id)}/retire${query}`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+  return normalizeCompositionRow(await parseCompositionResponse<unknown>(response))
+}
+
+// Values-free audit row: action/actor/createdAt are coarse by construction (closed enum / plain
+// string / ISO string); `detail` is clamped to ONLY the {from,to} status-transition pair — a
+// `version` number (present on save_version/reuse_version rows) or any other field the row might
+// carry is dropped, never surfaced.
+export interface ReadSourceCompositionAuditRow {
+  action: 'save_version' | 'reuse_version' | 'status_change'
+  actor: string | null
+  detail: { from?: CompositionStatus; to?: CompositionStatus }
+  createdAt: string | null
+}
+
+const COMPOSITION_STATUS_SET: ReadonlySet<string> = new Set(COMPOSITION_STATUSES)
+
+function clampCompositionAuditDetail(value: unknown): { from?: CompositionStatus; to?: CompositionStatus } {
+  const detail: { from?: CompositionStatus; to?: CompositionStatus } = {}
+  if (!isPlainObject(value)) return detail
+  if (typeof value.from === 'string' && COMPOSITION_STATUS_SET.has(value.from)) {
+    detail.from = value.from as CompositionStatus
+  }
+  if (typeof value.to === 'string' && COMPOSITION_STATUS_SET.has(value.to)) {
+    detail.to = value.to as CompositionStatus
+  }
+  return detail
+}
+
+export async function listReadSourceCompositionAudit(id: string, scope: IntegrationScope): Promise<ReadSourceCompositionAuditRow[]> {
+  const query = buildQuery({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
+  const response = await apiFetch(`/api/integration/read-source-compositions/${encodeURIComponent(id)}/audit${query}`)
+  const data = await parseCompositionResponse<unknown[]>(response)
+  return (Array.isArray(data) ? data : []).flatMap((row) => {
+    if (!isPlainObject(row)) return []
+    const action = row.action === 'save_version' || row.action === 'reuse_version' || row.action === 'status_change'
+      ? row.action
+      : null
+    if (!action) return []
+    return [{
+      action,
+      actor: typeof row.actor === 'string' ? row.actor : null,
+      detail: clampCompositionAuditDetail(row.detail),
+      createdAt: typeof row.createdAt === 'string' ? row.createdAt : null,
+    }]
+  })
 }
