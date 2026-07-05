@@ -48,6 +48,13 @@ import type { FormSchema } from '../types/approval-product'
 const logger = new Logger('ApprovalsRouter')
 const MAX_APPROVAL_PAGE_SIZE = 200
 const approvalTemplateAdminGuard = rbacGuardAny(['approval-templates:manage', 'approvals:admin-templates'])
+// B3-04 (design-lock 2026-07-05): the participant-facing directory picker. Unlike the template-author
+// directory above, this serves ordinary approval ACTIONS (transfer / add-sign), the fill-form user
+// field, and delegation self-service — those users may hold only approvals:read or :write, not the
+// author capability. Least-privilege UNION of the approval participation permissions. This is a
+// CANDIDATE directory, NOT an authorization fact: the actual transfer/create/delegate is still gated
+// by dispatchAction / createApproval / delegation-create downstream.
+const approvalParticipantDirectoryGuard = rbacGuardAny(['approvals:read', 'approvals:write', 'approvals:act'])
 
 let approvalsDegraded = false
 const allowDegradation = process.env.APPROVALS_OPTIONAL === '1'
@@ -609,6 +616,20 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         'APPROVAL_TEMPLATE_VERSION_FETCH_FAILED',
         'Failed to fetch approval template version',
       )
+    }
+  })
+
+  // B3-04: participant candidate-user directory. Registered BEFORE '/api/approvals/:id' so
+  // 'directory' is never matched as an :id. Reuses searchDirectoryUsers (active-only, {id,name,email},
+  // limit clamped to [1,50]) — same minimal-exposure shape as the author picker, wider guard.
+  r.get('/api/approvals/directory/users', authenticate, approvalParticipantDirectoryGuard, async (req: Request, res: Response) => {
+    try {
+      const q = String(req.query.q || '').trim()
+      const limit = Number.parseInt(String(req.query.limit ?? '20'), 10)
+      const users = await searchDirectoryUsers(q, Number.isFinite(limit) ? limit : 20)
+      res.json({ users })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_PARTICIPANT_DIRECTORY_FAILED', 'Failed to search directory users')
     }
   })
 

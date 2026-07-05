@@ -335,6 +335,7 @@ jobs:
           : "${DATABASE_URL:?DATABASE_URL is required for approval real-DB integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/approval-directory-endpoints.api.test.ts \
+            tests/integration/approval-participant-directory.api.test.ts \
             tests/integration/approval-p1c-field-permissions.api.test.ts \
             tests/integration/approval-wp-add-reduce-sign.api.test.ts \
             tests/integration/approval-direct-manager.api.test.ts \

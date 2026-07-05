@@ -21,6 +21,7 @@ export default defineConfig({
       'tests/integration/after-sales-plugin.install.test.ts',
       'tests/integration/after-sales-registry-backfill.test.ts',
       'tests/integration/approval-directory-endpoints.api.test.ts',
+      'tests/integration/approval-participant-directory.api.test.ts',
       'tests/integration/approval-p1c-field-permissions.api.test.ts',
       'tests/integration/approval-wp-add-reduce-sign.api.test.ts',
       'tests/integration/approval-direct-manager.api.test.ts',
