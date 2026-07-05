@@ -1,7 +1,8 @@
 # 考勤 override 导入护栏（备份提示 + 不可逆确认）design-lock — 2026-07-05
 
-> **Status: PROPOSED — 等 owner ratify 后才可实现**（本刀含 UX 行为变更：给既有提交流程
-> 加确认门，非 display-only，不适用 delegated-execution 姿势）。
+> **Status: RATIFIED（owner 2026-07-05，G1 姿势 = A 强制 Preview 先行；B 已否决）**——
+> ratify 以 owner 直接编辑本锁为准（G1 格 + §2 Preview 无覆盖计数锚点 + §4 不承诺精确 N
+> 边界 + §6 精确 N 两路 deferred 均为 owner 手笔）。实现按本锁 §3-§5 执行。
 > 依据：benchmark refresh v3 §3.5（安全默认：覆盖式导入"先导出再改"警告 + 不可逆操作
 > 显式提示 + 余额重算前备份）+ 2026-07-05 现状审计（§2 锚点）。
 
