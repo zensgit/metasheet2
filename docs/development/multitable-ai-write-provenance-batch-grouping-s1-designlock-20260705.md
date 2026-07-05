@@ -1,9 +1,9 @@
-# Multitable AI write provenance + commit-action batch grouping (rollback FOUNDATION) — S1 DESIGN LOCK (PROPOSED)
+# Multitable AI write provenance + commit-action batch grouping (rollback FOUNDATION) — S1 DESIGN LOCK
 
-- **Status**: PROPOSED — awaiting owner ratification. Docs-only PR; no runtime code ships here.
+- **Status**: RATIFIED + IMPLEMENTED — ratified by PR #3569 (`6b0e27bf2`) and implemented by PR #3584 (`4640f3662`). This document remains the original docs-only lock; the runtime landed separately.
 - **Slice**: S1 of the AI-fields governance arc (S1 provenance/grouping foundation → 🔒 S1b true history-batch rollback → S2 prompt-config-history UI → S3 staleness lineage → S4 cost visibility → S5 cleaning-oriented kinds).
 - **What S1 is NOT**: S1 makes **no rollback claim**. Today's restore surface cannot revert a history batch (see §4); batch-shaped revert is S1b, a separate gated design. S1 delivers the attribution + grouping that S1b (and history legibility today) require.
-- **Change surface when implemented** (single runtime PR after ratification): `post-commit-hooks.ts` (`RecordWriteSource` union), `record-write-service.ts` (`patchRecords` input + batch minting), `routes/multitable-ai.ts` (three write paths), History Center source label (inline map, see A5). **No new tables, no migrations, no new env flags, no restore-surface change.**
+- **Implemented change surface** (single runtime PR after ratification): `post-commit-hooks.ts` (`RecordWriteSource` union), `record-write-service.ts` (`patchRecords` input + batch minting), `routes/multitable-ai.ts` (three write paths), History Center source label (inline map, see A5). **No new tables, no migrations, no new env flags, no restore-surface change.**
 
 ## §1 Problem (verified at line level)
 
