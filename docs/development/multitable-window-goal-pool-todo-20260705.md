@@ -20,7 +20,7 @@
 - ⬜ **#3591 GW design-lock** — PROPOSED 待 ratify(顺带裁定:`VIRTUALIZE_MIN_ROWS=60` 是否复用于 grouped items 阈值);文档引用已校准到真实 pager/load-more 代码,合并顺序要求:#3582 先落地。
 - ⬜ **#3574 OAPI allowlist⟺guard tripwire** — P2 route-file scope tripwire 已补(`600e47e6d`),fresh CI 重跑中。
 - ⬜ **#3582 grid 性能基线** — 完工待审(docs+test;含"flat 路径已解决、真缺口=grouped 视图"的战略修正);内容已审,作为 #3591 前置应先合。
-- ⬜ **S2 design-lock 草稿** — 云端 routine 今日 13:18 CST 触发,产出 docs-only PR 后进入本批次。
+- ✅ **S2 design-lock** — MERGED `9f08a4bf9`(#3618),prompt-config history render-only lock ratified; runtime tracked below.
 
 ## W1 — 起草车道(W0 批次清空后启动;docs-only 零碰撞)
 
@@ -36,7 +36,7 @@
 
 ## W2 — build 车道(各自 lock ratify 后解锁)
 
-- 🔒 **W2-3 S2 runtime**(prompt-config-history UI)— 前置:S2 lock ratify。Sonnet 5 build + Fable 5 review;交付 verification MD。
+- ✅ **W2-3 S2 runtime**(prompt-config-history UI)— runtime MERGED `6e844cf89`(#3643); verification MD added in `multitable-ai-shortcut-prompt-config-history-s2-dev-verification-20260705.md`。
 - 🔒 **W2-4 GW runtime**(grouped 视图窗口化)— 前置:#3591 ratify。Fable 5 build(offset-table + 不变量;难度高);占 grid 互斥锁;验收含 Playwright 真浏览器前后数字(lock 硬性条款);交付 verification MD。
   W2-3 与 W2-4 文件面不重叠,可并行(不超并发上限)。
 
