@@ -1848,6 +1848,7 @@ function describeTrigger(rule: AutomationRule): string {
     // T1-2/T1-3: editor-exposed triggers get their localized type label in the card summary.
     case 'webhook.received':
     case 'approval.completed':
+    case 'approval.task_created':
       return automationTriggerTypeLabel(rule.triggerType, isZh.value)
     default:
       return String(rule.triggerType)

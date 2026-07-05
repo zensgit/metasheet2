@@ -13,6 +13,8 @@ import {
   claimDingTalkApprovalCardDeliveryActed,
   findDingTalkApprovalCardDeliveryById,
   insertDingTalkApprovalCardDelivery,
+  markDingTalkApprovalCardDeliverySendFailed,
+  markDingTalkApprovalCardDeliverySent,
   supersedeDingTalkApprovalCardDeliveriesForInstance,
 } from '../../src/integrations/dingtalk/approval-card-deliveries'
 
@@ -65,6 +67,8 @@ describeIfDb('A-1 — dingtalk approval card delivery ledger (real DB)', () => {
       deliveryKind: 'interactive_card',
     })
 
+    await markDingTalkApprovalCardDeliverySent(q, row.id, 'task_claim_test') // P2: only delivered cards are claimable
+
     const [first, second] = await Promise.all([
       claimDingTalkApprovalCardDeliveryActed(q, row.id, { action: 'approve', actedBy: 'user_b' }),
       claimDingTalkApprovalCardDeliveryActed(q, row.id, { action: 'approve', actedBy: 'user_b' }),
@@ -92,6 +96,7 @@ describeIfDb('A-1 — dingtalk approval card delivery ledger (real DB)', () => {
       recipientDingTalkUserId: 'dd_user_c',
       deliveryKind: 'work_notice_action_card',
     })
+    await markDingTalkApprovalCardDeliverySent(q, acted.id, 'task_supersede_test')
     await claimDingTalkApprovalCardDeliveryActed(q, acted.id, { action: 'approve', actedBy: 'user_c' })
 
     const keep = await insertDingTalkApprovalCardDelivery(q, {
@@ -121,7 +126,41 @@ describeIfDb('A-1 — dingtalk approval card delivery ledger (real DB)', () => {
     expect(sweptAll).toEqual([keep.id])
   })
 
-  it('DB CHECKs reject invalid delivery_kind / card_state / acted-audit inconsistency; FK rejects unknown instances', async () => {
+  it('P2: pending/failed sends are NEVER claimable — only a delivered card is actionable', async () => {
+    const pending = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId: INSTANCE,
+      nodeKey: 'approval_1',
+      recipientUserId: 'user_p2a',
+      recipientDingTalkUserId: 'dd_user_p2a',
+      deliveryKind: 'work_notice_action_card',
+    })
+    expect(await claimDingTalkApprovalCardDeliveryActed(q, pending.id, { action: 'approve', actedBy: 'user_p2a' })).toBeNull()
+    expect((await findDingTalkApprovalCardDeliveryById(q, pending.id))?.card_state).toBe('sent')
+
+    const failed = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId: INSTANCE,
+      nodeKey: 'approval_1',
+      recipientUserId: 'user_p2b',
+      recipientDingTalkUserId: 'dd_user_p2b',
+      deliveryKind: 'work_notice_action_card',
+    })
+    await markDingTalkApprovalCardDeliverySendFailed(q, failed.id, 'boom')
+    expect(await claimDingTalkApprovalCardDeliveryActed(q, failed.id, { action: 'approve', actedBy: 'user_p2b' })).toBeNull()
+    expect((await findDingTalkApprovalCardDeliveryById(q, failed.id))?.send_status).toBe('failed')
+
+    // a delivered card claims normally (control)
+    const delivered = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId: INSTANCE,
+      nodeKey: 'approval_1',
+      recipientUserId: 'user_p2c',
+      recipientDingTalkUserId: 'dd_user_p2c',
+      deliveryKind: 'work_notice_action_card',
+    })
+    await markDingTalkApprovalCardDeliverySent(q, delivered.id, null)
+    expect((await claimDingTalkApprovalCardDeliveryActed(q, delivered.id, { action: 'reject', actedBy: 'user_p2c' }))?.card_state).toBe('acted')
+  })
+
+    it('DB CHECKs reject invalid delivery_kind / card_state / acted-audit inconsistency; FK rejects unknown instances', async () => {
     await expect(
       q(`INSERT INTO dingtalk_approval_card_deliveries (id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind)
          VALUES ('bad_kind', $1, 'n1', 'u', 'dd', 'carrier_pigeon')`, [INSTANCE]),

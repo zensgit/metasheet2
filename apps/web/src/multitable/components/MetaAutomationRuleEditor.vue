@@ -47,6 +47,7 @@
             -->
             <option value="webhook.received">{{ automationTriggerTypeLabel('webhook.received', isZh) }}</option>
             <option value="approval.completed">{{ automationTriggerTypeLabel('approval.completed', isZh) }}</option>
+            <option value="approval.task_created">{{ automationTriggerTypeLabel('approval.task_created', isZh) }}</option>
           </select>
 
           <!-- field.value_changed config -->
@@ -149,6 +150,24 @@
             </div>
             <div v-if="approvalCompletedBlockReason" class="meta-rule-editor__hint" data-field="approvalCompletedBlockReason" style="color: var(--ms-color-danger, #d03050);">
               {{ approvalCompletedBlockReason }}
+            </div>
+          </template>
+
+          <!-- approval.task_created (A-2a template-routed) config -->
+          <template v-if="draft.triggerType === 'approval.task_created'">
+            <label class="meta-rule-editor__label">{{ isZh ? '审批模板' : 'Approval template' }}</label>
+            <select v-if="approvalTemplates.length > 0" v-model="draft.triggerConfig.templateId" class="meta-rule-editor__select" data-field="approvalTaskCreatedTemplateId">
+              <option value="">{{ isZh ? '请选择审批模板' : 'Select an approval template' }}</option>
+              <option v-for="t in approvalTemplates" :key="t.id" :value="t.id">{{ t.name || t.id }}</option>
+            </select>
+            <input v-else v-model="draft.triggerConfig.templateId" class="meta-rule-editor__input" type="text" :placeholder="isZh ? '审批模板 ID' : 'Approval template ID'" data-field="approvalTaskCreatedTemplateId" />
+            <div class="meta-rule-editor__hint" data-field="approvalTaskCreatedHint">
+              {{ isZh
+                ? '该模板产生新的审批待办（每位受理人一条）时触发。退回/跳转形成的新一轮待办会再次触发；同一轮重复投递自动去重。无记录上下文：动作仅支持通知类，不支持记录读写与发起审批，且不支持触发条件；创建者需持有审批读取权限并对该模板可见（保存与触发时均校验）。'
+                : 'Fires when this template produces a NEW pending approval task (one per recipient). A returned/jumped node fires again for its fresh round; duplicate deliveries of the same round dedupe. Record-less: only notification-family actions — no record actions, no start-approval, no conditions; the rule creator must hold approvals read permission and template visibility (checked at save AND at fire).' }}
+            </div>
+            <div v-if="approvalTaskCreatedBlockReason" class="meta-rule-editor__hint" data-field="approvalTaskCreatedBlockReason" style="color: var(--ms-color-danger, #d03050);">
+              {{ approvalTaskCreatedBlockReason }}
             </div>
           </template>
         </section>
@@ -673,6 +692,15 @@
                 <div><strong>{{ automationLabel('dingtalk.publicFormAccess', isZh) }}:</strong> {{ publicFormAccessState(action.config.publicFormViewId).summary }}</div>
                 <div><strong>{{ automationLabel('dingtalk.allowedAudience', isZh) }}:</strong> {{ publicFormAccessState(action.config.publicFormViewId).audienceSummary }}</div>
                 <div><strong>{{ automationLabel('dingtalk.internalProcessing', isZh) }}:</strong> {{ viewSummaryName(action.config.internalViewId, automationLabel('dingtalk.noInternalLink', isZh)) }}</div>
+              </div>
+            </div>
+
+            <!-- send_dingtalk_approval_card (A-2b): no inputs — recipient fixed from the event -->
+            <div v-if="action.type === 'send_dingtalk_approval_card'" class="meta-rule-editor__action-config">
+              <div class="meta-rule-editor__hint" data-field="approvalCardHint">
+                {{ isZh
+                  ? '发送带「查看并处理」按钮的钉钉审批卡片给该待办的受理人。收件人固定来自审批待办事件（不可手填）；卡片只含标题/编号等元数据，深链仅携带投递 ID 与签名令牌。仅可用于「当产生新审批待办时」触发器；未绑定钉钉的受理人记录为 skipped，不会猜测映射。'
+                  : 'Sends a DingTalk approval card with a 查看并处理 button to the pending task\'s assignee. The recipient is FIXED from the approval-task event (never author-supplied); the card carries metadata only and the deep link holds just the delivery id + signed token. Only valid on the approval.task_created trigger; unbound recipients are recorded as skipped — mappings are never guessed.' }}
               </div>
             </div>
 
@@ -1414,6 +1442,11 @@ const APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES = new Set<string>([
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
 ])
+// A-2b: the approval card additionally mounts on the pending-task trigger (and ONLY there).
+const APPROVAL_TASK_CREATED_FE_ALLOWED_ACTION_TYPES = new Set<string>([
+  ...APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES,
+  'send_dingtalk_approval_card',
+])
 
 function approvalCompletedOutcomeLabel(outcome: ApprovalCompletedOutcome): string {
   const zh = isZh.value
@@ -1438,6 +1471,26 @@ const approvalCompletedOutcomes = computed<string[]>({
   set: (value) => {
     draft.value.triggerConfig.outcomes = value
   },
+})
+
+// A-2a: same structural gates as approval.completed (templateId required, no conditions,
+// notification-family actions only) — mirrored so the reason names the right trigger.
+const approvalTaskCreatedBlockReason = computed<string>(() => {
+  if (draft.value.triggerType !== 'approval.task_created') return ''
+  const zh = isZh.value
+  const templateId = typeof draft.value.triggerConfig.templateId === 'string' ? draft.value.triggerConfig.templateId.trim() : ''
+  if (!templateId) return zh ? '请选择审批模板。' : 'Select an approval template.'
+  if (draft.value.conditions.conditions.length > 0) {
+    return zh ? '审批待办触发器不支持触发条件，请先移除所有条件。' : 'The approval-task trigger does not support conditions — remove them first.'
+  }
+  const disallowed = draft.value.actions.find((action) => !APPROVAL_TASK_CREATED_FE_ALLOWED_ACTION_TYPES.has(action.type))
+  if (disallowed) {
+    const label = automationActionTypeLabel(disallowed.type, zh)
+    return zh
+      ? `动作「${label}」不可用于审批待办触发器（仅支持通知类动作与审批卡片）。`
+      : `Action "${label}" is not allowed on the approval-task trigger (notification-family actions and the approval card only).`
+  }
+  return ''
 })
 
 const approvalCompletedBlockReason = computed<string>(() => {
@@ -1475,6 +1528,8 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   'send_email',
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
+  // A-2b: approval card — recipient comes from the approval.task_created event, config is empty.
+  'send_dingtalk_approval_card',
   // T0-3: expose only the safe authoring shape — same-base trigger-record delete, config: {}.
   // Cross-base delete remains backend/runtime-only and is not surfaced in this editor.
   'delete_record',
@@ -2353,6 +2408,7 @@ const canSave = computed(() => {
   if (draft.value.actions.length < 1) return false
   // T1-3: mirror the backend save gate (templateId / no-conditions / notification-only actions).
   if (draft.value.triggerType === 'approval.completed' && approvalCompletedBlockReason.value) return false
+  if (draft.value.triggerType === 'approval.task_created' && approvalTaskCreatedBlockReason.value) return false
   // T1-2: a signing secret is required; an existing rule with a stored (redacted-on-read) secret may
   // leave the field blank to keep it.
   if (draft.value.triggerType === 'webhook.received') {
@@ -3118,6 +3174,10 @@ function buildPayload(): Partial<AutomationRule> {
     // Normalize the date-reminder config so an unset/garbage direction or offset can't persist a no-op rule.
     triggerConfig.direction = triggerConfig.direction === 'after' ? 'after' : 'before'
     triggerConfig.offsetDays = Number(triggerConfig.offsetDays) || 0
+  }
+  if (d.triggerType === 'approval.task_created') {
+    // A-2a: trimmed templateId is the only config key.
+    triggerConfig.templateId = typeof triggerConfig.templateId === 'string' ? triggerConfig.templateId.trim() : ''
   }
   if (d.triggerType === 'approval.completed') {
     // T1-3: trimmed templateId; outcomes only when a valid non-empty selection exists (omitted =

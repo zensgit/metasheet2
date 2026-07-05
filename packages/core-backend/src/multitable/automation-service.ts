@@ -63,6 +63,7 @@ import {
   type AutomationApprovalBridgeRow,
 } from './automation-approval-bridge-service'
 import type { ApprovalCompletionEventV1 } from '../services/ApprovalCompletionEvent'
+import type { ApprovalTaskCreatedEventV1 } from '../services/ApprovalTaskCreatedEvent'
 import { applyTemplateVisibilityFilter, type ApprovalTemplateVisibilityActor } from '../services/ApprovalProductService'
 import { metrics } from '../metrics/metrics'
 import {
@@ -97,6 +98,7 @@ const VALID_TRIGGER_TYPES = new Set([
   'webhook.received',
   'form.submitted',
   'approval.completed',
+  'approval.task_created',
 ])
 
 // ── T1-3 approval.completed trigger (first-batch ballot 2026-07-01) ────────
@@ -118,6 +120,34 @@ const APPROVAL_COMPLETION_TRIGGER_EVENT_TYPES: readonly string[] = [
   'approval.revoked',
   'approval.cancelled',
 ]
+// ── A-2a approval.task_created trigger (one-tap lock #3594 implementation decision, owner-ratified
+// 2026-07-05). Same dedicated template-keyed dispatch as approval.completed: routed by REQUIRED
+// trigger_config.templateId; record-less; v1 allows ONLY non-record-targeting side effects (no record
+// writes / start_approval / delete_record), so no automation loop can form through pending events.
+const APPROVAL_TASK_CREATED_TRIGGER = 'approval.task_created'
+// A-2b: the card action joins the notification family HERE ONLY — it is meaningless (and rejected)
+// on every other trigger because its recipient comes from the pending-task event.
+const APPROVAL_CARD_ACTION_TYPE = 'send_dingtalk_approval_card'
+const APPROVAL_TASK_CREATED_ALLOWED_ACTION_TYPES: ReadonlySet<string> = new Set([
+  ...APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES,
+  APPROVAL_CARD_ACTION_TYPE,
+])
+
+/** A-2b placement gate: send_dingtalk_approval_card only mounts on approval.task_created rules. */
+function validateApprovalCardActionPlacement(
+  triggerType: string,
+  actionType: string,
+  nestedActions: AutomationAction[],
+): string | null {
+  if (triggerType === APPROVAL_TASK_CREATED_TRIGGER) return null
+  const usesCard = actionType === APPROVAL_CARD_ACTION_TYPE
+    || nestedActions.some((action) => action.type === APPROVAL_CARD_ACTION_TYPE)
+  if (usesCard) {
+    return 'send_dingtalk_approval_card is only allowed on approval.task_created rules (its recipient comes from the pending-task event)'
+  }
+  return null
+}
+
 const APPROVAL_TEMPLATE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /** Q6: outcomes filter — omitted/invalid persisted config degrades to approved-only (fail-closed default). */
@@ -879,6 +909,20 @@ export class AutomationService {
       this.subscriptionIds.push(id)
     }
 
+    // A-2a: pending-task events ride their own subscription — one event per new actionable
+    // assignment/recipient, routed by templateId like approval.completed.
+    {
+      const id = this.eventBus.subscribe<ApprovalTaskCreatedEventV1>(
+        'approval.task_created',
+        (payload) => {
+          this.handleApprovalTaskCreatedTrigger(payload).catch((err) => {
+            logger.error('Automation approval.task_created trigger error', err instanceof Error ? err : undefined)
+          })
+        },
+      )
+      this.subscriptionIds.push(id)
+    }
+
     logger.info('AutomationService initialized (V1)')
   }
 
@@ -952,6 +996,19 @@ export class AutomationService {
       input.createdBy ?? null,
     )
     if (approvalCompletedError) throw new AutomationRuleValidationError(approvalCompletedError)
+
+    const approvalTaskCreatedError = await this.validateApprovalTaskCreatedRuleAtSave(
+      input.triggerType,
+      (input.triggerConfig ?? null) as Record<string, unknown> | null,
+      input.actionType,
+      actionsForValidation,
+      input.conditions ?? null,
+      input.createdBy ?? null,
+    )
+    if (approvalTaskCreatedError) throw new AutomationRuleValidationError(approvalTaskCreatedError)
+
+    const cardPlacementError = validateApprovalCardActionPlacement(input.triggerType, input.actionType, actionsForValidation)
+    if (cardPlacementError) throw new AutomationRuleValidationError(cardPlacementError)
 
     // date_field rules carry a SERVER-SET activation `effectiveAt` (= now) so the firing floor is the rule's
     // activation, not its row createdAt. Spread-then-set overwrites any client-supplied effectiveAt (no backfill bypass).
@@ -1216,18 +1273,22 @@ export class AutomationService {
       const existingForApproval = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
       if (!existingForApproval || existingForApproval.sheet_id !== sheetId) return null
       const nextTriggerType = input.triggerType ?? existingForApproval.trigger_type
-      if (nextTriggerType === APPROVAL_COMPLETED_TRIGGER) {
-        const nextTriggerConfig = (
-          input.triggerConfig !== undefined ? input.triggerConfig : existingForApproval.trigger_config
-        ) as Record<string, unknown> | null
-        const nextActionType = input.actionType ?? existingForApproval.action_type
-        const nextActionConfig = (input.actionConfig ?? existingForApproval.action_config) as Record<string, unknown>
-        const nextActions = input.actions !== undefined ? input.actions : existingForApproval.actions ?? null
-        const nextExecutionMode = input.executionMode !== undefined
-          ? normalizeExecutionMode(input.executionMode)
-          : existingForApproval.execution_mode ?? null
-        const nextConditions = input.conditions !== undefined ? input.conditions : existingForApproval.conditions ?? null
-        const approvalActions = collectNestedAutomationActions(nextActionType, nextActionConfig, nextActions, nextExecutionMode)
+      const nextTriggerConfig = (
+        input.triggerConfig !== undefined ? input.triggerConfig : existingForApproval.trigger_config
+      ) as Record<string, unknown> | null
+      const nextActionType = input.actionType ?? existingForApproval.action_type
+      const nextActionConfig = (input.actionConfig ?? existingForApproval.action_config) as Record<string, unknown>
+      const nextActions = input.actions !== undefined ? input.actions : existingForApproval.actions ?? null
+      const nextExecutionMode = input.executionMode !== undefined
+        ? normalizeExecutionMode(input.executionMode)
+        : existingForApproval.execution_mode ?? null
+      const nextConditions = input.conditions !== undefined ? input.conditions : existingForApproval.conditions ?? null
+      const approvalActions = collectNestedAutomationActions(nextActionType, nextActionConfig, nextActions, nextExecutionMode)
+      // A-2b: placement gate runs for EVERY resulting shape (a card action smuggled onto a
+      // non-task_created rule via a partial update must not survive either).
+      const cardPlacementError = validateApprovalCardActionPlacement(nextTriggerType, nextActionType, approvalActions)
+      if (cardPlacementError) throw new AutomationRuleValidationError(cardPlacementError)
+      if (nextTriggerType === APPROVAL_COMPLETED_TRIGGER || nextTriggerType === APPROVAL_TASK_CREATED_TRIGGER) {
         const approvalCompletedError = await this.validateApprovalCompletedRuleAtSave(
           nextTriggerType,
           nextTriggerConfig,
@@ -1237,6 +1298,15 @@ export class AutomationService {
           existingForApproval.created_by,
         )
         if (approvalCompletedError) throw new AutomationRuleValidationError(approvalCompletedError)
+        const approvalTaskCreatedError = await this.validateApprovalTaskCreatedRuleAtSave(
+          nextTriggerType,
+          nextTriggerConfig,
+          nextActionType,
+          approvalActions,
+          nextConditions,
+          existingForApproval.created_by,
+        )
+        if (approvalTaskCreatedError) throw new AutomationRuleValidationError(approvalTaskCreatedError)
       }
     }
 
@@ -1762,6 +1832,54 @@ export class AutomationService {
     if (!createdBy) return 'approval.completed rules require an authenticated creator'
     if (!(await this.approvalCompletedCreatorAuthorized(createdBy))) {
       return 'approval.completed rules require the creator to hold approvals:read for the configured template'
+    }
+    if (!(await this.approvalTemplateVisibleToCreator(templateId, createdBy))) {
+      return 'trigger_config.templateId must reference an approval template visible to the rule creator'
+    }
+    return null
+  }
+
+  /**
+   * A-2a mirror of validateApprovalCompletedRuleAtSave for approval.task_created rules: REQUIRED existing
+   * templateId, no conditions (record-less v1), side-effect-only action allowlist (structurally no record
+   * writes / start_approval / delete_record — the owner-ratified v1 boundary), and the same two creator
+   * legs (approvals:read + template visibility) checked at save AND re-checked at fire.
+   */
+  private async validateApprovalTaskCreatedRuleAtSave(
+    triggerType: string,
+    triggerConfig: Record<string, unknown> | null,
+    actionType: string,
+    nestedActions: AutomationAction[],
+    conditions: ConditionGroup | null | undefined,
+    createdBy: string | null,
+  ): Promise<string | null> {
+    if (triggerType !== APPROVAL_TASK_CREATED_TRIGGER) return null
+    const config = triggerConfig ?? {}
+    const templateIdRaw = config.templateId
+    const templateId = typeof templateIdRaw === 'string' ? templateIdRaw.trim() : ''
+    if (!templateId) return 'trigger_config.templateId is required for approval.task_created rules'
+    if (!APPROVAL_TEMPLATE_UUID_RE.test(templateId)) {
+      return 'trigger_config.templateId must reference an existing approval template'
+    }
+    const template = await this.queryFn('SELECT id FROM approval_templates WHERE id = $1', [templateId])
+    if (template.rows.length === 0) {
+      return 'trigger_config.templateId must reference an existing approval template'
+    }
+    if (conditions) {
+      const nodes = Array.isArray(conditions.conditions) ? conditions.conditions : null
+      if (!nodes || nodes.length > 0) {
+        return 'approval.task_created rules cannot carry conditions (no record context in v1)'
+      }
+    }
+    const actionTypes = new Set<string>([actionType, ...nestedActions.map((action) => action.type)])
+    for (const type of actionTypes) {
+      if (!APPROVAL_TASK_CREATED_ALLOWED_ACTION_TYPES.has(type)) {
+        return `action ${type} is not allowed on approval.task_created rules (record-less v1 allows: ${[...APPROVAL_TASK_CREATED_ALLOWED_ACTION_TYPES].join(', ')})`
+      }
+    }
+    if (!createdBy) return 'approval.task_created rules require an authenticated creator'
+    if (!(await this.approvalCompletedCreatorAuthorized(createdBy))) {
+      return 'approval.task_created rules require the creator to hold approvals:read for the configured template'
     }
     if (!(await this.approvalTemplateVisibleToCreator(templateId, createdBy))) {
       return 'trigger_config.templateId must reference an approval template visible to the rule creator'
@@ -2432,6 +2550,64 @@ export class AutomationService {
   }
 
   /**
+   * A-2a dispatch for approval.task_created — one event per NEW actionable assignment/recipient
+   * (eventId embeds instanceId+nodeKey+entryEpoch+assigneeUserId, so a return/jump's fresh round
+   * re-fires while duplicate deliveries of the same round dedupe via the T2-6 ledger). Mirrors the
+   * completion dispatch: template-keyed routing, fire-time re-check of BOTH creator legs, per-rule
+   * exactly-once claim, record-less payload, and the same recursion-depth guard.
+   */
+  async handleApprovalTaskCreatedTrigger(event: ApprovalTaskCreatedEventV1): Promise<void> {
+    if (event.version !== 1 || event.source !== 'approval-product') return
+    if (event.eventType !== APPROVAL_TASK_CREATED_TRIGGER) return
+    const templateId = event.approval.templateId
+    if (!templateId) {
+      logger.debug(`approval task ${event.eventId} carries no templateId; approval.task_created rules cannot match (v1 out-of-contract)`)
+      return
+    }
+    const rules = await this.loadEnabledApprovalTaskCreatedRules(templateId)
+    if (rules.length === 0) return
+
+    const parentDepth = await this.approvalBridgeAutomationDepth(event.approval.instanceId)
+    const depth = parentDepth === null ? 0 : parentDepth + 1
+    if (depth >= MAX_AUTOMATION_DEPTH) {
+      logger.warn(`Automation recursion guard triggered (depth=${depth}) for approval.task_created on template ${templateId}`)
+      return
+    }
+
+    this.kickEventDedupLedgerSweepIfDue(Date.now())
+    for (const rule of rules) {
+      if (!(await this.approvalCompletedCreatorAuthorized(rule.created_by))) {
+        logger.warn(`approval.task_created rule ${rule.id} skipped: creator lacks approvals:read at fire time`)
+        continue
+      }
+      if (!(await this.approvalTemplateVisibleToCreator(templateId, rule.created_by))) {
+        logger.warn(`approval.task_created rule ${rule.id} skipped: template ${templateId} not visible to creator at fire time`)
+        continue
+      }
+      try {
+        const claimed = await this.claimEventDelivery(rule.id, `approval.task_created:${event.eventId}`)
+        if (!claimed) continue
+        const payload: AutomationEventPayload & Record<string, unknown> = {
+          sheetId: rule.sheet_id,
+          recordId: '',
+          data: {},
+          actorId: null,
+          _automationDepth: depth,
+          eventId: event.eventId,
+          eventType: event.eventType,
+          occurredAt: event.occurredAt,
+          approval: event.approval,
+          task: event.task,
+          requester: event.requester,
+        }
+        await this.executeRule(toExecutorRule(rule), payload)
+      } catch (err) {
+        logger.error(`approval.task_created rule ${rule.id} failed`, err instanceof Error ? err : undefined)
+      }
+    }
+  }
+
+  /**
    * Q4(b) helper: the parent automation depth for a bridge-originated approval instance, or null when no
    * bridge exists (human/API-started approval — a fresh chain). A bridge whose trigger_event carries no
    * depth counts as depth 0 (chain start). Lookup errors degrade to null — safe because approval.completed
@@ -2797,6 +2973,19 @@ export class AutomationService {
       .selectFrom('automation_rules')
       .selectAll()
       .where('trigger_type', '=', APPROVAL_COMPLETED_TRIGGER)
+      .where('enabled', '=', true)
+      .where(sql<string>`trigger_config->>'templateId'`, '=', templateId)
+      .orderBy('created_at', 'asc')
+      .execute()
+    return rows.map((r) => this.mapRow(r))
+  }
+
+  /** A-2a: same template-keyed routing for approval.task_created rules (see loadEnabledApprovalCompletedRules). */
+  async loadEnabledApprovalTaskCreatedRules(templateId: string): Promise<AutomationRule[]> {
+    const rows = await this.db
+      .selectFrom('automation_rules')
+      .selectAll()
+      .where('trigger_type', '=', APPROVAL_TASK_CREATED_TRIGGER)
       .where('enabled', '=', true)
       .where(sql<string>`trigger_config->>'templateId'`, '=', templateId)
       .orderBy('created_at', 'asc')

@@ -73,6 +73,12 @@ import {
   type ApprovalCompletionEventV1,
   type ApprovalCompletionTransitionSnapshot,
 } from './ApprovalCompletionEvent'
+import {
+  buildApprovalTaskCreatedEvent,
+  emitApprovalTaskCreatedEvent,
+  type ApprovalTaskCreatedInstanceSnapshot,
+  type ApprovalTaskCreatedTaskSnapshot,
+} from './ApprovalTaskCreatedEvent'
 import { getApprovalRecordProjectionService } from '../multitable/approval-record-projection-service'
 import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
@@ -3453,6 +3459,8 @@ export class ApprovalProductService {
     }
 
     let completionEvent: ApprovalCompletionEventV1 | null = null
+    // A-2a: user-typed assignment rows created in this transaction — emitted post-commit.
+    const createdTaskEvents: ApprovalTaskCreatedTaskSnapshot[] = []
     let client: ApprovalDbClient | null = null
     try {
       client = await pool.connect()
@@ -3494,7 +3502,7 @@ export class ApprovalProductService {
       // ACTIVATION (nodeEntryEpoch §4·A): initial node activation mints a fresh epoch. The
       // same-transaction auto-approval cascade at this node carries that same epoch (§7).
       const initialEntryEpoch = await this.bumpNodeActivationSeq(client, instanceId)
-      await this.insertAssignments(client, instanceId, initial.assignments, initialEntryEpoch)
+      createdTaskEvents.push(...(await this.insertAssignments(client, instanceId, initial.assignments, initialEntryEpoch)))
       await this.insertAutoApprovalEvents(client, instanceId, 0, initial.status, initial.autoApprovalEvents, initialEntryEpoch)
       await this.insertCcEvents(client, instanceId, 0, initial.status, initial.ccEvents)
       await this.insertApprovalRecord(client, instanceId, {
@@ -3593,6 +3601,10 @@ export class ApprovalProductService {
     // the emit makes auto-approve-at-create deterministic — the create hook writes the ONE terminal row
     // and the subsequent completion-event reconcile is a version-guarded no-op (not a second row).
     await this.projectApprovalOnCreate(instanceId)
+
+    // A-2a: after commit — the emitter re-checks is_active so an auto-approve cascade that
+    // deactivated the entry-node rows in the same transaction emits nothing.
+    await this.emitApprovalTaskCreatedEventsPostCommit(instanceId, createdTaskEvents)
 
     if (completionEvent) {
       emitApprovalCompletionEvent(completionEvent)
@@ -3771,7 +3783,7 @@ export class ApprovalProductService {
       )
       // ACTIVATION (nodeEntryEpoch §4·A): admin jump lands the instance on a (re)activated node.
       const jumpEntryEpoch = await this.bumpNodeActivationSeq(client, id)
-      await this.insertAssignments(client, id, resolution.assignments, jumpEntryEpoch)
+      const createdTaskEvents = await this.insertAssignments(client, id, resolution.assignments, jumpEntryEpoch)
       await this.insertApprovalRecord(client, id, {
         action: 'jump',
         actorId: actor.userId,
@@ -3811,6 +3823,7 @@ export class ApprovalProductService {
         )
       }
       await client.query('COMMIT')
+      await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
 
       jumpEvent = {
         instanceId: id,
@@ -4011,8 +4024,9 @@ export class ApprovalProductService {
               AND is_active = TRUE`,
           [instanceId, fromUserId],
         )
+        const createdTaskEvents: ApprovalTaskCreatedTaskSnapshot[] = []
         for (const [epoch, bucket] of reassignmentsByEpoch) {
-          await this.insertAssignments(client, instanceId, bucket, epoch)
+          createdTaskEvents.push(...(await this.insertAssignments(client, instanceId, bucket, epoch)))
         }
         await client.query(
           `UPDATE approval_instances
@@ -4044,6 +4058,7 @@ export class ApprovalProductService {
         }
 
         await client.query('COMMIT')
+        await this.emitApprovalTaskCreatedEventsPostCommit(instanceId, createdTaskEvents) // A-2a
         result.succeeded.push(instanceId)
         if (requesterId) affectedRequesters.add(requesterId)
       } catch (error) {
@@ -4199,7 +4214,7 @@ export class ApprovalProductService {
            WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE`,
           [id, currentNodeKey],
         )
-        await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, targetUserId), timeoutTransferEntryEpoch)
+        const createdTaskEvents = await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, targetUserId), timeoutTransferEntryEpoch)
         // Parity with the dispatch transfer: an in-place handover does not bump the instance version.
         await this.insertApprovalRecord(client, id, {
           action: 'transfer',
@@ -4215,6 +4230,7 @@ export class ApprovalProductService {
         })
         await consumeTimeout()
         await client.query('COMMIT')
+        await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
         return 'applied'
       }
 
@@ -4273,7 +4289,7 @@ export class ApprovalProductService {
       )
       // ACTIVATION (nodeEntryEpoch §4·A): timeout-jump re-activates the jump target node.
       const timeoutJumpEntryEpoch = await this.bumpNodeActivationSeq(client, id)
-      await this.insertAssignments(client, id, resolution.assignments, timeoutJumpEntryEpoch)
+      const createdTaskEvents = await this.insertAssignments(client, id, resolution.assignments, timeoutJumpEntryEpoch)
       await this.insertApprovalRecord(client, id, {
         action: 'jump',
         actorId: APPROVAL_TIMEOUT_SYSTEM_ACTOR,
@@ -4310,6 +4326,7 @@ export class ApprovalProductService {
       }
       await consumeTimeout()
       await client.query('COMMIT')
+      await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
 
       // Post-commit best-effort metrics, mirroring the return path: close the timed-out node's open
       // breakdown entry, then re-entry activation re-stamps the target node (incl. its own timeout).
@@ -4451,7 +4468,7 @@ export class ApprovalProductService {
         // the read otherwise) and stamp the handed-to assignee with it; NEVER bump node_activation_seq.
         const transferEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
-        await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, request.targetUserId), transferEntryEpoch)
+        const createdTaskEvents = await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, request.targetUserId), transferEntryEpoch)
         await this.insertApprovalRecord(client, id, {
           action: 'transfer',
           actorId: actor.userId,
@@ -4465,6 +4482,7 @@ export class ApprovalProductService {
           targetUserId: request.targetUserId,
         }, actor)
         await client.query('COMMIT')
+        await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
         return (await this.getApproval(id))!
       }
 
@@ -4499,7 +4517,7 @@ export class ApprovalProductService {
         // approve must count toward the same quorum, so preserve the node's current epoch (its active
         // siblings still hold it here — no deactivation precedes this insert); NEVER bump the seq.
         const addSignEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
-        await this.insertAssignments(
+        const createdTaskEvents = await this.insertAssignments(
           client,
           id,
           executor.buildAddSignAssignments(currentNodeKey, targetUserIds, actor.userId),
@@ -4522,6 +4540,7 @@ export class ApprovalProductService {
           targetUserId: targetUserIds[0],
         }, actor)
         await client.query('COMMIT')
+        await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
         return (await this.getApproval(id))!
       }
 
@@ -4740,7 +4759,7 @@ export class ApprovalProductService {
         // Its same-transaction auto-approval cascade (e.g. requester merge) carries this new epoch,
         // so the re-entered threshold node's stale prior-round votes (a different epoch) never count.
         const returnEntryEpoch = await this.bumpNodeActivationSeq(client, id)
-        await this.insertAssignments(client, id, resolution.assignments, returnEntryEpoch)
+        const createdTaskEvents = await this.insertAssignments(client, id, resolution.assignments, returnEntryEpoch)
         await this.insertApprovalRecord(client, id, {
           action: 'return',
           actorId: actor.userId,
@@ -4759,6 +4778,7 @@ export class ApprovalProductService {
         await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, returnEntryEpoch)
         await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
         await client.query('COMMIT')
+        await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
         if (resolution.currentNodeKey) {
           this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
@@ -4788,7 +4808,11 @@ export class ApprovalProductService {
           toStatus: 'rejected',
           fromVersion: instance.version,
           toVersion: nextVersion,
-          metadata: { nodeKey: currentNodeKey },
+          metadata: {
+            nodeKey: currentNodeKey,
+            // A-4: server-side channel attribution (card wrapper only; never request-sourced over HTTP).
+            ...(request.channelOrigin ? { channel: request.channelOrigin.channel, cardDeliveryId: request.channelOrigin.cardDeliveryId } : {}),
+          },
         }, actor)
         const completionEvent = this.buildCompletionEvent(
           instance,
@@ -5153,12 +5177,14 @@ export class ApprovalProductService {
       // captured before any deactivation); only the newly-inserted assignments + the cascade at the
       // next node carry `advanceEntryEpoch`.
       const advanceEntryEpoch = await this.bumpNodeActivationSeq(client, id)
-      await this.insertAssignments(client, id, resolution.assignments, advanceEntryEpoch)
+      const createdTaskEvents = await this.insertAssignments(client, id, resolution.assignments, advanceEntryEpoch)
       const approveRecordMetadata: Record<string, unknown> = {
         nodeKey: currentNodeKey,
         nextNodeKey: resolution.currentNodeKey,
         approvalMode,
         aggregateComplete: true,
+        // A-4: server-side channel attribution (card wrapper only; never request-sourced over HTTP).
+        ...(request.channelOrigin ? { channel: request.channelOrigin.channel, cardDeliveryId: request.channelOrigin.cardDeliveryId } : {}),
         ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
       }
       if (isInParallelRegion) {
@@ -5246,6 +5272,7 @@ export class ApprovalProductService {
         : null
 
       await client.query('COMMIT')
+      await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
 
       // Wave 2 WP5 slice 1 — emit metrics after commit so rollback failures
       // never leave dangling breakdown entries. All hooks are guarded.
@@ -5512,8 +5539,12 @@ export class ApprovalProductService {
     instanceId: string,
     assignments: Array<{ assignmentType: 'user' | 'role'; assigneeId: string; nodeKey: string; sourceStep: number; metadata?: unknown }>,
     entryEpoch: number | null,
-  ): Promise<void> {
+  ): Promise<ApprovalTaskCreatedTaskSnapshot[]> {
     await this.assertNoActiveAssignmentConflicts(client, instanceId, assignments)
+    // A-2a: every USER-typed row is one new actionable pending item — collected by the caller
+    // (still inside its transaction) and emitted as approval.task_created AFTER commit, mirroring
+    // the completion-event discipline. Role-typed rows do not fire v1 recipient events.
+    const createdTasks: ApprovalTaskCreatedTaskSnapshot[] = []
     for (const assignment of assignments) {
       await client.query(
         `INSERT INTO approval_assignments
@@ -5528,6 +5559,66 @@ export class ApprovalProductService {
           entryEpoch,
           JSON.stringify(assignment.metadata ?? {}),
         ],
+      )
+      if (assignment.assignmentType === 'user') {
+        createdTasks.push({
+          nodeKey: assignment.nodeKey,
+          entryEpoch,
+          assigneeUserId: assignment.assigneeId,
+          sourceStep: assignment.sourceStep,
+        })
+      }
+    }
+    return createdTasks
+  }
+
+  /**
+   * A-2a: post-commit emission of approval.task_created — one event per user-typed assignment row
+   * created by the just-committed operation. Best-effort by contract: a lookup/emit failure NEVER
+   * fails the approval flow (the T2-6 dedupe ledger also absorbs any later re-emission), and the
+   * instance snapshot is re-read AFTER commit so the event reflects durable state.
+   */
+  private async emitApprovalTaskCreatedEventsPostCommit(
+    instanceId: string,
+    tasks: ApprovalTaskCreatedTaskSnapshot[],
+  ): Promise<void> {
+    if (tasks.length === 0) return
+    try {
+      // Same-transaction cascades (auto-approve at entry, immediate handover) can deactivate a row
+      // BEFORE commit — only still-active assignments are real pending items, so re-check against
+      // durable state and drop the rest (values-free: key fields only).
+      const activeResult = await pool.query(
+        `SELECT node_key, assignee_id, entry_epoch FROM approval_assignments
+          WHERE instance_id = $1 AND is_active = TRUE AND assignment_type = 'user'`,
+        [instanceId],
+      )
+      const activeKeys = new Set(
+        (activeResult.rows as Array<{ node_key: string; assignee_id: string; entry_epoch: number | string | null }>).map(
+          (row) => `${row.node_key}:${row.entry_epoch === null ? 'null' : String(Number(row.entry_epoch))}:${row.assignee_id}`,
+        ),
+      )
+      const seen = new Set<string>()
+      const liveTasks = tasks.filter((task) => {
+        const key = `${task.nodeKey}:${task.entryEpoch === null ? 'null' : String(task.entryEpoch)}:${task.assigneeUserId}`
+        if (seen.has(key) || !activeKeys.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      if (liveTasks.length === 0) return
+      const result = await pool.query(
+        `SELECT id, request_no, template_id, template_version_id, published_definition_id,
+                business_key, workflow_key, requester_snapshot
+           FROM approval_instances WHERE id = $1`,
+        [instanceId],
+      )
+      const instance = result.rows[0] as ApprovalTaskCreatedInstanceSnapshot | undefined
+      if (!instance) return
+      for (const task of liveTasks) {
+        emitApprovalTaskCreatedEvent(buildApprovalTaskCreatedEvent({ instance, task }))
+      }
+    } catch (error) {
+      approvalProductLogger.warn(
+        `approval.task_created post-commit emission failed for ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
       )
     }
   }

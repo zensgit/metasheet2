@@ -12,6 +12,9 @@ export type AutomationActionType =
   | 'send_email'
   | 'send_dingtalk_group_message'
   | 'send_dingtalk_person_message'
+  // A-2b (one-tap lock #3594): approval-card delivery — ledger-anchored action_card send whose
+  // recipient is FIXED from the approval.task_created event (never author-supplied).
+  | 'send_dingtalk_approval_card'
   | 'lock_record'
   | 'wait_for_callback'
   | 'condition_branch'
@@ -31,6 +34,7 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'send_email',
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
+  'send_dingtalk_approval_card',
   'lock_record',
   'wait_for_callback',
   'condition_branch',

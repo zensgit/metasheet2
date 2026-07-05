@@ -973,6 +973,7 @@ export type AutomationTriggerType =
   | 'webhook.received'
   | 'form.submitted'
   | 'approval.completed'
+  | 'approval.task_created'
   // Legacy aliases
   | 'field.changed'
 
@@ -1013,6 +1014,7 @@ export type AutomationActionType =
   | 'send_email'
   | 'send_dingtalk_group_message'
   | 'send_dingtalk_person_message'
+  | 'send_dingtalk_approval_card'
   | 'delete_record'
   | 'lock_record'
   | 'wait_for_callback'

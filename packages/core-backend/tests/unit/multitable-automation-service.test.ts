@@ -363,7 +363,8 @@ describe('AutomationService', () => {
       const unsubscribeSpy = vi.spyOn(bus, 'unsubscribe')
 
       service.init()
-      expect(subscribeSpy).toHaveBeenCalledTimes(8)
+      // 4 record events + 4 approval completion events + approval.task_created (A-2a)
+      expect(subscribeSpy).toHaveBeenCalledTimes(9)
       expect(subscribeSpy).toHaveBeenCalledWith(
         'multitable.record.created',
         expect.any(Function),
@@ -398,7 +399,7 @@ describe('AutomationService', () => {
       )
 
       service.shutdown()
-      expect(unsubscribeSpy).toHaveBeenCalledTimes(8)
+      expect(unsubscribeSpy).toHaveBeenCalledTimes(9)
     })
   })
 })

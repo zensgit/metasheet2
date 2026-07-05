@@ -432,6 +432,12 @@ export interface CreateApprovalRequest {
 export interface ApprovalActionRequest {
   action: ApprovalActionType
   comment?: string
+  /**
+   * A-4 (one-tap lock #3594 §4): INTERNAL-ONLY channel attribution injected by the card-delivery
+   * wrapper — never accepted from HTTP bodies (the /actions route constructs its request from an
+   * explicit field whitelist). Recorded onto the approve/reject approval_records metadata.
+   */
+  channelOrigin?: { channel: string; cardDeliveryId: string }
   targetUserId?: string
   targetNodeKey?: string
   /**
