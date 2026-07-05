@@ -145,6 +145,10 @@ describe('Punch outcome clarity (pure)', () => {
     expect(classifyPunchErrorOutcome({ status: 429, code: 'PUNCH_TOO_SOON' }, tr)).toBeNull()
     expect(classifyPunchErrorOutcome({ status: 403, code: 'FORBIDDEN' }, tr)).toBeNull()
     expect(classifyPunchErrorOutcome({ status: 500, code: '' }, tr)).toBeNull()
+    // Distinct shape from `code: ''` above: a 5xx error object that omits the
+    // `code` key entirely (e.g. a network/proxy failure with no structured
+    // body). Must still fall through to null, not throw on the missing key.
+    expect(classifyPunchErrorOutcome({ status: 500 }, tr)).toBeNull()
     expect(classifyPunchErrorOutcome(null, tr)).toBeNull()
     expect(classifyPunchErrorOutcome(undefined, tr)).toBeNull()
   })
@@ -326,6 +330,189 @@ describe('Attendance punch outcome clarity (mount)', () => {
     await flushUi(4)
 
     // Typing alone must never trigger a re-POST.
+    expect(punchCallCount).toBe(1)
+  })
+
+  it('G2: a retry that 422s again keeps the note form open, preserves the draft, and never auto-repeats', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    const punchCalls: Array<Record<string, unknown>> = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        const body = JSON.parse(String((init as RequestInit).body))
+        punchCalls.push(body)
+        // Every attempt — including the retry — still needs a note (e.g. the
+        // org's requireNote check keeps rejecting it). This is the "note was
+        // filled in but still 422s again" path traced in the PR #3580 review
+        // (NIT-1a): no code path resets/clears the form on a repeat
+        // noteRequired, so it must stay open with the draft intact.
+        return jsonResponse(422, { ok: false, error: { code: 'OUTDOOR_NOTE_REQUIRED', message: '外勤打卡需填写备注' } })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Check In').click()
+    await flushUi(6)
+    expect(punchCalls).toHaveLength(1)
+    expect(container!.querySelector('[data-attendance-punch-note-form]')).toBeTruthy()
+
+    const noteInput = container!.querySelector<HTMLInputElement>('#attendance-punch-outdoor-note')
+    noteInput!.value = 'Still onsite, forgot to note earlier'
+    noteInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const retryButton = container!.querySelector<HTMLButtonElement>('[data-attendance-punch-note-retry]')
+    expect(retryButton!.disabled).toBe(false)
+    retryButton!.click()
+    await flushUi(6)
+
+    // Exactly one retry POST fired from the one click — no automatic repeat.
+    expect(punchCalls).toHaveLength(2)
+    expect(punchCalls[1]).toEqual({
+      eventType: 'check_in',
+      timezone: punchCalls[0].timezone,
+      meta: { note: 'Still onsite, forgot to note earlier' },
+    })
+
+    // The form must still be open — a second 422 must not silently drop it —
+    // and the draft the user already typed must not be wiped out.
+    expect(container!.querySelector('[data-attendance-punch-note-form]')).toBeTruthy()
+    expect(container!.querySelector<HTMLInputElement>('#attendance-punch-outdoor-note')?.value).toBe(
+      'Still onsite, forgot to note earlier',
+    )
+    expect(container!.textContent).toContain(
+      'Outdoor punch needs a note before it can be submitted. Add one below and retry.',
+    )
+
+    // Settling further must not fire a third, automatic POST.
+    await flushUi(4)
+    expect(punchCalls).toHaveLength(2)
+  })
+
+  it('G2 anti-crosstalk: switching straight to Check Out after a Check In note-prompt clears the stale state, and the retry always targets the most recent eventType', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    const punchCalls: Array<Record<string, unknown>> = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        const body = JSON.parse(String((init as RequestInit).body))
+        punchCalls.push(body)
+        if (punchCalls.length <= 2) {
+          // Both the initial Check In attempt and the fresh (non-retry)
+          // Check Out attempt land on the same outdoor-note requirement.
+          return jsonResponse(422, { ok: false, error: { code: 'OUTDOOR_NOTE_REQUIRED', message: '外勤打卡需填写备注' } })
+        }
+        return jsonResponse(200, { ok: true, data: {} })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    // 1) Check In needs a note; the inline form opens for it.
+    findButton(container!, 'Check In').click()
+    await flushUi(6)
+    expect(punchCalls).toHaveLength(1)
+    expect(punchCalls[0].eventType).toBe('check_in')
+    expect(container!.querySelector('[data-attendance-punch-note-form]')).toBeTruthy()
+
+    // The user starts a note for the Check In attempt, then changes their
+    // mind and clicks Check Out directly — WITHOUT clicking retry.
+    const noteInputBeforeSwitch = container!.querySelector<HTMLInputElement>('#attendance-punch-outdoor-note')
+    noteInputBeforeSwitch!.value = 'note meant for check-in, must not leak'
+    noteInputBeforeSwitch!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    findButton(container!, 'Check Out').click()
+    await flushUi(6)
+
+    // 2) `punch('check_out')` is a fresh (non-retry) call, so it resets the
+    // stale Check In note-form state before sending — its own POST is a
+    // plain base payload, not a continuation of Check In's retry (no
+    // leftover meta.note, no crossed eventType).
+    expect(punchCalls).toHaveLength(2)
+    expect(Object.keys(punchCalls[1]).sort()).toEqual(['eventType', 'timezone'])
+    expect(punchCalls[1].eventType).toBe('check_out')
+
+    // 3) The note form re-opened (Check Out also needs a note this org), but
+    // with a CLEARED draft — the abandoned Check In text must not survive
+    // the switch (proves the reset ran before Check Out's own attempt, not
+    // only after some later success).
+    expect(container!.querySelector('[data-attendance-punch-note-form]')).toBeTruthy()
+    const noteInputAfterSwitch = container!.querySelector<HTMLInputElement>('#attendance-punch-outdoor-note')
+    expect(noteInputAfterSwitch!.value).toBe('')
+
+    // 4) Anti-crosstalk lock on `punchOutdoorNoteEventType`: it must now be
+    // latched to 'check_out' (the most recent attempt), never stuck on the
+    // original 'check_in'. The only externally observable proof is which
+    // eventType the retry actually sends.
+    noteInputAfterSwitch!.value = 'note for check-out'
+    noteInputAfterSwitch!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+    const retryButton = container!.querySelector<HTMLButtonElement>('[data-attendance-punch-note-retry]')
+    expect(retryButton!.disabled).toBe(false)
+    retryButton!.click()
+    await flushUi(6)
+
+    expect(punchCalls).toHaveLength(3)
+    expect(punchCalls[2]).toEqual({
+      eventType: 'check_out',
+      timezone: punchCalls[0].timezone,
+      meta: { note: 'note for check-out' },
+    })
+    expect(container!.querySelector('[data-attendance-punch-note-form]')).toBeNull()
+  })
+
+  it('G2: pressing Enter with an empty or whitespace-only note draft is a no-op, matching the disabled retry button', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    let punchCallCount = 0
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        punchCallCount += 1
+        return jsonResponse(422, { ok: false, error: { code: 'OUTDOOR_NOTE_REQUIRED', message: '外勤打卡需填写备注' } })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Check In').click()
+    await flushUi(6)
+    expect(punchCallCount).toBe(1)
+
+    const noteInput = container!.querySelector<HTMLInputElement>('#attendance-punch-outdoor-note')
+    expect(noteInput).toBeTruthy()
+
+    // Whitespace-only draft: the retry button is disabled (existing
+    // coverage); Enter in the same input must be an equally inert no-op,
+    // not a bypass of that guard.
+    noteInput!.value = '   '
+    noteInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+    expect(container!.querySelector<HTMLButtonElement>('[data-attendance-punch-note-retry]')!.disabled).toBe(true)
+    noteInput!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushUi(4)
+    expect(punchCallCount).toBe(1)
+    expect(container!.querySelector('[data-attendance-punch-note-form]')).toBeTruthy()
+
+    // Fully empty draft: same guard holds.
+    noteInput!.value = ''
+    noteInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+    noteInput!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushUi(4)
     expect(punchCallCount).toBe(1)
   })
 
