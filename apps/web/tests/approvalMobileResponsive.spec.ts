@@ -38,12 +38,18 @@ vi.mock('../src/stores/featureFlags', () => ({
   }),
 }))
 
+// B2-01: `getTemplate` backs the list row key-field summary (`useApprovalListFieldSummary`) — a
+// named spy (unlike the other inline `vi.fn()`s above) so individual tests can control its
+// resolved/rejected value and assert on calls.
+const getTemplateSpy = vi.fn().mockResolvedValue({ formSchema: { fields: [] } })
+
 // Keep the on-mount badge/realtime side-effects off the real wire.
 vi.mock('../src/approvals/api', () => ({
   dispatchAction: vi.fn().mockResolvedValue({}),
   getPendingCount: vi.fn().mockResolvedValue({ count: 0, unreadCount: 0 }),
   markAllApprovalsRead: vi.fn().mockResolvedValue({ markedCount: 0 }),
   remindApproval: vi.fn().mockResolvedValue({ ok: true, data: {} }),
+  getTemplate: (...args: [string]) => getTemplateSpy(...args),
 }))
 vi.mock('../src/approvals/useApprovalCountsRealtime', () => ({
   useApprovalCountsRealtime: () => undefined,
@@ -201,6 +207,8 @@ describe('ApprovalCenterView — T3-1 mobile responsive gate', () => {
     mockLoading.value = false
     loadPendingSpy.mockClear()
     pushSpy.mockClear()
+    getTemplateSpy.mockClear()
+    getTemplateSpy.mockResolvedValue({ formSchema: { fields: [] } })
     setViewport(false)
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -310,5 +318,79 @@ describe('ApprovalCenterView — T3-1 mobile responsive gate', () => {
     expect(dateEl!.textContent).toContain('8 天')
     expect(dateEl!.classList.contains('approval-mobile-list__date--urgent')).toBe(true)
     expect(dateEl!.getAttribute('title')).toBeTruthy()
+  })
+
+  // ---------------------------------------------------------------------------
+  // B2-01 (待办列表关键字段摘要) — the mobile card list surfaces the same live-template summary
+  // line as the desktop table's title column, resolved from the `templateSchemas` cache
+  // ApprovalCenterView owns (useApprovalListFieldSummary) and passes down as a prop.
+  // ---------------------------------------------------------------------------
+  describe('B2-01: mobile card key-field summary', () => {
+    const leaveTemplateSchema = {
+      fields: [
+        {
+          id: 'fld_leave_type',
+          type: 'select',
+          label: '请假类型',
+          options: [{ label: '年假', value: 'annual' }],
+        },
+        { id: 'fld_duration', type: 'number', label: '时长' },
+        { id: 'fld_attachment', type: 'attachment', label: '附件' },
+      ],
+    }
+
+    it('flag ON + narrow → a card whose template has fields shows the summary line', async () => {
+      getTemplateSpy.mockResolvedValue({ formSchema: leaveTemplateSchema })
+      mockApprovalMobileFlag.value = true
+      setViewport(true)
+      mockPendingApprovals.value = [
+        {
+          ...pendingRow('1', '出差报销'),
+          templateId: 'tpl_leave',
+          formSnapshot: { fld_leave_type: 'annual', fld_duration: 2, fld_attachment: ['f1'] },
+        },
+      ]
+      await mountView()
+      await flushUi(6)
+
+      expect(getTemplateSpy).toHaveBeenCalledWith('tpl_leave')
+      const card = container!.querySelector('[data-testid="approval-mobile-card"]')
+      expect(card).toBeTruthy()
+      const summary = card!.querySelector('.approval-mobile-list__summary')
+      expect(summary).toBeTruthy()
+      expect(summary!.textContent?.trim()).toBe('请假类型：年假 · 时长：2')
+      // The attachment field is a schema field but never part of the summary.
+      expect(summary!.textContent).not.toContain('附件')
+    })
+
+    it('flag ON + narrow → a card without templateId shows no summary and never calls getTemplate', async () => {
+      mockApprovalMobileFlag.value = true
+      setViewport(true)
+      mockPendingApprovals.value = [pendingRow('1', '出差报销')]
+      await mountView()
+      await flushUi(6)
+
+      expect(getTemplateSpy).not.toHaveBeenCalled()
+      const card = container!.querySelector('[data-testid="approval-mobile-card"]')
+      expect(card).toBeTruthy()
+      expect(card!.querySelector('.approval-mobile-list__summary')).toBeNull()
+    })
+
+    it('flag ON + narrow → a template-fetch failure leaves the card summary-less, without throwing', async () => {
+      getTemplateSpy.mockRejectedValueOnce(new Error('模板不存在'))
+      mockApprovalMobileFlag.value = true
+      setViewport(true)
+      mockPendingApprovals.value = [
+        { ...pendingRow('1', '出差报销'), templateId: 'tpl_missing', formSnapshot: { fld_reason: '出差' } },
+      ]
+      await mountView()
+      await flushUi(6)
+
+      expect(getTemplateSpy).toHaveBeenCalledWith('tpl_missing')
+      const card = container!.querySelector('[data-testid="approval-mobile-card"]')
+      expect(card).toBeTruthy()
+      expect(card!.textContent).toContain('出差报销')
+      expect(card!.querySelector('.approval-mobile-list__summary')).toBeNull()
+    })
   })
 })

@@ -152,6 +152,7 @@
           :approvals="store.pendingApprovals"
           :loading="store.loading"
           :empty-text="mobileEmptyText.pending"
+          :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
         <el-table
@@ -173,7 +174,22 @@
             :selectable="isRowBatchSelectable"
           />
           <el-table-column prop="requestNo" label="审批编号" width="180" />
-          <el-table-column prop="title" label="标题" min-width="200" />
+          <el-table-column label="标题" min-width="200">
+            <!-- B2-01: key-field summary — a muted second line under the title so common items
+                 are decidable without opening (top 2-3 non-attachment/non-detail leaf fields from
+                 the LIVE template schema; see useApprovalListFieldSummary.ts for the live-label
+                 drift caveat). Absent for rows with no templateId or no cached schema yet. -->
+            <template #default="{ row }">
+              {{ row.title }}
+              <div
+                v-if="summaryLineFor(row)"
+                class="approval-center__row-summary"
+                :title="summaryLineFor(row)"
+              >
+                {{ summaryLineFor(row) }}
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column label="发起人" width="120">
             <template #default="{ row }">
               {{ row.requester?.name ?? '-' }}
@@ -267,6 +283,7 @@
           :approvals="store.myApprovals"
           :loading="store.loading"
           :empty-text="mobileEmptyText.mine"
+          :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
         <el-table
@@ -280,7 +297,22 @@
           @row-click="handleRowClick"
         >
           <el-table-column prop="requestNo" label="审批编号" width="180" />
-          <el-table-column prop="title" label="标题" min-width="200" />
+          <el-table-column label="标题" min-width="200">
+            <!-- B2-01: key-field summary — a muted second line under the title so common items
+                 are decidable without opening (top 2-3 non-attachment/non-detail leaf fields from
+                 the LIVE template schema; see useApprovalListFieldSummary.ts for the live-label
+                 drift caveat). Absent for rows with no templateId or no cached schema yet. -->
+            <template #default="{ row }">
+              {{ row.title }}
+              <div
+                v-if="summaryLineFor(row)"
+                class="approval-center__row-summary"
+                :title="summaryLineFor(row)"
+              >
+                {{ summaryLineFor(row) }}
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column label="发起人" width="120">
             <template #default="{ row }">
               {{ row.requester?.name ?? '-' }}
@@ -344,6 +376,7 @@
           :approvals="store.ccApprovals"
           :loading="store.loading"
           :empty-text="mobileEmptyText.cc"
+          :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
         <el-table
@@ -357,7 +390,22 @@
           @row-click="handleRowClick"
         >
           <el-table-column prop="requestNo" label="审批编号" width="180" />
-          <el-table-column prop="title" label="标题" min-width="200" />
+          <el-table-column label="标题" min-width="200">
+            <!-- B2-01: key-field summary — a muted second line under the title so common items
+                 are decidable without opening (top 2-3 non-attachment/non-detail leaf fields from
+                 the LIVE template schema; see useApprovalListFieldSummary.ts for the live-label
+                 drift caveat). Absent for rows with no templateId or no cached schema yet. -->
+            <template #default="{ row }">
+              {{ row.title }}
+              <div
+                v-if="summaryLineFor(row)"
+                class="approval-center__row-summary"
+                :title="summaryLineFor(row)"
+              >
+                {{ summaryLineFor(row) }}
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column label="发起人" width="120">
             <template #default="{ row }">
               {{ row.requester?.name ?? '-' }}
@@ -399,6 +447,7 @@
           :approvals="store.completedApprovals"
           :loading="store.loading"
           :empty-text="mobileEmptyText.completed"
+          :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
         <el-table
@@ -412,7 +461,22 @@
           @row-click="handleRowClick"
         >
           <el-table-column prop="requestNo" label="审批编号" width="180" />
-          <el-table-column prop="title" label="标题" min-width="200" />
+          <el-table-column label="标题" min-width="200">
+            <!-- B2-01: key-field summary — a muted second line under the title so common items
+                 are decidable without opening (top 2-3 non-attachment/non-detail leaf fields from
+                 the LIVE template schema; see useApprovalListFieldSummary.ts for the live-label
+                 drift caveat). Absent for rows with no templateId or no cached schema yet. -->
+            <template #default="{ row }">
+              {{ row.title }}
+              <div
+                v-if="summaryLineFor(row)"
+                class="approval-center__row-summary"
+                :title="summaryLineFor(row)"
+              >
+                {{ summaryLineFor(row) }}
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column label="发起人" width="120">
             <template #default="{ row }">
               {{ row.requester?.name ?? '-' }}
@@ -562,7 +626,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -572,6 +636,7 @@ import { useApprovalPermissions } from '../../approvals/permissions'
 import { dispatchAction, getPendingCount, markAllApprovalsRead, remindApproval } from '../../approvals/api'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
+import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
 import { useLocale } from '../../composables/useLocale'
@@ -581,6 +646,25 @@ import ApprovalMobileList from './ApprovalMobileList.vue'
 const router = useRouter()
 const store = useApprovalStore()
 const { canWrite } = useApprovalPermissions()
+
+// B2-01 (待办列表关键字段摘要) — lazy per-templateId FormSchema cache + row summary-line lookup,
+// shared by the desktop table below (all four tabs) and ApprovalMobileList (passed the raw
+// `templateSchemas` cache as a prop). See `useApprovalListFieldSummary.ts` for the full rationale
+// (live-template substitute for the list DTO's missing frozen formSchema, the live-label drift
+// tradeoff, and the session-scoped negative caching on fetch failure).
+const { schemas: templateSchemas, ensureLoadedForRows, summaryLineFor } = useApprovalListFieldSummary()
+const allVisibleApprovals = computed<UnifiedApprovalDTO[]>(() => [
+  ...store.pendingApprovals,
+  ...store.myApprovals,
+  ...store.ccApprovals,
+  ...store.completedApprovals,
+])
+// `immediate: true` covers the case where a tab's data is already populated at setup time (e.g.
+// a fresh mount whose store was pre-loaded); every subsequent load (tab switch/page/search/filter)
+// re-fires this because `allVisibleApprovals` recomputes to a new array reference.
+watch(allVisibleApprovals, (rows) => {
+  void ensureLoadedForRows(rows)
+}, { immediate: true })
 
 // T3-1 v0 — mobile approval surface (ballot Q10/Q11). The layout switches to the
 // touch-first card list ONLY when the tenant/user has opted in via the
@@ -1123,6 +1207,19 @@ onMounted(() => {
 
 .approval-center__wait-progress {
   margin-top: 2px;
+  font-size: 12px;
+  color: #909399;
+}
+
+/* B2-01: key-field summary line — muted, single-line, ellipsis-truncated so a long value never
+   wraps the row or blows out the column width; the full text is still available via the native
+   `:title` tooltip. */
+.approval-center__row-summary {
+  margin-top: 2px;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   font-size: 12px;
   color: #909399;
 }
