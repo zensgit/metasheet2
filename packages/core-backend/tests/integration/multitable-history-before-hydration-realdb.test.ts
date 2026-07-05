@@ -13,6 +13,15 @@
  *     and stays out of `changedFieldIds` (post-mask, unwidened) — mirrors the field-mask discipline in
  *     `multitable-history-events-realdb.test.ts` / `multitable-record-history-field-mask.test.ts`.
  *
+ * PR #3626 review gaps, closed here as goldens (f)/(g):
+ *   - (f) retention-thinned history: `loadPreviousSnapshots` looks up the NEAREST SURVIVING prior
+ *     revision (`version < t.version ORDER BY version DESC LIMIT 1`), not literally `version - 1`, because
+ *     `sweepMetaRevisionRetention` (meta-revision-retention.ts) can prune the MIDDLE of a record's log. This
+ *     pins the documented degradation: `before` silently resolves to an OLDER-than-immediate snapshot when
+ *     the true immediate-prior row is gone — a future "fix" cannot silently change this without a red test.
+ *   - (g) update with NO prior revision at all (hand-seeded first-ever row at version > 1, as if earlier
+ *     history predates capture or was fully pruned): `before` must degrade to `null` (safe), never throw.
+ *
  * Runs only with DATABASE_URL (sentinel fails-not-skips in CI).
  */
 import express, { type Express } from 'express'
@@ -34,11 +43,15 @@ const REC_UPD = `rec_t1b_upd_${TS}` // 3 revisions: create(v1) -> update(v2) -> 
 const REC_CREATE = `rec_t1b_create_${TS}` // 1 revision: create(v1) — golden (c)
 const REC_DELETE = `rec_t1b_delete_${TS}` // 3 revisions: create(v1) -> update(v2) -> delete(v3) — golden (d)
 const REC_MASK = `rec_t1b_mask_${TS}` // 2 revisions: create(v1) -> update(v2), both fields — golden (b)
+const REC_RETENTION = `rec_t1b_retention_${TS}` // create(v1)->update(v2, PRUNED)->update(v3) — golden (f)
+const REC_NOPRIOR = `rec_t1b_noprior_${TS}` // hand-seeded lone update at v5, no v1..v4 — golden (g)
 
 const UPDATE_BATCH = `batch_t1b_update_${TS}`
 const CREATE_BATCH = `batch_t1b_create_${TS}`
 const DELETE_BATCH = `batch_t1b_delete_${TS}`
 const MASK_BATCH = `batch_t1b_mask_${TS}`
+const RETENTION_BATCH = `batch_t1b_retention_${TS}`
+const NOPRIOR_BATCH = `batch_t1b_noprior_${TS}`
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
@@ -120,6 +133,25 @@ const seed = async () => {
   await insertRevision({ recordId: REC_MASK, version: 1, action: 'create', changedFieldIds: [STATUS, SALARY], snapshot: { [STATUS]: 'a', [SALARY]: 1000 } })
   await insertRevision({ recordId: REC_MASK, version: 2, action: 'update', changedFieldIds: [STATUS, SALARY], snapshot: { [STATUS]: 'b', [SALARY]: 2000 }, batchId: MASK_BATCH })
   await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,2)', [REC_MASK, SHEET_ID, JSON.stringify({ [STATUS]: 'b', [SALARY]: 2000 })])
+
+  // ----- REC_RETENTION: create(v1,'A') -> update(v2,'B') -> update(v3,'C'), then v2 is HARD-DELETED -----
+  // golden (f): the direct DELETE below mimics EXACTLY what `sweepMetaRevisionRetention`
+  // (meta-revision-retention.ts) does — it prunes non-latest rows of a record's log by id, never the
+  // latest — so we reproduce its effect on the table without running the sweeper itself. detail(v3) must
+  // resolve `before` to the NEAREST SURVIVING prior revision (v1='A'), not the true immediately-previous
+  // v2 value ('B', now gone) — pins the documented degradation, not a crash or a silent wrong-value pick.
+  await insertRevision({ recordId: REC_RETENTION, version: 1, action: 'create', changedFieldIds: [STATUS], snapshot: { [STATUS]: 'A' } })
+  await insertRevision({ recordId: REC_RETENTION, version: 2, action: 'update', changedFieldIds: [STATUS], snapshot: { [STATUS]: 'B' } })
+  await insertRevision({ recordId: REC_RETENTION, version: 3, action: 'update', changedFieldIds: [STATUS], snapshot: { [STATUS]: 'C' }, batchId: RETENTION_BATCH })
+  await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2 AND version = 2', [SHEET_ID, REC_RETENTION])
+  await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,3)', [REC_RETENTION, SHEET_ID, JSON.stringify({ [STATUS]: 'C' })])
+
+  // ----- REC_NOPRIOR: hand-seeded lone update at version 5, no v1..v4 rows at all -----
+  // golden (g): as if earlier history predates revision capture, or was fully pruned by retention. The
+  // batched lookup finds zero candidates (no row with version < 5 for this record) — before must degrade
+  // to null (safe), never throw, and `after` must still carry the masked snapshot.
+  await insertRevision({ recordId: REC_NOPRIOR, version: 5, action: 'update', changedFieldIds: [STATUS], snapshot: { [STATUS]: 'onlyRevision' }, batchId: NOPRIOR_BATCH })
+  await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,5)', [REC_NOPRIOR, SHEET_ID, JSON.stringify({ [STATUS]: 'onlyRevision' })])
 }
 
 describeIfDatabase('T1b before-image hydration goldens (real DB)', () => {
@@ -214,5 +246,23 @@ describeIfDatabase('T1b before-image hydration goldens (real DB)', () => {
     // the SAME change's other field is unaffected (surgical masking, not a wholesale drop)
     expect(change?.before?.[STATUS]).toBe('a')
     expect(change?.after?.[STATUS]).toBe('b')
+  })
+
+  test('(f) retention-thinned history: before resolves to the NEAREST SURVIVING prior revision, not the (now-pruned) immediate one', async () => {
+    const res = await detail(RETENTION_BATCH)
+    expect(res.status).toBe(200)
+    const change = changeOf(res, REC_RETENTION)
+    expect(change?.action).toBe('update')
+    expect(change?.before?.[STATUS]).toBe('A') // v1 (nearest surviving) — v2 ('B') was pruned by the sweep
+    expect(change?.after?.[STATUS]).toBe('C')
+  })
+
+  test('(g) update with no prior revision at all: before is null (safe degradation), after still resolves, nothing throws', async () => {
+    const res = await detail(NOPRIOR_BATCH)
+    expect(res.status).toBe(200)
+    const change = changeOf(res, REC_NOPRIOR)
+    expect(change?.action).toBe('update')
+    expect(change?.before).toBeNull()
+    expect(change?.after?.[STATUS]).toBe('onlyRevision')
   })
 })
