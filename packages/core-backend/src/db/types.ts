@@ -126,6 +126,7 @@ export interface Database {
   dingtalk_group_destinations: DingTalkGroupDestinationsTable
   dingtalk_group_deliveries: DingTalkGroupDeliveriesTable
   dingtalk_person_deliveries: DingTalkPersonDeliveriesTable
+  dingtalk_approval_card_deliveries: DingTalkApprovalCardDeliveriesTable
 }
 
 export interface SnapshotsTable {
@@ -1531,6 +1532,27 @@ export interface DingTalkGroupDeliveriesTable {
   initiated_by: string | null
   created_at: CreatedAt
   delivered_at: NullableTimestamp
+}
+
+/**
+ * A-1 (one-tap design-lock §3): actionable approval-card delivery ledger. One row = one card sent
+ * to one recipient; `id` doubles as the interactive-card outTrackId (Slice B). Callbacks resolve
+ * instance identity ONLY through this table.
+ */
+export interface DingTalkApprovalCardDeliveriesTable {
+  id: string
+  instance_id: string
+  node_key: string
+  recipient_user_id: string
+  recipient_dingtalk_user_id: string
+  delivery_kind: 'work_notice_action_card' | 'interactive_card'
+  task_id: string | null
+  card_state: 'sent' | 'acted' | 'superseded' | 'expired' | 'revoked'
+  acted_action: string | null
+  acted_by: string | null
+  acted_at: NullableTimestamp
+  created_at: CreatedAt
+  updated_at: CreatedAt
 }
 
 export interface DingTalkPersonDeliveriesTable {
