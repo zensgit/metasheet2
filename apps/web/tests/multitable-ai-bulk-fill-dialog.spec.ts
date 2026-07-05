@@ -45,6 +45,7 @@ const COMMIT_WIRE: AiBulkCommitData = {
     { recordId: 'rec_gone', outcome: 'not_in_cache' },
   ],
   counts: { written: 1, stale_reprev: 1, write_conflict: 0, not_in_cache: 1, skipped_no_perm: 1 },
+  batchId: 'batch_1',
 }
 
 function jsonResponse(body: unknown, init?: { status?: number; headers?: Record<string, string> }): Response {
@@ -205,6 +206,7 @@ describe('MetaAiBulkFillDialog — truthful-status rendering', () => {
         { recordId: 'rec_masked', outcome: 'not_in_cache' },
       ],
       counts: { written: 0, stale_reprev: 0, write_conflict: 0, not_in_cache: 2, skipped_no_perm: 0 },
+      batchId: null,
     }
     const fetchFn = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ ok: true, data: PREVIEW_WIRE }))

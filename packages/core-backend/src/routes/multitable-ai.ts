@@ -1191,7 +1191,11 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         { written: 0, stale_reprev: 0, write_conflict: 0, not_in_cache: 0, skipped_no_perm: 0 },
       )
 
-      return res.json({ outcomes, counts })
+      // AI-fields S1 LOCK-B6: expose the server-minted batch id so the caller can map this run to its
+      // history batch ephemerally (no persistence — meta_record_revisions stays frozen). null when
+      // nothing was actually written (no revision exists, so there is no batch to point at).
+      const batchId = counts.written > 0 ? commitBatchId : null
+      return res.json({ outcomes, counts, batchId })
     } catch (err) {
       console.error('[multitable-ai] bulk-commit failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to commit AI bulk preview' } })
@@ -1441,7 +1445,10 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       const aggregate = { confirmed: parsed.data.recordIds.length, attempted: generatedRows.length, counts }
       await setHeaderAggregate(ledgerQuery, jobId, aggregate, 'resolved')
 
-      return res.json({ jobId, state: 'resolved', counts, attempted: generatedRows.length })
+      // AI-fields S1 LOCK-B6: same ephemeral run→batch mapping as bulk-commit — null when nothing in
+      // this request actually committed (no revision, no batch to point at).
+      const batchId = counts.committed > 0 ? commitBatchId : null
+      return res.json({ jobId, state: 'resolved', counts, attempted: generatedRows.length, batchId })
     } catch (err) {
       console.error('[multitable-ai] bulk-job commit failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to commit bulk job' } })

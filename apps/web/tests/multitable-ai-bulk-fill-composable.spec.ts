@@ -43,6 +43,7 @@ const COMMIT_WIRE: AiBulkCommitData = {
     { recordId: 'rec_gone', outcome: 'not_in_cache' },
   ],
   counts: { written: 1, stale_reprev: 1, write_conflict: 0, not_in_cache: 1, skipped_no_perm: 1 },
+  batchId: 'batch_1',
 }
 
 function jsonResponse(body: unknown, init?: { status?: number; headers?: Record<string, string> }): Response {
@@ -87,7 +88,7 @@ describe('aiBulkPreview / aiBulkCommit client wire shape', () => {
     expect(JSON.parse(String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body))).toEqual({ fieldId: 'fld_t', scope: 'view', viewId: 'view_1' })
   })
 
-  it('aiBulkCommit posts {runId, recordIds} and returns outcomes + counts verbatim', async () => {
+  it('aiBulkCommit posts {runId, recordIds} and returns outcomes + counts + batchId verbatim', async () => {
     const fetchFn = vi.fn(async () => jsonResponse({ ok: true, data: COMMIT_WIRE }))
     const { client } = setup(fetchFn as never)
 
@@ -96,7 +97,8 @@ describe('aiBulkPreview / aiBulkCommit client wire shape', () => {
     const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/multitable/sheets/sheet_1/ai/shortcut/bulk-commit')
     expect(JSON.parse(String(init.body))).toEqual({ runId: 'aibulk_run1', recordIds: ['rec_ok', 'rec_masked'] })
-    expect(Object.keys(data).sort()).toEqual(['counts', 'outcomes'])
+    expect(Object.keys(data).sort()).toEqual(['batchId', 'counts', 'outcomes'])
+    expect(data.batchId).toBe('batch_1')
     expect(Object.keys(data.outcomes[0]).sort()).toEqual(['outcome', 'recordId'])
     expect(Object.keys(data.counts).sort()).toEqual(['not_in_cache', 'skipped_no_perm', 'stale_reprev', 'write_conflict', 'written'])
   })

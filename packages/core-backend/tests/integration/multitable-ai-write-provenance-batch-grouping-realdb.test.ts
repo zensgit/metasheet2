@@ -268,6 +268,9 @@ describeIfDatabase('AI-fields S1 — write provenance + commit-action batch grou
     expect(rev2?.batch_id).toBe(batchId)
     expect(rev3?.batch_id).toBe(batchId)
 
+    // LOCK-B6: the commit RESPONSE itself carries the same batch id (ephemeral run→batch mapping).
+    expect(res.body.batchId).toBe(batchId)
+
     // READ side #1: the base-level history EVENTS list groups these 3 rows into ONE batch.
     const events = await historyEventsReq()
     expect(events.status).toBe(200)
@@ -287,40 +290,48 @@ describeIfDatabase('AI-fields S1 — write provenance + commit-action batch grou
 
   // ── G3 ───────────────────────────────────────────────────────────────────
   test('G3: a MIXED-outcome bulk-commit batch — only WRITTEN rows join the batch; a non-written row contributes NOTHING', async () => {
-    await grantOwnWrite()
+    await grantOwnWrite() // actor may write only OWN records
     const runId = `aibulk_s1_g3_${TS}`
     const W1 = `rec_s1_g3w1_${TS}` // cached + fresh → written
     const W2 = `rec_s1_g3w2_${TS}` // cached + fresh → written
     const STALE = `rec_s1_g3stale_${TS}` // cached but version-shifted → stale_reprev
     const NOCACHE = `rec_s1_g3nc_${TS}` // confirmed but never cached → not_in_cache
+    const NOPERM = `rec_s1_g3noperm_${TS}` // owned by OTHER → commit-time re-gate → skipped_no_perm
     await seedRecord(W1, { [FLD_SRC]: 'a' }, ACTOR)
     await seedRecord(W2, { [FLD_SRC]: 'b' }, ACTOR)
     await seedRecord(STALE, { [FLD_SRC]: 'c' }, ACTOR)
     await seedRecord(NOCACHE, { [FLD_SRC]: 'd' }, ACTOR)
+    await seedRecord(NOPERM, { [FLD_SRC]: 'e' }, OTHER)
     await seedCacheRow({ runId, recordId: W1, proposedValue: 'OUT W1', previewVersion: 1 })
     await seedCacheRow({ runId, recordId: W2, proposedValue: 'OUT W2', previewVersion: 1 })
     await seedCacheRow({ runId, recordId: STALE, proposedValue: 'OUT STALE', previewVersion: 1 })
+    await seedCacheRow({ runId, recordId: NOPERM, proposedValue: 'SHOULD NOT LAND', previewVersion: 1 })
     await q('UPDATE meta_records SET version = 2 WHERE id = $1', [STALE]) // shift → stale
 
-    const res = await commitReq({ runId, recordIds: [W1, STALE, W2, NOCACHE] })
+    const res = await commitReq({ runId, recordIds: [W1, STALE, W2, NOCACHE, NOPERM] })
     expect(res.status).toBe(200)
     const byId = new Map((res.body.outcomes as Array<{ recordId: string; outcome: string }>).map((o) => [o.recordId, o.outcome]))
     expect(byId.get(W1)).toBe('written')
     expect(byId.get(W2)).toBe('written')
     expect(byId.get(STALE)).toBe('stale_reprev')
     expect(byId.get(NOCACHE)).toBe('not_in_cache')
+    expect(byId.get(NOPERM)).toBe('skipped_no_perm')
 
     const [rev1, rev2] = await Promise.all([revisionFor(W1), revisionFor(W2)])
     const batchId = rev1?.batch_id
     expect(batchId).toBeTruthy()
     expect(rev2?.batch_id).toBe(batchId)
 
-    // Only the 2 WRITTEN rows are in the batch — STALE and NOCACHE never got a revision at all.
+    // LOCK-B6: the commit RESPONSE carries the same batch id, even though this batch is mixed-outcome.
+    expect(res.body.batchId).toBe(batchId)
+
+    // Only the 2 WRITTEN rows are in the batch — STALE, NOCACHE, and NOPERM never got a revision at all.
     const inBatch = await revisionsInBatch(batchId as string)
     expect(inBatch).toHaveLength(2)
     expect(new Set(inBatch.map((r) => r.record_id))).toEqual(new Set([W1, W2]))
     expect(await revisionFor(STALE)).toBeUndefined()
     expect(await revisionFor(NOCACHE)).toBeUndefined()
+    expect(await revisionFor(NOPERM)).toBeUndefined()
   })
 
   // ── G4 ───────────────────────────────────────────────────────────────────
@@ -343,6 +354,10 @@ describeIfDatabase('AI-fields S1 — write provenance + commit-action batch grou
     expect(revA?.batch_id).toBeTruthy()
     expect(revB?.batch_id).toBeTruthy()
     expect(revA?.batch_id).not.toBe(revB?.batch_id)
+
+    // LOCK-B6: each response carries ITS OWN batch id, matching its own revision.
+    expect(r1.body.batchId).toBe(revA?.batch_id)
+    expect(r2.body.batchId).toBe(revB?.batch_id)
   })
 
   test('G4b: two SEPARATE jobs, each committed once → two DISTINCT batches (job commit is single-shot per job)', async () => {
@@ -378,6 +393,10 @@ describeIfDatabase('AI-fields S1 — write provenance + commit-action batch grou
     expect(rev2b?.batch_id).toBe(rev2a?.batch_id) // job2's two rows share a DIFFERENT batch
     expect(rev1a?.batch_id).not.toBe(rev2a?.batch_id)
 
+    // LOCK-B6: each job-commit response carries ITS OWN batch id.
+    expect(commit1.body.batchId).toBe(rev1a?.batch_id)
+    expect(commit2.body.batchId).toBe(rev2a?.batch_id)
+
     // A THIRD successful commit call is impossible on either job (single-shot; confirms the premise
     // behind the G4 judgment call above, not just asserted in prose).
     const recommit1 = await commitJobReq(jobId1, [R1A])
@@ -412,6 +431,9 @@ describeIfDatabase('AI-fields S1 — write provenance + commit-action batch grou
     expect(rev2?.batch_id).toBe(batchId) // shared across the chunk boundary
     expect(rev3?.batch_id).toBe(batchId)
     expect([rev1, rev2, rev3].every((r) => r?.source === 'ai-shortcut')).toBe(true)
+
+    // LOCK-B6: the job-commit RESPONSE carries the same batch id.
+    expect(commit.body.batchId).toBe(batchId)
 
     const events = await historyEventsReq()
     const batch = (events.body.data.batches as Array<{ batchId: string; visibleAffectedRecordCount: number }>)
@@ -491,5 +513,9 @@ describeIfDatabase('AI-fields S1 — write provenance + commit-action batch grou
     const rev = await revisionFor(R)
     expect(rev?.batch_id).toBeTruthy()
     expect(rev?.batch_id).not.toBe(evilBatchId) // the real batch_id is server-minted, never the client value
+
+    // LOCK-B6/B4: the RESPONSE batchId is also the real server-minted one, never the client's value.
+    expect(res.body.batchId).toBe(rev?.batch_id)
+    expect(res.body.batchId).not.toBe(evilBatchId)
   })
 })

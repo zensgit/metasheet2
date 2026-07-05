@@ -1184,6 +1184,8 @@ export interface AiBulkCommitRowOutcome {
 export interface AiBulkCommitData {
   outcomes: AiBulkCommitRowOutcome[]
   counts: Record<AiBulkCommitOutcome, number>
+  /** S1 LOCK-B6: server-minted history batch id for this commit action; null when nothing was written. */
+  batchId: string | null
 }
 
 // AI BULK fill — ASYNC JOB (B-4). When a bulk-preview request exceeds the inline
@@ -1293,6 +1295,8 @@ export interface AiBulkJobCommitData {
   state: AiBulkJobStatus
   counts: Record<AiBulkJobCommitOutcome, number>
   attempted: number
+  /** S1 LOCK-B6: server-minted history batch id for this commit request; null when nothing committed. */
+  batchId: string | null
 }
 
 /** Cancel response (multitable-ai.ts BJ-4 ~1316). `state` is `rejected` on success. */
