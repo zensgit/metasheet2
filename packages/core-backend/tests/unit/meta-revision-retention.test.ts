@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import {
   META_REVISION_RETENTION_DEFAULT_KEEP_N,
@@ -69,5 +69,30 @@ describe('meta-revision retention config', () => {
     })
     expect(typeof stop).toBe('function')
     stop() // clears the interval without error
+  })
+
+  test('scheduler: enabled sweeps BOTH record and config revisions on a tick (T9 D4 — one knob ages both)', async () => {
+    const seenSql: string[] = []
+    const queryFn = (async (sql: string) => { seenSql.push(String(sql)); return { rows: [], rowCount: 0 } }) as never
+    vi.useFakeTimers()
+    try {
+      const stop = startMetaRevisionRetention({
+        env: { MULTITABLE_META_REVISION_RETENTION_ENABLED: '1' },
+        query: queryFn,
+        logger: silentLogger,
+        intervalMs: 1_000,
+      })
+      await vi.advanceTimersByTimeAsync(1_000) // fire one tick + flush the async sweep chains
+      stop()
+    } finally {
+      vi.useRealTimers()
+    }
+    const joined = seenSql.join('\n')
+    // record-revision sweep ran (already wired before this fix)…
+    expect(joined).toContain('meta_record_revisions')
+    // …AND the config-revision sweep ran — the wiring gap this fix closes (config revisions
+    // were never pruned by the scheduler even with retention enabled, despite #3168's
+    // "same policy as records" / one-knob-ages-both intent).
+    expect(joined).toContain('meta_config_revisions')
   })
 })
