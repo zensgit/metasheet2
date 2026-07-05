@@ -518,4 +518,37 @@ describeIfDatabase('AI-fields S1 — write provenance + commit-action batch grou
     expect(res.body.batchId).toBe(rev?.batch_id)
     expect(res.body.batchId).not.toBe(evilBatchId)
   })
+
+  // ── G7b (job-commit parallel to G7) ────────────────────────────────────────
+  test('G7b: a client-supplied batchId in a JOB-commit request body has NO effect (server-minted only, LOCK-B4)', async () => {
+    await grantOwnWrite()
+    // Over-cap row count → the request is job-routed (mirrors G4b), exercising the job-commit route.
+    process.env.MULTITABLE_AI_BULK_MAX_ROWS = '1'
+    const R1 = `rec_s1_g7b_1_${TS}`
+    const R2 = `rec_s1_g7b_2_${TS}`
+    for (const r of [R1, R2]) await seedRecord(r, { [FLD_SRC]: 'x' }, ACTOR)
+
+    const start = await bulkPreviewReq({ fieldId: FLD_TARGET, scope: 'sheet', recordIds: [R1, R2] })
+    expect(start.status).toBe(200)
+    const jobId = start.body.jobId as string
+    expect(jobId).toMatch(/^aibulkjob_/)
+    await runJob(jobId)
+
+    // Inject the forbidden field directly — the commitJobReq helper never sends it, and the job-commit
+    // zod schema (routes/multitable-ai.ts) has no `batchId` key, so it is stripped before the handler.
+    const evilBatchId = 'evil-client-supplied-batch-id'
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/ai/shortcut/bulk-job/${jobId}/commit`)
+      .send({ recordIds: [R1, R2], batchId: evilBatchId })
+    expect(res.status).toBe(200) // extra field silently dropped by the schema, not a 400
+
+    const [rev1, rev2] = await Promise.all([revisionFor(R1), revisionFor(R2)])
+    expect(rev1?.batch_id).toBeTruthy()
+    expect(rev2?.batch_id).toBe(rev1?.batch_id) // the job's rows share ONE server-minted batch
+    expect(rev1?.batch_id).not.toBe(evilBatchId) // never the client-supplied value
+
+    // LOCK-B6/B4: the RESPONSE batchId is the real server-minted one, never the client's value.
+    expect(res.body.batchId).toBe(rev1?.batch_id)
+    expect(res.body.batchId).not.toBe(evilBatchId)
+  })
 })
