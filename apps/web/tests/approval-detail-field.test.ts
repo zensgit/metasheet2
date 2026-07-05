@@ -3,6 +3,7 @@ import type { FormField, FormSchema } from '../src/types/approval'
 import {
   buildDetailColumns,
   buildDetailRowsForDisplay,
+  buildDisplayFields,
   createEmptyDetailColumnDraft,
   createEmptyDetailRow,
   detailColumnDraftsFromField,
@@ -326,5 +327,118 @@ describe('isDetailCellVisible — per-field (two detail groups may share a sub-f
   it('a column without a visibilityRule is always visible', () => {
     const group = makeGroup('items', 'x')
     expect(isDetailCellVisible(group, group.columns![0], { kind: 'whatever' })).toBe(true)
+  })
+})
+
+describe('detailField — buildDisplayFields (B1-02 humanized scalar snapshot)', () => {
+  const displaySchema: FormSchema = {
+    fields: [
+      {
+        id: 'fld_type',
+        type: 'select',
+        label: '类型',
+        options: [{ label: '采购', value: 'purchase' }, { label: '报销', value: 'reimbursement' }],
+      },
+      {
+        id: 'fld_tags',
+        type: 'multi-select',
+        label: '标签',
+        options: [{ label: 'A', value: 'a' }, { label: 'B', value: 'b' }],
+      },
+      { id: 'fld_amount', type: 'number', label: '金额' },
+      { id: 'fld_date', type: 'date', label: '日期' },
+      { id: 'fld_reason', type: 'textarea', label: '原因' },
+      { id: 'items', type: 'detail', label: '明细', columns: [{ id: 'x', type: 'text', label: 'X' }] },
+    ],
+  }
+
+  it('orders scalar entries by schema order regardless of snapshot key order, skipping detail fields', () => {
+    const snapshot = {
+      fld_reason: '出差',
+      fld_date: '2026-01-02T03:04:05Z',
+      fld_amount: 1234.5,
+      fld_tags: ['a', 'b'],
+      fld_type: 'reimbursement',
+      items: [{ x: '1' }],
+    }
+    const fields = buildDisplayFields(displaySchema, snapshot)
+    expect(fields.map((f) => f.key)).toEqual(['fld_type', 'fld_tags', 'fld_amount', 'fld_date', 'fld_reason'])
+  })
+
+  it('maps a select value to its option label, falling back to the raw value when unmatched', () => {
+    const known = buildDisplayFields(displaySchema, { fld_type: 'reimbursement' })
+    expect(known[0]).toEqual({ key: 'fld_type', label: '类型', value: '报销' })
+
+    const unknown = buildDisplayFields(displaySchema, { fld_type: 'unknown_value' })
+    expect(unknown[0].value).toBe('unknown_value')
+  })
+
+  it('multi-select maps each stored value to its option label and joins with 、, falling back per-entry', () => {
+    const fields = buildDisplayFields(displaySchema, { fld_tags: ['a', 'b', 'c'] })
+    // 'c' has no matching option -> falls back to the raw value for that entry only.
+    expect(fields[0].value).toBe('A、B、c')
+  })
+
+  it('localizes a finite number via zh-CN grouping, falling back to String(value) when not finite', () => {
+    const finite = buildDisplayFields(displaySchema, { fld_amount: 1234567.5 })
+    expect(finite[0].value).toBe((1234567.5).toLocaleString('zh-CN'))
+
+    const notFinite = buildDisplayFields(displaySchema, { fld_amount: 'not-a-number' })
+    expect(notFinite[0].value).toBe('not-a-number')
+  })
+
+  it('formats a parsable date value and passes an unparsable one through unchanged', () => {
+    const parsable = buildDisplayFields(displaySchema, { fld_date: '2026-01-02T03:04:05Z' })
+    expect(parsable[0].value).toBe(new Date('2026-01-02T03:04:05Z').toLocaleString('zh-CN'))
+
+    // datetime fields format through the same branch (review fix: the spec's list named only `date`)
+    const dt = buildDisplayFields(
+      { fields: [{ id: 'fld_dt', label: '会议时间', type: 'datetime' }] } as never,
+      { fld_dt: '2026-01-02T03:04:05Z' },
+    )
+    expect(dt[0].value).toBe(new Date('2026-01-02T03:04:05Z').toLocaleString('zh-CN'))
+
+    const unparsable = buildDisplayFields(displaySchema, { fld_date: 'not-a-date' })
+    expect(unparsable[0].value).toBe('not-a-date')
+  })
+
+  it('appends snapshot keys absent from the schema after schema-ordered entries, using the raw key as label', () => {
+    const fields = buildDisplayFields(displaySchema, {
+      fld_reason: '原因内容',
+      legacy_field: 'some-legacy-value',
+      fld_type: 'purchase',
+    })
+    expect(fields.map((f) => f.key)).toEqual(['fld_type', 'fld_reason', 'legacy_field'])
+    const legacy = fields.find((f) => f.key === 'legacy_field')!
+    expect(legacy.label).toBe('legacy_field')
+    expect(legacy.value).toBe('some-legacy-value')
+  })
+
+  it('excludes detail fields entirely — they render elsewhere as tables, never as a raw/unknown entry', () => {
+    const fields = buildDisplayFields(displaySchema, { items: [{ x: '1' }], fld_reason: 'r' })
+    expect(fields.map((f) => f.key)).toEqual(['fld_reason'])
+    expect(fields.some((f) => f.key === 'items')).toBe(false)
+  })
+
+  it('renders null/undefined/empty-string scalar values as \'-\' regardless of field type', () => {
+    const fields = buildDisplayFields(displaySchema, { fld_reason: '', fld_amount: null, fld_date: undefined })
+    expect(fields.map((f) => f.value)).toEqual(['-', '-', '-'])
+  })
+
+  it('falls back to field.id as the label when label is empty, and skips fields absent from the snapshot', () => {
+    const schema: FormSchema = {
+      fields: [
+        { id: 'no_label_field', type: 'text', label: '' },
+        { id: 'absent_field', type: 'text', label: '不会出现' },
+      ],
+    }
+    const fields = buildDisplayFields(schema, { no_label_field: 'v' })
+    expect(fields).toEqual([{ key: 'no_label_field', label: 'no_label_field', value: 'v' }])
+  })
+
+  it('tolerates a missing schema and/or snapshot without throwing', () => {
+    expect(buildDisplayFields(null, { a: 'b' })).toEqual([{ key: 'a', label: 'a', value: 'b' }])
+    expect(buildDisplayFields(displaySchema, null)).toEqual([])
+    expect(buildDisplayFields(undefined, undefined)).toEqual([])
   })
 })

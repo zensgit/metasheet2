@@ -357,3 +357,95 @@ export function findDetailFieldInSchema(
   if (!field || field.type !== 'detail' || !Array.isArray(field.columns)) return null
   return field
 }
+
+export interface DisplayField {
+  /** Original formSnapshot key — used for `:key` binding and any cross-lookup (e.g. detailTables). */
+  key: string
+  label: string
+  value: string
+}
+
+function matchOptionLabel(options: FormOption[] | undefined, value: unknown): string {
+  const match = (options ?? []).find((option) => option.value === value)
+  return match ? match.label : String(value)
+}
+
+/**
+ * Mirrors the detail view's own zh-CN date formatting (`new Date(x).toLocaleString('zh-CN')`),
+ * but — unlike that helper — passes the raw value through unchanged when it doesn't parse as a
+ * date, instead of surfacing the JS-internal "Invalid Date" string to the reader.
+ */
+function formatDisplayDate(value: unknown): string {
+  const raw = String(value)
+  const parsed = new Date(raw)
+  return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString('zh-CN')
+}
+
+/**
+ * Formats a single scalar snapshot value for display, driven by its frozen schema field type.
+ * null/undefined/'' always render as '-' regardless of type. `select` maps the stored value to
+ * its option label, falling back to the raw value when no option matches (e.g. an option
+ * renamed/removed after the instance was created); `multi-select` maps each stored value the
+ * same way and joins with '、'; `date` uses `formatDisplayDate` (pass-through on unparsable);
+ * `number` localizes finite values via zh-CN grouping. Everything else (text/textarea/user/
+ * attachment) stringifies as-is.
+ */
+function formatDisplayValue(field: FormField, value: unknown): string {
+  if (value === null || value === undefined || value === '') return '-'
+  switch (field.type) {
+    case 'select':
+      return matchOptionLabel(field.options, value)
+    case 'multi-select': {
+      const values = Array.isArray(value) ? value : [value]
+      return values.map((entry) => matchOptionLabel(field.options, entry)).join('、')
+    }
+    case 'date':
+    case 'datetime':
+      return formatDisplayDate(value)
+    case 'number': {
+      const num = Number(value)
+      return Number.isFinite(num) ? num.toLocaleString('zh-CN') : String(value)
+    }
+    default:
+      return String(value)
+  }
+}
+
+/**
+ * B1-02: humanized scalar-field display entries for the detail view's form snapshot — schema
+ * order, resolved labels, and typed value formatting (option labels instead of raw stored
+ * values, localized numbers, formatted dates) — instead of the raw-machine-key / raw-value
+ * rendering the view previously fell back to for every snapshot entry.
+ *
+ * `detail` fields are deliberately excluded: they keep rendering via the existing
+ * `buildDetailRowsForDisplay` / `detailTables` table path, untouched by this helper. Snapshot
+ * keys that have no matching schema field (stale/legacy data) are appended AFTER the
+ * schema-ordered entries, using the raw key as label — so unexpected data is surfaced, not
+ * silently dropped.
+ */
+export function buildDisplayFields(
+  formSchema: FormSchema | null | undefined,
+  formSnapshot: Record<string, unknown> | null | undefined,
+): DisplayField[] {
+  const snapshot = formSnapshot ?? {}
+  const fields = formSchema?.fields ?? []
+  const knownFieldIds = new Set(fields.map((field) => field.id))
+  const result: DisplayField[] = []
+
+  for (const field of fields) {
+    if (field.type === 'detail') continue
+    if (!Object.prototype.hasOwnProperty.call(snapshot, field.id)) continue
+    result.push({
+      key: field.id,
+      label: field.label || field.id,
+      value: formatDisplayValue(field, snapshot[field.id]),
+    })
+  }
+
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (knownFieldIds.has(key)) continue
+    result.push({ key, label: key, value: String(value) })
+  }
+
+  return result
+}
