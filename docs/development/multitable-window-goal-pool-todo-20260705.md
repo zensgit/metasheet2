@@ -16,10 +16,10 @@
 ## W0 — 审阅批次(等 owner 动作,非开发)
 
 - ✅ **#3584 S1 runtime** — MERGED `4640f3662`(2026-07-05T02:26Z;head 含 post-review G7b)。S1 线(lock+runtime)全落地。
-- ⬜ **#3593 S1 验证 MD** — 已刷新到 runtime 终态(`8dc6a946f`:head/计数/G7b/非空转 7-red 实证),CI 全绿,待 PASS。
-- ⬜ **#3591 GW design-lock** — PROPOSED 待 ratify(顺带裁定:`VIRTUALIZE_MIN_ROWS=60` 是否复用于 grouped items 阈值)。
-- ⬜ **#3574 OAPI allowlist⟺guard tripwire** — 完工待审(test-only)。
-- ⬜ **#3582 grid 性能基线** — 完工待审(docs+test;含"flat 路径已解决、真缺口=grouped 视图"的战略修正)。
+- ⬜ **#3593 S1 验证 MD** — 已刷新到 runtime 终态(`11094e324`:head/计数/G7b/非空转 7-red + #3584 squash `4640f3662` 合并态),fresh CI 重跑中。
+- ⬜ **#3591 GW design-lock** — PROPOSED 待 ratify(顺带裁定:`VIRTUALIZE_MIN_ROWS=60` 是否复用于 grouped items 阈值);文档引用已校准到真实 pager/load-more 代码,合并顺序要求:#3582 先落地。
+- ⬜ **#3574 OAPI allowlist⟺guard tripwire** — P2 route-file scope tripwire 已补(`600e47e6d`),fresh CI 重跑中。
+- ⬜ **#3582 grid 性能基线** — 完工待审(docs+test;含"flat 路径已解决、真缺口=grouped 视图"的战略修正);内容已审,作为 #3591 前置应先合。
 - ⬜ **S2 design-lock 草稿** — 云端 routine 今日 13:18 CST 触发,产出 docs-only PR 后进入本批次。
 
 ## W1 — 起草车道(W0 批次清空后启动;docs-only 零碰撞)
