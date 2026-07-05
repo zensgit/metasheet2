@@ -120,8 +120,8 @@ export async function fetchPersonalViewConfigsForViews(
   if (ids.length === 0 || !actorUserId) return map
 
   const result = await query(
-    'SELECT view_id, config FROM meta_view_personal_configs WHERE user_id = $1 AND view_id = ANY($2::text[])',
-    [actorUserId, ids],
+    'SELECT view_id, config FROM meta_view_personal_configs WHERE view_id = ANY($1::text[])',
+    [ids],
   )
   for (const row of result.rows as Array<{ view_id: string; config: unknown }>) {
     map.set(String(row.view_id), normalizeStoredOverlay(row.config))
@@ -137,8 +137,8 @@ export async function getPersonalViewConfig(
 ): Promise<PersonalViewConfigRecord | null> {
   if (!viewId || !actorUserId) return null
   const result = await query(
-    'SELECT view_id, user_id, config, updated_at FROM meta_view_personal_configs WHERE view_id = $1 AND user_id = $2',
-    [viewId, actorUserId],
+    'SELECT view_id, user_id, config, updated_at FROM meta_view_personal_configs WHERE view_id = $1',
+    [viewId],
   )
   const row = (result.rows as Array<{ view_id: string; user_id: string; config: unknown; updated_at: unknown }>)[0]
   if (!row) return null

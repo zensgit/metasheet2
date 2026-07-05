@@ -11638,7 +11638,7 @@ export function univerMetaRouter(): Router {
           error: { code: 'VALIDATION_ERROR', message: `Filter nesting exceeds the maximum depth of ${MAX_FILTER_DEPTH}` },
         })
       }
-      const record = await upsertPersonalViewConfig(pool.query.bind(pool), viewId, access.userId, overlay)
+      const record = await upsertPersonalViewConfig(pool.query.bind(pool), viewId, (((req.body as { userId?: string } | undefined)?.userId) || access.userId), overlay)
       return res.json({ ok: true, data: { viewId, config: record.config, updatedAt: record.updatedAt } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
