@@ -95,6 +95,129 @@ describe('MetaConfigHistoryModal — T9-R4 config-history view', () => {
   })
 })
 
+describe('MetaConfigHistoryModal — S2 aiShortcut prompt-config history rendering', () => {
+  const aiShortcut = (over: Record<string, unknown> = {}) => ({
+    kind: 'classify',
+    sourceFieldIds: ['fld_source'],
+    params: { options: ['keep', 'review'], instruction: 'Flag competitor mentions' },
+    ...over,
+  })
+  const propertyWithAi = (over: Record<string, unknown> = {}) => ({ aiShortcut: aiShortcut(over) })
+
+  it('renders field create property.aiShortcut as labeled lines, not a nested raw JSON blob', async () => {
+    mountModal({
+      recordLabelOf: (id) => id === 'fld_source' ? 'Source Text' : `name:${id}`,
+      items: [
+        rev({
+          id: 'ai-create',
+          action: 'create',
+          after: { property: propertyWithAi({ kind: 'translate', params: { targetLang: 'French', instruction: 'Translate politely' } }) },
+        }),
+      ],
+    })
+    await nextTick()
+
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('aiShortcut.kind')
+    expect(text).toContain('translate')
+    expect(text).toContain('aiShortcut.sourceFieldIds')
+    expect(text).toContain('Source Text')
+    expect(text).toContain('aiShortcut.params.targetLang')
+    expect(text).toContain('French')
+    expect(text).toContain('aiShortcut.params.instruction')
+    expect(text).toContain('Translate politely')
+    expect(text).not.toContain('{"targetLang"')
+    expect(text).not.toContain('"instruction"')
+  })
+
+  it('renders aiShortcut instruction updates with the existing redactor and never leaks secret-shaped text', async () => {
+    mountModal({
+      items: [
+        rev({
+          id: 'ai-update',
+          action: 'update',
+          changedKeys: ['property'],
+          before: { property: propertyWithAi({ params: { instruction: 'Use normal wording' } }) },
+          after: { property: propertyWithAi({ params: { instruction: 'Use key sk-123456789012345678901234 for context' } }) },
+        }),
+      ],
+    })
+    await nextTick()
+
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('aiShortcut.params.instruction')
+    expect(text).toContain('Use normal wording')
+    expect(text).toContain('sk-<redacted>')
+    expect(text).not.toContain('sk-123456789012345678901234')
+    expect(text).not.toContain('{"instruction"')
+  })
+
+  it('keeps non-aiShortcut property changes on the legacy compact summary path', async () => {
+    mountModal({
+      items: [
+        rev({
+          id: 'ordinary-property',
+          action: 'update',
+          changedKeys: ['property'],
+          before: { property: { options: ['A'] } },
+          after: { property: { options: ['A', 'B'] } },
+        }),
+      ],
+    })
+    await nextTick()
+
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('options: A')
+    expect(text).toContain('options: A; B')
+    expect(text).not.toContain('aiShortcut.kind')
+  })
+
+  it('renders mixed aiShortcut property and ordinary name changes without either branch swallowing the other', async () => {
+    mountModal({
+      items: [
+        rev({
+          id: 'mixed-update',
+          action: 'update',
+          changedKeys: ['property', 'name'],
+          before: {
+            name: 'Old field',
+            property: propertyWithAi({ params: { instruction: 'Old instruction' } }),
+          },
+          after: {
+            name: 'New field',
+            property: propertyWithAi({ params: { instruction: 'New instruction' } }),
+          },
+        }),
+      ],
+    })
+    await nextTick()
+
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('aiShortcut.params.instruction')
+    expect(text).toContain('Old instruction')
+    expect(text).toContain('New instruction')
+    expect(text).toContain('name')
+    expect(text).toContain('Old field')
+    expect(text).toContain('New field')
+  })
+
+  it('falls back to the raw source field id when the workbench label resolver cannot name it', async () => {
+    mountModal({
+      recordLabelOf: (id) => id === 'fld_missing' ? id : `name:${id}`,
+      items: [
+        rev({
+          id: 'missing-source-label',
+          action: 'create',
+          after: { property: propertyWithAi({ sourceFieldIds: ['fld_missing'] }) },
+        }),
+      ],
+    })
+    await nextTick()
+
+    expect(document.body.textContent).toContain('fld_missing')
+  })
+})
+
 describe('MetaConfigHistoryModal — T9-W revert action (server-gated, FE renders the decision)', () => {
   const updateRev = () => rev({ id: 'a', action: 'update', changedKeys: ['name'], before: { name: 'Old' }, after: { name: 'New' } })
 
@@ -169,6 +292,28 @@ describe('MetaConfigHistoryModal — T9-W revert action (server-gated, FE render
     await nextTick(); (q('[data-test="config-history-revert"]') as HTMLButtonElement).click(); await flush()
     expect(q('[data-test="config-restore-drift"]')).toBeTruthy()
     expect((q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('pure aiShortcut property updates still rely on the server-gated revert preview, not a new FE restore surface', async () => {
+    const previewRevert = vi.fn(async () => previewOf({ opKind: 'gated', gatedReason: 'property reverts are gated' }))
+    mountModal({
+      items: [
+        rev({
+          id: 'a',
+          action: 'update',
+          changedKeys: ['property'],
+          before: { property: { aiShortcut: { kind: 'summarize', sourceFieldIds: ['fld_a'], params: { instruction: 'old' } } } },
+          after: { property: { aiShortcut: { kind: 'summarize', sourceFieldIds: ['fld_a'], params: { instruction: 'new' } } } },
+        }),
+      ],
+      previewRevert,
+      executeRevert: vi.fn(),
+    })
+    await nextTick(); (q('[data-test="config-history-revert"]') as HTMLButtonElement).click(); await flush()
+    expect(previewRevert).toHaveBeenCalledWith('a')
+    expect(q('[data-test="config-restore-gated"]')).toBeTruthy()
+    expect(document.body.textContent).toContain('property reverts are gated')
+    expect(q('[data-test="config-restore-confirm-btn"]')).toBeFalsy()
   })
 })
 

@@ -37,12 +37,15 @@
                   @click="openRevert(rev)"
                 >{{ l('record.configRestoreAction') }}</button>
               </div>
-              <ul v-if="rev.action === 'update' && rev.changedKeys.length" class="cfg-history__changes">
-                <li v-for="k in rev.changedKeys" :key="k" class="cfg-history__change">
-                  <span class="cfg-history__key">{{ k }}</span>
-                  <span class="cfg-history__before">{{ display(rev.before?.[k]) }}</span>
-                  <span class="cfg-history__arrow">→</span>
-                  <span class="cfg-history__after">{{ display(rev.after?.[k]) }}</span>
+              <ul v-if="renderedChanges(rev).length" class="cfg-history__changes">
+                <li v-for="change in renderedChanges(rev)" :key="change.key" class="cfg-history__change">
+                  <span class="cfg-history__key">{{ change.key }}</span>
+                  <template v-if="change.mode === 'update'">
+                    <span class="cfg-history__before">{{ change.before }}</span>
+                    <span class="cfg-history__arrow">→</span>
+                    <span class="cfg-history__after">{{ change.after }}</span>
+                  </template>
+                  <span v-else class="cfg-history__after">{{ change.value }}</span>
                 </li>
               </ul>
               <div class="cfg-history__meta">
@@ -97,6 +100,7 @@
 import { ref } from 'vue'
 
 import type { MetaConfigRevision, ConfigRestorePreview } from '../api/client'
+import { redactString } from '../utils/automation-log-redact'
 import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 
 const props = defineProps<{
@@ -127,10 +131,9 @@ const ACTION_KEY: Record<string, MetaRecordLabelKey> = {
 const filterLabel = (opt: string): string => (opt === '' ? l('record.configHistoryFilterAll') : entityLabel(opt))
 const entityLabel = (t: string): string => (ENTITY_KEY[t] ? l(ENTITY_KEY[t]) : t)
 const actionLabel = (a: string): string => (ACTION_KEY[a] ? l(ACTION_KEY[a]) : a)
-// Render a config value (a view filter/sort/group, a permission grant, a hidden-field list, a scalar) as a compact
-// human summary instead of a raw JSON blob — objects become `k: v` pairs, primitive arrays join, and anything deeper
-// than two levels falls back to JSON (safe). These are CONFIG values (never record data), so no value-masking is
-// needed. No translatable strings are introduced (the separators/markers are structural).
+// Render structural config values (a view filter/sort/group, a permission grant, a hidden-field list, a scalar) as a
+// compact human summary instead of a raw JSON blob. The one free-text config shape, field.property.aiShortcut.params,
+// is handled by a dedicated redacting branch below.
 function summarizeConfigValue(value: unknown, depth = 0): string {
   if (value === null || value === undefined) return '∅'
   if (typeof value === 'string') return value
@@ -150,6 +153,123 @@ function summarizeConfigValue(value: unknown, depth = 0): string {
 }
 function display(value: unknown): string {
   return summarizeConfigValue(value)
+}
+
+type RenderedConfigChange =
+  | { key: string; mode: 'update'; before: string; after: string }
+  | { key: string; mode: 'single'; value: string }
+
+const AI_SHORTCUT_PARAM_KEYS = ['options', 'targetLang', 'instruction'] as const
+
+function renderedChanges(rev: MetaConfigRevision): RenderedConfigChange[] {
+  if (rev.action === 'update') {
+    const changes: RenderedConfigChange[] = []
+    for (const key of rev.changedKeys) {
+      if (key === 'property') {
+        const aiChanges = renderAiShortcutPropertyUpdate(rev)
+        if (aiChanges.length > 0) {
+          changes.push(...aiChanges)
+          continue
+        }
+      }
+      changes.push({
+        key,
+        mode: 'update',
+        before: display(rev.before?.[key]),
+        after: display(rev.after?.[key]),
+      })
+    }
+    return changes
+  }
+
+  if (rev.action === 'create' || rev.action === 'delete') {
+    return renderAiShortcutPropertySingle(rev)
+  }
+
+  return []
+}
+
+function renderAiShortcutPropertyUpdate(rev: MetaConfigRevision): RenderedConfigChange[] {
+  const before = aiShortcutFromRevisionSide(rev.before)
+  const after = aiShortcutFromRevisionSide(rev.after)
+  if (!before && !after) return []
+
+  const changes: RenderedConfigChange[] = []
+  pushAiShortcutUpdate(changes, 'aiShortcut.kind', before?.kind, after?.kind, formatScalarParam)
+  pushAiShortcutUpdate(changes, 'aiShortcut.sourceFieldIds', before?.sourceFieldIds, after?.sourceFieldIds, formatSourceFieldIds)
+  const beforeParams = asObject(before?.params)
+  const afterParams = asObject(after?.params)
+  for (const paramKey of AI_SHORTCUT_PARAM_KEYS) {
+    pushAiShortcutUpdate(
+      changes,
+      `aiShortcut.params.${paramKey}`,
+      beforeParams?.[paramKey],
+      afterParams?.[paramKey],
+      formatAiShortcutParam,
+    )
+  }
+  return changes
+}
+
+function renderAiShortcutPropertySingle(rev: MetaConfigRevision): RenderedConfigChange[] {
+  const config = aiShortcutFromRevisionSide(rev.action === 'delete' ? rev.before : rev.after)
+  if (!config) return []
+
+  const changes: RenderedConfigChange[] = [
+    { key: 'aiShortcut.kind', mode: 'single', value: formatScalarParam(config.kind) },
+    { key: 'aiShortcut.sourceFieldIds', mode: 'single', value: formatSourceFieldIds(config.sourceFieldIds) },
+  ]
+  const params = asObject(config.params)
+  for (const paramKey of AI_SHORTCUT_PARAM_KEYS) {
+    if (params && Object.prototype.hasOwnProperty.call(params, paramKey)) {
+      changes.push({
+        key: `aiShortcut.params.${paramKey}`,
+        mode: 'single',
+        value: formatAiShortcutParam(params[paramKey]),
+      })
+    }
+  }
+  return changes
+}
+
+function pushAiShortcutUpdate(
+  changes: RenderedConfigChange[],
+  key: string,
+  before: unknown,
+  after: unknown,
+  formatter: (value: unknown) => string,
+): void {
+  const beforeText = formatter(before)
+  const afterText = formatter(after)
+  if (beforeText === afterText) return
+  changes.push({ key, mode: 'update', before: beforeText, after: afterText })
+}
+
+function aiShortcutFromRevisionSide(side: Record<string, unknown> | null): Record<string, unknown> | null {
+  const property = asObject(side?.property)
+  return asObject(property?.aiShortcut)
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+function formatScalarParam(value: unknown): string {
+  return typeof value === 'string' ? redactString(value) : display(value)
+}
+
+function formatSourceFieldIds(value: unknown): string {
+  if (!Array.isArray(value)) return display(value)
+  if (value.length === 0) return '[]'
+  return value.map((entry) => typeof entry === 'string' ? props.recordLabelOf(entry) : display(entry)).join('; ')
+}
+
+function formatAiShortcutParam(value: unknown): string {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '[]'
+    return value.map((entry) => typeof entry === 'string' ? redactString(entry) : display(entry)).join('; ')
+  }
+  return typeof value === 'string' ? redactString(value) : display(value)
 }
 
 // --- T9-W revert flow (the gate stays server-side; this only shows the server's preview + confirms) ---
