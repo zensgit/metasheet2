@@ -61,10 +61,17 @@ const fetchReportSpy = vi.fn().mockResolvedValue({
   }],
 })
 
+// B2-04: id→name lookup for the template-keyed columns (按模板汇总 / TopN 最慢实例 / TopN SLA
+// 风险模板 all render `templateDisplayName(row.templateId)`). Defaults to an empty page so the
+// pre-existing tests below (which assert the RAW id 'tmpl-risk-1' renders) keep passing unless a
+// test opts into a name mapping.
+const listTemplatesSpy = vi.fn().mockResolvedValue({ data: [], total: 0 })
+
 vi.mock('../src/approvals/api', () => ({
   fetchApprovalMetricsSummary: (query?: unknown) => fetchSummarySpy(query),
   fetchApprovalMetricsBreaches: () => fetchBreachesSpy(),
   fetchApprovalMetricsReport: (query?: unknown) => fetchReportSpy(query),
+  listTemplates: (query?: unknown) => listTemplatesSpy(query),
 }))
 
 type ColumnRegistryEntry = {
@@ -183,6 +190,8 @@ describe('ApprovalMetricsView TopN report', () => {
     fetchSummarySpy.mockClear()
     fetchBreachesSpy.mockClear()
     fetchReportSpy.mockClear()
+    listTemplatesSpy.mockClear()
+    listTemplatesSpy.mockResolvedValue({ data: [], total: 0 })
     columnSeq = 0
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -239,5 +248,72 @@ describe('ApprovalMetricsView TopN report', () => {
 
     expect(pushSpy).toHaveBeenCalledWith({ name: 'approval-detail', params: { id: 'apr-slow-1' } })
     expect(pushSpy).toHaveBeenCalledWith({ name: 'approval-template-detail', params: { id: 'tmpl-risk-1' } })
+  })
+
+  // B2-04: template-keyed tables previously rendered the raw templateId (unscannable). Both TopN
+  // tables key off the same 'tmpl-risk-1' fixture id, so a single listTemplates() mock covers both.
+  it('B2-04: renders the mapped template NAME instead of the raw id once listTemplates resolves a match', async () => {
+    listTemplatesSpy.mockResolvedValue({ data: [{ id: 'tmpl-risk-1', name: '采购审批' }], total: 1 })
+    const { default: ApprovalMetricsView } = await import('../src/views/approval/ApprovalMetricsView.vue')
+    app = createApp(ApprovalMetricsView)
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElLink', ElLink)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.directive('loading', {})
+    app.mount(container!)
+    await flushPromises()
+    await flushPromises() // listTemplates resolves on a separate onMounted call — give it a beat
+
+    expect(listTemplatesSpy).toHaveBeenCalledWith({ pageSize: 200 })
+    expect(container!.textContent).toContain('采购审批')
+    expect(container!.textContent).not.toContain('tmpl-risk-1')
+    // routing is untouched by the display mapping — still routes by the real id.
+    const buttons = Array.from(container!.querySelectorAll('button'))
+    buttons.find((button) => button.textContent?.includes('采购审批'))?.click()
+    expect(pushSpy).toHaveBeenCalledWith({ name: 'approval-template-detail', params: { id: 'tmpl-risk-1' } })
+  })
+
+  it('B2-04: falls back to the raw template id when listTemplates has no match (and stays non-fatal on rejection)', async () => {
+    listTemplatesSpy.mockResolvedValue({ data: [{ id: 'some-other-template', name: '别的模板' }], total: 1 })
+    const { default: ApprovalMetricsView } = await import('../src/views/approval/ApprovalMetricsView.vue')
+    app = createApp(ApprovalMetricsView)
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElLink', ElLink)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.directive('loading', {})
+    app.mount(container!)
+    await flushPromises()
+    await flushPromises()
+
+    expect(container!.textContent).toContain('tmpl-risk-1') // unmapped id → raw id fallback
+    expect(container!.textContent).not.toContain('别的模板')
+  })
+
+  it('B2-04: a rejected listTemplates does not break the dashboard (non-fatal, falls back to raw ids)', async () => {
+    listTemplatesSpy.mockRejectedValue(new Error('network error'))
+    const { default: ApprovalMetricsView } = await import('../src/views/approval/ApprovalMetricsView.vue')
+    app = createApp(ApprovalMetricsView)
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElLink', ElLink)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.directive('loading', {})
+    app.mount(container!)
+    await flushPromises()
+    await flushPromises()
+
+    expect(container!.textContent).toContain('TopN 最慢实例') // dashboard still renders
+    expect(container!.textContent).toContain('tmpl-risk-1') // falls back to the raw id
   })
 })

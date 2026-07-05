@@ -27,9 +27,12 @@
       <el-table-column label="时间窗">
         <template #default="{ row }">{{ fmt(row.startAt) }} ~ {{ fmt(row.endAt) }}</template>
       </el-table-column>
-      <el-table-column label="状态">
+      <el-table-column label="状态" width="150">
         <template #default="{ row }">
-          <el-tag :type="row.active ? 'success' : 'info'" size="small">{{ row.active ? '生效' : '已停用' }}</el-tag>
+          <el-tag :type="DELEGATION_STATUS_TAG_TYPE[delegationDisplayStatus(row).status]" size="small">
+            {{ delegationDisplayStatus(row).status }}
+          </el-tag>
+          <span v-if="delegationDisplayStatus(row).expiringSoon" class="expiring-soon-hint">即将到期</span>
         </template>
       </el-table-column>
       <el-table-column v-if="includeInactive" label="已路由审批" width="110">
@@ -78,7 +81,7 @@
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import {
   listDelegations,
@@ -89,6 +92,7 @@ import {
   type DelegationRecord,
   type DelegationForm,
 } from '../../approvals/delegations'
+import { delegationDisplayStatus, DELEGATION_STATUS_TAG_TYPE } from '../../approvals/delegationStatus'
 
 const { canManageTemplates: canManage } = useApprovalPermissions()
 const delegations = ref<DelegationRecord[]>([])
@@ -147,7 +151,18 @@ async function submit() {
   }
 }
 
+// B2-05: 停用 is a routing-affecting action (it takes the delegatee out of the assignee
+// resolution immediately) but was previously zero-friction — one click, no confirmation.
 async function disable(id: string) {
+  try {
+    await ElMessageBox.confirm(
+      '停用后该委托立即失效，进行中的转交不受影响。确定停用吗？',
+      '停用委托',
+      { confirmButtonText: '停用', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
   try {
     await disableDelegation(id)
     await load()
@@ -165,4 +180,10 @@ onMounted(load)
 .header h2 { margin: 0; }
 .actions { display: flex; align-items: center; gap: 12px; }
 .sub { color: var(--el-text-color-secondary); font-size: 13px; margin: 4px 0 0; }
+.expiring-soon-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--el-color-warning, #e6a23c);
+}
 </style>

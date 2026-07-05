@@ -36,12 +36,18 @@ const reportSpy = vi.fn()
 const breachesSpy = vi.fn()
 const teamsSpy = vi.fn()
 const peopleSpy = vi.fn()
+// B2-04: id→name lookup for the template-keyed tables. Defaults to an empty page (falls back to
+// raw ids); the mapped-name / fallback behaviour itself is covered in
+// approvalMetricsTopnReport.spec.ts, whose stub can render table CELL content (this file's ElTable
+// stub is count-only — see `rowsOf()` below — so it stays scoped to what it can assert here).
+const listTemplatesSpy = vi.fn().mockResolvedValue({ data: [], total: 0 })
 vi.mock('../src/approvals/api', () => ({
   fetchApprovalMetricsSummary: (...a: unknown[]) => summarySpy(...a),
   fetchApprovalMetricsReport: (...a: unknown[]) => reportSpy(...a),
   fetchApprovalMetricsBreaches: (...a: unknown[]) => breachesSpy(...a),
   fetchApprovalMetricsTeams: (...a: unknown[]) => teamsSpy(...a),
   fetchApprovalMetricsPeople: (...a: unknown[]) => peopleSpy(...a),
+  listTemplates: (...a: unknown[]) => listTemplatesSpy(...a),
 }))
 
 function emptySummary() {
@@ -103,14 +109,17 @@ const ElTableColumn = defineComponent({
   render() { return h('div', { 'data-column': this.prop || this.label }) },
 })
 // Drives the shared date-range: clicking emits a v-model update + @change so the
-// view re-runs loadAll with a concrete since/until.
+// view re-runs loadAll with a concrete since/until. B2-04: also surfaces the bound `shortcuts`
+// prop as a data attribute (labels only) so a test can assert the picker received presets
+// without needing to simulate Element Plus's real shortcut-panel DOM.
 const ElDatePicker = defineComponent({
   name: 'ElDatePicker',
-  props: { modelValue: { type: Array, default: null } },
+  props: { modelValue: { type: Array, default: null }, shortcuts: { type: Array, default: () => [] } },
   emits: ['update:modelValue', 'change'],
   render() {
     return h('button', {
       'data-testid': 'set-date-range',
+      'data-shortcut-labels': (this.shortcuts as Array<{ text: string }>).map((s) => s.text).join(','),
       onClick: () => {
         const range = ['2026-04-01', '2026-04-25']
         this.$emit('update:modelValue', range)
@@ -161,6 +170,7 @@ describe('ApprovalMetricsView — B analytics breakdown sections', () => {
     breachesSpy.mockReset().mockResolvedValue([])
     teamsSpy.mockReset().mockResolvedValue(TEAM_ROWS)
     peopleSpy.mockReset().mockResolvedValue(PEOPLE_ROWS)
+    listTemplatesSpy.mockReset().mockResolvedValue({ data: [], total: 0 })
     pushSpy.mockClear()
   })
 
@@ -240,5 +250,39 @@ describe('ApprovalMetricsView — B analytics breakdown sections', () => {
     const expected = { since: '2026-04-01T00:00:00Z', until: '2026-04-25T23:59:59Z', limit: 20 }
     expect(teamsSpy).toHaveBeenCalledWith(expected)
     expect(peopleSpy).toHaveBeenCalledWith(expected)
+  })
+
+  it('B2-04: the date-range picker receives quick-range shortcuts (近 7 天 / 近 30 天 / 本月)', async () => {
+    const m = await mountView()
+    app = m.app; container = m.container
+
+    const picker = container.querySelector<HTMLButtonElement>('[data-testid="set-date-range"]')
+    expect(picker, 'the date-range picker stub is present').toBeTruthy()
+    const labels = picker!.getAttribute('data-shortcut-labels')?.split(',') ?? []
+    expect(labels).toEqual(['近 7 天', '近 30 天', '本月'])
+  })
+
+  it('B2-04: fetches the template id→name lookup once on mount with a generous pageSize', async () => {
+    const m = await mountView()
+    app = m.app; container = m.container
+
+    expect(listTemplatesSpy).toHaveBeenCalledTimes(1)
+    expect(listTemplatesSpy).toHaveBeenCalledWith({ pageSize: 200 })
+
+    // Refreshing re-reads the breakdowns but must NOT re-fetch the template lookup — it is a
+    // once-on-mount catalog fetch, independent of the date range/refresh button.
+    const refresh = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.includes('刷新'))
+    refresh!.click()
+    await flushUi()
+    expect(listTemplatesSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('B2-04: a rejected template lookup is non-fatal — the dashboard still renders', async () => {
+    listTemplatesSpy.mockReset().mockRejectedValue(new Error('network error'))
+    const m = await mountView()
+    app = m.app; container = m.container
+
+    expect(container.textContent).toContain('按部门汇总')
+    expect(rowsOf(container, 'metrics-table-teams')).toBe(TEAM_ROWS.length)
   })
 })

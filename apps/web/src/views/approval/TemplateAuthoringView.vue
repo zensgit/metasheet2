@@ -23,7 +23,7 @@
           :loading="publishing"
           :disabled="!canSave"
           data-testid="approval-template-publish-button"
-          @click="handlePublish"
+          @click="openPublishChecklist"
         >
           发布
         </el-button>
@@ -1108,6 +1108,43 @@
         </el-collapse>
       </el-card>
     </div>
+
+    <!-- B2-03: publish pre-flight checklist — replaces the old "confirm first, validate after"
+         ElMessageBox.confirm. Every item mirrors an already-exported validator (see the
+         publishChecklist computed); the confirm button stays disabled until all are ✓. -->
+    <el-dialog
+      v-model="publishChecklistVisible"
+      title="发布前检查"
+      width="480px"
+      data-testid="approval-publish-checklist"
+    >
+      <ul class="template-authoring__publish-checklist">
+        <li
+          v-for="item in publishChecklist"
+          :key="item.key"
+          class="template-authoring__publish-checklist-item"
+          :class="item.ok ? 'is-ok' : 'is-fail'"
+          :data-testid="`approval-publish-checklist-item-${item.key}`"
+          :data-ok="item.ok"
+        >
+          <span class="template-authoring__publish-checklist-icon">{{ item.ok ? '✓' : '✗' }}</span>
+          <span class="template-authoring__publish-checklist-label">{{ item.label }}</span>
+          <span v-if="!item.ok && item.detail" class="template-authoring__publish-checklist-detail">{{ item.detail }}</span>
+        </li>
+      </ul>
+      <template #footer>
+        <el-button @click="publishChecklistVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="publishing"
+          :disabled="!canConfirmPublish"
+          data-testid="approval-publish-checklist-confirm"
+          @click="confirmPublish"
+        >
+          确认发布
+        </el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
@@ -1141,6 +1178,9 @@ import {
   setStepFieldPermission,
   unsupportedTemplateAuthoringReason,
   validateTemplateDraft,
+  validateTemplateFormFields,
+  validateTemplateApprovalFlow,
+  placeholderRoleNodeKeys,
   approvalFormulaInsertOptions,
   CONDITION_RULE_OPERATORS,
   PARALLEL_JOIN_MODES,
@@ -1170,7 +1210,6 @@ import {
   COMMON_APPROVAL_TEMPLATE_PRESETS,
   type CommonApprovalTemplatePresetId,
 } from '../../approvals/commonTemplatePresets'
-import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../../types/approval'
 import type {
   ApprovalAssigneeSource,
   ApprovalAssigneeSourceKind,
@@ -1523,10 +1562,11 @@ function approvalSourceIds(nodeKey: string): string[] {
 }
 // G-5 sentinel hint: true when the source is a static_role still carrying the starter-preset
 // placeholder (APPROVAL_ROLE_CONFIGURE_SENTINEL). The backend blocks publish on it; this surfaces it
-// in the editor so the admin replaces it first. Non-blocking — the draft still saves.
+// in the editor so the admin replaces it first. Non-blocking — the draft still saves. Delegates to
+// the shared `placeholderRoleNodeKeys` (B2-03) so the per-node hint and the aggregate publish
+// checklist item share one predicate.
 function approvalSourceIsPlaceholder(nodeKey: string): boolean {
-  return approvalSourceKind(nodeKey) === 'static_role'
-    && approvalSourceIds(nodeKey).includes(APPROVAL_ROLE_CONFIGURE_SENTINEL)
+  return publishPlaceholderRoleKeys.value.includes(nodeKey)
 }
 
 // ── D-2/D-3 topology authoring (structural graph edits via graphTopologyEdit + applyTopologyToComplexDraft) ──
@@ -1589,6 +1629,38 @@ const canvasValidity = computed<string[]>(() => (draft.value.preservedGraph ? gr
 function canvasNodeByKey(key: string): ApprovalNode | undefined {
   return canvasEffectiveGraph.value.nodes.find((n) => n.key === key)
 }
+
+// B2-03 publish pre-flight checklist — aggregates the SAME already-exported validators used
+// elsewhere in this view (validateTemplateFormFields / validateTemplateApprovalFlow + canvasValidity
+// / the G-5 sentinel scan) into one array the publish dialog renders BEFORE the admin commits to
+// publishing, instead of only discovering an invalid draft after the confirm (promise-then-renege).
+// This only surfaces existing checks earlier; it never relaxes any of them.
+interface PublishChecklistItem {
+  key: string
+  label: string
+  ok: boolean
+  detail?: string
+}
+const publishFormFieldIssues = computed<string[]>(() => validateTemplateFormFields(draft.value, unsupportedReason.value))
+// "审批流程" bundles the step/graph-edit errors with the canvas topology preview (graphValidityIssues)
+// — two independent validators that both gate a successful publish server-side.
+const publishApprovalFlowIssues = computed<string[]>(() => [
+  ...validateTemplateApprovalFlow(draft.value),
+  ...canvasValidity.value,
+])
+const publishPlaceholderRoleKeys = computed<string[]>(() => placeholderRoleNodeKeys(draft.value.approvalNodeEdits ?? {}))
+const publishPlaceholderRoleIssues = computed<string[]>(() =>
+  publishPlaceholderRoleKeys.value.map(
+    (key) => `审批节点「${canvasNodeByKey(key)?.name || key}」仍为占位审批角色，请先替换为真实角色`,
+  ),
+)
+const publishChecklist = computed<PublishChecklistItem[]>(() => [
+  { key: 'fields', label: '表单字段', ok: publishFormFieldIssues.value.length === 0, detail: publishFormFieldIssues.value[0] },
+  { key: 'flow', label: '审批流程', ok: publishApprovalFlowIssues.value.length === 0, detail: publishApprovalFlowIssues.value[0] },
+  { key: 'placeholder', label: '审批人占位', ok: publishPlaceholderRoleIssues.value.length === 0, detail: publishPlaceholderRoleIssues.value[0] },
+])
+const canConfirmPublish = computed(() => publishChecklist.value.every((item) => item.ok))
+const publishChecklistVisible = ref(false)
 const canvasEdgeLines = computed(() => {
   const pos = new Map(canvasLayout.value.nodes.map((n) => [n.key, n]))
   return canvasEffectiveGraph.value.edges.map((edge) => {
@@ -1879,17 +1951,18 @@ async function handleSave() {
   }
 }
 
-async function handlePublish() {
+// B2-03: publish pre-flight — opens the checklist dialog INSTEAD of confirming immediately, so an
+// invalid draft is visible before the admin commits (the dialog's own confirm button stays disabled
+// while `canConfirmPublish` is false). Once the checklist is all-green, `confirmPublish` runs the
+// SAME persistDraft → publishTemplate → success-routing sequence as before this change.
+function openPublishChecklist() {
   if (!canSave.value || publishing.value) return
-  try {
-    await ElMessageBox.confirm('发布后用户即可从模板中心发起审批，确认发布吗？', '发布审批模板', {
-      confirmButtonText: '发布',
-      cancelButtonText: '取消',
-      type: 'warning',
-    })
-  } catch {
-    return
-  }
+  publishChecklistVisible.value = true
+}
+
+async function confirmPublish() {
+  if (!canConfirmPublish.value) return
+  publishChecklistVisible.value = false
   publishing.value = true
   try {
     const saved = await persistDraft()
@@ -2166,6 +2239,43 @@ onUnmounted(() => {
 .template-authoring__error-list {
   margin: 6px 0 0;
   padding-left: 20px;
+}
+
+.template-authoring__publish-checklist {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.template-authoring__publish-checklist-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--el-fill-color-lighter, #f5f7fa);
+}
+
+.template-authoring__publish-checklist-item.is-ok .template-authoring__publish-checklist-icon {
+  color: var(--el-color-success, #67c23a);
+}
+
+.template-authoring__publish-checklist-item.is-fail .template-authoring__publish-checklist-icon {
+  color: var(--el-color-danger, #f56c6c);
+}
+
+.template-authoring__publish-checklist-icon {
+  font-weight: 700;
+}
+
+.template-authoring__publish-checklist-detail {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #606266);
 }
 
 pre {

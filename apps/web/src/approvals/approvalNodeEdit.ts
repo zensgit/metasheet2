@@ -4,6 +4,7 @@ import type {
   ApprovalNode,
   ApprovalNodeConfig,
 } from '../types/approval'
+import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../types/approval'
 
 // G-5 — approval-node editing inside a preserved complex graph. SCOPE: the approver SOURCE only
 // (`assigneeSources`). `approvalMode` / `emptyAssigneePolicy` / `autoApprovalPolicy` / any other
@@ -150,4 +151,20 @@ export function validateApprovalNodeEdits(
     }
   }
   return errors
+}
+
+/**
+ * B2-03 publish pre-flight: node keys whose FIRST assignee source is still the starter-preset
+ * placeholder role (`APPROVAL_ROLE_CONFIGURE_SENTINEL`). The backend fail-fasts on this at PUBLISH
+ * (`assertNoUnconfiguredPlaceholderRoles`, ApprovalProductService.ts) — this mirrors that check so
+ * the publish-checklist can warn BEFORE the confirm instead of after a rejected request. Non-fatal
+ * for save (mirrors the in-editor sentinel hint, which is also non-blocking).
+ */
+export function placeholderRoleNodeKeys(edits: ApprovalNodeEdits): string[] {
+  return Object.values(edits)
+    .filter((edit) => {
+      const source = edit.assigneeSources[0]
+      return source?.kind === 'static_role' && source.roleIds.includes(APPROVAL_ROLE_CONFIGURE_SENTINEL)
+    })
+    .map((edit) => edit.nodeKey)
 }

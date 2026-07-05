@@ -201,6 +201,20 @@ const ElAlert = defineComponent({
   },
 })
 
+// B2-03: publish pre-flight checklist dialog. Mirrors the real component's v-model visibility gate
+// (only rendered while `modelValue` is true) so tests can assert the dialog opens/closes.
+const ElDialog = defineComponent({
+  name: 'ElDialog',
+  props: { modelValue: Boolean, title: String, width: String },
+  emits: ['update:modelValue'],
+  render() {
+    if (!this.modelValue) return null
+    return h('div', {
+      'data-testid': (this.$attrs as any)?.['data-testid'],
+    }, [this.$slots.default?.(), this.$slots.footer?.()])
+  },
+})
+
 function installStubs(app: VueApp<Element>) {
   app.directive('loading', {})
   app.component('ElButton', ElButton)
@@ -210,6 +224,7 @@ function installStubs(app: VueApp<Element>) {
   app.component('ElOption', ElOption)
   app.component('ElCheckbox', ElCheckbox)
   app.component('ElAlert', ElAlert)
+  app.component('ElDialog', ElDialog)
   app.component('ElTable', ElTable)
   app.component('ElTableColumn', ElTableColumn)
   app.component('ElCard', passthrough('ElCard', 'section'))
@@ -1207,12 +1222,88 @@ describe('TemplateAuthoringView', () => {
 
     setInput('approval-template-key', 'purchase')
     setInput('approval-template-name', '采购审批')
+    // B2-03: publish now opens the pre-flight checklist FIRST; the real persist/publish sequence
+    // only runs once the dialog's own confirm button is clicked (a fresh linear draft with just
+    // key+name filled is all-green, so the confirm button is enabled).
     ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(createTemplateSpy).not.toHaveBeenCalled()
+    const dialog = container!.querySelector('[data-testid="approval-publish-checklist"]')
+    expect(dialog).not.toBeNull()
+    // all-green: every checklist item ✓, confirm enabled.
+    for (const key of ['fields', 'flow', 'placeholder']) {
+      const item = dialog!.querySelector(`[data-testid="approval-publish-checklist-item-${key}"]`)
+      expect(item).not.toBeNull()
+      expect(item!.getAttribute('data-ok')).toBe('true')
+      expect(item!.textContent).toContain('✓')
+    }
+    const confirmButton = dialog!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
+    expect(confirmButton.disabled).toBe(false)
+
+    confirmButton.click()
     await flushUi()
 
     expect(createTemplateSpy).toHaveBeenCalledTimes(1)
     expect(publishTemplateSpy).toHaveBeenCalledWith('tpl_created', { policy: { allowRevoke: true } })
     expect(pushSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_created' })
+  })
+
+  it('B2-03: an invalid draft (blank key/name) opens the publish checklist with a failing "表单字段" item and disables the confirm button', async () => {
+    await mountView()
+    // leave key/name blank — validateTemplateFormFields fails ('模板 Key 必填' / '模板名称必填').
+
+    ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const dialog = container!.querySelector('[data-testid="approval-publish-checklist"]')
+    expect(dialog).not.toBeNull()
+    const fieldsItem = dialog!.querySelector('[data-testid="approval-publish-checklist-item-fields"]')
+    expect(fieldsItem).not.toBeNull()
+    expect(fieldsItem!.getAttribute('data-ok')).toBe('false')
+    expect(fieldsItem!.textContent).toContain('✗')
+    expect(fieldsItem!.textContent).toContain('模板 Key 必填')
+
+    const confirmButton = dialog!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
+    expect(confirmButton.disabled).toBe(true)
+
+    confirmButton.click()
+    await flushUi()
+    expect(createTemplateSpy).not.toHaveBeenCalled()
+    expect(publishTemplateSpy).not.toHaveBeenCalled()
+  })
+
+  it('B2-03: a starter-preset placeholder role fails ONLY the "审批人占位" checklist item (fields/flow stay ✓) and disables the confirm button', async () => {
+    routeParams = { id: 'tpl_sentinel_publish' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({
+        assigneeSources: [{ kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'error',
+      }),
+    }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const dialog = container!.querySelector('[data-testid="approval-publish-checklist"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog!.querySelector('[data-testid="approval-publish-checklist-item-fields"]')!.getAttribute('data-ok')).toBe('true')
+    expect(dialog!.querySelector('[data-testid="approval-publish-checklist-item-flow"]')!.getAttribute('data-ok')).toBe('true')
+    const placeholderItem = dialog!.querySelector('[data-testid="approval-publish-checklist-item-placeholder"]')
+    expect(placeholderItem).not.toBeNull()
+    expect(placeholderItem!.getAttribute('data-ok')).toBe('false')
+    expect(placeholderItem!.textContent).toContain('✗')
+    expect(placeholderItem!.textContent).toContain('主管') // the placeholder node's name, so the admin can find it
+    expect(placeholderItem!.textContent).toContain('占位')
+
+    const confirmButton = dialog!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
+    expect(confirmButton.disabled).toBe(true)
+
+    confirmButton.click()
+    await flushUi()
+    expect(publishTemplateSpy).not.toHaveBeenCalled()
   })
 
   it('T7: wires the self-approver toggle through the mounted view into the saved payload', async () => {
