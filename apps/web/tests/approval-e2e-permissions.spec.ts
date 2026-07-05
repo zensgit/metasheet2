@@ -206,7 +206,13 @@ const ElInput = defineComponent({
   name: 'ElInput',
   props: { modelValue: [String, Number], placeholder: String, clearable: Boolean, type: String, rows: Number },
   emits: ['update:modelValue', 'clear'],
-  render() { return h('input', { 'data-el-input': 'true' }) },
+  render() {
+    return h('input', {
+      'data-el-input': 'true',
+      value: this.modelValue ?? '',
+      onInput: (e: Event) => this.$emit('update:modelValue', (e.target as HTMLInputElement).value),
+    })
+  },
 })
 
 const ElInputNumber = defineComponent({
@@ -757,7 +763,14 @@ describe('Approval E2E Permissions', () => {
       rejectBtn!.click()
       await flushUi()
 
+      // B1-04: the fixture's policy.rejectCommentRequired=true disables confirm until a reason is
+      // entered.
       const dialog = container!.querySelector('[data-dialog-visible="true"]')
+      const textarea = dialog!.querySelector('[data-el-input]') as HTMLInputElement
+      textarea.value = '金额有误'
+      textarea.dispatchEvent(new Event('input'))
+      await flushUi()
+
       const confirmBtn = Array.from(dialog!.querySelectorAll('button'))
         .find((b) => b.textContent?.trim() === '确认')
       confirmBtn!.click()
@@ -765,7 +778,7 @@ describe('Approval E2E Permissions', () => {
 
       expect(executeActionSpy).toHaveBeenCalledWith('apv_pending_1', {
         action: 'reject',
-        comment: undefined,
+        comment: '金额有误',
       })
     })
 

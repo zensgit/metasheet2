@@ -952,8 +952,17 @@ describe('Approval E2E Lifecycle', () => {
       rejectBtn!.click()
       await flushUi()
 
-      // Click confirm (danger button)
+      // B1-04: the fixture's policy.rejectCommentRequired=true disables confirm until a reason is
+      // entered — type one first (mirrors "entering comment before approving sends comment in
+      // action" above for the approve flow).
       const dialog = container!.querySelector('[data-dialog-visible="true"]')
+      const textarea = dialog!.querySelector('[data-el-input]') as HTMLInputElement
+      const nativeInputEvent = new Event('input', { bubbles: true })
+      Object.defineProperty(nativeInputEvent, 'target', { value: { value: '金额有误' } })
+      textarea.dispatchEvent(nativeInputEvent)
+      await flushUi()
+
+      // Click confirm (danger button)
       const confirmBtn = Array.from(dialog!.querySelectorAll('button'))
         .find((b) => b.textContent?.trim() === '确认')
       confirmBtn!.click()
@@ -961,7 +970,7 @@ describe('Approval E2E Lifecycle', () => {
 
       expect(executeActionSpy).toHaveBeenCalledWith('apv_pending_1', {
         action: 'reject',
-        comment: undefined,
+        comment: '金额有误',
       })
     })
 
@@ -978,7 +987,14 @@ describe('Approval E2E Lifecycle', () => {
       rejectBtn!.click()
       await flushUi()
 
+      // B1-04: same required-reason pre-flight as above.
       const dialog = container!.querySelector('[data-dialog-visible="true"]')
+      const textarea = dialog!.querySelector('[data-el-input]') as HTMLInputElement
+      const nativeInputEvent = new Event('input', { bubbles: true })
+      Object.defineProperty(nativeInputEvent, 'target', { value: { value: '金额有误' } })
+      textarea.dispatchEvent(nativeInputEvent)
+      await flushUi()
+
       const confirmBtn = Array.from(dialog!.querySelectorAll('button'))
         .find((b) => b.textContent?.trim() === '确认')
       confirmBtn!.click()

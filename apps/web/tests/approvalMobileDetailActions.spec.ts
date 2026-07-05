@@ -94,11 +94,26 @@ const ElButton = defineComponent({
   props: { type: String, loading: Boolean, disabled: Boolean, text: Boolean, plain: Boolean },
   emits: ['click'],
   render() {
+    // B1-04: reflect `disabled`/`loading` on the native button (matches real el-button, which
+    // also treats `loading` as disabled) so the reject-comment pre-flight is actually testable —
+    // a disabled button must not fire its click handler.
+    const isDisabled = this.disabled || this.loading
     return h('button', {
       'data-el-button': this.type || 'default',
-      onClick: (e: Event) => this.$emit('click', e),
+      disabled: isDisabled,
+      onClick: (e: Event) => {
+        if (isDisabled) return
+        this.$emit('click', e)
+      },
     }, this.$slots.default?.())
   },
+})
+// B1-04: dialog-scoped error alert needs its `title` text rendered so the SERVER-message
+// assertion can read it back; the generic `stub()` helper below only renders the default slot.
+const ElAlert = defineComponent({
+  name: 'ElAlert',
+  props: { title: String, type: String, closable: Boolean, showIcon: Boolean },
+  render() { return h('div', { 'data-el-alert': this.type || 'default' }, this.title) },
 })
 const ElDialog = defineComponent({
   name: 'ElDialog',
@@ -228,11 +243,12 @@ describe('ApprovalDetailView — T3-1 mobile action-set restriction', () => {
     const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
     app = createApp(Host)
     // Broad Element Plus stubs; the action buttons are the assertion surface.
-    for (const name of ['ElAlert', 'ElDivider', 'ElEmpty', 'ElTable', 'ElTimeline', 'ElTimelineItem', 'ElForm', 'ElFormItem', 'ElSelect', 'ElOption', 'ElRadioGroup', 'ElRadio', 'ElIcon']) {
+    for (const name of ['ElDivider', 'ElEmpty', 'ElTable', 'ElTimeline', 'ElTimelineItem', 'ElForm', 'ElFormItem', 'ElSelect', 'ElOption', 'ElRadioGroup', 'ElRadio', 'ElIcon']) {
       app.component(name, stub(name))
     }
     app.component('ElTableColumn', ElTableColumn)
     app.component('ElButton', ElButton)
+    app.component('ElAlert', ElAlert)
     app.component('ElDialog', ElDialog)
     app.component('ElPopconfirm', ElPopconfirm)
     app.component('ElTag', ElTag)
@@ -366,5 +382,85 @@ describe('ApprovalDetailView — T3-1 mobile action-set restriction', () => {
 
     const textarea = dialog!.querySelector('[data-el-input]') as HTMLInputElement
     expect(textarea.value).toBe('同意')
+  })
+
+  // ---------------------------------------------------------------------------
+  // B1-04 (宽恕型错误三件套) — dialog-scoped server errors + reject-comment pre-flight.
+  // ---------------------------------------------------------------------------
+
+  it('B1-04: action failure keeps the dialog open and shows the inline SERVER message', async () => {
+    await mountView()
+    const serverError = Object.assign(new Error('金额合计不一致'), { code: 'AMOUNT_MISMATCH', status: 400 })
+    executeActionSpy.mockRejectedValueOnce(serverError)
+
+    const approveBtn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.includes('通过'))
+    approveBtn!.click()
+    await flushUi()
+
+    const confirmBtn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.trim() === '确认')
+    confirmBtn!.click()
+    await flushUi()
+
+    // Dialog stays open (no generic toast closed it) and shows the server's own message.
+    const dialog = container!.querySelector('[data-el-dialog]')
+    expect(dialog).toBeTruthy()
+    const alert = dialog!.querySelector('[data-testid="approval-action-dialog-error"]')
+    expect(alert?.textContent).toBe('金额合计不一致')
+  })
+
+  it('B1-04: reject confirm is disabled until a reason is entered when policy.rejectCommentRequired=true', async () => {
+    mockActiveApproval.value = { ...pendingInstance(), policy: { rejectCommentRequired: true } }
+    await mountView()
+
+    const rejectBtn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.includes('驳回'))
+    rejectBtn!.click()
+    await flushUi()
+
+    const dialog = container!.querySelector('[data-el-dialog]')
+    const confirmBtn = Array.from(dialog!.querySelectorAll('button')).find((b) => b.textContent?.trim() === '确认') as HTMLButtonElement
+    expect(confirmBtn.disabled).toBe(true)
+
+    const textarea = dialog!.querySelector('[data-el-input]') as HTMLInputElement
+    textarea.value = '金额有误'
+    textarea.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    expect(confirmBtn.disabled).toBe(false)
+    confirmBtn.click()
+    await flushUi()
+    expect(executeActionSpy).toHaveBeenCalledWith('apv_1', expect.objectContaining({ action: 'reject', comment: '金额有误' }))
+  })
+
+  it('B1-04: reject confirm stays enabled with an empty comment when policy.rejectCommentRequired=false', async () => {
+    mockActiveApproval.value = { ...pendingInstance(), policy: { rejectCommentRequired: false } }
+    await mountView()
+
+    const rejectBtn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.includes('驳回'))
+    rejectBtn!.click()
+    await flushUi()
+
+    const dialog = container!.querySelector('[data-el-dialog]')
+    const confirmBtn = Array.from(dialog!.querySelectorAll('button')).find((b) => b.textContent?.trim() === '确认') as HTMLButtonElement
+    expect(confirmBtn.disabled).toBe(false)
+  })
+
+  it('B1-04: a typed error (status property) also triggers refresh-on-4xx, not just the legacy "API error: NNN" string', async () => {
+    mockApprovalMobileFlag.value = true
+    setViewport(true)
+    const typedError = Object.assign(new Error('审批流程已终止，无法执行操作'), { status: 409, code: 'APPROVAL_STATE_CONFLICT' })
+    executeActionSpy.mockRejectedValueOnce(typedError)
+    await mountView()
+    loadDetailSpy.mockClear()
+    loadHistorySpy.mockClear()
+
+    const approveBtn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.includes('通过'))
+    approveBtn!.click()
+    await flushUi()
+    const confirmBtn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.trim() === '确认')
+    confirmBtn!.click()
+    await flushUi()
+
+    expect(loadDetailSpy).toHaveBeenCalledWith('apv_1')
+    expect(loadHistorySpy).toHaveBeenCalledWith('apv_1')
   })
 })

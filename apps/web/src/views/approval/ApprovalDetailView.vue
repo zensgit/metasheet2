@@ -347,8 +347,19 @@
       :title="actionDialogTitle"
       width="480px"
     >
+      <!-- B1-04: dialog-scoped failure message — the server's own reason, kept in place of a
+           generic toast so the reader learns WHY without losing the dialog/typed comment. -->
+      <el-alert
+        v-if="actionDialogError"
+        type="error"
+        show-icon
+        :closable="false"
+        :title="actionDialogError"
+        data-testid="approval-action-dialog-error"
+        class="approval-detail__dialog-error"
+      />
       <el-form>
-        <el-form-item label="审批意见">
+        <el-form-item :label="actionCommentLabel">
           <!-- B1-05: quick phrases — this user's recently-used phrases first, then the fixed
                preset list for 通过/驳回. Clicking a chip fills (or appends to) the textarea;
                free-typed text is never remembered, only a submitted phrase that exactly
@@ -369,7 +380,7 @@
             v-model="actionComment"
             type="textarea"
             :rows="3"
-            placeholder="请输入审批意见"
+            :placeholder="actionCommentPlaceholder"
           />
         </el-form-item>
       </el-form>
@@ -378,6 +389,7 @@
         <el-button
           :type="currentAction === 'approve' ? 'success' : 'danger'"
           :loading="store.loading"
+          :disabled="actionConfirmDisabled"
           @click="submitAction"
         >
           确认
@@ -521,6 +533,16 @@
       title="添加评论"
       width="480px"
     >
+      <!-- B1-04: same dialog-scoped failure message as the 通过/驳回 dialog above. -->
+      <el-alert
+        v-if="actionDialogError"
+        type="error"
+        show-icon
+        :closable="false"
+        :title="actionDialogError"
+        data-testid="approval-action-dialog-error"
+        class="approval-detail__dialog-error"
+      />
       <el-form>
         <el-form-item label="评论内容">
           <!-- B1-05: quick phrases — see the 通过/驳回 dialog above for the same mechanics. -->
@@ -749,6 +771,12 @@ const commentDialogVisible = ref(false)
 const returnDialogVisible = ref(false)
 const currentAction = ref<ApprovalActionType>('approve')
 const actionComment = ref('')
+// B1-04: dialog-scoped failure message for the approve/reject + comment dialogs (宽恕型错误三件套
+// part 2). Cleared on next dialog open / next submit attempt; the catch blocks below set it
+// INSTEAD OF a generic toast so the reader sees the server's actual reason without losing their
+// typed comment — the dialog stays open (see `submitAction`/`submitComment`). Non-dialog actions
+// (revoke's popconfirm) are unaffected and keep their existing toast.
+const actionDialogError = ref<string | null>(null)
 const transferUserId = ref('')
 const returnTargetNodeKey = ref('')
 // P1-B 加签/减签 dialog state.
@@ -799,6 +827,17 @@ const returnableNodes = computed(() => {
 const actionDialogTitle = computed(() =>
   currentAction.value === 'approve' ? '审批通过' : '审批驳回',
 )
+
+// B1-04: reject-comment pre-flight. `policy.rejectCommentRequired` defaults to "required" — only
+// an explicit `false` waives it, so an absent/legacy policy snapshot stays conservative. Scoped to
+// the reject action only; the 通过 dialog's "审批意见" stays optional (mirrors the add-sign
+// disabled-until-complete pattern already used by `submitAddSign`/`submitReduceSign` below).
+const rejectCommentRequired = computed(() =>
+  currentAction.value === 'reject' && approval.value?.policy?.rejectCommentRequired !== false,
+)
+const actionCommentLabel = computed(() => (rejectCommentRequired.value ? '驳回原因（必填）' : '审批意见'))
+const actionCommentPlaceholder = computed(() => (rejectCommentRequired.value ? '请填写驳回原因' : '请输入审批意见'))
+const actionConfirmDisabled = computed(() => rejectCommentRequired.value && !actionComment.value.trim())
 
 // B1-05: quick-phrase chips for whichever action's dialog is currently open — this user's own
 // recently-used phrases (most-recent-first) first, then the fixed preset list, deduped, capped
@@ -964,6 +1003,7 @@ function retryLoad() {
 function openActionDialog(action: 'approve' | 'reject') {
   currentAction.value = action
   actionComment.value = ''
+  actionDialogError.value = null
   actionDialogVisible.value = true
 }
 
@@ -984,6 +1024,7 @@ function openCommentDialog() {
   // 'comment' preset/recent list here (rather than whatever approve/reject dialog ran last).
   currentAction.value = 'comment'
   actionComment.value = ''
+  actionDialogError.value = null
   commentDialogVisible.value = true
 }
 
@@ -994,11 +1035,27 @@ function openCommentDialog() {
 // detail + history so the mobile action bar reflects live state instead of a
 // stale one. Scoped to the mobile layout so desktop behavior is unchanged.
 function is4xxConflict(error: unknown): boolean {
+  // B1-04: `dispatchAction`'s real failures now carry a typed `.status` (see
+  // `ApprovalApiError`/`approvalRequestError` in approvals/api.ts) whose `.message` is the
+  // server's own text — it no longer matches the legacy "API error: NNN" shape below. Check
+  // `.status` first; keep the regex as a fallback for anything still throwing the old generic
+  // format (e.g. a mocked/legacy rejection).
+  if (error && typeof error === 'object' && 'status' in error) {
+    const status = (error as { status?: unknown }).status
+    if (typeof status === 'number') return status >= 400 && status < 500
+  }
   const message = error instanceof Error ? error.message : String(error ?? '')
   const match = /API error:\s*(\d{3})/.exec(message)
   if (!match) return false
   const status = Number(match[1])
   return status >= 400 && status < 500
+}
+
+// B1-04: prefer the typed/thrown error's own message (server text, or the helper's
+// status-coded fallback); anything else (a non-Error throw) falls back to the caller-supplied
+// generic copy so the dialog never renders a blank alert.
+function dialogErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback
 }
 
 async function refreshAfterStaleMobileAction(id: string, error: unknown): Promise<void> {
@@ -1008,7 +1065,9 @@ async function refreshAfterStaleMobileAction(id: string, error: unknown): Promis
 }
 
 async function submitAction() {
+  if (actionConfirmDisabled.value) return
   const id = route.params.id as string
+  actionDialogError.value = null
   try {
     await store.executeAction(id, {
       action: currentAction.value,
@@ -1019,7 +1078,9 @@ async function submitAction() {
     actionDialogVisible.value = false
     await store.loadHistory(id)
   } catch (error) {
-    ElMessage.error('操作失败，请重试')
+    // B1-04: keep the dialog open + show the server's own reason inline instead of a generic
+    // toast (see `actionDialogError` above); non-dialog actions further down keep their toasts.
+    actionDialogError.value = dialogErrorMessage(error, '操作失败，请重试')
     await refreshAfterStaleMobileAction(id, error)
   }
 }
@@ -1092,6 +1153,7 @@ async function submitReduceSign() {
 async function submitComment() {
   if (!actionComment.value.trim()) return
   const id = route.params.id as string
+  actionDialogError.value = null
   try {
     await store.executeAction(id, {
       action: 'comment',
@@ -1102,7 +1164,8 @@ async function submitComment() {
     commentDialogVisible.value = false
     await store.loadHistory(id)
   } catch (error) {
-    ElMessage.error('评论提交失败，请重试')
+    // B1-04: same dialog-scoped inline error as `submitAction` above.
+    actionDialogError.value = dialogErrorMessage(error, '评论提交失败，请重试')
     await refreshAfterStaleMobileAction(id, error)
   }
 }
@@ -1224,6 +1287,11 @@ onMounted(async () => {
 }
 
 .approval-detail__error {
+  margin-bottom: 16px;
+}
+
+/* B1-04: dialog-scoped failure alert (approve/reject + comment dialogs). */
+.approval-detail__dialog-error {
   margin-bottom: 16px;
 }
 

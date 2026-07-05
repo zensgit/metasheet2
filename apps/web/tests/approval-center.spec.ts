@@ -84,9 +84,20 @@ const ElTabPane = defineComponent({
 const ElTable = defineComponent({
   name: 'ElTable',
   props: { data: Array, loading: Boolean, stripe: Boolean, highlightCurrentRow: Boolean },
-  emits: ['row-click'],
+  emits: ['row-click', 'selection-change'],
   render() {
-    return h('div', { 'data-el-table': 'true' }, this.$slots.default?.())
+    return h('div', { 'data-el-table': 'true' }, [
+      // B1-04 test-only affordance: the real checkbox selection column can't be driven
+      // headlessly here, so expose a direct trigger for "select every row currently bound to
+      // `data`" — the SFC's own `handlePendingSelectionChange` still applies
+      // `isRowBatchSelectable`, so this stays honest about what ends up selected.
+      h('button', {
+        type: 'button',
+        'data-testid': 'test-select-all-rows',
+        onClick: () => this.$emit('selection-change', this.data ?? []),
+      }, 'select-all'),
+      this.$slots.default?.(),
+    ])
   },
 })
 
@@ -112,7 +123,11 @@ const ElInput = defineComponent({
   props: { modelValue: String, placeholder: String, clearable: Boolean, type: String, rows: Number },
   emits: ['update:modelValue', 'clear'],
   render() {
-    return h('input', { 'data-el-input': 'true' })
+    return h('input', {
+      'data-el-input': 'true',
+      value: this.modelValue ?? '',
+      onInput: (e: Event) => this.$emit('update:modelValue', (e.target as HTMLInputElement).value),
+    })
   },
 })
 
@@ -147,7 +162,28 @@ const ElButton = defineComponent({
   props: { type: String, text: Boolean, link: Boolean, plain: Boolean, size: String, loading: Boolean, disabled: Boolean },
   emits: ['click'],
   render() {
-    return h('button', { 'data-el-button': this.type || 'default', onClick: (e: Event) => this.$emit('click', e) }, this.$slots.default?.())
+    // B1-04: reflect `disabled`/`loading` on the native button (matches real el-button, which
+    // also treats `loading` as disabled) so the batch-reject pre-flight is actually testable — a
+    // disabled button must not fire its click handler.
+    const isDisabled = this.disabled || this.loading
+    return h('button', {
+      'data-el-button': this.type || 'default',
+      disabled: isDisabled,
+      onClick: (e: Event) => {
+        if (isDisabled) return
+        this.$emit('click', e)
+      },
+    }, this.$slots.default?.())
+  },
+})
+
+const ElDialog = defineComponent({
+  name: 'ElDialog',
+  props: { modelValue: Boolean, title: String, width: String },
+  emits: ['update:modelValue'],
+  render() {
+    if (!this.modelValue) return null
+    return h('div', { 'data-el-dialog': this.title }, [this.$slots.default?.(), this.$slots.footer?.()])
   },
 })
 
@@ -224,6 +260,7 @@ describe('ApprovalCenterView', () => {
     app.component('ElPagination', ElPagination)
     app.component('ElButton', ElButton)
     app.component('ElAlert', ElAlert)
+    app.component('ElDialog', ElDialog)
     app.component('ElEmpty', ElEmpty)
     app.directive('loading', stubDirective)
     app.mount(container!)
@@ -339,5 +376,90 @@ describe('ApprovalCenterView', () => {
       name: 'attendance',
       query: { section: 'attendance-overview-requests' },
     })
+  })
+
+  // ---------------------------------------------------------------------------
+  // B1-04 (宽恕型错误三件套 part 3) — batch reject pre-flight. List rows already carry `policy`
+  // (UnifiedApprovalDTO.policy), so `ApprovalCenterView` mirrors the single-instance reject
+  // dialog's conservative default: required unless EVERY selected row's policy explicitly opts
+  // out with `false`.
+  // ---------------------------------------------------------------------------
+  function pendingRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'apv_1',
+      requestNo: 'AP-100001',
+      title: '出差报销',
+      status: 'pending',
+      requester: { name: '张三' },
+      createdAt: '2026-04-10T08:00:00Z',
+      assignments: [],
+      policy: null,
+      ...overrides,
+    }
+  }
+
+  function selectAllPendingRows(): void {
+    const trigger = container!.querySelector('[data-testid="test-select-all-rows"]') as HTMLButtonElement
+    trigger.click()
+  }
+
+  it('B1-04: batch reject confirm is disabled until a comment is entered (default/undefined policy = required)', async () => {
+    mockPendingApprovals.value = [pendingRow()]
+    await mountView()
+
+    selectAllPendingRows()
+    await flushUi()
+
+    const openBtn = container!.querySelector('[data-testid="approval-batch-reject"]') as HTMLButtonElement
+    expect(openBtn.disabled).toBe(false)
+    openBtn.click()
+    await flushUi()
+
+    const confirmBtn = container!.querySelector('[data-testid="approval-batch-reject-confirm"]') as HTMLButtonElement
+    expect(confirmBtn).toBeTruthy()
+    expect(confirmBtn.disabled).toBe(true)
+
+    const commentInput = container!.querySelector('[data-testid="approval-batch-reject-comment"]') as HTMLInputElement
+    commentInput.value = '金额有误'
+    commentInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    expect(confirmBtn.disabled).toBe(false)
+  })
+
+  it('B1-04: batch reject confirm stays enabled with an empty comment when every selected row opts out', async () => {
+    mockPendingApprovals.value = [
+      pendingRow({ id: 'apv_1', policy: { rejectCommentRequired: false } }),
+      pendingRow({ id: 'apv_2', policy: { rejectCommentRequired: false } }),
+    ]
+    await mountView()
+
+    selectAllPendingRows()
+    await flushUi()
+
+    const openBtn = container!.querySelector('[data-testid="approval-batch-reject"]') as HTMLButtonElement
+    openBtn.click()
+    await flushUi()
+
+    const confirmBtn = container!.querySelector('[data-testid="approval-batch-reject-confirm"]') as HTMLButtonElement
+    expect(confirmBtn.disabled).toBe(false)
+  })
+
+  it('B1-04: batch reject confirm stays disabled when only SOME selected rows opt out (conservative default)', async () => {
+    mockPendingApprovals.value = [
+      pendingRow({ id: 'apv_1', policy: { rejectCommentRequired: false } }),
+      pendingRow({ id: 'apv_2', policy: null }),
+    ]
+    await mountView()
+
+    selectAllPendingRows()
+    await flushUi()
+
+    const openBtn = container!.querySelector('[data-testid="approval-batch-reject"]') as HTMLButtonElement
+    openBtn.click()
+    await flushUi()
+
+    const confirmBtn = container!.querySelector('[data-testid="approval-batch-reject-confirm"]') as HTMLButtonElement
+    expect(confirmBtn.disabled).toBe(true)
   })
 })

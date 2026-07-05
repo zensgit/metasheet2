@@ -407,7 +407,7 @@
         v-model="batchRejectComment"
         type="textarea"
         :rows="3"
-        placeholder="驳回意见（部分审批模板要求必填）"
+        :placeholder="batchRejectCommentRequired ? '驳回原因（必填）' : '驳回意见（选填）'"
         data-testid="approval-batch-reject-comment"
       />
       <template #footer>
@@ -415,6 +415,7 @@
         <el-button
           type="danger"
           :loading="batchRunning"
+          :disabled="batchRejectConfirmDisabled"
           data-testid="approval-batch-reject-confirm"
           @click="handleBatchReject"
         >
@@ -547,7 +548,18 @@ function openBatchReject(): void {
   batchRejectDialogVisible.value = true
 }
 
+// B1-04 (宽恕型错误三件套 part 3): batch reject pre-flight. List rows already carry `policy`
+// (UnifiedApprovalDTO.policy), so this mirrors the single-instance reject dialog's conservative
+// default — required unless EVERY selected row's policy explicitly opts out with `false`.
+const batchRejectCommentRequired = computed(() =>
+  selectedPending.value.some((row) => row.policy?.rejectCommentRequired !== false),
+)
+const batchRejectConfirmDisabled = computed(() =>
+  batchRejectCommentRequired.value && !batchRejectComment.value.trim(),
+)
+
 async function handleBatchReject(): Promise<void> {
+  if (batchRejectConfirmDisabled.value) return
   await runBatch('reject', batchRejectComment.value)
   batchRejectDialogVisible.value = false
 }
