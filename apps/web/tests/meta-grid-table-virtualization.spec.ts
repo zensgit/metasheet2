@@ -12,7 +12,7 @@
  * conditional-format cells still render in-window) — never brittle exact pixel counts.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App } from 'vue'
+import { createApp, h, nextTick, ref, type App } from 'vue'
 import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import type { EvaluatedFormatting, FieldScaleMap } from '../src/multitable/utils/conditional-formatting'
@@ -33,11 +33,12 @@ const FIELDS: MetaField[] = [
   { id: 'title', name: 'Title', type: 'string' },
   { id: 'score', name: 'Score', type: 'number' },
 ]
+const GROUP_FIELD: MetaField = { id: 'group', name: 'Group', type: 'string' }
 
 function makeRows(n: number): MetaRecord[] {
   const rows: MetaRecord[] = []
   for (let i = 0; i < n; i++) {
-    rows.push({ id: `r${i}`, version: 1, data: { title: `Row ${i}`, score: i } })
+    rows.push({ id: `r${i}`, version: 1, data: { title: `Row ${i}`, score: i, group: `Group ${i % 30}` } })
   }
   return rows
 }
@@ -89,6 +90,16 @@ function dataRowIds(root: HTMLDivElement): string[] {
 
 function renderedRowCount(root: HTMLDivElement): number {
   return root.querySelectorAll('tbody tr.meta-grid__row').length
+}
+
+function renderedGroupItemCount(root: HTMLDivElement): number {
+  return root.querySelectorAll('tbody tr.meta-grid__row, tbody tr.meta-grid__group-header, tbody tr.meta-grid__group-subtotal').length
+}
+
+function spacerHeight(root: HTMLDivElement, selector: string): number {
+  const cell = root.querySelector<HTMLElement>(`${selector} td`)
+  const parsed = Number.parseFloat(cell?.style.height ?? '0')
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 describe('MetaGridTable row virtualization (A1)', () => {
@@ -222,6 +233,189 @@ describe('MetaGridTable row virtualization (A1)', () => {
     expect(renderedRowCount(root)).toBe(2000)
     expect(root.querySelector('[data-test="grid-top-spacer"]')).toBeNull()
     expect(root.querySelector('[data-test="grid-bottom-spacer"]')).toBeNull()
+  })
+})
+
+describe('MetaGridTable grouped row virtualization (GW)', () => {
+  it('renders only a windowed subset of grouped rows when grouped item count is large', async () => {
+    const root = mountGrid(makeRows(3000), { groupField: GROUP_FIELD })
+    setViewport(root, 600)
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+
+    expect(renderedRowCount(root)).toBeGreaterThan(0)
+    expect(renderedRowCount(root)).toBeLessThan(200)
+    expect(renderedGroupItemCount(root)).toBeLessThan(240)
+    expect(root.querySelector('[data-test="grid-bottom-spacer"]')).toBeTruthy()
+    // C1: spacers reserve the exact full grouped stream height under jsdom's 36px density fallback.
+    const fullItems = 3000 + 30 // data rows + group headers; no subtotal rows without aggregateGroups
+    const mountedItems = renderedGroupItemCount(root)
+    expect(spacerHeight(root, '[data-test="grid-top-spacer"]') + mountedItems * 36 + spacerHeight(root, '[data-test="grid-bottom-spacer"]')).toBe(fullItems * 36)
+  })
+
+  it('shifts the grouped rendered window when the container is scrolled', async () => {
+    const root = mountGrid(makeRows(3000), { groupField: GROUP_FIELD })
+    const wrap = setViewport(root, 600)
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+
+    const firstBefore = dataRowIds(root)[0]
+    expect(firstBefore).toBe('1')
+
+    wrap.scrollTop = 18000
+    wrap.dispatchEvent(new Event('scroll'))
+    await nextTick()
+
+    const firstAfter = dataRowIds(root)[0]
+    expect(firstAfter).not.toBe(firstBefore)
+    expect(Number(firstAfter)).toBeGreaterThan(100)
+    expect(renderedRowCount(root)).toBeLessThan(200)
+    expect(root.querySelector('[data-test="grid-top-spacer"]')).toBeTruthy()
+  })
+
+  it('renders small grouped sets fully without spacer rows', async () => {
+    const root = mountGrid(makeRows(10), { groupField: GROUP_FIELD })
+    setViewport(root, 600)
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+
+    expect(renderedRowCount(root)).toBe(10)
+    expect(root.querySelector('[data-test="grid-top-spacer"]')).toBeNull()
+    expect(root.querySelector('[data-test="grid-bottom-spacer"]')).toBeNull()
+  })
+
+  it('keeps the keyboard-focused grouped row inside the rendered window while navigating down', async () => {
+    const root = mountGrid(makeRows(3000), { groupField: GROUP_FIELD })
+    const wrap = setViewport(root, 600)
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+
+    const grid = root.querySelector('.meta-grid') as HTMLElement
+    const scrollBefore = wrap.scrollTop
+    const PRESSES = 80
+    for (let i = 0; i < PRESSES; i++) {
+      grid.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    }
+    await nextTick()
+
+    expect(wrap.scrollTop).toBeGreaterThan(scrollBefore)
+    const focused = root.querySelector('tbody tr.meta-grid__row--focused') as HTMLElement | null
+    expect(focused).toBeTruthy()
+    expect(focused!.querySelector('.meta-grid__row-num span')?.textContent?.trim()).toBe(String(PRESSES))
+    expect(renderedRowCount(root)).toBeLessThan(200)
+  })
+
+  it('keeps select-all model-based under grouped windowing', async () => {
+    const onSelectionChange = vi.fn()
+    const root = mountGrid(makeRows(3000), {
+      groupField: GROUP_FIELD,
+      enableMultiSelect: true,
+      onSelectionChange,
+    })
+    setViewport(root, 600)
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+
+    expect(renderedRowCount(root)).toBeLessThan(200)
+    const checkbox = root.querySelector('thead input[type="checkbox"]') as HTMLInputElement
+    checkbox.dispatchEvent(new Event('change'))
+    await nextTick()
+
+    const selected = onSelectionChange.mock.calls.at(-1)?.[0] as string[]
+    expect(selected).toHaveLength(3000)
+    expect(selected[0]).toBe('r0')
+    expect(selected.at(-1)).toBe('r2999')
+  })
+
+  it('forces full grouped render during print and restores windowing after print', async () => {
+    const root = mountGrid(makeRows(3000), { groupField: GROUP_FIELD })
+    setViewport(root, 600)
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+
+    expect(renderedRowCount(root)).toBeLessThan(200)
+    window.dispatchEvent(new Event('beforeprint'))
+    await nextTick()
+
+    expect(renderedRowCount(root)).toBe(3000)
+    expect(root.querySelector('[data-test="grid-top-spacer"]')).toBeNull()
+    expect(root.querySelector('[data-test="grid-bottom-spacer"]')).toBeNull()
+
+    window.dispatchEvent(new Event('afterprint'))
+    await nextTick()
+    expect(renderedRowCount(root)).toBeLessThan(200)
+    expect(root.querySelector('[data-test="grid-bottom-spacer"]')).toBeTruthy()
+  })
+
+  it('keeps server subtotal values intact inside the grouped window', async () => {
+    const root = mountGrid(makeRows(300), {
+      groupField: GROUP_FIELD,
+      aggregationConfig: { score: 'sum' },
+      aggregateGroups: Array.from({ length: 30 }, (_, i) => ({
+        key: `Group ${i}`,
+        count: 10,
+        aggregates: { score: { fn: 'sum', value: 9000 + i } },
+      })),
+    })
+    setViewport(root, 600)
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+
+    expect(renderedGroupItemCount(root)).toBeLessThan(120)
+    const subtotal = root.querySelector('[data-test="group-subtotal"][data-group-path="Group 0"]') as HTMLElement | null
+    expect(subtotal).toBeTruthy()
+    expect(subtotal!.textContent).toContain('9000')
+  })
+
+  it('clamps to a nonblank grouped window after a controlled collapse while scrolled', async () => {
+    app?.unmount()
+    container?.remove()
+    const collapsed = ref<string[]>([])
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      setup() {
+        return () => h(MetaGridTable, {
+          rows: makeRows(3000),
+          visibleFields: FIELDS,
+          sortRules: [],
+          loading: false,
+          currentPage: 1,
+          totalPages: 1,
+          startIndex: 0,
+          canEdit: true,
+          canDelete: true,
+          searchText: '',
+          rowDensity: 'normal',
+          groupField: GROUP_FIELD,
+          collapsedGroupKeys: collapsed.value,
+          onToggleGroup: (key: string) => {
+            collapsed.value = collapsed.value.includes(key)
+              ? collapsed.value.filter((item) => item !== key)
+              : [...collapsed.value, key]
+          },
+        })
+      },
+    })
+    app.mount(container)
+    const root = container
+    const wrap = setViewport(root, 600)
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+
+    wrap.scrollTop = 18000
+    wrap.dispatchEvent(new Event('scroll'))
+    await nextTick()
+
+    const header = root.querySelector('[data-test="group-header"]') as HTMLElement
+    const toggledPath = header.getAttribute('data-group-path')
+    header.click()
+    await nextTick()
+
+    expect(collapsed.value).toContain(toggledPath)
+    expect(renderedGroupItemCount(root)).toBeGreaterThan(0)
+    expect(renderedGroupItemCount(root)).toBeLessThan(240)
+    expect(root.querySelector(`[data-test="group-header"][data-group-path="${toggledPath}"]`)).toBeTruthy()
   })
 })
 

@@ -33,7 +33,10 @@
           </tr>
         </thead>
         <tbody v-if="groupedRows">
-          <template v-for="item in groupRenderItems" :key="item.kind + ':' + (item.kind === 'data' ? item.row.id : item.path + ':' + item.kind)">
+          <tr v-if="topSpacerHeight > 0" class="meta-grid__spacer" aria-hidden="true" data-test="grid-top-spacer">
+            <td :colspan="colSpan" :style="{ height: `${topSpacerHeight}px`, padding: '0', border: 'none' }"></td>
+          </tr>
+          <template v-for="item in windowedGroupRenderItems" :key="item.kind + ':' + (item.kind === 'data' ? item.row.id : item.path + ':' + item.kind)">
             <!-- Nested group header: one per level, indented by depth, per-level collapse toggle -->
             <tr v-if="item.kind === 'header'" class="meta-grid__group-header" :class="`meta-grid__group-header--l${item.level}`" data-test="group-header" :data-group-path="item.path" :data-group-level="item.level" @click="toggleGroup(item.path)">
               <td :colspan="colSpan">
@@ -143,6 +146,9 @@
               </td>
             </tr>
           </template>
+          <tr v-if="bottomSpacerHeight > 0" class="meta-grid__spacer" aria-hidden="true" data-test="grid-bottom-spacer">
+            <td :colspan="colSpan" :style="{ height: `${bottomSpacerHeight}px`, padding: '0', border: 'none' }"></td>
+          </tr>
           <tr v-if="!rows.length && !loading">
             <td :colspan="colSpan" class="meta-grid__empty">
               <div class="meta-grid__empty-icon">&#x1F4CB;</div>
@@ -597,6 +603,8 @@ const tableWrap = ref<HTMLElement | null>(null)
 const scrollTop = ref(0)
 const viewportHeight = ref(0)
 const measuredRowHeight = ref(0)
+const measuredGroupHeaderHeight = ref(0)
+const measuredGroupSubtotalHeight = ref(0)
 // Overscan rows above/below the viewport so fast scroll / keyboard nav never reveals a blank gap.
 const OVERSCAN_ROWS = 8
 // Below this many rows the common case renders identically (no spacer rows) — small datasets are
@@ -612,6 +620,8 @@ function densityRowHeight(): number {
   return 36
 }
 const rowHeightPx = computed(() => (measuredRowHeight.value > 0 ? measuredRowHeight.value : densityRowHeight()))
+const groupHeaderHeightPx = computed(() => (measuredGroupHeaderHeight.value > 0 ? measuredGroupHeaderHeight.value : rowHeightPx.value))
+const groupSubtotalHeightPx = computed(() => (measuredGroupSubtotalHeight.value > 0 ? measuredGroupSubtotalHeight.value : rowHeightPx.value))
 
 // While printing we render EVERY row (a windowed table would print only ~20 rows). beforeprint flips
 // this and afterprint restores it (the print itself reads the synchronously-rendered DOM).
@@ -657,9 +667,19 @@ const windowRows = computed<Array<{ row: MetaRecord; index: number }>>(() => {
 })
 // Spacer heights reserve the off-screen rows' vertical space so the scrollbar + scroll position match a
 // fully-rendered table. zero when windowing is off (no spacer rows are emitted then).
-const topSpacerHeight = computed(() => (flatWindowEnabled.value ? windowStart.value * rowHeightPx.value : 0))
+const topSpacerHeight = computed(() =>
+  flatWindowEnabled.value
+    ? windowStart.value * rowHeightPx.value
+    : groupedWindowEnabled.value
+      ? groupedItemOffsets.value[groupWindowStart.value]
+      : 0,
+)
 const bottomSpacerHeight = computed(() =>
-  flatWindowEnabled.value ? (filteredRows.value.length - windowEnd.value) * rowHeightPx.value : 0,
+  flatWindowEnabled.value
+    ? (filteredRows.value.length - windowEnd.value) * rowHeightPx.value
+    : groupedWindowEnabled.value
+      ? groupedTotalHeight.value - groupedItemOffsets.value[groupWindowEnd.value]
+      : 0,
 )
 
 // ── A1: infinite-scroll trigger (the ACTIVATION of the windowing above) ─────────────────────────────
@@ -700,6 +720,12 @@ function measureViewport() {
   const firstRow = tableWrap.value.querySelector<HTMLElement>('tbody tr.meta-grid__row')
   const rh = firstRow?.offsetHeight ?? 0
   if (rh > 0) measuredRowHeight.value = rh
+  const firstGroupHeader = tableWrap.value.querySelector<HTMLElement>('tbody tr.meta-grid__group-header')
+  const gh = firstGroupHeader?.offsetHeight ?? 0
+  if (gh > 0) measuredGroupHeaderHeight.value = gh
+  const firstGroupSubtotal = tableWrap.value.querySelector<HTMLElement>('tbody tr.meta-grid__group-subtotal')
+  const gs = firstGroupSubtotal?.offsetHeight ?? 0
+  if (gs > 0) measuredGroupSubtotalHeight.value = gs
   maybeKickWhenNotScrollable()
 }
 
@@ -718,9 +744,21 @@ function maybeKickWhenNotScrollable() {
 // Keep the focused row inside the mounted window during keyboard navigation so arrow-keys never land on
 // an un-rendered row. No-op when windowing is off or no row is focused.
 function scrollFocusedRowIntoWindow() {
-  if (!flatWindowEnabled.value || !tableWrap.value || focusRow.value < 0) return
-  const rowTop = focusRow.value * rowHeightPx.value
-  const rowBottom = rowTop + rowHeightPx.value
+  if (!tableWrap.value || focusRow.value < 0) return
+  let rowTop = 0
+  let rowBottom = 0
+  if (groupedWindowEnabled.value) {
+    const itemIndex = groupedDataItemIndexForNavIndex(focusRow.value)
+    if (itemIndex < 0) return
+    const offsets = groupedItemOffsets.value
+    rowTop = offsets[itemIndex]
+    rowBottom = offsets[itemIndex + 1]
+  } else if (flatWindowEnabled.value) {
+    rowTop = focusRow.value * rowHeightPx.value
+    rowBottom = rowTop + rowHeightPx.value
+  } else {
+    return
+  }
   const viewTop = tableWrap.value.scrollTop
   const viewBottom = viewTop + effectiveViewportHeight.value
   let next = viewTop
@@ -859,6 +897,86 @@ const groupRenderItems = computed<GroupRenderItem[]>(() => {
   walk(groupedRows.value)
   return items
 })
+
+const renderableGroupItems = computed(() =>
+  hasGroupSubtotals.value ? groupRenderItems.value : groupRenderItems.value.filter((item) => item.kind !== 'subtotal'),
+)
+
+const groupedWindowEnabled = computed(() =>
+  !printing.value
+  && !!groupedRows.value
+  && renderableGroupItems.value.length > VIRTUALIZE_MIN_ROWS,
+)
+
+function groupRenderItemHeight(item: GroupRenderItem): number {
+  if (item.kind === 'header') return groupHeaderHeightPx.value
+  if (item.kind === 'subtotal') return groupSubtotalHeightPx.value
+  return rowHeightPx.value
+}
+
+const groupedItemOffsets = computed(() => {
+  const offsets: number[] = [0]
+  let next = 0
+  for (const item of renderableGroupItems.value) {
+    next += groupRenderItemHeight(item)
+    offsets.push(next)
+  }
+  return offsets
+})
+
+const groupedTotalHeight = computed(() => groupedItemOffsets.value[groupedItemOffsets.value.length - 1] ?? 0)
+
+function groupedItemIndexAtOffset(pixelTop: number): number {
+  const items = renderableGroupItems.value
+  if (items.length === 0) return 0
+  const offsets = groupedItemOffsets.value
+  const clamped = Math.max(0, Math.min(pixelTop, groupedTotalHeight.value - 1))
+  let lo = 0
+  let hi = items.length
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi + 1) / 2)
+    if (offsets[mid] <= clamped) lo = mid
+    else hi = mid - 1
+  }
+  return Math.min(items.length - 1, lo)
+}
+
+function groupedEndIndexAtOffset(pixelBottom: number): number {
+  const items = renderableGroupItems.value
+  if (items.length === 0) return 0
+  const offsets = groupedItemOffsets.value
+  const clamped = Math.max(0, Math.min(pixelBottom, groupedTotalHeight.value))
+  let lo = 0
+  let hi = items.length
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2)
+    if (offsets[mid] < clamped) lo = mid + 1
+    else hi = mid
+  }
+  return Math.max(1, Math.min(items.length, lo))
+}
+
+const groupWindowStart = computed(() => {
+  if (!groupedWindowEnabled.value) return 0
+  return Math.max(0, groupedItemIndexAtOffset(scrollTop.value) - OVERSCAN_ROWS)
+})
+
+const groupWindowEnd = computed(() => {
+  const items = renderableGroupItems.value
+  if (!groupedWindowEnabled.value) return items.length
+  const visibleEnd = groupedEndIndexAtOffset(scrollTop.value + effectiveViewportHeight.value)
+  return Math.max(groupWindowStart.value + 1, Math.min(items.length, visibleEnd + OVERSCAN_ROWS))
+})
+
+const windowedGroupRenderItems = computed(() => {
+  const items = renderableGroupItems.value
+  if (!groupedWindowEnabled.value) return items
+  return items.slice(groupWindowStart.value, groupWindowEnd.value)
+})
+
+function groupedDataItemIndexForNavIndex(navIndex: number): number {
+  return renderableGroupItems.value.findIndex((item) => item.kind === 'data' && item.navIndex === navIndex)
+}
 
 // Flat list for keyboard nav (data rows only, respecting collapsed groups). Built from the same tree so
 // it matches groupRenderItems' navIndex ordering exactly.
