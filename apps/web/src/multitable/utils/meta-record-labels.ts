@@ -55,6 +55,8 @@ export type MetaRecordLabelKey =
   | 'record.batchReasonUnavailable' | 'record.batchReasonVersionUnavailable' | 'record.batchReasonUnsupported'
   | 'record.batchReasonSnapshotUnavailable' | 'record.batchReasonSchemaDrift' | 'record.batchReasonNoChange'
   | 'record.batchReasonDenied' | 'record.batchReasonConflict' | 'record.batchReasonForbidden' | 'record.batchReasonError'
+  // --- Global History Center inline per-field diff (read-only detail expansion) ---
+  | 'record.historyDiffMasked'
   // --- T9-R4 config-history view ---
   | 'record.configHistoryTitle' | 'record.configHistoryClose' | 'record.configHistoryFilterAll'
   | 'record.configHistoryEntityField' | 'record.configHistoryEntityView' | 'record.configHistoryEntityPermission'
@@ -138,6 +140,12 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.restorePreviewLoading': { en: 'Loading preview…', zh: '正在加载预览…' },
   'record.restorePreviewSet': { en: 'set', zh: '设为' },
   'record.restorePreviewUnset': { en: 'clear', zh: '清空' },
+  // Global History Center inline diff: a changed field whose value is hidden on BOTH sides (LOCK-3
+  // field-level permission mask) — reused for both the before and after slot of a masked row. Distinct
+  // from a legitimate set/clear (record.restorePreviewSet / record.restorePreviewUnset, reused below),
+  // which are one-sided absences the FE can tell apart from a mask (see changeFieldDiffs in
+  // HistoryCenterModal.vue).
+  'record.historyDiffMasked': { en: 'Masked', zh: '已脱敏' },
   // BS-4 batch restore
   'record.batchRestoreTitle': { en: 'Batch restore', zh: '批量恢复' },
   'record.batchRestoreRevertOriginal': { en: 'Revert selected records to their original version', zh: '将所选记录恢复到初始版本' },
