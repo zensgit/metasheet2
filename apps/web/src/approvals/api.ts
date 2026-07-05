@@ -849,6 +849,62 @@ export async function getApprovalHistory(id: string): Promise<UnifiedApprovalHis
   return apiGet(`/api/approvals/${id}/history`)
 }
 
+// ---------------------------------------------------------------------------
+// B1-04 (宽恕型错误三件套) — typed error surfacing for the approval create/action
+// write paths. Generalizes the ad hoc `payload.error.code/message` parsing
+// `remindApproval` already does for its 429/failure branches (further below,
+// unchanged): a failed response is expected to carry `{ error: { code,
+// message } }`; the server's message is threaded through VERBATIM so the UI
+// can render the real reason instead of collapsing every failure into
+// '操作失败，请重试'. `apiPost`/`apiGet` (utils/api.ts) intentionally keep their
+// existing generic-message throw for every OTHER caller — this helper is
+// scoped to the approval create/action endpoints below.
+// ---------------------------------------------------------------------------
+export class ApprovalApiError extends Error {
+  /** HTTP status of the failed response — lets callers branch on 4xx/5xx without re-parsing `message`. */
+  readonly status: number
+  /** Server-declared machine code, when present (`payload.error.code`). */
+  readonly code?: string
+
+  constructor(message: string, status: number, code?: string) {
+    super(message)
+    this.name = 'ApprovalApiError'
+    this.status = status
+    this.code = code
+  }
+}
+
+/**
+ * Reads a failed response's `{ error: { code, message } }` body and throws an `ApprovalApiError`
+ * carrying the server's message verbatim (falling back to a generic status-coded message for a
+ * non-JSON or shape-less body). Exported standalone (rather than folded into a fetch wrapper) so
+ * it is unit-testable against a fabricated `Response` independent of `USE_MOCK`.
+ */
+export async function approvalRequestError(response: Response): Promise<never> {
+  const payload = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | null
+  const rawMessage = payload?.error?.message
+  const message = typeof rawMessage === 'string' && rawMessage.trim().length > 0
+    ? rawMessage
+    : `请求失败（${response.status}）`
+  throw new ApprovalApiError(message, response.status, payload?.error?.code)
+}
+
+/**
+ * POST + parse-JSON, surfacing a failed response via `approvalRequestError` instead of the
+ * generic `apiPost` throw. Used by `createApproval` and `dispatchAction` — the two write paths
+ * B1-04 covers; every other approval-template endpoint below is unchanged.
+ */
+async function postApprovalJson<T>(path: string, payload: unknown): Promise<T> {
+  const response = await apiFetch(path, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    await approvalRequestError(response)
+  }
+  return response.json()
+}
+
 export async function createApproval(req: CreateApprovalRequest): Promise<UnifiedApprovalDTO> {
   if (USE_MOCK) {
     return {
@@ -859,7 +915,7 @@ export async function createApproval(req: CreateApprovalRequest): Promise<Unifie
       formSnapshot: req.formData as Record<string, unknown>,
     }
   }
-  return apiPost('/api/approvals', req)
+  return postApprovalJson('/api/approvals', req)
 }
 
 /**
@@ -1027,5 +1083,5 @@ export async function dispatchAction(
     }
     return { ...base, status: statusMap[req.action] ?? base.status }
   }
-  return apiPost(`/api/approvals/${id}/actions`, req)
+  return postApprovalJson(`/api/approvals/${id}/actions`, req)
 }
