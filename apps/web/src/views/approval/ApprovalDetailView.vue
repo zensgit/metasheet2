@@ -79,25 +79,35 @@
           <el-divider />
 
           <div v-if="approval.formSnapshot" class="approval-detail__snapshot">
+            <!-- B1-02: humanized scalar fields — ordered + labeled via the frozen formSchema
+                 (buildDisplayFields), so readers see field labels and option labels instead of
+                 raw machine keys/values. `detail` fields are excluded here; they keep rendering
+                 via the detailTables loop below, unchanged. -->
             <div
-              v-for="(value, key) in approval.formSnapshot"
+              v-for="field in displayFields"
+              :key="field.key"
+              class="approval-detail__field"
+            >
+              <span class="approval-detail__label">{{ field.label }}</span>
+              <span>{{ field.value }}</span>
+            </div>
+            <!-- detail / sub-form (明细): render the frozen rows × columns as a read-only
+                 table driven by the instance's FROZEN formSchema columns (never the live
+                 template). -->
+            <div
+              v-for="(table, key) in detailTables"
               :key="key"
               class="approval-detail__field"
             >
-              <span class="approval-detail__label">{{ String(key) }}</span>
-              <!-- detail / sub-form (明细): render the frozen rows × columns as a read-only
-                   table driven by the instance's FROZEN formSchema columns (never the live
-                   template). Falls back to the stringify rendering when the field is not a
-                   usable detail or the value is not an array. -->
+              <span class="approval-detail__label">{{ key }}</span>
               <el-table
-                v-if="detailTables[String(key)]"
-                :data="detailTables[String(key)].rows"
+                :data="table.rows"
                 border
                 size="small"
                 class="approval-detail__detail-table"
               >
                 <el-table-column
-                  v-for="column in detailTables[String(key)].columns"
+                  v-for="column in table.columns"
                   :key="column.id"
                   :label="column.label"
                 >
@@ -106,7 +116,6 @@
                   </template>
                 </el-table-column>
               </el-table>
-              <span v-else>{{ formatFieldValue(value) }}</span>
             </div>
           </div>
           <el-empty v-else description="暂无表单数据" :image-size="80" />
@@ -340,6 +349,22 @@
     >
       <el-form>
         <el-form-item label="审批意见">
+          <!-- B1-05: quick phrases — this user's recently-used phrases first, then the fixed
+               preset list for 通过/驳回. Clicking a chip fills (or appends to) the textarea;
+               free-typed text is never remembered, only a submitted phrase that exactly
+               matches one of these chips (see `rememberQuickPhraseIfOffered`). -->
+          <div v-if="quickPhraseChips.length > 0" class="approval-detail__quick-phrases">
+            <el-tag
+              v-for="(phrase, index) in quickPhraseChips"
+              :key="phrase"
+              class="approval-detail__quick-phrase-chip"
+              effect="plain"
+              :data-testid="`approval-quick-phrase-${index}`"
+              @click="applyQuickPhrase(phrase)"
+            >
+              {{ phrase }}
+            </el-tag>
+          </div>
           <el-input
             v-model="actionComment"
             type="textarea"
@@ -498,6 +523,19 @@
     >
       <el-form>
         <el-form-item label="评论内容">
+          <!-- B1-05: quick phrases — see the 通过/驳回 dialog above for the same mechanics. -->
+          <div v-if="quickPhraseChips.length > 0" class="approval-detail__quick-phrases">
+            <el-tag
+              v-for="(phrase, index) in quickPhraseChips"
+              :key="phrase"
+              class="approval-detail__quick-phrase-chip"
+              effect="plain"
+              :data-testid="`approval-quick-phrase-${index}`"
+              @click="applyQuickPhrase(phrase)"
+            >
+              {{ phrase }}
+            </el-tag>
+          </div>
           <el-input
             v-model="actionComment"
             type="textarea"
@@ -576,9 +614,12 @@ import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
 import {
   buildDetailRowsForDisplay,
+  buildDisplayFields,
   findDetailFieldInSchema,
   type DetailDisplayTable,
+  type DisplayField,
 } from '../../approvals/detailField'
+import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 
 const route = useRoute()
 const router = useRouter()
@@ -616,6 +657,13 @@ const detailTables = computed<Record<string, DetailDisplayTable>>(() => {
   }
   return result
 })
+
+// B1-02: humanized scalar fields (label + formatted value, schema-ordered) — see
+// `buildDisplayFields` for the full contract. `detail` fields are excluded; they render via
+// `detailTables` above.
+const displayFields = computed<DisplayField[]>(() =>
+  buildDisplayFields(approval.value?.formSchema ?? null, approval.value?.formSnapshot ?? null),
+)
 
 // B1-01: real session identity — the previous `=== 'user_1'` mock meant production requesters
 // NEVER saw the requester-only actions (撤回/催办) this view already ships. Seeded SYNCHRONOUSLY
@@ -751,6 +799,30 @@ const returnableNodes = computed(() => {
 const actionDialogTitle = computed(() =>
   currentAction.value === 'approve' ? '审批通过' : '审批驳回',
 )
+
+// B1-05: quick-phrase chips for whichever action's dialog is currently open — this user's own
+// recently-used phrases (most-recent-first) first, then the fixed preset list, deduped, capped
+// at 5. `currentAction` is kept in sync with the open dialog by `openActionDialog`/
+// `openCommentDialog` below.
+const quickPhraseChips = computed<string[]>(() => {
+  const merged = [...recentPhrases(currentUserId.value, currentAction.value), ...phrasesForAction(currentAction.value)]
+  return Array.from(new Set(merged)).slice(0, 5)
+})
+
+function applyQuickPhrase(phrase: string): void {
+  actionComment.value = actionComment.value ? `${actionComment.value}，${phrase}` : phrase
+}
+
+/**
+ * Only remembers a submitted comment as a quick-phrase shortcut when it exactly matches one of
+ * the phrases OFFERED for the currently open dialog's action (recent ∪ preset, i.e.
+ * `quickPhraseChips` at submit time) — free-typed comments are never persisted, so this can't
+ * become a backdoor free-text log.
+ */
+function rememberQuickPhraseIfOffered(comment: string): void {
+  if (!quickPhraseChips.value.includes(comment)) return
+  rememberPhrase(currentUserId.value, currentAction.value, comment)
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -908,6 +980,9 @@ function openReturnDialog() {
 }
 
 function openCommentDialog() {
+  // B1-05: keeps `currentAction` in sync with the open dialog so `quickPhraseChips` offers the
+  // 'comment' preset/recent list here (rather than whatever approve/reject dialog ran last).
+  currentAction.value = 'comment'
   actionComment.value = ''
   commentDialogVisible.value = true
 }
@@ -940,6 +1015,7 @@ async function submitAction() {
       comment: actionComment.value || undefined,
     })
     ElMessage.success(currentAction.value === 'approve' ? '审批已通过' : '审批已驳回')
+    rememberQuickPhraseIfOffered(actionComment.value)
     actionDialogVisible.value = false
     await store.loadHistory(id)
   } catch (error) {
@@ -1022,6 +1098,7 @@ async function submitComment() {
       comment: actionComment.value,
     })
     ElMessage.success('评论已提交')
+    rememberQuickPhraseIfOffered(actionComment.value)
     commentDialogVisible.value = false
     await store.loadHistory(id)
   } catch (error) {
@@ -1208,6 +1285,17 @@ onMounted(async () => {
   margin-top: 4px;
 }
 
+.approval-detail__quick-phrases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.approval-detail__quick-phrase-chip {
+  cursor: pointer;
+}
+
 .approval-detail__timeline-content {
   padding: 0;
 }
@@ -1289,16 +1377,23 @@ onMounted(async () => {
   color: var(--el-text-color-secondary, #606266);
 }
 
+/* B1-05: sticky at the viewport bottom so approve/reject/... stay reachable while the form
+   snapshot / timeline scroll underneath, instead of requiring a scroll-to-bottom first. The
+   safe-area padding keeps the buttons clear of the home-indicator area on notched devices. */
 .approval-detail__actions {
   margin-top: 24px;
   padding: 16px 20px;
-  background: #fff;
+  padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  background: var(--el-bg-color, #fff);
   border: 1px solid var(--el-border-color-lighter, #e4e7ed);
   border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
 }
 
 .approval-detail__actions-primary {
@@ -1333,14 +1428,26 @@ onMounted(async () => {
     align-items: stretch;
   }
 
-  .approval-detail__actions-primary,
+  /* B1-05: the primary 通过/驳回 pair stays a two-up row (not a full column stack) so both
+     land in comfortable thumb reach; flex: 1 + min-height 44px keeps them evenly-sized,
+     tappable targets. The deferred secondary set keeps the existing full-width column stack —
+     its visibility/action set is unchanged (T3-1 v0 mobile gating still applies above). */
+  .approval-detail__actions-primary {
+    flex-direction: row;
+  }
+
   .approval-detail__actions-secondary {
     flex-direction: column;
     align-items: stretch;
     justify-content: center;
   }
 
-  .approval-detail__actions-primary :deep(.el-button),
+  .approval-detail__actions-primary :deep(.el-button) {
+    flex: 1;
+    min-height: 44px;
+    margin-left: 0;
+  }
+
   .approval-detail__actions-secondary :deep(.el-button) {
     width: 100%;
     margin-left: 0;
