@@ -5,7 +5,7 @@
 > **最佳决策声明（owner 不在场）**：主线已完成到 **flag-gated readiness**（runtime / docs / acceptance）；**prod enablement 与 product entry 仍需逐项 sign-off**。剩余全是 gated 决策。我**没有** enable 任何 flag、没有做 Reset-UI 的产品取舍、没有 build 任何不可逆语义——这正是这条线一贯的「单项 sign-off」纪律（"开 T8-2" 是被一句具体指令授权的）。本文是给你回来后**逐项授权**用的 readiness 依据，非破坏、不改代码。
 
 ## 0. 结论（一句话）
-**没有「未开发的大块」。** 五项剩余全部是三类门：**环境启用 flag**、**Reset-UI 产品取舍**、**仍未授权的不可逆语义**。其中只有 **1 个真正的工程前置**（permission-revert 并发门），其余皆为 owner 的运营/产品/授权决定。
+**没有「未开发的大块」。** 五项剩余全部是三类门：**环境启用 flag**、**Reset-UI 产品取舍**、**仍未授权的不可逆语义**。其中原列的唯一工程前置（permission-revert 并发门）**已于成文后闭环**（#3402 前向路由锁 + #3414 legacy 路由锁 + #3418 状态翻转，state-map 20260703 已确认 CLOSED），故现状 = 全部剩余皆为 owner 的运营/产品/授权决定。
 
 ## 1. 总览
 
@@ -13,7 +13,7 @@
 |---|---|---|---|---|
 | **PIT_RESET 启用** | env-enable | runtime + 单事务原子性 + UI 入口（#3301）全 merged，default-off | partial | **环境 owner**：trash-retention STOP-SHIP 确认 + flag-on live smoke + 决定置 true |
 | **PIT_UNDELETE 启用** | env-enable | T8-1 Revert-undelete 全 built（#3307/#3310/#3311 + 4 项 pre-rollout 修复），default-off | partial | **环境 owner**：补 flag-on live smoke 后启用（原「建议补多-resurrect 原子性 golden」已由 #3351 落地，见 §2.2 修正） |
-| **T9-W 5 个 config flags** | env-enable | 每 tier 的**安全子集**全 built + real-DB 验证，default-off | partial | **逐 tier owner 启用**；其中 **permission-revert 有工程前置（见 §2.5）** |
+| **T9-W 5 个 config flags** | env-enable | 每 tier 的**安全子集**全 built + real-DB 验证，default-off | partial | **逐 tier owner 启用**（permission-revert 的工程前置已闭环，见 §2.3 修正） |
 | **Reset-UI T-source** | product-entry | picker/wiring 已 DONE（#3301，最小 datetime-local 版） | partial | **产品 owner**：是否升级为 history-anchored picker（安全更优）；+ rollout |
 | **真·lossy retype / 值级 field undelete** | unauthorized-semantic | 已删字段的列值/links/auto-number **无 tombstone，字节已不存在** | partial（含 impossible 区） | **owner 单项 sign-off**：是否要「向前」捕获能力（不救已删数据） |
 
@@ -37,7 +37,7 @@
 - **Tier3 `CONFIG_UNCREATE`**：撤销「建字段/视图」= **drop**（destructive，**无 v1 undo**：列值永久消失）；HMAC planHash→409 PLAN_DRIFT；typed confirm；**无 FE**（client 不发 confirm）。
 - **Tier4 `CONFIG_UNDELETE`**：撤销「删字段/视图」= **仅定义 recreate**（列值/links/auto-number **不恢复**，preview note 明示）；**无 FE**。
 - **permission-revert `PERMISSION_REVERT`**：**仅去升级**（escalation→422）；在 `meta_sheets FOR UPDATE` 内复检 live grant 后才 apply；**无 FE**。
-**⚠ 工程前置（非 runbook 勾选项，owner 不可豁免）**：permission-revert 的**硬并发门**——**前向 grant/revoke 路由不取 sheet 锁**，并发前向写可把一次「已复检的去升级」交错成净升级；启用前须让前向路由取锁（或条件/版本化写）+ 补**双写者并发 golden**。
+**⚠ 工程前置〔2026-07-05 修正：已闭环〕**：本节成文时前向 grant/revoke 路由不取 sheet 锁；随后 **#3402（前向路由取 `meta_sheets FOR UPDATE`）+ #3414（legacy grant/revoke 路由同锁）** 落地、#3418 翻转状态，双侧序列化 CLOSED（17/17 三-PR 合并验证，见 permission-revert flag-on smoke runbook 20260630 §1.5 与 state-map 20260703）。该前置不再阻塞启用。
 **「完成」**：逐 tier 启用 + 给 3 个 typed-confirm tier 补 FE（今天无）+ Tier2 确认 option I + permission 并发门。
 **验证**：5 套 real-DB goldens 全注册 plugin-tests.yml（Tier1 closeout / Tier2 6 goldens / Tier3 14 / Tier4 15 / permission a–l）。**完成各项额外需**：逐 tier flag-on live smoke；permission 加锁后双写者 golden；typed-confirm tier 的 FE e2e。
 
