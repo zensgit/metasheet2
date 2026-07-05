@@ -151,7 +151,7 @@
           v-if="isMobileLayout"
           :approvals="store.pendingApprovals"
           :loading="store.loading"
-          :empty-text="searchText ? '未找到匹配的审批' : '暂无待处理审批'"
+          :empty-text="mobileEmptyText.pending"
           @select="handleRowClick"
         />
         <el-table
@@ -214,7 +214,7 @@
           v-if="isMobileLayout"
           :approvals="store.myApprovals"
           :loading="store.loading"
-          :empty-text="searchText ? '未找到匹配的审批' : '暂无我发起的审批'"
+          :empty-text="mobileEmptyText.mine"
           @select="handleRowClick"
         />
         <el-table
@@ -286,7 +286,7 @@
           v-if="isMobileLayout"
           :approvals="store.ccApprovals"
           :loading="store.loading"
-          :empty-text="searchText ? '未找到匹配的审批' : '暂无抄送我的审批'"
+          :empty-text="mobileEmptyText.cc"
           @select="handleRowClick"
         />
         <el-table
@@ -341,7 +341,7 @@
           v-if="isMobileLayout"
           :approvals="store.completedApprovals"
           :loading="store.loading"
-          :empty-text="searchText ? '未找到匹配的审批' : '暂无已完成审批'"
+          :empty-text="mobileEmptyText.completed"
           @select="handleRowClick"
         />
         <el-table
@@ -438,6 +438,7 @@ import { runApprovalBatchAction } from '../../approvals/useApprovalBatchActions'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
+import { useLocale } from '../../composables/useLocale'
 import ApprovalMobileList from './ApprovalMobileList.vue'
 
 const router = useRouter()
@@ -453,6 +454,28 @@ const { canWrite } = useApprovalPermissions()
 const { hasFeature } = useFeatureFlags()
 const { isMobile } = useMobileViewport()
 const isMobileLayout = computed(() => hasFeature('approvalMobile') && isMobile.value)
+
+// i18n follow-up (ballot T3-1 build-contract must-fix): the mobile card
+// list's per-tab empty-state copy shipped in #3517 as hardcoded Chinese
+// literals. Localize via the app's established `useLocale()` / `isZh`
+// pattern instead of a hardcoded string per tab.
+const { isZh } = useLocale()
+const mobileEmptyText = computed(() => {
+  if (isZh.value) {
+    return {
+      pending: searchText.value ? '未找到匹配的审批' : '暂无待处理审批',
+      mine: searchText.value ? '未找到匹配的审批' : '暂无我发起的审批',
+      cc: searchText.value ? '未找到匹配的审批' : '暂无抄送我的审批',
+      completed: searchText.value ? '未找到匹配的审批' : '暂无已完成审批',
+    }
+  }
+  return {
+    pending: searchText.value ? 'No matching approvals found' : 'No pending approvals',
+    mine: searchText.value ? 'No matching approvals found' : 'No approvals initiated by you',
+    cc: searchText.value ? 'No matching approvals found' : 'No approvals cc’d to you',
+    completed: searchText.value ? 'No matching approvals found' : 'No completed approvals',
+  }
+})
 
 // ── 操作台: batch approve/reject over the pending selection ────────────────
 const pendingTableRef = ref<{ clearSelection: () => void } | null>(null)
