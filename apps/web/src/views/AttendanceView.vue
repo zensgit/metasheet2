@@ -18534,15 +18534,39 @@ function closeImportOverrideConfirm(): void {
 
 function confirmImportOverride(): void {
   if (!importOverrideConfirm.confirmChecked) return
+  // [P1 TOCTOU fix] onConfirm funnels into runImport(), which rebuilds the payload from
+  // the LIVE form via buildImportPayload() — so G1 freshness must hold at CONFIRM time,
+  // not only when the modal opened (requestRunImport). If ANYTHING that feeds the payload
+  // was edited while the modal sat open (fingerprint drift ⇒ importOverridePreviewFresh
+  // flips false — this includes flipping the mode selector), refuse to submit: close the
+  // modal, never call runImport(), and require a fresh Preview. Without this re-check,
+  // Preview → open modal → edit form → Confirm would commit a never-previewed payload.
+  if (!importOverridePreviewFresh.value) {
+    closeImportOverrideConfirm()
+    setStatus(appendStatusContext(
+      tr(
+        'Import settings changed after Preview — run Preview again before an override import.',
+        '预览后导入设置已被修改——请重新预览后再执行覆盖导入。',
+      ),
+      importPreviewTimezoneHint.value,
+    ), 'error', {
+      hint: tr('The confirm dialog was closed without importing anything.', '确认弹窗已关闭，本次未执行任何导入。'),
+      action: 'retry-preview-import',
+    })
+    return
+  }
   const cb = importOverrideConfirm.onConfirm
   closeImportOverrideConfirm()
   if (cb) cb()
 }
 
 // Entry point wired to the Import button (replaces a direct @click="runImport"). Merge
-// stays one-click (G2); override snapshots the Preview's resolved scope NOW — same
-// snapshot-not-live-form discipline as requestAnnualAdjust()/requestAnnualAccrualCommit()
-// above — so editing the form while the modal is open cannot change what gets submitted.
+// stays one-click (G2); override snapshots the Preview's resolved scope NOW for the
+// modal's DISPLAY lines (same display-snapshot discipline as requestAnnualAdjust()/
+// requestAnnualAccrualCommit() above). The SUBMITTED payload, however, is rebuilt from
+// the live form inside runImport() — its integrity is enforced by the confirm-time
+// freshness re-check in confirmImportOverride() (a drifted form closes the modal and
+// requires a fresh Preview), not by this snapshot.
 function requestRunImport(): void {
   if (!importModeRequiresConfirm(importMode.value)) {
     void runImport()

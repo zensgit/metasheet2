@@ -415,6 +415,88 @@ describe('Attendance override-import guard (wired UI)', () => {
     expect(importSection.textContent).toContain('override mode requires a fresh Preview')
   })
 
+  // [P1 TOCTOU golden] The confirm-modal path must ALSO be freshness-gated at CONFIRM
+  // time: runImport() rebuilds the payload from the live form, so editing anything after
+  // the modal opened would otherwise submit a never-previewed payload (the Import-button
+  // disable above only guards modal OPENING, not an already-open modal).
+  it('override: editing the form while the confirm modal is open makes Confirm a no-op that requires a fresh Preview (no commit call)', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(baseApiFetchRouter({
+      preview: { items: [{ userId: 'user-1', workDate: '2026-04-04' }], rowCount: 1 },
+      commitImported: 1,
+    }))
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const importSection = findImportSection(container!)
+    findButton(importSection, 'Preview').click()
+    await flushUi(8)
+    importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.click()
+    await flushUi(6)
+
+    const modal = container!.querySelector('[data-import-override-confirm]')!
+    expect(modal, 'expected the override confirm modal to open').toBeTruthy()
+
+    // Edit a payload-feeding field AFTER the modal is open (the TOCTOU window).
+    setInput(importSection, '#attendance-import-user', 'a-user-never-previewed')
+    await flushUi(2)
+
+    const checkbox = modal.querySelector<HTMLInputElement>('[data-import-override-extra-confirm] input[type="checkbox"]')!
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    modal.querySelector<HTMLButtonElement>('[data-import-override-confirm-submit]')!.click()
+    await flushUi(8)
+
+    // Confirm must NOT have committed the drifted, never-previewed payload…
+    const commitCalled = apiFetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/attendance/import/commit'))
+    expect(commitCalled).toBe(false)
+    // …the modal is closed (stale confirmation context must not linger)…
+    expect(container!.querySelector('[data-import-override-confirm]')).toBeFalsy()
+    // …and the operator is told to re-run Preview.
+    expect(container!.textContent).toContain('Import settings changed after Preview')
+  })
+
+  it('override: flipping the mode selector to merge while the confirm modal is open is also a drifted-confirm no-op', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(baseApiFetchRouter({
+      preview: { items: [{ userId: 'user-1', workDate: '2026-04-04' }], rowCount: 1 },
+      commitImported: 1,
+    }))
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const importSection = findImportSection(container!)
+    findButton(importSection, 'Preview').click()
+    await flushUi(8)
+    importSection.querySelector<HTMLButtonElement>('[data-import-run]')!.click()
+    await flushUi(6)
+
+    const modal = container!.querySelector('[data-import-override-confirm]')!
+    expect(modal, 'expected the override confirm modal to open').toBeTruthy()
+
+    // Mode is part of the payload fingerprint: flipping it mid-modal is drift too —
+    // the confirmed-as-override submission must not silently run as a merge (or any
+    // other un-previewed shape).
+    selectOption(importSection, '#attendance-import-mode', 'merge')
+    await flushUi(2)
+
+    const checkbox = modal.querySelector<HTMLInputElement>('[data-import-override-extra-confirm] input[type="checkbox"]')!
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    modal.querySelector<HTMLButtonElement>('[data-import-override-confirm-submit]')!.click()
+    await flushUi(8)
+
+    const commitCalled = apiFetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/attendance/import/commit'))
+    expect(commitCalled).toBe(false)
+    expect(container!.querySelector('[data-import-override-confirm]')).toBeFalsy()
+  })
+
   it('merge: Import never opens the confirm modal and submits directly, even with no prior Preview', async () => {
     const apiFetchMock = vi.mocked(apiFetch)
     apiFetchMock.mockImplementation(baseApiFetchRouter({ commitImported: 0 }))
