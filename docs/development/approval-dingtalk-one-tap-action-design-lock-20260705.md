@@ -59,10 +59,15 @@ find-then-patch 同族纪律）。台账行不存在或 `card_state != 'sent'` �
 
 ## 4. 统一执行面：服务端内部 wrapper
 
-新增内部函数（非 HTTP 面）`executeApprovalActionFromCardDelivery(deliveryId, decision, dingtalkUserId, comment?)`：
+新增内部函数（非公开 HTTP 面）
+`executeApprovalActionFromCardDelivery(deliveryId, decision, actor, comment?)` ——
+**两个前端共用**：Slice A 的 card-delivery 动作端点（§5，`actor = { kind:'session', userId }`，
+会话内已认证的本地用户）与 Slice B 的 Stream 回调（`actor = { kind:'dingtalk', dingtalkUserId }`，
+平台已验证的点击者）。
 
-1. 台账反查 → `instance_id` + 期望受理人；
-2. `dingtalkUserId` → `user_external_identities` → 本地 user；**未绑定 → fail-closed**
+1. 台账反查 → `instance_id` + 期望受理人 + `card_state` 校验（非 `sent` → 拒绝并返回真实状态）；
+2. actor 解析：session 路径直接用本地 user；dingtalk 路径经
+   `user_external_identities` 映射 → 本地 user，**未绑定 → fail-closed**
    （A：落地页引导 `intent=bind`；B：卡片回「请先在网页端绑定钉钉」）；
 3. 调用与 `/api/approvals/:id/actions` 同一条内部动作路径 —— 受理人校验、reject comment 必填、
    nodeEntryEpoch、版本冲突**原样生效，零旁路**；
@@ -82,8 +87,12 @@ find-then-patch 同族纪律）。台账行不存在或 `card_state != 'sent'` �
   未绑定钉钉 → `intent=bind` 流（先例 PublicMultitableFormView）。
 - **决策页**（新，移动优先，动作集 = 同意/拒绝/意见 —— 在既有移动动作集边界内，不触碰其扩展议题）：
   单据摘要（标题 + 前 3 个关键表单字段）+ 同意 / 拒绝（意见按 `policy.rejectCommentRequired`
-  必填前置）→ 会话态直接调统一 `/actions`（此页是我们自己的前端，走正常 HTTP 面 + 会话鉴权；
-  wrapper 的 channel 注入对 A 亦生效：决策页提交经 wrapper 内部路径或等价注入点）。
+  必填前置）→ **提交到新的 card-delivery 动作端点**
+  `POST /api/approval-card-deliveries/:deliveryId/actions`（会话鉴权，body 仅
+  `{ decision, comment? }`）。该端点内部调用 `executeApprovalActionFromCardDelivery`（§4），
+  wrapper 再复用与 `/actions` 完全相同的服务端动作路径。
+  **移动决策页不得直接调用 raw `/api/approvals/:id/actions`** —— 直连会绕开台账
+  `card_state` 回写与 `cardDeliveryId` metadata 注入（本条即为封死该歧义路径的硬性规则）。
 - **A 的界限**：工作通知卡片**不可**原地更新 → 防重靠台账 + 引擎冲突语义；页面对已处理单据
   显示真实终态。
 - **A-6（后续增强，非前提）**：钉钉容器内 JSAPI `requestAuthCode` 静默免登，复用后端 exchange。
@@ -104,7 +113,8 @@ find-then-patch 同族纪律）。台账行不存在或 `card_state != 'sent'` �
 
 - **不可信通道**：回调/深链只携带 `(deliveryId|outTrackId, decision)`；一切业务数据服务端反查。
 - **身份 fail-closed**：只认平台验证的 dingtalk userId → 本地映射；无映射不猜、不建。
-- **零旁路**：卡片/页面全部经统一动作路径；服务端门控（受理人/意见必填/轮次隔离）无一豁免。
+- **零旁路**：卡片/页面全部经 card-delivery 端点 → wrapper → 统一动作路径；移动决策页与回调
+  一律**不得**直连 raw `/api/approvals/:id/actions`；服务端门控（受理人/意见必填/轮次隔离）无一豁免。
 - **审计**：`approval_records.metadata.channel` + `cardDeliveryId`，渠道可追溯、与台账互证。
 - **env-gate**：Stream worker 与卡片发送均按 env 配置注册，缺配置 = 静默不启用。
 - **UAT 纪律**：前端 `USE_MOCK = import.meta.env.DEV` —— 本地 dev 看不出真实链路，
@@ -125,7 +135,8 @@ find-then-patch 同族纪律）。台账行不存在或 `card_state != 'sent'` �
 - ⬜ **A-2** `action_card` 发送路径 + 深链 token + 写台账（automation 动作配置沿用既有
   meta-automation 编辑面，新增「审批卡片」投递形态）
 - ⬜ **A-3** 移动极简决策页 + `/launch` 登录/绑定接入（含未绑定 fail-closed 引导）
-- ⬜ **A-4** channel 注入 wrapper（§4；内部 API 扩展，HTTP 面不变）+ 台账状态回写
+- ⬜ **A-4** card-delivery 动作端点 `POST /api/approval-card-deliveries/:deliveryId/actions` +
+  channel 注入 wrapper（§4）+ 台账状态回写（raw `/actions` 直连禁令的 tripwire 测试随此项落）
 - ⬜ **A-5** 验证：单测（token/台账状态机/wrapper fail-closed 矩阵）+ 集成（伪造 instanceId 回调
   被忽略的 tripwire）+ 生产构建真钉钉 UAT
 - ⬜ **A-6**（增强，可后置）钉钉容器内 JSAPI 免登
