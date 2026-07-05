@@ -351,6 +351,7 @@ jobs:
             tests/integration/approval-nofm-threshold.test.ts \
             tests/integration/approval-bulk-reassign.api.test.ts \
             tests/integration/approval-node-signature-policy.api.test.ts \
+            tests/integration/dingtalk-approval-card-deliveries.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)

@@ -57,6 +57,11 @@ export default defineConfig({
       // T3-3 node signaturePolicy declared-inert floor: real HTTP + real DB round-trip.
       // Excluded from the no-DB default and wired into approval real-DB CI so it cannot skip-green.
       'tests/integration/approval-node-signature-policy.api.test.ts',
+      // A-1 DingTalk approval-card delivery ledger (one-tap lock §3): DATABASE_URL-gated
+      // (describeIfDb). Excluded from the no-DB default job so it doesn't skip-green, and wired as
+      // a WHOLE FILE into the `Run approval real-DB integration` step in plugin-tests.yml where it
+      // runs against real Postgres every PR.
+      'tests/integration/dingtalk-approval-card-deliveries.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
