@@ -2,7 +2,7 @@
 
 > **Design-lock**: ratified and merged to `main` — PR #3569, squash commit `6b0e27bf2`.
 > **Runtime**: code-complete, CI green, **awaiting owner merge** — PR #3584, branch
-> `claude/multitable-ai-provenance-s1-runtime-20260705`, head `b44a375e5`, 3 commits, +691/−11 across 12 files.
+> `claude/multitable-ai-provenance-s1-runtime-20260705`, head `66fa9183d`, 4 commits, +724/−11 across 12 files.
 > Per the lock's own change-surface statement: no new tables, no migrations, no new env flags, no
 > restore-surface change.
 
@@ -86,6 +86,11 @@ Eleven locked clauses — LOCK-A (source attribution) A1–A5, LOCK-B (commit-ac
   fixed, but on the backend integration-test side, in a file the round-1 sweep hadn't touched (that sweep
   covered FE fixtures + `tests/unit`, not `tests/integration`). Fixed by adding `batchId` to the pinned key
   set and asserting it is a string.
+- **Post-review follow-up** — `66fa9183d`: added **G7b**, the job-commit parallel of G7 — a client-supplied
+  `batchId` injected into a JOB-commit request body (bypassing the test helper, which never sends one) is
+  stripped by the route's zod schema; the job's rows share one server-minted batch id that is never the
+  client value, and the response `batchId` is the server-minted one (LOCK-B4/B6 proven on BOTH commit
+  routes, not just bulk-commit).
 
 Honest note: two independent verification passes (the implementing session, and a separate review pass)
 each missed a different completeness gap on the same clause (LOCK-B6) before CI or a subsequent pass caught
@@ -119,8 +124,8 @@ files and 1 pre-existing backend integration test (the CI-caught shape-lock upda
 ## 5. Verification matrix
 
 Real-DB suite `packages/core-backend/tests/integration/multitable-ai-write-provenance-batch-grouping-realdb.test.ts`
-(registered behind `describeIfDatabase`, sentinel fails-not-skips without `DATABASE_URL`) — **10/10**
-(sentinel + 9 scenarios); FE render suite
+(registered behind `describeIfDatabase`, sentinel fails-not-skips without `DATABASE_URL`) — **11/11**
+(sentinel + 10 scenarios); FE render suite
 `apps/web/tests/multitable-history-center-ai-shortcut-label.spec.ts` — **2/2**.
 
 | Golden | What it proves |
@@ -135,27 +140,33 @@ Real-DB suite `packages/core-backend/tests/integration/multitable-ai-write-prove
 | **G5b** | Restoring a record an AI batch touched, via the **existing** single-record restore route, writes `source='restore'`, never `'ai-shortcut'` — attribution never bleeds through restore (A4). |
 | **G6** | A plain (non-AI) `patch` caller is unaffected: no `batchId` supplied → each call still mints its own fresh id, `source` stays `'rest'` — byte-identical to pre-S1 behavior. |
 | **G7** | A client-supplied `batchId` in a bulk-commit request body has no effect — silently dropped by the zod schema (not a 400); both the revision's `batch_id` and the response's `batchId` are the real server-minted value, never the client-supplied one (B4/B6). |
+| **G7b** | The **job-commit** parallel of G7: a client-supplied `batchId` injected into a job-commit request body (raw request, bypassing the test helper) is stripped by that route's zod schema too; the job's rows share one server-minted batch id, never the client value, and the response `batchId` is the server-minted one — B4/B6 hold on BOTH commit routes. |
 | **G8** (FE, 2 tests) | History Center's inline `sourceLabel` map renders the `ai-shortcut` entry ("AI fill", not the raw string) for an attributed batch; an unrecognized source still falls back to its own raw string, unchanged. |
 
-**Non-vacuousness proof.** The suite's load-bearingness on the B1 mint line was checked twice, independently:
-once by the implementing session and once by a separate review pass, each reverting
-`record-write-service.ts`'s `const bulkBatchId = batchId ?? randomUUID()` to a bare `randomUUID()` (i.e.
-discarding the caller-supplied `batchId` entirely) and re-running the suite. Both runs observed the same
-result: **exactly G2, G3, G4b, and G5 go red** — the four goldens whose assertions depend on multiple rows
-written by one commit request sharing a batch id — while every other golden (G1, G4a, G6, G7, G5b, G8) stays
-green, because none of them assert **cross-row** batch-sharing within a single call. (G4a commits its two
-records in two *separate* requests, so distinct ids arise either way; G7's assertion is only that the
-client-supplied id is rejected, true regardless of the seam.) Reverting the mutation returns the suite to
-green. This is consistent with which goldens assert `expect(revX?.batch_id).toBe(revY?.batch_id)` across
-rows written by one request in the current test file.
+**Non-vacuousness proof** (mutating `record-write-service.ts`'s `const bulkBatchId = batchId ?? randomUUID()`
+back to a bare `randomUUID()` — i.e. discarding the caller-supplied `batchId` entirely — and re-running the
+suite). This was run at two points in the PR's history, and the RED set **grew** as the suite hardened:
 
-**Broader regression posture** (as reported across the PR's 3 commits, consistent at each): full backend unit
-suite **4186/4186** unaffected; backend `tsc --noEmit` and `apps/web` `vue-tsc -b` both clean; all 7
-`multitable-ai-*.test.ts` integration files green (85/85) on a fresh DB + fresh migrations after the final
-commit. PR #3584's CI is green across all required checks at head `b44a375e5`, including `test (20.x)`
-(10m27s) and `test (18.x)` (4m17s); the one non-passing entry, `Strict E2E with Enhanced Gates`, shows
-`skipping` — that job is gated repo-wide behind manual dispatch or a `v2-strict` PR label
-(`.github/workflows/observability-strict.yml`), unrelated to this change and not a required check.
+- **At `24a785e89`** (initial implementation, before the LOCK-B6 response fields existed), checked twice
+  independently (implementing session + a separate review pass), both observing the same result: exactly
+  **G2, G3, G4b, G5** go red — the four goldens asserting cross-row batch-sharing within one commit
+  request — everything else green.
+- **At the current head `66fa9183d`** (re-run on a fresh DB for this doc): the same mutation now trips
+  **seven** goldens — **G2, G3, G4a, G4b, G5, G7, G7b** — with only sentinel/G1/G5b/G6 green. The three
+  additions (G4a, G7, G7b) go red because round-1's LOCK-B6 fix added `response batchId === revision
+  batch_id` assertions: under the mutation the route still returns its minted `commitBatchId` while the
+  spine mints a *different* id for the revision, so even single-row-per-request goldens now catch the
+  divergence. Net effect: the round-1 response contract made the tripwire strictly stronger. Reverting the
+  mutation returns the suite to 11/11 green (byte-identical revert verified by empty `git diff`).
+
+**Broader regression posture**: full backend unit suite **4186/4186** unaffected; backend `tsc --noEmit`
+and `apps/web` `vue-tsc -b` both clean; all 7 `multitable-ai-*.test.ts` integration files green —
+**86/86** on a fresh DB + fresh migrations at head `66fa9183d` (single clean run for this doc; the count
+is 85→86 after G7b landed). PR #3584's CI was green across all required checks at `b44a375e5`, including
+`test (20.x)` (10m27s) and `test (18.x)` (4m17s), and re-runs on `66fa9183d`; the one non-passing entry,
+`Strict E2E with Enhanced Gates`, shows `skipping` — that job is gated repo-wide behind manual dispatch or
+a `v2-strict` PR label (`.github/workflows/observability-strict.yml`), unrelated to this change and not a
+required check.
 
 ## 6. Judgment calls
 
