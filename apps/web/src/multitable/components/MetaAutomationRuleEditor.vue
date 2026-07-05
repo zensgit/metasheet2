@@ -695,6 +695,15 @@
               </div>
             </div>
 
+            <!-- send_dingtalk_approval_card (A-2b): no inputs — recipient fixed from the event -->
+            <div v-if="action.type === 'send_dingtalk_approval_card'" class="meta-rule-editor__action-config">
+              <div class="meta-rule-editor__hint" data-field="approvalCardHint">
+                {{ isZh
+                  ? '发送带「查看并处理」按钮的钉钉审批卡片给该待办的受理人。收件人固定来自审批待办事件（不可手填）；卡片只含标题/编号等元数据，深链仅携带投递 ID 与签名令牌。仅可用于「当产生新审批待办时」触发器；未绑定钉钉的受理人记录为 skipped，不会猜测映射。'
+                  : 'Sends a DingTalk approval card with a 查看并处理 button to the pending task\'s assignee. The recipient is FIXED from the approval-task event (never author-supplied); the card carries metadata only and the deep link holds just the delivery id + signed token. Only valid on the approval.task_created trigger; unbound recipients are recorded as skipped — mappings are never guessed.' }}
+              </div>
+            </div>
+
             <!-- send_dingtalk_person_message config -->
             <div v-if="action.type === 'send_dingtalk_person_message'" class="meta-rule-editor__action-config">
               <div class="meta-rule-editor__preset-row">
@@ -1433,6 +1442,11 @@ const APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES = new Set<string>([
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
 ])
+// A-2b: the approval card additionally mounts on the pending-task trigger (and ONLY there).
+const APPROVAL_TASK_CREATED_FE_ALLOWED_ACTION_TYPES = new Set<string>([
+  ...APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES,
+  'send_dingtalk_approval_card',
+])
 
 function approvalCompletedOutcomeLabel(outcome: ApprovalCompletedOutcome): string {
   const zh = isZh.value
@@ -1469,12 +1483,12 @@ const approvalTaskCreatedBlockReason = computed<string>(() => {
   if (draft.value.conditions.conditions.length > 0) {
     return zh ? '审批待办触发器不支持触发条件，请先移除所有条件。' : 'The approval-task trigger does not support conditions — remove them first.'
   }
-  const disallowed = draft.value.actions.find((action) => !APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES.has(action.type))
+  const disallowed = draft.value.actions.find((action) => !APPROVAL_TASK_CREATED_FE_ALLOWED_ACTION_TYPES.has(action.type))
   if (disallowed) {
     const label = automationActionTypeLabel(disallowed.type, zh)
     return zh
-      ? `动作「${label}」不可用于审批待办触发器（仅支持通知类动作）。`
-      : `Action "${label}" is not allowed on the approval-task trigger (notification-family actions only).`
+      ? `动作「${label}」不可用于审批待办触发器（仅支持通知类动作与审批卡片）。`
+      : `Action "${label}" is not allowed on the approval-task trigger (notification-family actions and the approval card only).`
   }
   return ''
 })
@@ -1514,6 +1528,8 @@ const SUPPORTED_SELECTABLE_ACTION_TYPES: AutomationActionType[] = [
   'send_email',
   'send_dingtalk_group_message',
   'send_dingtalk_person_message',
+  // A-2b: approval card — recipient comes from the approval.task_created event, config is empty.
+  'send_dingtalk_approval_card',
   // T0-3: expose only the safe authoring shape — same-base trigger-record delete, config: {}.
   // Cross-base delete remains backend/runtime-only and is not surfaced in this editor.
   'delete_record',

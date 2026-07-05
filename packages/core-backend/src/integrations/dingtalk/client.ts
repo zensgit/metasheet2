@@ -641,6 +641,86 @@ export async function getDingTalkUserDetail(
   }
 }
 
+/**
+ * A-2b (one-tap lock #3594): action_card work notification — same corp-app channel as the markdown
+ * variant, but the OA `action_card` msgtype renders a tappable button (URL jump; in-chat callback
+ * buttons are the Slice-B interactive-card upgrade). Single-button form only.
+ */
+export interface DingTalkWorkNotificationActionCardInput {
+  userIds: string[]
+  title: string
+  /** Card body, markdown subset per the OA action_card contract. */
+  markdown: string
+  /** Button label (e.g. 查看并处理). */
+  singleTitle: string
+  /** Button target URL — the signed decision deep link. */
+  singleUrl: string
+}
+
+export async function sendDingTalkWorkNotificationActionCard(
+  accessToken: string,
+  input: DingTalkWorkNotificationActionCardInput,
+  config: DingTalkMessageConfig = readDingTalkMessageConfig(),
+  options?: DingTalkRequestOptions,
+): Promise<DingTalkWorkNotificationResult> {
+  const userIds = Array.from(new Set(
+    input.userIds
+      .map((userId) => String(userId ?? '').trim())
+      .filter(Boolean),
+  ))
+  const title = input.title.trim()
+  const markdown = input.markdown.trim()
+  const singleTitle = input.singleTitle.trim()
+  const singleUrl = input.singleUrl.trim()
+
+  if (userIds.length === 0) throw new Error('At least one DingTalk userId is required')
+  if (!title) throw new Error('DingTalk title is required')
+  if (!markdown) throw new Error('DingTalk markdown is required')
+  if (!singleTitle || !singleUrl) throw new Error('DingTalk action_card button title and url are required')
+
+  const payload = await requestDingTalkDirectoryJson(
+    `/topapi/message/corpconversation/asyncsend_v2?access_token=${encodeURIComponent(accessToken)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agent_id: Number.isNaN(Number(config.agentId)) ? config.agentId : Number(config.agentId),
+        userid_list: userIds.join(','),
+        to_all_user: false,
+        msg: {
+          msgtype: 'action_card',
+          action_card: {
+            title,
+            markdown,
+            single_title: singleTitle,
+            single_url: singleUrl,
+          },
+        },
+      }),
+    },
+    'Failed to send DingTalk action-card work notification',
+    config.baseUrl,
+    options,
+  )
+
+  const result = readNestedPayload(payload)
+  const taskIdValue = payload.task_id ?? payload.taskId ?? result.task_id ?? result.taskId
+  const requestIdValue = payload.request_id ?? payload.requestId ?? result.request_id ?? result.requestId
+  return {
+    taskId:
+      typeof taskIdValue === 'number'
+        ? String(taskIdValue)
+        : typeof taskIdValue === 'string'
+          ? taskIdValue
+              : undefined,
+    requestId:
+      typeof requestIdValue === 'string'
+        ? requestIdValue
+          : undefined,
+    raw: payload,
+  }
+}
+
 export async function sendDingTalkWorkNotification(
   accessToken: string,
   input: DingTalkWorkNotificationInput,

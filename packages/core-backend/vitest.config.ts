@@ -66,6 +66,8 @@ export default defineConfig({
       // from the no-DB default job so it doesn't skip-green, and wired as a WHOLE FILE into the
       // automation real-DB step in plugin-tests.yml where it runs against real Postgres every PR.
       'tests/integration/automation-approval-task-created-trigger.test.ts',
+      // A-2b approval-card action chain: DATABASE_URL-gated. Same two-point wiring (no skip-green).
+      'tests/integration/automation-dingtalk-approval-card-action.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

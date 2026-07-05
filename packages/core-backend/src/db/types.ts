@@ -1551,6 +1551,8 @@ export interface DingTalkApprovalCardDeliveriesTable {
   acted_action: string | null
   acted_by: string | null
   acted_at: NullableTimestamp
+  send_status: 'pending' | 'sent' | 'failed'
+  send_error: string | null
   created_at: CreatedAt
   updated_at: CreatedAt
 }

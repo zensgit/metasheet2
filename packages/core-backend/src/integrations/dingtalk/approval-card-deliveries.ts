@@ -35,6 +35,8 @@ export interface DingTalkApprovalCardDeliveryRow {
   acted_action: string | null
   acted_by: string | null
   acted_at: Date | string | null
+  send_status: 'pending' | 'sent' | 'failed'
+  send_error: string | null
   created_at: Date | string
   updated_at: Date | string
 }
@@ -42,7 +44,7 @@ export interface DingTalkApprovalCardDeliveryRow {
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
 
 const RETURNING_COLUMNS =
-  'id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id, card_state, acted_action, acted_by, acted_at, created_at, updated_at'
+  'id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id, card_state, acted_action, acted_by, acted_at, send_status, send_error, created_at, updated_at'
 
 export interface InsertDingTalkApprovalCardDeliveryInput {
   /** Optional caller-supplied id; defaults to a fresh UUID. Doubles as the interactive-card outTrackId (Slice B). */
@@ -107,6 +109,38 @@ export async function claimDingTalkApprovalCardDeliveryActed(
      WHERE id = $1 AND card_state = 'sent'
      RETURNING ${RETURNING_COLUMNS}`,
     [id, input.action, input.actedBy],
+  )
+  return (result.rows[0] as DingTalkApprovalCardDeliveryRow | undefined) ?? null
+}
+
+/** A-2b: records a successful send — task_id from asyncsend_v2, send_status pending→sent. */
+export async function markDingTalkApprovalCardDeliverySent(
+  query: QueryFn,
+  id: string,
+  taskId: string | null,
+): Promise<DingTalkApprovalCardDeliveryRow | null> {
+  const result = await query(
+    `UPDATE dingtalk_approval_card_deliveries
+     SET send_status = 'sent', task_id = $2, send_error = NULL, updated_at = NOW()
+     WHERE id = $1 AND send_status = 'pending'
+     RETURNING ${RETURNING_COLUMNS}`,
+    [id, taskId],
+  )
+  return (result.rows[0] as DingTalkApprovalCardDeliveryRow | undefined) ?? null
+}
+
+/** A-2b: records a failed send — traceable per the owner-ratified spec (send_status + send_error). */
+export async function markDingTalkApprovalCardDeliverySendFailed(
+  query: QueryFn,
+  id: string,
+  error: string,
+): Promise<DingTalkApprovalCardDeliveryRow | null> {
+  const result = await query(
+    `UPDATE dingtalk_approval_card_deliveries
+     SET send_status = 'failed', send_error = $2, updated_at = NOW()
+     WHERE id = $1 AND send_status = 'pending'
+     RETURNING ${RETURNING_COLUMNS}`,
+    [id, error],
   )
   return (result.rows[0] as DingTalkApprovalCardDeliveryRow | undefined) ?? null
 }

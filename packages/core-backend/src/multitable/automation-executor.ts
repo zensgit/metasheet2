@@ -19,8 +19,15 @@ import {
   DingTalkRequestError,
   fetchDingTalkAppAccessToken,
   sendDingTalkWorkNotification,
+  sendDingTalkWorkNotificationActionCard,
 } from '../integrations/dingtalk/client'
 import { readDingTalkMessageConfigFromRuntime } from '../integrations/dingtalk/work-notification-settings'
+import {
+  insertDingTalkApprovalCardDelivery,
+  markDingTalkApprovalCardDeliverySendFailed,
+  markDingTalkApprovalCardDeliverySent,
+} from '../integrations/dingtalk/approval-card-deliveries'
+import { createHmac } from 'crypto'
 import type { EventBus } from '../integration/events/event-bus'
 import {
   buildDingTalkMarkdown,
@@ -1660,6 +1667,9 @@ export class AutomationExecutor {
         case 'send_dingtalk_person_message':
           result = await this.executeSendDingTalkPersonMessage(action.config as unknown as SendDingTalkPersonMessageConfig, context)
           break
+        case 'send_dingtalk_approval_card':
+          result = await this.executeSendDingTalkApprovalCard(context)
+          break
         case 'lock_record':
           result = await this.executeLockRecord(action.config, context)
           break
@@ -2518,6 +2528,146 @@ export class AutomationExecutor {
         notificationStatus: result.status,
         recipientCount: recipients.length,
       },
+    }
+  }
+
+  /**
+   * A-2b (one-tap lock #3594, owner-ratified): approval-card delivery.
+   * - Only meaningful on approval.task_created rules: the recipient is FIXED from the trigger
+   *   event's assignee (rule authors cannot supply users — no misdelivery surface).
+   * - Ledger-first: the dingtalk_approval_card_deliveries row is written BEFORE the send (the
+   *   callback/decision-page anchor), task_id recorded on success, send_status/send_error make a
+   *   failed send traceable. Unbound recipients get a `skipped` row on the person-delivery
+   *   telemetry (no card row — nothing to anchor) and NEVER a guessed mapping.
+   * - The deep link carries ONLY the delivery id + an HMAC token (values-free): the decision page
+   *   resolves everything server-side through the card-delivery wrapper (§4/§5), never raw /actions.
+   */
+  private async executeSendDingTalkApprovalCard(context: ExecutionContext): Promise<AutomationStepResult> {
+    const actionType = 'send_dingtalk_approval_card' as const
+    const event = context.triggerEvent as {
+      eventType?: unknown
+      approval?: { instanceId?: unknown; requestNo?: unknown; templateId?: unknown }
+      task?: { nodeKey?: unknown; entryEpoch?: unknown; assigneeUserId?: unknown; sourceStep?: unknown }
+    } | null
+    const instanceId = typeof event?.approval?.instanceId === 'string' ? event.approval.instanceId : ''
+    const nodeKey = typeof event?.task?.nodeKey === 'string' ? event.task.nodeKey : ''
+    const assigneeUserId = typeof event?.task?.assigneeUserId === 'string' ? event.task.assigneeUserId : ''
+    if (event?.eventType !== 'approval.task_created' || !instanceId || !nodeKey || !assigneeUserId) {
+      return { actionType, status: 'failed', error: 'send_dingtalk_approval_card requires an approval.task_created trigger event' }
+    }
+
+    const baseUrl = resolveAutomationAppBaseUrl()
+    if (!baseUrl) {
+      return { actionType, status: 'failed', error: 'PUBLIC_APP_URL or APP_BASE_URL is required for the approval decision link' }
+    }
+    const linkSecret = (process.env.APPROVAL_CARD_LINK_SECRET ?? '').trim()
+    if (!linkSecret) {
+      return { actionType, status: 'failed', error: 'APPROVAL_CARD_LINK_SECRET is required for signed approval decision links' }
+    }
+
+    // Instance metadata for the card summary — ids/title/request_no only, NO form values.
+    const instanceResult = await this.deps.queryFn(
+      `SELECT title, request_no FROM approval_instances WHERE id = $1`,
+      [instanceId],
+    )
+    const instanceRow = (instanceResult.rows[0] ?? null) as { title?: string | null; request_no?: string | null } | null
+    if (!instanceRow) {
+      return { actionType, status: 'failed', error: 'Approval instance not found for the pending-task event' }
+    }
+    const approvalTitle = typeof instanceRow.title === 'string' && instanceRow.title.trim() ? instanceRow.title.trim() : '审批待办'
+    const requestNo = typeof instanceRow.request_no === 'string' ? instanceRow.request_no.trim() : ''
+
+    // Recipient mapping: same directory-link lateral the person-message action uses; fail-closed.
+    const recipientResult = await this.deps.queryFn(
+      `SELECT u.id AS local_user_id,
+              u.is_active AS local_user_active,
+              linked.external_user_id AS dingtalk_user_id
+         FROM users u
+         LEFT JOIN LATERAL (
+           SELECT a.external_user_id
+             FROM directory_account_links l
+             JOIN directory_accounts a ON a.id = l.directory_account_id
+            WHERE l.local_user_id = u.id
+              AND l.link_status = 'linked'
+              AND a.provider = 'dingtalk'
+              AND a.is_active = TRUE
+            ORDER BY a.updated_at DESC
+            LIMIT 1
+         ) linked ON TRUE
+        WHERE u.id = $1`,
+      [assigneeUserId],
+    )
+    const recipientRow = (recipientResult.rows[0] ?? null) as { local_user_active?: boolean; dingtalk_user_id?: string | null } | null
+    const dingtalkUserId = typeof recipientRow?.dingtalk_user_id === 'string' ? recipientRow.dingtalk_user_id.trim() : ''
+    if (!recipientRow || recipientRow.local_user_active !== true || !dingtalkUserId) {
+      await recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+        localUserId: assigneeUserId,
+        sourceType: 'automation',
+        subject: `审批待办：${approvalTitle}`,
+        content: '(approval card skipped)',
+        success: false,
+        status: 'skipped',
+        errorMessage: 'DingTalk account is not linked or user is inactive',
+        automationRuleId: context.ruleId,
+        recordId: context.recordId,
+        initiatedBy: context.actorId ?? null,
+      })
+      return { actionType, status: 'failed', error: 'Recipient has no linked, active DingTalk account (skipped — mappings are never guessed)' }
+    }
+
+    // Ledger FIRST — the row is the only legitimate delivery → instance anchor.
+    const entryEpochRaw = event.task?.entryEpoch
+    const sourceStepRaw = event.task?.sourceStep
+    const delivery = await insertDingTalkApprovalCardDelivery(this.deps.queryFn, {
+      instanceId,
+      nodeKey,
+      recipientUserId: assigneeUserId,
+      recipientDingTalkUserId: dingtalkUserId,
+      deliveryKind: 'work_notice_action_card',
+    })
+
+    const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)
+    const decisionUrl = buildAppLink(baseUrl, '/m/approval-decision', { d: delivery.id, t: token })
+    const markdownLines = [
+      `### 审批待办：${approvalTitle}`,
+      requestNo ? `- 编号：${requestNo}` : '',
+      `- 节点：${nodeKey}${typeof sourceStepRaw === 'number' ? `（第 ${sourceStepRaw} 步）` : ''}`,
+      '',
+      '请点击下方按钮处理。',
+    ].filter(Boolean)
+
+    try {
+      const messageConfig = await readDingTalkMessageConfigFromRuntime()
+      const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
+      const result = await sendDingTalkWorkNotificationActionCard(
+        accessToken,
+        {
+          userIds: [dingtalkUserId],
+          title: `审批待办：${approvalTitle}`,
+          markdown: markdownLines.join('\n'),
+          singleTitle: '查看并处理',
+          singleUrl: decisionUrl,
+        },
+        messageConfig,
+        { fetchFn: this.deps.fetchFn },
+      )
+      await markDingTalkApprovalCardDeliverySent(this.deps.queryFn, delivery.id, result.taskId ?? null)
+      return {
+        actionType,
+        status: 'success',
+        output: {
+          deliveryId: delivery.id,
+          instanceId,
+          nodeKey,
+          entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
+          recipientUserId: assigneeUserId,
+          taskId: result.taskId ?? null,
+        },
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      await markDingTalkApprovalCardDeliverySendFailed(this.deps.queryFn, delivery.id, errorMessage).catch(() => null)
+      return { actionType, status: 'failed', error: errorMessage, output: { deliveryId: delivery.id } }
     }
   }
 

@@ -6,10 +6,12 @@ import {
 } from '../../src/db/migrations/zzzz20260615150000_add_record_click_automation_action'
 
 describe('record_click automation action migration (B1-a1)', () => {
-  it('keeps the latest database action constraint in sync with app-level action types', () => {
-    // This migration widens chk_automation_action_type to the CURRENT ALL_ACTION_TYPES — so a future
-    // action type added to the app without a DB migration trips this drift guard RED.
+  it('keeps this constraint in sync with app-level action types except those added by later migrations', () => {
+    // No longer the LATEST migration (send_dingtalk_approval_card widened the constraint afterwards —
+    // see approval-card-automation-action-migration.test.ts for the live "latest in sync" guard).
+    const ADDED_BY_LATER_MIGRATIONS = new Set<string>(['send_dingtalk_approval_card'])
     for (const actionType of ALL_ACTION_TYPES) {
+      if (ADDED_BY_LATER_MIGRATIONS.has(actionType)) continue
       expect(AUTOMATION_ACTION_TYPES_WITH_RECORD_CLICK).toContain(actionType)
     }
   })

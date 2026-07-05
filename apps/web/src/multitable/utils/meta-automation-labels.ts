@@ -900,6 +900,8 @@ export function automationActionTypeLabel(type: AutomationActionType | UnknownAu
       return isZh ? '发送钉钉群消息' : 'Send DingTalk group message'
     case 'send_dingtalk_person_message':
       return isZh ? '发送钉钉个人消息' : 'Send DingTalk person message'
+    case 'send_dingtalk_approval_card':
+      return isZh ? '发送审批卡片（钉钉）' : 'Send approval card (DingTalk)'
     case 'delete_record':
       return isZh ? '删除记录' : 'Delete record'
     case 'lock_record':

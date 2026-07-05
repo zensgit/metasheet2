@@ -125,7 +125,28 @@ const APPROVAL_COMPLETION_TRIGGER_EVENT_TYPES: readonly string[] = [
 // trigger_config.templateId; record-less; v1 allows ONLY non-record-targeting side effects (no record
 // writes / start_approval / delete_record), so no automation loop can form through pending events.
 const APPROVAL_TASK_CREATED_TRIGGER = 'approval.task_created'
-const APPROVAL_TASK_CREATED_ALLOWED_ACTION_TYPES: ReadonlySet<string> = APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES
+// A-2b: the card action joins the notification family HERE ONLY — it is meaningless (and rejected)
+// on every other trigger because its recipient comes from the pending-task event.
+const APPROVAL_CARD_ACTION_TYPE = 'send_dingtalk_approval_card'
+const APPROVAL_TASK_CREATED_ALLOWED_ACTION_TYPES: ReadonlySet<string> = new Set([
+  ...APPROVAL_COMPLETED_ALLOWED_ACTION_TYPES,
+  APPROVAL_CARD_ACTION_TYPE,
+])
+
+/** A-2b placement gate: send_dingtalk_approval_card only mounts on approval.task_created rules. */
+function validateApprovalCardActionPlacement(
+  triggerType: string,
+  actionType: string,
+  nestedActions: AutomationAction[],
+): string | null {
+  if (triggerType === APPROVAL_TASK_CREATED_TRIGGER) return null
+  const usesCard = actionType === APPROVAL_CARD_ACTION_TYPE
+    || nestedActions.some((action) => action.type === APPROVAL_CARD_ACTION_TYPE)
+  if (usesCard) {
+    return 'send_dingtalk_approval_card is only allowed on approval.task_created rules (its recipient comes from the pending-task event)'
+  }
+  return null
+}
 
 const APPROVAL_TEMPLATE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -986,6 +1007,9 @@ export class AutomationService {
     )
     if (approvalTaskCreatedError) throw new AutomationRuleValidationError(approvalTaskCreatedError)
 
+    const cardPlacementError = validateApprovalCardActionPlacement(input.triggerType, input.actionType, actionsForValidation)
+    if (cardPlacementError) throw new AutomationRuleValidationError(cardPlacementError)
+
     // date_field rules carry a SERVER-SET activation `effectiveAt` (= now) so the firing floor is the rule's
     // activation, not its row createdAt. Spread-then-set overwrites any client-supplied effectiveAt (no backfill bypass).
     const persistedTriggerConfig: Record<string, unknown> =
@@ -1249,18 +1273,22 @@ export class AutomationService {
       const existingForApproval = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
       if (!existingForApproval || existingForApproval.sheet_id !== sheetId) return null
       const nextTriggerType = input.triggerType ?? existingForApproval.trigger_type
+      const nextTriggerConfig = (
+        input.triggerConfig !== undefined ? input.triggerConfig : existingForApproval.trigger_config
+      ) as Record<string, unknown> | null
+      const nextActionType = input.actionType ?? existingForApproval.action_type
+      const nextActionConfig = (input.actionConfig ?? existingForApproval.action_config) as Record<string, unknown>
+      const nextActions = input.actions !== undefined ? input.actions : existingForApproval.actions ?? null
+      const nextExecutionMode = input.executionMode !== undefined
+        ? normalizeExecutionMode(input.executionMode)
+        : existingForApproval.execution_mode ?? null
+      const nextConditions = input.conditions !== undefined ? input.conditions : existingForApproval.conditions ?? null
+      const approvalActions = collectNestedAutomationActions(nextActionType, nextActionConfig, nextActions, nextExecutionMode)
+      // A-2b: placement gate runs for EVERY resulting shape (a card action smuggled onto a
+      // non-task_created rule via a partial update must not survive either).
+      const cardPlacementError = validateApprovalCardActionPlacement(nextTriggerType, nextActionType, approvalActions)
+      if (cardPlacementError) throw new AutomationRuleValidationError(cardPlacementError)
       if (nextTriggerType === APPROVAL_COMPLETED_TRIGGER || nextTriggerType === APPROVAL_TASK_CREATED_TRIGGER) {
-        const nextTriggerConfig = (
-          input.triggerConfig !== undefined ? input.triggerConfig : existingForApproval.trigger_config
-        ) as Record<string, unknown> | null
-        const nextActionType = input.actionType ?? existingForApproval.action_type
-        const nextActionConfig = (input.actionConfig ?? existingForApproval.action_config) as Record<string, unknown>
-        const nextActions = input.actions !== undefined ? input.actions : existingForApproval.actions ?? null
-        const nextExecutionMode = input.executionMode !== undefined
-          ? normalizeExecutionMode(input.executionMode)
-          : existingForApproval.execution_mode ?? null
-        const nextConditions = input.conditions !== undefined ? input.conditions : existingForApproval.conditions ?? null
-        const approvalActions = collectNestedAutomationActions(nextActionType, nextActionConfig, nextActions, nextExecutionMode)
         const approvalCompletedError = await this.validateApprovalCompletedRuleAtSave(
           nextTriggerType,
           nextTriggerConfig,
