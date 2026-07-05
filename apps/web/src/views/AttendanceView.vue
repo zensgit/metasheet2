@@ -915,6 +915,42 @@
                 {{ tr('Ask an attendance admin to enable an active overtime rule before submitting overtime requests.', '请联系考勤管理员启用可用加班规则后再提交加班申请。') }}
               </small>
             </label>
+            <div
+              v-if="canQuickFillLeave"
+              class="attendance__field attendance__field--full"
+              data-leave-quickfill-group
+            >
+              <span>{{ tr('Quick fill (uses your effective shift window)', '快捷预填（按您的生效班次窗口）') }}</span>
+              <div class="attendance__quick-actions">
+                <button
+                  class="attendance__btn attendance__btn--compact"
+                  type="button"
+                  data-leave-quickfill-kind="full_day"
+                  @click="applyLeaveQuickFill('full_day')"
+                >
+                  {{ tr('Full day', '全天') }}
+                </button>
+                <button
+                  class="attendance__btn attendance__btn--compact"
+                  type="button"
+                  data-leave-quickfill-kind="morning_half"
+                  @click="applyLeaveQuickFill('morning_half')"
+                >
+                  {{ tr('Morning half-day', '上午半天') }}
+                </button>
+                <button
+                  class="attendance__btn attendance__btn--compact"
+                  type="button"
+                  data-leave-quickfill-kind="afternoon_half"
+                  @click="applyLeaveQuickFill('afternoon_half')"
+                >
+                  {{ tr('Afternoon half-day', '下午半天') }}
+                </button>
+              </div>
+              <small class="attendance__field-hint" data-leave-quickfill-half-note>
+                {{ leaveQuickFillHalfDayNote }}
+              </small>
+            </div>
             <label v-if="!isShiftSwapRequest" class="attendance__field" for="attendance-request-in">
               <span>{{ isLeaveOrOvertimeRequest ? tr('Start', '开始') : tr('Requested in', '申请打卡入') }}</span>
               <input
@@ -943,6 +979,13 @@
                 min="0"
               />
             </label>
+            <p
+              v-if="leaveMinutesDaysHint"
+              class="attendance__field-hint attendance__field--full"
+              data-leave-minutes-days-hint
+            >
+              {{ leaveMinutesDaysHint }}
+            </p>
             <label v-if="isLeaveRequest || isMakeupRequest" class="attendance__field" for="attendance-request-attachment">
               <span>{{ tr('Attachment URL', '附件链接') }}</span>
               <input
@@ -9437,6 +9480,13 @@ import {
   buildAttendanceShiftAssignmentPreview,
   parseAttendanceRotationSequenceInput,
 } from './attendance/attendanceRotationSequencePreview'
+import {
+  buildLeaveQuickFill,
+  computeLeaveMinutesDaysEquivalent,
+  hasValidLeaveQuickFillShiftWindow,
+  type AttendanceLeaveQuickFillKind,
+  type AttendanceLeaveQuickFillShiftWindow,
+} from './attendance/halfDayLeaveHelper'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
@@ -22747,6 +22797,90 @@ function formatSelfRulesWarning(code: string): string {
   }
   return labels[code] ?? code
 }
+
+// Half-day leave helper (display-only design-lock 20260705, PR #3605) -- G1 quick-fill + G2
+// minutes -> days hint. Pure math lives in ./attendance/halfDayLeaveHelper.ts; this is just the
+// wiring: the effective shift window comes from the same `selfRulesData.runtimeRule` the summary
+// above already reads, and the selected leave type comes from the existing `leaveTypes` wire.
+const selectedLeaveType = computed<AttendanceLeaveType | null>(
+  () => leaveTypes.value.find(item => item.id === requestForm.leaveTypeId) ?? null,
+)
+
+const leaveQuickFillShiftWindow = computed<AttendanceLeaveQuickFillShiftWindow | null>(() => {
+  const rule = selfRulesData.value?.runtimeRule
+  if (!rule) return null
+  return { workStartTime: rule.workStartTime, workEndTime: rule.workEndTime }
+})
+
+// Single source of truth for "shift window missing -> hide the buttons, don't guess a default"
+// (design-lock §2/§3) -- also gates the half-day rounding note below, since that note is about
+// the same buttons.
+const canQuickFillLeave = computed(() =>
+  isLeaveRequest.value
+  && Boolean(requestForm.leaveTypeId)
+  // workDate is a clearable `type=date` input; without it buildLeaveQuickFill() no-ops (review
+  // P3) — gate the buttons + rounding note on it too so a cleared date hides them consistently
+  // rather than showing dead buttons.
+  && Boolean(requestForm.workDate)
+  && hasValidLeaveQuickFillShiftWindow(leaveQuickFillShiftWindow.value),
+)
+
+// One-time seed only: this is a plain click handler, not a watcher, so it never re-applies and
+// never clobbers a manual edit made after the click (design-lock §2 "预填后用户编辑不回弹").
+function applyLeaveQuickFill(kind: AttendanceLeaveQuickFillKind): void {
+  const result = buildLeaveQuickFill(
+    kind,
+    requestForm.workDate,
+    leaveQuickFillShiftWindow.value,
+    selectedLeaveType.value,
+  )
+  if (!result) return
+  requestForm.requestedInAt = result.requestedInAt
+  requestForm.requestedOutAt = result.requestedOutAt
+  requestForm.minutes = String(result.minutes)
+}
+
+// "如实显示": disclose up front (not just after a click) whenever halving this leave type's
+// defaultMinutesPerDay isn't a whole number, so the rounding is visible before the user commits
+// to a half-day button. am_half/pm_half share the same minutes arithmetic, so either kind works
+// here as the source of the note.
+const leaveQuickFillHalfDayNote = computed(() => {
+  if (!canQuickFillLeave.value) return ''
+  const result = buildLeaveQuickFill(
+    'morning_half',
+    requestForm.workDate,
+    leaveQuickFillShiftWindow.value,
+    selectedLeaveType.value,
+  )
+  if (!result) return ''
+  const perDay = selectedLeaveType.value?.defaultMinutesPerDay
+  if (result.minutes === result.exactMinutes) {
+    return tr(
+      `Half day fills ${result.minutes} min (half of this leave type's ${perDay} min/day).`,
+      `半天预填 ${result.minutes} 分钟（该假种标准日 ${perDay} 分钟的一半）。`,
+    )
+  }
+  return tr(
+    `Half day fills ${result.minutes} min -- rounded from exactly half of this leave type's ${perDay} min/day (${result.exactMinutes}).`,
+    `半天预填 ${result.minutes} 分钟——由该假种标准日 ${perDay} 分钟的一半（${result.exactMinutes}）四舍五入而来。`,
+  )
+})
+
+// G2: minutes -> day-equivalent hint, explicitly against THIS leave type's defaultMinutesPerDay
+// (never an org-level standardDayMinutes -- that field isn't on the employee wire, design-lock §3).
+const leaveMinutesDaysHint = computed(() => {
+  if (!isLeaveRequest.value || !requestForm.leaveTypeId) return ''
+  const perDay = selectedLeaveType.value?.defaultMinutesPerDay
+  const days = computeLeaveMinutesDaysEquivalent(requestForm.minutes, perDay)
+  if (days === null) return ''
+  // toFixed(1) on top of the already-rounded-to-one-decimal `days` guarantees a stable trailing
+  // zero for the "保留一位小数" display (e.g. exactly `1` renders as "1.0", not "1").
+  const daysText = days.toFixed(1)
+  return tr(
+    `≈ ${daysText} day(s) (based on this leave type's standard day of ${perDay} min)`,
+    `≈ ${daysText} 天（按该假种标准日 ${perDay} 分钟）`,
+  )
+})
 
 // 年假/法定假 employee self-service: the overview card reads the caller's OWN balance via the token-locked /me
 // endpoint (no userId — the server forces the subject to the authenticated token). Read-only.
