@@ -106,6 +106,22 @@ describe('runReadSourceComposition', () => {
     expect((err as Error).message).toBe('READ_SOURCE_COMPOSITION_REQUEST_FAILED')
     expect((err as Error).message).not.toContain('MAT-001')
   })
+
+  it('clamps error.code to the EXACT registered set — a code-SHAPED business value coarsens to fallback', async () => {
+    // A regex clamp (uppercase+underscore) would PASS this; the registered-set clamp coarsens it.
+    apiFetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: 'MAT_001_SECRET', message: 'x' } }), { status: 409, headers: { 'Content-Type': 'application/json' } }),
+    )
+    const err = await runReadSourceComposition('rscc_1', 'M-001', SCOPE).then(() => null, (e) => e)
+    expect((err as Error).message).toBe('READ_SOURCE_COMPOSITION_REQUEST_FAILED')
+    expect((err as Error).message).not.toContain('MAT_001_SECRET')
+    // A genuinely registered code still passes through.
+    apiFetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: 'READ_SOURCE_COMPOSITION_CONFIG_NOT_APPROVED', message: 'x' } }), { status: 409, headers: { 'Content-Type': 'application/json' } }),
+    )
+    const ok = await runReadSourceComposition('rscc_1', 'M-001', SCOPE).then(() => null, (e) => e)
+    expect((ok as Error).message).toBe('READ_SOURCE_COMPOSITION_CONFIG_NOT_APPROVED')
+  })
 })
 
 describe('normalizeCompositionRunResult (values-free allowlist)', () => {
@@ -173,5 +189,31 @@ describe('normalizeCompositionRunResult (values-free allowlist)', () => {
     expect(result.evidence.planErrors).toEqual([
       { code: 'READ_SOURCE_COMPOSITION_STEP_NOT_APPROVED', field: 'steps.1.readSourceConfigId', reason: 'approved_read_config_required' },
     ])
+  })
+
+  it('bounded-clamps each planErrors field — a business value in code/field/reason drops the entry', () => {
+    const result = normalizeCompositionRunResult({
+      evidence: {
+        ok: false, failedStep: null, steps: [], errorCode: 'READ_SOURCE_COMPOSITION_PLAN_INVALID',
+        planErrors: [
+          // reason carries a business value (uppercase/space) → whole entry dropped.
+          { code: 'READ_SOURCE_COMPOSITION_STEP_NOT_APPROVED', field: 'steps.1.readSourceConfigId', reason: 'material MAT-001 SECRET' },
+          // field carries a business value → dropped.
+          { code: 'READ_SOURCE_COMPOSITION_STEP_MODE_INVALID', field: 'MAT-001 the material number', reason: 'resolver_lookup_required' },
+          // code is a code-SHAPED business value (no READ_SOURCE_COMPOSITION_ prefix) → dropped.
+          { code: 'MAT_001_SECRET', field: 'steps.0.readSourceConfigId', reason: 'approved_read_config_required' },
+          // a well-formed validator triple survives.
+          { code: 'READ_SOURCE_COMPOSITION_WRITE_CONFIG_REJECTED', field: 'steps.0.savePath', reason: 'write_shaped_key' },
+        ],
+      },
+      data: null,
+    })
+    expect(result.evidence.planErrors).toEqual([
+      { code: 'READ_SOURCE_COMPOSITION_WRITE_CONFIG_REJECTED', field: 'steps.0.savePath', reason: 'write_shaped_key' },
+    ])
+    const text = JSON.stringify(result)
+    for (const leak of ['MAT-001 SECRET', 'MAT-001 the material number', 'MAT_001_SECRET']) {
+      expect(text).not.toContain(leak)
+    }
   })
 })

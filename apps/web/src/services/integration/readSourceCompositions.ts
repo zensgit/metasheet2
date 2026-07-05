@@ -112,8 +112,32 @@ function buildQuery(input: Record<string, unknown>): string {
 // error.message is NEVER surfaced — only a clamped code + optional clamped reason — so the error path is
 // values-free BY CONSTRUCTION, not by trusting the server to keep messages coarse (a future server bug
 // echoing a business value into message can never reach the client render).
-const COMPOSITION_ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/
 const COMPOSITION_ERROR_REASON_PATTERN = /^[a-z0-9_:-]{1,80}$/
+// planErrors[].field is a structural path the C-R1 validator emits (e.g. `steps.1.readSourceConfigId`,
+// `(root)`, `steps.0.(unexpected)`). Bound it to that shape so a business value can never ride in.
+const COMPOSITION_ERROR_FIELD_PATTERN = /^[A-Za-z0-9_.()]{1,60}$/
+// planErrors[].code is a composition validator code (READ_SOURCE_COMPOSITION_*). Requiring the prefix is
+// stricter than a bare uppercase regex — a code-shaped business value (e.g. MAT_001_SECRET) is rejected.
+const COMPOSITION_VALIDATOR_CODE_PATTERN = /^READ_SOURCE_COMPOSITION_[A-Z_]{1,60}$/
+
+// The EXACT registered set of HTTP error.code values the composition run/list routes emit (the composition
+// config errors + the read-source-config errors re-surfaced during per-step loading + the auth codes).
+// error.code is clamped against this set — NOT a bare regex — so a code-SHAPED business value (uppercase +
+// underscore, e.g. MAT_001_SECRET, which would pass a regex) coarsens to the fixed fallback instead of
+// rendering. An unregistered-but-legit future server code also coarsens (safe degradation, never a leak).
+const COMPOSITION_REQUEST_ERROR_CODES: ReadonlySet<string> = new Set([
+  'READ_SOURCE_COMPOSITION_CONFIG_INVALID',
+  'READ_SOURCE_COMPOSITION_CONFIG_NOT_FOUND',
+  'READ_SOURCE_COMPOSITION_CONFIG_NOT_APPROVED',
+  'READ_SOURCE_COMPOSITION_CONFIG_STATUS_CONFLICT',
+  'READ_SOURCE_COMPOSITION_RUN_CONTRACT_INVALID',
+  'READ_SOURCE_CONFIG_INVALID',
+  'READ_SOURCE_CONFIG_NOT_FOUND',
+  'READ_SOURCE_CONFIG_NOT_APPROVED',
+  'READ_SOURCE_CONFIG_STATUS_CONFLICT',
+  'UNAUTHENTICATED',
+  'FORBIDDEN',
+])
 
 export class ReadSourceCompositionApiError extends Error {
   status: number
@@ -135,7 +159,7 @@ async function parseCompositionResponse<T>(response: Response): Promise<T> {
   if (!response.ok || (isPlainObject(payload) && payload.ok === false)) {
     const error = isPlainObject(payload) && isPlainObject(payload.error) ? payload.error : {}
     const details = isPlainObject(error.details) ? error.details : {}
-    const code = typeof error.code === 'string' && COMPOSITION_ERROR_CODE_PATTERN.test(error.code)
+    const code = typeof error.code === 'string' && COMPOSITION_REQUEST_ERROR_CODES.has(error.code)
       ? error.code
       : 'READ_SOURCE_COMPOSITION_REQUEST_FAILED'
     const reason = typeof details.reason === 'string' && COMPOSITION_ERROR_REASON_PATTERN.test(details.reason)
@@ -194,9 +218,15 @@ export function normalizeCompositionRunResult(value: unknown): CompositionRunRes
     const coarse = asCompositionPlanErrorCode(rawEvidence.errorCode)
     if (coarse) evidence.errorCode = coarse
     if (Array.isArray(rawEvidence.planErrors)) {
+      // Bounded-clamp EACH triple field (code / field / reason) — not just typeof string — so the triple
+      // is values-free by construction: a future server bug echoing a business value into any of the
+      // three cannot ride in. An entry failing any clamp is dropped whole (fail-closed).
       const triples = rawEvidence.planErrors
         .filter(isPlainObject)
-        .filter((e) => typeof e.code === 'string' && typeof e.field === 'string' && typeof e.reason === 'string')
+        .filter((e) =>
+          typeof e.code === 'string' && COMPOSITION_VALIDATOR_CODE_PATTERN.test(e.code)
+          && typeof e.field === 'string' && COMPOSITION_ERROR_FIELD_PATTERN.test(e.field)
+          && typeof e.reason === 'string' && COMPOSITION_ERROR_REASON_PATTERN.test(e.reason))
         .map((e) => ({ code: e.code as string, field: e.field as string, reason: e.reason as string }))
       if (triples.length > 0) evidence.planErrors = triples
     }
