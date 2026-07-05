@@ -1,7 +1,9 @@
 # 考勤批量排班（bulk-apply）design-lock — 2026-07-05
 
-> **Status: PROPOSED — 等 owner ratify + 两个决策（D1/D2）后才可实现**（本刀比其它
-> humanization 微切片大：涉及新交互面 + N-写编排，非 display-only，不适用 delegated-execution）。
+> **Status: RATIFIED（owner-delegated 2026-07-05：D1 = A checkbox-list MVP，D2 = A draft-then-publish；
+> drag-grid D1-B 与 bulk 端点仍 §6 deferred）**。owner 在对话中把"五个解锁点"整体委托处理，采纳
+> 本锁 §2 推荐档 **D1-A + D2-A**。实现按 §3-§5（frontend-only；泳道 A 串行，排在 half-day runtime 之后）。
+> 本刀比其它 humanization 微切片大：涉及新交互面 + N-写编排，非 display-only。
 > 依据：humanization backlog §4.5「复制/粘贴排班、划线排班」+ 2026-07-05 现状审计（§1 锚点）。
 
 ## 1. 审计结论（改变了这刀的形状）
