@@ -12,7 +12,7 @@
 | 项 | 门类 | main 现状（已核） | 可完成性 | 谁来定下一步 |
 |---|---|---|---|---|
 | **PIT_RESET 启用** | env-enable | runtime + 单事务原子性 + UI 入口（#3301）全 merged，default-off | partial | **环境 owner**：trash-retention STOP-SHIP 确认 + flag-on live smoke + 决定置 true |
-| **PIT_UNDELETE 启用** | env-enable | T8-1 Revert-undelete 全 built（#3307/#3310/#3311 + 4 项 pre-rollout 修复），default-off | partial | **环境 owner**：补 flag-on live smoke（+建议补「多 resurrect 强制失败」原子性 golden）后启用 |
+| **PIT_UNDELETE 启用** | env-enable | T8-1 Revert-undelete 全 built（#3307/#3310/#3311 + 4 项 pre-rollout 修复），default-off | partial | **环境 owner**：补 flag-on live smoke 后启用（原「建议补多-resurrect 原子性 golden」已由 #3351 落地，见 §2.2 修正） |
 | **T9-W 5 个 config flags** | env-enable | 每 tier 的**安全子集**全 built + real-DB 验证，default-off | partial | **逐 tier owner 启用**；其中 **permission-revert 有工程前置（见 §2.5）** |
 | **Reset-UI T-source** | product-entry | picker/wiring 已 DONE（#3301，最小 datetime-local 版） | partial | **产品 owner**：是否升级为 history-anchored picker（安全更优）；+ rollout |
 | **真·lossy retype / 值级 field undelete** | unauthorized-semantic | 已删字段的列值/links/auto-number **无 tombstone，字节已不存在** | partial（含 impossible 区） | **owner 单项 sign-off**：是否要「向前」捕获能力（不救已删数据） |
@@ -28,7 +28,7 @@
 ### 2.2 PIT_UNDELETE 启用（env-enable）— §4a 旧「未设计」已过期
 **现状**：T8-1 **Revert-undelete 全 built**，default-off（flag `MULTITABLE_ENABLE_PIT_UNDELETE`，univer-meta.ts:9343；off → `UNDELETE_DISABLED`）。复活「T 时存在、现已删」的记录：用 `reconstructRecordsAtT` 的**完整未掩码 T-snapshot**、原 id、**outbound `meta_links` 重建**、`source='restore'` revision、**单事务全或无、resurrect 先跑**；identity 绑 `resurrectScopeHash`（drift→409）、`canDeleteRecord` floor、typed `confirm:'undelete'`。**inbound 链接不重建**（设计选择 L4-A：当对端记录下次保存时自然回现，golden f 锁定），非缺陷。design-lock #3307 ratified；4 项 pre-rollout 评审修复（统一 cap 413 / resurrect schema-drift 守卫 / `source='restore'` / 无 partial-重排）全部已修。
 **「完成」= 启用运营决定**：补 flag-on live smoke（建议先在 sandbox，destructive-adjacent）。
-**验证**：goldens a–l（13 个）`multitable-undelete-pit-realdb.test.ts` 已注册 plugin-tests.yml（CI-proven，本地无 postgres）。**开口（doc 自陈）**：goldens 非本地跑（重点看 golden e resurrect 写入）；**「多 resurrect 强制失败」原子性 golden 建议补**（当前单事务由构造保证全或无，但未 golden 钉死）；TOCTOU `FOR UPDATE` 路径未 golden 覆盖；flag-on live smoke。
+**验证**：goldens a–n（15 个）`multitable-undelete-pit-realdb.test.ts` 已注册 plugin-tests.yml。**〔2026-07-05 修正〕**本节原「建议补『多 resurrect 强制失败』原子性 golden」在成文前一天即已由 **#3351 落地为 test (m)**（2 记录 undelete、trigger 强制第 2 条失败、断言全量回滚）——本 doc 当时未察，属 stale；(m) 已于 2026-07-05 被 mutation-proof 复核（拆单事务 → (m) 红，见 #3606 记录），同轮另落 **(n) 跨 strategy preview-token 拒收** route-level golden，且 15/15 已在本地 disposable Postgres 真跑过（不再是"仅 CI-proven"）。**仍开口**：TOCTOU `FOR UPDATE` 路径未 golden 覆盖；flag-on live smoke。
 
 ### 2.3 T9-W config-restore 5 个 flags（env-enable，逐 tier）
 **每 tier 的安全子集全 built + real-DB 验证、default-off。** 边界（务必逐 tier 看）：
