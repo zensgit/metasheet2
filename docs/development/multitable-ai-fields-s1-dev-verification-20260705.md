@@ -1,8 +1,8 @@
 # Multitable AI-fields governance arc — S1 write provenance + commit-action batch grouping — dev & verification (2026-07-05)
 
 > **Design-lock**: ratified and merged to `main` — PR #3569, squash commit `6b0e27bf2`.
-> **Runtime**: code-complete, CI green, **awaiting owner merge** — PR #3584, branch
-> `claude/multitable-ai-provenance-s1-runtime-20260705`, head `66fa9183d`, 4 commits, +724/−11 across 12 files.
+> **Runtime**: merged to `main` — PR #3584, squash commit `4640f3662`; PR branch head
+> `66fa9183d`, 4 commits, +724/−11 across 12 files before squash.
 > Per the lock's own change-surface statement: no new tables, no migrations, no new env flags, no
 > restore-surface change.
 
@@ -203,7 +203,7 @@ required check.
 **Arc ledger** (per the design-lock's §8, updated for this line's status):
 
 - **S1** (this line) — write provenance + commit-action batch grouping (rollback foundation): design ✅
-  merged (#3569, `6b0e27bf2`); runtime ✅ code-complete + CI green, merge pending (#3584, `b44a375e5`).
+  merged (#3569, `6b0e27bf2`); runtime ✅ merged (#3584, squash `4640f3662`, PR head `66fa9183d`).
 - 🔒 **S1b** — true history-batch rollback (restore-surface extension: batch-scoped revert + per-record
   predecessor targeting + a History Center write entry). Separate gated design-lock; explicitly not promised
   by S1.
