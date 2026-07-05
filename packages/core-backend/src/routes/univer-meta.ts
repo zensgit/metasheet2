@@ -212,6 +212,15 @@ import {
 } from '../multitable/post-commit-hooks'
 import { listRecordRevisions, recordRecordRevision, type RecordRevisionEntry } from '../multitable/record-history-service'
 import {
+  isPersonalViewsEnabled,
+  applyPersonalViewOverlay,
+  fetchPersonalViewConfigsForViews,
+  getPersonalViewConfig,
+  upsertPersonalViewConfig,
+  deletePersonalViewConfig,
+  sanitizePersonalOverlayConfig,
+} from '../multitable/personal-view-config'
+import {
   countUnreadRecordSubscriptionNotifications,
   getRecordSubscriptionStatus,
   listRecordSubscriptionNotifications,
@@ -10831,9 +10840,29 @@ export function univerMetaRouter(): Router {
         config: normalizeJson(r.config),
       }))
 
+      const requestAccess = await resolveRequestAccess(req)
       // #2052 (b): redact denied-field filter literals per the requester's allowed-field set.
-      const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, (await resolveRequestAccess(req)).userId, capabilities)
-      return res.json({ ok: true, data: { views: views.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)) } })
+      const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, requestAccess.userId, capabilities)
+
+      // Personal (per-user) view config overlay — Slice 1, flag default-OFF (design-lock
+      // docs/development/multitable-personal-views-design-lock-20260705.md §1-C / §P2). §1-C
+      // resolution: this actor's personal override (if a row exists) ELSE the shared config —
+      // absent override / flag-off leaves `effectiveViews === views` unchanged (byte-identical,
+      // G-B). `requestAccess.userId` is the authenticated actor resolved above (JWT/session via
+      // `resolveRequestAccess`) — NEVER a client-supplied id (§1-B).
+      let effectiveViews: UniverMetaViewConfig[] = views
+      if (isPersonalViewsEnabled() && requestAccess.userId) {
+        const overlays = await fetchPersonalViewConfigsForViews(
+          pool.query.bind(pool),
+          views.map((view) => view.id),
+          requestAccess.userId,
+        )
+        if (overlays.size > 0) {
+          effectiveViews = views.map((view) => applyPersonalViewOverlay(view, overlays.get(view.id)))
+        }
+      }
+
+      return res.json({ ok: true, data: { views: effectiveViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)) } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -11518,6 +11547,113 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete view failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete view' } })
+    }
+  })
+
+  // Personal (per-user) view config overlay — Slice 1 (design-lock
+  // docs/development/multitable-personal-views-design-lock-20260705.md). Flag default-OFF
+  // (§P2): while `MULTITABLE_ENABLE_PERSONAL_VIEWS` is unset/false these three routes 404 —
+  // they do not exist on the wire, so there is nothing for a flag-off deployment to expose.
+  // §1-B (LOAD-BEARING): the target user of every read/write below is
+  // `resolveSheetCapabilities(req, ...).access.userId` — the authenticated actor resolved from
+  // `req.user` (JWT/session) — NEVER `req.body.userId` / `req.query.userId` / an `x-user-id`
+  // header. No parameter on these routes can select a different user's row.
+  async function loadViewForPersonalConfig(
+    pool: ReturnType<typeof poolManager.get>,
+    viewId: string,
+  ): Promise<{ id: string; sheetId: string } | null> {
+    const current = await pool.query('SELECT id, sheet_id FROM meta_views WHERE id = $1', [viewId])
+    const row = (current as any).rows[0]
+    if (!row) return null
+    return { id: String(row.id), sheetId: String(row.sheet_id) }
+  }
+
+  router.get('/views/:viewId/personal-config', async (req: Request, res: Response) => {
+    if (!isPersonalViewsEnabled()) {
+      return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Not found' } })
+    }
+    const viewId = req.params.viewId
+    if (!viewId || typeof viewId !== 'string') {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId is required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const view = await loadViewForPersonalConfig(pool, viewId)
+      if (!view) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+      }
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
+      if (!access.userId) return sendForbidden(res)
+
+      const record = await getPersonalViewConfig(pool.query.bind(pool), viewId, access.userId)
+      return res.json({ ok: true, data: { viewId, config: record?.config ?? null, updatedAt: record?.updatedAt ?? null } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] get personal view config failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load personal view config' } })
+    }
+  })
+
+  router.put('/views/:viewId/personal-config', async (req: Request, res: Response) => {
+    if (!isPersonalViewsEnabled()) {
+      return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Not found' } })
+    }
+    const viewId = req.params.viewId
+    if (!viewId || typeof viewId !== 'string') {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId is required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const view = await loadViewForPersonalConfig(pool, viewId)
+      if (!view) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+      }
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      // Presentation-only overlay of a view the actor can already READ (§1-A); this is not a
+      // write to shared config/permissions, so the gate is read access, not canManageViews.
+      if (!capabilities.canRead) return sendForbidden(res)
+      if (!access.userId) return sendForbidden(res)
+
+      // Any `userId`/`actorId` field inside the request body is ignored entirely —
+      // `sanitizePersonalOverlayConfig` only ever extracts the known presentation facets.
+      const overlay = sanitizePersonalOverlayConfig((req.body as { config?: unknown } | undefined)?.config)
+      const record = await upsertPersonalViewConfig(pool.query.bind(pool), viewId, access.userId, overlay)
+      return res.json({ ok: true, data: { viewId, config: record.config, updatedAt: record.updatedAt } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] upsert personal view config failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to save personal view config' } })
+    }
+  })
+
+  router.delete('/views/:viewId/personal-config', async (req: Request, res: Response) => {
+    if (!isPersonalViewsEnabled()) {
+      return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Not found' } })
+    }
+    const viewId = req.params.viewId
+    if (!viewId || typeof viewId !== 'string') {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'viewId is required' } })
+    }
+    try {
+      const pool = poolManager.get()
+      const view = await loadViewForPersonalConfig(pool, viewId)
+      if (!view) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
+      }
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
+      if (!capabilities.canRead) return sendForbidden(res)
+      if (!access.userId) return sendForbidden(res)
+
+      const deleted = await deletePersonalViewConfig(pool.query.bind(pool), viewId, access.userId)
+      return res.json({ ok: true, data: { viewId, deleted } })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] delete personal view config failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete personal view config' } })
     }
   })
 
