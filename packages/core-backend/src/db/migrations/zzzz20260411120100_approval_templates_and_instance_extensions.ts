@@ -48,13 +48,46 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`.execute(db)
 
-  await sql`ALTER TABLE approval_templates
-    ADD CONSTRAINT approval_templates_active_version_fk
-    FOREIGN KEY (active_version_id) REFERENCES approval_template_versions(id) ON DELETE SET NULL`.execute(db).catch(() => undefined)
+  // These two FKs used to be guarded with `.execute(db).catch(() => undefined)`.
+  // That swallows ANY error, not just "already exists" -- and on Postgres a
+  // failed statement poisons the enclosing (implicit, per-migration)
+  // transaction, so once the swallowed error fired, the very next statement
+  // in this migration (the CREATE UNIQUE INDEX below) failed with
+  // "current transaction is aborted, commands ignored until end of
+  // transaction block" (reproduced by pre-creating one of these constraints
+  // and replaying this statement sequence in one transaction). Following the
+  // pg_constraint-existence-check pattern already used elsewhere in this
+  // migration set (e.g. zzzz20260409134000_create_delegated_role_scope_templates.ts)
+  // avoids ever attempting the ALTER when the constraint is already there,
+  // so nothing can fail and nothing needs to be swallowed. This is a safe
+  // in-place edit for both worlds: environments where this migration is
+  // already recorded as applied never re-run it (kysely skips by name), and
+  // environments where it hasn't run yet reach the identical end state
+  // (both FKs present) that the previous code intended -- just without the
+  // poisoning failure mode.
+  await sql`DO $$ BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = 'approval_templates_active_version_fk'
+        AND conrelid = 'approval_templates'::regclass
+    ) THEN
+      ALTER TABLE approval_templates
+        ADD CONSTRAINT approval_templates_active_version_fk
+        FOREIGN KEY (active_version_id) REFERENCES approval_template_versions(id) ON DELETE SET NULL;
+    END IF;
+  END $$`.execute(db)
 
-  await sql`ALTER TABLE approval_templates
-    ADD CONSTRAINT approval_templates_latest_version_fk
-    FOREIGN KEY (latest_version_id) REFERENCES approval_template_versions(id) ON DELETE SET NULL`.execute(db).catch(() => undefined)
+  await sql`DO $$ BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = 'approval_templates_latest_version_fk'
+        AND conrelid = 'approval_templates'::regclass
+    ) THEN
+      ALTER TABLE approval_templates
+        ADD CONSTRAINT approval_templates_latest_version_fk
+        FOREIGN KEY (latest_version_id) REFERENCES approval_template_versions(id) ON DELETE SET NULL;
+    END IF;
+  END $$`.execute(db)
 
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_templates_key
     ON approval_templates(key)`.execute(db)
