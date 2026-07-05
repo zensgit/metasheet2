@@ -798,6 +798,27 @@ describe('Approval E2E Lifecycle', () => {
       expect(tag?.textContent).toContain('待处理')
     })
 
+    // B1-03 (审批中心列表热路径包): the 已等待 chip sits next to the status tag and is scoped
+    // to status === 'pending' — once resolved, `updatedAt`/the history timeline already tell
+    // the "how long" story, so the chip should not linger.
+    it('B1-03: 已等待 chip renders next to the status tag while pending', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const chip = container!.querySelector('[data-testid="approval-wait-chip"]')
+      expect(chip).toBeTruthy()
+      expect(chip!.textContent).toContain('已等待')
+    })
+
+    it('B1-03: 已等待 chip is absent once the approval is no longer pending', async () => {
+      routeParams = { id: 'apv_approved_1' }
+      mockActiveApproval.value = mockApprovedApproval()
+      await mountDetailView()
+
+      expect(container!.querySelector('[data-testid="approval-wait-chip"]')).toBeNull()
+    })
+
     it('shows action buttons when status is pending', async () => {
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval()
