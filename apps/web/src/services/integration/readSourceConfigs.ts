@@ -408,7 +408,10 @@ export const RESOLVER_ERROR_CODES = [
   'READ_SOURCE_RESOLVER_FAILED',
 ] as const
 
-const READ_SOURCE_PROBE_ERROR_CODES = new Set([
+// Exported so the composition service layer (readSourceCompositions.ts) can exact-allowlist a per-step
+// errorCode against the SAME probe/resolver coarse-code set (a composition run's per-hop errorCode is a
+// probe/resolver code). Includes the resolver codes via the spread below.
+export const READ_SOURCE_PROBE_ERROR_CODES: ReadonlySet<string> = new Set([
   'READ_SOURCE_PROBE_CONTRACT_INVALID',
   'READ_SOURCE_PROBE_FAILED',
   'READ_SOURCE_PROBE_AUTH_FAILED',

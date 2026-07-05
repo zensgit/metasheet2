@@ -81,6 +81,31 @@ describe('runReadSourceComposition', () => {
     apiFetchMock.mockResolvedValueOnce(errorResponse('READ_SOURCE_COMPOSITION_CONFIG_NOT_APPROVED', 'not approved', 409))
     await expect(runReadSourceComposition('rscc_draft', 'M-001', SCOPE)).rejects.toThrow('READ_SOURCE_COMPOSITION_CONFIG_NOT_APPROVED')
   })
+
+  it('drops the raw server error.message from the thrown error — values-free by construction', async () => {
+    // A (hypothetical) server bug echoing a business value into error.message must NEVER reach the client
+    // error render. The thrown error carries only the clamped code (+ clamped reason), not the raw message.
+    apiFetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: 'READ_SOURCE_COMPOSITION_RUN_CONTRACT_INVALID', message: 'boom near MAT-001 SECRET', details: { reason: 'unexpected_field' } } }), {
+        status: 400, headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    const err = await runReadSourceComposition('rscc_1', 'M-001', SCOPE).then(() => null, (e) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).message).toBe('READ_SOURCE_COMPOSITION_RUN_CONTRACT_INVALID: unexpected_field')
+    // The raw server message (and any business value in it) never rides into the error the panel renders.
+    expect(JSON.stringify({ message: (err as Error).message, ...(err as Record<string, unknown>) })).not.toContain('MAT-001 SECRET')
+    expect((err as Error).message).not.toContain('boom')
+  })
+
+  it('coarsens a non-conforming server error code to a fixed fallback', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: 'leaky code MAT-001', message: 'x' } }), { status: 500, headers: { 'Content-Type': 'application/json' } }),
+    )
+    const err = await runReadSourceComposition('rscc_1', 'M-001', SCOPE).then(() => null, (e) => e)
+    expect((err as Error).message).toBe('READ_SOURCE_COMPOSITION_REQUEST_FAILED')
+    expect((err as Error).message).not.toContain('MAT-001')
+  })
 })
 
 describe('normalizeCompositionRunResult (values-free allowlist)', () => {
@@ -111,6 +136,26 @@ describe('normalizeCompositionRunResult (values-free allowlist)', () => {
     expect(nonScalar.data).toBeNull()
     const boolVal = normalizeCompositionRunResult({ evidence: { ok: true, failedStep: null, steps: [] }, data: { resolver: { target: 't', value: true } } })
     expect(boolVal.data).toBeNull()
+  })
+
+  it('exact-allowlists per-step errorCode against the composition ∪ probe/resolver union; drops unknown', () => {
+    const result = normalizeCompositionRunResult({
+      evidence: {
+        ok: false, failedStep: 0,
+        steps: [
+          { step: 0, ok: false, rule: 'exactly_one', errorCode: 'MAT_001_SECRET' },       // unknown → dropped
+          { step: 1, ok: false, errorCode: 'READ_SOURCE_RESOLVER_AMBIGUOUS' },             // resolver → kept
+          { step: 2, ok: false, errorCode: 'READ_SOURCE_PROBE_TIMEOUT' },                  // probe → kept
+          { step: 3, ok: false, errorCode: 'READ_SOURCE_COMPOSITION_STEP_NOT_RUN' },       // composition → kept
+        ],
+      },
+      data: null,
+    })
+    expect(result.evidence.steps[0]).toEqual({ step: 0, ok: false, rule: 'exactly_one' }) // errorCode dropped
+    expect(result.evidence.steps[1].errorCode).toBe('READ_SOURCE_RESOLVER_AMBIGUOUS')
+    expect(result.evidence.steps[2].errorCode).toBe('READ_SOURCE_PROBE_TIMEOUT')
+    expect(result.evidence.steps[3].errorCode).toBe('READ_SOURCE_COMPOSITION_STEP_NOT_RUN')
+    expect(JSON.stringify(result)).not.toContain('MAT_001_SECRET')
   })
 
   it('keeps values-free planErrors triples and drops malformed ones', () => {
