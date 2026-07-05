@@ -3,7 +3,7 @@
 > design-lock `approval-dingtalk-one-tap-action-design-lock-20260705.md` 的 **A-5 验收档**。
 > Slice A（A-1..A-4-core）实现已于 #3610（A-1）+ #3647（A-2a/A-2b/A-3+A-4-core）落地。
 > 本 MD = 「已做什么 + 自动化验证结论 + 真钉钉 UAT 剧本 + 验收判据」。
-> **两处待填**：① CI-green 引用待 #3647 合入后补 commit SHA；② 真钉钉 UAT *运行结果*
+> **一处待填**：真钉钉 UAT *运行结果*（① CI-green SHA 已补，见 §2）；
 > 待 owner 侧 env 就绪后按 §4 剧本实跑填入——在此之前本档为验收*计划*，非验收*结论*。
 
 ## 1. As-built（三提交，锁 checklist A-1..A-4-core）
@@ -24,7 +24,7 @@
   - `approval-card-delivery-wrapper.db.test.ts` 7/7（token 纪律 / undelivered stale / approve+channel 落账+claim / reject 必填重试 / 非受理人引擎拒 / **并发 tripwire**：Promise.all 双 approve → 恰一 engine action + 恰一 channel metadata + 恰一 claim / 源码守卫）
 - FE：`approvalCardDecisionView.spec.ts` 9/9（含未登录 auto-launch / 弹回手动按钮 / 已登录不 launch / 缺参本地失败 / 禁直连 tripwire）
 - `tsc` 0 · `vue-tsc -b` 0 · 换底后 unit 全量 pass · 三迁移本地真库执行成功
-- **CI-green SHA**：⬜ 待 #3647 合入后补（`git rev-parse origin/main` @ merge）
+- **CI-green SHA**：✅ 一键链主体 #3647 于 `b938bf617561bed9a56da40ec7ebb47054ba965b` 合入 main（A-1 #3610 先于其前）；上述 17/17 真库 + FE 9/9 均在该链的 CI 上通过。
 
 ## 3. Owner env 前置清单（UAT 实跑前配到验收环境）
 
@@ -54,7 +54,7 @@
 
 ## 5. 验收判据（PASS 定义）
 
-**PASS** = U1–U7 全部符合预期（U8 可选）+ §2 自动化验证全绿 + CI-green SHA 已补。
+**PASS** = U1–U7 全部符合预期（U8 可选）+ §2 自动化验证全绿（CI-green SHA 已补 ✅）。剩余唯一门 = owner env 就绪后按 §4 实跑 U1–U7。
 任一 U 项偏差即 **HOLD**，记录现象 → 定位（台账状态 / 免登 redirect / channel 注入 / 引擎门）→ 修复后重跑该项。
 
 ## 6. A-5 之后
