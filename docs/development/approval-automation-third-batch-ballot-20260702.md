@@ -25,10 +25,16 @@ authorization decision.
 
 | # | Decision | Proposed default | Vote |
 |---|---|---|---|
-| A1 | First destination scope | Authorize exactly one named staging destination first; production destination requires a separate follow-up approval after staging evidence. | ⬜ |
-| A2 | Host entry shape | Exact ASCII DNS host only, no scheme/path/port/wildcard/CIDR/IP literal; values supplied through `BPMN_HTTP_TASK_EGRESS_POLICY`, never request/BPMN variables. | ⬜ |
-| A3 | Evidence and smoke | Values-free smoke proving allowed host reaches mocked/approved transport and disallowed/private/redirect cases still deny; no full URL, headers, body, response, or secrets in evidence. | ⬜ |
-| A4 | Rollback | Removing or blanking the env policy returns the engine to deny-all with no DB migration or tenant data rewrite. | ⬜ |
+| A1 | First destination scope | Authorize exactly one named staging destination first; production destination requires a separate follow-up approval after staging evidence. | ✅ |
+| A2 | Host entry shape | Exact ASCII DNS host only, no scheme/path/port/wildcard/CIDR/IP literal; values supplied through `BPMN_HTTP_TASK_EGRESS_POLICY`, never request/BPMN variables. | ✅ |
+| A3 | Evidence and smoke | Values-free smoke proving allowed host reaches mocked/approved transport and disallowed/private/redirect cases still deny; no full URL, headers, body, response, or secrets in evidence. | ✅ |
+| A4 | Rollback | Removing or blanking the env policy returns the engine to deny-all with no DB migration or tenant data rewrite. | ✅ |
+
+**A3 — RATIFIED 2026-07-05 (owner vote): A1–A4 all ✅ adopt-default.** The governance shape is locked: staging-first
+single named destination, exact-ASCII-DNS-host-only via `BPMN_HTTP_TASK_EGRESS_POLICY`, values-free smoke evidence,
+env-blank rollback to deny-all. **This vote authorizes the framework, not any egress:** the engine stays **deny-all**
+until a named staging host is supplied AND the policy is enabled — naming that first staging host is a separate,
+explicit follow-up input. Production destinations remain a distinct later approval (A1).
 
 **Build/ops contract**
 
