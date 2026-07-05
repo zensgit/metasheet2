@@ -11,6 +11,7 @@
           start-placeholder="开始日期"
           end-placeholder="结束日期"
           value-format="YYYY-MM-DD"
+          :shortcuts="DATE_RANGE_SHORTCUTS"
           @change="loadAll"
         />
         <el-button type="primary" @click="loadAll" :loading="loading">
@@ -58,7 +59,7 @@
         <span>按模板汇总</span>
       </template>
       <el-table :data="summary.byTemplate" stripe v-loading="loading">
-        <el-table-column prop="templateId" label="模板 ID" min-width="240">
+        <el-table-column prop="templateId" label="模板" min-width="240">
           <template #default="{ row }">
             <el-link
               v-if="row.templateId"
@@ -66,7 +67,7 @@
               type="primary"
               @click="goTemplate(row.templateId)"
             >
-              {{ row.templateId }}
+              {{ templateDisplayName(row.templateId) }}
             </el-link>
             <span v-else class="metric-muted">未关联模板</span>
           </template>
@@ -194,7 +195,7 @@
           <el-table-column label="模板" min-width="180">
             <template #default="{ row }">
               <el-link v-if="row.templateId" type="primary" @click="goTemplate(row.templateId)">
-                {{ row.templateId }}
+                {{ templateDisplayName(row.templateId) }}
               </el-link>
               <span v-else class="metric-muted">未关联模板</span>
             </template>
@@ -219,7 +220,7 @@
           <el-table-column label="模板" min-width="220">
             <template #default="{ row }">
               <el-link v-if="row.templateId" type="primary" @click="goTemplate(row.templateId)">
-                {{ row.templateId }}
+                {{ templateDisplayName(row.templateId) }}
               </el-link>
               <span v-else class="metric-muted">未关联模板</span>
             </template>
@@ -253,6 +254,7 @@ import {
   fetchApprovalMetricsReport,
   fetchApprovalMetricsSummary,
   fetchApprovalMetricsTeams,
+  listTemplates,
   type ApprovalMetricsDimensionRow,
   type ApprovalMetricsRow,
   type ApprovalMetricsSummary,
@@ -287,8 +289,42 @@ const reportLoading = ref(false)
 const teamsLoading = ref(false)
 const peopleLoading = ref(false)
 const errorMessage = ref('')
+// B2-04: template id → name, fetched ONCE on mount (not tied to the date range/refresh) so the
+// per-template tables below can render a scannable name instead of a raw UUID.
+const templateNameById = ref<Map<string, string>>(new Map())
 
 const BREAKDOWN_LIMIT = 20
+// B2-04: quick date-range presets for the toolbar picker. Each `value` is a function so "近 7
+// 天"/"近 30 天"/"本月" stay relative to "now" at the moment the shortcut is clicked, not frozen
+// at module-eval time.
+const DATE_RANGE_SHORTCUTS = [
+  {
+    text: '近 7 天',
+    value: (): [Date, Date] => {
+      const end = new Date()
+      const start = new Date()
+      start.setDate(start.getDate() - 7)
+      return [start, end]
+    },
+  },
+  {
+    text: '近 30 天',
+    value: (): [Date, Date] => {
+      const end = new Date()
+      const start = new Date()
+      start.setDate(start.getDate() - 30)
+      return [start, end]
+    },
+  },
+  {
+    text: '本月',
+    value: (): [Date, Date] => {
+      const end = new Date()
+      const start = new Date(end.getFullYear(), end.getMonth(), 1)
+      return [start, end]
+    },
+  },
+]
 
 const approvalRatePercent = computed(() => {
   const decided = summary.value.approved + summary.value.rejected + summary.value.revoked + summary.value.returned
@@ -384,6 +420,23 @@ async function loadAll(): Promise<void> {
   await Promise.all([loadSummary(), loadBreaches(), loadReport(), loadTeams(), loadPeople()])
 }
 
+// B2-04: best-effort id→name lookup, fetched once (a generous pageSize so typical template
+// catalogs resolve in one page — the backend caps pageSize at 200 regardless). Non-fatal: a
+// failure (or a template outside the fetched page) just leaves the id unmapped, and
+// `templateDisplayName` falls back to the raw id, same as before this change.
+async function loadTemplateNames(): Promise<void> {
+  try {
+    const { data } = await listTemplates({ pageSize: 200 })
+    templateNameById.value = new Map(data.map((template) => [template.id, template.name]))
+  } catch {
+    templateNameById.value = new Map()
+  }
+}
+
+function templateDisplayName(templateId: string): string {
+  return templateNameById.value.get(templateId) ?? templateId
+}
+
 function barWidth(rate: number | null | undefined): string {
   const pct = typeof rate === 'number' && Number.isFinite(rate) ? rate * 100 : 0
   return `${Math.min(100, Math.max(0, pct))}%`
@@ -416,7 +469,10 @@ function goTemplate(templateId: string): void {
   router.push({ name: 'approval-template-detail', params: { id: templateId } })
 }
 
-onMounted(() => { void loadAll() })
+onMounted(() => {
+  void loadAll()
+  void loadTemplateNames()
+})
 </script>
 
 <style scoped>

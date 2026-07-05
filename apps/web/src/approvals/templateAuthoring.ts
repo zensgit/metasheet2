@@ -66,6 +66,7 @@ export { PARALLEL_JOIN_MODES } from './parallelEdit'
 export type { CcEdits, CcNodeEdit } from './ccEdit'
 export { CC_TARGET_TYPES } from './ccEdit'
 export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
+export { placeholderRoleNodeKeys } from './approvalNodeEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
@@ -1021,7 +1022,11 @@ export function buildSlaHours(draft: TemplateAuthoringDraft): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : Number.NaN
 }
 
-export function validateTemplateDraft(
+// B2-03: split out of the former monolithic `validateTemplateDraft` so the publish pre-flight
+// checklist can show a "表单字段" bucket independently (without re-deriving/duplicating the rules).
+// `validateTemplateDraft` below composes this + `validateTemplateApprovalFlow` in the SAME order as
+// before the split, so its combined output is byte-identical to the pre-split function.
+export function validateTemplateFormFields(
   draft: TemplateAuthoringDraft,
   unsupportedReason?: string | null,
 ): string[] {
@@ -1102,6 +1107,13 @@ export function validateTemplateDraft(
     cycleState.set(fieldId, 2)
   }
   visibilityDeps.forEach((_dependsOn, fieldId) => visitVisibility(fieldId))
+  return errors
+}
+
+// B2-03: the other half of the split — step / graph-edit ("审批流程") errors only. See
+// `validateTemplateFormFields` above for the rationale.
+export function validateTemplateApprovalFlow(draft: TemplateAuthoringDraft): string[] {
+  const errors: string[] = []
   // A complex graph (preservedGraph) carries no editable steps — the step requirement only
   // applies to linear drafts that build their graph from `steps`.
   if (!draft.preservedGraph && draft.steps.length === 0) errors.push('至少需要一个审批步骤')
@@ -1134,6 +1146,16 @@ export function validateTemplateDraft(
     }
   })
   return errors
+}
+
+export function validateTemplateDraft(
+  draft: TemplateAuthoringDraft,
+  unsupportedReason?: string | null,
+): string[] {
+  return [
+    ...validateTemplateFormFields(draft, unsupportedReason),
+    ...validateTemplateApprovalFlow(draft),
+  ]
 }
 
 export function buildCreateTemplatePayload(draft: TemplateAuthoringDraft): CreateApprovalTemplateRequest {
