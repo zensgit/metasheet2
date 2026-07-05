@@ -1,7 +1,62 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import {
+  createApp,
+  defineComponent,
+  h,
+  inject,
+  nextTick,
+  provide,
+  reactive,
+  ref,
+  Teleport,
+  type App as VueApp,
+  type Slot,
+} from 'vue'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
+
+// ---------------------------------------------------------------------------
+// element-plus — ElMessage spies. `ApprovalCenterView` imports `ElMessage` (a plain JS API,
+// not a component — the `<el-table>`/`<el-button>` etc. tags below are resolved purely via the
+// `app.component(...)` stub registrations in `mountView()`, unrelated to this mock) directly, so
+// mocking the module lets B1-03's inline-approve/reject + batch-manifest tests assert on the
+// exact toast copy without rendering real Element Plus notifications into `document.body`.
+// ---------------------------------------------------------------------------
+const elSuccessSpy = vi.fn()
+const elWarningSpy = vi.fn()
+const elErrorSpy = vi.fn()
+
+vi.mock('element-plus', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>('element-plus').catch(() => ({}))
+  return {
+    ...actual,
+    ElMessage: {
+      success: elSuccessSpy,
+      warning: elWarningSpy,
+      error: elErrorSpy,
+      info: vi.fn(),
+    },
+  }
+})
+
+// ---------------------------------------------------------------------------
+// approvals/api — dispatchAction/getPendingCount/markAllApprovalsRead/remindApproval. B1-03's
+// inline approve/reject and the batch failure manifest all go through `dispatchAction`
+// (single-instance and, via `runApprovalBatchAction`'s `dispatch` callback, per-row in a batch),
+// so this needs to be independently resolvable/rejectable per test rather than the real module's
+// always-succeeds mock-mode fixture.
+// ---------------------------------------------------------------------------
+const dispatchActionSpy = vi.fn<[string, unknown], Promise<unknown>>().mockResolvedValue({})
+const getPendingCountSpy = vi.fn().mockResolvedValue({ count: 0, unreadCount: 0 })
+const markAllApprovalsReadSpy = vi.fn().mockResolvedValue({ markedCount: 0 })
+const remindApprovalSpy = vi.fn().mockResolvedValue({ ok: true, data: {} })
+
+vi.mock('../src/approvals/api', () => ({
+  dispatchAction: (...args: [string, unknown]) => dispatchActionSpy(...args),
+  getPendingCount: (...args: unknown[]) => getPendingCountSpy(...args),
+  markAllApprovalsRead: (...args: unknown[]) => markAllApprovalsReadSpy(...args),
+  remindApproval: (...args: unknown[]) => remindApprovalSpy(...args),
+}))
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -81,32 +136,133 @@ const ElTabPane = defineComponent({
   },
 })
 
+// B1-03 needs to actually exercise per-row scoped-slot content (inline approve/reject buttons,
+// the 已等待 cell) rather than just count table/column placeholders, so ElTable/ElTableColumn
+// upgrade to the same registry pattern as `approvalTemplateCenterCategory.spec.ts`:
+// ElTableColumn children register their `#default="{ row }"` slot into a shared registry via
+// provide/inject; ElTable then walks `data` × registry to emit real per-row markup. The
+// `test-select-all-rows` trigger (B1-04) and the `data-el-table` marker are both preserved.
+type ColumnRegistryEntry = {
+  key: string
+  prop?: string
+  label?: string
+  defaultSlot?: Slot
+}
+type ColumnRegistry = {
+  columns: ColumnRegistryEntry[]
+  register: (entry: ColumnRegistryEntry) => void
+}
+const COLUMN_REGISTRY_KEY = Symbol('el-table-columns')
+
 const ElTable = defineComponent({
   name: 'ElTable',
-  props: { data: Array, loading: Boolean, stripe: Boolean, highlightCurrentRow: Boolean },
+  props: {
+    data: Array,
+    loading: Boolean,
+    stripe: Boolean,
+    highlightCurrentRow: Boolean,
+    maxHeight: [String, Number],
+    rowKey: [String, Function],
+  },
   emits: ['row-click', 'selection-change'],
-  render() {
-    return h('div', { 'data-el-table': 'true' }, [
-      // B1-04 test-only affordance: the real checkbox selection column can't be driven
-      // headlessly here, so expose a direct trigger for "select every row currently bound to
-      // `data`" — the SFC's own `handlePendingSelectionChange` still applies
-      // `isRowBatchSelectable`, so this stays honest about what ends up selected.
-      h('button', {
-        type: 'button',
-        'data-testid': 'test-select-all-rows',
-        onClick: () => this.$emit('selection-change', this.data ?? []),
-      }, 'select-all'),
-      this.$slots.default?.(),
-    ])
+  setup(props, { slots, emit }) {
+    const registry = reactive<ColumnRegistry>({
+      columns: [],
+      register(entry) {
+        registry.columns.push(entry)
+      },
+    })
+    provide(COLUMN_REGISTRY_KEY, registry)
+    return () => {
+      // Instantiate the default slot once so each ElTableColumn child's setup() runs and
+      // registers itself; rendered off-screen since the real per-row output is emitted below.
+      const columnInstances = slots.default?.() ?? []
+      const rows = (props.data as any[] | undefined) ?? []
+      return h('div', { 'data-el-table': 'true' }, [
+        // B1-04 test-only affordance: the real checkbox selection column can't be driven
+        // headlessly here, so expose a direct trigger for "select every row currently bound to
+        // `data`" — the SFC's own `handlePendingSelectionChange` still applies
+        // `isRowBatchSelectable`, so this stays honest about what ends up selected.
+        h('button', {
+          type: 'button',
+          'data-testid': 'test-select-all-rows',
+          onClick: () => emit('selection-change', rows),
+        }, 'select-all'),
+        h('div', { style: 'display:none' }, columnInstances),
+        ...rows.map((row, i) =>
+          h(
+            'div',
+            {
+              'data-el-row': (row?.id as string | undefined) ?? String(i),
+              key: (row?.id as string | undefined) ?? String(i),
+              // Bubble phase (the default): a descendant button's `.stop` (e.g. the inline
+              // 通过/驳回 actions) correctly prevents this from firing, matching real
+              // `@row-click` vs a row-scoped action button.
+              onClick: () => emit('row-click', row),
+            },
+            registry.columns.map((col) =>
+              col.defaultSlot
+                ? h('div', { 'data-el-cell': col.prop || col.label || col.key }, col.defaultSlot({ row }))
+                : h('div', { 'data-el-cell-header': col.prop || col.label }, ''),
+            ),
+          ),
+        ),
+      ])
+    }
   },
 })
 
+let columnSeq = 0
 const ElTableColumn = defineComponent({
   name: 'ElTableColumn',
-  props: { prop: String, label: String, width: [String, Number], minWidth: [String, Number], fixed: String },
+  props: {
+    prop: String,
+    label: String,
+    width: [String, Number],
+    minWidth: [String, Number],
+    fixed: String,
+    type: String,
+    selectable: Function,
+  },
+  setup(props, { slots }) {
+    const registry = inject<ColumnRegistry | null>(COLUMN_REGISTRY_KEY, null)
+    if (registry) {
+      registry.register({
+        key: `col-${columnSeq++}`,
+        prop: props.prop,
+        label: props.label,
+        defaultSlot: slots.default,
+      })
+    }
+    return () => null
+  },
+})
+
+// B1-03: real popconfirm semantics are two clicks — the reference OPENS the popup (real
+// Element Plus never dispatches anything on that click alone), and a SEPARATE 确认 button
+// INSIDE the popup (which Element Plus renders in a teleported popper, OUTSIDE the reference's
+// DOM subtree) actually emits `confirm`. Teleporting this test-only confirm trigger to
+// `document.body` reproduces that structural guarantee — a click on it can never bubble to an
+// ancestor row's `@row-click`, by construction, regardless of the reference's own `.stop` or any
+// re-render timing. (An earlier `onClickCapture`-on-a-wrapping-span design tried to fake this via
+// event-PHASE ordering instead of DOM structure; it raced against Vue's re-render scheduling —
+// intermittently failing only when run alongside other spec files — so it was replaced with this
+// unconditionally-robust Teleport.)
+const ElPopconfirm = defineComponent({
+  name: 'ElPopconfirm',
+  props: { title: String, confirmButtonText: String, cancelButtonText: String },
+  emits: ['confirm', 'cancel'],
   render() {
-    // Do not invoke scoped slots — they expect { row } context from el-table
-    return h('div', { 'data-column': this.prop || this.label })
+    return h('span', { 'data-el-popconfirm': this.title ?? '' }, [
+      this.$slots.reference?.(),
+      h(Teleport, { to: 'body' }, [
+        h('button', {
+          type: 'button',
+          'data-el-popconfirm-confirm': this.title ?? '',
+          onClick: () => this.$emit('confirm'),
+        }, '确认'),
+      ]),
+    ])
   },
 })
 
@@ -229,6 +385,18 @@ describe('ApprovalCenterView', () => {
     loadCompletedSpy.mockClear()
     pushSpy.mockClear()
 
+    elSuccessSpy.mockClear()
+    elWarningSpy.mockClear()
+    elErrorSpy.mockClear()
+    dispatchActionSpy.mockClear()
+    dispatchActionSpy.mockResolvedValue({})
+    getPendingCountSpy.mockClear()
+    getPendingCountSpy.mockResolvedValue({ count: 0, unreadCount: 0 })
+    markAllApprovalsReadSpy.mockClear()
+    markAllApprovalsReadSpy.mockResolvedValue({ markedCount: 0 })
+    remindApprovalSpy.mockClear()
+    remindApprovalSpy.mockResolvedValue({ ok: true, data: {} })
+
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -262,6 +430,7 @@ describe('ApprovalCenterView', () => {
     app.component('ElAlert', ElAlert)
     app.component('ElDialog', ElDialog)
     app.component('ElEmpty', ElEmpty)
+    app.component('ElPopconfirm', ElPopconfirm)
     app.directive('loading', stubDirective)
     app.mount(container!)
     await flushUi()
@@ -461,5 +630,182 @@ describe('ApprovalCenterView', () => {
 
     const confirmBtn = container!.querySelector('[data-testid="approval-batch-reject-confirm"]') as HTMLButtonElement
     expect(confirmBtn.disabled).toBe(true)
+  })
+
+  // ---------------------------------------------------------------------------
+  // B1-03 (审批中心列表热路径包) — part 1: inline approve/reject on the pending list.
+  // ---------------------------------------------------------------------------
+  it('B1-03: inline 通过 popconfirm-confirm dispatches exactly one approve action; row-click is not triggered', async () => {
+    mockPendingApprovals.value = [pendingRow({ id: 'apv_1', title: '出差报销' })]
+    await mountView()
+
+    const approveBtn = container!.querySelector('[data-testid="approval-row-approve-apv_1"]') as HTMLButtonElement
+    expect(approveBtn).toBeTruthy()
+    approveBtn.click()
+    await flushUi()
+    // The reference only OPENS the popup in real Element Plus — `.stop` must keep the row's own
+    // navigation untouched, and nothing should have dispatched yet.
+    expect(pushSpy).not.toHaveBeenCalled()
+    expect(dispatchActionSpy).not.toHaveBeenCalled()
+
+    const confirmBtn = document.querySelector('[data-el-popconfirm-confirm="确认通过「出差报销」？"]') as HTMLButtonElement
+    expect(confirmBtn).toBeTruthy()
+    confirmBtn.click()
+    await flushUi()
+
+    expect(dispatchActionSpy).toHaveBeenCalledTimes(1)
+    expect(dispatchActionSpy).toHaveBeenCalledWith('apv_1', { action: 'approve' })
+    expect(elSuccessSpy).toHaveBeenCalledWith('审批已通过')
+    expect(pushSpy).not.toHaveBeenCalled()
+
+    // Sanity: the row's OWN click handler (outside any action button) still navigates — proves
+    // the absence of navigation above is because of `.stop`, not a broken row-click wire.
+    const rowEl = container!.querySelector('[data-el-row="apv_1"]') as HTMLElement
+    rowEl.click()
+    await flushUi()
+    expect(pushSpy).toHaveBeenCalledWith({ name: 'approval-detail', params: { id: 'apv_1' } })
+  })
+
+  it('B1-03: inline 通过 failure surfaces the server message as a toast (approve never opens a dialog)', async () => {
+    mockPendingApprovals.value = [pendingRow({ id: 'apv_1', title: '出差报销' })]
+    dispatchActionSpy.mockRejectedValueOnce(new Error('该审批已被他人处理'))
+    await mountView()
+
+    ;(container!.querySelector('[data-testid="approval-row-approve-apv_1"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(document.querySelector('[data-el-popconfirm-confirm="确认通过「出差报销」？"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(elErrorSpy).toHaveBeenCalledWith('该审批已被他人处理')
+    expect(elSuccessSpy).not.toHaveBeenCalled()
+  })
+
+  it('B1-03: inline 驳回 dialog gates confirm on a required comment, then dispatches with it', async () => {
+    mockPendingApprovals.value = [pendingRow({ id: 'apv_1', policy: null })]
+    await mountView()
+
+    const rejectBtn = container!.querySelector('[data-testid="approval-row-reject-apv_1"]') as HTMLButtonElement
+    expect(rejectBtn).toBeTruthy()
+    rejectBtn.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-row-reject-dialog"]')).toBeTruthy()
+    const confirmBtn = container!.querySelector('[data-testid="approval-row-reject-confirm"]') as HTMLButtonElement
+    expect(confirmBtn.disabled).toBe(true)
+
+    const commentInput = container!.querySelector('[data-testid="approval-row-reject-comment"]') as HTMLInputElement
+    commentInput.value = '材料不全'
+    commentInput.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(confirmBtn.disabled).toBe(false)
+
+    confirmBtn.click()
+    await flushUi()
+
+    expect(dispatchActionSpy).toHaveBeenCalledWith('apv_1', { action: 'reject', comment: '材料不全' })
+    expect(elSuccessSpy).toHaveBeenCalledWith('审批已驳回')
+    expect(container!.querySelector('[data-testid="approval-row-reject-dialog"]')).toBeNull()
+    expect(pushSpy).not.toHaveBeenCalled()
+  })
+
+  it('B1-03: inline 驳回 confirm stays enabled with an empty comment when the row opts out, and omits the comment key', async () => {
+    mockPendingApprovals.value = [pendingRow({ id: 'apv_1', policy: { rejectCommentRequired: false } })]
+    await mountView()
+
+    ;(container!.querySelector('[data-testid="approval-row-reject-apv_1"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const confirmBtn = container!.querySelector('[data-testid="approval-row-reject-confirm"]') as HTMLButtonElement
+    expect(confirmBtn.disabled).toBe(false)
+
+    confirmBtn.click()
+    await flushUi()
+    expect(dispatchActionSpy).toHaveBeenCalledWith('apv_1', { action: 'reject' })
+  })
+
+  it('B1-03: inline 驳回 failure keeps the dialog open and shows the server message inline (not a toast)', async () => {
+    mockPendingApprovals.value = [pendingRow({ id: 'apv_1', policy: { rejectCommentRequired: false } })]
+    dispatchActionSpy.mockRejectedValueOnce(new Error('该审批已被撤回'))
+    await mountView()
+
+    ;(container!.querySelector('[data-testid="approval-row-reject-apv_1"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-row-reject-confirm"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-row-reject-dialog"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="approval-row-reject-error"]')?.textContent).toContain('该审批已被撤回')
+    expect(elErrorSpy).not.toHaveBeenCalled()
+  })
+
+  // ---------------------------------------------------------------------------
+  // B1-03 — part 2: 已等待 aging + progress glanceability.
+  // ---------------------------------------------------------------------------
+  it('B1-03: pending tab 已等待 column shows aging text, urgent severity class, and step progress', async () => {
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString()
+    mockPendingApprovals.value = [
+      pendingRow({ id: 'apv_1', createdAt: eightDaysAgo, currentStep: 2, totalSteps: 3 }),
+    ]
+    await mountView()
+
+    const cell = container!.querySelector('[data-el-row="apv_1"] [data-el-cell="已等待"]')
+    expect(cell).toBeTruthy()
+    expect(cell!.textContent).toContain('8 天')
+    expect(cell!.textContent).toContain('第 2/3 步')
+    expect(cell!.querySelector('.approval-center__wait--urgent')).toBeTruthy()
+  })
+
+  it('B1-03: mine tab shows 已等待 next to 催办 for pending rows', async () => {
+    const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString()
+    mockMyApprovals.value = [pendingRow({ id: 'apv_mine_1', createdAt: fiveHoursAgo })]
+    await mountView()
+
+    const cell = container!.querySelector('[data-el-row="apv_mine_1"] [data-el-cell="操作"]')
+    expect(cell).toBeTruthy()
+    expect(cell!.textContent).toContain('已等待')
+    expect(cell!.textContent).toContain('5 小时')
+    expect(cell!.querySelector('[data-testid="approval-urge-apv_mine_1"]')).toBeTruthy()
+  })
+
+  // ---------------------------------------------------------------------------
+  // B1-03 — part 3: batch failure manifest (replaces the old collapsed toast).
+  // ---------------------------------------------------------------------------
+  it('B1-03: a batch failure opens a manifest dialog listing failed rows; 重试失败项 re-dispatches only the failed ids', async () => {
+    mockPendingApprovals.value = [
+      pendingRow({ id: 'apv_a', title: 'AAA 报销', requestNo: 'AP-A' }),
+      pendingRow({ id: 'apv_b', title: 'BBB 报销', requestNo: 'AP-B' }),
+    ]
+    dispatchActionSpy.mockImplementation((id: unknown) =>
+      id === 'apv_b' ? Promise.reject(new Error('冲突：状态已变更')) : Promise.resolve({}),
+    )
+    await mountView()
+
+    selectAllPendingRows()
+    await flushUi()
+
+    const approveBtn = container!.querySelector('[data-testid="approval-batch-approve"]') as HTMLButtonElement
+    approveBtn.click()
+    await flushUi(6)
+
+    const dialog = container!.querySelector('[data-testid="approval-batch-result-dialog"]')
+    expect(dialog).toBeTruthy()
+    expect(dialog!.textContent).toContain('AP-B')
+    expect(dialog!.textContent).toContain('BBB 报销')
+    expect(dialog!.textContent).toContain('冲突：状态已变更')
+    // The succeeded row never shows up in the manifest.
+    expect(dialog!.textContent).not.toContain('AP-A')
+    expect(dispatchActionSpy).toHaveBeenCalledTimes(2)
+
+    // The retry succeeds this time.
+    dispatchActionSpy.mockImplementation(() => Promise.resolve({}))
+    const retryBtn = container!.querySelector('[data-testid="approval-batch-retry"]') as HTMLButtonElement
+    retryBtn.click()
+    await flushUi(6)
+
+    // Only the still-failed id (apv_b) is retried — apv_a is never re-dispatched.
+    expect(dispatchActionSpy).toHaveBeenCalledTimes(3)
+    expect(dispatchActionSpy).toHaveBeenNthCalledWith(3, 'apv_b', { action: 'approve' })
+    // Full success on retry closes the dialog.
+    expect(container!.querySelector('[data-testid="approval-batch-result-dialog"]')).toBeNull()
   })
 })
