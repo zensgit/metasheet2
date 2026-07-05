@@ -10,6 +10,14 @@ import {
   listReadSourceCompositions,
   runReadSourceComposition,
   normalizeCompositionRunResult,
+  buildReadSourceCompositionPayload,
+  validateReadSourceCompositionDraft,
+  saveReadSourceCompositionVersion,
+  approveReadSourceComposition,
+  retireReadSourceComposition,
+  listReadSourceCompositionAudit,
+  ReadSourceCompositionApiError,
+  type ReadSourceCompositionDraft,
 } from '../src/services/integration/readSourceCompositions'
 
 function jsonResponse(data: unknown, status = 200): Response {
@@ -213,6 +221,208 @@ describe('normalizeCompositionRunResult (values-free allowlist)', () => {
     ])
     const text = JSON.stringify(result)
     for (const leak of ['MAT-001 SECRET', 'MAT-001 the material number', 'MAT_001_SECRET']) {
+      expect(text).not.toContain(leak)
+    }
+  })
+})
+
+// --- authoring-tier service layer (save / approve / retire / audit) --------
+
+const VALID_DRAFT: ReadSourceCompositionDraft = {
+  name: 'material-to-bom',
+  step1ConfigId: 'rsc_material_lookup',
+  step2ConfigId: 'rsc_bom_lookup',
+  sourceTarget: 'itemId',
+}
+
+describe('buildReadSourceCompositionPayload', () => {
+  it('pins version/operations/toInput/step ids — a smuggled extra draft field never reaches the payload', () => {
+    const hostileDraft = {
+      ...VALID_DRAFT,
+      // Fields a hostile/careless caller might attach to the draft object; the builder only ever
+      // reads the four named draft properties, so none of these can ride into the payload.
+      operations: ['write'],
+      version: 99,
+      steps: [{ id: 'evil' }],
+      toInput: 'body',
+    } as unknown as ReadSourceCompositionDraft
+    const payload = buildReadSourceCompositionPayload(hostileDraft)
+    expect(payload).toEqual({
+      version: 1,
+      name: 'material-to-bom',
+      operations: ['read'],
+      steps: [
+        { id: 'step-1', readSourceConfigId: 'rsc_material_lookup' },
+        {
+          id: 'step-2',
+          readSourceConfigId: 'rsc_bom_lookup',
+          input: { fromStep: 'step-1', sourceTarget: 'itemId', toInput: 'key' },
+        },
+      ],
+    })
+  })
+
+  it('trims whitespace-padded draft fields', () => {
+    const payload = buildReadSourceCompositionPayload({
+      name: '  material-to-bom  ',
+      step1ConfigId: '  rsc_a  ',
+      step2ConfigId: '  rsc_b  ',
+      sourceTarget: '  itemId  ',
+    })
+    expect(payload.name).toBe('material-to-bom')
+    expect(payload.steps[0].readSourceConfigId).toBe('rsc_a')
+    expect(payload.steps[1].readSourceConfigId).toBe('rsc_b')
+    expect(payload.steps[1].input.sourceTarget).toBe('itemId')
+  })
+})
+
+describe('validateReadSourceCompositionDraft', () => {
+  it('passes a well-formed draft with zero problems', () => {
+    expect(validateReadSourceCompositionDraft(VALID_DRAFT)).toEqual([])
+  })
+
+  it('catches a bad name without echoing the raw value in any message', () => {
+    const problems = validateReadSourceCompositionDraft({ ...VALID_DRAFT, name: 'has spaces MAT-001 SECRET' })
+    expect(problems.length).toBeGreaterThan(0)
+    expect(problems.join(' ')).not.toContain('MAT-001 SECRET')
+  })
+
+  it('catches duplicate step config ids', () => {
+    const problems = validateReadSourceCompositionDraft({ ...VALID_DRAFT, step2ConfigId: VALID_DRAFT.step1ConfigId })
+    expect(problems).toContain('step1ConfigId 与 step2ConfigId 不能相同')
+  })
+
+  it('catches a secret-shaped overlong value in step/target fields WITHOUT echoing it in any message', () => {
+    const secret = `sk-${'A'.repeat(200)}`
+    const problems = validateReadSourceCompositionDraft({ ...VALID_DRAFT, step1ConfigId: secret, sourceTarget: secret })
+    expect(problems.length).toBeGreaterThan(0)
+    expect(problems.join(' ')).not.toContain(secret)
+  })
+})
+
+describe('saveReadSourceCompositionVersion', () => {
+  it('POSTs exactly { config } (the pinned payload) and reports reused:false on a 201 mint', async () => {
+    let sentBody: Record<string, unknown> | undefined
+    apiFetchMock.mockImplementationOnce(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body || '{}'))
+      return jsonResponse(
+        { id: 'rscc_1', name: 'material-to-bom', version: 1, status: 'draft', contentKey: 'ck1', updatedAt: '2026-07-05', reused: false },
+        201,
+      )
+    })
+    const result = await saveReadSourceCompositionVersion(VALID_DRAFT, SCOPE)
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/integration/read-source-compositions?tenantId=default',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(Object.keys(sentBody as object)).toEqual(['config'])
+    expect((sentBody as { config: unknown }).config).toEqual(buildReadSourceCompositionPayload(VALID_DRAFT))
+    expect(result).toEqual({
+      id: 'rscc_1', name: 'material-to-bom', version: 1, status: 'draft', contentKey: 'ck1', updatedAt: '2026-07-05', reused: false,
+    })
+  })
+
+  it('reports reused:true on a 200 content-key hit', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(
+      { id: 'rscc_1', name: 'material-to-bom', version: 1, status: 'draft', contentKey: 'ck1', updatedAt: '2026-07-05', reused: true },
+      200,
+    ))
+    const result = await saveReadSourceCompositionVersion(VALID_DRAFT, SCOPE)
+    expect(result.reused).toBe(true)
+  })
+
+  it('surfaces a 400 CONFIG_INVALID with CLAMPED fieldErrors — a well-formed triple is kept, a triple carrying a business-shaped value in field/reason/code is dropped whole', async () => {
+    apiFetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      error: {
+        code: 'READ_SOURCE_COMPOSITION_CONFIG_INVALID',
+        message: 'composition config is invalid',
+        details: {
+          errors: [
+            { code: 'READ_SOURCE_COMPOSITION_NAME_INVALID', field: 'name', reason: 'invalid_identifier' },
+            // business-value field (space + business token) → dropped whole
+            { code: 'READ_SOURCE_COMPOSITION_STEP_REF_INVALID', field: 'MAT-001 the material number', reason: 'invalid_reference' },
+            // business-value reason (space + business token) → dropped whole
+            { code: 'READ_SOURCE_COMPOSITION_STEP_INVALID', field: 'steps.0.id', reason: 'material MAT-001 SECRET' },
+            // code-SHAPED business value without the required prefix → dropped whole
+            { code: 'MAT_001_SECRET', field: 'steps.0.readSourceConfigId', reason: 'invalid_reference' },
+          ],
+        },
+      },
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } }))
+    const err = await saveReadSourceCompositionVersion(VALID_DRAFT, SCOPE).then(() => null, (e) => e)
+    expect(err).toBeInstanceOf(ReadSourceCompositionApiError)
+    const apiError = err as ReadSourceCompositionApiError
+    expect(apiError.code).toBe('READ_SOURCE_COMPOSITION_CONFIG_INVALID')
+    expect(apiError.fieldErrors).toEqual([
+      { code: 'READ_SOURCE_COMPOSITION_NAME_INVALID', field: 'name', reason: 'invalid_identifier' },
+    ])
+    const text = JSON.stringify({ message: apiError.message, ...apiError })
+    for (const leak of ['MAT-001 the material number', 'MAT-001 SECRET', 'MAT_001_SECRET']) {
+      expect(text).not.toContain(leak)
+    }
+  })
+})
+
+describe('approveReadSourceComposition / retireReadSourceComposition', () => {
+  it('POST to the approve/retire URLs and return the normalized row', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(
+      { id: 'rscc_1', name: 'material-to-bom', version: 1, status: 'approved', contentKey: 'ck1', updatedAt: '2026-07-05' },
+    ))
+    const approved = await approveReadSourceComposition('rscc_1', SCOPE)
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/integration/read-source-compositions/rscc_1/approve?tenantId=default',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(approved?.status).toBe('approved')
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(
+      { id: 'rscc_1', name: 'material-to-bom', version: 1, status: 'retired', contentKey: 'ck1', updatedAt: '2026-07-05' },
+    ))
+    const retired = await retireReadSourceComposition('rscc_1', SCOPE)
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/integration/read-source-compositions/rscc_1/retire?tenantId=default',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(retired?.status).toBe('retired')
+  })
+
+  it('throw with a clamped code only on a 409 NOT_APPROVED / STATUS_CONFLICT — the raw message never rides along', async () => {
+    apiFetchMock.mockResolvedValueOnce(errorResponse('READ_SOURCE_COMPOSITION_CONFIG_NOT_APPROVED', 'not approved yet MAT-001 SECRET', 409))
+    const err1 = await approveReadSourceComposition('rscc_draft', SCOPE).then(() => null, (e) => e)
+    expect((err1 as Error).message).toBe('READ_SOURCE_COMPOSITION_CONFIG_NOT_APPROVED')
+    expect((err1 as Error).message).not.toContain('MAT-001 SECRET')
+
+    apiFetchMock.mockResolvedValueOnce(errorResponse('READ_SOURCE_COMPOSITION_CONFIG_STATUS_CONFLICT', 'status conflict MAT-001 SECRET', 409))
+    const err2 = await retireReadSourceComposition('rscc_1', SCOPE).then(() => null, (e) => e)
+    expect((err2 as Error).message).toBe('READ_SOURCE_COMPOSITION_CONFIG_STATUS_CONFLICT')
+    expect((err2 as Error).message).not.toContain('MAT-001 SECRET')
+  })
+})
+
+describe('listReadSourceCompositionAudit', () => {
+  it('keeps only coarse fields; clamps detail to {from,to}; drops a smuggled value-bearing detail field and an unknown action', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse([
+      {
+        action: 'status_change', actor: 'user-1',
+        detail: { from: 'draft', to: 'approved', secretNote: 'MAT-001 SECRET' },
+        createdAt: '2026-07-05T00:00:00Z',
+      },
+      {
+        // save_version rows carry a `version` number in real detail — must be dropped, never surfaced.
+        action: 'save_version', actor: null,
+        detail: { version: 3, secretNote: 'LEAK' },
+        createdAt: '2026-07-04T00:00:00Z',
+      },
+      { action: 'weird_action', actor: 'x', detail: {}, createdAt: '2026-07-03T00:00:00Z' }, // unknown action → dropped
+    ]))
+    const rows = await listReadSourceCompositionAudit('rscc_1', SCOPE)
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/integration/read-source-compositions/rscc_1/audit?tenantId=default')
+    expect(rows).toEqual([
+      { action: 'status_change', actor: 'user-1', detail: { from: 'draft', to: 'approved' }, createdAt: '2026-07-05T00:00:00Z' },
+      { action: 'save_version', actor: null, detail: {}, createdAt: '2026-07-04T00:00:00Z' },
+    ])
+    const text = JSON.stringify(rows)
+    for (const leak of ['MAT-001 SECRET', 'LEAK', 'weird_action']) {
       expect(text).not.toContain(leak)
     }
   })
