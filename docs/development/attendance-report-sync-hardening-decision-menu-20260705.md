@@ -52,7 +52,21 @@ operator 清理动作（复用 job 控制面）。B2/B3 均小刀，但涉及"�
 - 报表"反超"叙事（考勤事实进多维表自由分析）**的地基已在**——本菜单只是把地基的
   运维成熟度补齐，不是新地基。
 
-## 4. 处置
+## 4. 处置 — owner-delegated 决策记录（2026-07-05）
 
-owner 从 A/B/C 各选一档（或全部现状保持）后，另起正式 design-lock 再实现；本文档
-不授权任何 runtime 改动。
+owner 在对话中把"五个解锁点"整体委托处理。据此逐档拍定：
+
+| 缺口 | 选定 | 理由 |
+|---|---|---|
+| **A 触发模型** | **A2 = 调度批量**（挂 `AttendanceScheduler` 第 N 个 job，env/settings-gated，日/时级批量 sync 活跃 org） | 复用成熟 leader-elected/env-gated 基座；爆炸半径可控（batch 边界 + maxPerRun）；与 RD digest 同为 scheduler 消费者 → 同一 tick-ownership 口径 |
+| **B 孤儿值列** | **defer（v1 记录为已知限制）** | 已承认的 P2（`index.cjs:~2549`）；非 A2 前置，单独小刀 |
+| **C 重复 row_key** | **diagnostic-first（先加只读诊断，量级明确后再定去重）** | 先答"重复行从哪来"（并发首写？历史遗留？）再决定 C2 收敛，不盲改 |
+
+**runtime 授权范围（owner-delegated）**：report-sync hardening **v1 = A2 调度触发 only**，
+backend-only（`AttendanceScheduler` job + settings 门，**不新增 admin UI**——避免踩 FE 泳道 A
+串行冲突），复用既有 `syncAttendanceReportRecords[ForUsers]` 写入器与分页 job 控制面，不改写入语义。
+B/C 各作独立后续 slice。正式实现锁 = `attendance-report-sync-a2-scheduled-trigger-design-lock`（另起，
+本记录授权其开工）。
+
+> 与 RD digest 的 tick-ownership：A2 job 与 digest producer 同挂 `AttendanceScheduler`；实现锁需
+> 明确二者独立注册、单 job 失败不跳过其它（沿用 A2 auto-write 的 composite-registry 纪律）。
