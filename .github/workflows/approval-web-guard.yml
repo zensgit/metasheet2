@@ -47,6 +47,10 @@ on:
       - 'apps/web/tests/amountAutoSum.test.ts'
       - 'apps/web/tests/useAutoSumTotal.test.ts'
       - 'apps/web/tests/lineDerivation.test.ts'
+      - 'apps/web/src/views/approval/ApprovalMobileList.vue'
+      - 'apps/web/src/views/approval/ApprovalCenterView.vue'
+      - 'apps/web/tests/approvalMobileI18n.spec.ts'
+      - 'apps/web/tests/approvalMobileResponsive.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -81,6 +85,10 @@ on:
       - 'apps/web/tests/amountAutoSum.test.ts'
       - 'apps/web/tests/useAutoSumTotal.test.ts'
       - 'apps/web/tests/lineDerivation.test.ts'
+      - 'apps/web/src/views/approval/ApprovalMobileList.vue'
+      - 'apps/web/src/views/approval/ApprovalCenterView.vue'
+      - 'apps/web/tests/approvalMobileI18n.spec.ts'
+      - 'apps/web/tests/approvalMobileResponsive.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -137,4 +145,6 @@ jobs:
         # changes; branches/joinNodeKey + all other nodes + edges byte-identical) + cross-phase
         # compose (condition G-2 + parallel G-3 both land) + seeding round-trip + validation preview
         # (joinMode in backend-accepted {'all','any'}; cc untouched / G-4).
-        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation --reporter=dot
+        # T3-1 mobile v0: i18n retrofit (locale-aware labels, fail-first RED on hardcoded-Chinese
+        # revert) + responsive/flag-off gate — FE-only, had NO required gate before this wiring (#3607).
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive --reporter=dot
