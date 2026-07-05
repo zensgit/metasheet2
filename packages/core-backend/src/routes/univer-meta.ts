@@ -219,6 +219,7 @@ import {
   upsertPersonalViewConfig,
   deletePersonalViewConfig,
   sanitizePersonalOverlayConfig,
+  type PersonalViewConfigOverlay,
 } from '../multitable/personal-view-config'
 import {
   countUnreadRecordSubscriptionNotifications,
@@ -11568,6 +11569,13 @@ export function univerMetaRouter(): Router {
     return { id: String(row.id), sheetId: String(row.sheet_id) }
   }
 
+  function redactPersonalOverlayFilterLiterals(
+    config: PersonalViewConfigOverlay | null,
+    allowedFieldIds: Set<string>,
+  ): PersonalViewConfigOverlay | null {
+    return redactViewConfigFilterLiterals(config, allowedFieldIds)
+  }
+
   router.get('/views/:viewId/personal-config', async (req: Request, res: Response) => {
     if (!isPersonalViewsEnabled()) {
       return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Not found' } })
@@ -11587,7 +11595,12 @@ export function univerMetaRouter(): Router {
       if (!access.userId) return sendForbidden(res)
 
       const record = await getPersonalViewConfig(pool.query.bind(pool), viewId, access.userId)
-      return res.json({ ok: true, data: { viewId, config: record?.config ?? null, updatedAt: record?.updatedAt ?? null } })
+      let config: PersonalViewConfigOverlay | null = null
+      if (record) {
+        const allowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), view.sheetId, access.userId, capabilities)
+        config = redactPersonalOverlayFilterLiterals(record.config, allowedFieldIds)
+      }
+      return res.json({ ok: true, data: { viewId, config, updatedAt: record?.updatedAt ?? null } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -11619,6 +11632,12 @@ export function univerMetaRouter(): Router {
       // Any `userId`/`actorId` field inside the request body is ignored entirely —
       // `sanitizePersonalOverlayConfig` only ever extracts the known presentation facets.
       const overlay = sanitizePersonalOverlayConfig((req.body as { config?: unknown } | undefined)?.config)
+      if (overlay.filterInfo !== undefined && filterInfoExceedsMaxDepth(overlay.filterInfo, 0)) {
+        return res.status(400).json({
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: `Filter nesting exceeds the maximum depth of ${MAX_FILTER_DEPTH}` },
+        })
+      }
       const record = await upsertPersonalViewConfig(pool.query.bind(pool), viewId, access.userId, overlay)
       return res.json({ ok: true, data: { viewId, config: record.config, updatedAt: record.updatedAt } })
     } catch (err) {

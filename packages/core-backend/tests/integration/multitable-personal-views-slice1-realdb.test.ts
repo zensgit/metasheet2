@@ -41,6 +41,7 @@ const SHARED_GROUP = {}
 const SHARED_HIDDEN: string[] = []
 
 const PERSONAL_A_FILTER = { conjunction: 'and', conditions: [{ fieldId: FIELD_ID, operator: 'is', value: 'personal-a-val' }] }
+const PERSONAL_SECRET_LITERAL = 'personal-secret-literal-do-not-leak'
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
@@ -78,6 +79,19 @@ const rowForUser = async (userId: string) =>
   (await q('SELECT config FROM meta_view_personal_configs WHERE view_id = $1 AND user_id = $2', [VIEW_ID, userId]))
     .rows[0] as { config: unknown } | undefined
 
+const bodyText = (res: { body: unknown }) => JSON.stringify(res.body)
+
+function buildTooDeepFilter(): Record<string, unknown> {
+  const root: { conjunction: string; conditions: unknown[] } = { conjunction: 'and', conditions: [] }
+  let cursor = root
+  for (let i = 0; i < 6; i += 1) {
+    const child: { conjunction: string; conditions: unknown[] } = { conjunction: 'and', conditions: [] }
+    cursor.conditions.push(child)
+    cursor = child
+  }
+  return root
+}
+
 describeIfDatabase('personal (per-user) view config overlay — slice 1 (real DB)', () => {
   beforeAll(async () => {
     app = express()
@@ -99,6 +113,7 @@ describeIfDatabase('personal (per-user) view config overlay — slice 1 (real DB
 
   afterAll(async () => {
     await q('DELETE FROM meta_view_personal_configs WHERE view_id = $1', [VIEW_ID]).catch(() => {})
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_views WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
@@ -110,6 +125,7 @@ describeIfDatabase('personal (per-user) view config overlay — slice 1 (real DB
     currentPerms = ['multitable:read', 'multitable:write']
     currentForgedHeader = undefined
     delete process.env.MULTITABLE_ENABLE_PERSONAL_VIEWS
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET_ID])
     await q('DELETE FROM meta_view_personal_configs WHERE view_id = $1', [VIEW_ID])
   })
 
@@ -203,6 +219,33 @@ describeIfDatabase('personal (per-user) view config overlay — slice 1 (real DB
     expect(resB.body.data.config).toBeNull() // B has no row of their own
   })
 
+  test('G-A: GET personal-config redacts denied-field filter literals after permission drift', async () => {
+    process.env.MULTITABLE_ENABLE_PERSONAL_VIEWS = 'true'
+    await q(
+      `INSERT INTO meta_view_personal_configs (view_id, user_id, config) VALUES ($1, $2, $3::jsonb)`,
+      [VIEW_ID, USER_A, JSON.stringify({
+        filterInfo: {
+          conjunction: 'and',
+          conditions: [{ fieldId: FIELD_ID, operator: 'is', value: PERSONAL_SECRET_LITERAL }],
+        },
+      })],
+    )
+    await q(
+      `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only)
+       VALUES ($1, $2, 'user', $3, false, false)`,
+      [SHEET_ID, FIELD_ID, USER_A],
+    )
+
+    currentUserId = USER_A
+    const res = await getPersonalConfig(VIEW_ID)
+    expect(res.status).toBe(200)
+    expect(bodyText(res)).not.toContain(PERSONAL_SECRET_LITERAL)
+    expect(res.body.data.config.filterInfo).toEqual({
+      conjunction: 'and',
+      conditions: [{ fieldId: FIELD_ID, operator: 'is' }],
+    })
+  })
+
   // ---------------------------------------------------------------------------------------
   // G-C — write isolation (LOAD-BEARING) + forged-identity clause
   // ---------------------------------------------------------------------------------------
@@ -214,6 +257,15 @@ describeIfDatabase('personal (per-user) view config overlay — slice 1 (real DB
 
     expect(await rowForUser(USER_A)).toBeDefined() // A's own row was written
     expect(await rowForUser(USER_B)).toBeUndefined() // B's row was NEVER created
+  })
+
+  test('G-C: over-depth personal filterInfo is rejected before persistence', async () => {
+    process.env.MULTITABLE_ENABLE_PERSONAL_VIEWS = 'true'
+    currentUserId = USER_A
+    const res = await putPersonalConfig(VIEW_ID, { filterInfo: buildTooDeepFilter() })
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    expect(await rowForUser(USER_A)).toBeUndefined()
   })
 
   test('G-C + forged-identity: A writing with a forged query.userId=B does NOT touch B\'s row', async () => {
