@@ -21,22 +21,24 @@
  * are the same set, following the same whole-file structural-scan discipline as
  * `multitable-stored-data-taint-chokepoint.guard.test.ts`:
  *
- *   1. Scan every `router.<verb>('<path>', ...)` registration in `routes/univer-meta.ts` and
- *      `routes/comments.ts` — confirmed (via `rg -ln apiTokenAuth packages/core-backend/src`) to be the
- *      ONLY two files where `apiTokenAuth` is ever mounted on a route — and split them into GUARDED
+ *   1. First scan every TypeScript file under `src/routes` to prove the explicit `ROUTE_FILES` scope
+ *      covers every route file that references `apiTokenAuth`.
+ *   2. Scan every `router.<verb>('<path>', ...)` registration in `routes/univer-meta.ts` and
+ *      `routes/comments.ts` — currently the ONLY two files where `apiTokenAuth` is mounted — and split
+ *      them into GUARDED
  *      (the registration's own argument list contains both `apiTokenAuth` and `requireScope(`) and
  *      UNGUARDED (every other registered route in the same two files).
- *   2. For each GUARDED route, assert the exported `isOapiAllowlistRequest` (the real gate function,
+ *   3. For each GUARDED route, assert the exported `isOapiAllowlistRequest` (the real gate function,
  *      not a re-typed copy) admits it.
- *   3. For each UNGUARDED route, assert `isOapiAllowlistRequest` REJECTS it — this is what actually
+ *   4. For each UNGUARDED route, assert `isOapiAllowlistRequest` REJECTS it — this is what actually
  *      proves the allowlist isn't over-broad: it's checked against every OTHER real route Express would
  *      dispatch on these two routers, not just a few hand-picked "adjacent path" guesses.
  *
  * If this test fails, you added/changed a route's guard-mounting or the allowlist's shape without
  * updating the other — see the two failure messages below for which direction drifted and what to fix.
  */
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readdirSync, readFileSync } from 'node:fs'
+import { join, relative, sep } from 'node:path'
 
 import { describe, expect, test } from 'vitest'
 
@@ -47,6 +49,7 @@ const read = (rel: string) => readFileSync(join(SRC, rel), 'utf8')
 
 /** The only two files where `apiTokenAuth` is ever mounted on a route (verified by whole-`src` grep). */
 const ROUTE_FILES = ['routes/univer-meta.ts', 'routes/comments.ts'] as const
+const ROUTE_FILE_SET = new Set<string>(ROUTE_FILES)
 
 interface RouteRegistration {
   file: (typeof ROUTE_FILES)[number]
@@ -103,7 +106,41 @@ const ALL_ROUTES = ROUTE_FILES.flatMap(extractRoutes)
 const GUARDED = ALL_ROUTES.filter((r) => r.guarded)
 const UNGUARDED = ALL_ROUTES.filter((r) => !r.guarded)
 
+function listRouteSourceFiles(dir = join(SRC, 'routes')): string[] {
+  const out: string[] = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const abs = join(dir, entry.name)
+    if (entry.isDirectory()) out.push(...listRouteSourceFiles(abs))
+    else if (entry.isFile() && entry.name.endsWith('.ts')) out.push(relative(SRC, abs).split(sep).join('/'))
+  }
+  return out.sort()
+}
+
+const routeFilesReferencingApiTokenAuth = listRouteSourceFiles()
+  .filter((file) => /\bapiTokenAuth\b/.test(read(file)))
+
 describe('#3365 OAPI allowlist⟺guard dual-reachability tripwire', () => {
+  test('ROUTE_FILES covers every route source file that references apiTokenAuth', () => {
+    const missing = routeFilesReferencingApiTokenAuth.filter((file) => !ROUTE_FILE_SET.has(file))
+    const stale = ROUTE_FILES.filter((file) => !routeFilesReferencingApiTokenAuth.includes(file))
+
+    expect(
+      missing,
+      `${missing.length} route file(s) reference apiTokenAuth but are outside ROUTE_FILES, so this ` +
+        `allowlist/guard tripwire would not scan their guarded OR unguarded routes:\n` +
+        missing.map((file) => `  - ${file}`).join('\n') +
+        `\n\nAdd the file to ROUTE_FILES and teach fullPath() its mount prefix, or avoid mounting ` +
+        `apiTokenAuth there.`,
+    ).toEqual([])
+
+    expect(
+      stale,
+      `${stale.length} ROUTE_FILES entry/entries no longer reference apiTokenAuth; remove stale scope ` +
+        `or update the tripwire's route discovery:\n` +
+        stale.map((file) => `  - ${file}`).join('\n'),
+    ).toEqual([])
+  })
+
   test('sanity: the source scan found a real population of routes on both sides (guards against a silent scan regression)', () => {
     // Both files register dozens of routes; if a future refactor changes the registration STYLE (e.g.
     // multi-line calls, a route-table object instead of direct `router.verb()` calls), this regex-based
