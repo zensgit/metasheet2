@@ -348,6 +348,7 @@ SELECT count(*) AS hmr5_requests FROM attendance_requests WHERE org_id = :hmr5_o
 SELECT count(*) AS hmr5_records FROM attendance_records WHERE org_id = :hmr5_org;
 SELECT count(*) AS hmr5_scopes FROM attendance_scheduler_scopes WHERE org_id = :hmr5_org;
 SELECT count(*) AS hmr5_user_orgs FROM user_orgs WHERE org_id = :hmr5_org;
+SELECT count(*) AS hmr5_user_roles FROM user_roles WHERE left(user_id, 11) = 'hmr5-smoke-';
 SELECT count(*) AS hmr5_users FROM users WHERE left(id, 11) = 'hmr5-smoke-';
 
 -- settings: compare the live document to the window baseline
@@ -356,7 +357,7 @@ SELECT count(*) AS hmr5_users FROM users WHERE left(id, 11) = 'hmr5-smoke-';
 
 The RD-4/5 runbook's own residue block (its digest/org tables) is part of this
 sweep by reference; so is the HMR-5 runbook's (its disposable org mirrors
-RD-4/5's — user_roles rows are cleaned by the helper via captured user ids). A stray row anywhere is a failed window close, not a
+RD-4/5's). A stray row anywhere is a failed window close, not a
 harmless warning — inspect before deleting anything by hand, and only delete
 via the owning runbook's stamped cleanup.
 
