@@ -14,6 +14,7 @@ import {
   type RecordPermissionScope,
   isFieldAlwaysReadOnly,
   isFieldPermissionHidden,
+  isFieldWriteForbidden,
 } from '../multitable/permission-derivation'
 import { validateAiShortcutFieldProperty } from '../multitable/ai-shortcut-config'
 import { withFieldRequiredWhenRule, withFieldVisibilityRule } from '../multitable/field-visibility-rule'
@@ -9017,7 +9018,7 @@ export function univerMetaRouter(): Router {
         const guard = fieldById.get(ch.fieldId)
         const perm = fieldPermissions[ch.fieldId]
         const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
-        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        const layer3Ok = !isFieldWriteForbidden(perm) // W1-3 LOCK-F2: shared predicate, same invariant
         return !staticOk || !layer3Ok
       })
       if (hasForbidden) {
@@ -9174,7 +9175,7 @@ export function univerMetaRouter(): Router {
         const guard = fieldById.get(ch.fieldId)
         const perm = fieldPermissions[ch.fieldId]
         const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
-        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        const layer3Ok = !isFieldWriteForbidden(perm) // W1-3 LOCK-F2: shared predicate, same invariant
         return !staticOk || !layer3Ok
       })
       if (hasForbidden) return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: 'Not permitted to restore one or more fields in this revision' } })
@@ -9317,7 +9318,7 @@ export function univerMetaRouter(): Router {
         const guard = fieldById.get(ch.fieldId)
         const perm = fieldPermissions[ch.fieldId]
         const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
-        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        const layer3Ok = !isFieldWriteForbidden(perm) // W1-3 LOCK-F2: shared predicate, same invariant
         return !staticOk || !layer3Ok
       })
       const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
@@ -9676,7 +9677,8 @@ export function univerMetaRouter(): Router {
         if (deniedIds.has(c.recordId)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'denied' }); continue }
         const hasForbidden = c.diff.some((ch) => {
           const guard = fieldById.get(ch.fieldId); const perm = fieldPermissions[ch.fieldId]
-          return !(guard && !guard.hidden && guard.readOnly !== true) || !(perm && perm.visible !== false && perm.readOnly !== true)
+          // W1-3 LOCK-F2: shared predicate for the layer-3 clause, same invariant as before.
+          return !(guard && !guard.hidden && guard.readOnly !== true) || isFieldWriteForbidden(perm)
         })
         if (hasForbidden) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
         try {
@@ -14106,6 +14108,26 @@ export function univerMetaRouter(): Router {
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
 
+      // W1-3 (multitable-per-subject-field-write-gate-w13-designlock-20260705, LOCK-F1/F3/F4): Layer-3
+      // per-subject field-WRITE gate, parity with grid `/patch` (`buildRecordPatchContext` is the SAME
+      // factory that gate uses). `RecordService.patchRecord` (below) enforces only PROPERTY-level guards
+      // (readOnly/hidden/computed); it never loads `field_permissions` at all. This route serves BOTH
+      // `mst_` token AND session/JWT callers — `apiTokenAuth` only intercepts `mst_`-prefixed bearer
+      // tokens and calls `next()` for everything else (middleware/api-token-auth.ts), so an ordinary
+      // session-authenticated single-record edit reaches this same handler too. Gate fail-closed, before
+      // any write. Field ids here are caller-submitted (this request's own `data` keys), so echoing the
+      // rejected ones back leaks nothing beyond what the caller already sent — same posture as `/patch`.
+      const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
+      if (!patchContext) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const forbiddenWriteFieldIds = [...new Set(Object.keys(parsed.data.data ?? {}))].filter((fid) =>
+        isFieldWriteForbidden(patchContext.fieldPermissions[fid]),
+      )
+      if (forbiddenWriteFieldIds.length > 0) {
+        return sendForbidden(res, `Field(s) not writable for this user: ${forbiddenWriteFieldIds.join(', ')}`)
+      }
+
       const recordService = new RecordService(pool, eventBus)
       if (yjsInvalidator) {
         recordService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
@@ -15941,10 +15963,10 @@ export function univerMetaRouter(): Router {
       // entry means not-visible/unknown ⇒ forbidden, never a false block of a normal field. `/patch`
       // fieldIds are caller-submitted, so naming the rejected ids leaks nothing (nonexistent and
       // read-masked fields are indistinguishable here — both fail the same way, so no existence oracle).
-      const forbiddenWriteFieldIds = [...new Set(parsed.data.changes.map((c) => c.fieldId))].filter((fid) => {
-        const perm = fieldPermissions[fid]
-        return !perm || perm.visible === false || perm.readOnly === true
-      })
+      // W1-3 LOCK-F2: shared predicate (`isFieldWriteForbidden`), same invariant as before.
+      const forbiddenWriteFieldIds = [...new Set(parsed.data.changes.map((c) => c.fieldId))].filter((fid) =>
+        isFieldWriteForbidden(fieldPermissions[fid]),
+      )
       if (forbiddenWriteFieldIds.length > 0) {
         return sendForbidden(res, `Field(s) not writable for this user: ${forbiddenWriteFieldIds.join(', ')}`)
       }

@@ -80,7 +80,7 @@ import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
 import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
-import { isFieldAlwaysReadOnly } from './multitable/permission-derivation'
+import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, FieldWritePermissionDeniedError } from './multitable/permission-derivation'
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
@@ -2312,7 +2312,7 @@ export class MetaSheetServer {
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
       const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
       const { RecordWriteService } = await import('./multitable/record-write-service')
-      const { loadSheetMemberUserIdSet } = await import('./multitable/permission-service')
+      const { loadSheetMemberUserIdSet, loadFieldPermissionScopeMap } = await import('./multitable/permission-service')
       const { createYjsInvalidationPostCommitHook } = await import('./multitable/post-commit-hooks')
       const { db: kyselyDbYjs } = await import('./db/db')
       const collabIO = this.injector.get(ICollabService).getIO()
@@ -2483,6 +2483,28 @@ export class MetaSheetServer {
               const { capabilities, sheetScope, isAdminRole, permissions: actorPerms } =
                 await resolveSheetCapabilitiesForUser(pool.query.bind(pool), sheetId, actorId)
 
+              // W1-3 (multitable-per-subject-field-write-gate-w13-designlock-20260705, LOCK-F1/F3/F4):
+              // Layer-3 per-subject field-WRITE gate. `RecordWriteService.patchRecords` (below, via
+              // `yjs-record-bridge.ts`'s executePatch) enforces only PROPERTY-level guards (fieldById
+              // above); it does NOT enforce per-subject `field_permissions.read_only` — so a field marked
+              // read-only for THIS actor specifically would otherwise be writable through the collab
+              // channel even though the everyday grid `/patch` route blocks it. Derive `fieldPermissions`
+              // via the SAME composite the grid gate uses (`deriveFieldPermissions` + a per-subject scope
+              // read), reusing `visibleFields` already loaded above (only the scope-map read is new — one
+              // extra indexed `field_permissions` read per debounced flush build, not per keystroke).
+              const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, actorId)
+              const fieldPermissions = deriveFieldPermissions(visibleFields as any, capabilities, { fieldScopeMap })
+              const forbiddenWriteFieldIds = Object.keys(patch).filter((fid) => isFieldWriteForbidden(fieldPermissions[fid]))
+              if (forbiddenWriteFieldIds.length > 0) {
+                // Fail-closed + atomic (F4): THROW a coarse, values-free error rather than returning null.
+                // `executePatch` maps a null input to `return false`, which lands in flushNow's
+                // `.then(applied => …)` branch and increments NEITHER success nor failure counter — a
+                // per-subject deny would be metric-invisible. Throwing routes to the `.catch` branch
+                // instead, so the deny increments `flushFailureCount` and is coarsely logged, matching how
+                // a genuine write failure is observed on this entry point (there is no HTTP response here).
+                throw new FieldWritePermissionDeniedError()
+              }
+
               return {
                 sheetId,
                 changesByRecord,
@@ -2503,6 +2525,12 @@ export class MetaSheetServer {
                 source: 'yjs-bridge' as const,
               }
             } catch (err) {
+              // W1-3 F4: a per-subject field-write denial must propagate as a rejection (see the throw
+              // above), NOT be folded into this generic "context unavailable" catch — otherwise it would
+              // become a null return here too and the deny would be metric-invisible. Every OTHER error
+              // (DB unavailable, record deleted mid-build, etc.) keeps the existing coarse-log + null-return
+              // behavior.
+              if (err instanceof FieldWritePermissionDeniedError) throw err
               console.error(`[yjs-bridge] Failed to build write input for ${recordId}:`, err)
               return null
             }
