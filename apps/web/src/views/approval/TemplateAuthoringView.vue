@@ -1,34 +1,35 @@
 <template>
-  <section class="template-authoring">
-    <header class="template-authoring__header">
-      <el-button text @click="goBack">
-        <el-icon><ArrowLeft /></el-icon>
-        返回模板列表
-      </el-button>
-      <div>
-        <h1>{{ isEditMode ? '编辑审批模板' : '新建审批模板' }}</h1>
-        <p>面向模板管理员的线性审批模板编辑器</p>
-      </div>
-      <div class="template-authoring__actions">
-        <el-button
-          :loading="saving"
-          :disabled="!canSave"
-          data-testid="approval-template-save-button"
-          @click="handleSave"
-        >
-          保存草稿
-        </el-button>
-        <el-button
-          type="primary"
-          :loading="publishing"
-          :disabled="!canSave"
-          data-testid="approval-template-publish-button"
-          @click="openPublishChecklist"
-        >
-          发布
-        </el-button>
-      </div>
-    </header>
+  <PageShell width="default">
+    <PageHeader
+      class="template-authoring__header"
+      :title="isEditMode ? '编辑审批模板' : '新建审批模板'"
+      subtitle="面向模板管理员的线性审批模板编辑器"
+      back
+      back-label="返回模板列表"
+      @back="goBack"
+    >
+      <template #actions>
+        <div class="template-authoring__actions">
+          <el-button
+            :loading="saving"
+            :disabled="!canSave"
+            data-testid="approval-template-save-button"
+            @click="handleSave"
+          >
+            保存草稿
+          </el-button>
+          <el-button
+            type="primary"
+            :loading="publishing"
+            :disabled="!canSave"
+            data-testid="approval-template-publish-button"
+            @click="openPublishChecklist"
+          >
+            发布
+          </el-button>
+        </div>
+      </template>
+    </PageHeader>
 
     <el-alert
       v-if="!canManageTemplates"
@@ -1145,13 +1146,15 @@
         </el-button>
       </template>
     </el-dialog>
-  </section>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
-import { ArrowLeft, Plus } from '@element-plus/icons-vue'
+import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import {
@@ -2002,31 +2005,6 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.template-authoring {
-  max-width: 1120px;
-  margin: 0 auto;
-  padding: 24px;
-}
-
-.template-authoring__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 18px;
-}
-
-.template-authoring__header h1 {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 600;
-}
-
-.template-authoring__header p {
-  margin: 4px 0 0;
-  color: var(--el-text-color-secondary, #606266);
-}
-
 .template-authoring__actions,
 .template-authoring__inline,
 .template-authoring__panel-header,
@@ -2277,11 +2255,6 @@ pre {
 }
 
 @media (max-width: 760px) {
-  .template-authoring__header {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
   .template-authoring__grid {
     grid-template-columns: 1fr;
   }

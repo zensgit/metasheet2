@@ -1,6 +1,8 @@
-# 一键卡片配置进设置 UI（含「生成随机密钥」按钮）· DESIGN-LOCK（PROPOSED）— 2026-07-06
+# 一键卡片配置进设置 UI（含「生成随机密钥」按钮）· DESIGN-LOCK（RATIFIED）— 2026-07-06
 
-> **状态：PROPOSED，待 owner ratify。** 未 ratify 前不实现（staged-opt-in）。
+> **状态：RATIFIED（owner「同意」2026-07-06）→ as-built：CFG-1 SHIPPED #3693 ·
+> CFG-2 SHIPPED #3698 · CFG-3 = 本 PR。** 原 PROPOSED 头在 #3690 合入时为准确状态，
+> ratify 后随 CFG-3 收尾翻转为 as-built（避免 closeout 口径漂移）。
 > **committed 文档纪律**：陈述 MetaSheet 自身原则，不出现外部品牌名。
 >
 > **目标**：把一键处理卡片当前 env-only 的两个配置（`APPROVAL_CARD_LINK_SECRET` 签名密钥 +
@@ -77,12 +79,15 @@
 - Slice B（Stream/互动卡片）配置——A-5 PASS + opt-in 后另议。
 - 多租户 per-workspace 密钥隔离——v1 沿用集成粒度，需要再评估。
 
-## 7. Checklist（ratify 后解锁）
+## 7. Checklist（as-built）
 
-- ✅ **CFG-0** 本设计锁（PROPOSED）
-- 🔒 **CFG-1** 解析器 + 两读点切换（env 优先、stored 加密兜底）+ 单测（含签验同源不变式）
-- 🔒 **CFG-2** 生成端点（admin-gated、不回显）+ 真库闭环
-- 🔒 **CFG-3** DirectoryManagementView 生成按钮 + chip + 重新生成确认 + URL 字段 + 不回显 tripwire
+- ✅ **CFG-0** 本设计锁（#3690；PROPOSED → owner ratify 2026-07-06）
+- ✅ **CFG-1** 解析器 + 两读点切换（env 优先、stored 加密兜底）+ 单测（含签验同源不变式）——#3693，
+  对抗审阅 APPROVE + 变异验证
+- ✅ **CFG-2** 生成端点（admin-gated、不回显）+ 真库闭环——#3698，含通用集成表单保存
+  整体重建 config 会**抹掉密钥**的 wipe-trap 修复（carry-through，变异证明 RED-before）
+- ✅ **CFG-3** DirectoryManagementView 生成按钮 + chip + 重新生成确认（ElMessageBox warning）+
+  URL 字段 + 不回显 tripwire——本 PR
 
 ## 8. 与 A-5 的关系（排序，不冲突）
 
@@ -93,4 +98,4 @@
 
 **一句话**：`APPROVAL_CARD_LINK_SECRET` 是自生成密钥，正好适合「页面一键生成」；实现即复用现有
 `encrypted-secrets` 加密存储 + `directory_integrations` 配置 + DirectoryManagementView 的 Agent-ID
-不回显模式，是干净的既有模式扩展。**待 owner ratify 后按 CFG-1→CFG-3 实现。**
+不回显模式，是干净的既有模式扩展。**CFG-1→CFG-3 已全部按锁实现落地（as-built 见 §7）。**

@@ -1,35 +1,39 @@
 <template>
-  <section class="template-detail">
-    <header class="template-detail__header">
-      <el-button text @click="goBack">
-        <el-icon><ArrowLeft /></el-icon>
-        返回模板列表
-      </el-button>
-      <h1 v-if="template">{{ template.name }}</h1>
-      <el-tag
-        v-if="template"
-        :type="statusTagType(template.status)"
-        size="large"
-        :effect="template.status === 'published' ? 'dark' : 'light'"
-      >
-        {{ statusLabel(template.status) }}
-      </el-tag>
-      <el-button
-        v-if="template && template.status === 'published' && canWrite"
-        type="primary"
-        :loading="store.loading"
-        @click="startApproval"
-      >
-        发起审批
-      </el-button>
-      <el-button
-        v-if="template && canManageTemplates"
-        data-testid="template-detail-edit-button"
-        @click="editTemplate"
-      >
-        编辑模板
-      </el-button>
-    </header>
+  <PageShell width="default">
+    <PageHeader
+      class="template-detail__header"
+      :title="headerTitle"
+      back
+      back-label="返回模板列表"
+      @back="goBack"
+    >
+      <template v-if="template" #meta>
+        <el-tag
+          :type="statusTagType(template.status)"
+          size="large"
+          :effect="template.status === 'published' ? 'dark' : 'light'"
+        >
+          {{ statusLabel(template.status) }}
+        </el-tag>
+      </template>
+      <template v-if="template" #actions>
+        <el-button
+          v-if="template.status === 'published' && canWrite"
+          type="primary"
+          :loading="store.loading"
+          @click="startApproval"
+        >
+          发起审批
+        </el-button>
+        <el-button
+          v-if="canManageTemplates"
+          data-testid="template-detail-edit-button"
+          @click="editTemplate"
+        >
+          编辑模板
+        </el-button>
+      </template>
+    </PageHeader>
 
     <el-alert
       v-if="store.error"
@@ -350,14 +354,15 @@
 
       <el-empty v-else-if="!store.loading" description="未找到模板" />
     </div>
-  </section>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  ArrowLeft,
   Flag,
   UserFilled,
   Message,
@@ -384,6 +389,9 @@ const store = useApprovalTemplateStore()
 const { canWrite, canManageTemplates } = useApprovalPermissions()
 
 const template = computed(() => store.activeTemplate)
+// PageHeader requires a non-optional title; before the template loads (or on error) fall back to
+// generic copy — the original hand-rolled `<h1 v-if="template">` rendered nothing at all here.
+const headerTitle = computed(() => template.value?.name ?? '审批模板')
 const visibilityRuleSummaries = computed(() => {
   const currentTemplate = template.value
   if (!currentTemplate) return []
@@ -659,26 +667,6 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.template-detail {
-  max-width: 1000px;
-  margin: 0 auto;
-  padding: 24px;
-}
-
-.template-detail__header {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-.template-detail__header h1 {
-  font-size: 20px;
-  font-weight: 600;
-  margin: 0;
-  flex: 1;
-}
-
 .template-detail__error {
   margin-bottom: 16px;
 }

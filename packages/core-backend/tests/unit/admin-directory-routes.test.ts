@@ -75,10 +75,22 @@ vi.mock('../../src/directory/directory-sync-scheduler', () => ({
   refreshDirectoryIntegrationSchedule: schedulerMocks.refreshDirectoryIntegrationSchedule,
 }))
 
+const approvalCardConfigMocks = vi.hoisted(() => ({
+  generateApprovalCardLinkSecret: vi.fn(),
+  getApprovalCardConfigStatus: vi.fn(),
+  saveApprovalCardPublicAppUrl: vi.fn(),
+}))
+
 vi.mock('../../src/integrations/dingtalk/work-notification-settings', () => ({
   getDingTalkWorkNotificationRuntimeStatusFromStore: workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore,
   saveDingTalkWorkNotificationAgentId: workNotificationMocks.saveDingTalkWorkNotificationAgentId,
   testDingTalkWorkNotificationAgentId: workNotificationMocks.testDingTalkWorkNotificationAgentId,
+}))
+
+vi.mock('../../src/integrations/dingtalk/approval-card-config', () => ({
+  generateApprovalCardLinkSecret: approvalCardConfigMocks.generateApprovalCardLinkSecret,
+  getApprovalCardConfigStatus: approvalCardConfigMocks.getApprovalCardConfigStatus,
+  saveApprovalCardPublicAppUrl: approvalCardConfigMocks.saveApprovalCardPublicAppUrl,
 }))
 
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
@@ -177,6 +189,91 @@ describe('adminDirectoryRouter', () => {
     workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore.mockReset()
     workNotificationMocks.saveDingTalkWorkNotificationAgentId.mockReset()
     workNotificationMocks.testDingTalkWorkNotificationAgentId.mockReset()
+    approvalCardConfigMocks.generateApprovalCardLinkSecret.mockReset()
+    approvalCardConfigMocks.getApprovalCardConfigStatus.mockReset()
+    approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockReset()
+  })
+
+  describe('approval-card config (CFG-2)', () => {
+    const CARD_STATUS = {
+      integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active' },
+      linkSecret: { configured: true, source: 'stored', envOverrideActive: false, valuePrinted: false },
+      publicAppUrl: { storedValue: 'https://app.example.com', source: 'stored', envOverrideActive: false },
+    }
+
+    it('admin-gates all three routes (403 for non-admin)', async () => {
+      rbacMocks.isRbacAdmin.mockResolvedValue(false)
+      for (const [method, path] of [
+        ['get', '/integrations/:integrationId/approval-card-config'],
+        ['post', '/integrations/:integrationId/approval-card-config/secret/generate'],
+        ['put', '/integrations/:integrationId/approval-card-config'],
+      ] as const) {
+        const response = await invokeRoute(method, path, {
+          params: { integrationId: 'dir-1' },
+          user: { id: 'user-1' },
+        })
+        expect(response.statusCode).toBe(403)
+      }
+      expect(approvalCardConfigMocks.generateApprovalCardLinkSecret).not.toHaveBeenCalled()
+      expect(approvalCardConfigMocks.getApprovalCardConfigStatus).not.toHaveBeenCalled()
+      expect(approvalCardConfigMocks.saveApprovalCardPublicAppUrl).not.toHaveBeenCalled()
+    })
+
+    it('generates the secret with a redacted audit entry and never echoes a value', async () => {
+      approvalCardConfigMocks.generateApprovalCardLinkSecret.mockResolvedValue(CARD_STATUS)
+
+      const response = await invokeRoute('post', '/integrations/:integrationId/approval-card-config/secret/generate', {
+        params: { integrationId: 'dir-1' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toMatchObject({ ok: true, data: { status: { linkSecret: { configured: true, valuePrinted: false } } } })
+      // No 64-hex plaintext anywhere in the wire response.
+      expect(JSON.stringify(response.body)).not.toMatch(/[0-9a-f]{64}/)
+      expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+        resourceType: 'approval-card-config',
+        meta: expect.objectContaining({ operation: 'generate_link_secret', valuePrinted: false }),
+      }))
+    })
+
+    it('returns 404 for an unknown integration', async () => {
+      approvalCardConfigMocks.generateApprovalCardLinkSecret.mockResolvedValue(null)
+      const response = await invokeRoute('post', '/integrations/:integrationId/approval-card-config/secret/generate', {
+        params: { integrationId: 'ghost' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+      expect(response.statusCode).toBe(404)
+    })
+
+    it('saves the public app URL and surfaces validation failures as 400', async () => {
+      approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockResolvedValue(CARD_STATUS)
+      const ok = await invokeRoute('put', '/integrations/:integrationId/approval-card-config', {
+        params: { integrationId: 'dir-1' },
+        body: { publicAppUrl: 'https://app.example.com' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+      expect(ok.statusCode).toBe(200)
+      expect(approvalCardConfigMocks.saveApprovalCardPublicAppUrl).toHaveBeenCalledWith('dir-1', 'https://app.example.com')
+
+      approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockRejectedValue(new Error('publicAppUrl must use http or https'))
+      const bad = await invokeRoute('put', '/integrations/:integrationId/approval-card-config', {
+        params: { integrationId: 'dir-1' },
+        body: { publicAppUrl: 'javascript:alert(1)' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+      expect(bad.statusCode).toBe(400)
+    })
+
+    it('rejects a PUT missing publicAppUrl instead of silently clearing', async () => {
+      const response = await invokeRoute('put', '/integrations/:integrationId/approval-card-config', {
+        params: { integrationId: 'dir-1' },
+        body: {},
+        user: { id: 'admin-1', role: 'admin' },
+      })
+      expect(response.statusCode).toBe(400)
+      expect(approvalCardConfigMocks.saveApprovalCardPublicAppUrl).not.toHaveBeenCalled()
+    })
   })
 
   it('rejects unauthenticated requests', async () => {

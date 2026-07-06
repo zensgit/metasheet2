@@ -1,12 +1,12 @@
 <template>
-  <section class="approval-new">
-    <header class="approval-new__header">
-      <el-button text @click="goBack">
-        <el-icon><ArrowLeft /></el-icon>
-        返回
-      </el-button>
-      <h1>发起审批</h1>
-    </header>
+  <PageShell width="narrow">
+    <PageHeader
+      class="approval-new__header"
+      title="发起审批"
+      back
+      back-label="返回"
+      @back="goBack"
+    />
 
     <el-alert
       v-if="templateStore.error || approvalStore.error"
@@ -363,7 +363,7 @@
 
       <el-empty v-else-if="!templateStore.loading" description="未找到审批模板" />
     </div>
-  </section>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
@@ -371,7 +371,8 @@ import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
-import { ArrowLeft } from '@element-plus/icons-vue'
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
 import type { FormField, FormSchema } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
@@ -667,25 +668,6 @@ watch([visibleFieldIds, template], () => {
 </script>
 
 <style scoped>
-.approval-new {
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 24px;
-}
-
-.approval-new__header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
-}
-
-.approval-new__header h1 {
-  font-size: 20px;
-  font-weight: 600;
-  margin: 0;
-}
-
 .approval-new__error {
   margin-bottom: 16px;
 }

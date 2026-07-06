@@ -51,6 +51,9 @@ class K3WiseWebApiAdapterError extends Error {
 
 const DEFAULT_OBJECTS = getK3WiseDocumentObjectDefaults()
 const DEFAULT_MATERIAL_LIST_MAX_LIMIT = 10
+// Bounded LIST page selection (#3703, owner-approved 2026-07-06): mirrors READ_SMOKE_LIST_MAX_PAGE_INDEX
+// in read-smoke.cjs — the adapter re-guards the same 1..10 bound (defense in depth, never wider).
+const MAX_MATERIAL_LIST_PAGE_INDEX = 10
 // C4 BOM read (#1709): GetDetail has no paging, so a large bill returns every line. Bound the records we
 // retain and the line count we report so a values-free read-smoke stays bounded regardless of bill size.
 const DEFAULT_MATERIAL_BOM_MAX_LINES = 1000
@@ -704,7 +707,7 @@ function assertMaterialListReadOnlyScope(request, objectConfig) {
       fields: Object.keys(request.filters),
     })
   }
-  const allowedOptionKeys = new Set(['k3ReadMode', 'listKey'])
+  const allowedOptionKeys = new Set(['k3ReadMode', 'listKey', 'listPageIndex'])
   const unknownOptions = Object.keys(request.options || {}).filter((key) => !allowedOptionKeys.has(key))
   if (unknownOptions.length > 0) {
     throw new AdapterValidationError('K3 WISE Material LIST smoke does not accept request-supplied options', {
@@ -712,6 +715,19 @@ function assertMaterialListReadOnlyScope(request, objectConfig) {
       object: request.object,
       fields: unknownOptions,
     })
+  }
+  // Bounded page selection (#3703, owner-approved 2026-07-06): defense-in-depth re-guard of the contract
+  // bound — a plain integer 1..MAX only. Anything else fails closed before any outbound call.
+  if (request.options.listPageIndex !== undefined) {
+    const pageIndex = request.options.listPageIndex
+    if (typeof pageIndex !== 'number' || !Number.isInteger(pageIndex) || pageIndex < 1 || pageIndex > MAX_MATERIAL_LIST_PAGE_INDEX) {
+      throw new AdapterValidationError('K3 WISE Material LIST smoke pageIndex is out of the fixed bound', {
+        code: 'K3_WISE_READ_LIST_PAGE_INDEX_INVALID',
+        object: request.object,
+        field: 'listPageIndex',
+        maxPageIndex: MAX_MATERIAL_LIST_PAGE_INDEX,
+      })
+    }
   }
   const maxLimit = toPositiveNumber(objectConfig.maxListLimit) || DEFAULT_MATERIAL_LIST_MAX_LIMIT
   if (request.limit > maxLimit) {
@@ -924,10 +940,13 @@ function buildListReadBody(request, objectConfig) {
     ? objectConfig.topField.trim()
     : 'Top'
   const container = isPlainObject(template[bodyKey]) ? template[bodyKey] : {}
+  // Bounded page selection (#3703): the scope guard has already enforced integer 1..MAX; absent → the
+  // shipped fixed page 1 (unchanged default).
+  const pageIndex = typeof request.options.listPageIndex === 'number' ? request.options.listPageIndex : 1
   template[bodyKey] = {
     ...container,
     [topField]: request.limit,
-    [pageIndexField]: 1,
+    [pageIndexField]: pageIndex,
     [pageSizeField]: request.limit,
   }
   const listFields = Array.isArray(objectConfig.readListFields)
@@ -1705,11 +1724,12 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       const listShapeProbe = materialListShapeProbe(readResponse.data)
       const dataDataPresent = listShapeProbe.dataData || listShapeProbe.dataLowerData || listShapeProbe.dataPascalData
       const dataRowCount = materialListRowCount(readResponse.data)
-      // Paging echo: what K3 reports it applied, vs what we requested (Top=PageSize=request.limit, PageIndex=1).
+      // Paging echo: what K3 reports it applied, vs what we requested (Top=PageSize=request.limit;
+      // PageIndex = the bounded requested page, default 1 — #3703).
       const dataPageSize = materialListPageSize(readResponse.data)
       const dataPageIndex = materialListPageIndex(readResponse.data)
       const requestedLimit = request.limit
-      const requestedPageIndex = 1
+      const requestedPageIndex = typeof request.options.listPageIndex === 'number' ? request.options.listPageIndex : 1
       const responseShapeProbe = materialListResponseShapeProbe(readResponse.data)
       if (!materialListBusinessSuccess(readResponse.data, config)) {
         const failureCode = materialListBusinessFailureCode(readResponse.data)

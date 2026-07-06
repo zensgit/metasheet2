@@ -1,24 +1,26 @@
 <template>
-  <section class="approval-metrics">
-    <header class="approval-metrics__header">
-      <h1>审批 SLA 与耗时</h1>
-      <div class="approval-metrics__toolbar">
-        <el-date-picker
-          v-model="dateRange"
-          type="daterange"
-          unlink-panels
-          range-separator="至"
-          start-placeholder="开始日期"
-          end-placeholder="结束日期"
-          value-format="YYYY-MM-DD"
-          :shortcuts="DATE_RANGE_SHORTCUTS"
-          @change="loadAll"
-        />
-        <el-button type="primary" @click="loadAll" :loading="loading">
-          刷新
-        </el-button>
-      </div>
-    </header>
+  <PageShell width="default">
+    <div class="approval-metrics">
+      <PageHeader class="approval-metrics__header" title="审批 SLA 与耗时">
+        <template #actions>
+          <div class="approval-metrics__toolbar">
+            <el-date-picker
+              v-model="dateRange"
+              type="daterange"
+              unlink-panels
+              range-separator="至"
+              start-placeholder="开始日期"
+              end-placeholder="结束日期"
+              value-format="YYYY-MM-DD"
+              :shortcuts="DATE_RANGE_SHORTCUTS"
+              @change="loadAll"
+            />
+            <el-button type="primary" @click="loadAll" :loading="loading">
+              刷新
+            </el-button>
+          </div>
+        </template>
+      </PageHeader>
 
     <el-alert
       v-if="errorMessage"
@@ -241,10 +243,13 @@
         </el-table>
       </el-card>
     </div>
-  </section>
+    </div>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '../../composables/useAuth'
@@ -477,17 +482,9 @@ onMounted(() => {
 
 <style scoped>
 .approval-metrics {
-  padding: 24px;
   display: flex;
   flex-direction: column;
   gap: 20px;
-}
-.approval-metrics__header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
 }
 .approval-metrics__toolbar {
   display: flex;

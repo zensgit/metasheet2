@@ -212,6 +212,10 @@
               <span>测试接收 DingTalk UserID</span>
               <input v-model.trim="draft.workNotificationTestUserId" class="directory-admin__input" type="text" placeholder="可选；填写后会发送测试工作通知" />
             </label>
+            <label class="directory-admin__field">
+              <span>一键卡片对外访问地址</span>
+              <input v-model.trim="draft.approvalCardPublicAppUrl" class="directory-admin__input" type="text" placeholder="一键卡片深链的对外可达地址；留空则使用部署环境配置" />
+            </label>
           </template>
           <label class="directory-admin__field">
             <span>根部门 ID</span>
@@ -309,6 +313,27 @@
               请先创建并选中钉钉目录集成，再通过专用的“测试工作通知”和“保存 Agent ID”按钮配置工作通知，避免敏感值跟随普通目录保存路径写入。
             </p>
           </div>
+          <div v-if="selectedIntegration" class="directory-admin__field directory-admin__field--wide">
+            <span>一键处理卡片配置说明</span>
+            <div class="directory-admin__chips">
+              <span class="directory-admin__chip" :class="{ 'directory-admin__chip--success': selectedIntegration?.config.approvalCardLinkSecretConfigured, 'directory-admin__chip--danger': selectedIntegration && !selectedIntegration.config.approvalCardLinkSecretConfigured }">
+                {{ selectedIntegration?.config.approvalCardLinkSecretConfigured ? '密钥已生成' : '未生成' }}
+              </span>
+              <span class="directory-admin__chip">不回显密钥值</span>
+            </div>
+            <p v-if="approvalCardLinkSecretEnvOverrideActive" class="directory-admin__hint">
+              部署环境变量已设置，页面生成的密钥暂不生效（环境变量优先）。
+            </p>
+            <p class="directory-admin__hint">
+              深链 HMAC 签名密钥由平台自动生成并加密存储，从不回显明文；重新生成会使已发出但未处理的一键处理卡片链接失效。对外访问地址用于拼接一键处理卡片决策深链，留空则使用部署环境配置。
+            </p>
+          </div>
+          <div v-else class="directory-admin__field directory-admin__field--wide">
+            <span>一键处理卡片配置说明</span>
+            <p class="directory-admin__hint">
+              请先创建并选中钉钉目录集成，再通过专用的“生成随机密钥”和“保存对外访问地址”按钮配置一键处理卡片，密钥永不在页面回显。
+            </p>
+          </div>
           <label class="directory-admin__field">
             <span>状态</span>
             <select v-model="draft.status" class="directory-admin__input">
@@ -345,6 +370,12 @@
           </button>
           <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || draft.workNotificationAgentId.trim().length === 0" @click="void saveWorkNotificationAgentId()">
             保存 Agent ID
+          </button>
+          <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="approvalCardBusy" @click="void generateApprovalCardLinkSecret()">
+            {{ approvalCardBusy ? '处理中...' : (selectedIntegration?.config.approvalCardLinkSecretConfigured ? '重新生成密钥' : '生成随机密钥') }}
+          </button>
+          <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="approvalCardBusy" @click="void saveApprovalCardPublicAppUrl()">
+            保存对外访问地址
           </button>
           <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || !selectedIntegration" @click="void syncIntegration()">
             手动同步
@@ -1815,6 +1846,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 
@@ -1833,6 +1865,8 @@ type DirectoryIntegration = {
     appKey: string
     appSecretConfigured: boolean
     workNotificationAgentIdConfigured?: boolean
+    approvalCardLinkSecretConfigured?: boolean
+    approvalCardPublicAppUrl?: string | null
     rootDepartmentId: string
     baseUrl: string | null
     pageSize: number
@@ -2126,6 +2160,7 @@ type DirectoryDraft = {
   appSecret: string
   workNotificationAgentId: string
   workNotificationTestUserId: string
+  approvalCardPublicAppUrl: string
   rootDepartmentId: string
   baseUrl: string
   pageSize: number
@@ -2166,6 +2201,8 @@ const loadingMoreReviewItems = ref(false)
 const loadingAccounts = ref(false)
 const loadingDepartments = ref(false)
 const busy = ref(false)
+const approvalCardBusy = ref(false)
+const approvalCardLinkSecretEnvOverrideActive = ref(false)
 const bindingAccountId = ref('')
 const unbindingAccountId = ref('')
 const acknowledgingAlertId = ref('')
@@ -2249,6 +2286,7 @@ const draft = reactive<DirectoryDraft>({
   appSecret: '',
   workNotificationAgentId: '',
   workNotificationTestUserId: '',
+  approvalCardPublicAppUrl: '',
   rootDepartmentId: '1',
   baseUrl: '',
   pageSize: 50,
@@ -2647,6 +2685,8 @@ function resetDraft() {
   draft.appSecret = ''
   draft.workNotificationAgentId = ''
   draft.workNotificationTestUserId = ''
+  draft.approvalCardPublicAppUrl = ''
+  approvalCardLinkSecretEnvOverrideActive.value = false
   draft.rootDepartmentId = '1'
   draft.baseUrl = ''
   draft.pageSize = 50
@@ -2670,6 +2710,7 @@ function applyIntegrationToDraft(integration: DirectoryIntegration) {
   draft.appSecret = ''
   draft.workNotificationAgentId = ''
   draft.workNotificationTestUserId = ''
+  draft.approvalCardPublicAppUrl = integration.config.approvalCardPublicAppUrl ?? ''
   draft.rootDepartmentId = integration.config.rootDepartmentId
   draft.baseUrl = integration.config.baseUrl ?? ''
   draft.pageSize = integration.config.pageSize
@@ -3423,6 +3464,7 @@ function describeDepartmentParent(department: DirectoryDepartment): string {
 
 async function selectIntegration(integrationId: string): Promise<void> {
   selectedIntegrationId.value = integrationId
+  approvalCardLinkSecretEnvOverrideActive.value = false
   testResult.value = null
   departments.value = []
   departmentsLoaded.value = false
@@ -4036,6 +4078,81 @@ async function saveWorkNotificationAgentId() {
     setStatus(error instanceof Error ? error.message : '保存工作通知 Agent ID 失败', 'error')
   } finally {
     busy.value = false
+  }
+}
+
+// Card-config lock §3.3 必做交互: regenerate is destructive for in-flight links → explicit
+// ElMessageBox warning confirm (service API — works app-wide even though this view is hand-rolled).
+async function confirmApprovalCardSecretRegenerate(): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(
+      '重新生成将使已发出但未处理的审批卡片链接失效，确定吗？',
+      '重新生成密钥',
+      { type: 'warning', confirmButtonText: '重新生成', cancelButtonText: '取消' },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+// CFG-3 (card-config lock §3.3): generate button never sends a secret — it only asks the
+// backend to generate+store one (encrypted) and returns presence booleans, never the value.
+async function generateApprovalCardLinkSecret() {
+  const integration = selectedIntegration.value
+  if (!integration) {
+    setStatus('请先选择或创建钉钉目录集成', 'error')
+    return
+  }
+  if (integration.config.approvalCardLinkSecretConfigured && !(await confirmApprovalCardSecretRegenerate())) {
+    return
+  }
+  approvalCardBusy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/directory/integrations/${integration.id}/approval-card-config/secret/generate`, {
+      method: 'POST',
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '生成一键卡片密钥失败'))
+    setStatus('已生成新的一键卡片密钥')
+    await loadIntegrations()
+    await selectIntegration(integration.id)
+    approvalCardLinkSecretEnvOverrideActive.value = body?.data?.status?.linkSecret?.envOverrideActive === true
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '生成一键卡片密钥失败', 'error')
+  } finally {
+    approvalCardBusy.value = false
+  }
+}
+
+function buildApprovalCardConfigPayload() {
+  return {
+    publicAppUrl: draft.approvalCardPublicAppUrl.trim(),
+  }
+}
+
+async function saveApprovalCardPublicAppUrl() {
+  const integration = selectedIntegration.value
+  if (!integration) {
+    setStatus('请先选择或创建钉钉目录集成', 'error')
+    return
+  }
+  approvalCardBusy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/directory/integrations/${integration.id}/approval-card-config`, {
+      method: 'PUT',
+      body: JSON.stringify(buildApprovalCardConfigPayload()),
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '保存一键卡片对外访问地址失败'))
+    const currentIntegrationId = integration.id
+    setStatus('一键卡片对外访问地址已保存')
+    await loadIntegrations()
+    await selectIntegration(currentIntegrationId)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '保存一键卡片对外访问地址失败', 'error')
+  } finally {
+    approvalCardBusy.value = false
   }
 }
 
