@@ -178,6 +178,7 @@ describe('Multitable context API', () => {
       canExport: true,
       canSendNotification: false,
       pitResetEnabled: false,
+      personalViewsEnabled: false,
     })
     expect(response.body.data.capabilityOrigin).toEqual({
       source: 'global-rbac',
@@ -368,6 +369,7 @@ describe('Multitable context API', () => {
       canExport: true,
       canSendNotification: true,
       pitResetEnabled: false,
+      personalViewsEnabled: false,
     })
     // Route-level contract lock for the new FE signal: flag ON + sheet-admin → pitResetEnabled true (its only true source).
     // The flag-off cases (false for both admin and non-admin) are locked by the two capabilities exact-matches above.
@@ -376,6 +378,13 @@ describe('Multitable context API', () => {
       const onResp = await request(app).get('/api/multitable/context').query({ sheetId: 'sheet_ops' }).expect(200)
       expect(onResp.body.data.capabilities.pitResetEnabled).toBe(true)
     } finally { delete process.env.MULTITABLE_ENABLE_PIT_RESET }
+    // Slice 3 contract lock: flag ON → personalViewsEnabled true (available to every reader, presentation-only —
+    // NOT ANDed with a management capability, unlike pitResetEnabled). Flag-off (false) locked by the exact-matches above.
+    process.env.MULTITABLE_ENABLE_PERSONAL_VIEWS = 'true'
+    try {
+      const onResp = await request(app).get('/api/multitable/context').query({ sheetId: 'sheet_ops' }).expect(200)
+      expect(onResp.body.data.capabilities.personalViewsEnabled).toBe(true)
+    } finally { delete process.env.MULTITABLE_ENABLE_PERSONAL_VIEWS }
     expect(response.body.data.viewPermissions).toEqual({
       view_grid: {
         canAccess: true,
