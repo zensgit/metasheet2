@@ -59,6 +59,22 @@ on:
       - 'apps/web/src/views/approval/ApprovalCenterView.vue'
       - 'apps/web/tests/approvalMobileI18n.spec.ts'
       - 'apps/web/tests/approvalMobileResponsive.spec.ts'
+      # UF-3 — status-color convergence: the shared StatusTag/statusDomains map now renders the
+      # approvalInstance status tag (ApprovalCenterView/ApprovalMobileList/ApprovalDetailView
+      # header/ApprovalInboxView) and the delegation status tag (MyDelegationView/
+      # DelegationSettingsView, via the existing delegationStatus.ts).
+      - 'apps/web/src/components/status/StatusTag.vue'
+      - 'apps/web/src/utils/statusDomains.ts'
+      - 'apps/web/src/approvals/delegationStatus.ts'
+      - 'apps/web/src/views/ApprovalInboxView.vue'
+      - 'apps/web/src/views/approval/MyDelegationView.vue'
+      - 'apps/web/src/views/approval/DelegationSettingsView.vue'
+      - 'apps/web/tests/statusTag.spec.ts'
+      - 'apps/web/tests/approval-inbox-auth-guard.spec.ts'
+      - 'apps/web/tests/myDelegationView.spec.ts'
+      - 'apps/web/tests/approvalDelegationView.spec.ts'
+      - 'apps/web/tests/approvalDelegationStatus.spec.ts'
+      - 'apps/web/tests/approval-e2e-lifecycle.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -105,6 +121,22 @@ on:
       - 'apps/web/src/views/approval/ApprovalCenterView.vue'
       - 'apps/web/tests/approvalMobileI18n.spec.ts'
       - 'apps/web/tests/approvalMobileResponsive.spec.ts'
+      # UF-3 — status-color convergence: the shared StatusTag/statusDomains map now renders the
+      # approvalInstance status tag (ApprovalCenterView/ApprovalMobileList/ApprovalDetailView
+      # header/ApprovalInboxView) and the delegation status tag (MyDelegationView/
+      # DelegationSettingsView, via the existing delegationStatus.ts).
+      - 'apps/web/src/components/status/StatusTag.vue'
+      - 'apps/web/src/utils/statusDomains.ts'
+      - 'apps/web/src/approvals/delegationStatus.ts'
+      - 'apps/web/src/views/ApprovalInboxView.vue'
+      - 'apps/web/src/views/approval/MyDelegationView.vue'
+      - 'apps/web/src/views/approval/DelegationSettingsView.vue'
+      - 'apps/web/tests/statusTag.spec.ts'
+      - 'apps/web/tests/approval-inbox-auth-guard.spec.ts'
+      - 'apps/web/tests/myDelegationView.spec.ts'
+      - 'apps/web/tests/approvalDelegationView.spec.ts'
+      - 'apps/web/tests/approvalDelegationStatus.spec.ts'
+      - 'apps/web/tests/approval-e2e-lifecycle.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -167,4 +199,9 @@ jobs:
         # container + header components all approval views converged on. pageShell.spec.ts locks
         # the width-tier→token mapping + title/subtitle/actions/meta slots + the back-navigation
         # contract (backTo path-push vs back event-delegation, and back taking priority over backTo).
-        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell --reporter=dot
+        # UF-3: status-color convergence — statusTag (StatusTag.vue + statusDomains.ts unit/mount
+        # coverage), approval-e2e-lifecycle (ApprovalDetailView header StatusTag regression),
+        # approval-inbox-auth-guard (ApprovalInboxView, had no gate before this wiring),
+        # myDelegationView/approvalDelegationView (MyDelegationView/DelegationSettingsView status
+        # cell), approvalDelegationStatus (delegationStatus.ts, had no gate before this wiring).
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus --reporter=dot

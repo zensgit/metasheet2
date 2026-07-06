@@ -26,13 +26,7 @@
     >
       <div class="approval-mobile-list__card-top">
         <span class="approval-mobile-list__title">{{ row.title ?? t.titleFallback }}</span>
-        <span
-          class="approval-mobile-list__status"
-          :class="`approval-mobile-list__status--${statusTagType(row.status)}`"
-          :data-status="row.status"
-        >
-          {{ statusLabel(row.status) }}
-        </span>
+        <StatusTag domain="approvalInstance" :status="row.status" size="sm" />
       </div>
       <div class="approval-mobile-list__meta">
         <span class="approval-mobile-list__request-no">{{ row.requestNo ?? '-' }}</span>
@@ -66,6 +60,7 @@ import type { FormSchema, UnifiedApprovalDTO } from '../../types/approval'
 import { useLocale } from '../../composables/useLocale'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import { resolveRowSummaryLine } from '../../approvals/useApprovalListFieldSummary'
+import StatusTag from '../../components/status/StatusTag.vue'
 
 // T3-1 v0 — dedicated touch-first list card (ballot Q10). Replaces the desktop
 // `el-table` (fixed column widths + horizontal scroll + tiny row-click targets)
@@ -106,26 +101,12 @@ const t = computed(() => (isZh.value
       loading: '加载中…',
       empty: '暂无审批',
       titleFallback: '审批申请',
-      status: {
-        pending: '待处理',
-        approved: '已通过',
-        rejected: '已驳回',
-        revoked: '已撤回',
-        cancelled: '已取消',
-      } as Record<string, string>,
       dateLocale: 'zh-CN',
     }
   : {
       loading: 'Loading…',
       empty: 'No approvals',
       titleFallback: 'Approval request',
-      status: {
-        pending: 'Pending',
-        approved: 'Approved',
-        rejected: 'Rejected',
-        revoked: 'Revoked',
-        cancelled: 'Cancelled',
-      } as Record<string, string>,
       dateLocale: 'en-US',
     }
 ))
@@ -135,20 +116,9 @@ const t = computed(() => (isZh.value
 // localized default rather than a hardcoded literal.
 const resolvedEmptyText = computed(() => props.emptyText ?? t.value.empty)
 
-function statusTagType(status: string): string {
-  const map: Record<string, string> = {
-    pending: 'warning',
-    approved: 'success',
-    rejected: 'danger',
-    revoked: 'info',
-    cancelled: 'info',
-  }
-  return map[status] ?? 'info'
-}
-
-function statusLabel(status: string): string {
-  return t.value.status[status] ?? status
-}
+// UF-3: status coloring/labels now come from <StatusTag domain="approvalInstance"> (see
+// utils/statusDomains.ts), which absorbed this file's zh/en status dictionary — one of six
+// independent status-color implementations the UI foundation design-lock audit found.
 
 function formatDate(dateStr: string): string {
   if (!dateStr) return '-'
@@ -203,35 +173,19 @@ function rowSummaryLine(row: UnifiedApprovalDTO): string {
   gap: 12px;
 }
 
+/* UF-3: keep the status chip from shrinking next to the (possibly long) title, same as the
+   card-top flex row previously relied on `.approval-mobile-list__status { flex-shrink: 0 }` for.
+   Vue applies this component's scope id to a mounted child's root node, so this scoped selector
+   reaches <StatusTag>'s root <span>. */
+.approval-mobile-list__card-top :deep(.ms-status-tag) {
+  flex-shrink: 0;
+}
+
 .approval-mobile-list__title {
   font-size: 15px;
   font-weight: 600;
   color: var(--el-text-color-primary, #303133);
   line-height: 1.4;
-}
-
-.approval-mobile-list__status {
-  flex-shrink: 0;
-  font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  background: var(--el-fill-color-light, #f5f7fa);
-  color: var(--el-text-color-secondary, #909399);
-}
-
-.approval-mobile-list__status--warning {
-  background: #fdf6ec;
-  color: #e6a23c;
-}
-
-.approval-mobile-list__status--success {
-  background: #f0f9eb;
-  color: #67c23a;
-}
-
-.approval-mobile-list__status--danger {
-  background: #fef0f0;
-  color: #f56c6c;
 }
 
 .approval-mobile-list__meta {
