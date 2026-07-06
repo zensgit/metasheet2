@@ -18,10 +18,12 @@ import type { PersonalViewConfigOverlay } from '../types'
  * DELETE the actor's own personal row, then let the caller re-fetch so the server returns the now-effective
  * (shared) config.
  *
- * The toggle is per-view, in-memory, session-local UI state — NOT synced from any "does a personal row
- * exist" server signal. Turning it ON routes subsequent in-place config edits (filter/sort/group/hidden/
- * order) to the personal-config endpoint; turning it OFF (or a flag-off session) routes them back to the
- * shared `updateView` path (§3 P2 proposed default). `enabled()` mirrors the session capability
+ * The toggle is per-view UI state that is INITIALIZED from the server's persisted override set on every context
+ * (re)load via `syncFromServer(personalOverrideViewIds)` — so a saved personal row shows ON after a refresh
+ * (state reflects the server, not local guesswork). Turning it ON routes subsequent in-place config edits
+ * (filter/sort/group/hidden/order) to the personal-config endpoint; turning it OFF is reset-to-shared
+ * (`handleToggleClick` DELETEs the actor's row + refetches, never a silent local flip). A flag-off session
+ * routes edits back to the shared `updateView` path (§3 P2). `enabled()` mirrors the session capability
  * (`MetaCapabilities.personalViewsEnabled`, flag-derived, set by `/context` — see §7 Q1) so a flag-off
  * session can never latch a view into personal mode (G-FE-4: byte-identical, inert when off).
  */
