@@ -49,9 +49,7 @@
       >
         <div class="automation-runs__summary">
           <span class="automation-runs__time">{{ formatTime(run.triggeredAt) }}</span>
-          <span class="automation-runs__badge" :class="`automation-runs__badge--${run.status}`" :data-status="run.status">
-            {{ automationStatusLabel(run.status, isZh) }}
-          </span>
+          <StatusTag domain="automationRun" :status="run.status" />
           <span class="automation-runs__rule" data-field="ruleId">{{ run.ruleId }}</span>
           <span v-if="run.sheetId" class="automation-runs__sheet" data-field="sheetId">{{ run.sheetId }}</span>
           <span class="automation-runs__trigger" data-field="triggeredBy">{{ run.triggeredBy }}</span>
@@ -75,9 +73,7 @@
               <span v-else-if="parallelChildStep(step.stepKey)" class="automation-runs__branch-child" data-field="parallel-child">
                 ↳ {{ automationLabel('runs.parallelBranchStep', isZh) }} {{ parallelChildStep(step.stepKey)?.branchKey }} · #{{ parallelChildStep(step.stepKey)?.actionIndex }}
               </span>
-              <span class="automation-runs__badge automation-runs__badge--sm" :class="`automation-runs__badge--${step.status}`">
-                {{ automationStatusLabel(step.status, isZh) }}
-              </span>
+              <StatusTag domain="automationRun" :status="step.status" size="sm" />
               <!-- A6-2: resume a suspended step (admin detail only; token used internally, never shown). -->
               <button
                 v-if="step.status === 'suspended' && step.suspend?.resumeToken"
@@ -127,6 +123,7 @@ import { multitableClient, type MultitableApiClient } from '../multitable/api/cl
 import type { AutomationRunView, AutomationRunStepView, WorkflowJobStatus } from '../multitable/types'
 import { automationLabel, automationStatusLabel, type AutomationLabelKey } from '../multitable/utils/meta-automation-labels'
 import { redactString, redactValue, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
+import StatusTag from '../components/status/StatusTag.vue'
 
 const props = defineProps<{ client?: MultitableApiClient }>()
 const client = props.client ?? multitableClient
@@ -326,12 +323,9 @@ if (isAdmin) void loadData()
 .automation-runs__sheet { color: #475569; }
 .automation-runs__trigger { color: #475569; }
 .automation-runs__duration { margin-left: auto; color: #94a3b8; }
-.automation-runs__badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; background: #f1f5f9; color: #475569; }
-.automation-runs__badge--resolved { background: #dcfce7; color: #16a34a; }
-.automation-runs__badge--failed, .automation-runs__badge--errored, .automation-runs__badge--rejected { background: #fef2f2; color: #dc2626; }
-.automation-runs__badge--skipped { background: #f1f5f9; color: #64748b; }
-.automation-runs__badge--running, .automation-runs__badge--queued, .automation-runs__badge--suspended { background: #eff6ff; color: #2563eb; }
-.automation-runs__badge--sm { font-size: 10px; padding: 1px 6px; }
+/* UF-3: the run/step status badges are now <StatusTag domain="automationRun"> (utils/
+   statusDomains.ts) — this file's own uppercase/hex badge palette (one of six independent
+   status-color implementations the UI foundation design-lock audit found) is removed. */
 .automation-runs__detail { margin-top: 8px; padding-top: 8px; border-top: 1px solid #e2e8f0; display: flex; flex-direction: column; gap: 6px; }
 .automation-runs__detail-h { margin: 6px 0 2px; font-size: 12px; font-weight: 700; color: #475569; text-transform: uppercase; }
 .automation-runs__step { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }

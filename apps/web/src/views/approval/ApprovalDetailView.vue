@@ -8,12 +8,7 @@
       @back="goBack"
     >
       <template v-if="approval" #meta>
-        <el-tag
-          :type="statusTagType(approval.status)"
-          size="large"
-        >
-          {{ statusLabel(approval.status) }}
-        </el-tag>
+        <StatusTag domain="approvalInstance" :status="approval.status" />
         <!-- B1-03: 已等待 aging — glanceable next to the status tag, only while still pending. -->
         <el-tag
           v-if="approval.status === 'pending'"
@@ -710,6 +705,7 @@ import {
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
+import StatusTag from '../../components/status/StatusTag.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -1036,6 +1032,12 @@ function rememberQuickPhraseIfOffered(comment: string): void {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+// UF-3: the header status tag now renders via <StatusTag domain="approvalInstance"> (see
+// utils/statusDomains.ts). `statusTagType` stays — it's still used below by
+// `timelineActionTagType` to color the timeline's per-entry ACTION tag (approve/reject/pending
+// are borrowed here as an action-outcome palette, not a rendered instance status — the timeline's
+// own event-kind badges like 自动审批/会签完成/退回 are a separate, out-of-scope concept; see
+// `.approval-detail__meta-badge*`).
 function statusTagType(status: string) {
   const map: Record<string, string> = {
     pending: 'warning',
@@ -1045,17 +1047,6 @@ function statusTagType(status: string) {
     cancelled: 'info',
   }
   return map[status] ?? ''
-}
-
-function statusLabel(status: string) {
-  const map: Record<string, string> = {
-    pending: '待处理',
-    approved: '已通过',
-    rejected: '已驳回',
-    revoked: '已撤回',
-    cancelled: '已取消',
-  }
-  return map[status] ?? status
 }
 
 function actionLabel(action: string, metadata?: Record<string, unknown>) {

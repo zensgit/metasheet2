@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 import {
   mockPendingApproval,
   mockApprovedApproval,
@@ -518,6 +519,12 @@ describe('Approval E2E Lifecycle', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // UF-3: the header status tag is now locale-aware (<StatusTag domain="approvalInstance">,
+    // via useLocale()/isZh) rather than the previous hardcoded-Chinese-always literal map. This
+    // whole spec's fixtures/assertions are Chinese, so pin the locale explicitly rather than
+    // relying on jsdom's default `navigator.language`.
+    useLocale().setLocale('zh-CN')
+
     // Reset all reactive state
     mockActiveApproval.value = null
     mockHistory.value = []
@@ -822,7 +829,9 @@ describe('Approval E2E Lifecycle', () => {
       const h1 = container!.querySelector('.approval-detail__header h1')
       expect(h1?.textContent).toBe('出差报销申请')
 
-      const tag = container!.querySelector('.approval-detail__header [data-el-tag]')
+      // UF-3: the header status tag is now <StatusTag> (framework-free by design, not `<el-tag>`)
+      // — select it by its `data-status` attribute instead of the ElTag test stub's `data-el-tag`.
+      const tag = container!.querySelector('.approval-detail__header [data-status]')
       expect(tag?.textContent).toContain('待处理')
     })
 
