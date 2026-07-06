@@ -287,6 +287,7 @@ describe('Attendance import preview regression', () => {
       expect(container!.textContent).toContain('检测到 Excel 文件')
       expect(container!.textContent).toContain('另存为')
       expect(unwrapRef<Record<string, unknown> | null>(setupState.statusMeta)?.action).toBe('retry-preview-import')
+      expect(container!.querySelector('[data-testid="attendance-import-recognition"]'), 'no recognition panel for a blocked file').toBeNull()
     } finally {
       setLocale(previousLocale)
     }
@@ -464,6 +465,57 @@ describe('Attendance import preview regression', () => {
     expect(apiFetchMock.mock.calls.some(call => String(call[0]).startsWith('/api/attendance/import/template'))).toBe(false)
     expect((setupState.importForm as { payload: string }).payload).toBe(editedPayload)
     expect(container!.textContent).toContain('Payload JSON has content but no template columns')
+  })
+
+  async function selectImportCsv(content: string, name = 'attendance.csv') {
+    const input = container!.querySelector('#attendance-import-csv') as HTMLInputElement
+    expect(input, 'expected csv file input').toBeTruthy()
+    const file = new File([content], name, { type: 'text/csv' })
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    input.dispatchEvent(new Event('change'))
+    // FileReader (the jsdom read path) resolves on the macrotask queue, so
+    // microtask-only flushes are not enough — poll briefly on real timers.
+    for (let i = 0; i < 40; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 5))
+      await flushUi(2)
+      if (container!.querySelector('[data-testid="attendance-import-recognition"]')) break
+    }
+  }
+
+  it('column recognition: selecting a csv shows green recognized / grey ignored chips at once', async () => {
+    mockTemplateEndpoint()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+
+    await selectImportCsv('姓名,日期,加班小时,自定义列\n张三,2026-06-01,1,x\n')
+
+    const panel = container!.querySelector('[data-testid="attendance-import-recognition"]') as HTMLElement | null
+    expect(panel, 'expected recognition panel').toBeTruthy()
+    expect(container!.querySelector('[data-testid="attendance-import-recognition-warning"]')).toBeNull()
+    const okChips = Array.from(panel!.querySelectorAll('.attendance__import-recognition-chip--ok'))
+      .map(chip => chip.textContent?.trim())
+    expect(okChips).toContain('加班小时')
+    expect(okChips).toContain('日期')
+    const greyChips = Array.from(panel!.querySelectorAll('.attendance__import-recognition-chip'))
+      .filter(chip => !chip.className.includes('--ok'))
+      .map(chip => chip.textContent?.trim())
+    expect(greyChips).toEqual(['自定义列'])
+  })
+
+  it('column recognition: a csv without a date column shows the red required warning', async () => {
+    mockTemplateEndpoint()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+
+    await selectImportCsv('姓名,加班小时\n张三,1\n')
+
+    const warning = container!.querySelector('[data-testid="attendance-import-recognition-warning"]') as HTMLElement | null
+    expect(warning, 'expected required-column warning').toBeTruthy()
+    expect(warning!.textContent).toContain('No date column found')
   })
 
   it('advanced options collapse by default; core fields stay visible; toggle expands', async () => {

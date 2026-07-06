@@ -6026,6 +6026,40 @@
                   />
                   <small v-if="importCsvFileName" class="attendance__field-hint">{{ tr('Selected', '已选择') }}: {{ importCsvFileName }}</small>
                 </label>
+                <div
+                  v-if="importCsvRecognition"
+                  class="attendance__field attendance__field--full attendance__import-recognition"
+                  data-testid="attendance-import-recognition"
+                >
+                  <div
+                    v-if="importCsvRecognition.missingDate || importCsvRecognition.missingContext"
+                    class="attendance__import-recognition-warning"
+                    data-testid="attendance-import-recognition-warning"
+                  >
+                    <template v-if="importCsvRecognition.missingDate">
+                      {{ tr('No date column found (e.g. 日期) — the import will be rejected. ', '未找到日期列（如「日期」）——导入将被拒绝。') }}
+                    </template>
+                    <template v-if="importCsvRecognition.missingContext">
+                      {{ tr('No people/attendance column found (e.g. 姓名/工号) — add one before importing. ', '未找到人员/考勤列（如「姓名/工号」）——请补充后再导入。') }}
+                    </template>
+                  </div>
+                  <div v-if="importCsvRecognition.recognized.length" class="attendance__import-recognition-row">
+                    <span class="attendance__import-recognition-label">{{ tr('Will import', '将导入') }} ({{ importCsvRecognition.recognized.length }}):</span>
+                    <span
+                      v-for="column in importCsvRecognition.recognized"
+                      :key="`rec-${column}`"
+                      class="attendance__import-recognition-chip attendance__import-recognition-chip--ok"
+                    >{{ column }}</span>
+                  </div>
+                  <div v-if="importCsvRecognition.unknown.length" class="attendance__import-recognition-row">
+                    <span class="attendance__import-recognition-label">{{ tr('Ignored (still usable by rules)', '将忽略（仍可用于规则匹配）') }} ({{ importCsvRecognition.unknown.length }}):</span>
+                    <span
+                      v-for="column in importCsvRecognition.unknown"
+                      :key="`unk-${column}`"
+                      class="attendance__import-recognition-chip"
+                    >{{ column }}</span>
+                  </div>
+                </div>
               </div>
               <div class="attendance__import-advanced-toggle">
                 <button
@@ -9711,6 +9745,12 @@ import {
   groupSupportedImportColumns,
   type AttendanceImportMappingColumnLike,
 } from './attendance/importTemplateColumns'
+import {
+  parseCsvHeaderFromText,
+  readBlobHeadText,
+  recognizeImportHeader,
+  type AttendanceImportHeaderRecognition,
+} from './attendance/importHeaderRecognition'
 import { resolveMakeupPunchRequestStatusCopy } from './attendance/makeupPunchRequestStatus'
 import {
   buildPunchRetryWithNotePayload,
@@ -13089,6 +13129,7 @@ const importMappingProfiles = ref<AttendanceImportMappingProfile[]>([])
 // D3 field-picker (import-section-ux design-lock): raw mapping columns from
 // /api/attendance/import/template (previously discarded) → grouped options.
 const importMappingColumnsRaw = ref<AttendanceImportMappingColumnLike[]>([])
+const importCsvRecognition = ref<AttendanceImportHeaderRecognition | null>(null)
 const importFieldGroups = computed(() => groupSupportedImportColumns(importMappingColumnsRaw.value))
 const importTemplateFieldKeys = ref<Set<string>>(new Set(IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS))
 const importTemplateHeaderPreview = computed(() =>
@@ -18190,6 +18231,7 @@ function normalizeUserMapPayload(payload: any, keyField: string): Record<string,
 async function handleImportCsvChange(event: Event) {
   const target = event.target as HTMLInputElement
   const file = target?.files?.[0] ?? null
+  importCsvRecognition.value = null
   if (file) {
     const verdict = await inspectImportFile(file)
     if (!verdict.ok) {
@@ -18212,6 +18254,39 @@ async function handleImportCsvChange(event: Event) {
   importCsvFileId.value = ''
   importCsvFileRowCountHint.value = null
   importCsvFileExpiresAt.value = ''
+  if (file) void analyzeImportCsvHeader(file)
+}
+
+// Column recognition (column-recognition design-lock): read-only vocabulary
+// fetch — unlike loadImportTemplate it must NOT touch payload/mode/profiles.
+async function ensureImportMappingColumns(): Promise<void> {
+  if (importMappingColumnsRaw.value.length > 0) return
+  try {
+    const response = await apiFetch('/api/attendance/import/template')
+    const data = await response.json().catch(() => ({} as any))
+    if (response.ok && data?.ok && Array.isArray(data.data?.mapping?.columns)) {
+      importMappingColumnsRaw.value = data.data.mapping.columns
+    }
+  } catch {
+    // vocabulary unavailable — recognition degrades to required-key checks
+  }
+}
+
+async function analyzeImportCsvHeader(file: File): Promise<void> {
+  try {
+    const [text] = await Promise.all([readBlobHeadText(file), ensureImportMappingColumns()])
+    if (importCsvFile.value !== file) return
+    const rowIndexRaw = Number(importCsvHeaderRow.value)
+    const header = parseCsvHeaderFromText(text, {
+      delimiter: importCsvDelimiter.value || ',',
+      headerRowIndex: importCsvHeaderRow.value !== '' && Number.isFinite(rowIndexRaw) && rowIndexRaw >= 0
+        ? rowIndexRaw
+        : null,
+    })
+    importCsvRecognition.value = recognizeImportHeader(header, importMappingColumnsRaw.value)
+  } catch {
+    importCsvRecognition.value = null
+  }
 }
 
 async function handleImportUserMapChange(event: Event) {
@@ -30433,5 +30508,48 @@ const holidaySectionBindings = {
   margin-top: var(--ms-space-2);
   padding-top: var(--ms-space-3);
   border-top: 1px dashed var(--ms-border-light);
+}
+
+/* Selection-time column recognition (column-recognition design-lock 20260706) */
+.attendance__import-recognition {
+  gap: var(--ms-space-2);
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+}
+
+.attendance__import-recognition-warning {
+  color: var(--ms-color-danger);
+  font-size: 12px;
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__import-recognition-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ms-space-1);
+  font-size: 12px;
+}
+
+.attendance__import-recognition-label {
+  color: var(--ms-text-2);
+  margin-right: var(--ms-space-1);
+}
+
+.attendance__import-recognition-chip {
+  display: inline-block;
+  padding: 0 var(--ms-space-2);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 999px;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-3);
+  line-height: 18px;
+}
+
+.attendance__import-recognition-chip--ok {
+  border-color: var(--ms-color-success);
+  color: var(--ms-color-success);
 }
 </style>
