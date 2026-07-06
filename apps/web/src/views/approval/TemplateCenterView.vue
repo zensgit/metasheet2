@@ -1,54 +1,55 @@
 <template>
-  <section class="template-center">
-    <header class="template-center__header">
-      <h1>审批模板</h1>
-      <div class="template-center__toolbar">
-        <el-select
-          v-model="categoryFilter"
-          placeholder="全部分类"
-          clearable
-          data-testid="template-center-category-filter"
-          style="width: 160px; margin-right: 12px"
-          @change="handleCategoryChange"
-        >
-          <el-option
-            v-for="category in categories"
-            :key="category"
-            :label="category"
-            :value="category"
-          />
-        </el-select>
-        <el-input
-          v-model="searchText"
-          placeholder="搜索模板名称"
-          clearable
-          style="width: 240px"
-          @clear="handleSearch"
-          @keyup.enter="handleSearch"
-        >
-          <template #prefix>
-            <el-icon><Search /></el-icon>
-          </template>
-        </el-input>
-        <el-button
-          v-if="canManageTemplates"
-          type="primary"
-          style="margin-left: 12px"
-          data-testid="template-center-new-button"
-          @click="createTemplate"
-        >
-          新建模板
-        </el-button>
-        <el-button
-          v-if="canManageTemplates"
-          style="margin-left: 8px"
-          data-testid="template-center-delegations-link"
-          @click="$router.push('/approval-delegations')"
-        >
-          委托设置
-        </el-button>
-      </div>
-    </header>
+  <PageShell width="default">
+    <PageHeader class="template-center__header" title="审批模板">
+      <template #actions>
+        <div class="template-center__toolbar">
+          <el-select
+            v-model="categoryFilter"
+            placeholder="全部分类"
+            clearable
+            data-testid="template-center-category-filter"
+            style="width: 160px; margin-right: 12px"
+            @change="handleCategoryChange"
+          >
+            <el-option
+              v-for="category in categories"
+              :key="category"
+              :label="category"
+              :value="category"
+            />
+          </el-select>
+          <el-input
+            v-model="searchText"
+            placeholder="搜索模板名称"
+            clearable
+            style="width: 240px"
+            @clear="handleSearch"
+            @keyup.enter="handleSearch"
+          >
+            <template #prefix>
+              <el-icon><Search /></el-icon>
+            </template>
+          </el-input>
+          <el-button
+            v-if="canManageTemplates"
+            type="primary"
+            style="margin-left: 12px"
+            data-testid="template-center-new-button"
+            @click="createTemplate"
+          >
+            新建模板
+          </el-button>
+          <el-button
+            v-if="canManageTemplates"
+            style="margin-left: 8px"
+            data-testid="template-center-delegations-link"
+            @click="$router.push('/approval-delegations')"
+          >
+            委托管理
+          </el-button>
+        </div>
+      </template>
+    </PageHeader>
 
     <!-- B1-08: 最近使用 — 发起热路径从「进模板全表找行」降到 1 击。localStorage per-user，
          点击已删除/已归档模板时由填单页的加载错误 + 返回兜底。 -->
@@ -187,10 +188,12 @@
       :page-size="pageSize"
       @update:current-page="handlePageChange"
     />
-  </section>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
@@ -336,25 +339,6 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.template-center {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 24px;
-}
-
-.template-center__header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
-
-.template-center__header h1 {
-  font-size: 22px;
-  font-weight: 600;
-  margin: 0;
-}
-
 .template-center__toolbar {
   display: flex;
   align-items: center;

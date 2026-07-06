@@ -286,7 +286,7 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/approval-delegations',
     name: 'approval-delegations',
     component: () => import('../views/approval/DelegationSettingsView.vue'),
-    meta: { title: 'Delegation Settings', titleZh: '委托设置', requiresAuth: true, permissions: ['approval-templates:manage'] }
+    meta: { title: 'Delegation Management', titleZh: '委托管理', requiresAuth: true, permissions: ['approval-templates:manage'] }
   },
   {
     // Self-service: any authenticated user manages THEIR OWN delegation (delegator forced
