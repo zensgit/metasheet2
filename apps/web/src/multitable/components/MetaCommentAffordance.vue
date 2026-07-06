@@ -16,18 +16,20 @@
       class="meta-comment-affordance__badge meta-comment-affordance__badge--mention"
       data-comment-affordance-badge="mention"
     >@{{ state.mentionCount }}</span>
-    <span
+    <el-icon
       v-if="state.showIcon"
       class="meta-comment-affordance__icon"
       data-comment-affordance-icon="true"
     >
-      &#x1F4AC;
-    </span>
+      <ChatDotRound />
+    </el-icon>
   </span>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { ElIcon } from 'element-plus'
+import { ChatDotRound } from '@element-plus/icons-vue'
 import {
   resolveCommentAffordanceStateClass,
   resolveCommentAffordanceStateName,

@@ -17,7 +17,7 @@
           :class="{ 'meta-tab-bar__view--active': v.id === activeViewId }"
           @click="emit('select-view', v.id)"
         >
-          <span class="meta-tab-bar__view-icon">{{ viewTypeIcon(v.type) }}</span>
+          <span class="meta-tab-bar__view-icon"><el-icon><component :is="viewTypeIcon(v.type)" /></el-icon></span>
           {{ v.name }}
         </button>
         <!--
@@ -44,8 +44,20 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import type { Component } from 'vue'
 import type { MetaSheet, MetaView } from '../types'
 import { useLocale } from '../../composables/useLocale'
+import { ElIcon } from 'element-plus'
+import {
+  Grid as IconGrid,
+  Tickets as IconForm,
+  Postcard as IconKanban,
+  Picture as IconGallery,
+  Calendar as IconCalendar,
+  DataLine as IconTimeline,
+  Histogram as IconGantt,
+  Share as IconHierarchy,
+} from '@element-plus/icons-vue'
 
 const props = defineProps<{
   sheets: MetaSheet[]
@@ -74,9 +86,20 @@ function onAddSheet() {
   emit('create-sheet', name)
 }
 
-function viewTypeIcon(type: string): string {
-  const map: Record<string, string> = { grid: '\u2637', form: '\u2263', kanban: '\u2630', gallery: '\u25A6', calendar: '\u2339', timeline: '\u2500', gantt: '\u25AC', hierarchy: '\u251C' }
-  return map[type] ?? '\u2637'
+// View-type icon map (UI-P1b): monochrome Element Plus SVGs replacing the former Unicode-glyph map
+// (grid \u2637, form \u2263, kanban \u2630, gallery \u25A6, calendar \u2339, timeline \u2500, gantt \u25AC, hierarchy \u251C).
+const VIEW_TYPE_ICON: Record<string, Component> = {
+  grid: IconGrid,
+  form: IconForm,
+  kanban: IconKanban,
+  gallery: IconGallery,
+  calendar: IconCalendar,
+  timeline: IconTimeline,
+  gantt: IconGantt,
+  hierarchy: IconHierarchy,
+}
+function viewTypeIcon(type: string): Component {
+  return VIEW_TYPE_ICON[type] ?? IconGrid
 }
 </script>
 
@@ -100,7 +123,7 @@ function viewTypeIcon(type: string): string {
 }
 .meta-tab-bar__view:hover { background: #eee; }
 .meta-tab-bar__view--active { background: #e8f0fe; color: #409eff; font-weight: 500; }
-.meta-tab-bar__view-icon { font-size: 14px; }
+.meta-tab-bar__view-icon { display: inline-flex; align-items: center; font-size: 14px; color: currentColor; }
 .meta-tab-bar__personal-toggle {
   padding: 2px 8px; font-size: 11px; border: 1px solid #d0d5dd; border-radius: 10px;
   background: #fff; color: #6b7280; cursor: pointer; white-space: nowrap;

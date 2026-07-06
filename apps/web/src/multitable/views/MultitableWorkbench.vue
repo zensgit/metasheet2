@@ -38,7 +38,7 @@
         :class="{ 'mt-workbench__mention-chip--unread': mentionInboxState.unreadMentionCount.value > 0 }"
         @click="onMentionChipClick"
       >
-        &#x1F4EC; {{ wb('toolbar.mentions', isZh) }} <strong>{{ mentionInboxState.unreadMentionCount.value || mentionInboxState.summary.value.unresolvedMentionCount }}</strong>
+        <el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.mentions" /></el-icon> {{ wb('toolbar.mentions', isZh) }} <strong>{{ mentionInboxState.unreadMentionCount.value || mentionInboxState.summary.value.unresolvedMentionCount }}</strong>
         <span v-if="mentionInboxState.unreadMentionCount.value > 0" class="mt-workbench__mention-chip-unread">{{ fmtMentionsUnread(mentionInboxState.unreadMentionCount.value, isZh) }}</span>
         <span class="mt-workbench__mention-chip-records">{{ fmtMentionsRecords(mentionInboxState.summary.value.mentionedRecordCount, isZh) }}</span>
       </button>
@@ -48,22 +48,22 @@
         :title="fmtCommentInboxTitle(commentInboxBadgeCount, isZh)"
         @click="openCommentInbox()"
       >
-        &#x1F4AC; {{ wb('toolbar.commentInbox', isZh) }}
+        <el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.commentInbox" /></el-icon> {{ wb('toolbar.commentInbox', isZh) }}
         <span v-if="commentInboxBadgeCount > 0" class="mt-workbench__mgr-badge">{{ commentInboxBadgeCount }}</span>
       </button>
       <MetaNotificationBell :api-client="workbench.client" @navigate="onNotificationNavigate" />
-      <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; {{ wb('toolbar.fields', isZh) }}</button>
-      <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()">&#x1F512; {{ wb('toolbar.access', isZh) }}</button>
-      <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; {{ wb('toolbar.views', isZh) }}</button>
-      <button v-if="canOpenWorkflowDesigner" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; {{ wb('toolbar.workflow', isZh) }}</button>
-      <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true">&#x26A1; {{ wb('toolbar.automations', isZh) }}</button>
-      <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary">&#x1F5C2; {{ wb('toolbar.templates', isZh) }}</button>
-      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard">&#x1F4CA; {{ wb('toolbar.dashboard', isZh) }}</button>
-      <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true">&#x1F517; {{ wb('toolbar.shareForm', isZh) }}</button>
-      <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true">&#x1F511; {{ wb('toolbar.apiWebhooks', isZh) }}</button>
-      <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" @click="showTrash = true">&#x1F5D1; {{ wb('toolbar.trash', isZh) }}</button>
-      <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true">&#x1F570; {{ isZh ? '历史' : 'History' }}</button>
-      <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory">&#x2699; {{ isZh ? '配置历史' : 'Config history' }}</button>
+      <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.fields" /></el-icon> {{ wb('toolbar.fields', isZh) }}</button>
+      <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.access" /></el-icon> {{ wb('toolbar.access', isZh) }}</button>
+      <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.views" /></el-icon> {{ wb('toolbar.views', isZh) }}</button>
+      <button v-if="canOpenWorkflowDesigner" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.workflow" /></el-icon> {{ wb('toolbar.workflow', isZh) }}</button>
+      <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.automations" /></el-icon> {{ wb('toolbar.automations', isZh) }}</button>
+      <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('toolbar.templates', isZh) }}</button>
+      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
+      <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
+      <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
+      <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
+      <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
+      <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
     </div>
     <ResetToPointPicker
       v-if="workbench.activeSheetId.value"
@@ -700,6 +700,44 @@ import {
   rememberRecentBaseOpen,
   toggleFavoriteBaseId,
 } from '../utils/base-local-state'
+import { ElIcon } from 'element-plus'
+import {
+  MessageBox as IconMentions,
+  ChatDotRound as IconCommentInbox,
+  Setting as IconFields,
+  Lock as IconAccess,
+  Menu as IconViews,
+  Setting as IconWorkflow,
+  Lightning as IconAutomations,
+  Files as IconTemplates,
+  DataBoard as IconDashboard,
+  Link as IconShareForm,
+  Key as IconApiWebhooks,
+  Delete as IconTrash,
+  Clock as IconHistory,
+  Setting as IconConfigHistory,
+} from '@element-plus/icons-vue'
+
+// Feature-row chrome icon map (UI-P1b). Same idiom as MetaToolbar's ICON map (UI-P1 slice-1): keyed by
+// action so the template reads `ICON.trash` etc. `fields`/`workflow`/`configHistory` intentionally share
+// the Setting glyph — the source markup already rendered the same gear character (&#x2699;) for all three,
+// so this is a like-for-like swap, not a new distinction.
+const ICON = {
+  mentions: IconMentions,
+  commentInbox: IconCommentInbox,
+  fields: IconFields,
+  access: IconAccess,
+  views: IconViews,
+  workflow: IconWorkflow,
+  automations: IconAutomations,
+  templates: IconTemplates,
+  dashboard: IconDashboard,
+  shareForm: IconShareForm,
+  apiWebhooks: IconApiWebhooks,
+  trash: IconTrash,
+  history: IconHistory,
+  configHistory: IconConfigHistory,
+} as const
 
 const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean; mode?: string; role?: MultitableRole }>()
 const emit = defineEmits<{
@@ -4330,9 +4368,10 @@ defineExpose({
 .mt-workbench__mention-chip--unread { border-color: #d48806; background: #faecd8; }
 .mt-workbench__mention-chip-unread { color: #d48806; font-size: 11px; font-weight: 600; }
 .mt-workbench__mention-chip-records { color: #999; font-size: 11px; }
-.mt-workbench__mgr-btn { padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #666; }
+.mt-workbench__mgr-btn { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #666; }
 .mt-workbench__mgr-btn:hover { background: #f5f7fa; color: #409eff; border-color: #c0d8f0; }
 .mt-workbench__mgr-btn--attention { border-color: #f59e0b; color: #92400e; background: #fffbeb; }
+.mt-workbench__mgr-btn-icon { font-size: 15px; color: currentColor; }
 .mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #f59e0b; color: #fff; font-size: 11px; font-weight: 600; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
 .mt-template-library {
