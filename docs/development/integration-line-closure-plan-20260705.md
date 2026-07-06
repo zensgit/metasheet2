@@ -68,9 +68,11 @@ A 能力关键路径
   ✅ A2 BL1 契约(owner opt-in "开 BL1")— #3689 7b9647f78 契约模块 + #3691 dev-verification MD
        附:pre-BL2 硬件验证 PASS(#3683,2026-07-06)——FPercentItemID 过滤/Data.DATA 容器/
        FBOMNumber 字段真机证过,BL1 唯一不确定点(byMaterialExampleInDocs=false)已消
-  🔒 A3 BL2 runtime(门:单独 opt-in;验证门已 PASS,只差 owner "开 BL2";
-       须落实 #3691 §4 两约束:完整字段锁 + runtime operator/body 钉死)
-  🔒 A4 BL3 打包+standalone 冒烟(门:单独 opt-in;owner 跑)
+  ✅ A3 BL2 runtime(owner opt-in "开 BL2" 2026-07-06)— #3695 1e18f85d5;#3691 §4 两约束落实
+       (契约锁点全字段核对 + adapter 常量钉死 operator/body);对抗审阅 APPROVE 零 P1/P2;
+       mutation 5/5 KILLED;runtimeValidated 仍 false(BL3 PASS 才翻真)
+  🔒 A4 BL3 打包+standalone 冒烟(门:单独 opt-in;owner 跑;多 BOM 父物料预期 AMBIGUOUS,
+       见 BL2 dev-verification MD §4)
   🔒 A5 BL4 组合复跑(门:BL2+BL3 PASS)
 B 质量收尾
   ✅ B1 integration CI guard lane(我)— #3660 00108b4b8;lane 合后在 main 实跑 green
