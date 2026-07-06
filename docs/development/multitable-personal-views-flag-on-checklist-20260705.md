@@ -23,9 +23,13 @@
        `req.user` (or an upstream `x-user-id`) from a client-controllable header in production. (The legacy
        `kanban.ts:25` / `views.ts:273,298` pattern must NOT be in the live auth path for these routes.) If ANY shim
        exists, DO NOT enable until it is removed or provably unreachable — it would defeat the actor-scoping.
-3. [ ] **Rollback is instant + config-only.** `isPersonalViewsEnabled()` is read **per request**, so setting
-       `MULTITABLE_ENABLE_PERSONAL_VIEWS` back to unset/false reverts to the shared path immediately — no restart, no
-       migration, no data rewrite. Verify the deploy toggles the env without a rebuild, and rehearse the off→on→off.
+3. [ ] **Rollback is config-only (no migration / no data rewrite); speed depends on your env-propagation.** The app
+       does **not** cache the flag — `isPersonalViewsEnabled()` reads `process.env.MULTITABLE_ENABLE_PERSONAL_VIEWS`
+       per request, so a running process picks up a changed value with no rebuild and no data rewrite. **But** an
+       external env change usually does NOT enter an already-running Node process on its own: most K8s / process-level
+       env delivery requires a **restart / redeploy** to take effect. So rollback speed is bounded by how your
+       deployment distributes env, not by the app. Before flag-on, **rehearse the actual off→on→off mechanism** in the
+       target environment and record whether it is hot (in-place) or requires restart/redeploy.
 4. [ ] **Observability while on.** Watch after enable: error rate on `GET/PUT/DELETE /views/:viewId/personal-config`
        and on `GET /views`; overlay-fetch latency on `GET /views` (one extra indexed query per request when on); and
        ANY cross-user anomaly report (a user seeing another's filter/sort ⇒ immediate rollback per #3, then re-audit
