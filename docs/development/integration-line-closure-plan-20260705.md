@@ -71,9 +71,12 @@ A 能力关键路径
   ✅ A3 BL2 runtime(owner opt-in "开 BL2" 2026-07-06)— #3695 1e18f85d5;#3691 §4 两约束落实
        (契约锁点全字段核对 + adapter 常量钉死 operator/body);对抗审阅 APPROVE 零 P1/P2;
        mutation 5/5 KILLED;runtimeValidated 仍 false(BL3 PASS 才翻真)
-  🔒 A4 BL3 打包+standalone 冒烟(门:单独 opt-in;owner 跑;多 BOM 父物料预期 AMBIGUOUS,
-       见 BL2 dev-verification MD §4)
-  🔒 A5 BL4 组合复跑(门:BL2+BL3 PASS)
+  ✅ A4 BL3 打包+standalone 冒烟(owner opt-in "开 BL3" 2026-07-06)— 执行单 #3701;release
+       multitable-onprem-bom-list-bl3-20260706-1e18f85d5;实体机 PASS 双证据(happy path
+       candidateCount=1 + 多 BOM 父物料 AMBIGUOUS policyConsistent,8 码族实战首验);
+       runtimeValidated 受控翻真 #3702 ef2ad42ff
+  🔄 A5 BL4 组合复跑(owner opt-in "开 BL4" 2026-07-06)— 执行单 #3703(沿用 BL3 包,
+       hop-2 复用 #3701 已审批配置);等实体机复跑证据;PASS → runbook 附录回填 + close-out
 B 质量收尾
   ✅ B1 integration CI guard lane(我)— #3660 00108b4b8;lane 合后在 main 实跑 green
   ⬜ B2 W1 处置(owner 二选一 → 我执行)
