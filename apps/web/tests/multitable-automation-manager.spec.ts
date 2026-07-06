@@ -17,6 +17,7 @@ import { MultitableApiClient } from '../src/multitable/api/client'
 import { useLocale } from '../src/composables/useLocale'
 import { AppRouteNames } from '../src/router/types'
 import type { AutomationRule, DingTalkGroupDelivery, DingTalkPersonDelivery } from '../src/multitable/types'
+import { epOptions, epSelectValue, epSelectValues, epSetSelect } from './helpers/epControls'
 
 function fakeRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
   return {
@@ -367,11 +368,11 @@ describe('MetaAutomationManager', () => {
     await nextTick()
 
     const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
     expect(container.querySelector('.meta-automation__form-title')?.textContent).toContain('新建自动化')
     expect(nameInput.placeholder).toBe('自动化名称')
-    expect(actionSelect.value).toBe('notify')
-    expect(Array.from(actionSelect.options).map((option) => option.value)).toEqual([
+    expect(epSelectValue(actionSelect)).toBe('notify')
+    expect(epOptions(actionSelect).map((option) => option.value)).toEqual([
       'notify',
       'update_field',
       'send_dingtalk_group_message',
@@ -379,17 +380,18 @@ describe('MetaAutomationManager', () => {
     ])
     expect(actionSelect.textContent).toContain('发送通知')
     expect((container.querySelector('[data-automation-field="notifyMessage"]') as HTMLInputElement).placeholder).toBe('通知内容')
-    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    // UF-4 shape adaptation: el-drawer's built-in close button carries a localized aria-label by
+    // design; the guard below still asserts the AUTHORED surface adds no aria-label noise.
+    expect(container.querySelectorAll('[aria-label]:not(.el-drawer__close-btn)')).toHaveLength(0)
     expect(container.querySelectorAll('[title]')).toHaveLength(0)
     expect(container.querySelectorAll('[placeholder]')).toHaveLength(2)
 
-    actionSelect.value = 'update_field'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    epSetSelect(actionSelect, 'update_field')
     await nextTick()
 
-    const targetField = container.querySelector('[data-automation-field="targetFieldId"]') as HTMLSelectElement
+    const targetField = container.querySelector('[data-automation-field="targetFieldId"]') as HTMLElement
     const targetValue = container.querySelector('[data-automation-field="targetValue"]') as HTMLInputElement
-    expect(targetField.value).toBe('')
+    expect(epSelectValue(targetField)).toBe('')
     expect(targetValue.placeholder).toBe('新值')
     expect(container.querySelector('.meta-automation__btn--primary')?.textContent).toContain('创建')
     expect(container.querySelectorAll('[placeholder]')).toHaveLength(2)
@@ -443,9 +445,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     expect(container.textContent).toContain('消息预设')
@@ -483,7 +484,9 @@ describe('MetaAutomationManager', () => {
     expect(summary?.textContent).toContain('消息摘要')
     expect(summary?.textContent).toContain('渲染正文')
     expect(summary?.textContent).toContain('处理 示例字段值')
-    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    // UF-4 shape adaptation: el-drawer's built-in close button carries a localized aria-label by
+    // design; the guard below still asserts the AUTHORED surface adds no aria-label noise.
+    expect(container.querySelectorAll('[aria-label]:not(.el-drawer__close-btn)')).toHaveLength(0)
     expect(container.querySelectorAll('[title]')).toHaveLength(0)
     expect(container.querySelectorAll('[placeholder]')).toHaveLength(8)
   })
@@ -697,17 +700,14 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'Advanced DingTalk group'
     nameInput.dispatchEvent(new Event('input'))
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
-    destinationSelect.value = 'dt_1'
-    destinationSelect.dispatchEvent(new Event('change'))
+    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLElement
+    epSetSelect(destinationSelect, 'dt_1')
     await flushPromises()
-    destinationSelect.value = 'dt_2'
-    destinationSelect.dispatchEvent(new Event('change'))
+    epSetSelect(destinationSelect, 'dt_2')
 
     const destinationFieldInput = container.querySelector('[data-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
     destinationFieldInput.value = 'record.fld_2'
@@ -721,13 +721,11 @@ describe('MetaAutomationManager', () => {
     bodyInput.value = 'Please fill {{record.status}}'
     bodyInput.dispatchEvent(new Event('input'))
 
-    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change'))
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
 
-    const internalViewSelect = container.querySelector('[data-field="internalViewId"]') as HTMLSelectElement
-    internalViewSelect.value = 'view_grid'
-    internalViewSelect.dispatchEvent(new Event('change'))
+    const internalViewSelect = container.querySelector('[data-field="internalViewId"]') as HTMLElement
+    epSetSelect(internalViewSelect, 'view_grid')
     await flushPromises()
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
@@ -769,7 +767,7 @@ describe('MetaAutomationManager', () => {
     expect(updatedSpy).toHaveBeenCalledTimes(1)
     expect(container.querySelector('[data-automation-rule="rule_new"]')?.textContent).toContain('Advanced DingTalk group')
     expect(container.querySelector('[data-automation-rule="rule_new"] .meta-automation__card-desc')?.textContent).toContain('Send DingTalk group message')
-    expect(container.querySelector('.meta-rule-editor__overlay')).toBeNull()
+    expect(container.querySelector('.meta-rule-editor')).toBeNull()
   })
 
   it('creates DingTalk person automation via the advanced rule editor', async () => {
@@ -785,9 +783,8 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'Advanced DingTalk person'
     nameInput.dispatchEvent(new Event('input'))
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const userIdsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
@@ -814,13 +811,11 @@ describe('MetaAutomationManager', () => {
     bodyInput.value = 'Please process {{record.status}}'
     bodyInput.dispatchEvent(new Event('input'))
 
-    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change'))
+    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
 
-    const internalViewSelect = container.querySelector('[data-field="dingtalkPersonInternalViewId"]') as HTMLSelectElement
-    internalViewSelect.value = 'view_grid'
-    internalViewSelect.dispatchEvent(new Event('change'))
+    const internalViewSelect = container.querySelector('[data-field="dingtalkPersonInternalViewId"]') as HTMLElement
+    epSetSelect(internalViewSelect, 'view_grid')
     await flushPromises()
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
@@ -866,7 +861,7 @@ describe('MetaAutomationManager', () => {
     expect(updatedSpy).toHaveBeenCalledTimes(1)
     expect(container.querySelector('[data-automation-rule="rule_new"]')?.textContent).toContain('Advanced DingTalk person')
     expect(container.querySelector('[data-automation-rule="rule_new"] .meta-automation__card-desc')?.textContent).toContain('Send DingTalk person message')
-    expect(container.querySelector('.meta-rule-editor__overlay')).toBeNull()
+    expect(container.querySelector('.meta-rule-editor')).toBeNull()
   })
 
   it('creates rule via form', async () => {
@@ -910,7 +905,8 @@ describe('MetaAutomationManager', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
-    const toggle = container.querySelector('[data-automation-toggle]') as HTMLInputElement
+    // UF-4 shape adaptation: the rule toggle is an el-checkbox; the native input lives inside it
+    const toggle = container.querySelector('[data-automation-toggle] input') as HTMLInputElement
     expect(toggle.checked).toBe(true)
     toggle.click()
     await flushPromises()
@@ -971,15 +967,14 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-automation-field="triggerFieldId"]')).toBeNull()
 
     // Change trigger type to field.changed
-    const triggerSelect = container.querySelector('[data-automation-field="triggerType"]') as HTMLSelectElement
-    triggerSelect.value = 'field.changed'
-    triggerSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const triggerSelect = container.querySelector('[data-automation-field="triggerType"]') as HTMLElement
+    epSetSelect(triggerSelect, 'field.changed')
     await nextTick()
 
-    const fieldPicker = container.querySelector('[data-automation-field="triggerFieldId"]') as HTMLSelectElement
+    const fieldPicker = container.querySelector('[data-automation-field="triggerFieldId"]') as HTMLElement
     expect(fieldPicker).not.toBeNull()
     // Should have option for each field plus the placeholder
-    expect(fieldPicker.options.length).toBe(fields.length + 1)
+    expect(epOptions(fieldPicker).length).toBe(fields.length + 1)
   })
 
   it('shows appropriate action config for each action type', async () => {
@@ -997,9 +992,8 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-automation-field="targetFieldId"]')).toBeNull()
 
     // Switch to update_field
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'update_field'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'update_field')
     await nextTick()
 
     expect(container.querySelector('[data-automation-field="notifyMessage"]')).toBeNull()
@@ -1020,17 +1014,14 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'DingTalk notify'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const destinationSelect = container.querySelector('[data-automation-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
-    destinationSelect.value = 'dt_1'
-    destinationSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const destinationSelect = container.querySelector('[data-automation-field="dingtalkDestinationPickerId"]') as HTMLElement
+    epSetSelect(destinationSelect, 'dt_1')
     await flushPromises()
-    destinationSelect.value = 'dt_2'
-    destinationSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    epSetSelect(destinationSelect, 'dt_2')
 
     const titleInput = container.querySelector('[data-automation-field="dingtalkTitleTemplate"]') as HTMLInputElement
     titleInput.value = 'Ticket {{recordId}}'
@@ -1040,13 +1031,11 @@ describe('MetaAutomationManager', () => {
     bodyInput.value = 'Please fill {{record.status}}'
     bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
 
-    const internalViewSelect = container.querySelector('[data-automation-field="internalViewId"]') as HTMLSelectElement
-    internalViewSelect.value = 'view_grid'
-    internalViewSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const internalViewSelect = container.querySelector('[data-automation-field="internalViewId"]') as HTMLElement
+    epSetSelect(internalViewSelect, 'view_grid')
     await flushPromises()
 
     expect(container.querySelector('[data-automation-group-destination="dt_1"]')).not.toBeNull()
@@ -1095,15 +1084,13 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'Org DingTalk notify'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const destinationSelect = container.querySelector('[data-automation-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
-    expect(destinationSelect.textContent).toContain('Organization catalog')
-    destinationSelect.value = 'dt_org'
-    destinationSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const destinationSelect = container.querySelector('[data-automation-field="dingtalkDestinationPickerId"]') as HTMLElement
+    expect(epOptions(destinationSelect).map((option) => option.textContent).join('\n')).toContain('Organization catalog')
+    epSetSelect(destinationSelect, 'dt_org')
     await flushPromises()
 
     const chip = container.querySelector('[data-automation-group-destination="dt_org"]') as HTMLElement
@@ -1145,9 +1132,8 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'DingTalk dynamic groups'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const emptyState = container.querySelector('[data-automation-field="dingtalkDestinationEmpty"]')
@@ -1208,13 +1194,12 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const internalViewSelect = container.querySelector('[data-automation-field="internalViewId"]') as HTMLSelectElement
-    const optionValues = Array.from(internalViewSelect.options).map((option) => option.value)
+    const internalViewSelect = container.querySelector('[data-automation-field="internalViewId"]') as HTMLElement
+    const optionValues = epOptions(internalViewSelect).map((option) => option.value)
     expect(optionValues).toContain('view_grid')
     expect(optionValues).not.toContain('view_other_sheet')
   })
@@ -1237,13 +1222,12 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLSelectElement
-    const optionValues = Array.from(publicFormSelect.options).map((option) => option.value)
+    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLElement
+    const optionValues = epOptions(publicFormSelect).map((option) => option.value)
     expect(optionValues).toContain('view_form')
     expect(optionValues).not.toContain('view_other_form')
   })
@@ -1261,14 +1245,12 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'DingTalk notify'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const destinationSelect = container.querySelector('[data-automation-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
-    destinationSelect.value = 'dt_1'
-    destinationSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const destinationSelect = container.querySelector('[data-automation-field="dingtalkDestinationPickerId"]') as HTMLElement
+    epSetSelect(destinationSelect, 'dt_1')
 
     const titleInput = container.querySelector('[data-automation-field="dingtalkTitleTemplate"]') as HTMLInputElement
     titleInput.value = 'Ticket {{recordId}}'
@@ -1278,9 +1260,8 @@ describe('MetaAutomationManager', () => {
     bodyInput.value = 'Please fill {{record.status}}'
     bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
@@ -1306,9 +1287,8 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'DingTalk dynamic groups'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const destinationFieldInput = container.querySelector('[data-automation-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
@@ -1352,9 +1332,8 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'DingTalk invalid dynamic groups'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const destinationFieldInput = container.querySelector('[data-automation-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
@@ -1388,14 +1367,12 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-automation-field="dingtalkDestinationFieldSelect"]') as HTMLSelectElement
-    fieldSelect.value = 'fld_2'
-    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const fieldSelect = container.querySelector('[data-automation-field="dingtalkDestinationFieldSelect"]') as HTMLElement
+    epSetSelect(fieldSelect, 'fld_2')
     await flushPromises()
 
     const fieldInput = container.querySelector('[data-automation-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
@@ -1414,9 +1391,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const fieldInput = container.querySelector('[data-automation-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
@@ -1437,14 +1413,12 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" is fully public')
@@ -1471,14 +1445,12 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" allows all bound DingTalk users to submit')
@@ -1504,14 +1476,12 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     expect(container.textContent).not.toContain('allows all bound DingTalk users to submit')
@@ -1531,14 +1501,12 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" is fully public')
@@ -1564,14 +1532,12 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" allows all bound DingTalk users to submit')
@@ -1590,14 +1556,12 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" is missing a public token')
@@ -1620,9 +1584,8 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'DingTalk person notify'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const userIdsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
@@ -1637,9 +1600,8 @@ describe('MetaAutomationManager', () => {
     bodyInput.value = 'Please fill {{record.status}}'
     bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
@@ -1665,9 +1627,8 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'DingTalk person notify'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const userIdsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
@@ -1682,13 +1643,11 @@ describe('MetaAutomationManager', () => {
     bodyInput.value = 'Please fill {{record.status}}'
     bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
 
-    const internalViewSelect = container.querySelector('[data-automation-field="dingtalkPersonInternalViewId"]') as HTMLSelectElement
-    internalViewSelect.value = 'view_grid'
-    internalViewSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const internalViewSelect = container.querySelector('[data-automation-field="dingtalkPersonInternalViewId"]') as HTMLElement
+    epSetSelect(internalViewSelect, 'view_grid')
     await flushPromises()
 
     const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
@@ -1721,9 +1680,8 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'DingTalk dynamic notify'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const recipientFieldInput = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
@@ -1773,9 +1731,8 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'DingTalk dynamic member-group notify'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const memberGroupFieldInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
@@ -1825,9 +1782,8 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'DingTalk invalid dynamic recipients'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const recipientFieldInput = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
@@ -1869,9 +1825,8 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'DingTalk invalid static recipients'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const userIdsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
@@ -1909,9 +1864,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const memberGroupFieldInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
@@ -1937,9 +1891,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const memberGroupFieldInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
@@ -1959,9 +1912,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const memberGroupFieldInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
@@ -1981,14 +1933,12 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldSelect"]') as HTMLSelectElement
-    fieldSelect.value = 'watcherGroupIds'
-    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldSelect"]') as HTMLElement
+    epSetSelect(fieldSelect, 'watcherGroupIds')
     await flushPromises()
 
     const memberGroupFieldInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
@@ -2006,13 +1956,12 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldSelect"]') as HTMLSelectElement
-    const optionValues = Array.from(fieldSelect.options).map((option) => option.value)
+    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldSelect"]') as HTMLElement
+    const optionValues = epOptions(fieldSelect).map((option) => option.value)
     expect(optionValues).toContain('watcherGroupIds')
     expect(optionValues).toContain('escalationGroupId')
     expect(optionValues).not.toContain('assigneeUserIds')
@@ -2028,14 +1977,12 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
-    fieldSelect.value = 'assigneeUserIds'
-    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldSelect"]') as HTMLElement
+    epSetSelect(fieldSelect, 'assigneeUserIds')
     await flushPromises()
 
     const recipientFieldInput = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
@@ -2053,13 +2000,12 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
-    const optionValues = Array.from(fieldSelect.options).map((option) => option.value)
+    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldSelect"]') as HTMLElement
+    const optionValues = epOptions(fieldSelect).map((option) => option.value)
     expect(optionValues).toContain('assigneeUserIds')
     expect(optionValues).toContain('reviewerUserId')
     expect(optionValues).not.toContain('fld_1')
@@ -2078,17 +2024,14 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'DingTalk multi dynamic notify'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
-    fieldSelect.value = 'assigneeUserIds'
-    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldSelect"]') as HTMLElement
+    epSetSelect(fieldSelect, 'assigneeUserIds')
     await flushPromises()
-    fieldSelect.value = 'reviewerUserId'
-    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    epSetSelect(fieldSelect, 'reviewerUserId')
     await flushPromises()
 
     const recipientFieldInput = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
@@ -2127,17 +2070,14 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
-    fieldSelect.value = 'assigneeUserIds'
-    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const fieldSelect = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldSelect"]') as HTMLElement
+    epSetSelect(fieldSelect, 'assigneeUserIds')
     await flushPromises()
-    fieldSelect.value = 'reviewerUserId'
-    fieldSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    epSetSelect(fieldSelect, 'reviewerUserId')
     await flushPromises()
 
     const firstChip = container.querySelector('[data-automation-recipient-field="assigneeUserIds"]') as HTMLButtonElement
@@ -2163,9 +2103,8 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'DingTalk search notify'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const searchInput = container.querySelector('[data-automation-field="dingtalkPersonUserSearch"]') as HTMLInputElement
@@ -2267,9 +2206,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const searchInput = container.querySelector('[data-automation-field="dingtalkPersonUserSearch"]') as HTMLInputElement
@@ -2336,7 +2274,7 @@ describe('MetaAutomationManager', () => {
 
     const statusFilter = document.querySelector('.meta-person-delivery [data-field="statusFilter"]') as HTMLSelectElement
     statusFilter.value = 'skipped'
-    statusFilter.dispatchEvent(new Event('change'))
+    statusFilter.dispatchEvent(new Event('change', { bubbles: true }))
     await flushPromises()
 
     expect(document.querySelector('[data-person-delivery-id="dpd_1"]')).toBeNull()
@@ -2740,9 +2678,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const presetBtn = container.querySelector('[data-automation-preset="group-form"]') as HTMLButtonElement
@@ -2751,13 +2688,13 @@ describe('MetaAutomationManager', () => {
 
     const titleInput = container.querySelector('[data-automation-field="dingtalkTitleTemplate"]') as HTMLInputElement
     const bodyInput = container.querySelector('[data-automation-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
-    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLSelectElement
-    const internalViewSelect = container.querySelector('[data-automation-field="internalViewId"]') as HTMLSelectElement
+    const publicFormSelect = container.querySelector('[data-automation-field="publicFormViewId"]') as HTMLElement
+    const internalViewSelect = container.querySelector('[data-automation-field="internalViewId"]') as HTMLElement
 
     expect(titleInput.value).toBe('{{recordId}} needs input')
     expect(bodyInput.value).toContain('Please complete this form request')
-    expect(publicFormSelect.value).toBe('view_form')
-    expect(internalViewSelect.value).toBe('')
+    expect(epSelectValue(publicFormSelect)).toBe('view_form')
+    expect(epSelectValue(internalViewSelect)).toBe('')
   })
 
   it('applies DingTalk person presets in the inline create form', async () => {
@@ -2769,9 +2706,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const userIdsInput = container.querySelector('[data-automation-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
@@ -2784,14 +2720,14 @@ describe('MetaAutomationManager', () => {
 
     const titleInput = container.querySelector('[data-automation-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
     const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
-    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    const internalViewSelect = container.querySelector('[data-automation-field="dingtalkPersonInternalViewId"]') as HTMLSelectElement
+    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    const internalViewSelect = container.querySelector('[data-automation-field="dingtalkPersonInternalViewId"]') as HTMLElement
 
     expect(userIdsInput.value).toBe('user_1')
     expect(titleInput.value).toBe('{{recordId}} needs input and processing')
     expect(bodyInput.value).toContain('Please complete the required form input')
-    expect(publicFormSelect.value).toBe('view_form')
-    expect(internalViewSelect.value).toBe('view_grid')
+    expect(epSelectValue(publicFormSelect)).toBe('view_form')
+    expect(epSelectValue(internalViewSelect)).toBe('view_grid')
   })
 
   it('inserts DingTalk template tokens in the inline create form', async () => {
@@ -2803,9 +2739,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     ;(container.querySelector('[data-automation-token="person-title-recordId"]') as HTMLButtonElement).click()
@@ -2827,9 +2762,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const recipientFieldInput = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
@@ -2848,9 +2782,8 @@ describe('MetaAutomationManager', () => {
     bodyInput.value = 'Handle {{record.xxx}}'
     bodyInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const publicFormSelect = container.querySelector('[data-automation-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     const summary = container.querySelector('[data-automation-summary="person"]')
@@ -2935,8 +2868,8 @@ describe('MetaAutomationManager', () => {
     editBtn.click()
     await flushPromises()
 
-    const actionSelect = document.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    expect(actionSelect.value).toBe('send_dingtalk_group_message')
+    const actionSelect = document.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    expect(epSelectValue(actionSelect)).toBe('send_dingtalk_group_message')
     expect(document.querySelector('[data-group-destination="dt_1"]')?.textContent).toContain('Ops Group')
     expect(document.querySelector('[data-group-destination="dt_2"]')?.textContent).toContain('Escalation Group')
     expect((document.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement).value).toBe('Ticket {{recordId}}')
@@ -2971,9 +2904,9 @@ describe('MetaAutomationManager', () => {
     editBtn.click()
     await flushPromises()
 
-    const actionSelect = document.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
+    const actionSelect = document.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
     const recipientFieldInput = document.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
-    expect(actionSelect.value).toBe('send_dingtalk_person_message')
+    expect(epSelectValue(actionSelect)).toBe('send_dingtalk_person_message')
     expect(recipientFieldInput.value).toBe('record.assigneeUserIds')
     expect((document.querySelector('[data-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement).value).toBe('Ticket {{recordId}}')
     expect((document.querySelector('[data-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement).value).toBe('Please fill {{record.status}}')
@@ -3018,9 +2951,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
@@ -3040,9 +2972,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
@@ -3062,9 +2993,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const recipientFieldInput = container.querySelector('[data-automation-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
@@ -3084,9 +3014,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const memberGroupFieldInput = container.querySelector('[data-automation-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
@@ -3106,9 +3035,8 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const bodyInput = container.querySelector('[data-automation-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
