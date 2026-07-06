@@ -1409,25 +1409,37 @@ describe('Approval E2E Lifecycle', () => {
       expect(loadHistorySpy).toHaveBeenCalledWith('apv_pending_1')
     })
 
-    it('revoked approval does not show action buttons', async () => {
+    it('revoked approval does not show action buttons (except UX B2-13\'s own-requester 再次提交)', async () => {
       routeParams = { id: 'apv_revoked_1' }
       mockActiveApproval.value = mockRevokedApproval()
       await mountDetailView()
 
       const actions = container!.querySelector('.approval-detail__actions')
       expect(actions).toBeTruthy()
-      expect(actions?.querySelectorAll('button').length).toBe(0)
+      // UX B2-13: this fixture's requester ('user_1') IS the mocked session user above, and
+      // 'revoked' is one of the resubmit-eligible terminal statuses, so 再次提交 now renders here
+      // too — carve it out of the "no action buttons" check instead of asserting a magic total, so
+      // a REAL regression (an approve/reject/etc. button leaking through for a terminal instance)
+      // still fails this test.
+      const otherButtons = Array.from(actions?.querySelectorAll('button') ?? [])
+        .filter((button) => button.getAttribute('data-testid') !== 'approval-resubmit-button')
+      expect(otherButtons.length).toBe(0)
+      expect(actions?.querySelector('[data-testid="approval-resubmit-button"]')).toBeTruthy()
       expect(actions?.querySelector('[data-el-alert="info"]')?.textContent).toContain('该审批已结束')
     })
 
-    it('rejected approval does not show action buttons', async () => {
+    it('rejected approval does not show action buttons (except UX B2-13\'s own-requester 再次提交)', async () => {
       routeParams = { id: 'apv_rejected_1' }
       mockActiveApproval.value = mockRejectedApproval()
       await mountDetailView()
 
       const actions = container!.querySelector('.approval-detail__actions')
       expect(actions).toBeTruthy()
-      expect(actions?.querySelectorAll('button').length).toBe(0)
+      // UX B2-13: same carve-out as the revoked case above — 'rejected' is also resubmit-eligible.
+      const otherButtons = Array.from(actions?.querySelectorAll('button') ?? [])
+        .filter((button) => button.getAttribute('data-testid') !== 'approval-resubmit-button')
+      expect(otherButtons.length).toBe(0)
+      expect(actions?.querySelector('[data-testid="approval-resubmit-button"]')).toBeTruthy()
       expect(actions?.querySelector('[data-el-alert="info"]')?.textContent).toContain('该审批已结束')
     })
   })
