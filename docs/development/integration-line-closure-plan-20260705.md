@@ -135,3 +135,48 @@ nothing。
 | 永久边界锁:终端用户自由表单连接器(end-user free-form connector) | 需显式再决定 | 同上 |
 | 永久边界锁:按系统凭证路径(per-system credential path) | 需显式再决定 | 同上 |
 | 永久边界锁:组合深度 > 2(composition depth > 2) | 需显式再决定 | 现有组合链锁定为两跳(C-R1→C-R4);超过两跳属于永久边界锁范畴,与上面的递归展开条目(REC-R1..R3)共享同一物理限制但走独立的再决定路径 |
+
+## 9. B2 / B5 处置 + C2 收口(owner 委托执行,2026-07-06)
+
+Owner 委托处理下述决定;均取**"声明现状为终态、不建新东西、可逆"**口径(要推进各自仍是随时的单独 opt-in)。
+
+### 9.1 B2 — W1 写自助化处置:contract-layer 完成、runtime 冻结(终态)
+
+W1(#3548 711bac2c4)= write-target config model + validator + 迁移 064 + 测试,**完全 latent**(零 service 注册/零路由/零 client)。当前无 named 写需求,且**生产外部写客户明令禁**(2026-07-03)。处置:
+
+```text
+W1Disposition=contract_layer_complete_runtime_frozen (freeze-is-done)
+W2W3W4=各自单独 opt-in;仅当出现 named 写需求 + owner 显式开 W2 时启动
+不计入线未完成项(与 C3 冻结池同口径)
+```
+
+W1 作为契约层就绪、runtime 冻结,是本线**合法收尾态**,不是欠账。
+
+### 9.2 B5 — 单配置 read 路由(:id/read)= runtime-tier-only 终态
+
+`POST /api/integration/read-source-configs/:id/read` 仅供运行时/清洗层消费(冒烟脚本覆盖),**无 UI 供给面**。处置:
+
+```text
+idReadDisposition=runtime_tier_only_final
+无 UI run affordance 为有意终态(该路由是运行时消费 API,非顾问配置面);冒烟通道已覆盖
+```
+
+### 9.3 C2 收口
+
+```text
+#1711=CLOSED as superseded(2026-07-06)——reference-mapping DF-T3 + resolver/composition 覆盖;PLM 图号→ERP 映射角度归 EII-R0
+#2777/#2438/#2642=独立 infra/devops 轨,不卡 owner-run 收尾
+现场契约缺口=独立 issue #3683([现场/客户] K3 BOM/GetList API 请求契约,BL1 前置)
+```
+
+### 9.4 C1 精化(修正 §4 的"现在关 #1709"建议)
+
+**#1709 暂不关**——它是**实体机 + BL 轨的活协调锚点**:实体机 poller 读 #1709、二跳 BL 轨(#3683 契约 → BL1..BL4)仍在推进。**关线时机 = 二跳 BL 轨结论(PASS 或显式 out-of-scope)之后**,届时 body-DoD-met + 残余 gate 全迁卫星(#3683/BL0/EII-R0 #3674/W0/REC-R0)再一次性关闭。现在关会切断实体机协调、且已被 #3388 先例证明"过早关会重开"。
+
+### 9.5 §5 checklist 推进(2026-07-06)
+
+```text
+B2 ⬜→✅(9.1 冻结声明)  B5 ⬜→✅(9.2 runtime-tier-only 终态)
+C2 🔄→✅(9.3:#1711 closed + 现场契约 #3683 + infra 轨 disposition)
+C1 保持 ⬜——精化为"待二跳 BL 轨结论后关"(9.4)
+```
