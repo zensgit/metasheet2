@@ -22,6 +22,7 @@ import {
   insertDingTalkApprovalCardDelivery,
   markDingTalkApprovalCardDeliverySent,
 } from '../../src/integrations/dingtalk/approval-card-deliveries'
+import { normalizeStoredSecretValue } from '../../src/security/encrypted-secrets'
 import { createHmac } from 'crypto'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -121,8 +122,8 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
     const instanceId = await newInstance()
     const deliveryId = await newSentDelivery(instanceId)
 
-    expect(verifyApprovalCardLinkToken(deliveryId, tokenFor(deliveryId))).toBe(true)
-    expect(verifyApprovalCardLinkToken(deliveryId, 'f'.repeat(32))).toBe(false)
+    expect(await verifyApprovalCardLinkToken(deliveryId, tokenFor(deliveryId))).toBe(true)
+    expect(await verifyApprovalCardLinkToken(deliveryId, 'f'.repeat(32))).toBe(false)
 
     expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token: 'f'.repeat(32), viewerUserId: APPROVER })).status).toBe('not_found')
     const ghost = randomUUID()
@@ -134,6 +135,35 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
       expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token: tokenFor(deliveryId), viewerUserId: APPROVER })).status).toBe('not_found')
     } finally {
       process.env.APPROVAL_CARD_LINK_SECRET = prev
+    }
+  })
+
+  test('CFG-1 stored-secret fallback: env unset → wrapper verifies a token signed with the stored (encrypted) secret', async () => {
+    const instanceId = await newInstance()
+    const deliveryId = await newSentDelivery(instanceId)
+    const storedSecret = `cdw-stored-secret-${TS}`
+    const prev = process.env.APPROVAL_CARD_LINK_SECRET
+    delete process.env.APPROVAL_CARD_LINK_SECRET
+    // Far-future updated_at so the resolver's "active first, most recent" pick lands on this row
+    // even in the shared plugin-tests database; removed in finally (shared-DB fixture discipline).
+    const inserted = await q(
+      `INSERT INTO directory_integrations (name, provider, status, corp_id, config, updated_at)
+       VALUES ($1, 'dingtalk', 'active', $2, $3::jsonb, '2099-01-01T00:00:00Z')
+       RETURNING id`,
+      [`cdw-card-config-${TS}`, `corp_cdw_${TS}`, JSON.stringify({ approvalCardLinkSecret: normalizeStoredSecretValue(storedSecret) })],
+    )
+    const integrationId = (inserted.rows[0] as { id: string }).id
+    try {
+      const storedToken = createHmac('sha256', storedSecret).update(deliveryId).digest('hex').slice(0, 32)
+      // Same-source invariant at the DB level: sign with the stored secret, verify through the wrapper.
+      expect(await verifyApprovalCardLinkToken(deliveryId, storedToken, q)).toBe(true)
+      expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token: storedToken, viewerUserId: APPROVER })).status).toBe('ok')
+      // The env-signed token no longer matches — stored source is authoritative when env is unset.
+      expect(await verifyApprovalCardLinkToken(deliveryId, tokenFor(deliveryId), q)).toBe(false)
+    } finally {
+      await q('DELETE FROM directory_integrations WHERE id = $1', [integrationId]).catch(() => {})
+      if (prev === undefined) delete process.env.APPROVAL_CARD_LINK_SECRET
+      else process.env.APPROVAL_CARD_LINK_SECRET = prev
     }
   })
 

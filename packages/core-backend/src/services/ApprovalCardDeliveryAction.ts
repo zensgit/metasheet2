@@ -15,6 +15,7 @@
 import { createHmac, timingSafeEqual } from 'crypto'
 
 import type { ApprovalProductService } from './ApprovalProductService'
+import { resolveApprovalCardLinkSecret } from '../integrations/dingtalk/approval-card-config'
 import {
   claimDingTalkApprovalCardDeliveryActed,
   findDingTalkApprovalCardDeliveryById,
@@ -54,12 +55,19 @@ export type ApprovalCardActionOutcome =
   | { status: 'engine_rejected'; code: string; message: string; httpStatus: number; summary: ApprovalCardDeliverySummary }
 
 /**
- * Deep-link token: HMAC-SHA256(deliveryId, APPROVAL_CARD_LINK_SECRET) truncated to 32 hex chars —
- * matches the executor's link composition exactly. Fail-closed without the secret.
+ * Deep-link token: HMAC-SHA256(deliveryId, approval-card link secret) truncated to 32 hex chars —
+ * matches the executor's link composition exactly. CFG-1: the secret resolves env-first with the
+ * stored (encrypted) directory-integration config as fallback — the SAME source the executor signs
+ * with. Fail-closed without the secret.
  */
-export function verifyApprovalCardLinkToken(deliveryId: string, token: string): boolean {
-  const secret = (process.env.APPROVAL_CARD_LINK_SECRET ?? '').trim()
-  if (!secret || !deliveryId || !token || token.length !== 32) return false
+export async function verifyApprovalCardLinkToken(
+  deliveryId: string,
+  token: string,
+  queryFn?: QueryFn,
+): Promise<boolean> {
+  if (!deliveryId || !token || token.length !== 32) return false
+  const secret = await resolveApprovalCardLinkSecret(queryFn)
+  if (!secret) return false
   const expected = createHmac('sha256', secret).update(deliveryId).digest('hex').slice(0, 32)
   const a = Buffer.from(expected, 'utf8')
   const b = Buffer.from(token, 'utf8')
@@ -124,7 +132,7 @@ export async function getApprovalCardDeliverySummary(
   deps: { query: QueryFn },
   input: { deliveryId: string; token: string; viewerUserId: string },
 ): Promise<{ status: 'ok'; summary: ApprovalCardDeliverySummary } | { status: 'not_found' }> {
-  if (!verifyApprovalCardLinkToken(input.deliveryId, input.token)) return { status: 'not_found' }
+  if (!(await verifyApprovalCardLinkToken(input.deliveryId, input.token, deps.query))) return { status: 'not_found' }
   const delivery = await findDingTalkApprovalCardDeliveryById(deps.query, input.deliveryId)
   if (!delivery) return { status: 'not_found' }
   const summary = await buildSummary(deps.query, delivery, input.viewerUserId)
@@ -142,7 +150,7 @@ export async function executeApprovalActionFromCardDelivery(
     actor: { userId: string; userName: string; roles?: string[]; ip?: string | null; userAgent?: string | null }
   },
 ): Promise<ApprovalCardActionOutcome> {
-  if (!verifyApprovalCardLinkToken(input.deliveryId, input.token)) return { status: 'not_found' }
+  if (!(await verifyApprovalCardLinkToken(input.deliveryId, input.token, deps.query))) return { status: 'not_found' }
   const delivery = await findDingTalkApprovalCardDeliveryById(deps.query, input.deliveryId)
   if (!delivery) return { status: 'not_found' }
 
