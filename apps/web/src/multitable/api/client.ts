@@ -30,6 +30,9 @@ import type {
   UpdateFieldInput,
   CreateViewInput,
   UpdateViewInput,
+  PersonalViewConfigOverlay,
+  PersonalViewConfigResponse,
+  DeletePersonalViewConfigResponse,
   CreateRecordInput,
   PatchRecordsInput,
   FormSubmitInput,
@@ -1646,6 +1649,31 @@ export class MultitableApiClient {
 
   async deleteView(viewId: string): Promise<{ deleted: string }> {
     const res = await this.fetch(`/api/multitable/views/${viewId}`, { method: 'DELETE' })
+    return this.parseJson(res)
+  }
+
+  // --- Personal (per-user) view config — Slice 3 ---
+  // LOAD-BEARING (design-lock multitable-personal-views-slice3-fe-toggle-design-lock-20260706.md §1-A /
+  // G-FE-1): these three methods carry NO user-identity field, query param, or header — the same `this.fetch`
+  // path as updateView/deleteView above, which itself adds only Authorization + x-tenant-id (apps/web/src/
+  // utils/api.ts authHeaders()). The server resolves the target user from the JWT actor alone. Do NOT add a
+  // userId/user_id body field or an x-user-id-style header to any of these — that would be a lock violation.
+  async getPersonalViewConfig(viewId: string): Promise<PersonalViewConfigResponse> {
+    const res = await this.fetch(`/api/multitable/views/${encodeURIComponent(viewId)}/personal-config`)
+    return this.parseJson(res)
+  }
+
+  async putPersonalViewConfig(viewId: string, overlay: PersonalViewConfigOverlay): Promise<PersonalViewConfigResponse> {
+    const res = await this.fetch(`/api/multitable/views/${encodeURIComponent(viewId)}/personal-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config: overlay }),
+    })
+    return this.parseJson(res)
+  }
+
+  async deletePersonalViewConfig(viewId: string): Promise<DeletePersonalViewConfigResponse> {
+    const res = await this.fetch(`/api/multitable/views/${encodeURIComponent(viewId)}/personal-config`, { method: 'DELETE' })
     return this.parseJson(res)
   }
 

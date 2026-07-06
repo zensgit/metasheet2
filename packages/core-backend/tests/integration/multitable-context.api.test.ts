@@ -151,6 +151,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -178,6 +181,7 @@ describe('Multitable context API', () => {
       canExport: true,
       canSendNotification: false,
       pitResetEnabled: false,
+      personalViewsEnabled: false,
     })
     expect(response.body.data.capabilityOrigin).toEqual({
       source: 'global-rbac',
@@ -272,6 +276,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -346,6 +353,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -368,6 +378,7 @@ describe('Multitable context API', () => {
       canExport: true,
       canSendNotification: true,
       pitResetEnabled: false,
+      personalViewsEnabled: false,
     })
     // Route-level contract lock for the new FE signal: flag ON + sheet-admin → pitResetEnabled true (its only true source).
     // The flag-off cases (false for both admin and non-admin) are locked by the two capabilities exact-matches above.
@@ -376,6 +387,13 @@ describe('Multitable context API', () => {
       const onResp = await request(app).get('/api/multitable/context').query({ sheetId: 'sheet_ops' }).expect(200)
       expect(onResp.body.data.capabilities.pitResetEnabled).toBe(true)
     } finally { delete process.env.MULTITABLE_ENABLE_PIT_RESET }
+    // Slice 3 contract lock: flag ON → personalViewsEnabled true (available to every reader, presentation-only —
+    // NOT ANDed with a management capability, unlike pitResetEnabled). Flag-off (false) locked by the exact-matches above.
+    process.env.MULTITABLE_ENABLE_PERSONAL_VIEWS = 'true'
+    try {
+      const onResp = await request(app).get('/api/multitable/context').query({ sheetId: 'sheet_ops' }).expect(200)
+      expect(onResp.body.data.capabilities.personalViewsEnabled).toBe(true)
+    } finally { delete process.env.MULTITABLE_ENABLE_PERSONAL_VIEWS }
     expect(response.body.data.viewPermissions).toEqual({
       view_grid: {
         canAccess: true,
@@ -429,6 +447,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -529,6 +550,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -573,6 +597,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -606,6 +633,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -731,6 +761,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(normalized)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -822,6 +855,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(normalized)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -917,6 +953,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -951,6 +990,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -986,6 +1028,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1013,6 +1058,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1090,6 +1138,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1165,6 +1216,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1241,6 +1295,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1319,6 +1376,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1434,6 +1494,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -1557,6 +1620,9 @@ describe('Multitable context API', () => {
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
+        // in these capability-shape tests ⇒ empty (no overlay; personalViewsEnabled still true from the route).
+        if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })

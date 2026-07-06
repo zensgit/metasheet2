@@ -12,6 +12,7 @@ import type {
   MetaViewPermission,
   PatchResult,
   PersonSummary,
+  PersonalViewConfigOverlay,
 } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 import { isPropertyHiddenField } from '../utils/field-permissions'
@@ -460,6 +461,13 @@ export function useMultitableGrid(opts: {
   viewId: Ref<string>
   client?: MultitableApiClient
   pageSize?: number
+  // Slice 3 (design-lock multitable-personal-views-slice3-fe-toggle-design-lock-20260706.md §3 P2 / G-FE-2):
+  // a single toggle-driven write-routing switch. When it returns true for the CURRENT viewId, the in-place
+  // config edits below (filter/sort/group/hidden) route to `putPersonalViewConfig` instead of the shared
+  // `updateView`. Absent/undefined (or false) ⇒ unchanged shared-write path — flag-off sessions never see
+  // this option set at all (usePersonalViewToggle.isPersonalMode is itself flag-gated), so a disabled
+  // session never emits a personal-config request from here (G-FE-4).
+  isPersonalMode?: (viewId: string) => boolean
 }) {
   const client = opts.client ?? multitableClient
   const pageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE
@@ -760,9 +768,20 @@ export function useMultitableGrid(opts: {
     sortFilterDirty.value = false
   }
 
+  // Slice 3 G-FE-2 write-routing: the ONE switch every in-place config edit below funnels through. ON (for
+  // this viewId) → PUT personal-config (actor-scoped, no identity in the request — see client.ts); OFF/absent
+  // → the shared updateView path, byte-identical to pre-Slice-3 behavior.
+  async function persistViewConfig(vid: string, input: PersonalViewConfigOverlay) {
+    if (opts.isPersonalMode?.(vid)) {
+      await client.putPersonalViewConfig(vid, input)
+    } else {
+      await client.updateView(vid, input)
+    }
+  }
+
   async function persistSortFilter(viewId: string) {
     try {
-      await client.updateView(viewId, {
+      await persistViewConfig(viewId, {
         sortInfo: buildSortInfo(sortRules.value) as Record<string, unknown> | undefined,
         filterInfo: (nestedFilterNodes.value
           ? buildFilterInfoFromNodes(nestedFilterNodes.value, filterConjunction.value)
@@ -820,7 +839,7 @@ export function useMultitableGrid(opts: {
     const vid = opts.viewId.value
     if (!vid) return
     try {
-      await client.updateView(vid, {
+      await persistViewConfig(vid, {
         groupInfo: next.length ? ({ fieldIds: next, fieldId: next[0] } as Record<string, unknown>) : undefined,
       })
     } catch { /* silent */ }
@@ -835,7 +854,7 @@ export function useMultitableGrid(opts: {
     const vid = opts.viewId.value
     if (!vid) return
     try {
-      await client.updateView(vid, { hiddenFieldIds: [...hiddenFieldIds.value] })
+      await persistViewConfig(vid, { hiddenFieldIds: [...hiddenFieldIds.value] })
     } catch { /* silent — will retry on next toggle */ }
   }
 
