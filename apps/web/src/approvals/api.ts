@@ -1085,3 +1085,54 @@ export async function dispatchAction(
   }
   return postApprovalJson(`/api/approvals/${id}/actions`, req)
 }
+
+// ---------------------------------------------------------------------------
+// B3-04 D-2 — participant directory picker (transfer / add-sign / fill-form user field /
+// delegation delegatee). Wraps the D-1 endpoint (#3664) GET /api/approvals/directory/users,
+// guarded server-side by the least-privilege union approvals:read|write|act — the SAME
+// endpoint any approval participant (not just a template author) can reach.
+//
+// Deliberately UNGATED by USE_MOCK, unlike almost everything else in this file: this is a
+// read-only, degrade-to-empty-safely lookup, not a CRUD path that needs a dev-mode fixture.
+// Every failure mode (network error, non-OK response, malformed JSON, malformed entries)
+// resolves to `[]` instead of throwing — a picker with no options degrades to manual entry,
+// it never crashes the surrounding form. This is a candidate directory, NOT an authorization
+// fact: the downstream dispatchAction/createApproval/delegation-create calls still gate the
+// real action against the real candidate.
+// ---------------------------------------------------------------------------
+export interface ApprovalDirectoryUser {
+  id: string
+  name: string
+  email: string
+}
+
+export async function searchApprovalDirectoryUsers(
+  q: string,
+  limit = 20,
+): Promise<ApprovalDirectoryUser[]> {
+  try {
+    const params = new URLSearchParams()
+    const normalized = q.trim()
+    if (normalized) params.set('q', normalized)
+    params.set('limit', String(limit))
+    const response = await apiFetch(`/api/approvals/directory/users?${params.toString()}`)
+    if (!response.ok) return []
+    const payload = await response.json().catch(() => null) as { users?: unknown } | null
+    if (!payload || !Array.isArray(payload.users)) return []
+    const users: ApprovalDirectoryUser[] = []
+    for (const entry of payload.users) {
+      if (!entry || typeof entry !== 'object') continue
+      const record = entry as Record<string, unknown>
+      const id = typeof record.id === 'string' ? record.id : ''
+      if (!id) continue
+      users.push({
+        id,
+        name: typeof record.name === 'string' ? record.name : '',
+        email: typeof record.email === 'string' ? record.email : '',
+      })
+    }
+    return users
+  } catch {
+    return []
+  }
+}

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import type { FormField, FormSchema } from '../src/types/approval'
@@ -46,6 +48,19 @@ vi.mock('../src/composables/useAuth', () => ({
     getCurrentUserId: vi.fn().mockResolvedValue('user_1'),
   }),
 }))
+
+// B3-04 D-2 — ApprovalUserPicker (the fill-form `user` field renderer, see the describe block
+// further below) fetches its options through `searchApprovalDirectoryUsers`. `vi.importActual`
+// keeps every other export (dispatchAction, createApproval, ...) real; this suite's OTHER tests
+// never render a `user`-type field so this mock is inert for them.
+const searchApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
+vi.mock('../src/approvals/api', async () => {
+  const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
+  return {
+    ...actual,
+    searchApprovalDirectoryUsers: (...args: unknown[]) => searchApprovalDirectoryUsersSpy(...args),
+  }
+})
 
 const mockActiveTemplate = ref<any>(null)
 const loadTemplateSpy = vi.fn().mockResolvedValue(undefined)
@@ -349,5 +364,31 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
     // Positive control — the non-attachment fields DID make it through, so the missing key isn't
     // just an artifact of an empty/failed payload.
     expect(payload.formData).toMatchObject({ reason: '出差申请', leave_days: 1 })
+  })
+
+  // -------------------------------------------------------------------------
+  // B3-04 D-2 — the fill-form `user` field now uses the real ApprovalUserPicker (participant
+  // directory), replacing the hardcoded 张三/李四/王五 fake option list — a production correctness
+  // defect, since those ids were never real users.
+  // -------------------------------------------------------------------------
+  it('static tripwire: the view source no longer contains the hardcoded fake-people literals', () => {
+    const src = readFileSync(join(__dirname, '../src/views/approval/ApprovalNewView.vue'), 'utf8')
+    for (const fakeName of ['张三', '李四', '王五', '赵六']) {
+      expect(src, `should not contain fake fixture name "${fakeName}"`).not.toContain(fakeName)
+    }
+  })
+
+  it('renders the real ApprovalUserPicker for a `user`-type form field', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_userfield',
+      formSchema: {
+        fields: [{ id: 'fld_assignee', type: 'user', label: '经办人', required: false } as FormField],
+      },
+    })
+    searchApprovalDirectoryUsersSpy.mockResolvedValue([{ id: 'u1', name: 'Alice', email: '' }])
+
+    await mountView()
+
+    expect(container!.querySelector('[data-testid="approval-user-picker"]')).toBeTruthy()
   })
 })

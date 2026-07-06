@@ -4,6 +4,8 @@
  * Full lifecycle coverage: template -> publish -> initiate -> approve/reject/transfer/comment/revoke
  * Uses the same component-level E2E pattern as approval-center.spec.ts.
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import {
@@ -92,6 +94,26 @@ vi.mock('../src/approvals/store', () => ({
     executeAction: executeActionSpy,
   }),
 }))
+
+// ---------------------------------------------------------------------------
+// B3-04 D-2 — participant directory picker mock. ApprovalUserPicker (used by the transfer /
+// add-sign dialogs below) fetches its option list through `searchApprovalDirectoryUsers`; the
+// fixture below preserves the SAME ids (user_2/user_3/user_4) the deleted hardcoded 李四/王五/赵六
+// option lists used to hardcode, so the pre-existing `select.value = 'user_2'` / `'user_3'`
+// assertions further down keep working unchanged. `vi.importActual` keeps every OTHER export
+// (dispatchAction, ApprovalApiError, ...) real — only this one function is overridden.
+// ---------------------------------------------------------------------------
+vi.mock('../src/approvals/api', async () => {
+  const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
+  return {
+    ...actual,
+    searchApprovalDirectoryUsers: vi.fn().mockResolvedValue([
+      { id: 'user_2', name: '李四', email: '' },
+      { id: 'user_3', name: '王五', email: '' },
+      { id: 'user_4', name: '赵六', email: '' },
+    ]),
+  }
+})
 
 // ---------------------------------------------------------------------------
 // Template store mock
@@ -1174,11 +1196,11 @@ describe('Approval E2E Lifecycle', () => {
       await flushUi()
 
       const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')!
-      // Multiple-select: selecting an option emits the array shape the v-model
-      // binds (the stub wraps the chosen value into a string[]). A single
-      // <select> can only hold one option value, so we pick one — enough to
-      // assert the array contract reaches the action.
-      const select = dialog.querySelector('[data-el-select-multiple="true"]') as HTMLSelectElement
+      // B3-04 D-2: add-sign now uses ApprovalUserPicker's REPEATED-PICK pattern (single-select,
+      // picking one appends it to `addSignUserIds` and resets the picker) instead of a multi-select
+      // dropdown. Picking one user is enough to assert the array contract (`targetUserIds`) reaches
+      // the action — the picker component itself owns the "pick several" UX (chips + reset).
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
       select.value = 'user_2'
       select.dispatchEvent(new Event('change', { bubbles: true }))
       await flushUi()
@@ -1253,6 +1275,62 @@ describe('Approval E2E Lifecycle', () => {
         action: 'reduce_sign',
         targetAssignmentUserId: 'manager-9',
       }))
+    })
+  })
+
+  // =========================================================================
+  // B3-04 D-2 — real participant pickers replace the hardcoded fake people
+  // (production correctness defect: transfer/add-sign used to offer 李四/王五/赵六/张三,
+  // ids that were never real users).
+  // =========================================================================
+  describe('B3-04 D-2: real participant pickers (transfer / add-sign)', () => {
+    const DETAIL_VIEW_SRC = readFileSync(
+      join(__dirname, '../src/views/approval/ApprovalDetailView.vue'),
+      'utf8',
+    )
+
+    it('static tripwire: the view source no longer contains the hardcoded fake-people literals', () => {
+      for (const fakeName of ['李四', '王五', '赵六', '张三']) {
+        expect(DETAIL_VIEW_SRC, `should not contain fake fixture name "${fakeName}"`).not.toContain(fakeName)
+      }
+    })
+
+    it('the transfer dialog renders the real ApprovalUserPicker', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const transferBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '转交')
+      transferBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="转交审批"]')
+      expect(dialog?.querySelector('[data-testid="approval-user-picker"]')).toBeTruthy()
+    })
+
+    it('the add-sign dialog renders the real ApprovalUserPicker and accumulates a pick as a labeled chip', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const addBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '加签')
+      addBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')!
+      expect(dialog.querySelector('[data-testid="approval-user-picker"]')).toBeTruthy()
+
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+      select.value = 'user_2'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi()
+
+      // Picked via the real directory fixture (id user_2 -> name 李四) — the chip shows the
+      // friendly name, not the raw id, proving the `select` event's richer option payload wired
+      // through to the label map.
+      expect(dialog.querySelector('[data-testid="approval-add-sign-chips"]')?.textContent).toContain('李四')
     })
   })
 

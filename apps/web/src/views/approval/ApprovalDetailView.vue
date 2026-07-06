@@ -452,14 +452,11 @@
     >
       <el-form>
         <el-form-item label="转交给">
-          <el-select v-model="transferUserId" placeholder="选择用户" filterable style="width: 100%">
-            <template #prefix>
-              <el-icon><Search /></el-icon>
-            </template>
-            <el-option label="李四 (部门经理)" value="user_2" />
-            <el-option label="王五 (总监)" value="user_3" />
-            <el-option label="赵六 (VP)" value="user_4" />
-          </el-select>
+          <ApprovalUserPicker
+            :model-value="transferUserId || null"
+            placeholder="搜索并选择转交对象"
+            @update:model-value="transferUserId = $event ?? ''"
+          />
         </el-form-item>
         <el-form-item label="转交说明">
           <el-input
@@ -486,18 +483,26 @@
     >
       <el-form>
         <el-form-item label="加签人">
-          <el-select
-            v-model="addSignUserIds"
-            multiple
-            filterable
-            placeholder="选择加签审批人"
-            style="width: 100%"
-            data-testid="approval-add-sign-users"
-          >
-            <el-option label="李四 (部门经理)" value="user_2" />
-            <el-option label="王五 (总监)" value="user_3" />
-            <el-option label="赵六 (VP)" value="user_4" />
-          </el-select>
+          <!-- P1-B 加签 target picker: ApprovalUserPicker is single-select by design (v-model one
+               id), so multi-target add-sign uses a REPEATED-PICK pattern instead of a multi-select
+               dropdown — pick one, it lands as a removable chip below, the picker resets for the
+               next pick. `addSignUserIds` (the submit payload shape) is unchanged. -->
+          <div v-if="addSignUserIds.length > 0" class="approval-detail__add-sign-chips" data-testid="approval-add-sign-chips">
+            <el-tag
+              v-for="uid in addSignUserIds"
+              :key="uid"
+              closable
+              class="approval-detail__add-sign-chip"
+              @close="removeAddSignUser(uid)"
+            >
+              {{ addSignUserLabels[uid] || uid }}
+            </el-tag>
+          </div>
+          <ApprovalUserPicker
+            :model-value="addSignPickerValue"
+            placeholder="搜索并添加加签人"
+            @select="onAddSignUserSelected"
+          />
         </el-form-item>
         <el-form-item label="加签方式">
           <el-radio-group v-model="addSignMode" data-testid="approval-add-sign-mode">
@@ -663,7 +668,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   ArrowLeft,
-  Search,
   Check,
   Close,
   Right,
@@ -677,7 +681,8 @@ import type { ApprovalActionType, ApprovalAssignmentDTO, ApprovalGraph } from '.
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
-import { markApprovalRead, remindApproval } from '../../approvals/api'
+import { markApprovalRead, remindApproval, type ApprovalDirectoryUser } from '../../approvals/api'
+import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import { useAuth } from '../../composables/useAuth'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
@@ -910,6 +915,12 @@ const returnTargetNodeKey = ref('')
 // P1-B 加签/减签 dialog state.
 const addSignDialogVisible = ref(false)
 const addSignUserIds = ref<string[]>([])
+// B3-04 D-2: the repeated-pick picker's OWN transient slot (always reset to null after each pick
+// so it is ready for the next one) + a display-name side map keyed by id (ApprovalUserPicker only
+// carries ids in `addSignUserIds` — the submit payload shape — so the chip labels need their own
+// lookup, populated from the picker's richer `select` event).
+const addSignPickerValue = ref<string | null>(null)
+const addSignUserLabels = ref<Record<string, string>>({})
 const addSignMode = ref<'before' | 'parallel'>('parallel')
 const reduceSignDialogVisible = ref(false)
 const reduceSignUserId = ref('')
@@ -1232,9 +1243,27 @@ async function submitTransfer() {
 
 function openAddSignDialog() {
   addSignUserIds.value = []
+  addSignUserLabels.value = {}
+  addSignPickerValue.value = null
   addSignMode.value = 'parallel'
   actionComment.value = ''
   addSignDialogVisible.value = true
+}
+
+// B3-04 D-2: repeated-pick handler for the add-sign target picker — append the picked id (no
+// duplicates), remember its display label for the chip, then reset the picker's transient slot
+// so it is ready for the next pick.
+function onAddSignUserSelected(option: ApprovalDirectoryUser | null): void {
+  if (!option) return
+  if (!addSignUserIds.value.includes(option.id)) {
+    addSignUserIds.value = [...addSignUserIds.value, option.id]
+    addSignUserLabels.value = { ...addSignUserLabels.value, [option.id]: option.name || option.id }
+  }
+  addSignPickerValue.value = null
+}
+
+function removeAddSignUser(id: string): void {
+  addSignUserIds.value = addSignUserIds.value.filter((existing) => existing !== id)
 }
 
 async function submitAddSign() {
@@ -1501,6 +1530,13 @@ onMounted(async () => {
 
 .approval-detail__quick-phrase-chip {
   cursor: pointer;
+}
+
+.approval-detail__add-sign-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 
 .approval-detail__timeline-content {

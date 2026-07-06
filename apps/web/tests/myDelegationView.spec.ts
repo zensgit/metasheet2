@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, inject, nextTick, provide, reactive, type App as VueApp, type Slot } from 'vue'
 import type { DelegationRecord } from '../src/approvals/delegations'
@@ -28,6 +30,18 @@ vi.mock('element-plus', () => ({
   ElMessage: { success: vi.fn(), warning: vi.fn(), error: (...a: unknown[]) => messageErrorSpy(...a) },
   ElMessageBox: { confirm: (...a: unknown[]) => confirmSpy(...a) },
 }))
+
+// B3-04 D-2 — the 新建委托 dialog's delegatee field now uses the real ApprovalUserPicker
+// (participant directory), replacing the manual free-text id input. `vi.importActual` keeps every
+// other export (listDelegations, createDelegation, ...) real.
+const searchApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
+vi.mock('../src/approvals/api', async () => {
+  const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
+  return {
+    ...actual,
+    searchApprovalDirectoryUsers: (...args: unknown[]) => searchApprovalDirectoryUsersSpy(...args),
+  }
+})
 
 type ColumnRegistryEntry = { key: string; prop?: string; label?: string; defaultSlot?: Slot }
 type ColumnRegistry = { columns: ColumnRegistryEntry[]; register: (entry: ColumnRegistryEntry) => void }
@@ -248,5 +262,26 @@ describe('MyDelegationView (self-service 我的委托) — B2-05 status tag + di
     expect(confirmSpy).toHaveBeenCalledTimes(1)
     expect(disableOwnDelegationSpy).not.toHaveBeenCalled()
     expect(listOwnDelegationsSpy).toHaveBeenCalledTimes(1) // no reload — disable never ran
+  })
+
+  // ---------------------------------------------------------------------------
+  // B3-04 D-2 — the 新建委托 dialog's delegatee field now uses the real ApprovalUserPicker
+  // instead of a manual free-text id input.
+  // ---------------------------------------------------------------------------
+  it('the 新建委托 dialog renders the real ApprovalUserPicker for the delegatee field', async () => {
+    await mountView([])
+
+    const newButton = container!.querySelector('[data-testid="my-delegation-new"]') as HTMLButtonElement
+    newButton.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-user-picker"]')).toBeTruthy()
+  })
+
+  it('static tripwire: the view source contains no hardcoded fake-people literals', () => {
+    const src = readFileSync(join(__dirname, '../src/views/approval/MyDelegationView.vue'), 'utf8')
+    for (const fakeName of ['张三', '李四', '王五', '赵六']) {
+      expect(src, `should not contain fake fixture name "${fakeName}"`).not.toContain(fakeName)
+    }
   })
 })

@@ -40,6 +40,10 @@ vi.mock('../src/approvals/permissions', () => ({
 vi.mock('../src/approvals/api', () => ({
   markApprovalRead: vi.fn().mockResolvedValue({ ok: true }),
   remindApproval: vi.fn().mockResolvedValue({ ok: true, data: {} }),
+  // B3-04 D-2: ApprovalUserPicker (transfer/add-sign dialogs) calls this on mount; this suite
+  // never opens those dialogs, but stubbing it keeps the eager mount-time search a clean resolved
+  // no-op instead of an unhandled real-fetch attempt.
+  searchApprovalDirectoryUsers: vi.fn().mockResolvedValue([]),
 }))
 
 // B1-01: mutable session identity — per-test control over requester/my-turn affordances.
