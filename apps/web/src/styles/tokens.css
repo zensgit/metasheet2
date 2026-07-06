@@ -99,6 +99,16 @@
   --el-color-danger-light-9: #fce9e9;
   --el-color-danger-dark-2: #b01e1e;
 
+  /* error — Element Plus's alias family for danger (form validation text etc.);
+   * left unmapped it would keep EP's stock red beside our danger red. */
+  --el-color-error: var(--ms-color-danger);
+  --el-color-error-light-3: #e76767;
+  --el-color-error-light-5: #ee9393;
+  --el-color-error-light-7: #f5bebe;
+  --el-color-error-light-8: #f8d4d4;
+  --el-color-error-light-9: #fce9e9;
+  --el-color-error-dark-2: #b01e1e;
+
   /* info — base #6b7280 */
   --el-color-info: var(--ms-color-info);
   --el-color-info-light-3: #979ca6;
