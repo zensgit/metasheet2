@@ -23,6 +23,10 @@ import {
 } from '../integrations/dingtalk/client'
 import { readDingTalkMessageConfigFromRuntime } from '../integrations/dingtalk/work-notification-settings'
 import {
+  resolveApprovalCardLinkSecret,
+  resolveApprovalCardPublicAppUrl,
+} from '../integrations/dingtalk/approval-card-config'
+import {
   insertDingTalkApprovalCardDelivery,
   markDingTalkApprovalCardDeliverySendFailed,
   markDingTalkApprovalCardDeliverySent,
@@ -2556,13 +2560,15 @@ export class AutomationExecutor {
       return { actionType, status: 'failed', error: 'send_dingtalk_approval_card requires an approval.task_created trigger event' }
     }
 
-    const baseUrl = resolveAutomationAppBaseUrl()
+    // CFG-1: env first, stored directory-integration config as fallback (same-source with the
+    // wrapper's verify — see approval-card-config.ts). Empty still fail-closes the send.
+    const baseUrl = await resolveApprovalCardPublicAppUrl(this.deps.queryFn)
     if (!baseUrl) {
-      return { actionType, status: 'failed', error: 'PUBLIC_APP_URL or APP_BASE_URL is required for the approval decision link' }
+      return { actionType, status: 'failed', error: 'PUBLIC_APP_URL or APP_BASE_URL (or the stored approval-card public app URL) is required for the approval decision link' }
     }
-    const linkSecret = (process.env.APPROVAL_CARD_LINK_SECRET ?? '').trim()
+    const linkSecret = await resolveApprovalCardLinkSecret(this.deps.queryFn)
     if (!linkSecret) {
-      return { actionType, status: 'failed', error: 'APPROVAL_CARD_LINK_SECRET is required for signed approval decision links' }
+      return { actionType, status: 'failed', error: 'APPROVAL_CARD_LINK_SECRET (env or stored approval-card link secret) is required for signed approval decision links' }
     }
 
     // Instance metadata for the card summary — ids/title/request_no only, NO form values.
