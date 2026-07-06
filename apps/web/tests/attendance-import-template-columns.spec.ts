@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   IMPORT_TEMPLATE_BASE_COLUMNS,
@@ -74,6 +76,30 @@ describe('importTemplateColumns', () => {
     const groups = groupSupportedImportColumns(MAPPING_COLUMNS)
     const header = buildTemplateHeaderFromSelection(groups, new Set(IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS))
     expect(header).toEqual(['日期', '工号', '姓名', '上班1打卡时间', '下班1打卡时间', '考勤结果', '异常原因', '考勤组'])
+  })
+
+  it('default selection stays in sync with the backend starter template (fixture-sync)', () => {
+    // Guard against silent drift (review P3-1): the hardcoded default keys must
+    // keep reproducing the backend's first template profile. Reads the real
+    // plugin source so a backend starter-template change turns this red.
+    const source = readFileSync(
+      resolve(__dirname, '../../../plugins/plugin-attendance/index.cjs'),
+      'utf8',
+    )
+    const mappingBlock = source.match(/const IMPORT_MAPPING_COLUMNS = \[([\s\S]*?)\n\]/)?.[1]
+    expect(mappingBlock, 'expected IMPORT_MAPPING_COLUMNS in plugin source').toBeTruthy()
+    const realColumns = Array.from(
+      mappingBlock!.matchAll(/sourceField: '([^']+)', targetField: '([^']+)'/g),
+    ).map(match => ({ sourceField: match[1], targetField: match[2] }))
+    expect(realColumns.length).toBeGreaterThan(30)
+
+    const starterBlock = source.match(/templateColumns: \[([^\]]+)\]/)?.[1]
+    expect(starterBlock, 'expected first profile templateColumns').toBeTruthy()
+    const starterColumns = Array.from(starterBlock!.matchAll(/'([^']+)'/g)).map(match => match[1])
+
+    const groups = groupSupportedImportColumns(realColumns)
+    const header = buildTemplateHeaderFromSelection(groups, new Set(IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS))
+    expect([...header].sort()).toEqual([...starterColumns].sort())
   })
 
   it('select-all covers every option across groups', () => {
