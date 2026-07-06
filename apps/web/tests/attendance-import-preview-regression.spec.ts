@@ -252,7 +252,8 @@ describe('Attendance import preview regression', () => {
   })
 
   it('blocks selecting an Excel .xlsx in the CSV import input: no import API call, actionable zh guidance', async () => {
-    const { setLocale } = useLocale()
+    const { locale, setLocale } = useLocale()
+    const previousLocale = locale.value
     setLocale('zh-CN')
     try {
       const apiFetchMock = vi.mocked(apiFetch)
@@ -287,7 +288,65 @@ describe('Attendance import preview regression', () => {
       expect(container!.textContent).toContain('另存为')
       expect(unwrapRef<Record<string, unknown> | null>(setupState.statusMeta)?.action).toBe('retry-preview-import')
     } finally {
-      setLocale('en')
+      setLocale(previousLocale)
+    }
+  })
+
+  it('maps import VALIDATION_ERROR to actionable zh copy per server diagnostic, keeping the code chip', async () => {
+    const { locale, setLocale } = useLocale()
+    const previousLocale = locale.value
+    setLocale('zh-CN')
+    try {
+      const apiFetchMock = vi.mocked(apiFetch)
+      let previewRequestCount = 0
+      apiFetchMock.mockImplementation(async (path: string) => {
+        const url = String(path)
+        if (url.startsWith('/api/attendance/import/prepare')) {
+          return jsonResponse(200, {
+            ok: true,
+            data: { commitToken: 'token-validation', expiresAt: '2099-01-01T00:00:00.000Z' },
+          })
+        }
+        if (url.startsWith('/api/attendance/import/preview')) {
+          previewRequestCount += 1
+          return jsonResponse(400, {
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: previewRequestCount === 1
+                ? 'No rows to preview. CSV content did not yield any non-empty rows.'
+                : 'CSV header must include a work date column and at least one user or attendance column',
+            },
+          })
+        }
+        return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+      })
+
+      app = createApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      await flushUi(6)
+
+      const zhHeading = Array.from(container!.querySelectorAll('h4')).find(
+        candidate => candidate.textContent?.includes('导入（钉钉')
+      )
+      expect(zhHeading, 'expected zh import section heading').toBeTruthy()
+      const importSection = zhHeading!.closest('.attendance__admin-section') as HTMLElement
+
+      // Server "No rows to preview…" → row-specific zh copy + Save-As-CSV hint.
+      findButton(importSection, '预览').click()
+      await flushUi(6)
+      expect(container!.textContent).toContain('文件未解析出可导入的数据行')
+      expect(container!.textContent).toContain('另存为 → CSV')
+      expect(container!.textContent).toContain('VALIDATION_ERROR')
+
+      // Server header-missing diagnostic → header-specific zh copy.
+      findButton(importSection, '预览').click()
+      await flushUi(6)
+      expect(previewRequestCount).toBe(2)
+      expect(container!.textContent).toContain('CSV 表头缺少必需列')
+      expect(container!.textContent).toContain('VALIDATION_ERROR')
+    } finally {
+      setLocale(previousLocale)
     }
   })
 })

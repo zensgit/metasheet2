@@ -19201,7 +19201,7 @@ function classifyStatusError(
     // unmatched Latin-only text under a zh UI, leaving only the bare code chip.
     // Surface an actionable message instead (meta.code stays set above, so the
     // support-facing code chip is unchanged).
-    if (/no rows to import/i.test(originalMessage)) {
+    if (/no rows to (import|preview)/i.test(originalMessage)) {
       message = tr('The file produced no importable rows.', '文件未解析出可导入的数据行。')
     } else if (/header must include/i.test(originalMessage)) {
       message = tr('The CSV header is missing required columns.', 'CSV 表头缺少必需列。')
