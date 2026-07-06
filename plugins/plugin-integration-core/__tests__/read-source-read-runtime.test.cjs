@@ -253,6 +253,46 @@ async function testListPageCapAndProjection() {
   assert.deepEqual(data.containers.primary.records[0], { colGamma: 'SIGMA-VALUE-0', colDelta: null, colAbsent: null })
   assertEvidenceValuesFree(evidence)
   assert.equal(state.readArgs[0].limit, 10)
+  // No pageIndex input → no listPageIndex option (adapter default page 1, shipped behavior unchanged).
+  assert.equal(state.readArgs[0].options.listPageIndex, undefined)
+}
+
+// Bounded LIST page input (#3703): list_page configured reads accept inputs.pageIndex (integer 1..10),
+// which rides to the adapter as the dedicated listPageIndex option — the data plane itself is unchanged.
+async function testListPageBoundedPageIndexInput() {
+  const prepared = prepareConfiguredRead({ config: normalizedConfig('list_page'), inputs: { pageIndex: 3 } })
+  const { deps, state } = mockDeps({
+    read: () => ({ records: [], raw: { Data: { Data: [{ FSigmaField: 'SIGMA-VALUE-P3' }] } } }),
+  })
+  const { evidence, data } = await executeConfiguredRead(prepared, deps)
+  assert.equal(evidence.ok, true)
+  assert.equal(data.containers.primary.records.length, 1)
+  assertEvidenceValuesFree(evidence)
+  assert.equal(state.readArgs[0].options.listPageIndex, 3, 'bounded pageIndex reaches the adapter request option')
+  assert.equal(state.readArgs[0].limit, 10, 'row cap unchanged by paging')
+
+  // Bounds fail closed at input normalization — before any adapter/outbound.
+  for (const badPage of [0, 11, -1, 1.5, '3', null, true, {}, [], Number.NaN]) {
+    assert.throws(
+      () => prepareConfiguredRead({ config: normalizedConfig('list_page'), inputs: { pageIndex: badPage } }),
+      (error) => error instanceof ReadSourceProbeContractError && error.reason === 'page_index_invalid',
+      `pageIndex ${JSON.stringify(badPage)} must fail closed`,
+    )
+  }
+  // pageIndex on a non-list mode is rejected, never silently dropped.
+  for (const mode of ['single_record', 'resolver_lookup']) {
+    assert.throws(
+      () => prepareConfiguredRead({ config: normalizedConfig(mode), inputs: { key: 'M-001', pageIndex: 2 } }),
+      (error) => error instanceof ReadSourceProbeContractError && error.reason === 'page_index_not_allowed',
+      `${mode} pageIndex must be rejected`,
+    )
+  }
+  // keyField'd list_page: key + pageIndex compose.
+  const keyed = prepareConfiguredRead({
+    config: normalizedConfig('list_page', { keyField: 'FNumber' }),
+    inputs: { key: 'M-001', pageIndex: 2 },
+  })
+  assert.deepEqual({ ...keyed.inputs }, { key: 'M-001', pageIndex: 2 })
 }
 
 async function testDetailWithLinesBothContainersMapped() {
@@ -368,6 +408,7 @@ async function main() {
   await testResolverLookupRuntime()
   await testSingleRecordDataPlane()
   await testListPageCapAndProjection()
+  await testListPageBoundedPageIndexInput()
   await testDetailWithLinesBothContainersMapped()
   await testContainerMissingAndShapeMismatch()
   await testAdapterErrorsAreCoarseWithNullData()
