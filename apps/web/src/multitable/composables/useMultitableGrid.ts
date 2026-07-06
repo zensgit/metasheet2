@@ -1385,7 +1385,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, lastBatchId, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
+    fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, lastBatchId, page, hiddenFieldIds, fieldOrder, visibleFields, readOnlyFieldIds,
     // A1 infinite-scroll accumulation state
     loadingMore, accumulationCapped,
     sortRules, filterRules, filterConjunction, nestedFilterNodes, filterGroups, sortFilterDirty,
