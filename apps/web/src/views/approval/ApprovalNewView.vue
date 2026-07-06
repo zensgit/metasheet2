@@ -22,7 +22,7 @@
       </template>
     </el-alert>
 
-    <div v-loading="templateStore.loading || approvalStore.loading" class="approval-new__content-wrapper">
+    <div v-loading="templateStore.loading || approvalStore.loading || prefillLoading" class="approval-new__content-wrapper">
       <div v-if="template" class="approval-new__body">
         <!-- Template info card -->
         <el-card class="approval-new__info-card" shadow="never">
@@ -37,6 +37,20 @@
           <p v-if="template.description" class="approval-new__info-desc">{{ template.description }}</p>
           <p v-else class="approval-new__info-desc approval-new__info-desc--empty">暂无描述</p>
         </el-card>
+
+        <!-- UX B2-13 (再次提交): shown only once a `?fromInstance=` prefill actually applied at
+             least one field (see `applyResubmitPrefill`) — a requester fixing a rejected/revoked/
+             cancelled submission should know the form was pre-populated, not silently discover it. -->
+        <el-alert
+          v-if="prefillNoticeVisible"
+          title="已从上一次申请预填，请检查后提交"
+          type="info"
+          show-icon
+          :closable="true"
+          class="approval-new__prefill-notice"
+          data-testid="approval-prefill-notice"
+          @close="prefillNoticeVisible = false"
+        />
 
         <!-- UX B2-07: submit-time flow preview ("会到谁手上、几步") — read-only, derived from the
              loaded template's approvalGraph, so a requester can see the flow BEFORE filling the
@@ -376,6 +390,8 @@ import {
   validateDetailRows,
 } from '../../approvals/detailField'
 import { summarizeApprovalFlow, type ApprovalFlowStep } from '../../approvals/graphSummary'
+import { getApproval } from '../../approvals/api'
+import { prefillFromSnapshot } from '../../approvals/prefillFromSnapshot'
 
 const route = useRoute()
 const router = useRouter()
@@ -385,6 +401,13 @@ const { canWrite } = useApprovalPermissions()
 
 const formRef = ref<FormInstance>()
 const formData = reactive<Record<string, unknown>>({})
+// UX B2-13 (再次提交): true once a `?fromInstance=` prefill actually applied at least one field —
+// see `applyResubmitPrefill` below. Drives the "已从上一次申请预填" notice.
+const prefillNoticeVisible = ref(false)
+// UX B2-13: folded into the SAME `v-loading` overlay as the template/submit loads (below) so the
+// form can't be interacted with — and submitted un-prefilled — during the brief window between
+// the template finishing its own load and the source-instance prefill fetch resolving.
+const prefillLoading = ref(false)
 const template = computed(() => templateStore.activeTemplate)
 const visibleFields = computed(() => {
   if (!template.value) return []
@@ -573,6 +596,33 @@ async function handleSubmit() {
   }
 }
 
+// UX B2-13 (再次提交) — `?fromInstance=<id>` (set by `ApprovalDetailView`'s 「再次提交」button)
+// carries a REJECTED/REVOKED/CANCELLED source instance to prefill this fresh draft from, so a
+// requester fixing a rejected submission doesn't have to retype the whole form. Runs AFTER the
+// defaultValue seeding in `onMounted` below so a prefilled value always wins over a field's own
+// `defaultValue`. `prefillFromSnapshot`'s drift guard (dropped/retyped fields, no attachments) is
+// the ONLY gate — no crash / bad value regardless of how much the template changed since the
+// source was submitted. Best-effort: a failed source-instance fetch never blocks filling the form
+// fresh — it just silently skips the prefill.
+async function applyResubmitPrefill(): Promise<void> {
+  if (!template.value) return
+  const fromInstance = route.query.fromInstance
+  const sourceId = typeof fromInstance === 'string' ? fromInstance : null
+  if (!sourceId) return
+  prefillLoading.value = true
+  try {
+    const source = await getApproval(sourceId)
+    const prefilled = prefillFromSnapshot(template.value.formSchema, source.formSnapshot)
+    if (Object.keys(prefilled).length === 0) return
+    Object.assign(formData, prefilled)
+    prefillNoticeVisible.value = true
+  } catch {
+    // best-effort — the fresh form still works fully unprefilled.
+  } finally {
+    prefillLoading.value = false
+  }
+}
+
 onMounted(async () => {
   const templateId = route.params.templateId as string
   await templateStore.loadTemplate(templateId)
@@ -589,6 +639,7 @@ onMounted(async () => {
       }
     }
   }
+  await applyResubmitPrefill()
 })
 
 function syncVisibleFormState() {
@@ -644,6 +695,11 @@ watch([visibleFieldIds, template], () => {
 }
 
 .approval-new__info-card {
+  margin-bottom: 8px;
+}
+
+/* UX B2-13: 再次提交 prefill notice — same weight as the top-level error alert, but info-toned. */
+.approval-new__prefill-notice {
   margin-bottom: 8px;
 }
 

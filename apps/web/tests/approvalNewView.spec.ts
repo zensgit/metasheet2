@@ -19,6 +19,9 @@ import { mockPendingApproval, mockPublishedTemplate } from './helpers/approval-t
 //   - B2-15: validation depth — required rules trigger on blur+change, and a `detail` row
 //     missing a required cell aborts submit with a readable message instead of an unreadable
 //     backend 400.
+//   - B2-13: 再次提交 prefill — a `?fromInstance=<id>` query param loads that (rejected/revoked/
+//     cancelled) source instance and prefills `formData` via `prefillFromSnapshot`, showing a
+//     subtle notice; absent the query, behavior is unchanged.
 //
 // General render/submit/visibility-rule coverage for this view already lives in
 // approval-e2e-permissions.spec.ts / approval-e2e-lifecycle.spec.ts — this file only exercises
@@ -46,6 +49,11 @@ vi.mock('element-plus', () => ({
   },
 }))
 
+// B2-13 — mutable so the resubmit-prefill suite can set `fromInstance` per-test; every
+// PRE-EXISTING test in this file never touches `routeQuery`, so it stays `{}` for them exactly as
+// the previous hardcoded literal was.
+let routeQuery: Record<string, string> = {}
+
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
   return {
@@ -53,7 +61,7 @@ vi.mock('vue-router', async () => {
     useRouter: () => ({ push: pushSpy, back: backSpy }),
     useRoute: () => ({
       params: { templateId: 'tpl_numfields' },
-      query: {},
+      query: routeQuery,
       path: '/approvals/new/tpl_numfields',
       meta: {},
     }),
@@ -76,11 +84,16 @@ vi.mock('../src/composables/useAuth', () => ({
 // keeps every other export (dispatchAction, createApproval, ...) real; this suite's OTHER tests
 // never render a `user`-type field so this mock is inert for them.
 const searchApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
+// B2-13 — the resubmit-prefill suite mocks the source-instance fetch; every other describe block
+// in this file never sets `?fromInstance=`, so `applyResubmitPrefill` short-circuits before ever
+// calling this, leaving it unused (and unconfigured) for them.
+const getApprovalSpy = vi.fn()
 vi.mock('../src/approvals/api', async () => {
   const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
   return {
     ...actual,
     searchApprovalDirectoryUsers: (...args: unknown[]) => searchApprovalDirectoryUsersSpy(...args),
+    getApproval: (...args: unknown[]) => getApprovalSpy(...args),
   }
 })
 
@@ -730,5 +743,184 @@ describe('ApprovalNewView — B2-15 validation depth', () => {
     expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
     const payload = submitApprovalSpy.mock.calls[0][0]
     expect(payload.formData.items).toEqual([{ item_name: '机票', amount_text: '合计 1000 元' }])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// UX B2-13 — 再次提交 prefill. `?fromInstance=<id>` loads that source instance and prefills
+// `formData` via `prefillFromSnapshot` (unit-tested in isolation in
+// approval-prefill-from-snapshot.test.ts — this block only exercises the VIEW's wiring: does it
+// call `getApproval` with the right id, does the merged value actually reach `formData`, does the
+// notice show, and does an absent query / a failed fetch leave the fresh-form behavior unchanged).
+// Own describe block (own mount lifecycle), same reasoning as the B2-07/B2-15 blocks above.
+// ---------------------------------------------------------------------------
+describe('ApprovalNewView — B2-13 再次提交 prefill', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    routeQuery = {}
+    submitApprovalSpy.mockReset()
+    submitApprovalSpy.mockResolvedValue(mockPendingApproval({ id: 'apv_resubmit_1' }))
+    getApprovalSpy.mockReset()
+    loadTemplateSpy.mockClear()
+    pushSpy.mockClear()
+    backSpy.mockClear()
+    messageWarningSpy.mockClear()
+    messageSuccessSpy.mockClear()
+    messageErrorSpy.mockClear()
+    capturedFormRules = undefined
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    routeQuery = {}
+    vi.clearAllMocks()
+  })
+
+  async function mountView() {
+    const { default: ApprovalNewView } = await import('../src/views/approval/ApprovalNewView.vue')
+    const Host = defineComponent({ setup: () => () => h(ApprovalNewView as any) })
+    app = createApp(Host)
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElDivider', ElDivider)
+    app.component('ElEmpty', ElEmpty)
+    app.component('ElForm', ElForm)
+    app.component('ElFormItem', ElFormItem)
+    app.component('ElIcon', ElIcon)
+    app.component('ElInput', ElInput)
+    app.component('ElInputNumber', ElInputNumber)
+    app.component('ElOption', ElOption)
+    app.component('ElSelect', ElSelect)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElTag', ElTag)
+    app.component('ElUpload', ElUpload)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  function submitButton(): HTMLButtonElement {
+    const btn = Array.from(container!.querySelectorAll('button')).find((b) => b.textContent?.includes('提交审批'))
+    expect(btn).toBeTruthy()
+    return btn as HTMLButtonElement
+  }
+
+  function prefillNotice(): HTMLElement | null {
+    return container!.querySelector('[data-testid="approval-prefill-notice"]')
+  }
+
+  function formSchemaRequiredReasonAndAmount(): FormSchema {
+    return {
+      fields: [
+        { id: 'reason', type: 'text', label: '事由', required: true } as FormField,
+        { id: 'amount', type: 'number', label: '金额', required: true } as FormField,
+      ],
+    }
+  }
+
+  it('loads the source instance, prefills formData, and shows the notice', async () => {
+    routeQuery = { fromInstance: 'apv_source_1' }
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_resubmit',
+      formSchema: formSchemaRequiredReasonAndAmount(),
+    })
+    getApprovalSpy.mockResolvedValue(
+      mockPendingApproval({
+        id: 'apv_source_1',
+        status: 'rejected',
+        formSnapshot: { reason: '出差报销（第一次）', amount: 3000 },
+      }),
+    )
+
+    await mountView()
+
+    expect(getApprovalSpy).toHaveBeenCalledWith('apv_source_1')
+    expect(prefillNotice()).toBeTruthy()
+    expect(prefillNotice()?.textContent).toContain('已从上一次申请预填')
+
+    // Neither 'reason' nor 'amount' has a `defaultValue` in this schema — a successful submit
+    // (required-field validation passing) is only possible if the prefill actually reached
+    // `formData`, not just fetched-and-discarded.
+    submitButton().click()
+    await flushUi()
+
+    expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+    const payload = submitApprovalSpy.mock.calls[0][0]
+    expect(payload.formData).toMatchObject({ reason: '出差报销（第一次）', amount: 3000 })
+  })
+
+  it('does not prefill when there is no `fromInstance` query — unchanged behavior', async () => {
+    routeQuery = {}
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_resubmit_none',
+      formSchema: formSchemaRequiredReasonAndAmount(),
+    })
+
+    await mountView()
+
+    expect(getApprovalSpy).not.toHaveBeenCalled()
+    expect(prefillNotice()).toBeNull()
+
+    // Both required fields are still unset (no defaultValue, no prefill) — submit fails
+    // client-side validation exactly as it did before this feature existed.
+    submitButton().click()
+    await flushUi()
+
+    expect(submitApprovalSpy).not.toHaveBeenCalled()
+    expect(messageWarningSpy).toHaveBeenCalledWith('请检查表单中的必填项')
+  })
+
+  it('a failed source-instance fetch silently skips prefill — the fresh form still works', async () => {
+    routeQuery = { fromInstance: 'apv_missing' }
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_resubmit_fail',
+      formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: false } as FormField] },
+    })
+    getApprovalSpy.mockRejectedValue(new Error('not found'))
+
+    await mountView()
+
+    expect(prefillNotice()).toBeNull()
+
+    submitButton().click()
+    await flushUi()
+
+    expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('a field dropped from the current template is skipped (view-level drift guard) — no crash', async () => {
+    routeQuery = { fromInstance: 'apv_source_drift' }
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_resubmit_drift',
+      formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true } as FormField] },
+    })
+    getApprovalSpy.mockResolvedValue(
+      mockPendingApproval({
+        id: 'apv_source_drift',
+        status: 'rejected',
+        // 'legacy_field_removed' no longer exists on the current template.
+        formSnapshot: { reason: '出差报销', legacy_field_removed: 'old value' },
+      }),
+    )
+
+    await mountView()
+
+    submitButton().click()
+    await flushUi()
+
+    expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+    const payload = submitApprovalSpy.mock.calls[0][0]
+    expect(payload.formData).toMatchObject({ reason: '出差报销' })
+    expect(payload.formData).not.toHaveProperty('legacy_field_removed')
   })
 })

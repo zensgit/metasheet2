@@ -377,14 +377,25 @@
             <el-button plain :loading="store.loading" @click="openCommentDialog">评论</el-button>
           </div>
         </template>
-        <el-alert
-          v-else
-          title="该审批已结束"
-          type="info"
-          show-icon
-          :closable="false"
-          style="flex: 1"
-        />
+        <template v-else>
+          <el-alert
+            title="该审批已结束"
+            type="info"
+            show-icon
+            :closable="false"
+            style="flex: 1"
+          />
+          <!-- UX B2-13: 再次提交 — own+terminal (rejected/revoked/cancelled) only; see
+               `canResubmit`/`handleResubmit`. -->
+          <el-button
+            v-if="canResubmit"
+            type="primary"
+            data-testid="approval-resubmit-button"
+            @click="handleResubmit"
+          >
+            再次提交
+          </el-button>
+        </template>
       </div>
     </div>
 
@@ -768,6 +779,20 @@ const isRequester = computed(() => {
   return !!currentUserId.value && approval.value?.requester?.id === currentUserId.value
 })
 
+// UX B2-13 (再次提交) — the reject→fix→resubmit loop is a requester's biggest-friction moment
+// today (hand-retype the whole form). Eligible ONLY for the CURRENT USER'S OWN instance (reuses
+// `isRequester` above) in a TERMINAL state that means "this didn't go through and nothing
+// downstream is acting on it any more": rejected / revoked / cancelled. `approved` is deliberately
+// EXCLUDED — it already succeeded, there is nothing to fix/resubmit. An instance with no
+// `templateId` (e.g. synced in from an external source system) has no fill-form to route back to,
+// so it is excluded too — fail-closed rather than a dead button.
+const RESUBMIT_ELIGIBLE_STATUSES = new Set(['rejected', 'revoked', 'cancelled'])
+const canResubmit = computed(() => {
+  const detail = approval.value
+  if (!detail || !isRequester.value || !detail.templateId) return false
+  return RESUBMIT_ELIGIBLE_STATUSES.has(detail.status)
+})
+
 // B1-01: "等待你处理" cue — the reader holds a still-active user assignment at the current
 // node (or any branch of a parallel region). Mirrors, not replaces, the server-side action gate.
 const isMyTurn = computed(() => {
@@ -1137,6 +1162,20 @@ function retryLoad() {
   const id = route.params.id as string
   store.error = null
   Promise.all([store.loadDetail(id), store.loadHistory(id)])
+}
+
+// UX B2-13 (再次提交) — route to the SAME template's fill page, carrying this instance's id as
+// `fromInstance` so `ApprovalNewView` can load it and prefill the fresh draft (see
+// `prefillFromSnapshot`). Does NOT submit anything itself — the requester still reviews + submits
+// the new draft normally (B2-15 validation, B2-07 preview, etc. all still apply).
+function handleResubmit(): void {
+  const detail = approval.value
+  if (!detail?.templateId) return
+  router.push({
+    name: 'approval-create',
+    params: { templateId: detail.templateId },
+    query: { fromInstance: detail.id },
+  })
 }
 
 function openActionDialog(action: 'approve' | 'reject') {
