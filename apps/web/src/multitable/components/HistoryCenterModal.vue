@@ -13,6 +13,23 @@
         <button class="meta-hist__close" type="button" :aria-label="t('关闭', 'Close')" @click="emit('close')">×</button>
       </header>
 
+      <div v-if="initialBatchId && !pinnedDismissed" class="meta-hist__pinned" data-test="hist-pinned-batch">
+        <div class="meta-hist__pinned-head">
+          <span class="meta-hist__pinned-label">{{ t('已定位到该批次', 'Jumped to this batch') }}</span>
+          <button class="meta-hist__pinned-dismiss" type="button" data-test="hist-pinned-dismiss" @click="dismissPinned">{{ t('清除定位', 'Clear') }}</button>
+        </div>
+        <p v-if="pinnedLoading" class="meta-hist__hint">{{ t('加载中…', 'Loading…') }}</p>
+        <p v-else-if="!pinnedDetail" class="meta-hist__hint">{{ t('无法打开该批次', 'This batch is unavailable') }}</p>
+        <template v-else>
+          <div class="meta-hist__pinned-summary">
+            <span class="meta-hist__who">{{ actorLabel(pinnedDetail.actorName, pinnedDetail.actorId) }} · {{ sourceLabel(pinnedDetail.source) }}</span>
+            <span class="meta-hist__when">{{ formatTime(pinnedDetail.createdAt) }}</span>
+            <span class="meta-hist__counts" data-test="hist-pinned-counts">{{ countLabel(pinnedDetail) }}</span>
+          </div>
+          <HistoryBatchChangesList :changes="pinnedDetail.changes" :fields="fields" :action-label="actionLabel" />
+        </template>
+      </div>
+
       <div class="meta-hist__filters">
         <input v-model.trim="filterSearch" class="meta-hist__filter" :placeholder="t('搜索可见数据', 'Search visible data')" data-test="hist-filter-search" @keyup.enter="reload" />
         <input v-model.trim="filterActor" class="meta-hist__filter" :placeholder="t('操作人 ID', 'Actor id')" data-test="hist-filter-actor" @keyup.enter="reload" />
@@ -51,39 +68,7 @@
           <div v-if="expandedId === b.batchId" class="meta-hist__detail" data-test="hist-detail">
             <p v-if="detailLoading" class="meta-hist__hint">{{ t('加载中…', 'Loading…') }}</p>
             <p v-else-if="!detail" class="meta-hist__hint">{{ t('无法打开该批次', 'This batch is unavailable') }}</p>
-            <ul v-else class="meta-hist__changes">
-              <li v-for="(c, i) in detail.changes" :key="`${c.recordId}-${i}`" class="meta-hist__change" data-test="hist-change">
-                <div class="meta-hist__change-summary">
-                  <span class="meta-hist__change-action" :data-action="c.action">{{ actionLabel(c.action) }}</span>
-                  <span class="meta-hist__change-rec" :title="c.recordId">{{ shortRecordId(c.recordId) }}</span>
-                  <span class="meta-hist__change-fields">{{ fieldsLabel(c.changedFieldIds.length) }}</span>
-                </div>
-                <ul v-if="c.changedFieldIds.length" class="meta-hist__diff" data-test="hist-diff">
-                  <li v-for="d in changeFieldDiffs(c)" :key="d.fieldId" class="meta-hist__diff-row" data-test="hist-diff-row">
-                    <span class="meta-hist__diff-label" :title="diffFieldName(d.fieldId)">{{ diffFieldName(d.fieldId) }}</span>
-                    <span class="meta-hist__diff-values">
-                      <template v-if="d.shape === 'masked'">
-                        <span class="meta-hist__diff-masked" data-test="hist-diff-masked">{{ diffMaskedLabel() }}</span>
-                      </template>
-                      <template v-else-if="d.shape === 'set'">
-                        <span class="meta-hist__diff-op" data-test="hist-diff-op">{{ diffOpLabel('set') }}</span>
-                        <span class="meta-hist__diff-after" :title="d.after">{{ d.after }}</span>
-                      </template>
-                      <template v-else-if="d.shape === 'cleared'">
-                        <span class="meta-hist__diff-before" :title="d.before">{{ d.before }}</span>
-                        <span class="meta-hist__diff-arrow" aria-hidden="true">→</span>
-                        <span class="meta-hist__diff-op" data-test="hist-diff-op">{{ diffOpLabel('cleared') }}</span>
-                      </template>
-                      <template v-else>
-                        <span class="meta-hist__diff-before" :title="d.before">{{ d.before }}</span>
-                        <span class="meta-hist__diff-arrow" aria-hidden="true">→</span>
-                        <span class="meta-hist__diff-after" :title="d.after">{{ d.after }}</span>
-                      </template>
-                    </span>
-                  </li>
-                </ul>
-              </li>
-            </ul>
+            <HistoryBatchChangesList v-else :changes="detail.changes" :fields="fields" :action-label="actionLabel" />
           </div>
         </li>
       </ul>
@@ -104,8 +89,8 @@
 import { ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { useHistoryCenter } from '../composables/useHistoryCenter'
-import { historyActor, recordLabel } from '../utils/meta-record-labels'
-import type { HistoryBatchSummary, HistoryChange } from '../types'
+import { historyActor } from '../utils/meta-record-labels'
+import HistoryBatchChangesList from './HistoryBatchChangesList.vue'
 
 const props = defineProps<{
   open: boolean
@@ -113,11 +98,14 @@ const props = defineProps<{
   sheetId?: string
   fields?: Array<{ id: string; name: string }>
   /**
-   * W3-5: a commit toast's "view in history" deep-link sets this to the batch it just wrote — on open, the
-   * modal loads the normal (unfiltered) list AND immediately expands this one batch's detail via the SAME
-   * `toggle`/`getHistoryBatch` mechanism a manual row click uses (no new filtering API). If the batch has
-   * since scrolled off the default page (or ages out under retention), the expand silently finds nothing —
-   * same as any other detail-load miss; it never throws.
+   * W3-5/W3-5b: a commit toast's "view in history" deep-link sets this to the batch it just wrote. On open,
+   * the modal loads the normal (unfiltered) list AND ALSO fetches this one batch's own detail via the SAME
+   * `getHistoryBatch` mechanism a manual row click uses (no new filtering API) into a PINNED banner at the
+   * top of the modal (see `pinnedDetail`/`loadPinned`) — independent of whether the batch is among the rows
+   * on the current page (a different active filter, or many commits since, would otherwise leave it with no
+   * row to expand under; the pinned banner ALWAYS shows it). A "clear" affordance on the banner dismisses it
+   * without affecting the normal paged list. If the batch is unavailable (e.g. aged out under retention),
+   * the banner shows the same "unavailable" hint as a normal row's failed expand — it never throws.
    */
   initialBatchId?: string | null
 }>()
@@ -135,7 +123,15 @@ const filterTo = ref('')
 const filterField = ref('')
 const scopeAllSheets = ref(false) // T2b: default to the active sheet; opt in to all readable tables
 
-const { batches, loading, loadingMore, error, nextCursor, searchTruncated, expandedId, detail, detailLoading, load, loadMore, toggle: toggleBatch } = useHistoryCenter()
+const {
+  batches, loading, loadingMore, error, nextCursor, searchTruncated, expandedId, detail, detailLoading, load, loadMore, toggle: toggleBatch,
+  pinnedDetail, pinnedLoading, loadPinned, clearPinned,
+} = useHistoryCenter()
+
+// W3-5b: local dismiss flag for the pinned banner — reset whenever a fresh deep-linked open fires (below),
+// so re-opening the modal with a NEW initialBatchId always shows its own pinned banner even if a PREVIOUS
+// one was dismissed in this same mounted instance.
+const pinnedDismissed = ref(false)
 
 function reload(): Promise<void> {
   return load(props.baseId, {
@@ -161,13 +157,22 @@ watch(
   () => [props.open, props.baseId] as const,
   ([open]) => {
     if (!open || !props.baseId) return
-    void reload().then(() => {
-      // W3-5: a deep-linked open — expand the target batch right away, same as a manual row click.
-      if (props.initialBatchId) void toggle(props.initialBatchId)
-    })
+    void reload()
+    // W3-5b: the pinned banner is the sole deep-link display mechanism (see the prop doc above) — it does
+    // NOT depend on `reload()` finishing or on the batch being present in the resulting page, so it fires
+    // independently. Reset any earlier dismissal, and drop a stale pin from a previous deep-linked open
+    // when this open has no `initialBatchId` (e.g. the toolbar's plain "History" button).
+    pinnedDismissed.value = false
+    if (props.initialBatchId) void loadPinned(props.baseId, props.initialBatchId)
+    else clearPinned()
   },
   { immediate: true },
 )
+
+function dismissPinned(): void {
+  pinnedDismissed.value = true
+  clearPinned()
+}
 
 function actorLabel(name: string | null | undefined, actorId: string | null): string {
   if (name) return name
@@ -190,63 +195,12 @@ function actionLabel(action: string): string {
   const pair = map[action]
   return pair ? t(pair[0], pair[1]) : action
 }
-function countLabel(b: HistoryBatchSummary): string {
+// countLabel is shared by the per-row batch button (b: HistoryBatchSummary) AND the W3-5b pinned banner
+// (pinnedDetail: HistoryBatchDetail) — both carry the same two visible-count fields, so the parameter
+// type only requires that structural subset (never the full HistoryBatchSummary shape).
+function countLabel(b: { visibleAffectedRecordCount: number; visibleAffectedFieldCount: number }): string {
   return t(`${b.visibleAffectedRecordCount} 条记录 · ${b.visibleAffectedFieldCount} 个字段`,
     `${b.visibleAffectedRecordCount} record(s) · ${b.visibleAffectedFieldCount} field(s)`)
-}
-function fieldsLabel(n: number): string {
-  return t(`${n} 个字段`, `${n} field(s)`)
-}
-function shortRecordId(id: string): string {
-  const trimmed = id.startsWith('rec_') ? id.slice(4) : id
-  return `#${trimmed.slice(0, 8)}`
-}
-
-// --- Inline per-field diff (read-only detail expansion) ---
-// Renders EXACTLY what the batch-detail payload already carries (HistoryChange.before/after, both
-// already permission-masked server-side per LOCK-3) — no extra fetch, no un-masking. A field is only
-// ever a diff row here because it is already listed in `changedFieldIds` (itself post-mask); this code
-// never widens that set.
-type FieldDiffShape = 'changed' | 'set' | 'cleared' | 'masked'
-interface FieldDiffRow { fieldId: string; shape: FieldDiffShape; before: string; after: string }
-
-function hasFieldValue(container: Record<string, unknown> | null, fieldId: string): boolean {
-  return !!container && Object.prototype.hasOwnProperty.call(container, fieldId)
-}
-function formatDiffValue(v: unknown): string {
-  if (v === null || v === undefined) return '—'
-  if (typeof v === 'object') {
-    try { return JSON.stringify(v) } catch { return String(v) }
-  }
-  return String(v)
-}
-// Shape rule (per changed field id):
-//  - present on both sides           → 'changed' (normal before→after diff)
-//  - present only on the after side  → 'set'      (no prior value — e.g. a create, or a field just added)
-//  - present only on the before side → 'cleared'  (the field was emptied)
-//  - present on NEITHER side         → 'masked'   (LOCK-3 hid the value on both sides even though the
-//                                                   batch still reports the field as changed)
-function changeFieldDiffs(c: HistoryChange): FieldDiffRow[] {
-  return c.changedFieldIds.map((fieldId) => {
-    const beforeHas = hasFieldValue(c.before, fieldId)
-    const afterHas = hasFieldValue(c.after, fieldId)
-    const shape: FieldDiffShape = beforeHas && afterHas ? 'changed' : afterHas ? 'set' : beforeHas ? 'cleared' : 'masked'
-    return {
-      fieldId,
-      shape,
-      before: beforeHas ? formatDiffValue((c.before as Record<string, unknown>)[fieldId]) : '',
-      after: afterHas ? formatDiffValue((c.after as Record<string, unknown>)[fieldId]) : '',
-    }
-  })
-}
-function diffFieldName(fieldId: string): string {
-  return props.fields?.find((f) => f.id === fieldId)?.name ?? fieldId
-}
-function diffOpLabel(shape: 'set' | 'cleared'): string {
-  return recordLabel(shape === 'set' ? 'record.restorePreviewSet' : 'record.restorePreviewUnset', isZh.value)
-}
-function diffMaskedLabel(): string {
-  return recordLabel('record.historyDiffMasked', isZh.value)
 }
 function formatTime(iso: string): string {
   if (!iso) return ''
@@ -272,22 +226,16 @@ function formatTime(iso: string): string {
 .meta-hist__who { flex: 1; min-width: 0; color: var(--meta-text-secondary, #888); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-hist__when { color: var(--meta-text-secondary, #888); font-size: 12px; white-space: nowrap; }
 .meta-hist__detail { padding: 4px 0 10px 12px; }
-.meta-hist__changes { list-style: none; margin: 0; padding: 0; }
-.meta-hist__change { padding: 3px 0; font-size: 12px; }
-.meta-hist__change-summary { display: flex; gap: 10px; align-items: center; }
-.meta-hist__change-action { font-weight: 500; min-width: 48px; }
-.meta-hist__change-rec { color: var(--meta-text-secondary, #888); }
-.meta-hist__change-fields { color: var(--meta-text-secondary, #888); }
-.meta-hist__diff { list-style: none; margin: 4px 0 0; padding: 0; }
-.meta-hist__diff-row { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
-.meta-hist__diff-row + .meta-hist__diff-row { border-top: 1px dashed var(--meta-border, #eee); }
-.meta-hist__diff-label { flex: 0 0 auto; max-width: 38%; font-weight: 600; color: var(--meta-text-secondary, #475569); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.meta-hist__diff-values { flex: 1 1 auto; display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-.meta-hist__diff-before { color: #94a3b8; text-decoration: line-through; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
-.meta-hist__diff-arrow { flex: 0 0 auto; color: #cbd5e1; }
-.meta-hist__diff-after { color: var(--meta-text, #0f172a); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.meta-hist__diff-op { flex: 0 0 auto; font-style: italic; color: var(--meta-text-secondary, #888); }
-.meta-hist__diff-masked { color: var(--meta-text-secondary, #888); font-style: italic; }
+/* W3-5b pinned-batch banner — new markup, so per the UI-foundation design-lock (tokens.css §3.1) it takes
+   color/spacing/radius ONLY from the real, always-resolvable `--ms-*` tokens (no hardcoded hex, no new
+   token vocabulary), unlike this file's pre-existing `--meta-*` hex-fallback pattern above/below (legacy,
+   left as-is — out of scope for this additive change). */
+.meta-hist__pinned { border: 1px solid var(--ms-border); border-left: 3px solid var(--ms-color-primary); border-radius: var(--ms-radius-md); padding: var(--ms-space-3); margin-bottom: var(--ms-space-4); background: var(--ms-bg-card); }
+.meta-hist__pinned-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--ms-space-2); }
+.meta-hist__pinned-label { font-size: 12px; font-weight: 600; color: var(--ms-color-primary); }
+.meta-hist__pinned-dismiss { font-size: 12px; padding: 2px 8px; border: 1px solid var(--ms-border); border-radius: var(--ms-radius-sm); background: none; color: var(--ms-text-2); cursor: pointer; }
+.meta-hist__pinned-dismiss:hover { background: var(--ms-bg-page); }
+.meta-hist__pinned-summary { display: flex; gap: 12px; align-items: center; margin-bottom: var(--ms-space-2); }
 .meta-hist__error { color: var(--meta-danger, #c0392b); margin: 0 0 8px; }
 .meta-hist__hint { color: var(--meta-text-secondary, #888); padding: 12px 0; }
 </style>
