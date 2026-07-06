@@ -455,9 +455,9 @@ async function testWrongModeFailsBeforeRead() {
 // ── latent-state + key predicate units ───────────────────────────────────────────────────────────────
 
 function testLatentStateAndKeyPredicate() {
-  // BL2 does NOT flip runtimeValidated — the controlled false→true transition happens only with a BL3
-  // standalone entity-machine PASS (owner review constraint; BL0 standalone-first gate).
-  assert.equal(K3WISE_BOM_LIST_BY_MATERIAL_PRESET.runtimeValidated, false)
+  // The controlled false→true transition (owner review constraint; BL0 standalone-first gate) happened
+  // at BL3: standalone entity-machine smoke PASS #3701 (happy path + fail-closed AMBIGUOUS policy check).
+  assert.equal(K3WISE_BOM_LIST_BY_MATERIAL_PRESET.runtimeValidated, true)
   assert.equal(K3WISE_BOM_LIST_BY_MATERIAL_PRESET.byMaterialExampleInDocs, false)
 
   for (const good of ['31415', '007', 42, '9'.repeat(20)]) {
