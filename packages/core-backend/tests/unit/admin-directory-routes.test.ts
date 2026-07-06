@@ -264,6 +264,16 @@ describe('adminDirectoryRouter', () => {
       })
       expect(bad.statusCode).toBe(400)
     })
+
+    it('rejects a PUT missing publicAppUrl instead of silently clearing', async () => {
+      const response = await invokeRoute('put', '/integrations/:integrationId/approval-card-config', {
+        params: { integrationId: 'dir-1' },
+        body: {},
+        user: { id: 'admin-1', role: 'admin' },
+      })
+      expect(response.statusCode).toBe(400)
+      expect(approvalCardConfigMocks.saveApprovalCardPublicAppUrl).not.toHaveBeenCalled()
+    })
   })
 
   it('rejects unauthenticated requests', async () => {

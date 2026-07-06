@@ -244,8 +244,13 @@ export function adminDirectoryRouter(): Router {
 
     try {
       const body = (req.body ?? {}) as Record<string, unknown>
-      const publicAppUrl = typeof body.publicAppUrl === 'string' ? body.publicAppUrl : ''
-      const status = await saveApprovalCardPublicAppUrl(req.params.integrationId, publicAppUrl)
+      // Explicit contract: clearing requires an explicit '' — a missing field is a caller bug,
+      // never a silent clear.
+      if (typeof body.publicAppUrl !== 'string') {
+        jsonError(res, 400, 'APPROVAL_CARD_CONFIG_SAVE_FAILED', 'publicAppUrl is required (send "" to clear)')
+        return
+      }
+      const status = await saveApprovalCardPublicAppUrl(req.params.integrationId, body.publicAppUrl)
       if (!status) {
         jsonError(res, 404, 'DIRECTORY_NOT_FOUND', 'Directory integration not found')
         return
