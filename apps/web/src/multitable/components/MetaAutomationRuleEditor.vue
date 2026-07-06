@@ -16,33 +16,32 @@
 
         <!-- Name -->
         <label class="meta-rule-editor__label">{{ automationLabel('editor.name', isZh) }}</label>
-        <input v-model="draft.name" class="meta-rule-editor__input" type="text" :placeholder="automationLabel('editor.namePlaceholder', isZh)" data-field="name" />
+        <el-input v-model="draft.name" type="text" :placeholder="automationLabel('editor.namePlaceholder', isZh)" data-field="name" />
 
         <!-- Execution mode (A6-1 opt-in): persist a per-action WorkflowJob plane -->
-        <label class="meta-rule-editor__label" data-field="executionModeToggle">
-          <input
-            type="checkbox"
-            :checked="draft.executionMode === 'workflow_job_v1' || requiresJobMode"
-            :disabled="requiresJobMode"
-            data-field="executionMode"
-            @change="setExecutionMode(($event.target as HTMLInputElement).checked)"
-          />
+        <el-checkbox
+          class="meta-rule-editor__label"
+          data-field="executionModeToggle"
+          :model-value="draft.executionMode === 'workflow_job_v1' || requiresJobMode"
+          :disabled="requiresJobMode"
+          @change="setExecutionMode($event === true)"
+        >
           {{ automationLabel('editor.executionModeLabel', isZh) }}
-        </label>
+        </el-checkbox>
         <div class="meta-rule-editor__hint" data-field="executionModeHint">{{ requiresJobMode ? automationLabel('editor.executionModeRequiredHint', isZh) : automationLabel('editor.executionModeHint', isZh) }}</div>
 
         <!-- 1. Trigger selector -->
         <section class="meta-rule-editor__section">
           <div class="meta-rule-editor__section-title">{{ automationLabel('trigger.title', isZh) }}</div>
-          <select v-model="draft.triggerType" class="meta-rule-editor__select" data-field="triggerType">
-            <option value="record.created">{{ automationTriggerTypeLabel('record.created', isZh) }}</option>
-            <option value="record.updated">{{ automationTriggerTypeLabel('record.updated', isZh) }}</option>
-            <option value="record.deleted">{{ automationTriggerTypeLabel('record.deleted', isZh) }}</option>
-            <option value="field.value_changed">{{ automationTriggerTypeLabel('field.value_changed', isZh) }}</option>
-            <option value="form.submitted">{{ automationTriggerTypeLabel('form.submitted', isZh) }}</option>
-            <option value="schedule.cron">{{ automationTriggerTypeLabel('schedule.cron', isZh) }}</option>
-            <option value="schedule.interval">{{ automationTriggerTypeLabel('schedule.interval', isZh) }}</option>
-            <option value="schedule.date_field">{{ automationTriggerTypeLabel('schedule.date_field', isZh) }}</option>
+          <el-select v-model="draft.triggerType" class="meta-rule-editor__select" data-field="triggerType">
+            <el-option value="record.created" data-value="record.created" :label="automationTriggerTypeLabel('record.created', isZh)" />
+            <el-option value="record.updated" data-value="record.updated" :label="automationTriggerTypeLabel('record.updated', isZh)" />
+            <el-option value="record.deleted" data-value="record.deleted" :label="automationTriggerTypeLabel('record.deleted', isZh)" />
+            <el-option value="field.value_changed" data-value="field.value_changed" :label="automationTriggerTypeLabel('field.value_changed', isZh)" />
+            <el-option value="form.submitted" data-value="form.submitted" :label="automationTriggerTypeLabel('form.submitted', isZh)" />
+            <el-option value="schedule.cron" data-value="schedule.cron" :label="automationTriggerTypeLabel('schedule.cron', isZh)" />
+            <el-option value="schedule.interval" data-value="schedule.interval" :label="automationTriggerTypeLabel('schedule.interval', isZh)" />
+            <el-option value="schedule.date_field" data-value="schedule.date_field" :label="automationTriggerTypeLabel('schedule.date_field', isZh)" />
             <!--
               `webhook.received` is live since the signed inbound endpoint shipped (T1-2):
               POST /api/multitable/automation/webhooks/:ruleId with HMAC-SHA256 timestamp-bound
@@ -50,77 +49,76 @@
               trigger (record-less v1 — the backend save gate restricts its actions to the
               notification family and requires template visibility for the rule creator).
             -->
-            <option value="webhook.received">{{ automationTriggerTypeLabel('webhook.received', isZh) }}</option>
-            <option value="approval.completed">{{ automationTriggerTypeLabel('approval.completed', isZh) }}</option>
-            <option value="approval.task_created">{{ automationTriggerTypeLabel('approval.task_created', isZh) }}</option>
-          </select>
+            <el-option value="webhook.received" data-value="webhook.received" :label="automationTriggerTypeLabel('webhook.received', isZh)" />
+            <el-option value="approval.completed" data-value="approval.completed" :label="automationTriggerTypeLabel('approval.completed', isZh)" />
+            <el-option value="approval.task_created" data-value="approval.task_created" :label="automationTriggerTypeLabel('approval.task_created', isZh)" />
+          </el-select>
 
           <!-- field.value_changed config -->
           <template v-if="draft.triggerType === 'field.value_changed'">
             <label class="meta-rule-editor__label">{{ automationLabel('trigger.watchField', isZh) }}</label>
-            <select v-model="draft.triggerConfig.fieldId" class="meta-rule-editor__select" data-field="triggerFieldId">
-              <option value="">{{ automationLabel('trigger.selectField', isZh) }}</option>
-              <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
-            </select>
+            <el-select v-model="(draft.triggerConfig.fieldId as string)" class="meta-rule-editor__select" :placeholder="automationLabel('trigger.selectField', isZh)" data-field="triggerFieldId">
+              <el-option value="" data-value="" :label="automationLabel('trigger.selectField', isZh)" />
+              <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
+            </el-select>
             <label class="meta-rule-editor__label">{{ automationLabel('trigger.condition', isZh) }}</label>
-            <select v-model="draft.triggerConfig.condition" class="meta-rule-editor__select" data-field="triggerCondition">
-              <option value="any">{{ automationTriggerConditionLabel('any', isZh) }}</option>
-              <option value="equals">{{ automationTriggerConditionLabel('equals', isZh) }}</option>
-              <option value="changed_to">{{ automationTriggerConditionLabel('changed_to', isZh) }}</option>
-            </select>
+            <el-select v-model="(draft.triggerConfig.condition as string)" class="meta-rule-editor__select" data-field="triggerCondition">
+              <el-option value="any" data-value="any" :label="automationTriggerConditionLabel('any', isZh)" />
+              <el-option value="equals" data-value="equals" :label="automationTriggerConditionLabel('equals', isZh)" />
+              <el-option value="changed_to" data-value="changed_to" :label="automationTriggerConditionLabel('changed_to', isZh)" />
+            </el-select>
             <template v-if="draft.triggerConfig.condition !== 'any'">
               <label class="meta-rule-editor__label">{{ automationLabel('editor.value', isZh) }}</label>
-              <input v-model="draft.triggerConfig.value" class="meta-rule-editor__input" type="text" :placeholder="automationLabel('editor.value', isZh)" data-field="triggerValue" />
+              <el-input v-model="(draft.triggerConfig.value as string)" type="text" :placeholder="automationLabel('editor.value', isZh)" data-field="triggerValue" />
             </template>
           </template>
 
           <!-- schedule.cron config -->
           <template v-if="draft.triggerType === 'schedule.cron'">
             <label class="meta-rule-editor__label">{{ automationLabel('trigger.preset', isZh) }}</label>
-            <select v-model="cronPreset" class="meta-rule-editor__select" data-field="cronPreset">
-              <option value="*/5 * * * *">{{ automationCronPresetLabel('*/5 * * * *', isZh) }}</option>
-              <option value="0 * * * *">{{ automationCronPresetLabel('0 * * * *', isZh) }}</option>
-              <option value="0 0 * * *">{{ automationCronPresetLabel('0 0 * * *', isZh) }}</option>
-              <option value="0 0 * * 1">{{ automationCronPresetLabel('0 0 * * 1', isZh) }}</option>
-              <option value="custom">{{ automationCronPresetLabel('custom', isZh) }}</option>
-            </select>
+            <el-select v-model="cronPreset" class="meta-rule-editor__select" data-field="cronPreset">
+              <el-option value="*/5 * * * *" data-value="*/5 * * * *" :label="automationCronPresetLabel('*/5 * * * *', isZh)" />
+              <el-option value="0 * * * *" data-value="0 * * * *" :label="automationCronPresetLabel('0 * * * *', isZh)" />
+              <el-option value="0 0 * * *" data-value="0 0 * * *" :label="automationCronPresetLabel('0 0 * * *', isZh)" />
+              <el-option value="0 0 * * 1" data-value="0 0 * * 1" :label="automationCronPresetLabel('0 0 * * 1', isZh)" />
+              <el-option value="custom" data-value="custom" :label="automationCronPresetLabel('custom', isZh)" />
+            </el-select>
             <template v-if="cronPreset === 'custom'">
               <label class="meta-rule-editor__label">{{ automationLabel('trigger.cronExpression', isZh) }}</label>
-              <input v-model="draft.triggerConfig.cron" class="meta-rule-editor__input" type="text" placeholder="* * * * *" data-field="cronExpression" />
+              <el-input v-model="(draft.triggerConfig.cron as string)" type="text" placeholder="* * * * *" data-field="cronExpression" />
             </template>
           </template>
 
           <!-- schedule.interval config -->
           <template v-if="draft.triggerType === 'schedule.interval'">
             <label class="meta-rule-editor__label">{{ automationLabel('trigger.intervalMinutes', isZh) }}</label>
-            <input v-model.number="draft.triggerConfig.intervalMinutes" class="meta-rule-editor__input" type="number" min="1" placeholder="5" data-field="intervalMinutes" />
+            <el-input v-model.number="(draft.triggerConfig.intervalMinutes as number | undefined)" type="number" min="1" placeholder="5" data-field="intervalMinutes" />
           </template>
 
           <!-- schedule.date_field (date reminder) config -->
           <template v-if="draft.triggerType === 'schedule.date_field'">
             <label class="meta-rule-editor__label">{{ isZh ? '日期字段' : 'Date field' }}</label>
-            <select v-model="draft.triggerConfig.dateFieldId" class="meta-rule-editor__select" data-field="dateFieldId">
-              <option value="">{{ isZh ? '请选择日期字段' : 'Select a date field' }}</option>
-              <option v-for="field in dateReminderCandidateFields" :key="field.id" :value="field.id">{{ field.name }}</option>
-            </select>
+            <el-select v-model="(draft.triggerConfig.dateFieldId as string)" class="meta-rule-editor__select" :placeholder="isZh ? '请选择日期字段' : 'Select a date field'" data-field="dateFieldId">
+              <el-option value="" data-value="" :label="isZh ? '请选择日期字段' : 'Select a date field'" />
+              <el-option v-for="field in dateReminderCandidateFields" :key="field.id" :value="field.id" :data-value="field.id" :label="field.name" />
+            </el-select>
             <label class="meta-rule-editor__label">{{ isZh ? '提前 / 延后天数' : 'Days offset' }}</label>
-            <input v-model.number="draft.triggerConfig.offsetDays" class="meta-rule-editor__input" type="number" min="0" placeholder="3" data-field="offsetDays" />
+            <el-input v-model.number="(draft.triggerConfig.offsetDays as number | undefined)" type="number" min="0" placeholder="3" data-field="offsetDays" />
             <label class="meta-rule-editor__label">{{ isZh ? '方向' : 'Direction' }}</label>
-            <select v-model="draft.triggerConfig.direction" class="meta-rule-editor__select" data-field="direction">
-              <option value="before">{{ isZh ? '日期之前' : 'Before the date' }}</option>
-              <option value="after">{{ isZh ? '日期之后' : 'After the date' }}</option>
-            </select>
+            <el-select v-model="(draft.triggerConfig.direction as string)" class="meta-rule-editor__select" data-field="direction">
+              <el-option value="before" data-value="before" :label="isZh ? '日期之前' : 'Before the date'" />
+              <el-option value="after" data-value="after" :label="isZh ? '日期之后' : 'After the date'" />
+            </el-select>
             <label class="meta-rule-editor__label">{{ isZh ? '触发时间（UTC，可选）' : 'Time of day (UTC, optional)' }}</label>
-            <input v-model="draft.triggerConfig.timeOfDay" class="meta-rule-editor__input" type="time" placeholder="09:00" data-field="timeOfDay" />
+            <el-input v-model="(draft.triggerConfig.timeOfDay as string)" type="time" placeholder="09:00" data-field="timeOfDay" />
             <div class="meta-rule-editor__hint" data-field="dateFieldTimeHint">{{ isZh ? '每天按此 UTC 时间触发；服务重启后会补发当天到点的提醒。' : 'Fires daily at this UTC time; a restart catches up today\'s due reminders.' }}</div>
           </template>
 
           <!-- webhook.received (signed inbound) config -->
           <template v-if="draft.triggerType === 'webhook.received'">
             <label class="meta-rule-editor__label">{{ isZh ? '签名密钥（Secret）' : 'Signing secret' }}</label>
-            <input
-              v-model="draft.triggerConfig.secret"
-              class="meta-rule-editor__input"
+            <el-input
+              v-model="(draft.triggerConfig.secret as string)"
               type="password"
               autocomplete="new-password"
               :placeholder="savedWebhookSecretConfigured ? (isZh ? '已配置 — 留空保持不变，输入新值以更换' : 'Configured — leave blank to keep, enter a new value to rotate') : (isZh ? '必填：用于 HMAC-SHA256 请求签名' : 'Required: used for HMAC-SHA256 request signing')"
@@ -136,24 +134,23 @@
           <!-- approval.completed (T1-3 template-routed) config -->
           <template v-if="draft.triggerType === 'approval.completed'">
             <label class="meta-rule-editor__label">{{ isZh ? '审批模板' : 'Approval template' }}</label>
-            <select v-if="approvalTemplates.length > 0" v-model="draft.triggerConfig.templateId" class="meta-rule-editor__select" data-field="approvalCompletedTemplateId">
-              <option value="">{{ isZh ? '请选择审批模板' : 'Select an approval template' }}</option>
-              <option v-for="t in approvalTemplates" :key="t.id" :value="t.id">{{ t.name || t.id }}</option>
-            </select>
-            <input v-else v-model="draft.triggerConfig.templateId" class="meta-rule-editor__input" type="text" :placeholder="isZh ? '审批模板 ID' : 'Approval template ID'" data-field="approvalCompletedTemplateId" />
+            <el-select v-if="approvalTemplates.length > 0" v-model="(draft.triggerConfig.templateId as string)" class="meta-rule-editor__select" :placeholder="isZh ? '请选择审批模板' : 'Select an approval template'" data-field="approvalCompletedTemplateId">
+              <el-option value="" data-value="" :label="isZh ? '请选择审批模板' : 'Select an approval template'" />
+              <el-option v-for="t in approvalTemplates" :key="t.id" :value="t.id" :data-value="t.id" :label="t.name || t.id" />
+            </el-select>
+            <el-input v-else v-model="(draft.triggerConfig.templateId as string)" type="text" :placeholder="isZh ? '审批模板 ID' : 'Approval template ID'" data-field="approvalCompletedTemplateId" />
             <label class="meta-rule-editor__label">{{ isZh ? '触发的完成结果（默认仅“通过”）' : 'Completion outcomes that fire (default: approved only)' }}</label>
-            <div class="meta-rule-editor__hint" data-field="approvalCompletedOutcomes">
-              <label v-for="outcome in APPROVAL_COMPLETED_OUTCOME_OPTIONS" :key="outcome" style="margin-right: 12px;">
-                <input v-model="approvalCompletedOutcomes" type="checkbox" :value="outcome" :data-field="`approvalOutcome-${outcome}`" />
+            <el-checkbox-group v-model="approvalCompletedOutcomes" class="meta-rule-editor__hint" data-field="approvalCompletedOutcomes">
+              <el-checkbox v-for="outcome in APPROVAL_COMPLETED_OUTCOME_OPTIONS" :key="outcome" :value="outcome" :data-field="`approvalOutcome-${outcome}`">
                 {{ approvalCompletedOutcomeLabel(outcome) }}
-              </label>
-            </div>
+              </el-checkbox>
+            </el-checkbox-group>
             <div class="meta-rule-editor__hint" data-field="approvalCompletedHint">
               {{ isZh
                 ? '配置的审批模板完成时触发。该触发器无记录上下文：动作仅支持通知类（站内通知 / Webhook / 邮件 / 钉钉消息），不支持记录读写与发起审批，且不支持触发条件；创建者需持有审批读取权限并对该模板可见（保存与触发时均校验）。'
                 : 'Fires when the configured approval template completes. Record-less: only notification-family actions (notification / webhook / email / DingTalk) are allowed — no record actions, no start-approval, no conditions; the rule creator must hold approvals read permission and template visibility (checked at save AND at fire).' }}
             </div>
-            <div v-if="approvalCompletedBlockReason" class="meta-rule-editor__hint" data-field="approvalCompletedBlockReason" style="color: var(--ms-color-danger, #d03050);">
+            <div v-if="approvalCompletedBlockReason" class="meta-rule-editor__hint" data-field="approvalCompletedBlockReason" style="color: var(--ms-color-danger);">
               {{ approvalCompletedBlockReason }}
             </div>
           </template>
@@ -161,17 +158,17 @@
           <!-- approval.task_created (A-2a template-routed) config -->
           <template v-if="draft.triggerType === 'approval.task_created'">
             <label class="meta-rule-editor__label">{{ isZh ? '审批模板' : 'Approval template' }}</label>
-            <select v-if="approvalTemplates.length > 0" v-model="draft.triggerConfig.templateId" class="meta-rule-editor__select" data-field="approvalTaskCreatedTemplateId">
-              <option value="">{{ isZh ? '请选择审批模板' : 'Select an approval template' }}</option>
-              <option v-for="t in approvalTemplates" :key="t.id" :value="t.id">{{ t.name || t.id }}</option>
-            </select>
-            <input v-else v-model="draft.triggerConfig.templateId" class="meta-rule-editor__input" type="text" :placeholder="isZh ? '审批模板 ID' : 'Approval template ID'" data-field="approvalTaskCreatedTemplateId" />
+            <el-select v-if="approvalTemplates.length > 0" v-model="(draft.triggerConfig.templateId as string)" class="meta-rule-editor__select" :placeholder="isZh ? '请选择审批模板' : 'Select an approval template'" data-field="approvalTaskCreatedTemplateId">
+              <el-option value="" data-value="" :label="isZh ? '请选择审批模板' : 'Select an approval template'" />
+              <el-option v-for="t in approvalTemplates" :key="t.id" :value="t.id" :data-value="t.id" :label="t.name || t.id" />
+            </el-select>
+            <el-input v-else v-model="(draft.triggerConfig.templateId as string)" type="text" :placeholder="isZh ? '审批模板 ID' : 'Approval template ID'" data-field="approvalTaskCreatedTemplateId" />
             <div class="meta-rule-editor__hint" data-field="approvalTaskCreatedHint">
               {{ isZh
                 ? '该模板产生新的审批待办（每位受理人一条）时触发。退回/跳转形成的新一轮待办会再次触发；同一轮重复投递自动去重。无记录上下文：动作仅支持通知类，不支持记录读写与发起审批，且不支持触发条件；创建者需持有审批读取权限并对该模板可见（保存与触发时均校验）。'
                 : 'Fires when this template produces a NEW pending approval task (one per recipient). A returned/jumped node fires again for its fresh round; duplicate deliveries of the same round dedupe. Record-less: only notification-family actions — no record actions, no start-approval, no conditions; the rule creator must hold approvals read permission and template visibility (checked at save AND at fire).' }}
             </div>
-            <div v-if="approvalTaskCreatedBlockReason" class="meta-rule-editor__hint" data-field="approvalTaskCreatedBlockReason" style="color: var(--ms-color-danger, #d03050);">
+            <div v-if="approvalTaskCreatedBlockReason" class="meta-rule-editor__hint" data-field="approvalTaskCreatedBlockReason" style="color: var(--ms-color-danger);">
               {{ approvalTaskCreatedBlockReason }}
             </div>
           </template>
@@ -184,18 +181,20 @@
             <span class="meta-rule-editor__hint">{{ automationLabel('condition.optional', isZh) }}</span>
           </div>
           <div v-if="draft.conditions.conditions.length > 1" class="meta-rule-editor__conjunction">
-            <button
-              type="button"
+            <el-button
+              size="small"
               class="meta-rule-editor__toggle-btn"
               :class="{ 'meta-rule-editor__toggle-btn--active': draft.conditions.conjunction === 'AND' }"
+              :type="draft.conditions.conjunction === 'AND' ? 'primary' : 'default'"
               @click="draft.conditions.conjunction = 'AND'"
-            >{{ automationLabel('condition.and', isZh) }}</button>
-            <button
-              type="button"
+            >{{ automationLabel('condition.and', isZh) }}</el-button>
+            <el-button
+              size="small"
               class="meta-rule-editor__toggle-btn"
               :class="{ 'meta-rule-editor__toggle-btn--active': draft.conditions.conjunction === 'OR' }"
+              :type="draft.conditions.conjunction === 'OR' ? 'primary' : 'default'"
               @click="draft.conditions.conjunction = 'OR'"
-            >{{ automationLabel('condition.or', isZh) }}</button>
+            >{{ automationLabel('condition.or', isZh) }}</el-button>
           </div>
           <div class="meta-rule-editor__condition-list">
             <template v-for="entry in conditionEditorEntries" :key="entry.pathKey">
@@ -207,29 +206,31 @@
               >
                 <span class="meta-rule-editor__group-label">{{ automationLabel('condition.group', isZh) }}</span>
                 <div class="meta-rule-editor__conjunction">
-                  <button
-                    type="button"
+                  <el-button
+                    size="small"
                     class="meta-rule-editor__toggle-btn"
                     :class="{ 'meta-rule-editor__toggle-btn--active': normalizeConditionConjunction(entry.group) === 'AND' }"
+                    :type="normalizeConditionConjunction(entry.group) === 'AND' ? 'primary' : 'default'"
                     @click="setGroupConjunction(entry.group, 'AND')"
-                  >{{ automationLabel('condition.and', isZh) }}</button>
-                  <button
-                    type="button"
+                  >{{ automationLabel('condition.and', isZh) }}</el-button>
+                  <el-button
+                    size="small"
                     class="meta-rule-editor__toggle-btn"
                     :class="{ 'meta-rule-editor__toggle-btn--active': normalizeConditionConjunction(entry.group) === 'OR' }"
+                    :type="normalizeConditionConjunction(entry.group) === 'OR' ? 'primary' : 'default'"
                     @click="setGroupConjunction(entry.group, 'OR')"
-                  >{{ automationLabel('condition.or', isZh) }}</button>
+                  >{{ automationLabel('condition.or', isZh) }}</el-button>
                 </div>
                 <div class="meta-rule-editor__condition-actions">
-                  <button class="meta-rule-editor__btn" type="button" data-action="add-nested-condition" @click="addConditionToGroup(entry.path)">{{ automationLabel('condition.addNestedCondition', isZh) }}</button>
-                  <button
+                  <el-button size="small" class="meta-rule-editor__btn" data-action="add-nested-condition" @click="addConditionToGroup(entry.path)">{{ automationLabel('condition.addNestedCondition', isZh) }}</el-button>
+                  <el-button
+                    size="small"
                     class="meta-rule-editor__btn"
-                    type="button"
                     data-action="add-condition-group"
                     :disabled="!entry.canAddGroup"
                     @click="addGroupToGroup(entry.path)"
-                  >{{ automationLabel('condition.addNestedGroup', isZh) }}</button>
-                  <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeConditionNode(entry.path)" :title="automationLabel('condition.removeGroupTitle', isZh)">&times;</button>
+                  >{{ automationLabel('condition.addNestedGroup', isZh) }}</el-button>
+                  <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeConditionNode(entry.path)" :title="automationLabel('condition.removeGroupTitle', isZh)">&times;</el-button>
                 </div>
               </div>
               <div
@@ -239,84 +240,83 @@
                 :data-condition-index="entry.pathKey"
                 :data-condition-path="entry.pathKey"
               >
-                <select
-                  :value="entry.condition.fieldId"
+                <el-select
+                  :model-value="entry.condition.fieldId"
                   class="meta-rule-editor__select meta-rule-editor__select--sm"
-                  @change="onConditionFieldChange(entry.condition, ($event.target as HTMLSelectElement).value)"
+                  :placeholder="automationLabel('condition.selectField', isZh)"
+                  @change="onConditionFieldChange(entry.condition, $event)"
                 >
-                  <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
-                  <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
-                </select>
-                <select
-                  :value="entry.condition.operator"
+                  <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
+                  <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
+                </el-select>
+                <el-select
+                  :model-value="entry.condition.operator"
                   class="meta-rule-editor__select meta-rule-editor__select--sm"
-                  @change="onConditionOperatorChange(entry.condition, ($event.target as HTMLSelectElement).value as ConditionOperator)"
+                  @change="onConditionOperatorChange(entry.condition, $event as ConditionOperator)"
                 >
-                  <option v-for="op in conditionOperatorsForField(entry.condition.fieldId)" :key="op.value" :value="op.value">{{ automationConditionOperatorLabel(op.value, isZh) }}</option>
-                </select>
+                  <el-option v-for="op in conditionOperatorsForField(entry.condition.fieldId)" :key="op.value" :value="op.value" :data-value="op.value" :label="automationConditionOperatorLabel(op.value, isZh)" />
+                </el-select>
                 <template v-if="!isUnaryOperator(entry.condition.operator)">
-                  <select
+                  <el-select
                     v-if="conditionValueWidget(entry.condition) === 'booleanMultiSelect'"
-                    :value="booleanMultiSelectConditionValues(entry.condition)"
+                    :model-value="booleanMultiSelectConditionValues(entry.condition)"
                     class="meta-rule-editor__select meta-rule-editor__select--sm"
                     data-condition-value="boolean-multi-select"
                     multiple
                     @change="onBooleanMultiSelectConditionValueChange(entry.condition, $event)"
                   >
-                    <option value="true">true</option>
-                    <option value="false">false</option>
-                  </select>
-                  <select
+                    <el-option value="true" data-value="true" label="true" />
+                    <el-option value="false" data-value="false" label="false" />
+                  </el-select>
+                  <el-select
                     v-else-if="conditionValueWidget(entry.condition) === 'boolean'"
-                    :value="booleanConditionValue(entry.condition)"
+                    :model-value="booleanConditionValue(entry.condition)"
                     class="meta-rule-editor__select meta-rule-editor__select--sm"
+                    :placeholder="automationLabel('condition.selectValue', isZh)"
                     data-condition-value="boolean"
-                    @change="onBooleanConditionValueChange(entry.condition, ($event.target as HTMLSelectElement).value)"
+                    @change="onBooleanConditionValueChange(entry.condition, $event)"
                   >
-                    <option value="">{{ automationLabel('condition.selectValue', isZh) }}</option>
-                    <option value="true">true</option>
-                    <option value="false">false</option>
-                  </select>
-                  <select
+                    <el-option value="" data-value="" :label="automationLabel('condition.selectValue', isZh)" />
+                    <el-option value="true" data-value="true" label="true" />
+                    <el-option value="false" data-value="false" label="false" />
+                  </el-select>
+                  <el-select
                     v-else-if="conditionValueWidget(entry.condition) === 'select'"
-                    :value="singleSelectConditionValue(entry.condition)"
+                    :model-value="singleSelectConditionValue(entry.condition)"
                     class="meta-rule-editor__select meta-rule-editor__select--sm"
+                    :placeholder="automationLabel('condition.selectValue', isZh)"
                     data-condition-value="select"
-                    @change="entry.condition.value = ($event.target as HTMLSelectElement).value"
+                    @change="entry.condition.value = $event"
                   >
-                    <option value="">{{ automationLabel('condition.selectValue', isZh) }}</option>
-                    <option v-for="option in conditionFieldOptions(entry.condition)" :key="option.value" :value="option.value">
-                      {{ optionLabel(option) }}
-                    </option>
-                  </select>
-                  <select
+                    <el-option value="" data-value="" :label="automationLabel('condition.selectValue', isZh)" />
+                    <el-option v-for="option in conditionFieldOptions(entry.condition)" :key="option.value" :value="option.value" :data-value="option.value" :label="optionLabel(option)" />
+                  </el-select>
+                  <el-select
                     v-else-if="conditionValueWidget(entry.condition) === 'multiSelect'"
-                    :value="multiSelectConditionValues(entry.condition)"
+                    :model-value="multiSelectConditionValues(entry.condition)"
                     class="meta-rule-editor__select meta-rule-editor__select--sm"
                     data-condition-value="multi-select"
                     multiple
                     @change="onMultiSelectConditionValueChange(entry.condition, $event)"
                   >
-                    <option v-for="option in conditionFieldOptions(entry.condition)" :key="option.value" :value="option.value">
-                      {{ optionLabel(option) }}
-                    </option>
-                  </select>
-                  <input
+                    <el-option v-for="option in conditionFieldOptions(entry.condition)" :key="option.value" :value="option.value" :data-value="option.value" :label="optionLabel(option)" />
+                  </el-select>
+                  <el-input
                     v-else
-                    v-model="entry.condition.value"
-                    class="meta-rule-editor__input meta-rule-editor__input--sm"
+                    v-model="(entry.condition.value as string)"
+                    class="meta-rule-editor__input--sm"
                     :type="conditionValueInputType(entry.condition)"
                     :inputmode="conditionValueInputMode(entry.condition)"
                     :placeholder="conditionValuePlaceholder(entry.condition)"
                   />
                 </template>
-                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeConditionNode(entry.path)" :title="automationLabel('condition.removeConditionTitle', isZh)">&times;</button>
+                <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeConditionNode(entry.path)" :title="automationLabel('condition.removeConditionTitle', isZh)">&times;</el-button>
               </div>
             </template>
           </div>
           <div class="meta-rule-editor__condition-actions">
-            <button class="meta-rule-editor__btn" type="button" data-action="add-condition" @click="addCondition">{{ automationLabel('condition.addCondition', isZh) }}</button>
-            <button class="meta-rule-editor__btn" type="button" data-action="add-condition-group" @click="addGroupToGroup([])">{{ automationLabel('condition.addGroup', isZh) }}</button>
+            <el-button size="small" class="meta-rule-editor__btn" data-action="add-condition" @click="addCondition">{{ automationLabel('condition.addCondition', isZh) }}</el-button>
+            <el-button size="small" class="meta-rule-editor__btn" data-action="add-condition-group" @click="addGroupToGroup([])">{{ automationLabel('condition.addGroup', isZh) }}</el-button>
           </div>
         </section>
 
@@ -331,157 +331,161 @@
           >
             <div class="meta-rule-editor__action-header">
               <span class="meta-rule-editor__action-num">{{ idx + 1 }}.</span>
-              <select v-model="action.type" class="meta-rule-editor__select" @change="onDraftActionTypeChange(action)">
-                <option
+              <el-select v-model="action.type" class="meta-rule-editor__select" @change="onDraftActionTypeChange(action)">
+                <el-option
                   v-for="type in selectableActionTypes(action.type)"
                   :key="type"
                   :value="type"
+                  :data-value="type"
                   :disabled="isUnsupportedSelectableActionType(type)"
-                >
-                  {{ automationActionTypeLabel(type, isZh) }}
-                </option>
-              </select>
+                  :label="automationActionTypeLabel(type, isZh)"
+                />
+              </el-select>
               <div class="meta-rule-editor__action-btns">
-                <button v-if="idx > 0" class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="moveAction(idx, -1)" :title="automationLabel('editor.moveUpTitle', isZh)">&#x2191;</button>
-                <button v-if="idx < draft.actions.length - 1" class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="moveAction(idx, 1)" :title="automationLabel('editor.moveDownTitle', isZh)">&#x2193;</button>
-                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeAction(idx)" :title="automationLabel('editor.removeActionTitle', isZh)">&times;</button>
+                <el-button v-if="idx > 0" size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="moveAction(idx, -1)" :title="automationLabel('editor.moveUpTitle', isZh)">&#x2191;</el-button>
+                <el-button v-if="idx < draft.actions.length - 1" size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="moveAction(idx, 1)" :title="automationLabel('editor.moveDownTitle', isZh)">&#x2193;</el-button>
+                <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeAction(idx)" :title="automationLabel('editor.removeActionTitle', isZh)">&times;</el-button>
               </div>
             </div>
 
             <!-- update_record config -->
             <div v-if="action.type === 'update_record'" class="meta-rule-editor__action-config">
               <div v-for="(pair, pidx) in (action.config.fieldUpdates as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
-                <select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm">
-                  <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
-                  <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
-                </select>
-                <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" :placeholder="automationLabel('editor.value', isZh)" />
-                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeFieldUpdate(action, pidx)">&times;</button>
+                <el-select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)">
+                  <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
+                  <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
+                </el-select>
+                <el-input v-model="pair.value" class="meta-rule-editor__input--sm" type="text" :placeholder="automationLabel('editor.value', isZh)" />
+                <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeFieldUpdate(action, pidx)">&times;</el-button>
               </div>
-              <button class="meta-rule-editor__btn" type="button" @click="addFieldUpdate(action)">{{ automationLabel('editor.addField', isZh) }}</button>
+              <el-button size="small" class="meta-rule-editor__btn" @click="addFieldUpdate(action)">{{ automationLabel('editor.addField', isZh) }}</el-button>
             </div>
 
             <!-- create_record config -->
             <div v-if="action.type === 'create_record'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.targetSheetId', isZh) }}</label>
-              <input v-model="action.config.targetSheetId" class="meta-rule-editor__input" type="text" :placeholder="automationLabel('actionConfig.sheetIdPlaceholder', isZh)" />
+              <el-input v-model="action.config.targetSheetId" type="text" :placeholder="automationLabel('actionConfig.sheetIdPlaceholder', isZh)" />
               <div v-for="(pair, pidx) in (action.config.fieldValues as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
-                <input v-model="pair.fieldId" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" :placeholder="automationLabel('actionConfig.fieldIdPlaceholder', isZh)" />
-                <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" :placeholder="automationLabel('editor.value', isZh)" />
-                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeCreateFieldValue(action, pidx)">&times;</button>
+                <el-input v-model="pair.fieldId" class="meta-rule-editor__input--sm" type="text" :placeholder="automationLabel('actionConfig.fieldIdPlaceholder', isZh)" />
+                <el-input v-model="pair.value" class="meta-rule-editor__input--sm" type="text" :placeholder="automationLabel('editor.value', isZh)" />
+                <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeCreateFieldValue(action, pidx)">&times;</el-button>
               </div>
-              <button class="meta-rule-editor__btn" type="button" @click="addCreateFieldValue(action)">{{ automationLabel('editor.addField', isZh) }}</button>
+              <el-button size="small" class="meta-rule-editor__btn" @click="addCreateFieldValue(action)">{{ automationLabel('editor.addField', isZh) }}</el-button>
             </div>
 
             <!-- send_webhook config -->
             <div v-if="action.type === 'send_webhook'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.url', isZh) }}</label>
-              <input v-model="action.config.url" class="meta-rule-editor__input" type="url" placeholder="https://..." />
+              <el-input v-model="action.config.url" type="url" placeholder="https://..." />
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.method', isZh) }}</label>
-              <select v-model="action.config.method" class="meta-rule-editor__select">
-                <option value="POST">POST</option>
-                <option value="PUT">PUT</option>
-                <option value="GET">GET</option>
-              </select>
+              <el-select v-model="action.config.method" class="meta-rule-editor__select">
+                <el-option value="POST" data-value="POST" label="POST" />
+                <el-option value="PUT" data-value="PUT" label="PUT" />
+                <el-option value="GET" data-value="GET" label="GET" />
+              </el-select>
             </div>
 
             <!-- send_notification config -->
             <div v-if="action.type === 'send_notification'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.userId', isZh) }}</label>
-              <input v-model="action.config.userId" class="meta-rule-editor__input" type="text" :placeholder="automationLabel('actionConfig.userId', isZh)" />
+              <el-input v-model="action.config.userId" type="text" :placeholder="automationLabel('actionConfig.userId', isZh)" />
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.message', isZh) }}</label>
-              <textarea v-model="action.config.message" class="meta-rule-editor__textarea" :placeholder="automationLabel('actionConfig.notificationMessagePlaceholder', isZh)" rows="3"></textarea>
+              <el-input v-model="action.config.message" type="textarea" :placeholder="automationLabel('actionConfig.notificationMessagePlaceholder', isZh)" :rows="3" />
             </div>
 
             <!-- start_approval config -->
             <div v-if="action.type === 'start_approval'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__label">{{ isZh ? '审批模板' : 'Approval template' }}</label>
-              <select v-if="approvalTemplates.length > 0" v-model="action.config.templateId" class="meta-rule-editor__select" data-field="approvalTemplateId">
-                <option value="">{{ isZh ? '请选择审批模板' : 'Select an approval template' }}</option>
-                <option v-for="t in approvalTemplates" :key="t.id" :value="t.id">{{ t.name || t.id }}</option>
-              </select>
-              <input v-else v-model="action.config.templateId" class="meta-rule-editor__input" type="text" :placeholder="isZh ? '审批模板 ID' : 'Approval template ID'" data-field="approvalTemplateId" />
+              <el-select v-if="approvalTemplates.length > 0" v-model="(action.config.templateId as string)" class="meta-rule-editor__select" :placeholder="isZh ? '请选择审批模板' : 'Select an approval template'" data-field="approvalTemplateId">
+                <el-option value="" data-value="" :label="isZh ? '请选择审批模板' : 'Select an approval template'" />
+                <el-option v-for="t in approvalTemplates" :key="t.id" :value="t.id" :data-value="t.id" :label="t.name || t.id" />
+              </el-select>
+              <el-input v-else v-model="(action.config.templateId as string)" type="text" :placeholder="isZh ? '审批模板 ID' : 'Approval template ID'" data-field="approvalTemplateId" />
               <label class="meta-rule-editor__label">{{ isZh ? '表单字段映射（审批字段 → 记录字段）' : 'Form-data mapping (approval field → record field)' }}</label>
               <div v-for="(pair, pidx) in (action.config.formDataMappingPairs as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
-                <input v-model="pair.fieldId" class="meta-rule-editor__input meta-rule-editor__input--sm" type="text" :placeholder="isZh ? '审批字段' : 'Approval field'" data-field="approvalMappingKey" />
-                <select v-model="pair.value" class="meta-rule-editor__select meta-rule-editor__select--sm" data-field="approvalMappingValue">
-                  <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
-                  <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
-                </select>
-                <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeApprovalMapping(action, pidx)">&times;</button>
+                <el-input v-model="pair.fieldId" class="meta-rule-editor__input--sm" type="text" :placeholder="isZh ? '审批字段' : 'Approval field'" data-field="approvalMappingKey" />
+                <el-select v-model="pair.value" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)" data-field="approvalMappingValue">
+                  <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
+                  <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
+                </el-select>
+                <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeApprovalMapping(action, pidx)">&times;</el-button>
               </div>
-              <button class="meta-rule-editor__btn" type="button" @click="addApprovalMapping(action)">{{ automationLabel('editor.addField', isZh) }}</button>
+              <el-button size="small" class="meta-rule-editor__btn" @click="addApprovalMapping(action)">{{ automationLabel('editor.addField', isZh) }}</el-button>
 
               <!-- W7 approval-result writeback (optional): three source-field pickers. Type compat is a hint; the
                    currently-configured value is always preserved as a marked option (see resultWritebackFieldOptions). -->
               <label class="meta-rule-editor__label">{{ automationLabel('resultWriteback.title', isZh) }}</label>
               <div class="meta-rule-editor__hint">{{ automationLabel('resultWriteback.hint', isZh) }}</div>
               <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.statusField', isZh) }}</label>
-              <select v-model="action.config.resultWritebackStatusField" class="meta-rule-editor__select" data-field="resultWritebackStatusField">
-                <option value="">{{ automationLabel('resultWriteback.none', isZh) }}</option>
-                <option v-for="opt in resultWritebackFieldOptions('status', action.config.resultWritebackStatusField)" :key="opt.id" :value="opt.id" :data-marked="opt.marked || undefined">{{ opt.label }}</option>
-              </select>
+              <el-select v-model="action.config.resultWritebackStatusField" class="meta-rule-editor__select" :placeholder="automationLabel('resultWriteback.none', isZh)" data-field="resultWritebackStatusField">
+                <el-option value="" data-value="" :label="automationLabel('resultWriteback.none', isZh)" />
+                <el-option v-for="opt in resultWritebackFieldOptions('status', action.config.resultWritebackStatusField)" :key="opt.id" :value="opt.id" :data-value="opt.id" :data-marked="opt.marked || undefined" :label="opt.label" />
+              </el-select>
               <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.approverField', isZh) }}</label>
-              <select v-model="action.config.resultWritebackApproverField" class="meta-rule-editor__select" data-field="resultWritebackApproverField">
-                <option value="">{{ automationLabel('resultWriteback.none', isZh) }}</option>
-                <option v-for="opt in resultWritebackFieldOptions('approver', action.config.resultWritebackApproverField)" :key="opt.id" :value="opt.id" :data-marked="opt.marked || undefined">{{ opt.label }}</option>
-              </select>
+              <el-select v-model="action.config.resultWritebackApproverField" class="meta-rule-editor__select" :placeholder="automationLabel('resultWriteback.none', isZh)" data-field="resultWritebackApproverField">
+                <el-option value="" data-value="" :label="automationLabel('resultWriteback.none', isZh)" />
+                <el-option v-for="opt in resultWritebackFieldOptions('approver', action.config.resultWritebackApproverField)" :key="opt.id" :value="opt.id" :data-value="opt.id" :data-marked="opt.marked || undefined" :label="opt.label" />
+              </el-select>
               <label class="meta-rule-editor__label meta-rule-editor__label--sub">{{ automationLabel('resultWriteback.completedAtField', isZh) }}</label>
-              <select v-model="action.config.resultWritebackCompletedAtField" class="meta-rule-editor__select" data-field="resultWritebackCompletedAtField">
-                <option value="">{{ automationLabel('resultWriteback.none', isZh) }}</option>
-                <option v-for="opt in resultWritebackFieldOptions('completedAt', action.config.resultWritebackCompletedAtField)" :key="opt.id" :value="opt.id" :data-marked="opt.marked || undefined">{{ opt.label }}</option>
-              </select>
+              <el-select v-model="action.config.resultWritebackCompletedAtField" class="meta-rule-editor__select" :placeholder="automationLabel('resultWriteback.none', isZh)" data-field="resultWritebackCompletedAtField">
+                <el-option value="" data-value="" :label="automationLabel('resultWriteback.none', isZh)" />
+                <el-option v-for="opt in resultWritebackFieldOptions('completedAt', action.config.resultWritebackCompletedAtField)" :key="opt.id" :value="opt.id" :data-value="opt.id" :data-marked="opt.marked || undefined" :label="opt.label" />
+              </el-select>
             </div>
 
             <!-- send_email config -->
             <div v-if="action.type === 'send_email'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.recipients', isZh) }}</label>
-              <textarea
+              <el-input
                 v-model="action.config.recipientsText"
-                class="meta-rule-editor__textarea"
-                rows="3"
+                type="textarea"
+                :rows="3"
                 placeholder="ops@example.com, owner@example.com"
                 data-field="emailRecipients"
-              ></textarea>
+              />
               <div class="meta-rule-editor__hint">{{ automationLabel('actionConfig.emailRecipientsHint', isZh) }}</div>
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.subjectTemplate', isZh) }}</label>
-              <input
+              <el-input
                 v-model="action.config.subjectTemplate"
-                class="meta-rule-editor__input"
                 type="text"
                 :placeholder="automationLabel('actionConfig.emailSubjectPlaceholder', isZh)"
                 data-field="emailSubjectTemplate"
               />
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.bodyTemplate', isZh) }}</label>
-              <textarea
+              <el-input
                 v-model="action.config.bodyTemplate"
-                class="meta-rule-editor__textarea"
-                rows="4"
+                type="textarea"
+                :rows="4"
                 :placeholder="automationLabel('actionConfig.emailBodyPlaceholder', isZh)"
                 data-field="emailBodyTemplate"
-              ></textarea>
+              />
             </div>
 
             <!-- send_dingtalk_group_message config -->
             <div v-if="action.type === 'send_dingtalk_group_message'" class="meta-rule-editor__action-config">
               <div class="meta-rule-editor__preset-row">
                 <span class="meta-rule-editor__preset-label">{{ automationLabel('dingtalk.preset', isZh) }}</span>
-                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetForm" @click="applyGroupPreset(action, 'form_request')">{{ automationDingTalkPresetLabel('form_request', isZh) }}</button>
-                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetInternal" @click="applyGroupPreset(action, 'internal_process')">{{ automationDingTalkPresetLabel('internal_process', isZh) }}</button>
-                <button class="meta-rule-editor__btn" type="button" data-field="groupPresetBoth" @click="applyGroupPreset(action, 'form_and_process')">{{ automationDingTalkPresetLabel('form_and_process', isZh) }}</button>
+                <el-button size="small" class="meta-rule-editor__btn" data-field="groupPresetForm" @click="applyGroupPreset(action, 'form_request')">{{ automationDingTalkPresetLabel('form_request', isZh) }}</el-button>
+                <el-button size="small" class="meta-rule-editor__btn" data-field="groupPresetInternal" @click="applyGroupPreset(action, 'internal_process')">{{ automationDingTalkPresetLabel('internal_process', isZh) }}</el-button>
+                <el-button size="small" class="meta-rule-editor__btn" data-field="groupPresetBoth" @click="applyGroupPreset(action, 'form_and_process')">{{ automationDingTalkPresetLabel('form_and_process', isZh) }}</el-button>
               </div>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.addGroups', isZh) }}</label>
-              <select
+              <el-select
                 v-model="action.config.destinationPickerId"
                 class="meta-rule-editor__select"
+                :placeholder="automationLabel('dingtalk.addGroupOption', isZh)"
                 data-field="dingtalkDestinationPickerId"
-                @change="appendGroupDestination(action, $event.target as HTMLSelectElement)"
+                @change="appendGroupDestination(action, $event)"
               >
-                <option value="">{{ automationLabel('dingtalk.addGroupOption', isZh) }}</option>
-                <option v-for="destination in availableGroupDestinations(action)" :key="destination.id" :value="destination.id">
-                  {{ destination.name }} · {{ groupDestinationScopeLabel(destination) }}
-                </option>
-              </select>
+                <el-option value="" data-value="" :label="automationLabel('dingtalk.addGroupOption', isZh)" />
+                <el-option
+                  v-for="destination in availableGroupDestinations(action)"
+                  :key="destination.id"
+                  :value="destination.id"
+                  :data-value="destination.id"
+                  :label="`${destination.name} · ${groupDestinationScopeLabel(destination)}`"
+                />
+              </el-select>
               <div class="meta-rule-editor__hint" data-field="dingtalkDestinationPickerHint">
                 {{ automationLabel('dingtalk.groupsRegisteredHint', isZh) }}
               </div>
@@ -511,9 +515,8 @@
               </div>
               <div v-if="dingTalkDestinationsError" class="meta-rule-editor__hint">{{ dingTalkDestinationsError }}</div>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.recordGroupFieldPaths', isZh) }}</label>
-              <input
+              <el-input
                 v-model="action.config.destinationFieldPath"
-                class="meta-rule-editor__input"
                 type="text"
                 placeholder="record.opsDestinationId, record.escalationDestinationIds"
                 data-field="dingtalkDestinationFieldPath"
@@ -522,16 +525,16 @@
                 {{ automationLabel('dingtalk.recordGroupFieldPathHint', isZh) }}
               </div>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.pickGroupField', isZh) }}</label>
-              <select
+              <el-select
+                :model-value="''"
                 class="meta-rule-editor__select"
+                :placeholder="automationLabel('dingtalk.pickFieldOption', isZh)"
                 data-field="dingtalkDestinationFieldSelect"
-                @change="appendGroupDestinationFieldPath(action, $event.target as HTMLSelectElement)"
+                @change="appendGroupDestinationFieldPath(action, $event)"
               >
-                <option value="">{{ automationLabel('dingtalk.pickFieldOption', isZh) }}</option>
-                <option v-for="field in groupDestinationCandidateFields" :key="field.id" :value="field.id">
-                  {{ field.name }}
-                </option>
-              </select>
+                <el-option value="" data-value="" :label="automationLabel('dingtalk.pickFieldOption', isZh)" />
+                <el-option v-for="field in groupDestinationCandidateFields" :key="field.id" :value="field.id" :data-value="field.id" :label="field.name" />
+              </el-select>
               <div
                 v-if="selectedGroupDestinationFields(action).length"
                 class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected"
@@ -557,9 +560,8 @@
                 {{ warning }}
               </div>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.titleTemplate', isZh) }}</label>
-              <input
+              <el-input
                 v-model="action.config.titleTemplate"
-                class="meta-rule-editor__input"
                 type="text"
                 :placeholder="automationLabel('dingtalk.titleTemplatePlaceholder', isZh)"
                 data-field="dingtalkTitleTemplate"
@@ -573,25 +575,25 @@
               </div>
               <div class="meta-rule-editor__token-row">
                 <span class="meta-rule-editor__preset-label">{{ automationLabel('dingtalk.templateTokens', isZh) }}</span>
-                <button
+                <el-button
                   v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
                   :key="token.key"
+                  size="small"
                   class="meta-rule-editor__btn"
-                  type="button"
                   :data-field="`groupTitleToken-${token.key}`"
                   @click="appendGroupTemplateToken(action, 'titleTemplate', token.value)"
                 >
                   {{ dingTalkTemplateTokenLabel(token, isZh) }}
-                </button>
+                </el-button>
               </div>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.bodyTemplate', isZh) }}</label>
-              <textarea
+              <el-input
                 v-model="action.config.bodyTemplate"
-                class="meta-rule-editor__textarea"
-                rows="4"
+                type="textarea"
+                :rows="4"
                 :placeholder="automationLabel('dingtalk.bodyTemplatePlaceholder', isZh)"
                 data-field="dingtalkBodyTemplate"
-              ></textarea>
+              />
               <div
                 v-for="warning in templateSyntaxWarnings(action.config.bodyTemplate)"
                 :key="`group-body-${warning}`"
@@ -601,26 +603,27 @@
               </div>
               <div class="meta-rule-editor__token-row">
                 <span class="meta-rule-editor__preset-label">{{ automationLabel('dingtalk.templateTokens', isZh) }}</span>
-                <button
+                <el-button
                   v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
                   :key="token.key"
+                  size="small"
                   class="meta-rule-editor__btn"
-                  type="button"
                   :data-field="`groupBodyToken-${token.key}`"
                   @click="appendGroupTemplateToken(action, 'bodyTemplate', token.value, true)"
                 >
                   {{ dingTalkTemplateTokenLabel(token, isZh) }}
-                </button>
+                </el-button>
               </div>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.publicFormView', isZh) }}</label>
-              <select
+              <el-select
                 v-model="action.config.publicFormViewId"
                 class="meta-rule-editor__select"
+                :placeholder="automationLabel('dingtalk.noPublicFormLinkOption', isZh)"
                 data-field="publicFormViewId"
               >
-                  <option value="">{{ automationLabel('dingtalk.noPublicFormLinkOption', isZh) }}</option>
-                <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
-              </select>
+                <el-option value="" data-value="" :label="automationLabel('dingtalk.noPublicFormLinkOption', isZh)" />
+                <el-option v-for="view in formViews" :key="view.id" :value="view.id" :data-value="view.id" :label="view.name" />
+              </el-select>
               <div
                 v-for="warning in publicFormLinkWarnings(action.config.publicFormViewId, true)"
                 :key="`group-public-form-${warning}`"
@@ -650,14 +653,15 @@
                 </div>
               </template>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.internalProcessingView', isZh) }}</label>
-              <select
+              <el-select
                 v-model="action.config.internalViewId"
                 class="meta-rule-editor__select"
+                :placeholder="automationLabel('dingtalk.noInternalLinkOption', isZh)"
                 data-field="internalViewId"
               >
-                <option value="">{{ automationLabel('dingtalk.noInternalLinkOption', isZh) }}</option>
-                <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
-              </select>
+                <el-option value="" data-value="" :label="automationLabel('dingtalk.noInternalLinkOption', isZh)" />
+                <el-option v-for="view in internalViews" :key="view.id" :value="view.id" :data-value="view.id" :label="view.name" />
+              </el-select>
               <div
                 v-for="warning in internalViewLinkWarnings(action.config.internalViewId)"
                 :key="`group-internal-view-${warning}`"
@@ -673,25 +677,27 @@
                 <div class="meta-rule-editor__preview-body"><strong>{{ automationLabel('dingtalk.bodyTemplate', isZh) }}:</strong> {{ templatePreviewText(action.config.bodyTemplate, automationLabel('dingtalk.noBodyTemplate', isZh)) }}</div>
                 <div class="meta-rule-editor__preview-line">
                   <span><strong>{{ automationLabel('dingtalk.renderedTitle', isZh) }}:</strong> {{ renderedTemplateExample(action.config.titleTemplate, automationLabel('dingtalk.noRenderedTitle', isZh)) }}</span>
-                  <button
+                  <el-button
+                    size="small"
+                    round
                     class="meta-rule-editor__copy-btn"
-                    type="button"
                     :data-field="`groupRenderedTitleCopy-${idx}`"
                     @click="copyPreviewText(`group-title-${idx}`, renderedTemplateExample(action.config.titleTemplate, ''))"
                   >
                     {{ copiedPreviewKey === `group-title-${idx}` ? automationLabel('dingtalk.copied', isZh) : automationLabel('dingtalk.copy', isZh) }}
-                  </button>
+                  </el-button>
                 </div>
                 <div class="meta-rule-editor__preview-line meta-rule-editor__preview-body">
                   <span><strong>{{ automationLabel('dingtalk.renderedBody', isZh) }}:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, automationLabel('dingtalk.noRenderedBody', isZh)) }}</span>
-                  <button
+                  <el-button
+                    size="small"
+                    round
                     class="meta-rule-editor__copy-btn"
-                    type="button"
                     :data-field="`groupRenderedBodyCopy-${idx}`"
                     @click="copyPreviewText(`group-body-${idx}`, renderedTemplateExample(action.config.bodyTemplate, ''))"
                   >
                     {{ copiedPreviewKey === `group-body-${idx}` ? automationLabel('dingtalk.copied', isZh) : automationLabel('dingtalk.copy', isZh) }}
-                  </button>
+                  </el-button>
                 </div>
                 <div><strong>{{ automationLabel('dingtalk.publicForm', isZh) }}:</strong> {{ viewSummaryName(action.config.publicFormViewId, automationLabel('dingtalk.noPublicFormLink', isZh)) }}</div>
                 <div><strong>{{ automationLabel('dingtalk.publicFormAccess', isZh) }}:</strong> {{ publicFormAccessState(action.config.publicFormViewId).summary }}</div>
@@ -713,14 +719,13 @@
             <div v-if="action.type === 'send_dingtalk_person_message'" class="meta-rule-editor__action-config">
               <div class="meta-rule-editor__preset-row">
                 <span class="meta-rule-editor__preset-label">{{ automationLabel('dingtalk.preset', isZh) }}</span>
-                <button class="meta-rule-editor__btn" type="button" data-field="personPresetForm" @click="applyPersonPreset(action, 'form_request')">{{ automationDingTalkPresetLabel('form_request', isZh) }}</button>
-                <button class="meta-rule-editor__btn" type="button" data-field="personPresetInternal" @click="applyPersonPreset(action, 'internal_process')">{{ automationDingTalkPresetLabel('internal_process', isZh) }}</button>
-                <button class="meta-rule-editor__btn" type="button" data-field="personPresetBoth" @click="applyPersonPreset(action, 'form_and_process')">{{ automationDingTalkPresetLabel('form_and_process', isZh) }}</button>
+                <el-button size="small" class="meta-rule-editor__btn" data-field="personPresetForm" @click="applyPersonPreset(action, 'form_request')">{{ automationDingTalkPresetLabel('form_request', isZh) }}</el-button>
+                <el-button size="small" class="meta-rule-editor__btn" data-field="personPresetInternal" @click="applyPersonPreset(action, 'internal_process')">{{ automationDingTalkPresetLabel('internal_process', isZh) }}</el-button>
+                <el-button size="small" class="meta-rule-editor__btn" data-field="personPresetBoth" @click="applyPersonPreset(action, 'form_and_process')">{{ automationDingTalkPresetLabel('form_and_process', isZh) }}</el-button>
               </div>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.searchUsersOrGroups', isZh) }}</label>
-              <input
+              <el-input
                 v-model="action.config.userIdsSearch"
-                class="meta-rule-editor__input"
                 type="text"
                 :placeholder="automationLabel('dingtalk.searchUsersOrGroupsPlaceholder', isZh)"
                 data-field="dingtalkPersonUserSearch"
@@ -778,40 +783,45 @@
                 </button>
               </div>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.localUserIds', isZh) }}</label>
-              <textarea
+              <el-input
                 v-model="action.config.userIdsText"
-                class="meta-rule-editor__textarea"
-                rows="3"
+                type="textarea"
+                :rows="3"
                 :placeholder="automationLabel('dingtalk.localUserIdsPlaceholder', isZh)"
                 data-field="dingtalkPersonUserIds"
-              ></textarea>
+              />
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.memberGroupIds', isZh) }}</label>
-              <textarea
+              <el-input
                 v-model="action.config.memberGroupIdsText"
-                class="meta-rule-editor__textarea"
-                rows="2"
+                type="textarea"
+                :rows="2"
                 :placeholder="automationLabel('dingtalk.memberGroupIdsPlaceholder', isZh)"
                 data-field="dingtalkPersonMemberGroupIds"
-              ></textarea>
+              />
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.recordRecipientFieldPaths', isZh) }}</label>
-              <input
+              <el-input
                 v-model="action.config.recipientFieldPath"
-                class="meta-rule-editor__input"
                 type="text"
                 :placeholder="automationLabel('dingtalk.recordRecipientFieldPathPlaceholder', isZh)"
                 data-field="dingtalkPersonRecipientFieldPath"
               />
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.pickRecipientField', isZh) }}</label>
-              <select
+              <el-select
+                :model-value="''"
                 class="meta-rule-editor__select"
+                :placeholder="automationLabel('dingtalk.chooseUserFieldOption', isZh)"
                 data-field="dingtalkPersonRecipientFieldSelect"
-                @change="appendRecipientFieldPath(action, ($event.target as HTMLSelectElement))"
+                @change="appendRecipientFieldPath(action, $event)"
               >
-                <option value="">{{ automationLabel('dingtalk.chooseUserFieldOption', isZh) }}</option>
-                <option v-for="field in recipientCandidateFields" :key="field.id" :value="field.id">
-                  {{ field.name }} (record.{{ field.id }})
-                </option>
-              </select>
+                <el-option value="" data-value="" :label="automationLabel('dingtalk.chooseUserFieldOption', isZh)" />
+                <el-option
+                  v-for="field in recipientCandidateFields"
+                  :key="field.id"
+                  :value="field.id"
+                  :data-value="field.id"
+                  :label="`${field.name} (record.${field.id})`"
+                />
+              </el-select>
               <div
                 v-if="selectedRecipientFields(action).length"
                 class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected"
@@ -839,24 +849,29 @@
                 {{ automationLabel('dingtalk.recordRecipientFieldPathHint', isZh) }}
               </div>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.recordMemberGroupFieldPaths', isZh) }}</label>
-              <input
+              <el-input
                 v-model="action.config.memberGroupRecipientFieldPath"
-                class="meta-rule-editor__input"
                 type="text"
                 :placeholder="automationLabel('dingtalk.recordMemberGroupFieldPathPlaceholder', isZh)"
                 data-field="dingtalkPersonMemberGroupRecipientFieldPath"
               />
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.pickMemberGroupField', isZh) }}</label>
-              <select
+              <el-select
+                :model-value="''"
                 class="meta-rule-editor__select"
+                :placeholder="automationLabel('dingtalk.chooseMemberGroupFieldOption', isZh)"
                 data-field="dingtalkPersonMemberGroupRecipientFieldSelect"
-                @change="appendMemberGroupRecipientFieldPath(action, $event.target as HTMLSelectElement)"
+                @change="appendMemberGroupRecipientFieldPath(action, $event)"
               >
-                <option value="">{{ automationLabel('dingtalk.chooseMemberGroupFieldOption', isZh) }}</option>
-                <option v-for="field in memberGroupRecipientCandidateFields" :key="field.id" :value="field.id">
-                  {{ field.name }} (record.{{ field.id }})
-                </option>
-              </select>
+                <el-option value="" data-value="" :label="automationLabel('dingtalk.chooseMemberGroupFieldOption', isZh)" />
+                <el-option
+                  v-for="field in memberGroupRecipientCandidateFields"
+                  :key="field.id"
+                  :value="field.id"
+                  :data-value="field.id"
+                  :label="`${field.name} (record.${field.id})`"
+                />
+              </el-select>
               <div
                 v-if="selectedMemberGroupRecipientFields(action).length"
                 class="meta-rule-editor__recipient-list meta-rule-editor__recipient-list--selected"
@@ -884,9 +899,8 @@
                 {{ automationLabel('dingtalk.recordMemberGroupFieldPathHint', isZh) }}
               </div>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.titleTemplate', isZh) }}</label>
-              <input
+              <el-input
                 v-model="action.config.titleTemplate"
-                class="meta-rule-editor__input"
                 type="text"
                 :placeholder="automationLabel('dingtalk.titleTemplatePlaceholder', isZh)"
                 data-field="dingtalkPersonTitleTemplate"
@@ -900,25 +914,25 @@
               </div>
               <div class="meta-rule-editor__token-row">
                 <span class="meta-rule-editor__preset-label">{{ automationLabel('dingtalk.templateTokens', isZh) }}</span>
-                <button
+                <el-button
                   v-for="token in DINGTALK_TITLE_TEMPLATE_TOKENS"
                   :key="token.key"
+                  size="small"
                   class="meta-rule-editor__btn"
-                  type="button"
                   :data-field="`personTitleToken-${token.key}`"
                   @click="appendPersonTemplateToken(action, 'titleTemplate', token.value)"
                 >
                   {{ dingTalkTemplateTokenLabel(token, isZh) }}
-                </button>
+                </el-button>
               </div>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.bodyTemplate', isZh) }}</label>
-              <textarea
+              <el-input
                 v-model="action.config.bodyTemplate"
-                class="meta-rule-editor__textarea"
-                rows="4"
+                type="textarea"
+                :rows="4"
                 :placeholder="automationLabel('dingtalk.bodyTemplatePlaceholder', isZh)"
                 data-field="dingtalkPersonBodyTemplate"
-              ></textarea>
+              />
               <div
                 v-for="warning in templateSyntaxWarnings(action.config.bodyTemplate)"
                 :key="`person-body-${warning}`"
@@ -928,26 +942,27 @@
               </div>
               <div class="meta-rule-editor__token-row">
                 <span class="meta-rule-editor__preset-label">{{ automationLabel('dingtalk.templateTokens', isZh) }}</span>
-                <button
+                <el-button
                   v-for="token in DINGTALK_BODY_TEMPLATE_TOKENS"
                   :key="token.key"
+                  size="small"
                   class="meta-rule-editor__btn"
-                  type="button"
                   :data-field="`personBodyToken-${token.key}`"
                   @click="appendPersonTemplateToken(action, 'bodyTemplate', token.value, true)"
                 >
                   {{ dingTalkTemplateTokenLabel(token, isZh) }}
-                </button>
+                </el-button>
               </div>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.publicFormView', isZh) }}</label>
-              <select
+              <el-select
                 v-model="action.config.publicFormViewId"
                 class="meta-rule-editor__select"
+                :placeholder="automationLabel('dingtalk.noPublicFormLinkOption', isZh)"
                 data-field="dingtalkPersonPublicFormViewId"
               >
-                <option value="">{{ automationLabel('dingtalk.noPublicFormLinkOption', isZh) }}</option>
-                <option v-for="view in formViews" :key="view.id" :value="view.id">{{ view.name }}</option>
-              </select>
+                <el-option value="" data-value="" :label="automationLabel('dingtalk.noPublicFormLinkOption', isZh)" />
+                <el-option v-for="view in formViews" :key="view.id" :value="view.id" :data-value="view.id" :label="view.name" />
+              </el-select>
               <div
                 v-for="warning in publicFormLinkWarnings(action.config.publicFormViewId, true)"
                 :key="`person-public-form-${warning}`"
@@ -977,14 +992,15 @@
                 </div>
               </template>
               <label class="meta-rule-editor__label">{{ automationLabel('dingtalk.internalProcessingView', isZh) }}</label>
-              <select
+              <el-select
                 v-model="action.config.internalViewId"
                 class="meta-rule-editor__select"
+                :placeholder="automationLabel('dingtalk.noInternalLinkOption', isZh)"
                 data-field="dingtalkPersonInternalViewId"
               >
-                <option value="">{{ automationLabel('dingtalk.noInternalLinkOption', isZh) }}</option>
-                <option v-for="view in internalViews" :key="view.id" :value="view.id">{{ view.name }}</option>
-              </select>
+                <el-option value="" data-value="" :label="automationLabel('dingtalk.noInternalLinkOption', isZh)" />
+                <el-option v-for="view in internalViews" :key="view.id" :value="view.id" :data-value="view.id" :label="view.name" />
+              </el-select>
               <div
                 v-for="warning in internalViewLinkWarnings(action.config.internalViewId)"
                 :key="`person-internal-view-${warning}`"
@@ -1001,25 +1017,27 @@
                 <div class="meta-rule-editor__preview-body"><strong>{{ automationLabel('dingtalk.bodyTemplate', isZh) }}:</strong> {{ templatePreviewText(action.config.bodyTemplate, automationLabel('dingtalk.noBodyTemplate', isZh)) }}</div>
                 <div class="meta-rule-editor__preview-line">
                   <span><strong>{{ automationLabel('dingtalk.renderedTitle', isZh) }}:</strong> {{ renderedTemplateExample(action.config.titleTemplate, automationLabel('dingtalk.noRenderedTitle', isZh)) }}</span>
-                  <button
+                  <el-button
+                    size="small"
+                    round
                     class="meta-rule-editor__copy-btn"
-                    type="button"
                     :data-field="`personRenderedTitleCopy-${idx}`"
                     @click="copyPreviewText(`person-title-${idx}`, renderedTemplateExample(action.config.titleTemplate, ''))"
                   >
                     {{ copiedPreviewKey === `person-title-${idx}` ? automationLabel('dingtalk.copied', isZh) : automationLabel('dingtalk.copy', isZh) }}
-                  </button>
+                  </el-button>
                 </div>
                 <div class="meta-rule-editor__preview-line meta-rule-editor__preview-body">
                   <span><strong>{{ automationLabel('dingtalk.renderedBody', isZh) }}:</strong> {{ renderedTemplateExample(action.config.bodyTemplate, automationLabel('dingtalk.noRenderedBody', isZh)) }}</span>
-                  <button
+                  <el-button
+                    size="small"
+                    round
                     class="meta-rule-editor__copy-btn"
-                    type="button"
                     :data-field="`personRenderedBodyCopy-${idx}`"
                     @click="copyPreviewText(`person-body-${idx}`, renderedTemplateExample(action.config.bodyTemplate, ''))"
                   >
                     {{ copiedPreviewKey === `person-body-${idx}` ? automationLabel('dingtalk.copied', isZh) : automationLabel('dingtalk.copy', isZh) }}
-                  </button>
+                  </el-button>
                 </div>
                 <div><strong>{{ automationLabel('dingtalk.publicForm', isZh) }}:</strong> {{ viewSummaryName(action.config.publicFormViewId, automationLabel('dingtalk.noPublicFormLink', isZh)) }}</div>
                 <div><strong>{{ automationLabel('dingtalk.publicFormAccess', isZh) }}:</strong> {{ publicFormAccessState(action.config.publicFormViewId).summary }}</div>
@@ -1030,10 +1048,13 @@
 
             <!-- lock_record config -->
             <div v-if="action.type === 'lock_record'" class="meta-rule-editor__action-config">
-              <label class="meta-rule-editor__toggle-label">
-                <input type="checkbox" v-model="action.config.locked" />
+              <el-checkbox
+                class="meta-rule-editor__toggle-label"
+                :model-value="action.config.locked === true"
+                @update:model-value="action.config.locked = $event === true"
+              >
                 {{ automationLabel('actionConfig.lockRecord', isZh) }}
-              </label>
+              </el-checkbox>
             </div>
 
             <!-- delete_record config (T0-3): same-base trigger-record only; acknowledgement is UI-only. -->
@@ -1041,15 +1062,14 @@
               <div class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="deleteRecordWarning">
                 {{ automationLabel('actionConfig.deleteRecordWarning', isZh) }}
               </div>
-              <label class="meta-rule-editor__toggle-label">
-                <input
-                  type="checkbox"
-                  data-field="deleteRecordAck"
-                  :checked="isDeleteRecordAcknowledged(action)"
-                  @change="setDeleteRecordAcknowledged(action, ($event.target as HTMLInputElement).checked)"
-                />
+              <el-checkbox
+                class="meta-rule-editor__toggle-label"
+                data-field="deleteRecordAck"
+                :model-value="isDeleteRecordAcknowledged(action)"
+                @change="setDeleteRecordAcknowledged(action, $event === true)"
+              >
                 {{ automationLabel('actionConfig.deleteRecordAck', isZh) }}
-              </label>
+              </el-checkbox>
             </div>
 
             <!-- wait_for_callback config (A6-2: info-only, ZERO params — the suspend point; no
@@ -1067,88 +1087,88 @@
                 <div class="meta-rule-editor__hint">{{ automationLabel('conditionBranch.hint', isZh) }}</div>
                 <div v-for="(branch, bIdx) in action.config.branches" :key="bIdx" class="meta-rule-editor__branch" :data-branch-index="bIdx">
                   <div class="meta-rule-editor__branch-header">
-                    <input v-model="branch.key" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.key', isZh)" data-field="branch-key" />
-                    <input v-model="branch.label" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.label', isZh)" data-field="branch-label" />
-                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" data-action="remove-branch" @click="removeBranch(action, bIdx)">&times;</button>
+                    <el-input v-model="branch.key" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.key', isZh)" data-field="branch-key" />
+                    <el-input v-model="branch.label" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.label', isZh)" data-field="branch-label" />
+                    <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" data-action="remove-branch" @click="removeBranch(action, bIdx)">&times;</el-button>
                   </div>
                   <div v-if="branch.conditions.length > 1" class="meta-rule-editor__conjunction">
-                    <button type="button" class="meta-rule-editor__toggle-btn" :class="{ 'meta-rule-editor__toggle-btn--active': branch.conjunction === 'AND' }" @click="branch.conjunction = 'AND'">{{ automationLabel('condition.and', isZh) }}</button>
-                    <button type="button" class="meta-rule-editor__toggle-btn" :class="{ 'meta-rule-editor__toggle-btn--active': branch.conjunction === 'OR' }" @click="branch.conjunction = 'OR'">{{ automationLabel('condition.or', isZh) }}</button>
+                    <el-button size="small" class="meta-rule-editor__toggle-btn" :class="{ 'meta-rule-editor__toggle-btn--active': branch.conjunction === 'AND' }" :type="branch.conjunction === 'AND' ? 'primary' : 'default'" @click="branch.conjunction = 'AND'">{{ automationLabel('condition.and', isZh) }}</el-button>
+                    <el-button size="small" class="meta-rule-editor__toggle-btn" :class="{ 'meta-rule-editor__toggle-btn--active': branch.conjunction === 'OR' }" :type="branch.conjunction === 'OR' ? 'primary' : 'default'" @click="branch.conjunction = 'OR'">{{ automationLabel('condition.or', isZh) }}</el-button>
                   </div>
                   <div v-for="(cond, cIdx) in branch.conditions" :key="cIdx" class="meta-rule-editor__condition-row" :data-branch-condition-index="cIdx">
-                    <select :value="cond.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onConditionFieldChange(cond, ($event.target as HTMLSelectElement).value)">
-                      <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
-                      <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
-                    </select>
-                    <select :value="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onConditionOperatorChange(cond, ($event.target as HTMLSelectElement).value as ConditionOperator)">
-                      <option v-for="op in conditionOperatorsForField(cond.fieldId)" :key="op.value" :value="op.value">{{ automationConditionOperatorLabel(op.value, isZh) }}</option>
-                    </select>
-                    <input v-if="!isUnaryOperator(cond.operator)" v-model="cond.value" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('condition.selectValue', isZh)" />
-                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchCondition(branch, cIdx)">&times;</button>
+                    <el-select :model-value="cond.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)" @change="onConditionFieldChange(cond, $event)">
+                      <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
+                      <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
+                    </el-select>
+                    <el-select :model-value="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onConditionOperatorChange(cond, $event as ConditionOperator)">
+                      <el-option v-for="op in conditionOperatorsForField(cond.fieldId)" :key="op.value" :value="op.value" :data-value="op.value" :label="automationConditionOperatorLabel(op.value, isZh)" />
+                    </el-select>
+                    <el-input v-if="!isUnaryOperator(cond.operator)" v-model="(cond.value as string)" class="meta-rule-editor__input--sm" :placeholder="automationLabel('condition.selectValue', isZh)" />
+                    <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchCondition(branch, cIdx)">&times;</el-button>
                   </div>
-                  <button class="meta-rule-editor__btn" type="button" data-action="add-branch-condition" @click="addBranchCondition(branch)">{{ automationLabel('condition.addCondition', isZh) }}</button>
+                  <el-button size="small" class="meta-rule-editor__btn" data-action="add-branch-condition" @click="addBranchCondition(branch)">{{ automationLabel('condition.addCondition', isZh) }}</el-button>
                   <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-branch-action-index="aIdx">
-                    <select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t">{{ automationActionTypeLabel(t, isZh) }}</option>
-                    </select>
+                    <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
+                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                    </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
-                        <select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm">
-                          <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
-                          <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
-                        </select>
-                        <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.value', isZh)" />
-                        <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchFieldPair(bAct, pIdx)">&times;</button>
+                        <el-select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)">
+                          <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
+                          <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
+                        </el-select>
+                        <el-input v-model="pair.value" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.value', isZh)" />
+                        <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchFieldPair(bAct, pIdx)">&times;</el-button>
                       </div>
-                      <button class="meta-rule-editor__btn" type="button" data-action="add-branch-field" @click="addBranchFieldPair(bAct)">{{ automationLabel('conditionBranch.addField', isZh) }}</button>
+                      <el-button size="small" class="meta-rule-editor__btn" data-action="add-branch-field" @click="addBranchFieldPair(bAct)">{{ automationLabel('conditionBranch.addField', isZh) }}</el-button>
                     </template>
                     <template v-else-if="bAct.type === 'send_notification'">
-                      <input v-model="bAct.userId" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" />
-                      <input v-model="bAct.message" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.message', isZh)" />
+                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" />
+                      <el-input v-model="bAct.message" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.message', isZh)" />
                     </template>
                     <!-- A6-3-3b branch-local wait_for_callback: zero-param suspend point (no fields to author) -->
                     <template v-else-if="bAct.type === 'wait_for_callback'">
                       <span class="meta-rule-editor__hint" data-field="branch-wait-for-callback-hint">{{ automationLabel('actionConfig.waitForCallbackHint', isZh) }}</span>
                     </template>
-                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchAction(branch, aIdx)">&times;</button>
+                    <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchAction(branch, aIdx)">&times;</el-button>
                   </div>
-                  <button class="meta-rule-editor__btn" type="button" data-action="add-branch-action" @click="addBranchAction(branch)">{{ automationLabel('conditionBranch.addAction', isZh) }}</button>
+                  <el-button size="small" class="meta-rule-editor__btn" data-action="add-branch-action" @click="addBranchAction(branch)">{{ automationLabel('conditionBranch.addAction', isZh) }}</el-button>
                 </div>
-                <button class="meta-rule-editor__btn" type="button" data-action="add-branch" @click="addBranch(action)">{{ automationLabel('conditionBranch.addBranch', isZh) }}</button>
+                <el-button size="small" class="meta-rule-editor__btn" data-action="add-branch" @click="addBranch(action)">{{ automationLabel('conditionBranch.addBranch', isZh) }}</el-button>
                 <div v-if="action.config.defaultBranch" class="meta-rule-editor__branch" data-field="default-branch">
                   <div class="meta-rule-editor__branch-header">
                     <span class="meta-rule-editor__group-label">{{ automationLabel('conditionBranch.default', isZh) }}</span>
-                    <input v-model="action.config.defaultBranch.key" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.key', isZh)" data-field="default-branch-key" />
-                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" data-action="remove-default-branch" @click="removeDefaultBranch(action)">&times;</button>
+                    <el-input v-model="action.config.defaultBranch.key" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.key', isZh)" data-field="default-branch-key" />
+                    <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" data-action="remove-default-branch" @click="removeDefaultBranch(action)">&times;</el-button>
                   </div>
                   <div v-for="(bAct, aIdx) in action.config.defaultBranch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-default-branch-action-index="aIdx">
-                    <select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t">{{ automationActionTypeLabel(t, isZh) }}</option>
-                    </select>
+                    <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
+                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                    </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
-                        <select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm">
-                          <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
-                          <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
-                        </select>
-                        <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.value', isZh)" />
-                        <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchFieldPair(bAct, pIdx)">&times;</button>
+                        <el-select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)">
+                          <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
+                          <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
+                        </el-select>
+                        <el-input v-model="pair.value" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.value', isZh)" />
+                        <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchFieldPair(bAct, pIdx)">&times;</el-button>
                       </div>
-                      <button class="meta-rule-editor__btn" type="button" @click="addBranchFieldPair(bAct)">{{ automationLabel('conditionBranch.addField', isZh) }}</button>
+                      <el-button size="small" class="meta-rule-editor__btn" @click="addBranchFieldPair(bAct)">{{ automationLabel('conditionBranch.addField', isZh) }}</el-button>
                     </template>
                     <template v-else-if="bAct.type === 'send_notification'">
-                      <input v-model="bAct.userId" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" />
-                      <input v-model="bAct.message" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.message', isZh)" />
+                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.userIds', isZh)" />
+                      <el-input v-model="bAct.message" class="meta-rule-editor__input--sm" :placeholder="automationLabel('conditionBranch.message', isZh)" />
                     </template>
                     <!-- A6-3-3b branch-local wait_for_callback (default branch): zero-param suspend point -->
                     <template v-else-if="bAct.type === 'wait_for_callback'">
                       <span class="meta-rule-editor__hint" data-field="branch-wait-for-callback-hint">{{ automationLabel('actionConfig.waitForCallbackHint', isZh) }}</span>
                     </template>
-                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchAction(action.config.defaultBranch, aIdx)">&times;</button>
+                    <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchAction(action.config.defaultBranch, aIdx)">&times;</el-button>
                   </div>
-                  <button class="meta-rule-editor__btn" type="button" @click="addBranchAction(action.config.defaultBranch)">{{ automationLabel('conditionBranch.addAction', isZh) }}</button>
+                  <el-button size="small" class="meta-rule-editor__btn" @click="addBranchAction(action.config.defaultBranch)">{{ automationLabel('conditionBranch.addAction', isZh) }}</el-button>
                 </div>
-                <button v-else class="meta-rule-editor__btn" type="button" data-action="add-default-branch" @click="addDefaultBranch(action)">{{ automationLabel('conditionBranch.addDefault', isZh) }}</button>
+                <el-button v-else size="small" class="meta-rule-editor__btn" data-action="add-default-branch" @click="addDefaultBranch(action)">{{ automationLabel('conditionBranch.addDefault', isZh) }}</el-button>
                 <div v-if="conditionBranchKeyError" class="meta-rule-editor__error" data-field="branch-key-error">{{ conditionBranchKeyError }}</div>
               </template>
             </div>
@@ -1162,46 +1182,46 @@
                 <div class="meta-rule-editor__hint">{{ automationLabel('parallelBranch.hint', isZh) }}</div>
                 <div v-for="(branch, bIdx) in action.config.parallelBranches" :key="bIdx" class="meta-rule-editor__branch" :data-parallel-branch-index="bIdx">
                   <div class="meta-rule-editor__branch-header">
-                    <input v-model="branch.key" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.key', isZh)" data-field="parallel-branch-key" />
-                    <input v-model="branch.label" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.label', isZh)" data-field="parallel-branch-label" />
-                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" data-action="remove-parallel-branch" @click="removeParallelBranch(action, bIdx)">&times;</button>
+                    <el-input v-model="branch.key" class="meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.key', isZh)" data-field="parallel-branch-key" />
+                    <el-input v-model="branch.label" class="meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.label', isZh)" data-field="parallel-branch-label" />
+                    <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" data-action="remove-parallel-branch" @click="removeParallelBranch(action, bIdx)">&times;</el-button>
                   </div>
                   <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-parallel-branch-action-index="aIdx">
-                    <select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t">{{ automationActionTypeLabel(t, isZh) }}</option>
-                    </select>
+                    <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
+                      <el-option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                    </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
-                        <select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm">
-                          <option value="">{{ automationLabel('condition.selectField', isZh) }}</option>
-                          <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
-                        </select>
-                        <input v-model="pair.value" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.value', isZh)" />
-                        <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchFieldPair(bAct, pIdx)">&times;</button>
+                        <el-select v-model="pair.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)">
+                          <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
+                          <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
+                        </el-select>
+                        <el-input v-model="pair.value" class="meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.value', isZh)" />
+                        <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchFieldPair(bAct, pIdx)">&times;</el-button>
                       </div>
-                      <button class="meta-rule-editor__btn" type="button" data-action="add-parallel-branch-field" @click="addBranchFieldPair(bAct)">{{ automationLabel('parallelBranch.addField', isZh) }}</button>
+                      <el-button size="small" class="meta-rule-editor__btn" data-action="add-parallel-branch-field" @click="addBranchFieldPair(bAct)">{{ automationLabel('parallelBranch.addField', isZh) }}</el-button>
                     </template>
                     <template v-else-if="bAct.type === 'send_notification'">
-                      <input v-model="bAct.userId" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.userIds', isZh)" />
-                      <input v-model="bAct.message" class="meta-rule-editor__input meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.message', isZh)" />
+                      <el-input v-model="bAct.userId" class="meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.userIds', isZh)" />
+                      <el-input v-model="bAct.message" class="meta-rule-editor__input--sm" :placeholder="automationLabel('parallelBranch.message', isZh)" />
                     </template>
-                    <button class="meta-rule-editor__btn meta-rule-editor__btn--icon" type="button" @click="removeBranchAction(branch, aIdx)">&times;</button>
+                    <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchAction(branch, aIdx)">&times;</el-button>
                   </div>
-                  <button class="meta-rule-editor__btn" type="button" data-action="add-parallel-branch-action" @click="addBranchAction(branch)">{{ automationLabel('parallelBranch.addAction', isZh) }}</button>
+                  <el-button size="small" class="meta-rule-editor__btn" data-action="add-parallel-branch-action" @click="addBranchAction(branch)">{{ automationLabel('parallelBranch.addAction', isZh) }}</el-button>
                 </div>
-                <button class="meta-rule-editor__btn" type="button" data-action="add-parallel-branch" @click="addParallelBranch(action)">{{ automationLabel('parallelBranch.addBranch', isZh) }}</button>
+                <el-button size="small" class="meta-rule-editor__btn" data-action="add-parallel-branch" @click="addParallelBranch(action)">{{ automationLabel('parallelBranch.addBranch', isZh) }}</el-button>
                 <div v-if="parallelBranchKeyError" class="meta-rule-editor__error" data-field="parallel-branch-key-error">{{ parallelBranchKeyError }}</div>
                 <div v-if="parallelBranchActionError" class="meta-rule-editor__error" data-field="parallel-branch-action-error">{{ parallelBranchActionError }}</div>
               </template>
             </div>
           </div>
-          <button
+          <el-button
             v-if="draft.actions.length < 3"
+            size="small"
             class="meta-rule-editor__btn"
-            type="button"
             data-action="add-action"
             @click="addAction"
-          >{{ automationLabel('editor.addAction', isZh) }}</button>
+          >{{ automationLabel('editor.addAction', isZh) }}</el-button>
         </section>
     </div>
 
@@ -1228,19 +1248,18 @@
             {{ props.testRunState.message }}
           </div>
         </div>
-        <button class="meta-rule-editor__btn meta-rule-editor__btn--primary" type="button" :disabled="!canSave || saving" data-action="save" @click="onSave">
+        <el-button type="primary" class="meta-rule-editor__btn--primary" :disabled="!canSave || saving" data-action="save" @click="onSave">
           {{ saving ? automationLabel('editor.saving', isZh) : automationLabel('editor.save', isZh) }}
-        </button>
-        <button
+        </el-button>
+        <el-button
           class="meta-rule-editor__btn"
-          type="button"
           :disabled="saving || !props.rule?.id || props.testRunState?.status === 'running'"
           @click="onTestRun"
           data-action="test"
         >
           {{ props.testRunState?.status === 'running' ? automationLabel('testRun.running', isZh) : automationLabel('testRun.button', isZh) }}
-        </button>
-        <button class="meta-rule-editor__btn" type="button" @click="requestClose">{{ automationLabel('editor.cancel', isZh) }}</button>
+        </el-button>
+        <el-button class="meta-rule-editor__btn" @click="requestClose">{{ automationLabel('editor.cancel', isZh) }}</el-button>
       </div>
     </template>
   </el-drawer>
@@ -1248,7 +1267,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
-import { ElDrawer } from 'element-plus'
+import { ElButton, ElCheckbox, ElCheckboxGroup, ElDrawer, ElInput, ElOption, ElSelect } from 'element-plus'
 import { useLocale } from '../../composables/useLocale'
 import type { MultitableApiClient } from '../api/client'
 import type {
@@ -1765,14 +1784,12 @@ function onBooleanConditionValueChange(condition: AutomationCondition, value: st
   }
 }
 
-function onBooleanMultiSelectConditionValueChange(condition: AutomationCondition, event: Event) {
-  const select = event.target as HTMLSelectElement
-  condition.value = Array.from(select.selectedOptions).map((option) => option.value)
+function onBooleanMultiSelectConditionValueChange(condition: AutomationCondition, values: string[]) {
+  condition.value = [...values]
 }
 
-function onMultiSelectConditionValueChange(condition: AutomationCondition, event: Event) {
-  const select = event.target as HTMLSelectElement
-  condition.value = Array.from(select.selectedOptions).map((option) => option.value)
+function onMultiSelectConditionValueChange(condition: AutomationCondition, values: string[]) {
+  condition.value = [...values]
 }
 
 function isNumericConditionFieldType(fieldType: string | undefined): boolean {
@@ -2737,15 +2754,14 @@ function availableGroupDestinations(action: DraftAction) {
   return dingTalkDestinations.value.filter((destination) => !selected.has(destination.id))
 }
 
-function appendGroupDestination(action: DraftAction, select: HTMLSelectElement) {
-  const destinationId = select.value.trim()
+function appendGroupDestination(action: DraftAction, selected: string) {
+  const destinationId = selected.trim()
   if (!destinationId) return
   const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
   destinationIds.push(destinationId)
   action.config.destinationIds = Array.from(new Set(destinationIds))
   action.config.destinationId = action.config.destinationIds[0] || ''
   action.config.destinationPickerId = ''
-  select.value = ''
 }
 
 function removeGroupDestination(action: DraftAction, destinationId: string) {
@@ -2772,15 +2788,14 @@ function groupDestinationFieldPathSummary(value: unknown) {
   return labels.join(', ')
 }
 
-function appendGroupDestinationFieldPath(action: DraftAction, select: HTMLSelectElement) {
-  const fieldId = select.value.trim()
+function appendGroupDestinationFieldPath(action: DraftAction, selected: string) {
+  const fieldId = selected.trim()
   if (!fieldId) return
   const paths = parseRecipientFieldPathsText(action.config.destinationFieldPath)
   paths.push(fieldId)
   action.config.destinationFieldPath = Array.from(new Set(paths))
     .map((path) => `record.${path}`)
     .join(', ')
-  select.value = ''
 }
 
 function removeGroupDestinationFieldPath(action: DraftAction, path: string) {
@@ -2928,15 +2943,14 @@ function memberGroupRecipientFieldPathSummary(value: unknown) {
   return labels.join(', ')
 }
 
-function appendRecipientFieldPath(action: DraftAction, select: HTMLSelectElement) {
-  const fieldId = select.value.trim()
+function appendRecipientFieldPath(action: DraftAction, selected: string) {
+  const fieldId = selected.trim()
   if (!fieldId) return
   const paths = parseRecipientFieldPathsText(action.config.recipientFieldPath)
   paths.push(fieldId)
   action.config.recipientFieldPath = Array.from(new Set(paths))
     .map((path) => `record.${path}`)
     .join(', ')
-  select.value = ''
 }
 
 function removeRecipientFieldPath(action: DraftAction, path: string) {
@@ -2946,15 +2960,14 @@ function removeRecipientFieldPath(action: DraftAction, path: string) {
     .join(', ')
 }
 
-function appendMemberGroupRecipientFieldPath(action: DraftAction, select: HTMLSelectElement) {
-  const fieldId = select.value.trim()
+function appendMemberGroupRecipientFieldPath(action: DraftAction, selected: string) {
+  const fieldId = selected.trim()
   if (!fieldId) return
   const paths = parseRecipientFieldPathsText(action.config.memberGroupRecipientFieldPath)
   paths.push(fieldId)
   action.config.memberGroupRecipientFieldPath = Array.from(new Set(paths))
     .map((path) => `record.${path}`)
     .join(', ')
-  select.value = ''
 }
 
 function removeMemberGroupRecipientFieldPath(action: DraftAction, path: string) {
@@ -3412,7 +3425,7 @@ function onTestRun() {
 
 <style scoped>
 /* UF-4: the hand-rolled fixed overlay + panel + header/close chrome is now provided by el-drawer. */
-.meta-rule-editor__title { margin: 0; font-size: 16px; font-weight: 700; color: #0f172a; }
+.meta-rule-editor__title { margin: 0; font-size: 16px; font-weight: 700; color: var(--ms-text-1); }
 
 .meta-rule-editor__body {
   display: flex;
@@ -3420,10 +3433,10 @@ function onTestRun() {
   gap: 8px;
 }
 
-.meta-rule-editor__error { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: #fef2f2; color: #b91c1c; }
+.meta-rule-editor__error { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: var(--el-color-danger-light-9); color: var(--el-color-danger-dark-2); }
 
 .meta-rule-editor__section {
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--ms-border-light);
   border-radius: 10px;
   padding: 12px;
   display: flex;
@@ -3431,8 +3444,8 @@ function onTestRun() {
   gap: 8px;
 }
 
-.meta-rule-editor__section-title { font-size: 14px; font-weight: 600; color: #0f172a; }
-.meta-rule-editor__hint { font-weight: 400; color: #94a3b8; font-size: 12px; }
+.meta-rule-editor__section-title { font-size: 14px; font-weight: 600; color: var(--ms-text-1); }
+.meta-rule-editor__hint { font-weight: 400; color: var(--ms-text-3); font-size: 12px; }
 
 .meta-rule-editor__access-summary {
   border-radius: 8px;
@@ -3441,36 +3454,36 @@ function onTestRun() {
 
 .meta-rule-editor__access-audience {
   border-radius: 8px;
-  background: #f8fafc;
-  color: #475569;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
   padding: 6px 8px;
 }
 
 .meta-rule-editor__access-summary--public {
-  background: #fffbeb;
-  color: #92400e;
+  background: var(--ms-bg-card)beb;
+  color: var(--el-color-warning-dark-2);
 }
 
 .meta-rule-editor__access-summary--dingtalk {
-  background: #eff6ff;
-  color: #1d4ed8;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
 }
 
 .meta-rule-editor__access-summary--dingtalk_granted {
-  background: #ecfdf5;
-  color: #047857;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .meta-rule-editor__access-summary--unavailable {
-  background: #fef2f2;
-  color: #b91c1c;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger-dark-2);
 }
 
-.meta-rule-editor__label { font-size: 12px; font-weight: 600; color: #475569; margin-top: 4px; }
+.meta-rule-editor__label { font-size: 12px; font-weight: 600; color: var(--ms-text-2); margin-top: 4px; }
 
-.meta-rule-editor__hint--error { color: #b91c1c; }
+.meta-rule-editor__hint--error { color: var(--el-color-danger-dark-2); }
 
-.meta-rule-editor__hint--warning { color: #b45309; }
+.meta-rule-editor__hint--warning { color: var(--el-color-warning-dark-2); }
 
 .meta-rule-editor__test-run-feedback {
   flex: 1 1 280px;
@@ -3484,25 +3497,10 @@ function onTestRun() {
   font-weight: 600;
 }
 
-.meta-rule-editor__test-run-status--success { color: #15803d; }
-.meta-rule-editor__test-run-status--failed { color: #b91c1c; }
-.meta-rule-editor__test-run-status--skipped { color: #b45309; }
-.meta-rule-editor__test-run-status--running { color: #1d4ed8; }
-
-.meta-rule-editor__input,
-.meta-rule-editor__select,
-.meta-rule-editor__textarea {
-  width: 100%;
-  min-width: 0;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 13px;
-  background: #fff;
-  box-sizing: border-box;
-}
-
-.meta-rule-editor__textarea { resize: vertical; font-family: inherit; }
+.meta-rule-editor__test-run-status--success { color: var(--el-color-success-dark-2); }
+.meta-rule-editor__test-run-status--failed { color: var(--el-color-danger-dark-2); }
+.meta-rule-editor__test-run-status--skipped { color: var(--el-color-warning-dark-2); }
+.meta-rule-editor__test-run-status--running { color: var(--el-color-primary-dark-2); }
 
 .meta-rule-editor__input--sm,
 .meta-rule-editor__select--sm {
@@ -3533,13 +3531,13 @@ function onTestRun() {
   gap: 8px;
   align-items: center;
   padding: 8px;
-  border: 1px dashed #cbd5e1;
+  border: 1px dashed var(--ms-border);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .meta-rule-editor__group-label {
-  color: #475569;
+  color: var(--ms-text-2);
   font-size: 12px;
   font-weight: 600;
 }
@@ -3553,24 +3551,8 @@ function onTestRun() {
 
 .meta-rule-editor__conjunction { display: flex; gap: 4px; }
 
-.meta-rule-editor__toggle-btn {
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  padding: 4px 12px;
-  background: #fff;
-  font-size: 12px;
-  cursor: pointer;
-  color: #475569;
-}
-
-.meta-rule-editor__toggle-btn--active {
-  background: #2563eb;
-  border-color: #2563eb;
-  color: #fff;
-}
-
 .meta-rule-editor__action-row {
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
   padding: 10px;
   display: flex;
@@ -3584,7 +3566,7 @@ function onTestRun() {
   gap: 8px;
 }
 
-.meta-rule-editor__action-num { font-weight: 700; font-size: 14px; color: #2563eb; }
+.meta-rule-editor__action-num { font-weight: 700; font-size: 14px; color: var(--ms-color-primary); }
 
 .meta-rule-editor__action-btns { display: flex; gap: 4px; margin-left: auto; }
 
@@ -3613,24 +3595,24 @@ function onTestRun() {
 .meta-rule-editor__preset-label {
   font-size: 12px;
   font-weight: 600;
-  color: #475569;
+  color: var(--ms-text-2);
 }
 
 .meta-rule-editor__preview {
-  border: 1px solid #dbeafe;
-  background: #f8fbff;
+  border: 1px solid var(--el-color-primary-light-8);
+  background: var(--el-color-primary-light-9);
   border-radius: 8px;
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
   font-size: 12px;
-  color: #334155;
+  color: var(--ms-text-2);
 }
 
 .meta-rule-editor__preview-title {
   font-weight: 700;
-  color: #1e3a8a;
+  color: var(--el-color-primary-dark-2);
 }
 
 .meta-rule-editor__preview-line {
@@ -3646,13 +3628,6 @@ function onTestRun() {
 
 .meta-rule-editor__copy-btn {
   flex-shrink: 0;
-  border: 1px solid #bfdbfe;
-  background: #fff;
-  color: #1d4ed8;
-  border-radius: 999px;
-  padding: 2px 8px;
-  font-size: 11px;
-  cursor: pointer;
 }
 
 .meta-rule-editor__recipient-list {
@@ -3671,19 +3646,19 @@ function onTestRun() {
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--ms-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--ms-bg-card);
   padding: 8px 10px;
   cursor: pointer;
-  color: #0f172a;
+  color: var(--ms-text-1);
 }
 
 .meta-rule-editor__recipient-option span,
 .meta-rule-editor__recipient-chip span,
 .meta-rule-editor__recipient-chip em {
   font-size: 12px;
-  color: #64748b;
+  color: var(--ms-text-3);
   font-style: normal;
 }
 
@@ -3692,7 +3667,7 @@ function onTestRun() {
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: #475569;
+  color: var(--ms-text-2);
 }
 
 .meta-rule-editor__footer {
@@ -3701,19 +3676,4 @@ function onTestRun() {
   flex-wrap: wrap;
   gap: 8px;
 }
-
-.meta-rule-editor__btn {
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  padding: 6px 14px;
-  background: #fff;
-  color: #0f172a;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.meta-rule-editor__btn:disabled { opacity: 0.55; cursor: not-allowed; }
-.meta-rule-editor__btn--primary { border-color: #2563eb; background: #2563eb; color: #fff; }
-.meta-rule-editor__btn--danger { border-color: #ef4444; color: #b91c1c; }
-.meta-rule-editor__btn--icon { padding: 4px 8px; font-size: 14px; line-height: 1; }
 </style>

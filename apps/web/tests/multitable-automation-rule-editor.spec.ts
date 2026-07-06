@@ -9,6 +9,7 @@ import MetaAutomationRuleEditor from '../src/multitable/components/MetaAutomatio
 import { automationTriggerTypeLabel } from '../src/multitable/utils/meta-automation-labels'
 import { useLocale } from '../src/composables/useLocale'
 import type { AutomationRule, ConditionGroup } from '../src/multitable/types'
+import { epOptions, epSelectValue, epSelectValues, epSetSelect } from './helpers/epControls'
 
 const fields = [
   { id: 'fld_1', name: 'Status', type: 'select' },
@@ -260,9 +261,8 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()
 
-    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
-    triggerSelect.value = 'approval.task_created'
-    triggerSelect.dispatchEvent(new Event('change'))
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLElement
+    epSetSelect(triggerSelect, 'approval.task_created')
     await flushPromises()
 
     // templateId input rendered (text fallback without loaded templates) + block reason asks for a template
@@ -282,14 +282,14 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()
 
-    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLElement
     expect(triggerSelect).toBeTruthy()
     // record.created/updated/deleted + field.value_changed + form.submitted + schedule.cron/interval/date_field
     // + webhook.received (selectable since the signed inbound endpoint shipped, T1-2 #3489)
     // + approval.completed (T1-3 #3467 template-routed trigger)
     // + approval.task_created (A-2a one-tap lock #3594 pending-task trigger).
-    expect(triggerSelect.options.length).toBe(11)
-    const triggerValues = Array.from(triggerSelect.options).map((option) => option.value)
+    expect(epOptions(triggerSelect).length).toBe(11)
+    const triggerValues = epOptions(triggerSelect).map((option) => option.value)
     expect(triggerValues).toContain('webhook.received')
     expect(triggerValues).toContain('approval.completed')
     expect(triggerValues).toContain('approval.task_created')
@@ -300,7 +300,9 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()
 
-    const text = container.textContent ?? ''
+    // UF-4 shape adaptation: el-select option labels live in teleported dropdown lists,
+    // so the zh-CN sweep scans the document (the container's superset), not just the container.
+    const text = document.body.textContent ?? ''
     expect(text).toContain('新建自动化规则')
     expect(text).toContain('名称')
     expect(text).toContain('触发器')
@@ -314,19 +316,18 @@ describe('MetaAutomationRuleEditor', () => {
     const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
     expect(nameInput.placeholder).toBe('自动化名称')
 
-    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
-    expect(triggerSelect.options[0]?.value).toBe('record.created')
-    expect(triggerSelect.options[0]?.textContent?.trim()).toBe('当记录创建时')
-    expect(triggerSelect.options[3]?.value).toBe('field.value_changed')
-    expect(triggerSelect.options[3]?.textContent?.trim()).toBe('当字段值变化时')
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLElement
+    expect(epOptions(triggerSelect)[0]?.value).toBe('record.created')
+    expect(epOptions(triggerSelect)[0]?.textContent?.trim()).toBe('当记录创建时')
+    expect(epOptions(triggerSelect)[3]?.value).toBe('field.value_changed')
+    expect(epOptions(triggerSelect)[3]?.textContent?.trim()).toBe('当字段值变化时')
 
-    triggerSelect.value = 'schedule.cron'
-    triggerSelect.dispatchEvent(new Event('change'))
+    epSetSelect(triggerSelect, 'schedule.cron')
     await flushPromises()
 
-    const cronSelect = container.querySelector('[data-field="cronPreset"]') as HTMLSelectElement
-    expect(cronSelect.options[0]?.value).toBe('*/5 * * * *')
-    expect(cronSelect.options[0]?.textContent?.trim()).toBe('每 5 分钟')
+    const cronSelect = container.querySelector('[data-field="cronPreset"]') as HTMLElement
+    expect(epOptions(cronSelect)[0]?.value).toBe('*/5 * * * *')
+    expect(epOptions(cronSelect)[0]?.textContent?.trim()).toBe('每 5 分钟')
   })
 
   it('localizes condition builder labels and placeholders without translating field options', async () => {
@@ -338,22 +339,20 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    expect(fieldSelect.options[0]?.textContent?.trim()).toBe('-- 字段 --')
-    expect(fieldSelect.options[1]?.textContent?.trim()).toBe('Status')
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    expect(epOptions(fieldSelect)[0]?.textContent?.trim()).toBe('-- 字段 --')
+    expect(epOptions(fieldSelect)[1]?.textContent?.trim()).toBe('Status')
 
-    fieldSelect.value = 'fld_score'
-    fieldSelect.dispatchEvent(new Event('change'))
+    epSetSelect(fieldSelect, 'fld_score')
     await flushPromises()
 
-    const operatorSelect = Array.from(conditionRow.querySelectorAll('select'))[1] as HTMLSelectElement
-    expect(operatorSelect.options[0]?.value).toBe('equals')
-    expect(operatorSelect.options[0]?.textContent?.trim()).toBe('等于')
-    operatorSelect.value = 'in'
-    operatorSelect.dispatchEvent(new Event('change'))
+    const operatorSelect = Array.from(conditionRow.querySelectorAll('.el-select'))[1] as HTMLElement
+    expect(epOptions(operatorSelect)[0]?.value).toBe('equals')
+    expect(epOptions(operatorSelect)[0]?.textContent?.trim()).toBe('等于')
+    epSetSelect(operatorSelect, 'in')
     await flushPromises()
 
-    const valueInput = conditionRow.querySelector('input') as HTMLInputElement
+    const valueInput = conditionRow.querySelector('.el-input__inner') as HTMLInputElement
     expect(valueInput.placeholder).toBe('逗号分隔的值')
   })
 
@@ -362,12 +361,11 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    expect(actionSelect.options[0]?.value).toBe('update_record')
-    expect(actionSelect.options[0]?.textContent?.trim()).toBe('更新记录')
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    expect(epOptions(actionSelect)[0]?.value).toBe('update_record')
+    expect(epOptions(actionSelect)[0]?.textContent?.trim()).toBe('更新记录')
 
-    actionSelect.value = 'send_email'
-    actionSelect.dispatchEvent(new Event('change'))
+    epSetSelect(actionSelect, 'send_email')
     await flushPromises()
 
     const text = container.textContent ?? ''
@@ -387,8 +385,8 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    const actionValues = Array.from(actionSelect.options).map((option) => option.value)
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    const actionValues = epOptions(actionSelect).map((option) => option.value)
     expect(actionValues).toContain('update_record')
     expect(actionValues).toContain('create_record')
     expect(actionValues).toContain('send_webhook')
@@ -399,7 +397,7 @@ describe('MetaAutomationRuleEditor', () => {
     expect(actionValues).toContain('wait_for_callback')
     // rank 8: lock_record is now a complete contract → re-exposed as a selectable, enabled action.
     expect(actionValues).toContain('lock_record')
-    const lockOption = Array.from(actionSelect.options).find((option) => option.value === 'lock_record')
+    const lockOption = epOptions(actionSelect).find((option) => option.value === 'lock_record')
     expect(lockOption?.disabled).toBe(false)
   })
 
@@ -411,13 +409,12 @@ describe('MetaAutomationRuleEditor', () => {
     ;(container.querySelector('[data-field="name"]') as HTMLInputElement).value = 'Delete trigger record'
     ;(container.querySelector('[data-field="name"]') as HTMLInputElement).dispatchEvent(new Event('input'))
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    const deleteOption = Array.from(actionSelect.options).find((option) => option.value === 'delete_record')
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    const deleteOption = epOptions(actionSelect).find((option) => option.value === 'delete_record')
     expect(deleteOption).toBeTruthy()
     expect(deleteOption?.disabled).toBe(false)
 
-    actionSelect.value = 'delete_record'
-    actionSelect.dispatchEvent(new Event('change'))
+    epSetSelect(actionSelect, 'delete_record')
     await flushPromises()
 
     expect(container.querySelector('[data-action-config="delete_record"]')).toBeTruthy()
@@ -429,7 +426,7 @@ describe('MetaAutomationRuleEditor', () => {
     saveBtn.click()
     expect(saved).not.toHaveBeenCalled()
 
-    const ack = container.querySelector('[data-field="deleteRecordAck"]') as HTMLInputElement
+    const ack = container.querySelector('[data-field="deleteRecordAck"] input') as HTMLInputElement
     expect(ack.checked).toBe(false)
     ack.checked = true
     ack.dispatchEvent(new Event('change'))
@@ -458,9 +455,9 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    const ack = container.querySelector('[data-field="deleteRecordAck"]') as HTMLInputElement
-    expect(actionSelect.value).toBe('delete_record')
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    const ack = container.querySelector('[data-field="deleteRecordAck"] input') as HTMLInputElement
+    expect(epSelectValue(actionSelect)).toBe('delete_record')
     expect(ack.checked).toBe(true)
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
@@ -486,9 +483,9 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    const lockOption = Array.from(actionSelect.options).find((option) => option.value === 'lock_record')
-    expect(actionSelect.value).toBe('lock_record')
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    const lockOption = epOptions(actionSelect).find((option) => option.value === 'lock_record')
+    expect(epSelectValue(actionSelect)).toBe('lock_record')
     expect(lockOption).toBeTruthy()
     // rank 8: lock_record is a complete contract → the existing rule's option stays selectable & enabled
     // (previously hidden behind the #2278 stop-gap that disabled the then-broken action).
@@ -545,9 +542,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     expect(container.textContent).toContain('消息预设')
@@ -600,9 +596,8 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()
 
-    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
-    triggerSelect.value = 'field.value_changed'
-    triggerSelect.dispatchEvent(new Event('change'))
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLElement
+    epSetSelect(triggerSelect, 'field.value_changed')
     await flushPromises()
 
     const fieldSelect = container.querySelector('[data-field="triggerFieldId"]')
@@ -613,9 +608,8 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()
 
-    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
-    triggerSelect.value = 'schedule.cron'
-    triggerSelect.dispatchEvent(new Event('change'))
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLElement
+    epSetSelect(triggerSelect, 'schedule.cron')
     await flushPromises()
 
     const cronSelect = container.querySelector('[data-field="cronPreset"]')
@@ -626,9 +620,8 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()
 
-    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
-    triggerSelect.value = 'schedule.date_field'
-    triggerSelect.dispatchEvent(new Event('change'))
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLElement
+    epSetSelect(triggerSelect, 'schedule.date_field')
     await flushPromises()
 
     expect(container.querySelector('[data-field="dateFieldId"]')).toBeTruthy()
@@ -645,9 +638,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.value = 'On form submit'
     nameInput.dispatchEvent(new Event('input'))
 
-    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
-    triggerSelect.value = 'form.submitted'
-    triggerSelect.dispatchEvent(new Event('change'))
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLElement
+    epSetSelect(triggerSelect, 'form.submitted')
     await flushPromises()
 
     // form.submitted is config-less — none of the type-specific config sub-forms render for it.
@@ -668,8 +660,8 @@ describe('MetaAutomationRuleEditor', () => {
     } as AutomationRule
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule })
     await flushPromises()
-    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
-    expect(triggerSelect.value).toBe('form.submitted')
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLElement
+    expect(epSelectValue(triggerSelect)).toBe('form.submitted')
   })
 
   it('exposes start_approval as a selectable action with template + form-data mapping, and saves it', async () => {
@@ -679,9 +671,9 @@ describe('MetaAutomationRuleEditor', () => {
     const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
     nameInput.value = 'start approval'; nameInput.dispatchEvent(new Event('input'))
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    expect(Array.from(actionSelect.options).map((o) => o.value)).toContain('start_approval')
-    actionSelect.value = 'start_approval'; actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    expect(epOptions(actionSelect).map((o) => o.value)).toContain('start_approval')
+    epSetSelect(actionSelect, 'start_approval')
     await flushPromises()
 
     // No client injected → the template picker degrades to a free-text input (the rbac/empty fallback).
@@ -694,9 +686,9 @@ describe('MetaAutomationRuleEditor', () => {
     addBtn.click()
     await flushPromises()
     const keyInput = cfg.querySelector('[data-field="approvalMappingKey"]') as HTMLInputElement
-    const valSelect = cfg.querySelector('[data-field="approvalMappingValue"]') as HTMLSelectElement
+    const valSelect = cfg.querySelector('[data-field="approvalMappingValue"]') as HTMLElement
     keyInput.value = 'amount'; keyInput.dispatchEvent(new Event('input'))
-    valSelect.value = 'fld_2'; valSelect.dispatchEvent(new Event('change'))
+    epSetSelect(valSelect, 'fld_2')
     await flushPromises()
 
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
@@ -720,10 +712,10 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
     await flushPromises()
     // form.submitted trigger + start_approval action coexist; the mapping disassembled into an editable row.
-    expect((container.querySelector('[data-field="triggerType"]') as HTMLSelectElement).value).toBe('form.submitted')
+    expect(epSelectValue(container.querySelector('[data-field="triggerType"]'))).toBe('form.submitted')
     expect((container.querySelector('[data-field="approvalTemplateId"]') as HTMLInputElement).value).toBe('tmpl_9')
     expect((container.querySelector('[data-field="approvalMappingKey"]') as HTMLInputElement).value).toBe('amount')
-    expect((container.querySelector('[data-field="approvalMappingValue"]') as HTMLSelectElement).value).toBe('fld_2')
+    expect(epSelectValue(container.querySelector('[data-field="approvalMappingValue"]'))).toBe('fld_2')
 
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
     await flushPromises()
@@ -754,8 +746,8 @@ describe('MetaAutomationRuleEditor', () => {
   async function selectStartApproval(container: HTMLElement) {
     const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
     nameInput.value = 'start approval'; nameInput.dispatchEvent(new Event('input'))
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'start_approval'; actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'start_approval')
     await flushPromises()
     const tmpl = container.querySelector('[data-field="approvalTemplateId"]') as HTMLInputElement
     tmpl.value = 'tmpl_1'; tmpl.dispatchEvent(new Event('input'))
@@ -767,21 +759,21 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
     await selectStartApproval(container)
 
-    const statusSel = container.querySelector('[data-field="resultWritebackStatusField"]') as HTMLSelectElement
-    const approverSel = container.querySelector('[data-field="resultWritebackApproverField"]') as HTMLSelectElement
-    const completedSel = container.querySelector('[data-field="resultWritebackCompletedAtField"]') as HTMLSelectElement
+    const statusSel = container.querySelector('[data-field="resultWritebackStatusField"]') as HTMLElement
+    const approverSel = container.querySelector('[data-field="resultWritebackApproverField"]') as HTMLElement
+    const completedSel = container.querySelector('[data-field="resultWritebackCompletedAtField"]') as HTMLElement
     expect(statusSel).not.toBeNull()
     expect(approverSel).not.toBeNull()
     expect(completedSel).not.toBeNull()
 
     // status hint = string / longText / select → Status(select), Name(string), Priority(select); plus "(not written)".
-    const statusVals = Array.from(statusSel.options).map((o) => o.value)
+    const statusVals = epOptions(statusSel).map((o) => o.value)
     expect(statusVals).toContain('')
     expect(statusVals).toEqual(expect.arrayContaining(['fld_1', 'fld_2', 'fld_priority']))
     expect(statusVals).not.toContain('fld_score') // number is not a status-compatible hint
     // approver hint = string / longText → only Name(string).
-    expect(Array.from(approverSel.options).map((o) => o.value)).toEqual(expect.arrayContaining(['', 'fld_2']))
-    expect(Array.from(approverSel.options).map((o) => o.value)).not.toContain('fld_1')
+    expect(epOptions(approverSel).map((o) => o.value)).toEqual(expect.arrayContaining(['', 'fld_2']))
+    expect(epOptions(approverSel).map((o) => o.value)).not.toContain('fld_1')
   })
 
   it('W7: OMITS config.resultWriteback when no writeback picker is set (omit-when-empty, not an invalid {})', async () => {
@@ -800,10 +792,10 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
     await flushPromises()
     await selectStartApproval(container)
-    const statusSel = container.querySelector('[data-field="resultWritebackStatusField"]') as HTMLSelectElement
-    const approverSel = container.querySelector('[data-field="resultWritebackApproverField"]') as HTMLSelectElement
-    statusSel.value = 'fld_1'; statusSel.dispatchEvent(new Event('change'))
-    approverSel.value = 'fld_2'; approverSel.dispatchEvent(new Event('change'))
+    const statusSel = container.querySelector('[data-field="resultWritebackStatusField"]') as HTMLElement
+    const approverSel = container.querySelector('[data-field="resultWritebackApproverField"]') as HTMLElement
+    epSetSelect(statusSel, 'fld_1')
+    epSetSelect(approverSel, 'fld_2')
     await flushPromises()
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
     await flushPromises()
@@ -827,7 +819,7 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
     await flushPromises()
     // draftConfigFromAction backfilled the pickers from the loaded config.
-    expect((container.querySelector('[data-field="resultWritebackStatusField"]') as HTMLSelectElement).value).toBe('fld_1')
+    expect(epSelectValue(container.querySelector('[data-field="resultWritebackStatusField"]'))).toBe('fld_1')
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
     await flushPromises()
     const cfg = saved.mock.calls[0][0].actions[0].config
@@ -859,14 +851,14 @@ describe('MetaAutomationRuleEditor', () => {
     // option → select.value falls back to '' → these go RED. (The save assertion below passes via Vue v-model
     // binding-persistence regardless of P2 — Vue never clears a bound value just because it left the options —
     // so the DOM is the genuine P2 regression lever; see the design-lock §3 P2 / §4 reconciliation.)
-    const statusSel = container.querySelector('[data-field="resultWritebackStatusField"]') as HTMLSelectElement
-    const approverSel = container.querySelector('[data-field="resultWritebackApproverField"]') as HTMLSelectElement
-    expect(statusSel.value).toBe('fld_score')
-    const statusOpt = Array.from(statusSel.options).find((o) => o.value === 'fld_score')
+    const statusSel = container.querySelector('[data-field="resultWritebackStatusField"]') as HTMLElement
+    const approverSel = container.querySelector('[data-field="resultWritebackApproverField"]') as HTMLElement
+    expect(epSelectValue(statusSel)).toBe('fld_score')
+    const statusOpt = epOptions(statusSel).find((o) => o.value === 'fld_score')
     expect(statusOpt).toBeTruthy()
-    expect(statusOpt?.getAttribute('data-marked')).toBe('true') // appended as the marked current-value option
-    expect(approverSel.value).toBe('fld_gone')
-    expect(Array.from(approverSel.options).some((o) => o.value === 'fld_gone')).toBe(true)
+    expect(statusOpt?.el.getAttribute('data-marked')).toBe('true') // appended as the marked current-value option
+    expect(epSelectValue(approverSel)).toBe('fld_gone')
+    expect(epOptions(approverSel).some((o) => o.value === 'fld_gone')).toBe(true)
 
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
     await flushPromises()
@@ -904,28 +896,25 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect, operatorSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
+    const [fieldSelect, operatorSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
 
-    fieldSelect.value = 'fld_2'
-    fieldSelect.dispatchEvent(new Event('change'))
+    epSetSelect(fieldSelect, 'fld_2')
     await flushPromises()
 
-    expect(Array.from(operatorSelect.options).map((option) => option.value)).toContain('contains')
-    expect(Array.from(operatorSelect.options).map((option) => option.value)).not.toContain('greater_than')
+    expect(epOptions(operatorSelect).map((option) => option.value)).toContain('contains')
+    expect(epOptions(operatorSelect).map((option) => option.value)).not.toContain('greater_than')
 
-    operatorSelect.value = 'contains'
-    operatorSelect.dispatchEvent(new Event('change'))
+    epSetSelect(operatorSelect, 'contains')
     await flushPromises()
-    expect(operatorSelect.value).toBe('contains')
+    expect(epSelectValue(operatorSelect)).toBe('contains')
 
-    fieldSelect.value = 'fld_score'
-    fieldSelect.dispatchEvent(new Event('change'))
+    epSetSelect(fieldSelect, 'fld_score')
     await flushPromises()
 
-    const numericOperatorValues = Array.from(operatorSelect.options).map((option) => option.value)
+    const numericOperatorValues = epOptions(operatorSelect).map((option) => option.value)
     expect(numericOperatorValues).toContain('greater_than')
     expect(numericOperatorValues).not.toContain('contains')
-    expect(operatorSelect.value).toBe('equals')
+    expect(epSelectValue(operatorSelect)).toBe('equals')
   })
 
   it('limits attachment field conditions to empty-state operators', async () => {
@@ -941,14 +930,13 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect, operatorSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    fieldSelect.value = 'fld_files'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const [fieldSelect, operatorSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(fieldSelect, 'fld_files')
     await flushPromises()
 
-    expect(Array.from(operatorSelect.options).map((option) => option.value)).toEqual(['is_empty', 'is_not_empty'])
-    expect(operatorSelect.value).toBe('is_empty')
-    expect(conditionRow.querySelector('input')).toBeNull()
+    expect(epOptions(operatorSelect).map((option) => option.value)).toEqual(['is_empty', 'is_not_empty'])
+    expect(epSelectValue(operatorSelect)).toBe('is_empty')
+    expect(conditionRow.querySelector('.el-input__inner')).toBeNull()
 
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
     await flushPromises()
@@ -969,7 +957,7 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.value = 'job rule'
     nameInput.dispatchEvent(new Event('input'))
 
-    const toggle = container.querySelector('[data-field="executionMode"]') as HTMLInputElement
+    const toggle = container.querySelector('[data-field="executionModeToggle"] input') as HTMLInputElement
     expect(toggle).not.toBeNull()
     expect(toggle.checked).toBe(false) // default off — existing rules unaffected
 
@@ -994,7 +982,7 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
     await flushPromises()
 
-    const toggle = container.querySelector('[data-field="executionMode"]') as HTMLInputElement
+    const toggle = container.querySelector('[data-field="executionModeToggle"] input') as HTMLInputElement
     expect(toggle.checked).toBe(true) // draftFromRule reflected the saved opt-in
 
     toggle.checked = false
@@ -1017,20 +1005,19 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.value = 'wait rule'
     nameInput.dispatchEvent(new Event('input'))
 
-    const toggle = container.querySelector('[data-field="executionMode"]') as HTMLInputElement
+    const toggle = container.querySelector('[data-field="executionModeToggle"] input') as HTMLInputElement
     expect(toggle.checked).toBe(false) // off by default
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    expect(Array.from(actionSelect.options).map((o) => o.value)).toContain('wait_for_callback')
-    actionSelect.value = 'wait_for_callback'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    expect(epOptions(actionSelect).map((o) => o.value)).toContain('wait_for_callback')
+    epSetSelect(actionSelect, 'wait_for_callback')
     await flushPromises()
 
     // Info-only: the hint renders and there are ZERO param inputs (no webhook-URL/timer/manual-task fields).
     const cfg = container.querySelector('[data-action-config="wait_for_callback"]') as HTMLElement
     expect(cfg).not.toBeNull()
     expect(container.querySelector('[data-field="wait-for-callback-hint"]')).not.toBeNull()
-    expect(cfg.querySelectorAll('input, textarea, select').length).toBe(0)
+    expect(cfg.querySelectorAll('input, textarea, .el-select').length).toBe(0)
 
     // BLOCKING FIX: selecting wait_for_callback auto-enables AND LOCKS workflow_job_v1 (can't turn it off
     // into the runtime-fail-closed state).
@@ -1056,7 +1043,7 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
     await flushPromises()
 
-    const toggle = container.querySelector('[data-field="executionMode"]') as HTMLInputElement
+    const toggle = container.querySelector('[data-field="executionModeToggle"] input') as HTMLInputElement
     expect(toggle.checked).toBe(true) // forced on
     expect(toggle.disabled).toBe(true) // locked
 
@@ -1080,12 +1067,11 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    fieldSelect.value = 'fld_score'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(fieldSelect, 'fld_score')
     await flushPromises()
 
-    const valueInput = conditionRow.querySelector('input') as HTMLInputElement
+    const valueInput = conditionRow.querySelector('.el-input__inner') as HTMLInputElement
     expect(valueInput.type).toBe('number')
     valueInput.value = '42.5'
     valueInput.dispatchEvent(new Event('input'))
@@ -1114,17 +1100,15 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    fieldSelect.value = 'fld_score'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(fieldSelect, 'fld_score')
     await flushPromises()
 
-    const operatorSelect = Array.from(conditionRow.querySelectorAll('select'))[1] as HTMLSelectElement
-    operatorSelect.value = 'in'
-    operatorSelect.dispatchEvent(new Event('change'))
+    const operatorSelect = Array.from(conditionRow.querySelectorAll('.el-select'))[1] as HTMLElement
+    epSetSelect(operatorSelect, 'in')
     await flushPromises()
 
-    const valueInput = conditionRow.querySelector('input') as HTMLInputElement
+    const valueInput = conditionRow.querySelector('.el-input__inner') as HTMLInputElement
     expect(valueInput.type).toBe('text')
     expect(valueInput.placeholder).toBe('Comma-separated values')
     valueInput.value = '1, 2.5, -3'
@@ -1154,17 +1138,15 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    fieldSelect.value = 'fld_score'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(fieldSelect, 'fld_score')
     await flushPromises()
 
-    const operatorSelect = Array.from(conditionRow.querySelectorAll('select'))[1] as HTMLSelectElement
-    operatorSelect.value = 'not_in'
-    operatorSelect.dispatchEvent(new Event('change'))
+    const operatorSelect = Array.from(conditionRow.querySelectorAll('.el-select'))[1] as HTMLElement
+    epSetSelect(operatorSelect, 'not_in')
     await flushPromises()
 
-    const valueInput = conditionRow.querySelector('input') as HTMLInputElement
+    const valueInput = conditionRow.querySelector('.el-input__inner') as HTMLInputElement
     valueInput.value = '1, nope'
     valueInput.dispatchEvent(new Event('input'))
     await flushPromises()
@@ -1190,15 +1172,13 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    fieldSelect.value = 'fld_done'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(fieldSelect, 'fld_done')
     await flushPromises()
 
-    const valueSelect = conditionRow.querySelector('[data-condition-value="boolean"]') as HTMLSelectElement
+    const valueSelect = conditionRow.querySelector('[data-condition-value="boolean"]') as HTMLElement
     expect(valueSelect).toBeTruthy()
-    valueSelect.value = 'false'
-    valueSelect.dispatchEvent(new Event('change'))
+    epSetSelect(valueSelect, 'false')
     await flushPromises()
 
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
@@ -1224,22 +1204,22 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    fieldSelect.value = 'fld_done'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(fieldSelect, 'fld_done')
     await flushPromises()
 
-    const operatorSelect = Array.from(conditionRow.querySelectorAll('select'))[1] as HTMLSelectElement
-    operatorSelect.value = 'in'
-    operatorSelect.dispatchEvent(new Event('change'))
+    const operatorSelect = Array.from(conditionRow.querySelectorAll('.el-select'))[1] as HTMLElement
+    epSetSelect(operatorSelect, 'in')
     await flushPromises()
 
-    const valueSelect = conditionRow.querySelector('[data-condition-value="boolean-multi-select"]') as HTMLSelectElement
-    expect(valueSelect.multiple).toBe(true)
-    valueSelect.options[0].selected = true
-    valueSelect.options[1].selected = true
-    valueSelect.dispatchEvent(new Event('change'))
+    const valueSelect = conditionRow.querySelector('[data-condition-value="boolean-multi-select"]') as HTMLElement
+    // UF-4 shape adaptation: toggle the multi-select's options by clicking them (el-select
+    // multiple), instead of flipping native option.selected + dispatching change.
+    epSetSelect(valueSelect, epOptions(valueSelect)[0].value)
     await flushPromises()
+    epSetSelect(valueSelect, epOptions(valueSelect)[1].value)
+    await flushPromises()
+    expect(epSelectValues(valueSelect)).toHaveLength(2)
 
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
     await flushPromises()
@@ -1264,18 +1244,18 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    fieldSelect.value = 'fld_done'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(fieldSelect, 'fld_done')
     await flushPromises()
 
-    const operatorSelect = Array.from(conditionRow.querySelectorAll('select'))[1] as HTMLSelectElement
-    operatorSelect.value = 'not_in'
-    operatorSelect.dispatchEvent(new Event('change'))
+    const operatorSelect = Array.from(conditionRow.querySelectorAll('.el-select'))[1] as HTMLElement
+    epSetSelect(operatorSelect, 'not_in')
     await flushPromises()
 
-    const valueSelect = conditionRow.querySelector('[data-condition-value="boolean-multi-select"]') as HTMLSelectElement
-    expect(valueSelect.multiple).toBe(true)
+    const valueSelect = conditionRow.querySelector('[data-condition-value="boolean-multi-select"]') as HTMLElement
+    // UF-4 shape adaptation: `multiple` is a native-select property; assert the el-select
+    // renders with no selected values instead (the empty state under test).
+    expect(epSelectValues(valueSelect)).toHaveLength(0)
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
     expect(saveBtn.disabled).toBe(true)
@@ -1298,15 +1278,13 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    fieldSelect.value = 'fld_priority'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(fieldSelect, 'fld_priority')
     await flushPromises()
 
-    const valueSelect = conditionRow.querySelector('[data-condition-value="select"]') as HTMLSelectElement
-    expect(Array.from(valueSelect.options).map((option) => option.textContent)).toEqual(['-- value --', 'Low', 'High'])
-    valueSelect.value = 'high'
-    valueSelect.dispatchEvent(new Event('change'))
+    const valueSelect = conditionRow.querySelector('[data-condition-value="select"]') as HTMLElement
+    expect(epOptions(valueSelect).map((option) => option.textContent)).toEqual(['-- value --', 'Low', 'High'])
+    epSetSelect(valueSelect, 'high')
     await flushPromises()
 
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
@@ -1349,28 +1327,24 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect, operatorSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    fieldSelect.value = 'fld_priority'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const [fieldSelect, operatorSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(fieldSelect, 'fld_priority')
     await flushPromises()
 
-    const priorityValueSelect = conditionRow.querySelector('[data-condition-value="select"]') as HTMLSelectElement
-    priorityValueSelect.value = 'high'
-    priorityValueSelect.dispatchEvent(new Event('change'))
+    const priorityValueSelect = conditionRow.querySelector('[data-condition-value="select"]') as HTMLElement
+    epSetSelect(priorityValueSelect, 'high')
     await flushPromises()
     expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(false)
 
-    fieldSelect.value = 'fld_stage'
-    fieldSelect.dispatchEvent(new Event('change'))
+    epSetSelect(fieldSelect, 'fld_stage')
     await flushPromises()
 
-    const stageValueSelect = conditionRow.querySelector('[data-condition-value="select"]') as HTMLSelectElement
-    expect(operatorSelect.value).toBe('equals')
-    expect(stageValueSelect.value).toBe('')
+    const stageValueSelect = conditionRow.querySelector('[data-condition-value="select"]') as HTMLElement
+    expect(epSelectValue(operatorSelect)).toBe('equals')
+    expect(epSelectValue(stageValueSelect)).toBe('')
     expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(true)
 
-    stageValueSelect.value = 'todo'
-    stageValueSelect.dispatchEvent(new Event('change'))
+    epSetSelect(stageValueSelect, 'todo')
     await flushPromises()
 
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
@@ -1396,20 +1370,19 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    fieldSelect.value = 'fld_tags'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(fieldSelect, 'fld_tags')
     await flushPromises()
 
-    const operatorSelect = Array.from(conditionRow.querySelectorAll('select'))[1] as HTMLSelectElement
-    operatorSelect.value = 'in'
-    operatorSelect.dispatchEvent(new Event('change'))
+    const operatorSelect = Array.from(conditionRow.querySelectorAll('.el-select'))[1] as HTMLElement
+    epSetSelect(operatorSelect, 'in')
     await flushPromises()
 
-    const valueSelect = conditionRow.querySelector('[data-condition-value="multi-select"]') as HTMLSelectElement
-    valueSelect.options[0].selected = true
-    valueSelect.options[1].selected = true
-    valueSelect.dispatchEvent(new Event('change'))
+    const valueSelect = conditionRow.querySelector('[data-condition-value="multi-select"]') as HTMLElement
+    // UF-4 shape adaptation: toggle the multi-select's options by clicking them (el-select multiple).
+    epSetSelect(valueSelect, epOptions(valueSelect)[0].value)
+    await flushPromises()
+    epSetSelect(valueSelect, epOptions(valueSelect)[1].value)
     await flushPromises()
 
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
@@ -1435,12 +1408,11 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    fieldSelect.value = 'fld_due'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(fieldSelect, 'fld_due')
     await flushPromises()
 
-    const valueInput = conditionRow.querySelector('input') as HTMLInputElement
+    const valueInput = conditionRow.querySelector('.el-input__inner') as HTMLInputElement
     expect(valueInput.type).toBe('date')
     valueInput.value = '2026-05-11'
     valueInput.dispatchEvent(new Event('input'))
@@ -1474,20 +1446,18 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
-    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    fieldSelect.value = 'fld_1'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const [fieldSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(fieldSelect, 'fld_1')
     await flushPromises()
 
-    const operatorSelect = Array.from(conditionRow.querySelectorAll('select'))[1] as HTMLSelectElement
-    operatorSelect.value = 'in'
-    operatorSelect.dispatchEvent(new Event('change'))
+    const operatorSelect = Array.from(conditionRow.querySelectorAll('.el-select'))[1] as HTMLElement
+    epSetSelect(operatorSelect, 'in')
     await flushPromises()
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
     expect(saveBtn.disabled).toBe(true)
 
-    const valueInput = conditionRow.querySelector('input') as HTMLInputElement
+    const valueInput = conditionRow.querySelector('.el-input__inner') as HTMLInputElement
     valueInput.value = 'Ready, Blocked'
     valueInput.dispatchEvent(new Event('input'))
     await flushPromises()
@@ -1532,7 +1502,7 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.querySelector('[data-condition-group-path="1"]')).toBeTruthy()
 
     const nestedNameRow = container.querySelector('[data-condition-path="1-0"]') as HTMLElement
-    const nestedValueInput = nestedNameRow.querySelector('input') as HTMLInputElement
+    const nestedValueInput = nestedNameRow.querySelector('.el-input__inner') as HTMLInputElement
     nestedValueInput.value = 'Enterprise'
     nestedValueInput.dispatchEvent(new Event('input'))
     await flushPromises()
@@ -1574,11 +1544,10 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const rootConditionRow = container.querySelector('[data-condition-path="0"]') as HTMLElement
-    const rootSelects = Array.from(rootConditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    rootSelects[0].value = 'fld_1'
-    rootSelects[0].dispatchEvent(new Event('change'))
+    const rootSelects = Array.from(rootConditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(rootSelects[0], 'fld_1')
     await flushPromises()
-    const rootValueInput = rootConditionRow.querySelector('input') as HTMLInputElement
+    const rootValueInput = rootConditionRow.querySelector('.el-input__inner') as HTMLInputElement
     rootValueInput.value = 'Ready'
     rootValueInput.dispatchEvent(new Event('input'))
 
@@ -1591,14 +1560,12 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     const nestedConditionRow = container.querySelector('[data-condition-path="1-0"]') as HTMLElement
-    const nestedSelects = Array.from(nestedConditionRow.querySelectorAll('select')) as HTMLSelectElement[]
-    nestedSelects[0].value = 'fld_2'
-    nestedSelects[0].dispatchEvent(new Event('change'))
+    const nestedSelects = Array.from(nestedConditionRow.querySelectorAll('.el-select')) as HTMLElement[]
+    epSetSelect(nestedSelects[0], 'fld_2')
     await flushPromises()
-    nestedSelects[1].value = 'contains'
-    nestedSelects[1].dispatchEvent(new Event('change'))
+    epSetSelect(nestedSelects[1], 'contains')
     await flushPromises()
-    const nestedValueInput = nestedConditionRow.querySelector('input') as HTMLInputElement
+    const nestedValueInput = nestedConditionRow.querySelector('.el-input__inner') as HTMLInputElement
     nestedValueInput.value = 'VIP'
     nestedValueInput.dispatchEvent(new Event('input'))
     await flushPromises()
@@ -1832,9 +1799,11 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'notify'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    // UF-4 shape adaptation: the native test assigned .value = 'notify', which is not one of the
+    // selectable options (the assignment blanked the select); with el-select we change the draft
+    // action through a real option — any non-DingTalk type exercises the same guard.
+    epSetSelect(actionSelect, 'send_notification')
     await flushPromises()
 
     ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
@@ -1926,8 +1895,8 @@ describe('MetaAutomationRuleEditor', () => {
     const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
     expect(nameInput.value).toBe('Existing')
 
-    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
-    expect(triggerSelect.value).toBe('record.updated')
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLElement
+    expect(epSelectValue(triggerSelect)).toBe('record.updated')
   })
 
   it('emits normalized send_email action payload', async () => {
@@ -1944,9 +1913,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.value = 'Email owner'
     nameInput.dispatchEvent(new Event('input'))
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_email'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_email')
     await flushPromises()
 
     const recipientsInput = container.querySelector('[data-field="emailRecipients"]') as HTMLTextAreaElement
@@ -1999,9 +1967,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.value = 'Wait then update'
     nameInput.dispatchEvent(new Event('input'))
 
-    const firstActionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    firstActionSelect.value = 'wait_for_callback'
-    firstActionSelect.dispatchEvent(new Event('change'))
+    const firstActionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(firstActionSelect, 'wait_for_callback')
     await flushPromises()
 
     ;(container.querySelector('[data-action="add-action"]') as HTMLButtonElement).click()
@@ -2011,10 +1978,9 @@ describe('MetaAutomationRuleEditor', () => {
     ;(followUpRow.querySelector('.meta-rule-editor__action-config .meta-rule-editor__btn') as HTMLButtonElement).click()
     await flushPromises()
 
-    const fieldSelect = followUpRow.querySelector('.meta-rule-editor__field-pair select') as HTMLSelectElement
-    fieldSelect.value = 'fld_1'
-    fieldSelect.dispatchEvent(new Event('change'))
-    const valueInput = followUpRow.querySelector('.meta-rule-editor__field-pair input') as HTMLInputElement
+    const fieldSelect = followUpRow.querySelector('.meta-rule-editor__field-pair .el-select') as HTMLElement
+    epSetSelect(fieldSelect, 'fld_1')
+    const valueInput = followUpRow.querySelector('.meta-rule-editor__field-pair .el-input__inner') as HTMLInputElement
     valueInput.value = 'Done'
     valueInput.dispatchEvent(new Event('input'))
     await flushPromises()
@@ -2049,21 +2015,19 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.value = 'Wait then create'
     nameInput.dispatchEvent(new Event('input'))
 
-    const firstActionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    firstActionSelect.value = 'wait_for_callback'
-    firstActionSelect.dispatchEvent(new Event('change'))
+    const firstActionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(firstActionSelect, 'wait_for_callback')
     await flushPromises()
 
     ;(container.querySelector('[data-action="add-action"]') as HTMLButtonElement).click()
     await flushPromises()
 
     const followUpRow = container.querySelector('[data-action-index="1"]') as HTMLElement
-    const followUpSelect = followUpRow.querySelector('.meta-rule-editor__action-header select') as HTMLSelectElement
-    followUpSelect.value = 'create_record'
-    followUpSelect.dispatchEvent(new Event('change'))
+    const followUpSelect = followUpRow.querySelector('.meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(followUpSelect, 'create_record')
     await flushPromises()
 
-    const targetSheetInput = followUpRow.querySelector('.meta-rule-editor__action-config > input') as HTMLInputElement
+    const targetSheetInput = followUpRow.querySelector('.meta-rule-editor__action-config .el-input__inner') as HTMLInputElement
     targetSheetInput.value = 'sheet_target'
     targetSheetInput.dispatchEvent(new Event('input'))
     ;(followUpRow.querySelector('.meta-rule-editor__action-config .meta-rule-editor__btn') as HTMLButtonElement).click()
@@ -2104,21 +2068,19 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.value = 'Wait then notify'
     nameInput.dispatchEvent(new Event('input'))
 
-    const firstActionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    firstActionSelect.value = 'wait_for_callback'
-    firstActionSelect.dispatchEvent(new Event('change'))
+    const firstActionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(firstActionSelect, 'wait_for_callback')
     await flushPromises()
 
     ;(container.querySelector('[data-action="add-action"]') as HTMLButtonElement).click()
     await flushPromises()
 
     const followUpRow = container.querySelector('[data-action-index="1"]') as HTMLElement
-    const followUpSelect = followUpRow.querySelector('.meta-rule-editor__action-header select') as HTMLSelectElement
-    followUpSelect.value = 'send_notification'
-    followUpSelect.dispatchEvent(new Event('change'))
+    const followUpSelect = followUpRow.querySelector('.meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(followUpSelect, 'send_notification')
     await flushPromises()
 
-    const [userInput, messageInput] = Array.from(followUpRow.querySelectorAll('input, textarea')) as Array<HTMLInputElement | HTMLTextAreaElement>
+    const [userInput, messageInput] = Array.from(followUpRow.querySelectorAll('.el-input__inner, textarea')) as Array<HTMLInputElement | HTMLTextAreaElement>
     userInput.value = 'user_1, user_2'
     userInput.dispatchEvent(new Event('input'))
     messageInput.value = 'Resume completed'
@@ -2153,9 +2115,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.value = 'Email owner'
     nameInput.dispatchEvent(new Event('input'))
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_email'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_email')
     await flushPromises()
 
     const recipientsInput = container.querySelector('[data-field="emailRecipients"]') as HTMLTextAreaElement
@@ -2192,20 +2153,17 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const pickerHint = container.querySelector('[data-field="dingtalkDestinationPickerHint"]')
     expect(pickerHint?.textContent).toContain('registered for this table')
 
-    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
-    destinationSelect.value = 'dt_1'
-    destinationSelect.dispatchEvent(new Event('change'))
+    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLElement
+    epSetSelect(destinationSelect, 'dt_1')
     await flushPromises()
-    destinationSelect.value = 'dt_2'
-    destinationSelect.dispatchEvent(new Event('change'))
+    epSetSelect(destinationSelect, 'dt_2')
 
     const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
     titleInput.value = 'Ticket {{recordId}}'
@@ -2215,13 +2173,11 @@ describe('MetaAutomationRuleEditor', () => {
     bodyInput.value = 'Please review {{record.status}}'
     bodyInput.dispatchEvent(new Event('input'))
 
-    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change'))
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
 
-    const internalViewSelect = container.querySelector('[data-field="internalViewId"]') as HTMLSelectElement
-    internalViewSelect.value = 'view_grid'
-    internalViewSelect.dispatchEvent(new Event('change'))
+    const internalViewSelect = container.querySelector('[data-field="internalViewId"]') as HTMLElement
+    epSetSelect(internalViewSelect, 'view_grid')
     await flushPromises()
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
@@ -2287,15 +2243,13 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
-    expect(destinationSelect.textContent).toContain('Organization catalog')
-    destinationSelect.value = 'dt_org'
-    destinationSelect.dispatchEvent(new Event('change'))
+    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLElement
+    expect(epOptions(destinationSelect).map((option) => option.textContent).join('\n')).toContain('Organization catalog')
+    epSetSelect(destinationSelect, 'dt_org')
     await flushPromises()
 
     const chip = container.querySelector('[data-group-destination="dt_org"]') as HTMLElement
@@ -2344,9 +2298,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const emptyState = container.querySelector('[data-field="dingtalkDestinationEmpty"]')
@@ -2413,8 +2366,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    expect(actionSelect.value).toBe('send_dingtalk_group_message')
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    expect(epSelectValue(actionSelect)).toBe('send_dingtalk_group_message')
     expect(container.querySelector('[data-group-destination="dt_1"]')?.textContent).toContain('Ops Group')
     expect(container.querySelector('[data-group-destination="dt_2"]')?.textContent).toContain('Escalation Group')
     expect((container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement).value).toBe('Ticket {{recordId}}')
@@ -2460,9 +2413,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const fieldPathHint = container.querySelector('[data-field="dingtalkDestinationFieldPathHint"]')
@@ -2517,9 +2469,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const destinationFieldInput = container.querySelector('[data-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
@@ -2554,14 +2505,12 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-field="dingtalkDestinationFieldSelect"]') as HTMLSelectElement
-    fieldSelect.value = 'fld_2'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const fieldSelect = container.querySelector('[data-field="dingtalkDestinationFieldSelect"]') as HTMLElement
+    epSetSelect(fieldSelect, 'fld_2')
     await flushPromises()
 
     const fieldInput = container.querySelector('[data-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
@@ -2582,9 +2531,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const fieldInput = container.querySelector('[data-field="dingtalkDestinationFieldPath"]') as HTMLInputElement
@@ -2607,14 +2555,12 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change'))
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     expect(container.textContent).toContain('Public form sharing is disabled for "Public Form"')
@@ -2641,14 +2587,12 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.value = 'Notify DingTalk'
     nameInput.dispatchEvent(new Event('input'))
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
-    destinationSelect.value = 'dt_1'
-    destinationSelect.dispatchEvent(new Event('change'))
+    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLElement
+    epSetSelect(destinationSelect, 'dt_1')
 
     const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
     titleInput.value = 'Ticket {{recordId}}'
@@ -2658,9 +2602,8 @@ describe('MetaAutomationRuleEditor', () => {
     bodyInput.value = 'Please review {{record.status}}'
     bodyInput.dispatchEvent(new Event('input'))
 
-    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change'))
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
@@ -2682,14 +2625,12 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change'))
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" is fully public')
@@ -2716,14 +2657,12 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change'))
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" allows all bound DingTalk users to submit')
@@ -2745,14 +2684,12 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change'))
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     expect(container.textContent).not.toContain('allows all bound DingTalk users to submit')
@@ -2812,14 +2749,12 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change'))
+    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     expect(container.querySelector('[data-field="personPublicFormAccessSummary-0"]')?.textContent)
@@ -2845,14 +2780,12 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change'))
+    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" is fully public')
@@ -2874,14 +2807,12 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change'))
+    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     expect(container.textContent).toContain('Public form sharing for "Public Form" allows all bound DingTalk users to submit')
@@ -2910,9 +2841,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const userIdsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
@@ -2927,13 +2857,11 @@ describe('MetaAutomationRuleEditor', () => {
     bodyInput.value = 'Please review {{record.status}}'
     bodyInput.dispatchEvent(new Event('input'))
 
-    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change'))
+    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
 
-    const internalViewSelect = container.querySelector('[data-field="dingtalkPersonInternalViewId"]') as HTMLSelectElement
-    internalViewSelect.value = 'view_grid'
-    internalViewSelect.dispatchEvent(new Event('change'))
+    const internalViewSelect = container.querySelector('[data-field="dingtalkPersonInternalViewId"]') as HTMLElement
+    epSetSelect(internalViewSelect, 'view_grid')
     await flushPromises()
 
     expect(container.querySelector('[data-field="personMessageSummary"]')?.textContent).toContain('Fully public; anyone with the link can submit')
@@ -3016,9 +2944,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.value = 'Notify People'
     nameInput.dispatchEvent(new Event('input'))
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const userIdsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
@@ -3033,9 +2960,8 @@ describe('MetaAutomationRuleEditor', () => {
     bodyInput.value = 'Please review {{record.status}}'
     bodyInput.dispatchEvent(new Event('input'))
 
-    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    publicFormSelect.value = 'view_form'
-    publicFormSelect.dispatchEvent(new Event('change'))
+    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    epSetSelect(publicFormSelect, 'view_form')
     await flushPromises()
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
@@ -3100,9 +3026,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const recipientFieldInput = container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
@@ -3164,9 +3089,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const recipientFieldInput = container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
@@ -3212,9 +3136,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const userIdsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
@@ -3272,8 +3195,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    expect(actionSelect.value).toBe('send_dingtalk_person_message')
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    expect(epSelectValue(actionSelect)).toBe('send_dingtalk_person_message')
     expect((container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement).value).toBe('record.assigneeUserIds')
     expect((container.querySelector('[data-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement).value).toBe('Ticket {{recordId}}')
     expect((container.querySelector('[data-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement).value).toBe('Please review {{record.status}}')
@@ -3320,9 +3243,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const memberGroupFieldInput = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
@@ -3367,9 +3289,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const memberGroupFieldInput = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
@@ -3397,9 +3318,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const memberGroupFieldInput = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
@@ -3421,9 +3341,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const memberGroupFieldInput = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
@@ -3445,14 +3364,12 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldSelect"]') as HTMLSelectElement
-    fieldSelect.value = 'watcherGroupIds'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const fieldSelect = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldSelect"]') as HTMLElement
+    epSetSelect(fieldSelect, 'watcherGroupIds')
     await flushPromises()
 
     const memberGroupFieldInput = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
@@ -3471,13 +3388,12 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldSelect"]') as HTMLSelectElement
-    const optionValues = Array.from(fieldSelect.options).map((option) => option.value)
+    const fieldSelect = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldSelect"]') as HTMLElement
+    const optionValues = epOptions(fieldSelect).map((option) => option.value)
     expect(optionValues).toContain('watcherGroupIds')
     expect(optionValues).toContain('escalationGroupId')
     expect(optionValues).not.toContain('assigneeUserIds')
@@ -3495,14 +3411,12 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
-    fieldSelect.value = 'assigneeUserIds'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLElement
+    epSetSelect(fieldSelect, 'assigneeUserIds')
     await flushPromises()
 
     const recipientFieldInput = container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
@@ -3521,13 +3435,12 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
-    const optionValues = Array.from(fieldSelect.options).map((option) => option.value)
+    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLElement
+    const optionValues = epOptions(fieldSelect).map((option) => option.value)
     expect(optionValues).toContain('assigneeUserIds')
     expect(optionValues).toContain('reviewerUserId')
     expect(optionValues).not.toContain('fld_1')
@@ -3551,17 +3464,14 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
-    fieldSelect.value = 'assigneeUserIds'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLElement
+    epSetSelect(fieldSelect, 'assigneeUserIds')
     await flushPromises()
-    fieldSelect.value = 'reviewerUserId'
-    fieldSelect.dispatchEvent(new Event('change'))
+    epSetSelect(fieldSelect, 'reviewerUserId')
     await flushPromises()
 
     const recipientFieldInput = container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
@@ -3601,17 +3511,14 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
-    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLSelectElement
-    fieldSelect.value = 'assigneeUserIds'
-    fieldSelect.dispatchEvent(new Event('change'))
+    const fieldSelect = container.querySelector('[data-field="dingtalkPersonRecipientFieldSelect"]') as HTMLElement
+    epSetSelect(fieldSelect, 'assigneeUserIds')
     await flushPromises()
-    fieldSelect.value = 'reviewerUserId'
-    fieldSelect.dispatchEvent(new Event('change'))
+    epSetSelect(fieldSelect, 'reviewerUserId')
     await flushPromises()
 
     const firstChip = container.querySelector('[data-field-recipient="assigneeUserIds"]') as HTMLButtonElement
@@ -3642,9 +3549,8 @@ describe('MetaAutomationRuleEditor', () => {
     nameInput.dispatchEvent(new Event('input'))
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const searchInput = container.querySelector('[data-field="dingtalkPersonUserSearch"]') as HTMLInputElement
@@ -3749,9 +3655,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const searchInput = container.querySelector('[data-field="dingtalkPersonUserSearch"]') as HTMLInputElement
@@ -3798,9 +3703,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const presetBtn = container.querySelector('[data-field="groupPresetBoth"]') as HTMLButtonElement
@@ -3809,13 +3713,13 @@ describe('MetaAutomationRuleEditor', () => {
 
     const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
     const bodyInput = container.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
-    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLSelectElement
-    const internalViewSelect = container.querySelector('[data-field="internalViewId"]') as HTMLSelectElement
+    const publicFormSelect = container.querySelector('[data-field="publicFormViewId"]') as HTMLElement
+    const internalViewSelect = container.querySelector('[data-field="internalViewId"]') as HTMLElement
 
     expect(titleInput.value).toBe('{{recordId}} needs input and processing')
     expect(bodyInput.value).toContain('Please complete the required form input')
-    expect(publicFormSelect.value).toBe('view_form')
-    expect(internalViewSelect.value).toBe('view_grid')
+    expect(epSelectValue(publicFormSelect)).toBe('view_form')
+    expect(epSelectValue(internalViewSelect)).toBe('view_grid')
   })
 
   it('applies DingTalk person message presets without touching recipients', async () => {
@@ -3829,9 +3733,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const userIdsInput = container.querySelector('[data-field="dingtalkPersonUserIds"]') as HTMLTextAreaElement
@@ -3844,14 +3747,14 @@ describe('MetaAutomationRuleEditor', () => {
 
     const titleInput = container.querySelector('[data-field="dingtalkPersonTitleTemplate"]') as HTMLInputElement
     const bodyInput = container.querySelector('[data-field="dingtalkPersonBodyTemplate"]') as HTMLTextAreaElement
-    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLSelectElement
-    const internalViewSelect = container.querySelector('[data-field="dingtalkPersonInternalViewId"]') as HTMLSelectElement
+    const publicFormSelect = container.querySelector('[data-field="dingtalkPersonPublicFormViewId"]') as HTMLElement
+    const internalViewSelect = container.querySelector('[data-field="dingtalkPersonInternalViewId"]') as HTMLElement
 
     expect(userIdsInput.value).toBe('user_1')
     expect(titleInput.value).toBe('{{recordId}} needs processing')
     expect(bodyInput.value).toContain('Please review and process this record')
-    expect(publicFormSelect.value).toBe('')
-    expect(internalViewSelect.value).toBe('view_grid')
+    expect(epSelectValue(publicFormSelect)).toBe('')
+    expect(epSelectValue(internalViewSelect)).toBe('view_grid')
   })
 
   it('inserts DingTalk template tokens in the rule editor', async () => {
@@ -3865,9 +3768,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     ;(container.querySelector('[data-field="groupTitleToken-recordId"]') as HTMLButtonElement).click()
@@ -3891,14 +3793,12 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
-    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLSelectElement
-    destinationSelect.value = 'dt_1'
-    destinationSelect.dispatchEvent(new Event('change'))
+    const destinationSelect = container.querySelector('[data-field="dingtalkDestinationPickerId"]') as HTMLElement
+    epSetSelect(destinationSelect, 'dt_1')
 
     const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
     titleInput.value = 'Ticket {{recordId}}'
@@ -3930,9 +3830,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
@@ -3954,9 +3853,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const titleInput = container.querySelector('[data-field="dingtalkTitleTemplate"]') as HTMLInputElement
@@ -3978,9 +3876,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const recipientFieldInput = container.querySelector('[data-field="dingtalkPersonRecipientFieldPath"]') as HTMLInputElement
@@ -4002,9 +3899,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_person_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_person_message')
     await flushPromises()
 
     const memberGroupFieldInput = container.querySelector('[data-field="dingtalkPersonMemberGroupRecipientFieldPath"]') as HTMLInputElement
@@ -4026,9 +3922,8 @@ describe('MetaAutomationRuleEditor', () => {
     })
     await flushPromises()
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_dingtalk_group_message'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_dingtalk_group_message')
     await flushPromises()
 
     const bodyInput = container.querySelector('[data-field="dingtalkBodyTemplate"]') as HTMLTextAreaElement
@@ -4047,8 +3942,8 @@ describe('MetaAutomationRuleEditor', () => {
   it('exposes webhook.received and approval.completed as trigger options with localized labels', async () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()
-    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
-    const values = Array.from(triggerSelect.options).map((option) => option.value)
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLElement
+    const values = epOptions(triggerSelect).map((option) => option.value)
     expect(values).toContain('webhook.received')
     expect(values).toContain('approval.completed')
     expect(automationTriggerTypeLabel('approval.completed', false)).toBe('When approval completes')
@@ -4063,9 +3958,8 @@ describe('MetaAutomationRuleEditor', () => {
     ;(container.querySelector('[data-field="name"]') as HTMLInputElement).value = 'Notify on completion'
     ;(container.querySelector('[data-field="name"]') as HTMLInputElement).dispatchEvent(new Event('input'))
 
-    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
-    triggerSelect.value = 'approval.completed'
-    triggerSelect.dispatchEvent(new Event('change'))
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLElement
+    epSetSelect(triggerSelect, 'approval.completed')
     await flushPromises()
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
@@ -4085,14 +3979,13 @@ describe('MetaAutomationRuleEditor', () => {
     expect(container.querySelector('[data-field="approvalCompletedBlockReason"]')?.textContent)
       .toContain('notification-family actions only')
 
-    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-    actionSelect.value = 'send_notification'
-    actionSelect.dispatchEvent(new Event('change'))
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    epSetSelect(actionSelect, 'send_notification')
     await flushPromises()
 
     // Outcomes default to approved-only; add "rejected".
-    const approvedBox = container.querySelector('[data-field="approvalOutcome-approved"]') as HTMLInputElement
-    const rejectedBox = container.querySelector('[data-field="approvalOutcome-rejected"]') as HTMLInputElement
+    const approvedBox = container.querySelector('[data-field="approvalOutcome-approved"] input') as HTMLInputElement
+    const rejectedBox = container.querySelector('[data-field="approvalOutcome-rejected"] input') as HTMLInputElement
     expect(approvedBox.checked).toBe(true)
     expect(rejectedBox.checked).toBe(false)
     rejectedBox.click()
@@ -4116,9 +4009,8 @@ describe('MetaAutomationRuleEditor', () => {
     ;(container.querySelector('[data-field="name"]') as HTMLInputElement).value = 'Inbound hook'
     ;(container.querySelector('[data-field="name"]') as HTMLInputElement).dispatchEvent(new Event('input'))
 
-    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLSelectElement
-    triggerSelect.value = 'webhook.received'
-    triggerSelect.dispatchEvent(new Event('change'))
+    const triggerSelect = container.querySelector('[data-field="triggerType"]') as HTMLElement
+    epSetSelect(triggerSelect, 'webhook.received')
     await flushPromises()
 
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
