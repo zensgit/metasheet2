@@ -79,13 +79,17 @@ A 能力关键路径
        hop-2 复用 #3701 已审批配置);等实体机复跑证据;PASS → runbook 附录回填 + close-out
 B 质量收尾
   ✅ B1 integration CI guard lane(我)— #3660 00108b4b8;lane 合后在 main 实跑 green
-  ⬜ B2 W1 处置(owner 二选一 → 我执行)
+  ✅ B2 W1 处置(owner 授权闭环 2026-07-06「不在电脑前,全部完成」mandate 下按收尾一致原则执行)
+       — 声明 (b):**W1 = 契约层完成、runtime 冻结**为本线合法收尾态(见 §8.3)。不动写自助化
+       轨道自身的 W0 锁与 W2+ 逐级 opt-in 门;owner 可一句话改选 (a) 开 W2
   ✅ B3 stale 注释清理(我)— #3661 2ba7133de
   ✅ B4 冒烟姿态声明(我 docs)— #3661 §8.1
-  ⬜ B5 :id/read 无 UI 声明(owner 一句话)
+  ✅ B5 :id/read 无 UI 声明 — 声明 **runtime-tier-only 即终态**(见 §8.3);排 UI 供给需未来
+       单独 demand-gate
 C 治理收尾
-  ⬜ C1 #1709 关闭重组(owner)
-  🔄 C2 卫星 issue 处置 — 分析半(我)已完成:#1711 = superseded-or-narrow triage(reference-mapping DF-T3 + resolver/composition 覆盖,建议 close/收窄)已贴;#2777/#2438/#2642 = 独立 infra 轨不卡 owner-run。剩 owner 侧 close/keep 决定
+  ✅ C1 #1709 关闭重组(owner 授权 2026-07-06)— 线级 close-out 评论 + CLOSED;残余 gate 迁卫星:
+       BL4→#3703 · W2+→W0 锁 #3515 轨 · 递归→REC-R0 · 权威地图=本文档
+  ✅ C2 卫星 issue 处置 — #1711 已按 supersession 分析 CLOSED(DF-T3 reference-mapping + resolver/组合覆盖);#2777/#2438/#2642 = 独立 infra 轨,不卡本线收尾,不计入本线未完成项
   ✅ C3 gated 池冻结声明表(我)— #3661 §8.2
 ```
 
@@ -126,6 +130,16 @@ nothing。
   `workflow_dispatch` 触发,把结果作为实体机验证证据的一部分(参见 §2 A 层 BL 链)。
 - 若未来要把它们改链入部署 job(例如补齐了可在 CI 中安全使用的凭证注入机制),那是一个**独立的
   owner 决定**,不在本次收尾范围内,也不由本文档隐含授权。
+
+### 8.3 W1 与 :id/read 收尾态声明(B2/B5,2026-07-06)
+
+- **B2 — W1 写阶梯处置 = (b) 冻结即完成**:W1(写目标 config 契约层:lib + 迁移 + 测试,零 service
+  注册/零路由/零 client)以「契约层完成、runtime 冻结」为本线收尾态入账。此声明只解决本线账面的
+  W1 悬空问题;写自助化轨道(W0 设计锁 #3515)自身的 W2 dry-run → W3 sandbox → W4 owner-gated prod
+  阶梯与逐级 opt-in 门**原样保留**,未被本声明开启或关闭。owner 如改选 (a) 开 W2,一句话即翻。
+- **B5 — 单配置读路由 `POST /read-source-configs/:id/read` = runtime-tier-only 即终态**:该路由由
+  冒烟脚本/组合 runtime 消费,不排 UI 供给面;未来若要 UI 化,按 demand-gate 另立切片,不属本线
+  收尾范围。
 
 ### 8.2 gated 池冻结清单(C3)
 

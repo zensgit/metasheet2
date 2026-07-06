@@ -21,4 +21,16 @@ describe('UF-1 design-token foundation (tokens.css)', () => {
   it('contains no !important (tokens win by import order, not specificity hacks)', () => {
     expect(tokensCss).not.toContain('!important')
   })
+
+  // Generic elevation + control-sizing tokens added when the multitable grid line
+  // (design-lock §8, an independent line) needed values the UF-1 base did not yet
+  // define. Pinned here so a future "dead CSS" sweep cannot silently drop them —
+  // they are consumed by the grid/toolbar surface, not just their own file.
+  it.each([
+    '--ms-control-height',
+    '--ms-shadow-card',
+    '--ms-shadow-pop',
+  ])('defines the generic foundation token %s', (token) => {
+    expect(tokensCss).toMatch(new RegExp(`${token}:\\s*[^;]+;`))
+  })
 })

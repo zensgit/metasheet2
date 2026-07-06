@@ -5,10 +5,19 @@
  * PATCH /records/:recordId and POST /patch echo the written record back masked by the SAME-SHEET set
  * `visiblePropertyFieldIds` = LAYER-2 only (property.hidden). F3 upgrades the same-sheet echo to the
  * layer-2 ∧ layer-3 composite (the #2028 read-path pattern) so a `field_permissions.visible=false` value
- * is never echoed. The WRITE gate is untouched: writability is `canEditRecord` + `fieldById` (layer-2
- * hidden / readOnly / type), which never consults field_permissions — so a field can be WRITABLE yet
- * READ-denied (write-only-no-read). R2/R4 prove that exact case: PATCH FLD_SECRET itself succeeds and
- * PERSISTS, but the echo must still omit it. That is what F3 closes that F0a's read mask did not.
+ * is never echoed.
+ *
+ * UPDATED by W1-3 (docs/development/multitable-per-subject-field-write-gate-w13-designlock-20260705.md,
+ * RATIFIED, merged 470250e1a): at the time F3 shipped, the WRITE gate on `PATCH /records/:recordId` was
+ * untouched — writability was `canEditRecord` + `fieldById` (layer-2 hidden/readOnly/type) only, which
+ * never consulted `field_permissions` — so a field could be WRITABLE yet READ-denied ("write-only-no-read").
+ * W1-3 closes exactly that write-side gap (the two-part fix F3 explicitly left for later): it adds the
+ * SAME layer-3 `field_permissions` pre-check `PATCH /records/:recordId` uses on grid `/patch` (which
+ * ALREADY rejected a `visible=false` write before W1-3 too — this was already an inconsistency between the
+ * two routes, not a new one). R2 below now asserts the field is REJECTED (403), not silently
+ * written-but-unechoed — parity across every route is the point of W1-3 F5 ("route the two missing paths
+ * through the EXISTING derive, unchanged" — the SAME `visible === false ⇒ forbidden` clause grid `/patch`
+ * already enforced). "Write-only-no-read" is no longer reachable via any write route.
  *
  * Out of F3 scope (flagged separately in the verification doc): crossSheetRelated (returned UNMASKED at
  * record-write-service.ts:985 — a different mechanism needing per-related-sheet perms) and the realtime
@@ -97,14 +106,19 @@ describeIfDatabase('F3 write-echo field mask (real DB)', () => {
     expect(JSON.stringify(res.body)).not.toContain(SECRET_INITIAL)
   })
 
-  test('R2 (PATCH write-only-no-read): PATCH a denied field itself → write PERSISTS but echo omits it', async () => {
+  test('R2 (W1-3: write-only-no-read CLOSED): PATCH a layer-3-denied field is now REJECTED (403), zero side effects — parity with grid /patch', async () => {
+    // Pre-W1-3 this field was writable-but-unechoed ("write-only-no-read" — see the file header). W1-3
+    // adds the SAME layer-3 field_permissions pre-check grid /patch already had (visible===false ⇒
+    // forbidden) to this route too, so the write is now rejected fail-closed BEFORE it ever reaches
+    // RecordService.patchRecord — no partial write, no version bump.
     currentUser = { id: USER_ID, roles: ['member'], perms: ['multitable:write'] }
     const rewrite = `do-not-leak-f3-rewrite-${TS}`
+    const before = await dbField(FLD_SECRET)
     const res = await patchReq(REC_ID, { sheetId: SHEET_ID, data: { [FLD_SECRET]: rewrite } })
-    expect(res.status).toBe(200) // writable: the write gate is layer-2, never field_permissions
-    expect(res.body.data.record.data[FLD_SECRET]).toBeUndefined() // echo omits the value just written (RED pre-fix)
+    expect(res.status).toBe(403)
+    expect(res.body.error.message).toContain(FLD_SECRET) // caller-submitted id — same non-leak posture as grid /patch
     expect(JSON.stringify(res.body)).not.toContain(rewrite)
-    expect(await dbField(FLD_SECRET)).toBe(rewrite) // ...but the write really happened — mask is echo-only
+    expect(await dbField(FLD_SECRET)).toBe(before) // zero side effects — the write never happened
   })
 
   test('R3 (POST /patch computed echo): a denied FORMULA value is masked from the records echo — positive control first', async () => {

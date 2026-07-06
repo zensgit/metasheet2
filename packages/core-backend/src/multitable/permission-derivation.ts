@@ -98,6 +98,40 @@ export function deriveFieldPermissions(
   )
 }
 
+/**
+ * W1-3 (multitable-per-subject-field-write-gate-w13-designlock-20260705, LOCK-F2): the ONE-LINE
+ * invariant every layer-3 per-subject field-WRITE gate rejects on — extracted as a tiny pure helper so
+ * the two W1-3 write paths (the Yjs bridge write-input builder in `index.ts`, and the single-record
+ * `PATCH /records/:recordId` handler in `routes/univer-meta.ts`) and the pre-existing route-level gates
+ * all reference the SAME predicate rather than re-typing it. `perm` comes from `deriveFieldPermissions`
+ * (every VISIBLE field gets an entry, permissive by default absent a scope row) — so `!perm` means the
+ * field is not in the visible-field set at all (hidden / unknown), never a false block of a normal field.
+ *
+ * Deliberately predicate-ONLY: the surrounding gate FLOW differs per call site (caller-submitted field
+ * ids that may be echoed back vs. server-derived ids that must stay generalized to avoid an existence
+ * oracle) and is intentionally NOT unified — only this invariant is shared.
+ */
+export function isFieldWriteForbidden(perm: MultitableFieldPermission | undefined): boolean {
+  return !perm || perm.visible === false || perm.readOnly === true
+}
+
+/**
+ * W1-3 F4: thrown by a write-input BUILDER (no HTTP response of its own — currently only the Yjs bridge)
+ * when `isFieldWriteForbidden` rejects one or more changed fields. Deliberately coarse — values-free, no
+ * field values, no field ids beyond this fixed message — because the only consumer is a generic
+ * catch/log/metric handler (`YjsRecordBridge`'s `flushNow` `.catch`), not a route that reasons about
+ * per-field-id leak safety the way `sendForbidden(...)` call sites do. MUST be thrown, never signaled by
+ * returning null/false: a null-shaped "no write" return is indistinguishable from other benign no-op
+ * reasons (e.g. a deleted record) and would make the denial invisible to both success and failure
+ * metrics — see the design-lock's F4 rationale.
+ */
+export class FieldWritePermissionDeniedError extends Error {
+  constructor(message = 'One or more changed fields are not writable for this user') {
+    super(message)
+    this.name = 'FieldWritePermissionDeniedError'
+  }
+}
+
 export function deriveViewPermissions(
   views: Array<{ id: string }>,
   capabilities: Pick<MultitableCapabilities, 'canRead' | 'canManageViews'>,

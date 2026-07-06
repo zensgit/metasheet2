@@ -30,7 +30,7 @@ export type WorkbenchLabelKey =
   | 'toast.recordCreateBlocked' | 'toast.recordEditBlocked' | 'toast.recordDeleteBlocked'
   | 'toast.datesUpdated' | 'toast.hierarchyUpdated' | 'toast.recordDeleted' | 'toast.recordDuplicated'
   | 'toast.recordLocked' | 'toast.recordUnlocked' | 'toast.recordLockFailed'
-  | 'toast.loadedLatest' | 'toast.changeReapplied' | 'toast.recordUpdated'
+  | 'toast.loadedLatest' | 'toast.changeReapplied' | 'toast.recordUpdated' | 'toast.viewInHistory'
   | 'toast.commentUpdated' | 'toast.commentAdded'
   | 'toast.commentResolved' | 'toast.commentDeleted' | 'toast.linkedRecordsUpdated'
   | 'toast.viewSettingsSaved'
@@ -136,6 +136,7 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.loadedLatest': { en: 'Loaded the latest row state', zh: '已加载最新行状态' },
   'toast.changeReapplied': { en: 'Change reapplied', zh: '修改已重新应用' },
   'toast.recordUpdated': { en: 'Record updated', zh: '记录已更新' },
+  'toast.viewInHistory': { en: 'View in history', zh: '在历史记录中查看' },
   'toast.commentUpdated': { en: 'Comment updated', zh: '评论已更新' },
   'toast.commentAdded': { en: 'Comment added', zh: '评论已添加' },
   'toast.commentResolved': { en: 'Comment resolved', zh: '评论已解决' },

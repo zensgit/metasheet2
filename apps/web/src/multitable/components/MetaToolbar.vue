@@ -117,8 +117,22 @@
       </div>
 
       <!-- Undo/Redo -->
+      <span class="meta-toolbar__divider" aria-hidden="true"></span>
       <button class="meta-toolbar__btn" :disabled="!canUndo" :title="l('toolbar.undoTitle')" :aria-label="l('toolbar.undo')" @click="emit('undo')">&#x21A9;</button>
       <button class="meta-toolbar__btn" :disabled="!canRedo" :title="l('toolbar.redoTitle')" :aria-label="l('toolbar.redo')" @click="emit('redo')">&#x21AA;</button>
+      <!--
+        Slice 3 personal-views "reset to shared" (design-lock multitable-personal-views-slice3-fe-toggle-
+        design-lock-20260706.md §3 P1 + G-FE-3 / G-FE-4): rendered ONLY while the personal toggle is ON for
+        the active view (implies the session capability is on too — the caller only ever passes true when
+        both hold). Deletes the actor's own personal-config row, never the shared view (§1-B parent lock).
+      -->
+      <button
+        v-if="canResetToShared"
+        class="meta-toolbar__btn meta-toolbar__btn--reset-personal"
+        data-testid="reset-to-shared"
+        :title="resetToSharedLabel"
+        @click="emit('reset-to-shared')"
+      >{{ resetToSharedLabel }}</button>
     </div>
     <div class="meta-toolbar__right">
       <div class="meta-toolbar__search" :class="{ 'meta-toolbar__search--active': !!searchText }" role="search">
@@ -127,6 +141,7 @@
         <button v-if="searchText" class="meta-toolbar__search-clear" :aria-label="l('toolbar.clearSearch')" @click="emit('update:search-text', '')">&times;</button>
       </div>
       <span v-if="totalRows !== undefined" class="meta-toolbar__row-count">{{ rowCount(totalRows, isZh) }}</span>
+      <span class="meta-toolbar__divider" aria-hidden="true"></span>
       <!-- Row density -->
       <div class="meta-toolbar__dropdown">
         <button class="meta-toolbar__btn" :title="l('toolbar.rowHeight')" :aria-label="l('toolbar.rowHeight')" @click="showDensityPanel = !showDensityPanel">&#x2195; {{ l('toolbar.rows') }}</button>
@@ -178,6 +193,9 @@ const props = withDefaults(defineProps<{
   totalRows?: number
   rowDensity?: RowDensity
   sortFilterDirty?: boolean
+  // Slice 3: true only when personal views are enabled for the session AND the personal toggle is ON for
+  // the active view — absent/false hides the action entirely (no request can ever originate from it).
+  canResetToShared?: boolean
 }>(), { filterGroups: () => [] })
 
 const emit = defineEmits<{
@@ -205,10 +223,12 @@ const emit = defineEmits<{
   (e: 'print'): void
   (e: 'set-row-density', density: RowDensity): void
   (e: 'auto-fit-columns'): void
+  (e: 'reset-to-shared'): void
 }>()
 
 const { isZh } = useLocale()
 const l = (key: MetaCoreLabelKey) => metaCoreLabel(key, isZh.value)
+const resetToSharedLabel = computed(() => (isZh.value ? '恢复为共享视图' : 'Reset to shared'))
 
 const showFieldPicker = ref(false)
 const showSortPanel = ref(false)
@@ -299,18 +319,25 @@ function onAddFilterGroup() {
 </script>
 
 <style scoped>
-.meta-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; border-bottom: 1px solid #e5e7eb; background: #fff; }
-.meta-toolbar__left { display: flex; gap: 4px; align-items: center; }
-.meta-toolbar__right { display: flex; gap: 4px; }
-.meta-toolbar__btn { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; font-size: 13px; border: 1px solid #ddd; border-radius: 4px; background: #fff; cursor: pointer; color: #555; }
-.meta-toolbar__btn:hover:not(:disabled) { background: #f5f5f5; border-color: #ccc; }
+.meta-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--ms-border-light, #e7e8ec); background: var(--ms-bg-card, #fff); }
+.meta-toolbar__left { display: flex; gap: 2px; align-items: center; }
+.meta-toolbar__right { display: flex; gap: 4px; align-items: center; }
+.meta-toolbar__divider { display: inline-block; width: 1px; align-self: stretch; margin: 4px 6px; background: var(--ms-border-light, #e7e8ec); flex-shrink: 0; }
+.meta-toolbar__btn {
+  display: inline-flex; align-items: center; gap: 4px; height: var(--ms-control-height, 32px); box-sizing: border-box;
+  padding: 0 10px; font-size: 13px; border: 1px solid transparent; border-radius: var(--ms-radius-sm, 6px);
+  background: transparent; cursor: pointer; color: var(--ms-text-2, #646a73);
+}
+.meta-toolbar__btn:hover:not(:disabled) { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-text-1, #1f2329); }
 .meta-toolbar__btn:disabled { opacity: 0.35; cursor: not-allowed; }
-.meta-toolbar__btn--primary { background: #409eff; color: #fff; border-color: #409eff; }
-.meta-toolbar__btn--primary:hover { background: #66b1ff; }
+.meta-toolbar__btn--primary { background: var(--ms-color-primary, #245bdb); color: #fff; border-color: var(--ms-color-primary, #245bdb); }
+.meta-toolbar__btn--primary:hover:not(:disabled) { background: var(--el-color-primary-dark-2, #1e4fc0); color: #fff; }
+.meta-toolbar__btn--reset-personal { color: #067647; border-color: #6ce9a6; background: #ecfdf3; }
+.meta-toolbar__btn--reset-personal:hover { background: #d1fadf; }
 .meta-toolbar__btn-icon { font-size: 14px; }
-.meta-toolbar__badge { font-size: 10px; background: #409eff; color: #fff; padding: 0 5px; border-radius: 8px; min-width: 16px; text-align: center; }
+.meta-toolbar__badge { font-size: 10px; background: var(--ms-color-primary, #245bdb); color: #fff; padding: 0 5px; border-radius: 8px; min-width: 16px; text-align: center; }
 .meta-toolbar__dropdown { position: relative; }
-.meta-toolbar__panel { position: absolute; top: 100%; left: 0; z-index: 20; min-width: 200px; background: #fff; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 4px 12px rgba(0,0,0,.1); padding: 8px; margin-top: 4px; }
+.meta-toolbar__panel { position: absolute; top: 100%; left: 0; z-index: 20; min-width: 200px; background: var(--ms-bg-card, #fff); border: 1px solid var(--ms-border-light, #e7e8ec); border-radius: var(--ms-radius-sm, 6px); box-shadow: var(--ms-shadow-pop, 0 4px 12px rgba(0,0,0,.1)); padding: 8px; margin-top: 4px; }
 .meta-toolbar__panel--filter { min-width: 420px; }
 .meta-toolbar__panel--density { min-width: 120px; }
 .meta-toolbar__field-toggle { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; cursor: pointer; }
@@ -326,8 +353,8 @@ function onAddFilterGroup() {
 .meta-toolbar__add { border: none; background: none; color: #409eff; cursor: pointer; font-size: 12px; padding: 4px 0; }
 .meta-toolbar__add:hover { text-decoration: underline; }
 .meta-toolbar__add--danger { color: #f56c6c; }
-.meta-toolbar__apply { display: block; width: 100%; margin-top: 8px; padding: 5px 0; background: #409eff; color: #fff; border: none; border-radius: 3px; font-size: 12px; cursor: pointer; }
-.meta-toolbar__apply:hover { background: #66b1ff; }
+.meta-toolbar__apply { display: block; width: 100%; margin-top: 8px; padding: 5px 0; background: var(--ms-color-primary, #245bdb); color: #fff; border: none; border-radius: var(--ms-radius-sm, 6px); font-size: 12px; cursor: pointer; }
+.meta-toolbar__apply:hover { background: var(--el-color-primary-dark-2, #1e4fc0); }
 .meta-toolbar__apply-hint { margin: 6px 0 0; color: #777; font-size: 11px; }
 .meta-toolbar__group-none { color: #999; }
 .meta-toolbar__field-type { font-size: 10px; color: #aaa; margin-left: auto; }
@@ -339,9 +366,9 @@ function onAddFilterGroup() {
 .meta-toolbar__group-remove:hover { color: #f56c6c; }
 .meta-toolbar__group-add { border: none; background: none; color: #409eff; cursor: pointer; font-size: 12px; padding: 4px 0; }
 .meta-toolbar__group-add:hover { text-decoration: underline; }
-.meta-toolbar__search { display: flex; align-items: center; gap: 4px; border: 1px solid #ddd; border-radius: 4px; padding: 2px 8px; background: #fafafa; transition: border-color 0.2s, background 0.2s; }
-.meta-toolbar__search:focus-within { border-color: #409eff; background: #fff; }
-.meta-toolbar__search--active { border-color: #409eff; background: #ecf5ff; }
+.meta-toolbar__search { display: flex; align-items: center; gap: 4px; height: var(--ms-control-height, 32px); box-sizing: border-box; border: 1px solid var(--ms-border-light, #e7e8ec); border-radius: var(--ms-radius-sm, 6px); padding: 0 8px; background: var(--ms-bg-page, #f5f6f8); transition: border-color 0.2s, background 0.2s; }
+.meta-toolbar__search:focus-within { border-color: var(--ms-color-primary, #245bdb); background: var(--ms-bg-card, #fff); }
+.meta-toolbar__search--active { border-color: var(--ms-color-primary, #245bdb); background: var(--el-color-primary-light-9, #eef3ff); }
 .meta-toolbar__search-icon { font-size: 12px; opacity: 0.5; }
 .meta-toolbar__search-input { border: none; outline: none; font-size: 12px; width: 140px; background: transparent; color: #333; }
 .meta-toolbar__search-input::placeholder { color: #bbb; }

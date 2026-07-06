@@ -63,12 +63,14 @@ EP 衍生色（light-N）按 EP 官方 mix 公式由主值生成，写死进 tok
 
 ## 6. 切片阶梯（每刀独立 PR；模型按难度自动选）
 
-- ✅ **UF-0** 本设计锁（RATIFIED 2026-07-06）
-- ⬜ **UF-1** `styles/tokens.css` + `main.ts` 接线 + EP 变量映射 + App.vue 外壳收敛到 token
-  （幽灵 `--ms-color-danger` 落地）——纯增量，vue-tsc + build + 视觉冒烟
-- ⬜ **UF-2** `PageShell`/`PageHeader` 组件 + 审批全视图换装（含补齐委托双页页头）
-- ⬜ **UF-3** `StatusTag` 组件 + 状态域映射表（审批/模板/委托/自动化运行 四域），
-  替换全部 6 处局部实现；zh/en 标签走既有 locale 机制
+- ✅ **UF-0** 本设计锁（RATIFIED 2026-07-06，#3696）
+- ✅ **UF-1** `styles/tokens.css` + `main.ts` 接线 + EP 变量映射（含 error 色族）+ App.vue 外壳
+  收敛到 token（幽灵 `--ms-color-danger` 落地）——#3697
+- ✅ **UF-2** `PageShell`/`PageHeader` 组件 + 9 个审批视图换装（含补齐委托双页页头、
+  管理面统一命名「委托管理」）——#3706
+- ✅ **UF-3** `StatusTag` 组件 + 状态域映射表（审批实例/委托/自动化运行 三域先行；
+  **模板域 = UF-3b 补刀**），替换全部 6 处局部实现；顺带修复收件箱无色状态 +
+  委托页不分 locale 恒中文两个缺陷——#3710
 - ⬜ **UF-4** 自动化管理器/规则编辑器迁回 EP（叠层自绘弹窗 → `el-drawer`/整页；原生控件 → EP；
   逻辑零改动）——设计判断最重的一刀
 - ⬜ **UF-5** 审批中心 4 份复制表格收敛为共享列定义 + 统一表格密度

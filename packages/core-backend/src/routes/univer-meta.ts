@@ -14,6 +14,7 @@ import {
   type RecordPermissionScope,
   isFieldAlwaysReadOnly,
   isFieldPermissionHidden,
+  isFieldWriteForbidden,
 } from '../multitable/permission-derivation'
 import { validateAiShortcutFieldProperty } from '../multitable/ai-shortcut-config'
 import { withFieldRequiredWhenRule, withFieldVisibilityRule } from '../multitable/field-visibility-rule'
@@ -6704,10 +6705,28 @@ export function univerMetaRouter(): Router {
         hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
         config: normalizeJson(row.config),
       }))
-      const selectedView = viewId
-        ? serializedViews.find((view: UniverMetaViewConfig) => view.id === viewId) ?? null
-        : serializedViews[0] ?? null
       const viewIds = serializedViews.map((v: UniverMetaViewConfig) => v.id)
+      // Personal (per-user) view overlay on the MAIN load path — Slice 1/Slice 3 P1 fix. The Workbench
+      // loads via /context (loadContext → ctx.views), NOT GET /views, so the overlay MUST also run here or
+      // a saved personal row is invisible on the main grid. Same contract as GET /views: flag-on + actor
+      // ⇒ this actor's personal override ELSE shared (§1-C); actor = access.userId (§1-B), never a client
+      // id. Runs BEFORE selectedView / fieldPermissions / redaction so (a) personal hidden/order flow into
+      // the derived metadata exactly as the shared view's own facets do, and (b) redaction runs on the
+      // personal filterInfo too (no personal-filter literal leak). Absent override / flag-off ⇒
+      // effectiveViews === serializedViews (byte-identical). `personalOverrideViewIds` is the FE-init
+      // signal: which views have a persisted personal row, so the "My view" toggle reflects server state.
+      let effectiveViews: UniverMetaViewConfig[] = serializedViews
+      let personalOverrideViewIds: string[] = []
+      if (isPersonalViewsEnabled() && access.userId) {
+        const overlays = await fetchPersonalViewConfigsForViews(pool.query.bind(pool), viewIds, access.userId)
+        if (overlays.size > 0) {
+          personalOverrideViewIds = viewIds.filter((id: string) => overlays.has(id))
+          effectiveViews = serializedViews.map((view: UniverMetaViewConfig) => applyPersonalViewOverlay(view, overlays.get(view.id)))
+        }
+      }
+      const selectedView = viewId
+        ? effectiveViews.find((view: UniverMetaViewConfig) => view.id === viewId) ?? null
+        : effectiveViews[0] ?? null
       const viewScopeMap = access.userId ? await loadViewPermissionScopeMap(pool.query.bind(pool), viewIds, access.userId) : new Map()
       // #2052 (b): bind fieldScopeMap to effectiveSheetId (NOT resolvedSheetId) — on a base-only ?baseId=
       // request resolvedSheetId is null but the returned views bind to effectiveSheetId; gating off
@@ -6720,7 +6739,7 @@ export function univerMetaRouter(): Router {
       // #2052 (b): allowed-field set for redacting filter literals — BOTH inputs keyed to effectiveSheetId
       // (activeFields above + this fieldScopeMap), so the redaction matches the sheet whose views ship.
       const allowedFieldIds = computeAllowedFieldIds(activeFields, capabilities, fieldScopeMap)
-      const viewPermissions = deriveViewPermissions(serializedViews, capabilities, viewScopeMap)
+      const viewPermissions = deriveViewPermissions(effectiveViews, capabilities, viewScopeMap)
 
       return res.json({
         ok: true,
@@ -6743,11 +6762,24 @@ export function univerMetaRouter(): Router {
             !isSystemPeopleSheetDescription(row.description)
             && readableSheetRows.some((visibleRow) => String(visibleRow.id) === String(row.id)),
           ),
-          views: serializedViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)),
+          views: effectiveViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)),
+          // Slice 3 P1: which of the returned views have a persisted personal override for THIS actor, so the
+          // FE "My view" toggle initializes from server state (not local guesswork). Empty when flag-off / no
+          // override / no actor. Actor-scoped (§1-B) — never reflects another user's rows.
+          personalOverrideViewIds,
           // T8-2 Reset UI flag-visibility contract (#3239): a flag-derived, FE-readable signal so the Reset entry can be
           // truly HIDDEN when off (not a phantom flag read on the client). True iff MULTITABLE_ENABLE_PIT_RESET is on AND
           // the actor is a sheet-admin — mirrors the reset routes' PIT_RESET_ENABLED() + canManageSheetAccess gate.
-          capabilities: { ...capabilities, pitResetEnabled: (String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true') && capabilities.canManageSheetAccess === true },
+          //
+          // Slice 3 (design-lock multitable-personal-views-slice3-fe-toggle-design-lock-20260706.md §7 Q1):
+          // the personal-views "My view" toggle is gated on this SAME flag-derived-capability pattern — no
+          // client-side env const. Available to every actor who can read (P1: presentation-only, no per-view
+          // opt-in), so unlike pitResetEnabled this is not additionally ANDed with a management capability.
+          capabilities: {
+            ...capabilities,
+            pitResetEnabled: (String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true') && capabilities.canManageSheetAccess === true,
+            personalViewsEnabled: isPersonalViewsEnabled(),
+          },
           capabilityOrigin,
           fieldPermissions,
           viewPermissions,
@@ -8986,7 +9018,7 @@ export function univerMetaRouter(): Router {
         const guard = fieldById.get(ch.fieldId)
         const perm = fieldPermissions[ch.fieldId]
         const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
-        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        const layer3Ok = !isFieldWriteForbidden(perm) // W1-3 LOCK-F2: shared predicate, same invariant
         return !staticOk || !layer3Ok
       })
       if (hasForbidden) {
@@ -9143,7 +9175,7 @@ export function univerMetaRouter(): Router {
         const guard = fieldById.get(ch.fieldId)
         const perm = fieldPermissions[ch.fieldId]
         const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
-        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        const layer3Ok = !isFieldWriteForbidden(perm) // W1-3 LOCK-F2: shared predicate, same invariant
         return !staticOk || !layer3Ok
       })
       if (hasForbidden) return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: 'Not permitted to restore one or more fields in this revision' } })
@@ -9286,7 +9318,7 @@ export function univerMetaRouter(): Router {
         const guard = fieldById.get(ch.fieldId)
         const perm = fieldPermissions[ch.fieldId]
         const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
-        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        const layer3Ok = !isFieldWriteForbidden(perm) // W1-3 LOCK-F2: shared predicate, same invariant
         return !staticOk || !layer3Ok
       })
       const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
@@ -9645,7 +9677,8 @@ export function univerMetaRouter(): Router {
         if (deniedIds.has(c.recordId)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'denied' }); continue }
         const hasForbidden = c.diff.some((ch) => {
           const guard = fieldById.get(ch.fieldId); const perm = fieldPermissions[ch.fieldId]
-          return !(guard && !guard.hidden && guard.readOnly !== true) || !(perm && perm.visible !== false && perm.readOnly !== true)
+          // W1-3 LOCK-F2: shared predicate for the layer-3 clause, same invariant as before.
+          return !(guard && !guard.hidden && guard.readOnly !== true) || isFieldWriteForbidden(perm)
         })
         if (hasForbidden) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
         try {
@@ -14075,6 +14108,26 @@ export function univerMetaRouter(): Router {
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
 
+      // W1-3 (multitable-per-subject-field-write-gate-w13-designlock-20260705, LOCK-F1/F3/F4): Layer-3
+      // per-subject field-WRITE gate, parity with grid `/patch` (`buildRecordPatchContext` is the SAME
+      // factory that gate uses). `RecordService.patchRecord` (below) enforces only PROPERTY-level guards
+      // (readOnly/hidden/computed); it never loads `field_permissions` at all. This route serves BOTH
+      // `mst_` token AND session/JWT callers — `apiTokenAuth` only intercepts `mst_`-prefixed bearer
+      // tokens and calls `next()` for everything else (middleware/api-token-auth.ts), so an ordinary
+      // session-authenticated single-record edit reaches this same handler too. Gate fail-closed, before
+      // any write. Field ids here are caller-submitted (this request's own `data` keys), so echoing the
+      // rejected ones back leaks nothing beyond what the caller already sent — same posture as `/patch`.
+      const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
+      if (!patchContext) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const forbiddenWriteFieldIds = [...new Set(Object.keys(parsed.data.data ?? {}))].filter((fid) =>
+        isFieldWriteForbidden(patchContext.fieldPermissions[fid]),
+      )
+      if (forbiddenWriteFieldIds.length > 0) {
+        return sendForbidden(res, `Field(s) not writable for this user: ${forbiddenWriteFieldIds.join(', ')}`)
+      }
+
       const recordService = new RecordService(pool, eventBus)
       if (yjsInvalidator) {
         recordService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
@@ -15910,10 +15963,10 @@ export function univerMetaRouter(): Router {
       // entry means not-visible/unknown ⇒ forbidden, never a false block of a normal field. `/patch`
       // fieldIds are caller-submitted, so naming the rejected ids leaks nothing (nonexistent and
       // read-masked fields are indistinguishable here — both fail the same way, so no existence oracle).
-      const forbiddenWriteFieldIds = [...new Set(parsed.data.changes.map((c) => c.fieldId))].filter((fid) => {
-        const perm = fieldPermissions[fid]
-        return !perm || perm.visible === false || perm.readOnly === true
-      })
+      // W1-3 LOCK-F2: shared predicate (`isFieldWriteForbidden`), same invariant as before.
+      const forbiddenWriteFieldIds = [...new Set(parsed.data.changes.map((c) => c.fieldId))].filter((fid) =>
+        isFieldWriteForbidden(fieldPermissions[fid]),
+      )
       if (forbiddenWriteFieldIds.length > 0) {
         return sendForbidden(res, `Field(s) not writable for this user: ${forbiddenWriteFieldIds.join(', ')}`)
       }
@@ -16008,6 +16061,12 @@ export function univerMetaRouter(): Router {
           ...(result.linkSummaries ? { linkSummaries: result.linkSummaries } : {}),
           ...(result.attachmentSummaries ? { attachmentSummaries: result.attachmentSummaries } : {}),
           ...(result.relatedRecords ? { relatedRecords: result.relatedRecords } : {}),
+          // W3-5: echo the batchId so a REST/grid caller can deep-link into the History Center for exactly
+          // this commit. NOTE (scope, not fixed here): only meaningful for this single patchRecords call —
+          // the `partialSuccess` branch above calls patchRecords ONCE PER RECORD with no shared batchId, so
+          // each record there mints its OWN batch (unlike the AI bulk-commit route, which explicitly shares
+          // one). That is a pre-existing gap in this route, out of scope for this additive change.
+          ...(result.batchId ? { batchId: result.batchId } : {}),
         },
       })
     } catch (err) {

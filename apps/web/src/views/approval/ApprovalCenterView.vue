@@ -7,7 +7,7 @@
             v-model="searchText"
             placeholder="搜索审批编号或标题"
             clearable
-            style="width: 240px"
+            class="approval-center__toolbar-search"
             @clear="handleSearch"
             @keyup.enter="handleSearch"
           >
@@ -19,7 +19,7 @@
             v-model="statusFilter"
             placeholder="状态筛选"
             clearable
-            style="width: 140px; margin-left: 12px"
+            class="approval-center__toolbar-select"
             @change="handleSearch"
           >
             <el-option label="待处理" value="pending" />
@@ -30,7 +30,7 @@
           <el-select
             v-model="sourceSystemFilter"
             placeholder="来源系统"
-            style="width: 140px; margin-left: 12px"
+            class="approval-center__toolbar-select"
             data-testid="approval-source-filter"
             @change="handleSourceSystemChange"
           >
@@ -41,7 +41,7 @@
           <el-button
             v-if="canWrite"
             type="primary"
-            style="margin-left: 12px"
+            class="approval-center__toolbar-button"
             @click="router.push({ name: 'approval-template-list' })"
           >
             发起审批
@@ -156,115 +156,57 @@
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
-        <el-table
+        <ApprovalCenterTable
           v-else
           ref="pendingTableRef"
-          v-loading="store.loading"
-          :data="store.pendingApprovals"
-          style="width: 100%"
-          max-height="560"
-          stripe
-          highlight-current-row
-          :row-key="rowKey"
+          :rows="store.pendingApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无待处理审批'"
+          :summary-line-for="summaryLineFor"
+          show-selection
+          :selectable="isRowBatchSelectable"
+          show-wait-column
+          :actions-width="150"
           @row-click="handleRowClick"
           @selection-change="handlePendingSelectionChange"
         >
-          <el-table-column
-            type="selection"
-            width="44"
-            :selectable="isRowBatchSelectable"
-          />
-          <el-table-column prop="requestNo" label="审批编号" width="180" />
-          <el-table-column label="标题" min-width="200">
-            <!-- B2-01: key-field summary — a muted second line under the title so common items
-                 are decidable without opening (top 2-3 non-attachment/non-detail leaf fields from
-                 the LIVE template schema; see useApprovalListFieldSummary.ts for the live-label
-                 drift caveat). Absent for rows with no templateId or no cached schema yet. -->
-            <template #default="{ row }">
-              {{ row.title }}
-              <div
-                v-if="summaryLineFor(row)"
-                class="approval-center__row-summary"
-                :title="summaryLineFor(row)"
-              >
-                {{ summaryLineFor(row) }}
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="发起人" width="120">
-            <template #default="{ row }">
-              {{ row.requester?.name ?? '-' }}
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <StatusTag domain="approvalInstance" :status="row.status" />
-            </template>
-          </el-table-column>
-          <el-table-column label="发起时间" width="180">
-            <template #default="{ row }">
-              {{ formatDate(row.createdAt) }}
-            </template>
-          </el-table-column>
-          <!-- B1-03 (part 2): 已等待 aging — glanceable severity (>3d warn / >7d urgent) so a
-               reviewer can triage the oldest requests first. The 第 X/Y 步 sub-line only renders
-               when both numbers are present (mirrors ApprovalDetailView's "进度" meta item). -->
-          <el-table-column label="已等待" width="140">
-            <template #default="{ row }">
-              <span :class="waitClass(row.createdAt)">{{ formatRelativeWait(row.createdAt) }}</span>
-              <div
-                v-if="row.currentStep != null && row.totalSteps != null"
-                class="approval-center__wait-progress"
-              >
-                第 {{ row.currentStep }}/{{ row.totalSteps }} 步
-              </div>
-            </template>
-          </el-table-column>
           <!-- B1-03 (part 1): inline approve/reject hot path — only for platform-native pending
                rows (reuses `isRowBatchSelectable`; attendance-bridged rows keep routing to the
                attendance module via row-click and never show these). @click.stop on every
                reference so opening the popconfirm / reject dialog never also navigates the row. -->
-          <el-table-column label="操作" width="150" fixed="right">
-            <template #default="{ row }">
-              <template v-if="isRowBatchSelectable(row)">
-                <el-popconfirm
-                  :title="`确认通过「${row.title}」？`"
-                  confirm-button-text="确认"
-                  cancel-button-text="取消"
-                  @confirm="handleInlineApprove(row)"
-                >
-                  <template #reference>
-                    <el-button
-                      type="primary"
-                      link
-                      :loading="inlineApprovingId === row.id"
-                      :disabled="inlineApprovingId !== null"
-                      :data-testid="`approval-row-approve-${row.id}`"
-                      @click.stop
-                    >
-                      通过
-                    </el-button>
-                  </template>
-                </el-popconfirm>
-                <el-button
-                  type="danger"
-                  link
-                  :disabled="inlineApprovingId !== null"
-                  :data-testid="`approval-row-reject-${row.id}`"
-                  @click.stop="openRowReject(row)"
-                >
-                  驳回
-                </el-button>
-              </template>
+          <template #actions="{ row }">
+            <template v-if="isRowBatchSelectable(row)">
+              <el-popconfirm
+                :title="`确认通过「${row.title}」？`"
+                confirm-button-text="确认"
+                cancel-button-text="取消"
+                @confirm="handleInlineApprove(row)"
+              >
+                <template #reference>
+                  <el-button
+                    type="primary"
+                    link
+                    :loading="inlineApprovingId === row.id"
+                    :disabled="inlineApprovingId !== null"
+                    :data-testid="`approval-row-approve-${row.id}`"
+                    @click.stop
+                  >
+                    通过
+                  </el-button>
+                </template>
+              </el-popconfirm>
+              <el-button
+                type="danger"
+                link
+                :disabled="inlineApprovingId !== null"
+                :data-testid="`approval-row-reject-${row.id}`"
+                @click.stop="openRowReject(row)"
+              >
+                驳回
+              </el-button>
             </template>
-          </el-table-column>
-          <template #empty>
-            <el-empty
-              :description="searchText ? '未找到匹配的审批' : '暂无待处理审批'"
-              :image-size="100"
-            />
           </template>
-        </el-table>
+        </ApprovalCenterTable>
         <el-pagination
           class="approval-center__pagination"
           background
@@ -285,77 +227,36 @@
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
-        <el-table
+        <ApprovalCenterTable
           v-else
-          v-loading="store.loading"
-          :data="store.myApprovals"
-          style="width: 100%"
-          max-height="560"
-          stripe
-          highlight-current-row
+          :rows="store.myApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无我发起的审批'"
+          :summary-line-for="summaryLineFor"
+          :actions-width="170"
           @row-click="handleRowClick"
         >
-          <el-table-column prop="requestNo" label="审批编号" width="180" />
-          <el-table-column label="标题" min-width="200">
-            <!-- B2-01: key-field summary — a muted second line under the title so common items
-                 are decidable without opening (top 2-3 non-attachment/non-detail leaf fields from
-                 the LIVE template schema; see useApprovalListFieldSummary.ts for the live-label
-                 drift caveat). Absent for rows with no templateId or no cached schema yet. -->
-            <template #default="{ row }">
-              {{ row.title }}
-              <div
-                v-if="summaryLineFor(row)"
-                class="approval-center__row-summary"
-                :title="summaryLineFor(row)"
-              >
-                {{ summaryLineFor(row) }}
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="发起人" width="120">
-            <template #default="{ row }">
-              {{ row.requester?.name ?? '-' }}
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <StatusTag domain="approvalInstance" :status="row.status" />
-            </template>
-          </el-table-column>
-          <el-table-column label="发起时间" width="180">
-            <template #default="{ row }">
-              {{ formatDate(row.createdAt) }}
-            </template>
-          </el-table-column>
           <!-- 催办: a requester nudge to the current approver, only meaningful while the instance is
                still pending. Server-side rate-limited (1/instance/user/hour); 429 surfaces gracefully.
                B1-03: 已等待 sits right next to it — the longer a request has waited, the more it
                motivates the requester to actually click 催办. -->
-          <el-table-column label="操作" width="170" fixed="right">
-            <template #default="{ row }">
-              <span v-if="row.status === 'pending'" :class="waitClass(row.createdAt)">
-                已等待 {{ formatRelativeWait(row.createdAt) }}
-              </span>
-              <el-button
-                v-if="row.status === 'pending'"
-                type="primary"
-                link
-                :loading="remindingId === row.id"
-                :disabled="remindingId !== null"
-                :data-testid="`approval-urge-${row.id}`"
-                @click.stop="handleUrge(row)"
-              >
-                催办
-              </el-button>
-            </template>
-          </el-table-column>
-          <template #empty>
-            <el-empty
-              :description="searchText ? '未找到匹配的审批' : '暂无我发起的审批'"
-              :image-size="100"
-            />
+          <template #actions="{ row }">
+            <span v-if="row.status === 'pending'" :class="waitClass(row.createdAt)">
+              已等待 {{ formatRelativeWait(row.createdAt) }}
+            </span>
+            <el-button
+              v-if="row.status === 'pending'"
+              type="primary"
+              link
+              :loading="remindingId === row.id"
+              :disabled="remindingId !== null"
+              :data-testid="`approval-urge-${row.id}`"
+              @click.stop="handleUrge(row)"
+            >
+              催办
+            </el-button>
           </template>
-        </el-table>
+        </ApprovalCenterTable>
         <el-pagination
           class="approval-center__pagination"
           background
@@ -376,55 +277,14 @@
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
-        <el-table
+        <ApprovalCenterTable
           v-else
-          v-loading="store.loading"
-          :data="store.ccApprovals"
-          style="width: 100%"
-          max-height="560"
-          stripe
-          highlight-current-row
+          :rows="store.ccApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无抄送我的审批'"
+          :summary-line-for="summaryLineFor"
           @row-click="handleRowClick"
-        >
-          <el-table-column prop="requestNo" label="审批编号" width="180" />
-          <el-table-column label="标题" min-width="200">
-            <!-- B2-01: key-field summary — a muted second line under the title so common items
-                 are decidable without opening (top 2-3 non-attachment/non-detail leaf fields from
-                 the LIVE template schema; see useApprovalListFieldSummary.ts for the live-label
-                 drift caveat). Absent for rows with no templateId or no cached schema yet. -->
-            <template #default="{ row }">
-              {{ row.title }}
-              <div
-                v-if="summaryLineFor(row)"
-                class="approval-center__row-summary"
-                :title="summaryLineFor(row)"
-              >
-                {{ summaryLineFor(row) }}
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="发起人" width="120">
-            <template #default="{ row }">
-              {{ row.requester?.name ?? '-' }}
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <StatusTag domain="approvalInstance" :status="row.status" />
-            </template>
-          </el-table-column>
-          <el-table-column label="发起时间" width="180">
-            <template #default="{ row }">
-              {{ formatDate(row.createdAt) }}
-            </template>
-          </el-table-column>
-          <template #empty>
-            <el-empty
-              :description="searchText ? '未找到匹配的审批' : '暂无抄送我的审批'"
-              :image-size="100"
-            />
-          </template>
-        </el-table>
+        />
         <el-pagination
           class="approval-center__pagination"
           background
@@ -445,55 +305,14 @@
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
-        <el-table
+        <ApprovalCenterTable
           v-else
-          v-loading="store.loading"
-          :data="store.completedApprovals"
-          style="width: 100%"
-          max-height="560"
-          stripe
-          highlight-current-row
+          :rows="store.completedApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无已完成审批'"
+          :summary-line-for="summaryLineFor"
           @row-click="handleRowClick"
-        >
-          <el-table-column prop="requestNo" label="审批编号" width="180" />
-          <el-table-column label="标题" min-width="200">
-            <!-- B2-01: key-field summary — a muted second line under the title so common items
-                 are decidable without opening (top 2-3 non-attachment/non-detail leaf fields from
-                 the LIVE template schema; see useApprovalListFieldSummary.ts for the live-label
-                 drift caveat). Absent for rows with no templateId or no cached schema yet. -->
-            <template #default="{ row }">
-              {{ row.title }}
-              <div
-                v-if="summaryLineFor(row)"
-                class="approval-center__row-summary"
-                :title="summaryLineFor(row)"
-              >
-                {{ summaryLineFor(row) }}
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="发起人" width="120">
-            <template #default="{ row }">
-              {{ row.requester?.name ?? '-' }}
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <StatusTag domain="approvalInstance" :status="row.status" />
-            </template>
-          </el-table-column>
-          <el-table-column label="发起时间" width="180">
-            <template #default="{ row }">
-              {{ formatDate(row.createdAt) }}
-            </template>
-          </el-table-column>
-          <template #empty>
-            <el-empty
-              :description="searchText ? '未找到匹配的审批' : '暂无已完成审批'"
-              :image-size="100"
-            />
-          </template>
-        </el-table>
+        />
         <el-pagination
           class="approval-center__pagination"
           background
@@ -635,9 +454,9 @@ import { useMobileViewport } from '../../composables/useMobileViewport'
 import { useLocale } from '../../composables/useLocale'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import ApprovalMobileList from './ApprovalMobileList.vue'
+import ApprovalCenterTable from './ApprovalCenterTable.vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
-import StatusTag from '../../components/status/StatusTag.vue'
 
 const router = useRouter()
 const store = useApprovalStore()
@@ -703,14 +522,11 @@ const batchRejectDialogVisible = ref(false)
 const batchRejectComment = ref('')
 const remindingId = ref<string | null>(null)
 
-// B1-03: 已等待 aging severity class — shared by the pending table's column and the 我发起的
-// tab's inline hint next to 催办 (same warn/urgent palette everywhere it appears).
+// B1-03: 已等待 aging severity class — the 我发起的 tab's inline hint next to 催办 (same
+// warn/urgent palette as ApprovalCenterTable's own internal 已等待 column, kept separate since
+// this one lives in this view's `actions` slot content rather than the shared table body).
 function waitClass(createdAt: string): string {
   return `approval-center__wait approval-center__wait--${waitSeverity(createdAt)}`
-}
-
-function rowKey(row: UnifiedApprovalDTO): string {
-  return row.id
 }
 
 // Only platform-native pending rows are batch-actionable here; attendance-backed approvals live in the
@@ -999,10 +815,8 @@ const attendanceRequestsSection = 'attendance-overview-requests'
 // utils/statusDomains.ts) — the local statusTagType/statusLabel maps this file used to declare
 // were one of six independent status-color implementations audited in the UI foundation
 // design-lock and are removed here.
-function formatDate(dateStr: string) {
-  if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString('zh-CN')
-}
+// UF-5: the per-row `发起时间` date formatter moved into ApprovalCenterTable.vue along with the
+// table markup that was its only caller.
 
 // ---------------------------------------------------------------------------
 // Handlers
@@ -1102,6 +916,15 @@ onMounted(() => {
 .approval-center__toolbar {
   display: flex;
   align-items: center;
+  gap: var(--ms-space-3);
+}
+
+.approval-center__toolbar-search {
+  width: 240px;
+}
+
+.approval-center__toolbar-select {
+  width: 140px;
 }
 
 .approval-center__error {
@@ -1162,25 +985,6 @@ onMounted(() => {
 
 .approval-center__wait--urgent {
   color: #f56c6c;
-}
-
-.approval-center__wait-progress {
-  margin-top: 2px;
-  font-size: 12px;
-  color: #909399;
-}
-
-/* B2-01: key-field summary line — muted, single-line, ellipsis-truncated so a long value never
-   wraps the row or blows out the column width; the full text is still available via the native
-   `:title` tooltip. */
-.approval-center__row-summary {
-  margin-top: 2px;
-  max-width: 100%;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: 12px;
-  color: #909399;
 }
 
 .approval-center__row-reject-summary {
@@ -1270,17 +1074,16 @@ onMounted(() => {
 @media (max-width: 768px) {
   .approval-center__toolbar {
     flex-wrap: wrap;
-    gap: 8px;
+    gap: var(--ms-space-2);
   }
 
-  .approval-center__toolbar :deep(.el-input),
-  .approval-center__toolbar :deep(.el-select) {
-    width: 100% !important;
-    margin-left: 0 !important;
-  }
-
-  .approval-center__toolbar :deep(.el-button) {
-    margin-left: 0 !important;
+  /* UF-5: these three classes previously carried the fixed desktop widths as inline `style=`
+     attributes, which forced the `!important` overrides below (an inline style always wins over
+     a plain class rule). Now that the width lives in a class rule of ordinary specificity, this
+     media-query rule (declared later in the cascade) overrides it without `!important`. */
+  .approval-center__toolbar-search,
+  .approval-center__toolbar-select,
+  .approval-center__toolbar-button {
     width: 100%;
   }
 

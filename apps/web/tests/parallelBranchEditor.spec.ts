@@ -4,6 +4,7 @@ import { createApp, h, nextTick } from 'vue'
 import MetaAutomationRuleEditor from '../src/multitable/components/MetaAutomationRuleEditor.vue'
 import { useLocale } from '../src/composables/useLocale'
 import type { AutomationRule } from '../src/multitable/types'
+import { epOptions, epSelectValue, epSelectValues, epSetSelect } from './helpers/epControls'
 
 function flush() {
   return new Promise<void>((resolve) => setTimeout(resolve, 0)).then(() => nextTick())
@@ -29,9 +30,8 @@ function setInput(container: HTMLElement, selector: string, value: string) {
 }
 
 function selectAction0(container: HTMLElement, type: string) {
-  const select = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-  select.value = type
-  select.dispatchEvent(new Event('change'))
+  const select = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+  epSetSelect(select, type)
 }
 
 function ruleWithParallel(config: Record<string, unknown>): AutomationRule {
@@ -62,7 +62,7 @@ describe('A6-3-4/W3-2a parallel_branch editor', () => {
     selectAction0(container, 'parallel_branch')
     await flush()
 
-    const toggle = container.querySelector('[data-field="executionMode"]') as HTMLInputElement
+    const toggle = container.querySelector('[data-field="executionModeToggle"] input') as HTMLInputElement
     expect(toggle.checked).toBe(true)
     expect(toggle.disabled).toBe(true)
     expect(container.querySelector('[data-action-config="parallel_branch"]')).not.toBeNull()
@@ -87,10 +87,9 @@ describe('A6-3-4/W3-2a parallel_branch editor', () => {
     ;(container.querySelector('[data-parallel-branch-index="0"] [data-action="add-parallel-branch-field"]') as HTMLButtonElement).click()
     await flush()
     const pair = container.querySelector('[data-parallel-branch-index="0"] .meta-rule-editor__field-pair') as HTMLElement
-    const pairField = pair.querySelector('select') as HTMLSelectElement
-    pairField.value = 'fld_1'
-    pairField.dispatchEvent(new Event('change'))
-    const pairValue = pair.querySelector('input') as HTMLInputElement
+    const pairField = pair.querySelector('.el-select') as HTMLElement
+    epSetSelect(pairField, 'fld_1')
+    const pairValue = pair.querySelector('.el-input__inner') as HTMLInputElement
     pairValue.value = 'done'
     pairValue.dispatchEvent(new Event('input'))
     await flush()
@@ -172,9 +171,9 @@ describe('A6-3-4/W3-2a parallel_branch editor', () => {
     await flush()
 
     const branchActionSelect = container.querySelector(
-      '[data-action-config="parallel_branch"] [data-parallel-branch-action-index="0"] select',
-    ) as HTMLSelectElement
-    const options = Array.from(branchActionSelect.options).map((o) => o.value)
+      '[data-action-config="parallel_branch"] [data-parallel-branch-action-index="0"] .el-select',
+    ) as HTMLElement
+    const options = epOptions(branchActionSelect).map((o) => o.value)
     expect(options).toContain('update_record')
     expect(options).toContain('send_notification')
     expect(options).not.toContain('wait_for_callback')

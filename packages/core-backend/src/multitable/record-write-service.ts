@@ -307,6 +307,15 @@ export interface RecordPatchResult {
   linkSummaries?: Record<string, unknown>
   attachmentSummaries?: Record<string, unknown>
   relatedRecords?: Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }>
+  /**
+   * W3-5: the batch grouping id this call's revision(s) were stamped with (LOCK-B1/B2 seam) — the caller's
+   * explicit `batchId` if supplied, else the fresh `randomUUID()` this call minted (`bulkBatchId`). Echoed
+   * back so a REST/grid caller can deep-link into the History Center for exactly this commit (read-only;
+   * echoing an already-server-minted, already-persisted id changes no write-path semantics — LOCK-B5).
+   * Omitted (not merely undefined-valued) when `updated` is empty (nothing was actually written, e.g. every
+   * change was a same-value no-op), so a caller never deep-links to a batch that has no revisions.
+   */
+  batchId?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +658,16 @@ export class RecordWriteService {
 
     const h = this.helpers
 
+    // Global-history T1 (LOCK-12): one bulk patchRecords call = ONE user action = ONE batch. Share a single
+    // batch_id across every record's revision so the history projection groups them as one batch, not many
+    // unrelated ones. AI-fields S1 (LOCK-B1/B2): a caller MAY supply its own batchId to group MULTIPLE
+    // patchRecords calls into one commit-action batch — absent, this is the same fresh randomUUID() as
+    // before the seam existed (byte-identical default for every non-AI caller). Hoisted above the mutation
+    // transaction (W3-5) so the RESULT can echo it back for a caller's history deep-link — it is otherwise
+    // unreachable outside the transaction closure. Purely a value computation with no side effect ordering
+    // dependency on running inside the transaction.
+    const bulkBatchId = batchId ?? randomUUID()
+
     // -----------------------------------------------------------------------
     // Step 0: Validate changes (field writability + value constraints)
     // -----------------------------------------------------------------------
@@ -768,12 +787,7 @@ export class RecordWriteService {
         if (fid && ids.length > 0) personRestrictByFieldId.set(fid, ids)
       }
 
-      // Global-history T1 (LOCK-12): one bulk patchRecords call = ONE user action = ONE batch. Share a
-      // single batch_id across every record's revision so the history projection groups them as one batch,
-      // not many unrelated ones. AI-fields S1 (LOCK-B1/B2): a caller MAY supply its own batchId to group
-      // MULTIPLE patchRecords calls into one commit-action batch — absent, this is the same fresh
-      // randomUUID() as before the seam existed (byte-identical default for every non-AI caller).
-      const bulkBatchId = batchId ?? randomUUID()
+      // bulkBatchId is computed above (hoisted, W3-5) — shared by every record this call writes.
       for (const [recordId, changes] of changesByRecord.entries()) {
         const expectedVersion = Array.from(
           new Set(changes.map((c) => c.expectedVersion).filter((v): v is number => typeof v === 'number')),
@@ -1411,6 +1425,9 @@ export class RecordWriteService {
       ...(patchLinkSummaries ? { linkSummaries: patchLinkSummaries } : {}),
       ...(patchAttachmentSummaries ? { attachmentSummaries: patchAttachmentSummaries } : {}),
       ...(crossSheetRelated.length > 0 ? { relatedRecords: crossSheetRelated } : {}),
+      // W3-5: only echo the batchId when something was actually written under it (never point a caller's
+      // history deep-link at a batch with zero revisions).
+      ...(updates.length > 0 ? { batchId: bulkBatchId } : {}),
     }
   }
 

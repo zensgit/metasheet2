@@ -79,7 +79,35 @@ export interface MetaView {
   // fallback (dual-read) for back-compat. Kanban/Gantt keep using `{ fieldId }` on their own views.
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
+  // Slice 2/3b (per-view, incl. per-user personal overlay, column order): the server resolves/merges the
+  // effective order onto this field (applyPersonalViewOverlay) — the FE never computes the merge. Slice 3b's
+  // grid consumer (useMultitableGrid `visibleFields`) renders columns in this order, FAIL-SOFT on
+  // stale/unknown/hidden ids. Absent ⇒ natural field order (server `field.order`).
+  fieldOrder?: string[]
   config?: Record<string, unknown>
+}
+
+// --- Personal (per-user) view config overlay — Slice 3 FE consumption of the Slice 1/2 backend contract ---
+// Mirrors packages/core-backend/src/multitable/personal-view-config.ts `PersonalViewConfigOverlay`. LOAD-BEARING
+// (design-lock multitable-personal-views-slice3-fe-toggle-design-lock-20260706.md §1-A): the FE NEVER attaches a
+// user id to these requests — the server resolves the target user from the JWT actor alone.
+export interface PersonalViewConfigOverlay {
+  filterInfo?: Record<string, unknown>
+  sortInfo?: Record<string, unknown>
+  groupInfo?: Record<string, unknown>
+  hiddenFieldIds?: string[]
+  fieldOrder?: string[]
+}
+
+export interface PersonalViewConfigResponse {
+  viewId: string
+  config: PersonalViewConfigOverlay | null
+  updatedAt: string | null
+}
+
+export interface DeletePersonalViewConfigResponse {
+  viewId: string
+  deleted: boolean
 }
 
 // --- Conditional formatting (MF3) ---
@@ -284,6 +312,10 @@ export interface MetaContext {
   capabilityOrigin?: MetaCapabilityOrigin
   fieldPermissions?: Record<string, MetaFieldPermission>
   viewPermissions?: Record<string, MetaViewPermission>
+  // Slice 3: view ids for which THIS actor has a persisted personal override (server-applied on the returned
+  // `views`). The FE "My view" toggle initializes from this so its state reflects the server, not local
+  // guesswork. Absent/empty ⇒ no personal rows / flag-off. Actor-scoped — never another user's rows.
+  personalOverrideViewIds?: string[]
 }
 
 // --- Record context (GET /api/multitable/records/:recordId) ---
@@ -437,6 +469,11 @@ export interface MetaCapabilities {
   /** T8-2 Reset flag-visibility signal (#3239): flag-derived (MULTITABLE_ENABLE_PIT_RESET ∧ sheet-admin), set by
    *  /context. Optional — absent/false ⇒ the Reset entry is HIDDEN (the FE half of "inert until enabled"). */
   pitResetEnabled?: boolean
+  /** Slice 3 personal-views "My view" toggle flag-visibility signal (design-lock
+   *  multitable-personal-views-slice3-fe-toggle-design-lock-20260706.md §7 Q1): flag-derived
+   *  (MULTITABLE_ENABLE_PERSONAL_VIEWS), set by /context. Optional — absent/false ⇒ the toggle + reset-to-shared
+   *  action are HIDDEN and no personal-config request is ever emitted (G-FE-4). NOT a client-side env const. */
+  personalViewsEnabled?: boolean
   canManageViews: boolean
   canComment: boolean
   canManageAutomation: boolean
@@ -675,6 +712,9 @@ export interface PatchResult {
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
   relatedRecords?: Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }>
+  /** W3-5: the server-minted batchId this commit's revision(s) were grouped under — absent only if the
+   *  server predates the seam. Lets a caller deep-link into the History Center for this exact commit. */
+  batchId?: string
 }
 
 // --- Form submit ---
