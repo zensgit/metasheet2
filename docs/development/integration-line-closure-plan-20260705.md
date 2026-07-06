@@ -87,7 +87,8 @@ B 质量收尾
   ✅ B5 :id/read 无 UI 声明 — 声明 **runtime-tier-only 即终态**(见 §8.3);排 UI 供给需未来
        单独 demand-gate
 C 治理收尾
-  ⬜ C1 #1709 关闭重组(owner)
+  ✅ C1 #1709 关闭重组(owner 授权 2026-07-06)— 线级 close-out 评论 + CLOSED;残余 gate 迁卫星:
+       BL4→#3703 · W2+→W0 锁 #3515 轨 · 递归→REC-R0 · 权威地图=本文档
   ✅ C2 卫星 issue 处置 — #1711 已按 supersession 分析 CLOSED(DF-T3 reference-mapping + resolver/组合覆盖);#2777/#2438/#2642 = 独立 infra 轨,不卡本线收尾,不计入本线未完成项
   ✅ C3 gated 池冻结声明表(我)— #3661 §8.2
 ```
