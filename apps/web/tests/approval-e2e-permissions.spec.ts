@@ -13,6 +13,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 import {
   mockPendingApproval,
   mockApprovedApproval,
@@ -453,6 +454,13 @@ describe('Approval E2E Permissions', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // UF-3b — the template detail header tag is now <StatusTag domain="approvalTemplate">
+    // (locale-aware via useLocale()/isZh), not a hardcoded-Chinese-always ternary. This spec's
+    // fixtures/assertions are Chinese, so pin the locale explicitly rather than relying on
+    // jsdom's default `navigator.language` (same fix as approval-e2e-lifecycle.spec.ts's UF-3
+    // pin for the approvalInstance domain).
+    useLocale().setLocale('zh-CN')
+
     mockActiveApproval.value = null
     mockHistoryRef.value = []
     mockLoading.value = false
@@ -881,8 +889,10 @@ describe('Approval E2E Permissions', () => {
       const h1 = container!.querySelector('.template-detail__header h1')
       expect(h1?.textContent).toBe('通用审批模板')
 
-      // Status tag (published)
-      const statusTag = container!.querySelector('.template-detail__header [data-el-tag]')
+      // Status tag (published) — UF-3b: now <StatusTag> (framework-free by design, not
+      // `<el-tag>`), select it by its `data-status` attribute instead of the ElTag test stub's
+      // `data-el-tag`.
+      const statusTag = container!.querySelector('.template-detail__header [data-status]')
       expect(statusTag?.textContent).toContain('已发布')
 
       // "发起审批" button present for published

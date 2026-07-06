@@ -29,9 +29,7 @@
           <template #header>
             <div class="approval-new__info-header">
               <h2>{{ template.name }}</h2>
-              <el-tag :type="template.status === 'published' ? 'success' : 'info'" size="small">
-                {{ template.status === 'published' ? '已发布' : template.status }}
-              </el-tag>
+              <StatusTag domain="approvalTemplate" :status="template.status" size="sm" />
             </div>
           </template>
           <p v-if="template.description" class="approval-new__info-desc">{{ template.description }}</p>
@@ -373,6 +371,7 @@ import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
+import StatusTag from '../../components/status/StatusTag.vue'
 import type { FormField, FormSchema } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
