@@ -70,16 +70,18 @@ A 能力关键路径
   🔒 A4 BL3 打包+standalone 冒烟(门:单独 opt-in;owner 跑)
   🔒 A5 BL4 组合复跑(门:BL2+BL3 PASS)
 B 质量收尾
-  ⬜ B1 integration CI guard lane(我;最高优先)
+  ✅ B1 integration CI guard lane(我)— #3660 00108b4b8;lane 合后在 main 实跑 green
   ⬜ B2 W1 处置(owner 二选一 → 我执行)
-  ✅ B3 stale 注释清理(我)
-  ✅ B4 冒烟姿态声明(我 docs / owner 可改链入)
+  ✅ B3 stale 注释清理(我)— #3661 2ba7133de
+  ✅ B4 冒烟姿态声明(我 docs)— #3661 §8.1
   ⬜ B5 :id/read 无 UI 声明(owner 一句话)
 C 治理收尾
   ⬜ C1 #1709 关闭重组(owner)
-  ⬜ C2 卫星 issue 处置(owner+我)
-  ✅ C3 gated 池冻结声明表(我,并入收尾文档)
+  🔄 C2 卫星 issue 处置 — 分析半(我)已完成:#1711 = superseded-or-narrow triage(reference-mapping DF-T3 + resolver/composition 覆盖,建议 close/收窄)已贴;#2777/#2438/#2642 = 独立 infra 轨不卡 owner-run。剩 owner 侧 close/keep 决定
+  ✅ C3 gated 池冻结声明表(我)— #3661 §8.2
 ```
+
+> checklist 同步(2026-07-06):B1 已随 #3660 落地(该 PR 未回改本表)+ C2 分析半完成——本次补记以保权威地图与 main 一致。
 
 **建议起手序**(并行三轨):A1(owner 实体机)∥ B1+B3(我,今天可完)∥ B2/C1 两个 owner 决定
 (异步定即可)。A 层其余按 BL 门渐进;全部勾完后出最终《收尾报告 MD》并关线。
