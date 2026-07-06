@@ -18,6 +18,7 @@ import {
   pruneHiddenFormDataWithDetail,
   summaryFields,
   validateDetailColumnsDraft,
+  validateDetailRows,
   visibleDetailColumnsForRow,
   type DetailColumnDraft,
 } from '../src/approvals/detailField'
@@ -543,5 +544,128 @@ describe('formatSummaryLine (B2-01)', () => {
 
   it('returns an empty string for an empty array', () => {
     expect(formatSummaryLine([])).toBe('')
+  })
+})
+
+describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row required check)', () => {
+  const expenseSchema: FormSchema = {
+    fields: [
+      { id: 'reason', type: 'text', label: '事由', required: true },
+      {
+        id: 'items',
+        type: 'detail',
+        label: '报销明细',
+        columns: [
+          { id: 'item_name', type: 'text', label: '项目', required: true },
+          { id: 'amount', type: 'number', label: '金额', required: true },
+          { id: 'note', type: 'text', label: '备注' }, // not required — never flagged
+        ],
+      },
+    ],
+  }
+
+  it('a missing required cell produces a violation with the table label, 1-based row #, and column label', () => {
+    const violations = validateDetailRows(expenseSchema, {
+      reason: '出差',
+      items: [{ item_name: '机票', amount: 1000 }, { item_name: '', amount: 500 }],
+    })
+    expect(violations).toEqual(['"报销明细" 第 2 行缺少 "项目"'])
+  })
+
+  it('every empty required cell across every row gets its own violation', () => {
+    const violations = validateDetailRows(expenseSchema, {
+      reason: '出差',
+      items: [{ item_name: '', amount: undefined }, { item_name: '酒店', amount: 300 }],
+    })
+    expect(violations).toEqual([
+      '"报销明细" 第 1 行缺少 "项目"',
+      '"报销明细" 第 1 行缺少 "金额"',
+    ])
+  })
+
+  it('all required cells filled -> no violations (note stays optional even when blank)', () => {
+    const violations = validateDetailRows(expenseSchema, {
+      reason: '出差',
+      items: [{ item_name: '机票', amount: 1000, note: '' }],
+    })
+    expect(violations).toEqual([])
+  })
+
+  it('a non-detail field (even top-level required) is never checked here — that is el-form’s job', () => {
+    const violations = validateDetailRows(expenseSchema, { reason: '', items: [] })
+    expect(violations).toEqual([])
+  })
+
+  it('no rows at all (empty array, or missing entirely) -> no violations', () => {
+    expect(validateDetailRows(expenseSchema, { reason: 'x', items: [] })).toEqual([])
+    expect(validateDetailRows(expenseSchema, { reason: 'x' })).toEqual([])
+    expect(validateDetailRows(expenseSchema, { reason: 'x', items: 'not-an-array' })).toEqual([])
+  })
+
+  it('a detail field with no required columns is skipped without inspecting rows', () => {
+    const noRequiredSchema: FormSchema = {
+      fields: [{ id: 'items', type: 'detail', label: '明细', columns: [{ id: 'note', type: 'text', label: '备注' }] }],
+    }
+    expect(validateDetailRows(noRequiredSchema, { items: [{ note: '' }, {}] })).toEqual([])
+  })
+
+  it('a cell hidden for THIS row by its own visibilityRule is never flagged, even if required and empty', () => {
+    const gatedSchema: FormSchema = {
+      fields: [{
+        id: 'items',
+        type: 'detail',
+        label: '明细',
+        columns: [
+          { id: 'kind', type: 'select', label: '类型', options: [{ label: '常规', value: 'normal' }, { label: '其他', value: 'other' }] },
+          { id: 'note', type: 'text', label: '备注', required: true, visibilityRule: { fieldId: 'kind', operator: 'eq', value: 'other' } },
+        ],
+      }],
+    }
+    // note is hidden for a 'normal' row -> not flagged despite required+empty; shown (and empty) for
+    // an 'other' row -> flagged.
+    const violations = validateDetailRows(gatedSchema, {
+      items: [{ kind: 'normal', note: undefined }, { kind: 'other', note: undefined }],
+    })
+    expect(violations).toEqual(['"明细" 第 2 行缺少 "备注"'])
+  })
+
+  it('an actively-derived (read-only) required column is never flagged — the real gap is its operand(s)', () => {
+    const derivedSchema: FormSchema = {
+      fields: [{
+        id: 'items',
+        type: 'detail',
+        label: '明细',
+        columns: [
+          { id: 'qty', type: 'number', label: '数量' },
+          { id: 'price', type: 'number', label: '单价' },
+          {
+            id: 'subtotal',
+            type: 'number',
+            label: '小计',
+            required: true,
+            props: { derivedFrom: { operandColumnIds: ['qty', 'price'], operation: 'product' } },
+          },
+        ],
+      }],
+    }
+    // subtotal is required but derivation-active (both operands visible) -> the user can't type
+    // into it directly, so it must never be the reported violation even though it's still empty.
+    const violations = validateDetailRows(derivedSchema, {
+      items: [{ qty: 2, price: 10, subtotal: undefined }],
+    })
+    expect(violations).toEqual([])
+  })
+
+  it('falls back to field.id / column.id in the message when label is empty', () => {
+    const noLabelSchema: FormSchema = {
+      fields: [{
+        id: 'items',
+        type: 'detail',
+        label: '',
+        columns: [{ id: 'col_a', type: 'text', label: '', required: true }],
+      }],
+    }
+    const violations = validateDetailRows(noLabelSchema, { items: [{ col_a: '' }] })
+    expect(violations).toEqual(['"items" 第 1 行缺少 "col_a"'])
   })
 })

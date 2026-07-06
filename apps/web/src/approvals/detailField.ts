@@ -1,5 +1,6 @@
 import type { FormField, FormFieldType, FormOption, FormSchema } from '../types/approval'
-import { getVisibleFormFields, pruneHiddenFormData } from './fieldVisibility'
+import { getVisibleFormFields, isEmptyValue, pruneHiddenFormData } from './fieldVisibility'
+import { isRowDerivationActive } from './lineDerivation'
 
 /**
  * Pure (Element-Plus-free) helpers for the `detail` / sub-form (明细/子表单) field type.
@@ -296,6 +297,55 @@ export function pruneHiddenFormDataWithDetail(
     result[key] = detailField ? pruneHiddenDetailRows(detailField, value) : value
   }
   return result
+}
+
+/**
+ * UX B2-15 (item 3) — client-side required-cell check for `detail` (子表) rows. `el-form`'s
+ * `rules` (see `ApprovalNewView.vue`'s `formRules`) only ever cover TOP-LEVEL fields; a detail
+ * column's `required: true` has never been enforced client-side — the fill view's `<el-table>` grid
+ * has no validation of its own — so a requester could submit a row missing a required cell and only
+ * find out from an unreadable backend 400. Pure + Element-Plus-free, mirroring this module's
+ * existing convention, so it is directly unit-testable without mounting the view.
+ *
+ * A required column is SKIPPED (never flagged) for a given row when:
+ *  - it is hidden FOR THAT ROW by its own `visibilityRule` (mirrors `isDetailCellVisible` — a
+ *    hidden cell can never be filled by the user, so it can never be "missing");
+ *  - it is an ACTIVELY-derived read-only target for that row (mirrors the view's
+ *    `isDetailDerivedColumnReadOnly`, via `isRowDerivationActive` from `lineDerivation.ts`) — the
+ *    user cannot type into it directly, so flagging it would block submission on a cell nobody can
+ *    fix; a real gap surfaces instead as its own violation on the empty OPERAND column(s).
+ *
+ * Message shape mirrors the audit's own example — `"报销明细" 第 2 行缺少 "金额"` — table label +
+ * 1-based row number + column label, specific enough to act on directly. Non-`detail` fields are
+ * ignored entirely (top-level required-ness is `el-form`'s job, not this function's).
+ */
+export function validateDetailRows(
+  formSchema: FormSchema,
+  formData: Record<string, unknown>,
+): string[] {
+  const violations: string[] = []
+  for (const field of formSchema.fields) {
+    if (field.type !== 'detail') continue
+    const columns = field.columns ?? []
+    const requiredColumns = columns.filter((column) => column.required)
+    if (requiredColumns.length === 0) continue
+    const rows = formData[field.id]
+    if (!Array.isArray(rows)) continue
+    const fieldLabel = field.label || field.id
+
+    rows.forEach((rawRow, index) => {
+      const row = rawRow && typeof rawRow === 'object' ? (rawRow as Record<string, unknown>) : {}
+      const visibleIds = new Set(visibleDetailColumnsForRow(columns, row).map((column) => column.id))
+      for (const column of requiredColumns) {
+        if (!visibleIds.has(column.id)) continue // hidden this row — can never be "missing"
+        if (isRowDerivationActive(columns, column, row)) continue // read-only derived target
+        if (isEmptyValue(row[column.id])) {
+          violations.push(`"${fieldLabel}" 第 ${index + 1} 行缺少 "${column.label || column.id}"`)
+        }
+      }
+    })
+  }
+  return violations
 }
 
 export interface DetailDisplayColumn {
