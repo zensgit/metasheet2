@@ -2788,49 +2788,67 @@ async function recalculateFormulaFields(
   // formula-over-lookup sees the actual lookup value instead of the absent-on-reload `0`.
   // Same-record / same-sheet only; absent → raw reload (unchanged for form-submit).
   hydratedDataByRecord?: Map<string, Record<string, unknown>>,
+  // W1-1 (design-lock 2026-07-05 §3 LOCK-B, B3): explicit recompute-target override for the
+  // expression-change bulk recompute. The bulk-recompute route KNOWS which formula field must be
+  // recomputed (ITS OWN expression just changed) — it must not rely on the changedFieldIds
+  // dependency-graph discovery below, which only ever finds DOWNSTREAM formulas that reference
+  // changedFieldIds as an input (formula_dependencies.field_id = the dependent formula,
+  // .depends_on_field_id = its input) and would silently no-op for the changed field itself
+  // (never "depends on itself") — including the zero-field-reference case (e.g. `=TODAY()`),
+  // which has no formula_dependencies rows at all. When provided, this REPLACES graph discovery
+  // with the given set (narrowed to actual formula fields); changedFieldIds may then be `[]`.
+  // Everything downstream (taint skip, relation-agg/pure split, per-record materialization) is
+  // unchanged — the SAME taint discipline applies byte-for-byte to both callers.
+  explicitFormulaFieldIds?: Set<string>,
 ): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
-  if (updatedRecordIds.length === 0 || changedFieldIds.length === 0) return []
+  if (updatedRecordIds.length === 0) return []
+  if (!explicitFormulaFieldIds && changedFieldIds.length === 0) return []
   const formulaFieldIds = fields.filter((f) => f.type === 'formula').map((f) => f.id)
   if (formulaFieldIds.length === 0) return []
-
-  // A-min trigger: a lookup/rollup's value changes when its underlying LINK field is edited, but
-  // changedFieldIds carries the link id, not the derived lookup id — so the dependency gate
-  // (formula → lookup) would miss. Expand the changed set with the SAME-RECORD lookup/rollup ids
-  // whose linkFieldId is in changedFieldIds. This stays bounded to updatedRecordIds (the patched
-  // records) → it never reaches foreign/related records' formulas (that is A-full, gated).
-  const changedSet = new Set(changedFieldIds)
-  const effectiveChangedFieldIds = [...changedSet]
-  for (const field of fields) {
-    if (field.type !== 'lookup' && field.type !== 'rollup') continue
-    if (changedSet.has(field.id)) continue
-    const cfg = field.type === 'lookup' ? parseLookupFieldConfig(field.property) : parseRollupFieldConfig(field.property)
-    if (cfg && changedSet.has(cfg.linkFieldId)) {
-      effectiveChangedFieldIds.push(field.id)
-    }
-  }
-
-  // Gate: only recompute when a changed (or dependent-lookup) field actually feeds a formula here.
-  // The returned field ids are ALSO the recompute allowlist (F1, review of #2450): hydration is
-  // actor-scoped, so a formula whose inputs did not change must not be re-evaluated — it could
-  // be clobbered with a permission-degraded value (unreadable foreign sheet → lookup []).
-  const depRes = await query(
-    `SELECT DISTINCT field_id FROM formula_dependencies
-     WHERE depends_on_field_id = ANY($1::text[])
-       AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $2)
-       AND sheet_id = $2`,
-    [effectiveChangedFieldIds, sheetId],
-  )
   const formulaFieldIdSet = new Set(formulaFieldIds)
-  const dependentFormulaFieldIds = new Set(
-    (depRes.rows as any[]).map((row) => String(row.field_id)).filter((id) => formulaFieldIdSet.has(id)),
-  )
-  if (dependentFormulaFieldIds.size === 0) {
-    // Older/stale configs can be missing formula_dependencies rows even though
-    // field.property.expression is authoritative for evaluation. Fall back to
-    // expression refs so a PATCH still materializes dependent formulas.
-    const changedIdSet = new Set(effectiveChangedFieldIds)
-    for (const id of formulaFieldsReferencingChangedFields(fields, formulaFieldIdSet, changedIdSet)) {
-      dependentFormulaFieldIds.add(id)
+
+  let dependentFormulaFieldIds: Set<string>
+  if (explicitFormulaFieldIds) {
+    dependentFormulaFieldIds = new Set([...explicitFormulaFieldIds].filter((id) => formulaFieldIdSet.has(id)))
+  } else {
+    // A-min trigger: a lookup/rollup's value changes when its underlying LINK field is edited, but
+    // changedFieldIds carries the link id, not the derived lookup id — so the dependency gate
+    // (formula → lookup) would miss. Expand the changed set with the SAME-RECORD lookup/rollup ids
+    // whose linkFieldId is in changedFieldIds. This stays bounded to updatedRecordIds (the patched
+    // records) → it never reaches foreign/related records' formulas (that is A-full, gated).
+    const changedSet = new Set(changedFieldIds)
+    const effectiveChangedFieldIds = [...changedSet]
+    for (const field of fields) {
+      if (field.type !== 'lookup' && field.type !== 'rollup') continue
+      if (changedSet.has(field.id)) continue
+      const cfg = field.type === 'lookup' ? parseLookupFieldConfig(field.property) : parseRollupFieldConfig(field.property)
+      if (cfg && changedSet.has(cfg.linkFieldId)) {
+        effectiveChangedFieldIds.push(field.id)
+      }
+    }
+
+    // Gate: only recompute when a changed (or dependent-lookup) field actually feeds a formula here.
+    // The returned field ids are ALSO the recompute allowlist (F1, review of #2450): hydration is
+    // actor-scoped, so a formula whose inputs did not change must not be re-evaluated — it could
+    // be clobbered with a permission-degraded value (unreadable foreign sheet → lookup []).
+    const depRes = await query(
+      `SELECT DISTINCT field_id FROM formula_dependencies
+       WHERE depends_on_field_id = ANY($1::text[])
+         AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $2)
+         AND sheet_id = $2`,
+      [effectiveChangedFieldIds, sheetId],
+    )
+    dependentFormulaFieldIds = new Set(
+      (depRes.rows as any[]).map((row) => String(row.field_id)).filter((id) => formulaFieldIdSet.has(id)),
+    )
+    if (dependentFormulaFieldIds.size === 0) {
+      // Older/stale configs can be missing formula_dependencies rows even though
+      // field.property.expression is authoritative for evaluation. Fall back to
+      // expression refs so a PATCH still materializes dependent formulas.
+      const changedIdSet = new Set(effectiveChangedFieldIds)
+      for (const id of formulaFieldsReferencingChangedFields(fields, formulaFieldIdSet, changedIdSet)) {
+        dependentFormulaFieldIds.add(id)
+      }
     }
   }
   if (dependentFormulaFieldIds.size === 0) return []
@@ -2901,6 +2919,61 @@ async function recalculateFormulaFields(
     if (Object.keys(formulaData).length > 0) results.push({ recordId, data: formulaData })
   }
   return results
+}
+
+/**
+ * W1-1 (design-lock 2026-07-05 §2 LOCK-F, F2) — "writer-taint context: one value, two
+ * constructors". Every req-based resolver `recalculateFormulaFields` consults —
+ * `resolveTaintedFormulaFieldIds` and (transitively, via `resolveRelationAggregation`)
+ * `resolveForeignFieldReadability` / `resolveReadableSheetIds` / `resolveBaseReadable` /
+ * `resolveSheetReadableCapabilities` — bottoms out at `resolveRequestAccess(req)`, which reads
+ * ONLY `req.user?.{id,sub,userId,roles,perms,permissions,role}`; nothing in this call graph
+ * touches cookies, headers, or any other Express-specific surface (verified: `access.ts`'s only
+ * `req.*` access lives inside `resolveRequestAccess`). So constructor 1 (REST) is the real
+ * Express `Request` (unchanged); constructor 2 (bridge) is this function — a minimal
+ * `Request`-shaped stand-in whose `user` carries only the flushing actor's id. Passing it into
+ * the UNCHANGED `recalculateFormulaFields` reproduces REST's taint discipline byte-for-byte (the
+ * same function body runs — no parallel re-implementation to drift): `resolveRequestAccess` falls
+ * through to its own DB-authoritative branch (`listUserPermissions` / `isAdmin`), exactly the path
+ * a REST request whose JWT carries no baked-in role/permission claims already takes. A null
+ * actorId (no authenticated flushing actor) resolves to an empty/non-admin access — fail-closed,
+ * never a bypass; there is no "system context" here that could launder a masked value.
+ */
+function buildWriterTaintContext(actorId: string | null): Request {
+  return { user: actorId ? { id: actorId } : undefined } as unknown as Request
+}
+
+/**
+ * W1-1 (design-lock 2026-07-05 §2 LOCK-F, F1) — the Yjs-bridge counterpart of
+ * `recalculateFormulaFields`. The bridge (index.ts) has no Express `req` (a collaborative flush
+ * originates from a WebSocket actor, not an HTTP request) but must apply the SAME write-side
+ * taint skip (F2) and same-record recompute scope (F3, including relation-aggregation-backed
+ * formulas — both req-consumers are covered by the synthetic context) as REST Step 4c. This is
+ * the ONLY new call site the resolver chokepoint gains: it delegates to the existing
+ * `recalculateFormulaFields` unchanged (no new direct call to `resolveTaintedFormulaFieldIds` /
+ * `resolveRelationAggregation` — the structural guard's frozen call count is untouched), so the
+ * taint logic is reused byte-for-byte rather than re-implemented in parallel. Exported for
+ * `index.ts`'s Yjs-bridge `RecordWriteHelpers` wiring; not used by any REST path (the REST helper
+ * keeps its own `req`-closure implementation — see `createRecordWriteHelpers`).
+ */
+export async function recalculateFormulaFieldsForActor(
+  actorId: string | null,
+  query: QueryFn,
+  sheetId: string,
+  fields: UniverMetaField[],
+  updatedRecordIds: string[],
+  changedFieldIds: string[],
+  hydratedDataByRecord?: Map<string, Record<string, unknown>>,
+): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
+  return recalculateFormulaFields(
+    buildWriterTaintContext(actorId),
+    query,
+    sheetId,
+    fields,
+    updatedRecordIds,
+    changedFieldIds,
+    hydratedDataByRecord,
+  )
 }
 
 /**
@@ -5749,6 +5822,22 @@ class RecordLockedError extends Error {
   constructor(message = 'Record is locked') {
     super(message)
     this.name = 'RecordLockedError'
+  }
+}
+
+/**
+ * W1-1 (design-lock 2026-07-05 §3 LOCK-B, B2): thrown INSIDE the field-update transaction when an
+ * expression-change PATCH's sheet has more live records than the bulk-recompute cap — aborts the
+ * WHOLE transaction (fail-closed, BS-6 posture: no silent partial/truncated recompute, config NOT
+ * saved) so the route's catch block can map it to 422 `FORMULA_EXPRESSION_BULK_OVER_CAP`.
+ */
+class FormulaExpressionBulkOverCapError extends Error {
+  constructor(
+    public total: number,
+    public max: number,
+  ) {
+    super(`Sheet has ${total} live records, above the ${max}-record formula bulk-recompute ceiling`)
+    this.name = 'FormulaExpressionBulkOverCapError'
   }
 }
 
@@ -10517,6 +10606,11 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), preflightSheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       let sheetId = ''
+      // W1-1 (design-lock 2026-07-05 §3 LOCK-B, B2/B3): set INSIDE the transaction when this PATCH
+      // triggers the expression-change bulk recompute; the snapshot of live record ids is reused
+      // for BOTH the pre-commit cap check and the post-commit chunked recompute (B3) so the
+      // response counts are internally consistent (no re-query drift between the two).
+      let bulkRecomputeRecordIds: string[] | null = null
       const updated = await pool.transaction(async ({ query }) => {
         const existing = await query(
           'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1',
@@ -10648,6 +10742,28 @@ export function univerMetaRouter(): Router {
           throw new ValidationError(hierarchyParentMutationError)
         }
 
+        // W1-1 (design-lock §3 LOCK-B, B1/B2): an expression-change PATCH bulk-recomputes every
+        // live record afterward (B3). B1 trigger = the request explicitly CARRIES
+        // `property.expression` on a (or newly-converted-to) formula field — fires on BOTH an
+        // actual-change AND a same-expression re-save (the re-save is the deliberate GF8 recovery
+        // lever; B1 is "expression present", never "value differs"). Bound BEFORE committing the
+        // config (BS-6 fail-closed posture): over the cap aborts the WHOLE transaction so the
+        // config change itself never lands — no silent partial/truncated recompute.
+        if (nextType === 'formula' && expressionInPayload) {
+          const maxRows = Number(process.env.MULTITABLE_FORMULA_BULK_RECOMPUTE_MAX_ROWS) > 0
+            ? Math.floor(Number(process.env.MULTITABLE_FORMULA_BULK_RECOMPUTE_MAX_ROWS))
+            : 1000
+          // ORDER BY for deterministic chunk composition (B3) — a stable processing order makes a
+          // partial mid-chunk failure's "what already persisted" set reproducible; it does not
+          // change WHICH records are in scope, only the order they are chunked/attempted in.
+          const liveRes = await query('SELECT id FROM meta_records WHERE sheet_id = $1 ORDER BY id ASC', [sheetId])
+          const liveRecordIds = ((liveRes as any).rows as Array<{ id: unknown }>).map((r) => String(r.id))
+          if (liveRecordIds.length > maxRows) {
+            throw new FormulaExpressionBulkOverCapError(liveRecordIds.length, maxRows)
+          }
+          bulkRecomputeRecordIds = liveRecordIds
+        }
+
         if (typeof desiredOrder === 'number' && desiredOrder !== currentOrder) {
           // T9-R1: a reorder shifts the fields BETWEEN old and new position — record each shifted field's order too.
           if (desiredOrder < currentOrder) {
@@ -10710,13 +10826,74 @@ export function univerMetaRouter(): Router {
       })
 
       invalidateFieldCache(sheetId)
-      return res.json({ ok: true, data: { field: updated } })
+
+      // W1-1 (design-lock §3 LOCK-B, B3): AFTER the config transaction commits, in the SAME
+      // request — a recompute failure can never roll back the already-committed config (B6).
+      // Chunked (pages of 200) via the SAME recalculateFormulaFields the REST write-path uses
+      // (B4: under the EDITING ACTOR's own `req`, so the write-side taint skip applies verbatim —
+      // no system/full-access bypass) with an explicit target override (B3) since the route
+      // already knows which field must be recomputed. B5's write posture (raw derived UPDATE, no
+      // version bump, no meta_record_revisions row) is inherited unchanged from that helper.
+      let bulkRecompute:
+        | { attempted: number; recomputed: number; taintSkipped: number; failed: boolean; error?: string }
+        | undefined
+      if (bulkRecomputeRecordIds) {
+        const BULK_RECOMPUTE_CHUNK_SIZE = 200
+        const freshFields = await loadSheetFields({ query: pool.query.bind(pool) }, sheetId)
+        const explicitFormulaFieldIds = new Set([fieldId])
+        let recomputed = 0
+        let processedCount = 0
+        let failed = false
+        let errorCode: string | undefined
+        for (let i = 0; i < bulkRecomputeRecordIds.length; i += BULK_RECOMPUTE_CHUNK_SIZE) {
+          const chunk = bulkRecomputeRecordIds.slice(i, i + BULK_RECOMPUTE_CHUNK_SIZE)
+          try {
+            const results = await recalculateFormulaFields(
+              req,
+              pool.query.bind(pool),
+              sheetId,
+              freshFields,
+              chunk,
+              [],
+              undefined,
+              explicitFormulaFieldIds,
+            )
+            recomputed += results.length
+            processedCount += chunk.length
+          } catch (err) {
+            // B6: abort remaining chunks; the committed config stands; un-recomputed rows remain
+            // on the pre-slice lazy-refresh behavior (strictly no worse than today). Recovery = a
+            // same-expression re-save (B1 fires on expression-present, not expression-changed).
+            console.error('[univer-meta] expression-change bulk recompute failed mid-chunk:', err)
+            failed = true
+            errorCode = 'BULK_RECOMPUTE_FAILED'
+            break
+          }
+        }
+        bulkRecompute = {
+          attempted: bulkRecomputeRecordIds.length,
+          recomputed,
+          taintSkipped: processedCount - recomputed,
+          failed,
+          ...(errorCode ? { error: errorCode } : {}),
+        }
+      }
+
+      return res.json({ ok: true, data: { field: updated, ...(bulkRecompute ? { bulkRecompute } : {}) } })
     } catch (err: any) {
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
       if (err instanceof PermissionError) {
         return sendForbidden(res, err.message)
+      }
+      if (err instanceof FormulaExpressionBulkOverCapError) {
+        // B2: fail-closed, config NOT saved (the transaction already rolled back) — no silent
+        // partial/truncated recompute.
+        return res.status(422).json({
+          ok: false,
+          error: { code: 'FORMULA_EXPRESSION_BULK_OVER_CAP', message: err.message, total: err.total, max: err.max },
+        })
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })

@@ -248,7 +248,9 @@ describe('RecordWriteService', () => {
 
     // Helper is invoked with the changed field ids so it can gate on formula_dependencies.
     // 6th arg = hydratedDataByRecord (A-min): undefined here since this sheet has no lookup/rollup
-    // fields, so the write-path Step-4 hydration block does not run.
+    // fields, so the write-path Step-4 hydration block does not run. 7th arg = actorId (W1-1
+    // design-lock §2 LOCK-F, F1): Step 4c now passes the writing actor through so the Yjs-bridge
+    // helper can derive its writer-taint context from it — buildTestInput()'s default actorId.
     expect(recalculateFormulaFields).toHaveBeenCalledWith(
       expect.any(Function),
       'sheet1',
@@ -256,6 +258,7 @@ describe('RecordWriteService', () => {
       ['rec1'],
       ['fld_name'],
       undefined,
+      'user1',
     )
     // Editing client: the computed formula value rides back in the response records.
     expect(result.records).toEqual(

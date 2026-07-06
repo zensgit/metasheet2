@@ -385,6 +385,13 @@ export interface RecordWriteHelpers {
     // A-min (design #2246): optional pre-hydrated row data per record (lookup/rollup resolved
     // in-memory) so formula-over-lookup evals against the actual value. Absent → raw reload.
     hydratedDataByRecord?: Map<string, Record<string, unknown>>,
+    // W1-1 (design-lock 2026-07-05 §2 LOCK-F, F1): optional trailing actor id — the WRITING actor
+    // for this patch. The REST implementation ignores it (its `req` closure is already the
+    // authoritative writer-taint context; zero behavior change). The Yjs-bridge implementation
+    // (index.ts) has no Express `req` and uses this to derive the SAME writer-taint context via
+    // `recalculateFormulaFieldsForActor` (univer-meta.ts), so a collaborative edit gets the
+    // byte-identical taint-skip discipline as a REST write by the same actor.
+    actorId?: string | null,
   ) => Promise<Array<{ recordId: string; data: Record<string, unknown> }>>
   loadLinkValuesByRecord: (
     query: QueryFn,
@@ -1273,6 +1280,9 @@ export class RecordWriteService {
               updates.map((update) => update.recordId),
               changedFieldIds,
               hydratedDataByRecord,
+              // W1-1 (design-lock §2 LOCK-F, F1): pass the writing actor through so the Yjs-bridge
+              // helper can derive its writer-taint context from it (the REST helper ignores this).
+              actorId,
             )
           ).map((record) => ({
             recordId: record.recordId,

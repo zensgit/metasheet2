@@ -2381,6 +2381,10 @@ export class MetaSheetServer {
 
         // Bridge: Y.Text changes → RecordWriteService.patchRecords()
         const pool = poolManager.get()
+        // W1-1 (design-lock 2026-07-05 §2 LOCK-F, F1): the actor-based recompute sibling lives in
+        // univer-meta.ts (its two req-consumers — the taint resolver + relation-aggregation — are
+        // chokepoint-guarded to that file), imported here just for this wiring.
+        const { recalculateFormulaFieldsForActor } = await import('./routes/univer-meta')
         const recordWriteService = new RecordWriteService(pool, eventBus, {
           normalizeLinkIds: (v) => (Array.isArray(v) ? v.map(String) : []),
           normalizeAttachmentIds: (v) => (Array.isArray(v) ? v.map(String) : []),
@@ -2397,12 +2401,19 @@ export class MetaSheetServer {
           filterRecordFieldSummaryMap: (map) => map,
           serializeLinkSummaryMap: () => ({}),
           serializeAttachmentSummaryMap: () => ({}),
+          // W1-1 (design-lock §2 LOCK-F, F4): lookup/rollup fan-out stays a DELIBERATE stub — they
+          // are computed-on-read (no persistent stale value), so a collab edit only misses the
+          // cross-record ECHO, never a stale materialized value. Named residual; a separate gated
+          // slice if demand names it (GF9 pins this stays stubbed).
           applyLookupRollup: async () => {},
           computeDependentLookupRollupRecords: async () => [],
-          // Yjs-bridge writes intentionally skip computed-field recompute (lookup/
-          // rollup are stubbed above); formula recalc stays scoped to the REST PATCH
-          // path for now and is stubbed here for the same reason.
-          recalculateFormulaFields: async () => [],
+          // W1-1 (design-lock §2 LOCK-F, F1/F3): formula recalc is NO LONGER stubbed. The bridge has
+          // no Express `req`, so it calls the actor-based sibling of the REST recompute — same
+          // taint discipline, byte-for-byte (the SAME function body runs under a synthetic
+          // writer-taint context keyed on the real flushing actor id instead of a request; no
+          // system/full-access bypass).
+          recalculateFormulaFields: (q, sid, f, ids, changed, hydrated, actorId) =>
+            recalculateFormulaFieldsForActor(actorId ?? null, q, sid, f, ids, changed, hydrated),
           loadLinkValuesByRecord: async () => new Map(),
           buildLinkSummaries: async () => new Map(),
           buildAttachmentSummaries: async () => new Map(),
