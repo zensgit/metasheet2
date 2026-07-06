@@ -87,6 +87,11 @@ assert.equal(keyedListReq.limit, 10)
 assert.equal(keyedListReq.options.k3ReadMode, 'list')
 assert.equal(keyedListReq.options.listKey, 'MAT-')
 assert.equal(keyedListReq.options[READ_SMOKE_LIST_REQUEST_MARKER], true, 'keyed LIST request also carries the internal route-only marker')
+// Bounded pageIndex (#3703) rides as the dedicated option; absent → no option (adapter default page 1).
+assert.equal(listReq.options.listPageIndex, undefined, 'no pageIndex → no listPageIndex option')
+const pagedListReq = buildReadSmokeRequest(LIST_PRESET, { object: 'material', mode: 'list', pageIndex: 4 })
+assert.equal(pagedListReq.options.listPageIndex, 4, 'contract pageIndex maps to options.listPageIndex')
+assert.equal(pagedListReq.options[READ_SMOKE_LIST_REQUEST_MARKER], true, 'paged LIST request still carries the internal route-only marker')
 
 // --- non-persisted read config overlay: target-side Save config is preserved, read config is in-memory only ---
 const storedSystem = {
