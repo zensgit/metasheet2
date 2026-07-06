@@ -1,53 +1,54 @@
 <template>
-  <section class="approval-center">
-    <header class="approval-center__header">
-      <h1>审批中心</h1>
-      <div class="approval-center__toolbar">
-        <el-input
-          v-model="searchText"
-          placeholder="搜索审批编号或标题"
-          clearable
-          style="width: 240px"
-          @clear="handleSearch"
-          @keyup.enter="handleSearch"
-        >
-          <template #prefix>
-            <el-icon><Search /></el-icon>
-          </template>
-        </el-input>
-        <el-select
-          v-model="statusFilter"
-          placeholder="状态筛选"
-          clearable
-          style="width: 140px; margin-left: 12px"
-          @change="handleSearch"
-        >
-          <el-option label="待处理" value="pending" />
-          <el-option label="已通过" value="approved" />
-          <el-option label="已驳回" value="rejected" />
-          <el-option label="已撤回" value="revoked" />
-        </el-select>
-        <el-select
-          v-model="sourceSystemFilter"
-          placeholder="来源系统"
-          style="width: 140px; margin-left: 12px"
-          data-testid="approval-source-filter"
-          @change="handleSourceSystemChange"
-        >
-          <el-option label="全部来源" value="all" />
-          <el-option label="平台审批" value="platform" />
-          <el-option label="PLM 审批" value="plm" />
-        </el-select>
-        <el-button
-          v-if="canWrite"
-          type="primary"
-          style="margin-left: 12px"
-          @click="router.push({ name: 'approval-template-list' })"
-        >
-          发起审批
-        </el-button>
-      </div>
-    </header>
+  <PageShell width="default">
+    <PageHeader class="approval-center__header" title="审批中心">
+      <template #actions>
+        <div class="approval-center__toolbar">
+          <el-input
+            v-model="searchText"
+            placeholder="搜索审批编号或标题"
+            clearable
+            style="width: 240px"
+            @clear="handleSearch"
+            @keyup.enter="handleSearch"
+          >
+            <template #prefix>
+              <el-icon><Search /></el-icon>
+            </template>
+          </el-input>
+          <el-select
+            v-model="statusFilter"
+            placeholder="状态筛选"
+            clearable
+            style="width: 140px; margin-left: 12px"
+            @change="handleSearch"
+          >
+            <el-option label="待处理" value="pending" />
+            <el-option label="已通过" value="approved" />
+            <el-option label="已驳回" value="rejected" />
+            <el-option label="已撤回" value="revoked" />
+          </el-select>
+          <el-select
+            v-model="sourceSystemFilter"
+            placeholder="来源系统"
+            style="width: 140px; margin-left: 12px"
+            data-testid="approval-source-filter"
+            @change="handleSourceSystemChange"
+          >
+            <el-option label="全部来源" value="all" />
+            <el-option label="平台审批" value="platform" />
+            <el-option label="PLM 审批" value="plm" />
+          </el-select>
+          <el-button
+            v-if="canWrite"
+            type="primary"
+            style="margin-left: 12px"
+            @click="router.push({ name: 'approval-template-list' })"
+          >
+            发起审批
+          </el-button>
+        </div>
+      </template>
+    </PageHeader>
 
     <el-alert
       v-if="store.error"
@@ -622,7 +623,7 @@
         </el-button>
       </template>
     </el-dialog>
-  </section>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
@@ -642,6 +643,8 @@ import { useMobileViewport } from '../../composables/useMobileViewport'
 import { useLocale } from '../../composables/useLocale'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import ApprovalMobileList from './ApprovalMobileList.vue'
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
 
 const router = useRouter()
 const store = useApprovalStore()
@@ -1121,25 +1124,6 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.approval-center {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 24px;
-}
-
-.approval-center__header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
-
-.approval-center__header h1 {
-  font-size: 22px;
-  font-weight: 600;
-  margin: 0;
-}
-
 .approval-center__toolbar {
   display: flex;
   align-items: center;
@@ -1309,16 +1293,6 @@ onMounted(() => {
    should reflow on any narrow viewport so the search + filters never overflow
    horizontally. */
 @media (max-width: 768px) {
-  .approval-center {
-    padding: 16px 12px;
-  }
-
-  .approval-center__header {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 12px;
-  }
-
   .approval-center__toolbar {
     flex-wrap: wrap;
     gap: 8px;

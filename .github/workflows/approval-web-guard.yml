@@ -32,6 +32,14 @@ on:
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
       - 'apps/web/src/views/approval/ApprovalNewView.vue'
       - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
+      - 'apps/web/src/views/approval/ApprovalMetricsView.vue'
+      - 'apps/web/src/views/approval/TemplateCenterView.vue'
+      - 'apps/web/src/views/approval/TemplateDetailView.vue'
+      - 'apps/web/src/views/approval/DelegationSettingsView.vue'
+      - 'apps/web/src/views/approval/MyDelegationView.vue'
+      - 'apps/web/src/components/layout/PageShell.vue'
+      - 'apps/web/src/components/layout/PageHeader.vue'
+      - 'apps/web/tests/pageShell.spec.ts'
       - 'apps/web/tests/approval-common-template-presets.test.ts'
       - 'apps/web/tests/approvalTemplateAuthoring.spec.ts'
       - 'apps/web/tests/approval-detail-field.test.ts'
@@ -70,6 +78,14 @@ on:
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
       - 'apps/web/src/views/approval/ApprovalNewView.vue'
       - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
+      - 'apps/web/src/views/approval/ApprovalMetricsView.vue'
+      - 'apps/web/src/views/approval/TemplateCenterView.vue'
+      - 'apps/web/src/views/approval/TemplateDetailView.vue'
+      - 'apps/web/src/views/approval/DelegationSettingsView.vue'
+      - 'apps/web/src/views/approval/MyDelegationView.vue'
+      - 'apps/web/src/components/layout/PageShell.vue'
+      - 'apps/web/src/components/layout/PageHeader.vue'
+      - 'apps/web/tests/pageShell.spec.ts'
       - 'apps/web/tests/approval-common-template-presets.test.ts'
       - 'apps/web/tests/approvalTemplateAuthoring.spec.ts'
       - 'apps/web/tests/approval-detail-field.test.ts'
@@ -147,4 +163,8 @@ jobs:
         # (joinMode in backend-accepted {'all','any'}; cc untouched / G-4).
         # T3-1 mobile v0: i18n retrofit (locale-aware labels, fail-first RED on hardcoded-Chinese
         # revert) + responsive/flag-off gate — FE-only, had NO required gate before this wiring (#3607).
-        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive --reporter=dot
+        # UF-2 (ui-foundation-design-lock-20260706.md §6): PageShell/PageHeader — the shared page
+        # container + header components all approval views converged on. pageShell.spec.ts locks
+        # the width-tier→token mapping + title/subtitle/actions/meta slots + the back-navigation
+        # contract (backTo path-push vs back event-delegation, and back taking priority over backTo).
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell --reporter=dot

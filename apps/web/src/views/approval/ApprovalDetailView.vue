@@ -1,48 +1,50 @@
 <template>
-  <section class="approval-detail">
-    <header class="approval-detail__header">
-      <el-button text @click="goBack">
-        <el-icon><ArrowLeft /></el-icon>
-        返回列表
-      </el-button>
-      <h1 v-if="approval">{{ approval.title ?? '审批详情' }}</h1>
-      <el-tag
-        v-if="approval"
-        :type="statusTagType(approval.status)"
-        size="large"
-      >
-        {{ statusLabel(approval.status) }}
-      </el-tag>
-      <!-- B1-03: 已等待 aging — glanceable next to the status tag, only while still pending. -->
-      <el-tag
-        v-if="approval && approval.status === 'pending'"
-        :type="waitChipType"
-        size="large"
-        effect="plain"
-        data-testid="approval-wait-chip"
-      >
-        已等待 {{ waitChipLabel }}
-      </el-tag>
-      <el-tag
-        v-if="approval && isInParallelRegion"
-        type="warning"
-        size="large"
-        class="approval-detail__parallel-badge"
-        effect="light"
-      >
-        并行中 · {{ parallelBranchNodeKeys.map(nodeLabel).join(' / ') }}
-      </el-tag>
-      <!-- B1-01: my-turn cue — the reader is an active assignee at the current node(s). -->
-      <el-tag
-        v-if="approval && isMyTurn"
-        type="success"
-        size="large"
-        effect="light"
-        data-testid="approval-my-turn-badge"
-      >
-        等待你处理
-      </el-tag>
-    </header>
+  <PageShell width="default">
+    <PageHeader
+      class="approval-detail__header"
+      :title="headerTitle"
+      back
+      back-label="返回列表"
+      @back="goBack"
+    >
+      <template v-if="approval" #meta>
+        <el-tag
+          :type="statusTagType(approval.status)"
+          size="large"
+        >
+          {{ statusLabel(approval.status) }}
+        </el-tag>
+        <!-- B1-03: 已等待 aging — glanceable next to the status tag, only while still pending. -->
+        <el-tag
+          v-if="approval.status === 'pending'"
+          :type="waitChipType"
+          size="large"
+          effect="plain"
+          data-testid="approval-wait-chip"
+        >
+          已等待 {{ waitChipLabel }}
+        </el-tag>
+        <el-tag
+          v-if="isInParallelRegion"
+          type="warning"
+          size="large"
+          class="approval-detail__parallel-badge"
+          effect="light"
+        >
+          并行中 · {{ parallelBranchNodeKeys.map(nodeLabel).join(' / ') }}
+        </el-tag>
+        <!-- B1-01: my-turn cue — the reader is an active assignee at the current node(s). -->
+        <el-tag
+          v-if="isMyTurn"
+          type="success"
+          size="large"
+          effect="light"
+          data-testid="approval-my-turn-badge"
+        >
+          等待你处理
+        </el-tag>
+      </template>
+    </PageHeader>
 
     <el-alert
       v-if="store.error"
@@ -670,15 +672,16 @@
         </el-button>
       </template>
     </el-dialog>
-  </section>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
 import {
-  ArrowLeft,
   Check,
   Close,
   Right,
@@ -726,6 +729,9 @@ const { isMobile } = useMobileViewport()
 const isMobileLayout = computed(() => hasFeature('approvalMobile') && isMobile.value)
 
 const approval = computed(() => store.activeApproval)
+// PageHeader requires a non-optional title; before the detail loads (or on error) fall back to
+// the same generic copy the original hand-rolled `<h1 v-if="approval">` used.
+const headerTitle = computed(() => approval.value?.title ?? '审批详情')
 
 // B1-03: 已等待 chip — a glanceable "how long has this been sitting" cue next to the status tag,
 // only meaningful while the instance is still pending (once resolved, `updatedAt`/the history
@@ -1473,26 +1479,6 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.approval-detail {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 24px;
-}
-
-.approval-detail__header {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-.approval-detail__header h1 {
-  font-size: 20px;
-  font-weight: 600;
-  margin: 0;
-  flex: 1;
-}
-
 .approval-detail__error {
   margin-bottom: 16px;
 }
@@ -1740,10 +1726,6 @@ onMounted(async () => {
    approve/reject/comment (deferred actions hidden), so the remaining controls
    are laid out as full-width, comfortably tappable rows. */
 @media (max-width: 768px) {
-  .approval-detail {
-    padding: 16px 12px;
-  }
-
   .approval-detail__body {
     grid-template-columns: 1fr;
   }

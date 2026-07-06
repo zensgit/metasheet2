@@ -1,20 +1,21 @@
 <template>
-  <div class="delegation-settings">
-    <div class="header">
-      <div>
-        <h2>委托设置</h2>
-        <p class="sub">为审批人配置时间窗内的委托（委托人 → 被委托人）。同一委托人 + 范围目标仅允许一条生效委托。</p>
-      </div>
-      <div class="actions">
-        <el-switch
-          v-model="includeInactive"
-          data-testid="delegation-history-toggle"
-          active-text="显示历史"
-          @change="load"
-        />
-        <el-button type="primary" :disabled="!canManage" data-testid="delegation-new" @click="openCreate">新建委托</el-button>
-      </div>
-    </div>
+  <PageShell width="default">
+    <PageHeader
+      title="委托管理"
+      subtitle="为审批人配置时间窗内的委托（委托人 → 被委托人）。同一委托人 + 范围目标仅允许一条生效委托。"
+    >
+      <template #actions>
+        <div class="actions">
+          <el-switch
+            v-model="includeInactive"
+            data-testid="delegation-history-toggle"
+            active-text="显示历史"
+            @change="load"
+          />
+          <el-button type="primary" :disabled="!canManage" data-testid="delegation-new" @click="openCreate">新建委托</el-button>
+        </div>
+      </template>
+    </PageHeader>
 
     <el-alert v-if="!canManage" type="info" :closable="false" title="需要审批模板管理权限才能配置委托" />
 
@@ -76,12 +77,14 @@
         <el-button type="primary" :loading="saving" data-testid="delegation-submit" @click="submit">保存</el-button>
       </template>
     </el-dialog>
-  </div>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import {
   listDelegations,
@@ -175,11 +178,7 @@ onMounted(load)
 </script>
 
 <style scoped>
-.delegation-settings { padding: 16px; }
-.header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
-.header h2 { margin: 0; }
 .actions { display: flex; align-items: center; gap: 12px; }
-.sub { color: var(--el-text-color-secondary); font-size: 13px; margin: 4px 0 0; }
 .expiring-soon-hint {
   display: block;
   margin-top: 2px;
