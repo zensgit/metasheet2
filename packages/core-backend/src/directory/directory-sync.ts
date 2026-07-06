@@ -277,6 +277,8 @@ export type DirectoryIntegrationSummary = {
     appKey: string
     appSecretConfigured: boolean
     workNotificationAgentIdConfigured: boolean
+    approvalCardLinkSecretConfigured: boolean
+    approvalCardPublicAppUrl: string | null
     rootDepartmentId: string
     baseUrl: string | null
     pageSize: number
@@ -976,6 +978,8 @@ function parseIntegrationConfig(row: Pick<DirectoryIntegrationRow, 'config'>): D
 
 function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegrationSummary {
   const config = parseIntegrationConfig(row)
+  // Approval-card keys are presence-only in summaries (secret never decrypted here).
+  const rawConfig = parseJsonRecord(row.config)
   return {
     id: row.id,
     orgId: row.org_id,
@@ -995,6 +999,8 @@ function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegratio
       appKey: config.appKey,
       appSecretConfigured: Boolean(config.appSecret),
       workNotificationAgentIdConfigured: Boolean(config.workNotificationAgentId),
+      approvalCardLinkSecretConfigured: Boolean(normalizeText(rawConfig.approvalCardLinkSecret)),
+      approvalCardPublicAppUrl: normalizeText(rawConfig.approvalCardPublicAppUrl) || null,
       rootDepartmentId: config.rootDepartmentId,
       baseUrl: config.baseUrl ?? null,
       pageSize: config.pageSize,
@@ -1579,6 +1585,13 @@ export async function updateDirectoryIntegration(
     memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
     memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
   })
+  // Carry-through for keys NOT edited by this generic form (approval-card config lives in the
+  // same JSONB but is written only via its dedicated admin endpoints): the rebuild below would
+  // otherwise silently wipe them on every integration-form save. The encrypted secret is carried
+  // as-is — never decrypted here.
+  const rawCurrentConfig = parseJsonRecord(current.config)
+  const carriedApprovalCardLinkSecret = normalizeText(rawCurrentConfig.approvalCardLinkSecret) || null
+  const carriedApprovalCardPublicAppUrl = normalizeText(rawCurrentConfig.approvalCardPublicAppUrl) || null
   const result = await query<DirectoryIntegrationRow>(
     `UPDATE directory_integrations
      SET name = $2,
@@ -1613,6 +1626,8 @@ export async function updateDirectoryIntegration(
         memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
         memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
         memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
+        approvalCardLinkSecret: carriedApprovalCardLinkSecret,
+        approvalCardPublicAppUrl: carriedApprovalCardPublicAppUrl,
       }),
       Boolean(normalized.syncEnabled),
       normalized.scheduleCron,

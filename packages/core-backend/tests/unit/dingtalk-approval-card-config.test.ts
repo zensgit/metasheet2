@@ -14,8 +14,11 @@ vi.mock('../../src/db/pg', () => ({
 import {
   APPROVAL_CARD_LINK_SECRET_CONFIG_KEY,
   APPROVAL_CARD_PUBLIC_APP_URL_CONFIG_KEY,
+  generateApprovalCardLinkSecret,
+  getApprovalCardConfigStatus,
   resolveApprovalCardLinkSecret,
   resolveApprovalCardPublicAppUrl,
+  saveApprovalCardPublicAppUrl,
 } from '../../src/integrations/dingtalk/approval-card-config'
 import { verifyApprovalCardLinkToken } from '../../src/services/ApprovalCardDeliveryAction'
 
@@ -90,6 +93,102 @@ describe('approval card config resolvers (CFG-1)', () => {
       // Even a token forged with an EMPTY HMAC key must be rejected — no secret means no verify.
       const emptyKeyForgery = createHmac('sha256', '').update('card-delivery-1').digest('hex').slice(0, 32)
       await expect(verifyApprovalCardLinkToken('card-delivery-1', emptyKeyForgery)).resolves.toBe(false)
+    })
+  })
+
+  describe('CFG-2 generateApprovalCardLinkSecret', () => {
+    function mockIntegration(config: Record<string, unknown> = {}) {
+      return { id: 'dir-1', name: 'DingTalk CN', status: 'active', config }
+    }
+
+    it('stores an ENCRYPTED 32-byte secret and never echoes the plaintext', async () => {
+      let storedParam = ''
+      dbMocks.query
+        .mockResolvedValueOnce({ rows: [mockIntegration()] })
+        .mockImplementationOnce(async (_sql: string, params: unknown[]) => {
+          storedParam = String(params[2])
+          return { rows: [mockIntegration({ [APPROVAL_CARD_LINK_SECRET_CONFIG_KEY]: storedParam })] }
+        })
+      const status = await generateApprovalCardLinkSecret('dir-1')
+      expect(status?.linkSecret.configured).toBe(true)
+      expect(status?.linkSecret.source).toBe('stored')
+      expect(status?.linkSecret.valuePrinted).toBe(false)
+      // Written value is encrypted-at-rest — never the raw hex.
+      expect(storedParam.startsWith('enc:')).toBe(true)
+      expect(/^[0-9a-f]{64}$/.test(storedParam)).toBe(false)
+      // The response must not leak the plaintext (64 hex chars) anywhere.
+      expect(JSON.stringify(status)).not.toMatch(/[0-9a-f]{64}/)
+      const updateSql = dbMocks.query.mock.calls[1][0] as string
+      expect(updateSql).toContain('jsonb_set')
+    })
+
+    it('returns null for an unknown integration (no write issued)', async () => {
+      dbMocks.query.mockResolvedValueOnce({ rows: [] })
+      await expect(generateApprovalCardLinkSecret('ghost')).resolves.toBeNull()
+      expect(dbMocks.query).toHaveBeenCalledTimes(1)
+    })
+
+    it('reports envOverrideActive when env still wins at runtime', async () => {
+      vi.stubEnv('APPROVAL_CARD_LINK_SECRET', 'env-secret')
+      dbMocks.query
+        .mockResolvedValueOnce({ rows: [mockIntegration()] })
+        .mockResolvedValueOnce({ rows: [mockIntegration({ [APPROVAL_CARD_LINK_SECRET_CONFIG_KEY]: 'enc:x' })] })
+      const status = await generateApprovalCardLinkSecret('dir-1')
+      expect(status?.linkSecret.envOverrideActive).toBe(true)
+      expect(status?.linkSecret.source).toBe('env')
+    })
+  })
+
+  describe('CFG-2 saveApprovalCardPublicAppUrl', () => {
+    function mockIntegration(config: Record<string, unknown> = {}) {
+      return { id: 'dir-1', name: 'DingTalk CN', status: 'active', config }
+    }
+
+    it('accepts absolute http(s) URLs and echoes the stored value (not a secret)', async () => {
+      dbMocks.query
+        .mockResolvedValueOnce({ rows: [mockIntegration()] })
+        .mockResolvedValueOnce({ rows: [mockIntegration({ [APPROVAL_CARD_PUBLIC_APP_URL_CONFIG_KEY]: 'https://app.example.com' })] })
+      const status = await saveApprovalCardPublicAppUrl('dir-1', 'https://app.example.com')
+      expect(status?.publicAppUrl.storedValue).toBe('https://app.example.com')
+      expect(status?.publicAppUrl.source).toBe('stored')
+    })
+
+    it('rejects non-http(s) and relative URLs at the write (scheme allowlist)', async () => {
+      await expect(saveApprovalCardPublicAppUrl('dir-1', 'javascript:alert(1)')).rejects.toThrow('http or https')
+      await expect(saveApprovalCardPublicAppUrl('dir-1', 'ftp://host/x')).rejects.toThrow('http or https')
+      await expect(saveApprovalCardPublicAppUrl('dir-1', 'not a url')).rejects.toThrow('absolute http(s) URL')
+      // Validation happens BEFORE any DB access.
+      expect(dbMocks.query).not.toHaveBeenCalled()
+    })
+
+    it('clears the stored URL when saving empty', async () => {
+      dbMocks.query
+        .mockResolvedValueOnce({ rows: [mockIntegration({ [APPROVAL_CARD_PUBLIC_APP_URL_CONFIG_KEY]: 'https://old.example.com' })] })
+        .mockResolvedValueOnce({ rows: [mockIntegration({})] })
+      const status = await saveApprovalCardPublicAppUrl('dir-1', '')
+      expect(status?.publicAppUrl.storedValue).toBeNull()
+      expect(status?.publicAppUrl.source).toBe('missing')
+      const clearSql = dbMocks.query.mock.calls[1][0] as string
+      expect(clearSql).toContain("- $2::text")
+    })
+  })
+
+  describe('CFG-2 getApprovalCardConfigStatus', () => {
+    it('reports presence booleans only, with env-first sourcing', async () => {
+      vi.stubEnv('PUBLIC_APP_URL', 'https://env.example.com')
+      dbMocks.query.mockResolvedValueOnce({
+        rows: [{ id: 'dir-1', name: 'n', status: 'active', config: { [APPROVAL_CARD_LINK_SECRET_CONFIG_KEY]: normalizeStoredSecretValue('s') } }],
+      })
+      const status = await getApprovalCardConfigStatus('dir-1')
+      expect(status?.linkSecret).toEqual({ configured: true, source: 'stored', envOverrideActive: false, valuePrinted: false })
+      expect(status?.publicAppUrl.source).toBe('env')
+      expect(status?.publicAppUrl.envOverrideActive).toBe(true)
+      expect(JSON.stringify(status)).not.toContain('enc:')
+    })
+
+    it('returns null for an unknown integration', async () => {
+      dbMocks.query.mockResolvedValueOnce({ rows: [] })
+      await expect(getApprovalCardConfigStatus('ghost')).resolves.toBeNull()
     })
   })
 

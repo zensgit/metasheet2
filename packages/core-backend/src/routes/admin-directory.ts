@@ -27,6 +27,11 @@ import {
   saveDingTalkWorkNotificationAgentId,
   testDingTalkWorkNotificationAgentId,
 } from '../integrations/dingtalk/work-notification-settings'
+import {
+  generateApprovalCardLinkSecret,
+  getApprovalCardConfigStatus,
+  saveApprovalCardPublicAppUrl,
+} from '../integrations/dingtalk/approval-card-config'
 import { refreshDirectoryIntegrationSchedule } from '../directory/directory-sync-scheduler'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
@@ -183,6 +188,83 @@ export function adminDirectoryRouter(): Router {
       jsonOk(res, { integration })
     } catch (error) {
       jsonError(res, 400, 'DIRECTORY_UPDATE_FAILED', readErrorMessage(error, 'Failed to update directory integration'))
+    }
+  })
+
+  // CFG-2 (card-config lock §3.2): approval-card self-service config. The secret is generated
+  // server-side, stored encrypted, and NEVER echoed — responses carry presence booleans only.
+  router.get('/integrations/:integrationId/approval-card-config', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const status = await getApprovalCardConfigStatus(req.params.integrationId)
+      if (!status) {
+        jsonError(res, 404, 'DIRECTORY_NOT_FOUND', 'Directory integration not found')
+        return
+      }
+      jsonOk(res, { status })
+    } catch (error) {
+      jsonError(res, 500, 'APPROVAL_CARD_CONFIG_STATUS_FAILED', readErrorMessage(error, 'Failed to load approval card config status'))
+    }
+  })
+
+  router.post('/integrations/:integrationId/approval-card-config/secret/generate', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const status = await generateApprovalCardLinkSecret(req.params.integrationId)
+      if (!status) {
+        jsonError(res, 404, 'DIRECTORY_NOT_FOUND', 'Directory integration not found')
+        return
+      }
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'approval-card-config',
+        resourceId: status.integration.id,
+        meta: {
+          integrationId: status.integration.id,
+          operation: 'generate_link_secret',
+          valuePrinted: false,
+          envOverrideActive: status.linkSecret.envOverrideActive,
+        },
+      })
+      jsonOk(res, { status })
+    } catch (error) {
+      jsonError(res, 400, 'APPROVAL_CARD_SECRET_GENERATE_FAILED', readErrorMessage(error, 'Failed to generate approval card link secret'))
+    }
+  })
+
+  router.put('/integrations/:integrationId/approval-card-config', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>
+      const publicAppUrl = typeof body.publicAppUrl === 'string' ? body.publicAppUrl : ''
+      const status = await saveApprovalCardPublicAppUrl(req.params.integrationId, publicAppUrl)
+      if (!status) {
+        jsonError(res, 404, 'DIRECTORY_NOT_FOUND', 'Directory integration not found')
+        return
+      }
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'approval-card-config',
+        resourceId: status.integration.id,
+        meta: {
+          integrationId: status.integration.id,
+          operation: 'save_public_app_url',
+          publicAppUrl: status.publicAppUrl.storedValue,
+        },
+      })
+      jsonOk(res, { status })
+    } catch (error) {
+      jsonError(res, 400, 'APPROVAL_CARD_CONFIG_SAVE_FAILED', readErrorMessage(error, 'Failed to save approval card config'))
     }
   })
 
