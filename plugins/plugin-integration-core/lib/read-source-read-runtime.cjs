@@ -32,6 +32,12 @@ const {
 // owns all multiplicity-rule selection + values-free evidence; this executor only supplies the outbound
 // keyed read + the config, then returns the evaluator's { evidence, data } verbatim.
 const { evaluateResolver } = require('./read-source-resolver-evaluator.cjs')
+// BL2 (#1709): when the by-material BOM-list preset fails in the shared resolver evaluator, the generic
+// resolver code is remapped to the preset's registered family (BL0 error taxonomy) — exact-key map only.
+const {
+  K3WISE_BOM_LIST_BY_MATERIAL_PRESET,
+  K3_WISE_BOM_LIST_BY_MATERIAL_RESOLVER_CODE_MAP,
+} = require('./read-source-bom-list-by-material-contract.cjs')
 const { applyReadSmokePresetOverlay } = require('./read-smoke.cjs')
 
 const CONFIGURED_READ_BODY_KEYS = Object.freeze(['config', 'inputs'])
@@ -181,7 +187,23 @@ async function executeConfiguredRead(prepared, { system, createAdapter, timeoutM
   // the caller with no further chaining. The composition path (C-R3, merged, read-source-composition-runtime.cjs)
   // orchestrates this executor per hop instead of calling it standalone.
   if (plan.mode === 'resolver_lookup') {
-    return evaluateResolver(config, raw, { rowCap: plan.rowCap })
+    const outcome = evaluateResolver(config, raw, { rowCap: plan.rowCap })
+    // BL2: surface the by-material BOM-list failure in its OWN registered family (BL0 taxonomy) so a
+    // second-hop list failure never reads as a generic resolver failure during standalone diagnosis.
+    // Exact-key map, evidence rebuilt frozen; the ok/data planes and every other evidence key are
+    // untouched (the family codes are registered in the probe error-code set, so this stays values-free
+    // under the same safeErrorCode discipline).
+    if (
+      plan.object === K3WISE_BOM_LIST_BY_MATERIAL_PRESET.object
+      && plan.requiredKind === K3WISE_BOM_LIST_BY_MATERIAL_PRESET.requiredKind
+      && outcome.evidence.ok === false
+    ) {
+      const mapped = K3_WISE_BOM_LIST_BY_MATERIAL_RESOLVER_CODE_MAP[outcome.evidence.errorCode]
+      if (mapped !== undefined) {
+        return { ...outcome, evidence: Object.freeze({ ...outcome.evidence, errorCode: mapped }) }
+      }
+    }
+    return outcome
   }
 
   const shapes = {}
