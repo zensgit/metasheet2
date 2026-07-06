@@ -251,9 +251,14 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
     expect(onClose).not.toHaveBeenCalled()
 
+    // Review P2 (UF-4): the confirm=true leg must go through the X button — i.e. through
+    // el-drawer's `before-close` — not the Cancel button (which calls requestClose directly).
+    // A bypassed `before-close` (e.g. `(done) => done()`) closes the drawer WITHOUT emitting
+    // close, so this exact assertion is what turns red under that mutation.
     confirmSpy.mockReturnValue(true)
-    cancelBtn.click()
+    xBtn.click()
     await flushPromises()
+    expect(confirmSpy).toHaveBeenCalledTimes(3)
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
