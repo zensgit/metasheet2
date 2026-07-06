@@ -10,14 +10,22 @@
 // display status to a tone; `automationRun` derives its zh/en labels by calling the existing
 // `automationStatusLabel` (multitable/utils/meta-automation-labels.ts) rather than re-declaring
 // automation copy here.
+//
+// UF-3b — closes the 4th "status domain" gap UF-3 flagged but didn't land: `approvalTemplate`
+// (TemplateCenterView's tab/column tag, TemplateDetailView's header tag, ApprovalNewView's
+// info-card tag) previously each hand-rolled a `published`/`draft`/`archived` ternary or a
+// two-branch `status === 'published' ? ... : ...` map. Vocabulary is the `ApprovalTemplateStatus`
+// type (types/approval.ts) — verified against source, NOT the three-value guess ("draft/
+// published/disabled") floated before grounding; the real third state is `archived`.
 
 import { automationStatusLabel } from '../multitable/utils/meta-automation-labels'
 import type { WorkflowJobStatus } from '../multitable/types'
 import type { DelegationDisplayStatus } from '../approvals/delegationStatus'
+import type { ApprovalTemplateStatus } from '../types/approval'
 
 export type StatusTone = 'success' | 'warning' | 'danger' | 'info' | 'primary' | 'neutral'
 
-export type StatusDomain = 'approvalInstance' | 'delegation' | 'automationRun'
+export type StatusDomain = 'approvalInstance' | 'approvalTemplate' | 'delegation' | 'automationRun'
 
 export interface StatusDisplayEntry {
   tone: StatusTone
@@ -45,6 +53,17 @@ const APPROVAL_INSTANCE_STATUS_DOMAIN: Record<string, StatusDisplayEntry> = {
   rejected: { tone: 'danger', zh: '已驳回', en: 'Rejected' },
   revoked: { tone: 'info', zh: '已撤回', en: 'Revoked' },
   cancelled: { tone: 'info', zh: '已取消', en: 'Cancelled' },
+}
+
+// ---------------------------------------------------------------------------
+// approvalTemplate — the THREE `ApprovalTemplateStatus` values (types/approval.ts). Tone/label
+// values carried over unchanged from the three call sites' now-deleted local
+// `statusTagType`/`statusLabel` maps (semantics preserved, not re-decided here): `published`
+// mapped to EP `success`, `draft` to `warning`, `archived` to `info`.
+const APPROVAL_TEMPLATE_STATUS_DOMAIN: Record<ApprovalTemplateStatus, StatusDisplayEntry> = {
+  published: { tone: 'success', zh: '已发布', en: 'Published' },
+  draft: { tone: 'warning', zh: '草稿', en: 'Draft' },
+  archived: { tone: 'info', zh: '已归档', en: 'Archived' },
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +118,7 @@ const AUTOMATION_RUN_STATUS_DOMAIN: Record<string, StatusDisplayEntry> = Object.
 
 const DOMAIN_TABLES: Record<StatusDomain, Record<string, StatusDisplayEntry>> = {
   approvalInstance: APPROVAL_INSTANCE_STATUS_DOMAIN,
+  approvalTemplate: APPROVAL_TEMPLATE_STATUS_DOMAIN,
   delegation: DELEGATION_STATUS_DOMAIN,
   automationRun: AUTOMATION_RUN_STATUS_DOMAIN,
 }
