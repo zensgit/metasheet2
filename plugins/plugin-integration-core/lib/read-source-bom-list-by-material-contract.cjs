@@ -114,7 +114,9 @@ function isBomListByMaterialPresetConfig(config) {
 const K3_WISE_BOM_LIST_BY_MATERIAL_KEY_PATTERN = /^[0-9]{1,20}$/
 
 function isBomListByMaterialKeyValid(value) {
-  if (typeof value === 'number') return Number.isInteger(value) && value >= 0 && K3_WISE_BOM_LIST_BY_MATERIAL_KEY_PATTERN.test(String(value))
+  // Safe-integer bound: a precision-lossy large double (e.g. 1e20) can stringify into a digits-only run
+  // that no longer equals the caller's intended id — reject it rather than filter on a corrupted key.
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 && K3_WISE_BOM_LIST_BY_MATERIAL_KEY_PATTERN.test(String(value))
   if (typeof value !== 'string') return false
   return K3_WISE_BOM_LIST_BY_MATERIAL_KEY_PATTERN.test(value.trim())
 }

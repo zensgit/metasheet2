@@ -98,6 +98,7 @@ function happyRaw() {
 // Data-plane / private-value sentinels that must NEVER appear in values-free evidence.
 const EVIDENCE_SENTINELS = Object.freeze([
   '31415', 'BOM-PLANTED', 'FBOMNumber', 'bom_number', 'k3host', 'wire-secret', 'Successful', 'boom-message',
+  'tenant_1', 'sys_bl2',
 ])
 
 function assertEvidenceValuesFree(evidence) {
@@ -462,7 +463,9 @@ function testLatentStateAndKeyPredicate() {
   for (const good of ['31415', '007', 42, '9'.repeat(20)]) {
     assert.equal(isBomListByMaterialKeyValid(good), true, `key ${JSON.stringify(good)} must be valid`)
   }
-  for (const bad of ['', '31a15', '1 OR 1=1', "1'", '-1', 1.5, -3, null, undefined, {}, [], '9'.repeat(21), 'FItemID']) {
+  // Precision-lossy large doubles are rejected on the number branch (Number.isSafeInteger bound) — a
+  // corrupted stringification must never become a filter value.
+  for (const bad of ['', '31a15', '1 OR 1=1', "1'", '-1', 1.5, -3, 1e20, Number.MAX_SAFE_INTEGER + 2, null, undefined, {}, [], '9'.repeat(21), 'FItemID']) {
     assert.equal(isBomListByMaterialKeyValid(bad), false, `key ${JSON.stringify(bad)} must be invalid`)
   }
 }
