@@ -119,6 +119,19 @@
       <!-- Undo/Redo -->
       <button class="meta-toolbar__btn" :disabled="!canUndo" :title="l('toolbar.undoTitle')" :aria-label="l('toolbar.undo')" @click="emit('undo')">&#x21A9;</button>
       <button class="meta-toolbar__btn" :disabled="!canRedo" :title="l('toolbar.redoTitle')" :aria-label="l('toolbar.redo')" @click="emit('redo')">&#x21AA;</button>
+      <!--
+        Slice 3 personal-views "reset to shared" (design-lock multitable-personal-views-slice3-fe-toggle-
+        design-lock-20260706.md §3 P1 + G-FE-3 / G-FE-4): rendered ONLY while the personal toggle is ON for
+        the active view (implies the session capability is on too — the caller only ever passes true when
+        both hold). Deletes the actor's own personal-config row, never the shared view (§1-B parent lock).
+      -->
+      <button
+        v-if="canResetToShared"
+        class="meta-toolbar__btn meta-toolbar__btn--reset-personal"
+        data-testid="reset-to-shared"
+        :title="resetToSharedLabel"
+        @click="emit('reset-to-shared')"
+      >{{ resetToSharedLabel }}</button>
     </div>
     <div class="meta-toolbar__right">
       <div class="meta-toolbar__search" :class="{ 'meta-toolbar__search--active': !!searchText }" role="search">
@@ -178,6 +191,9 @@ const props = withDefaults(defineProps<{
   totalRows?: number
   rowDensity?: RowDensity
   sortFilterDirty?: boolean
+  // Slice 3: true only when personal views are enabled for the session AND the personal toggle is ON for
+  // the active view — absent/false hides the action entirely (no request can ever originate from it).
+  canResetToShared?: boolean
 }>(), { filterGroups: () => [] })
 
 const emit = defineEmits<{
@@ -205,10 +221,12 @@ const emit = defineEmits<{
   (e: 'print'): void
   (e: 'set-row-density', density: RowDensity): void
   (e: 'auto-fit-columns'): void
+  (e: 'reset-to-shared'): void
 }>()
 
 const { isZh } = useLocale()
 const l = (key: MetaCoreLabelKey) => metaCoreLabel(key, isZh.value)
+const resetToSharedLabel = computed(() => (isZh.value ? '恢复为共享视图' : 'Reset to shared'))
 
 const showFieldPicker = ref(false)
 const showSortPanel = ref(false)
@@ -307,6 +325,8 @@ function onAddFilterGroup() {
 .meta-toolbar__btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .meta-toolbar__btn--primary { background: #409eff; color: #fff; border-color: #409eff; }
 .meta-toolbar__btn--primary:hover { background: #66b1ff; }
+.meta-toolbar__btn--reset-personal { color: #067647; border-color: #6ce9a6; background: #ecfdf3; }
+.meta-toolbar__btn--reset-personal:hover { background: #d1fadf; }
 .meta-toolbar__btn-icon { font-size: 14px; }
 .meta-toolbar__badge { font-size: 10px; background: #409eff; color: #fff; padding: 0 5px; border-radius: 8px; min-width: 16px; text-align: center; }
 .meta-toolbar__dropdown { position: relative; }

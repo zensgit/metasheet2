@@ -6747,7 +6747,16 @@ export function univerMetaRouter(): Router {
           // T8-2 Reset UI flag-visibility contract (#3239): a flag-derived, FE-readable signal so the Reset entry can be
           // truly HIDDEN when off (not a phantom flag read on the client). True iff MULTITABLE_ENABLE_PIT_RESET is on AND
           // the actor is a sheet-admin — mirrors the reset routes' PIT_RESET_ENABLED() + canManageSheetAccess gate.
-          capabilities: { ...capabilities, pitResetEnabled: (String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true') && capabilities.canManageSheetAccess === true },
+          //
+          // Slice 3 (design-lock multitable-personal-views-slice3-fe-toggle-design-lock-20260706.md §7 Q1):
+          // the personal-views "My view" toggle is gated on this SAME flag-derived-capability pattern — no
+          // client-side env const. Available to every actor who can read (P1: presentation-only, no per-view
+          // opt-in), so unlike pitResetEnabled this is not additionally ANDed with a management capability.
+          capabilities: {
+            ...capabilities,
+            pitResetEnabled: (String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true') && capabilities.canManageSheetAccess === true,
+            personalViewsEnabled: isPersonalViewsEnabled(),
+          },
           capabilityOrigin,
           fieldPermissions,
           viewPermissions,
