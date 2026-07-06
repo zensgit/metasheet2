@@ -237,7 +237,7 @@ html, body {
   font-size: 14px;
   line-height: 1.5;
   color: #333;
-  background-color: #f5f5f5;
+  background-color: var(--ms-bg-page);
 }
 
 #app {
@@ -268,7 +268,7 @@ html, body {
 .brand-text {
   font-size: 18px;
   font-weight: 600;
-  color: #1976d2;
+  color: var(--ms-color-primary);
   white-space: nowrap;
 }
 
@@ -350,8 +350,8 @@ html, body {
 }
 
 .nav-link.router-link-active {
-  background-color: #e3f2fd;
-  color: #1976d2;
+  background-color: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
 }
 
 .app-main {

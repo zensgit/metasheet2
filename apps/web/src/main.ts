@@ -6,6 +6,10 @@ import { createPinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
+// MetaSheet design tokens (single source of truth per the UI foundation
+// design-lock). MUST come after the element-plus stylesheet so the
+// `--el-color-*` overrides in tokens.css win the cascade.
+import './styles/tokens.css'
 // Shared border-left accent palette for effective-calendar chips. Imported
 // here once so multitable Calendar view, attendance personal calendar, and
 // holiday admin section all see the same `--calendar-source-accent` vars.
