@@ -83,6 +83,13 @@ on:
       # TemplateDetailView status tag by `data-status` and had no gate wiring before this (its
       # 40 tests ran in no required workflow).
       - 'apps/web/tests/approval-e2e-permissions.spec.ts'
+      # UF-7 — i18n mechanism convergence: WorkflowHubView.vue (the worst zh/en mixing surface
+      # in the repo audit) converges on a typed key-table (workflowHubLabels.ts) + useLocale(),
+      # matching the established multitable meta-*-labels.ts pattern. Had no mount-level gate
+      # before this wiring.
+      - 'apps/web/src/views/WorkflowHubView.vue'
+      - 'apps/web/src/views/workflowHubLabels.ts'
+      - 'apps/web/tests/workflowHubView.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -153,6 +160,13 @@ on:
       # TemplateDetailView status tag by `data-status` and had no gate wiring before this (its
       # 40 tests ran in no required workflow).
       - 'apps/web/tests/approval-e2e-permissions.spec.ts'
+      # UF-7 — i18n mechanism convergence: WorkflowHubView.vue (the worst zh/en mixing surface
+      # in the repo audit) converges on a typed key-table (workflowHubLabels.ts) + useLocale(),
+      # matching the established multitable meta-*-labels.ts pattern. Had no mount-level gate
+      # before this wiring.
+      - 'apps/web/src/views/WorkflowHubView.vue'
+      - 'apps/web/src/views/workflowHubLabels.ts'
+      - 'apps/web/tests/workflowHubView.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -228,4 +242,9 @@ jobs:
         # rendering from `rows`, row-click/selection-change re-emission, the per-tab difference
         # props (showSelection/selectable/showWaitColumn/actionsWidth), the `actions` slot
         # presence/absence toggling the 操作 column, and the empty state.
-        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable --reporter=dot
+        # UF-7: workflowHubView — first mounted harness for WorkflowHubView.vue; asserts BOTH
+        # locale directions render fully in one language (zh locale → Chinese everywhere, en
+        # locale → English everywhere, no mixed card), the chip/status/role/source enum labels
+        # resolve through the key-table (not bare English enum values), the pager range label is
+        # locale-aware, and a static tripwire against the original hardcoded-English literals.
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView --reporter=dot
