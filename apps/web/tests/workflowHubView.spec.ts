@@ -180,8 +180,8 @@ describe('WorkflowHubView — UF-7 i18n convergence (zh locale → Chinese every
     // The view's `<router-link>` usages carry :to objects only used for real navigation —
     // stub it to a plain anchor (avoids requiring a full router plugin + silences the
     // "Failed to resolve component" console noise; purely cosmetic passthrough).
-    app.component('router-link', {
-      props: ['to'],
+    app.component('RouterLink', {
+      props: { to: { type: [String, Object], required: false, default: undefined } },
       render() {
         return h('a', { 'data-router-link': 'true' }, this.$slots.default ? this.$slots.default() : [])
       },
