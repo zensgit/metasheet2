@@ -25,12 +25,14 @@
 
 export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
-/** The facets a personal overlay may set. Field-order overlay is OUT of scope for slice 1 (slice 2). */
+/** The facets a personal overlay may set. `fieldOrder` added in slice 2 (per-user field order). */
 export type PersonalViewConfigOverlay = {
   filterInfo?: Record<string, unknown>
   sortInfo?: Record<string, unknown>
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
+  // slice 2: per-user field order — an ordered list of field ids overriding the sheet-global order for THIS actor.
+  fieldOrder?: string[]
 }
 
 export type PersonalViewConfigRecord = {
@@ -40,7 +42,7 @@ export type PersonalViewConfigRecord = {
   updatedAt: string
 }
 
-const OVERLAY_KEYS = ['filterInfo', 'sortInfo', 'groupInfo', 'hiddenFieldIds'] as const
+const OVERLAY_KEYS = ['filterInfo', 'sortInfo', 'groupInfo', 'hiddenFieldIds', 'fieldOrder'] as const
 
 export const PERSONAL_VIEWS_FLAG_ENV = 'MULTITABLE_ENABLE_PERSONAL_VIEWS'
 
@@ -68,6 +70,9 @@ export function sanitizePersonalOverlayConfig(input: unknown): PersonalViewConfi
   if (Array.isArray(input.hiddenFieldIds)) {
     out.hiddenFieldIds = input.hiddenFieldIds.filter((id): id is string => typeof id === 'string')
   }
+  if (Array.isArray(input.fieldOrder)) {
+    out.fieldOrder = input.fieldOrder.filter((id): id is string => typeof id === 'string')
+  }
   return out
 }
 
@@ -89,6 +94,7 @@ export function applyPersonalViewOverlay<
     sortInfo?: Record<string, unknown>
     groupInfo?: Record<string, unknown>
     hiddenFieldIds?: string[]
+    fieldOrder?: string[]
   },
 >(view: T, overlay: PersonalViewConfigOverlay | null | undefined): T {
   if (!overlay) return view
@@ -101,6 +107,7 @@ export function applyPersonalViewOverlay<
     ...(overlay.sortInfo !== undefined ? { sortInfo: overlay.sortInfo } : {}),
     ...(overlay.groupInfo !== undefined ? { groupInfo: overlay.groupInfo } : {}),
     ...(overlay.hiddenFieldIds !== undefined ? { hiddenFieldIds: overlay.hiddenFieldIds } : {}),
+    ...(overlay.fieldOrder !== undefined ? { fieldOrder: overlay.fieldOrder } : {}),
   }
 }
 

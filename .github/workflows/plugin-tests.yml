@@ -327,6 +327,7 @@ jobs:
             tests/integration/data-source-c3-keyset-realdb.test.ts \
             tests/integration/data-source-test-ephemeral-realdb.test.ts \
             tests/integration/multitable-personal-views-slice1-realdb.test.ts \
+            tests/integration/multitable-personal-views-slice2-fieldorder-realdb.test.ts \
             --reporter=dot
 
       - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets)
