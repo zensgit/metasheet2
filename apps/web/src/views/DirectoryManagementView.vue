@@ -1846,6 +1846,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
 
@@ -4080,9 +4081,19 @@ async function saveWorkNotificationAgentId() {
   }
 }
 
-function confirmApprovalCardSecretRegenerate(): boolean {
-  if (typeof window === 'undefined') return true
-  return window.confirm('重新生成将使已发出但未处理的审批卡片链接失效，确定吗？')
+// Card-config lock §3.3 必做交互: regenerate is destructive for in-flight links → explicit
+// ElMessageBox warning confirm (service API — works app-wide even though this view is hand-rolled).
+async function confirmApprovalCardSecretRegenerate(): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(
+      '重新生成将使已发出但未处理的审批卡片链接失效，确定吗？',
+      '重新生成密钥',
+      { type: 'warning', confirmButtonText: '重新生成', cancelButtonText: '取消' },
+    )
+    return true
+  } catch {
+    return false
+  }
 }
 
 // CFG-3 (card-config lock §3.3): generate button never sends a secret — it only asks the
@@ -4093,7 +4104,7 @@ async function generateApprovalCardLinkSecret() {
     setStatus('请先选择或创建钉钉目录集成', 'error')
     return
   }
-  if (integration.config.approvalCardLinkSecretConfigured && !confirmApprovalCardSecretRegenerate()) {
+  if (integration.config.approvalCardLinkSecretConfigured && !(await confirmApprovalCardSecretRegenerate())) {
     return
   }
   approvalCardBusy.value = true

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import DirectoryManagementView from '../src/views/DirectoryManagementView.vue'
 
 const apiFetchMock = vi.fn()
@@ -6111,7 +6112,7 @@ describe('DirectoryManagementView', () => {
       mockInitialLoad(createIntegration({
         config: { ...createIntegration().config, approvalCardLinkSecretConfigured: true },
       }))
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
 
       app = createApp(DirectoryManagementView)
       registerRouterLink(app)
@@ -6124,7 +6125,11 @@ describe('DirectoryManagementView', () => {
       regenerateButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
       await flushUi()
 
-      expect(confirmSpy).toHaveBeenCalledWith('重新生成将使已发出但未处理的审批卡片链接失效，确定吗？')
+      expect(confirmSpy).toHaveBeenCalledWith(
+        '重新生成将使已发出但未处理的审批卡片链接失效，确定吗？',
+        '重新生成密钥',
+        expect.objectContaining({ type: 'warning' }),
+      )
       expect(apiFetchMock).not.toHaveBeenCalledWith(
         '/api/admin/directory/integrations/dir-1/approval-card-config/secret/generate',
         expect.anything(),
@@ -6141,7 +6146,7 @@ describe('DirectoryManagementView', () => {
       mockSelectIntegrationRefresh(createIntegration({
         config: { ...createIntegration().config, approvalCardLinkSecretConfigured: true },
       }))
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
 
       app = createApp(DirectoryManagementView)
       registerRouterLink(app)
@@ -6153,7 +6158,11 @@ describe('DirectoryManagementView', () => {
       regenerateButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
       await flushUi(10)
 
-      expect(confirmSpy).toHaveBeenCalledWith('重新生成将使已发出但未处理的审批卡片链接失效，确定吗？')
+      expect(confirmSpy).toHaveBeenCalledWith(
+        '重新生成将使已发出但未处理的审批卡片链接失效，确定吗？',
+        '重新生成密钥',
+        expect.objectContaining({ type: 'warning' }),
+      )
       expect(apiFetchMock).toHaveBeenCalledWith(
         '/api/admin/directory/integrations/dir-1/approval-card-config/secret/generate',
         expect.objectContaining({ method: 'POST' }),
@@ -6170,7 +6179,7 @@ describe('DirectoryManagementView', () => {
       mockSelectIntegrationRefresh(createIntegration({
         config: { ...createIntegration().config, approvalCardLinkSecretConfigured: true },
       }))
-      const confirmSpy = vi.spyOn(window, 'confirm')
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
 
       app = createApp(DirectoryManagementView)
       registerRouterLink(app)
