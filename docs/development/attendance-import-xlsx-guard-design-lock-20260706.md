@@ -57,3 +57,14 @@
 ## 6. 完成口径
 
 共享模块 + 双接入 + R2 + 三档测试 → opus 对抗审阅 0 P1/P2 → 三红线（0 P1/P2；纯前端 display/guard、default-preserving；fresh-green required checks + up-to-date）。FE 串行车道（触碰 `AttendanceView.vue`）。
+
+## 7. 追加硬化（2026-07-06 自主批次）：选文件异步竞态守卫
+
+> owner 复审 #3694 时点名的 P3 follow-up（"极端情况下用户快速连续选择两个文件，前一个 sniff
+> 晚返回可能覆盖后一个选择；顺手可在返回前确认 `target.files?.[0] === file` 再写状态"）。
+
+`handleImportCsvChange` 的 `inspectImportFile` 是异步的（读魔术字节）：快速连选 A→B 时，
+A 的检查晚返回会以 A 的结论写状态——若 A 被拦截还会清空 input（毁掉 B 的选择）。
+修复（shell + composable 双接入，同护栏纪律）：`await inspectImportFile` 返回后、写任何状态前，
+确认 `target.files?.[0] === file` 仍成立，否则直接丢弃过期结论。测试用可控 resolve 的
+File-like 复现 A 慢 B 快，断言 B 的选择不被 A 的迟到结论（无论放行或拦截）扰动；mutation 证明。
