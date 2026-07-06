@@ -5832,11 +5832,14 @@
                   <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
                     {{ importLoading ? tr('Loading...', '加载中...') : tr('Load template', '加载模板') }}
                   </button>
-                  <button class="attendance__btn" :disabled="importLoading || !importTemplateGuide" @click="downloadImportTemplateCsv">
+                  <button class="attendance__btn" :disabled="importLoading" @click="downloadImportTemplateCsv">
                     {{ tr('Download CSV template', '下载 CSV 模板') }}
                   </button>
                 </div>
               </div>
+              <small v-if="!importTemplateGuide" class="attendance__field-hint attendance__import-template-hint">
+                {{ tr('Click "Load template" to pick fields and generate an import template.', '点击「加载模板」可勾选字段生成导入模板。') }}
+              </small>
               <div v-if="importTemplateGuide" class="attendance__template-guide">
                 <div class="attendance__template-guide-header">
                   <strong>{{ tr('Template guide', '模板说明') }}</strong>
@@ -5925,6 +5928,47 @@
                       </tbody>
                     </table>
                   </div>
+                  <div v-if="importFieldGroups.length" class="attendance__template-guide-card attendance__template-guide-card--full attendance__field-picker" data-testid="attendance-import-field-picker">
+                    <div class="attendance__template-guide-title">{{ tr('Pick fields to generate a template', '选择字段，生成导入模板') }}</div>
+                    <div class="attendance__field-picker-groups">
+                      <div v-for="group in importFieldGroups" :key="group.key" class="attendance__field-picker-group">
+                        <div class="attendance__field-picker-group-label">{{ tr(group.labelEn, group.labelZh) }}</div>
+                        <div class="attendance__field-picker-options">
+                          <label
+                            v-for="option in group.options"
+                            :key="option.key"
+                            class="attendance__field-picker-option"
+                            :title="tr(option.meaningEn, option.meaningZh)"
+                          >
+                            <input
+                              type="checkbox"
+                              :checked="importTemplateFieldKeys.has(option.key)"
+                              @change="toggleImportTemplateField(option.key)"
+                            />
+                            <span>{{ option.columnName }}</span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="attendance__field-picker-preview">
+                      <span>{{ tr('Header preview (required columns locked)', '表头预览（必填列已锁定）') }}:</span>
+                      <code data-testid="attendance-import-header-preview">{{ importTemplateHeaderPreview.join(',') }}</code>
+                    </div>
+                    <div class="attendance__admin-actions">
+                      <button class="attendance__btn" type="button" @click="downloadImportSelectedTemplateCsv">
+                        {{ tr('Download template (selected fields)', '下载模板（所选列）') }}
+                      </button>
+                      <button class="attendance__btn" type="button" @click="copyImportTemplateHeader">
+                        {{ tr('Copy header', '复制表头') }}
+                      </button>
+                      <button class="attendance__btn" type="button" @click="selectAllImportTemplateFields">
+                        {{ tr('Select all', '全选') }}
+                      </button>
+                      <button class="attendance__btn" type="button" @click="resetImportTemplateFields">
+                        {{ tr('Reset to default', '恢复默认') }}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
               <div class="attendance__admin-grid">
@@ -5982,6 +6026,23 @@
                   />
                   <small v-if="importCsvFileName" class="attendance__field-hint">{{ tr('Selected', '已选择') }}: {{ importCsvFileName }}</small>
                 </label>
+              </div>
+              <div class="attendance__import-advanced-toggle">
+                <button
+                  class="attendance__btn"
+                  type="button"
+                  data-testid="attendance-import-advanced-toggle"
+                  :aria-expanded="importAdvancedOpen ? 'true' : 'false'"
+                  @click="importAdvancedOpen = !importAdvancedOpen"
+                >
+                  {{ importAdvancedOpen ? tr('Hide advanced options', '收起高级选项') : tr('Advanced options', '高级选项') }}
+                  <span v-if="importAdvancedActiveCount > 0" class="attendance__import-advanced-badge">{{ importAdvancedActiveCount }}</span>
+                </button>
+                <small v-if="!importAdvancedOpen" class="attendance__field-hint">
+                  {{ tr('Header row, delimiter, user map, grouping, payload JSON.', '表头行、分隔符、用户映射、分组、负载 JSON。') }}
+                </small>
+              </div>
+              <div v-show="importAdvancedOpen" class="attendance__admin-grid attendance__import-advanced" data-testid="attendance-import-advanced">
                 <label class="attendance__field" for="attendance-import-csv-header">
                   <span>{{ tr('CSV header row', 'CSV 表头行') }}</span>
                   <input
@@ -9643,6 +9704,13 @@ import {
   detectSpreadsheetByName,
   inspectImportFile,
 } from './attendance/importFileGuard'
+import {
+  IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS,
+  allSelectableImportFieldKeys,
+  buildTemplateHeaderFromSelection,
+  groupSupportedImportColumns,
+  type AttendanceImportMappingColumnLike,
+} from './attendance/importTemplateColumns'
 import { resolveMakeupPunchRequestStatusCopy } from './attendance/makeupPunchRequestStatus'
 import {
   buildPunchRetryWithNotePayload,
@@ -13018,6 +13086,25 @@ const payrollCycleSummary = ref<AttendanceSummary | null>(null)
 const importProfileId = ref('')
 const importMode = ref<'override' | 'merge'>('override')
 const importMappingProfiles = ref<AttendanceImportMappingProfile[]>([])
+// D3 field-picker (import-section-ux design-lock): raw mapping columns from
+// /api/attendance/import/template (previously discarded) → grouped options.
+const importMappingColumnsRaw = ref<AttendanceImportMappingColumnLike[]>([])
+const importFieldGroups = computed(() => groupSupportedImportColumns(importMappingColumnsRaw.value))
+const importTemplateFieldKeys = ref<Set<string>>(new Set(IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS))
+const importTemplateHeaderPreview = computed(() =>
+  buildTemplateHeaderFromSelection(importFieldGroups.value, importTemplateFieldKeys.value))
+function toggleImportTemplateField(key: string) {
+  const next = new Set(importTemplateFieldKeys.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  importTemplateFieldKeys.value = next
+}
+function selectAllImportTemplateFields() {
+  importTemplateFieldKeys.value = new Set(allSelectableImportFieldKeys(importFieldGroups.value))
+}
+function resetImportTemplateFields() {
+  importTemplateFieldKeys.value = new Set(IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS)
+}
 const selectedImportProfile = computed(() => {
   if (!importProfileId.value) return null
   return importMappingProfiles.value.find(profile => profile.id === importProfileId.value) ?? null
@@ -13656,6 +13743,25 @@ const importGroupAutoCreate = ref(false)
 const importGroupAutoAssign = ref(false)
 const importGroupRuleSetId = ref('')
 const importGroupTimezone = ref('')
+// D1 core/advanced grouping (import-section-ux design-lock): advanced fields
+// collapse behind a toggle; count tracks non-default advanced settings so the
+// badge (and initial auto-expand) reflect hidden active configuration.
+const importAdvancedOpen = ref(false)
+const importAdvancedActiveCount = computed(() => {
+  let count = 0
+  if (String(importCsvHeaderRow.value ?? '').trim() !== '') count += 1
+  if (importCsvDelimiter.value && importCsvDelimiter.value !== ',') count += 1
+  if (importUserMap.value) count += 1
+  if (importGroupAutoCreate.value) count += 1
+  if (importGroupAutoAssign.value) count += 1
+  if (importGroupRuleSetId.value) count += 1
+  if (importGroupTimezone.value) count += 1
+  if (String(importForm.userId ?? '').trim() !== '') count += 1
+  return count
+})
+onMounted(() => {
+  if (importAdvancedActiveCount.value > 0) importAdvancedOpen.value = true
+})
 const importCommitToken = ref('')
 const importCommitTokenExpiresAt = ref('')
 const attendanceImportBatchStorageKey = computed(() =>
@@ -17915,6 +18021,7 @@ async function loadImportTemplate() {
     importMode.value = payloadExample?.mode === 'merge' ? 'merge' : 'override'
     importForm.payload = JSON.stringify(payloadExample, null, 2)
     importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles) ? data.data.mappingProfiles : []
+    importMappingColumnsRaw.value = Array.isArray(data.data?.mapping?.columns) ? data.data.mapping.columns : []
     setStatus(tr('Import template loaded.', '导入模板已加载。'))
   } catch (error) {
     setStatus(readErrorMessage(error, tr('Failed to load import template', '加载导入模板失败')), 'error')
@@ -17923,7 +18030,26 @@ async function loadImportTemplate() {
   }
 }
 
-function downloadImportTemplateCsv() {
+async function downloadImportTemplateCsv() {
+  // One-click (import-section-ux design-lock D2): auto-load the template first
+  // instead of erroring, so the download works from a cold panel. Guard: only
+  // when the payload is untouched — loadImportTemplate overwrites
+  // importForm.payload, and a hand-edited (or mid-edit, unparseable) payload
+  // must never be silently destroyed by a template download.
+  if (!importTemplateGuide.value) {
+    const rawPayload = String(importForm.payload ?? '').trim()
+    if (rawPayload && rawPayload !== '{}') {
+      setStatus(
+        tr(
+          'Payload JSON has content but no template columns — fix or clear it, or click "Load template" to replace it.',
+          '负载 JSON 已有内容但无法生成模板——请修正/清空后再试，或点「加载模板」覆盖当前负载。',
+        ),
+        'error',
+      )
+      return
+    }
+    await loadImportTemplate()
+  }
   const guide = importTemplateGuide.value
   if (!guide) {
     setStatus(tr('Load the import template before downloading CSV guidance.', '请先加载导入模板，再下载 CSV 模板。'), 'error')
@@ -17948,6 +18074,51 @@ function downloadImportTemplateCsv() {
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
   setStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
+}
+
+function triggerImportCsvDownload(filename: string, csv: string) {
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  try {
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+  } finally {
+    link.remove()
+    URL.revokeObjectURL(url)
+  }
+}
+
+// D3 field-picker actions: build the header from the current selection.
+function downloadImportSelectedTemplateCsv() {
+  const header = importTemplateHeaderPreview.value
+  if (header.length === 0) {
+    setStatus(tr('Load the import template to pick fields first.', '请先加载导入模板并勾选字段。'), 'error')
+    return
+  }
+  const csv = `${header.map(escapeCsvCell).join(',')}\n${header.map(() => '').join(',')}\n`
+  triggerImportCsvDownload('attendance-import-template-selected.csv', csv)
+  setStatus(tr(
+    `CSV template downloaded (${header.length} columns).`,
+    `CSV 模板已下载（${header.length} 列）。`,
+  ))
+}
+
+async function copyImportTemplateHeader() {
+  const headerLine = importTemplateHeaderPreview.value.join(',')
+  if (!headerLine) {
+    setStatus(tr('Load the import template to pick fields first.', '请先加载导入模板并勾选字段。'), 'error')
+    return
+  }
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+    await navigator.clipboard.writeText(headerLine)
+    setStatus(tr('Template header copied.', '模板表头已复制。'))
+  } catch {
+    setStatus(tr('Copy failed — please copy the header preview manually.', '复制失败——请手动复制表头预览。'), 'error')
+  }
 }
 
 function applyImportProfile() {
@@ -30177,5 +30348,90 @@ const holidaySectionBindings = {
   flex-direction: column;
   gap: 4px;
   margin-top: 8px;
+}
+
+/* Import section UX (import-section-ux design-lock 20260706) — all values
+   from UF --ms-* tokens; new hardcoded hex here would be a defect. */
+.attendance__import-template-hint {
+  display: block;
+  margin: var(--ms-space-1) 0 var(--ms-space-2);
+  color: var(--ms-text-3);
+}
+
+.attendance__field-picker-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-3);
+  margin-top: var(--ms-space-2);
+}
+
+.attendance__field-picker-group-label {
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-2);
+  margin-bottom: var(--ms-space-1);
+  font-size: 12px;
+}
+
+.attendance__field-picker-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ms-space-2);
+}
+
+.attendance__field-picker-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-1);
+  padding: var(--ms-space-1) var(--ms-space-2);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-sm);
+  background: var(--ms-bg-card);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.attendance__field-picker-option:has(input:checked) {
+  border-color: var(--ms-color-primary);
+  color: var(--ms-color-primary);
+}
+
+.attendance__field-picker-preview {
+  margin: var(--ms-space-3) 0 var(--ms-space-2);
+  font-size: 12px;
+  color: var(--ms-text-2);
+  word-break: break-all;
+}
+
+.attendance__field-picker-preview code {
+  background: var(--ms-bg-page);
+  padding: var(--ms-space-1) var(--ms-space-2);
+  border-radius: var(--ms-radius-sm);
+}
+
+.attendance__import-advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-3);
+  margin: var(--ms-space-3) 0 var(--ms-space-2);
+}
+
+.attendance__import-advanced-badge {
+  display: inline-block;
+  margin-left: var(--ms-space-1);
+  min-width: 16px;
+  padding: 0 var(--ms-space-1);
+  border-radius: 999px;
+  background: var(--ms-color-primary);
+  color: var(--ms-bg-card);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.attendance__import-advanced {
+  margin-top: var(--ms-space-2);
+  padding-top: var(--ms-space-3);
+  border-top: 1px dashed var(--ms-border-light);
 }
 </style>

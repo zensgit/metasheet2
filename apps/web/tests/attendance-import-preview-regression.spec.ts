@@ -349,4 +349,141 @@ describe('Attendance import preview regression', () => {
       setLocale(previousLocale)
     }
   })
+
+  function mockTemplateEndpoint(): ReturnType<typeof vi.mocked<typeof apiFetch>> {
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async (path: string) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/template')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: {
+              source: 'dingtalk_csv',
+              mode: 'override',
+              columns: ['日期', '工号', '姓名', '考勤组', '上班1打卡时间', '下班1打卡时间', '考勤结果', '异常原因'],
+              requiredFields: ['日期'],
+            },
+            mappingProfiles: [],
+            mapping: {
+              columns: [
+                { sourceField: '上班1打卡时间', targetField: 'firstInAt' },
+                { sourceField: '下班1打卡时间', targetField: 'lastOutAt' },
+                { sourceField: '考勤结果', targetField: 'status' },
+                { sourceField: '异常原因', targetField: 'exceptionReason' },
+                { sourceField: '加班小时', targetField: 'overtimeHours' },
+                { sourceField: '考勤组', targetField: 'attendanceGroup' },
+              ],
+            },
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+    return apiFetchMock
+  }
+
+  function stubObjectUrl() {
+    const createObjectURL = vi.fn(() => 'blob:mock')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, configurable: true })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, configurable: true })
+    return { createObjectURL, revokeObjectURL }
+  }
+
+  it('field picker: load template renders grouped checkboxes and selection drives the header preview + download', async () => {
+    mockTemplateEndpoint()
+    const { createObjectURL } = stubObjectUrl()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+
+    const importSection = findImportSection(container!)
+    findButton(importSection, 'Load template').click()
+    await flushUi(6)
+
+    const picker = container!.querySelector('[data-testid="attendance-import-field-picker"]') as HTMLElement | null
+    expect(picker, 'expected field picker card').toBeTruthy()
+    expect(picker!.textContent).toContain('Punch times')
+
+    const preview = () => (container!.querySelector('[data-testid="attendance-import-header-preview"]') as HTMLElement).textContent ?? ''
+    expect(preview()).toBe('日期,工号,姓名,上班1打卡时间,下班1打卡时间,考勤结果,异常原因,考勤组')
+
+    const overtime = Array.from(picker!.querySelectorAll('label')).find(
+      candidate => candidate.textContent?.trim() === '加班小时'
+    )
+    expect(overtime, 'expected 加班小时 option').toBeTruthy()
+    ;(overtime!.querySelector('input') as HTMLInputElement).click()
+    await flushUi(2)
+    expect(preview()).toContain('加班小时')
+
+    findButton(picker!, 'Download template (selected fields)').click()
+    await flushUi(2)
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    expect(container!.textContent).toContain('CSV template downloaded (9 columns).')
+  })
+
+  it('one-click template download: works from a cold panel by auto-loading first', async () => {
+    const apiFetchMock = mockTemplateEndpoint()
+    const { createObjectURL } = stubObjectUrl()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+    apiFetchMock.mockClear()
+
+    const importSection = findImportSection(container!)
+    const download = findButton(importSection, 'Download CSV template')
+    expect(download.disabled).toBe(false)
+    download.click()
+    await flushUi(8)
+
+    expect(apiFetchMock.mock.calls.some(call => String(call[0]).startsWith('/api/attendance/import/template'))).toBe(true)
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    expect(container!.textContent).toContain('CSV template downloaded.')
+  })
+
+  it('one-click download never destroys a hand-edited payload: errors instead of auto-loading', async () => {
+    const apiFetchMock = mockTemplateEndpoint()
+    stubObjectUrl()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    const setupState = (vm as any).$?.setupState as Record<string, unknown>
+    const editedPayload = '{"source":"manual","rows":['
+    ;(setupState.importForm as { payload: string }).payload = editedPayload
+    await flushUi(2)
+    apiFetchMock.mockClear()
+
+    const importSection = findImportSection(container!)
+    findButton(importSection, 'Download CSV template').click()
+    await flushUi(6)
+
+    expect(apiFetchMock.mock.calls.some(call => String(call[0]).startsWith('/api/attendance/import/template'))).toBe(false)
+    expect((setupState.importForm as { payload: string }).payload).toBe(editedPayload)
+    expect(container!.textContent).toContain('Payload JSON has content but no template columns')
+  })
+
+  it('advanced options collapse by default; core fields stay visible; toggle expands', async () => {
+    mockTemplateEndpoint()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+
+    const advanced = container!.querySelector('[data-testid="attendance-import-advanced"]') as HTMLElement | null
+    expect(advanced, 'expected advanced group container').toBeTruthy()
+    expect(advanced!.style.display).toBe('none')
+    expect(container!.querySelector('#attendance-import-csv'), 'core csv input stays visible').toBeTruthy()
+    expect(advanced!.querySelector('#attendance-import-payload'), 'payload JSON lives in advanced').toBeTruthy()
+
+    const toggle = container!.querySelector('[data-testid="attendance-import-advanced-toggle"]') as HTMLButtonElement
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    toggle.click()
+    await flushUi(2)
+    expect(advanced!.style.display).not.toBe('none')
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+  })
 })
