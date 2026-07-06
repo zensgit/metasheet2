@@ -3,7 +3,7 @@
 // K3 WISE BOM/GetList-by-material-id — BL1 contract/preset metadata. Pure module; no adapter, no runtime,
 // no network, no write. Locks (BL0 design-lock #3603): the preset owns endpoint/filter/field/container;
 // the coarse-code family is exact-registered (no prefix); everything is values-free and latent
-// (runtimeValidated=false until BL2/BL3).
+// (runtimeValidated flipped true at BL3 #3701 standalone entity-machine PASS).
 
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -50,9 +50,10 @@ function testPresetShape() {
   assert.equal(p.automaticSelectionByStatusVersionDate, false)
   // Identity class for this customer (EII-R0 + operator confirmation).
   assert.equal(p.entryIdentifierClass, 'ID')
-  // Latent by construction: docs gave no by-material example; BL2/BL3 must prove it.
+  // Docs fact: no by-material example existed; the contract was proven on hardware instead —
+  // BL3 standalone entity-machine smoke PASS (#3701) flipped runtimeValidated in its controlled transition.
   assert.equal(p.byMaterialExampleInDocs, false)
-  assert.equal(p.runtimeValidated, false)
+  assert.equal(p.runtimeValidated, true)
 }
 
 // ── values-free: no business value can be hiding in the metadata ──────────────────────────────────

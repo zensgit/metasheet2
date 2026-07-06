@@ -24,9 +24,12 @@
 // list/container (BL0 request-contract lock: "endpoint, body, filter expression, field list, response
 // containers, and resolver rule are preset/config-owned, never runtime-request-owned").
 
-// The confirmed contract is DOC-DERIVED with no by-material example in the docs (#3683
-// getListDocProvidedByMaterialExample=false); BL2/BL3 MUST prove it on real hardware before it is trusted.
-// runtimeValidated stays false in BL1 by construction.
+// The contract was DOC-DERIVED with no by-material example in the docs (#3683
+// getListDocProvidedByMaterialExample=false; byMaterialExampleInDocs stays false as a docs fact). The
+// controlled runtimeValidated false->true transition happened at BL3 (#3701, 2026-07-06): standalone
+// entity-machine smoke PASS on release multitable-onprem-bom-list-bl3-20260706-1e18f85d5 — happy path
+// (candidateCount=1, resolved, rule=exactly_one) AND the fail-closed policy check (multi-BOM parent ->
+// K3_WISE_BOM_LIST_BY_MATERIAL_AMBIGUOUS, policyConsistent) both proven on real hardware.
 const K3WISE_BOM_LIST_BY_MATERIAL_PRESET = Object.freeze({
   preset: 'k3wise.bom-list-by-material-id.v1',
   requiredKind: 'erp:k3-wise-webapi',
@@ -60,7 +63,7 @@ const K3WISE_BOM_LIST_BY_MATERIAL_PRESET = Object.freeze({
   // #3683 caveat: the docs give no by-material example; filterField is derived from the BOM template
   // schema + the generic Filter dialect. Latent until BL2/BL3 prove it.
   byMaterialExampleInDocs: false,
-  runtimeValidated: false,
+  runtimeValidated: true,
 })
 
 // Registered coarse-code family (BL0 error taxonomy). EXACT registered values only — never a
