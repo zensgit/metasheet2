@@ -775,7 +775,9 @@ async function onResetToShared() {
 // every context (re)load, so a saved personal row shows the toggle ON after refresh — mode reflects server
 // state, not local guesswork (P1). Flag-off clears it (G-FE-4, enforced inside syncFromServer).
 watch(
-  () => workbench.personalOverrideViewIds.value,
+  // `?.` so a partial embedding/test-stub of the workbench that omits this ref degrades to "no personal
+  // overrides" instead of throwing at setup; the real useMultitableWorkbench always exposes it.
+  () => workbench.personalOverrideViewIds?.value,
   (ids) => personalView.syncFromServer(ids ?? []),
   { immediate: true },
 )
