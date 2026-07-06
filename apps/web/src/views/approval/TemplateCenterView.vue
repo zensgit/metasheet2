@@ -45,7 +45,7 @@
             data-testid="template-center-delegations-link"
             @click="$router.push('/approval-delegations')"
           >
-            委托设置
+            委托管理
           </el-button>
         </div>
       </template>
