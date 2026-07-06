@@ -4,7 +4,7 @@
       <!-- Hide Fields -->
       <div class="meta-toolbar__dropdown">
         <button class="meta-toolbar__btn" @click="showFieldPicker = !showFieldPicker">
-          <span class="meta-toolbar__btn-icon">&#x2630;</span> {{ l('toolbar.fields') }}
+          <el-icon class="meta-toolbar__btn-icon"><component :is="ICON.fields" /></el-icon> {{ l('toolbar.fields') }}
           <span v-if="hiddenCount" class="meta-toolbar__badge">{{ hiddenCount }}</span>
         </button>
         <div v-if="showFieldPicker" class="meta-toolbar__panel" @keydown.escape="showFieldPicker = false">
@@ -18,7 +18,7 @@
       <!-- Sort -->
       <div class="meta-toolbar__dropdown">
         <button class="meta-toolbar__btn" @click="showSortPanel = !showSortPanel">
-          <span class="meta-toolbar__btn-icon">&#x2195;</span> {{ l('toolbar.sort') }}
+          <el-icon class="meta-toolbar__btn-icon"><component :is="ICON.sort" /></el-icon> {{ l('toolbar.sort') }}
           <span v-if="sortRules.length" class="meta-toolbar__badge">{{ sortRules.length }}</span>
         </button>
         <div v-if="showSortPanel" class="meta-toolbar__panel" @keydown.escape="showSortPanel = false">
@@ -40,7 +40,7 @@
       <!-- Filter -->
       <div class="meta-toolbar__dropdown">
         <button class="meta-toolbar__btn" @click="showFilterPanel = !showFilterPanel">
-          <span class="meta-toolbar__btn-icon">&#x2A01;</span> {{ l('toolbar.filter') }}
+          <el-icon class="meta-toolbar__btn-icon"><component :is="ICON.filter" /></el-icon> {{ l('toolbar.filter') }}
           <span v-if="filterRules.length + filterGroups.length" class="meta-toolbar__badge">{{ filterRules.length + filterGroups.length }}</span>
         </button>
         <div v-if="showFilterPanel" class="meta-toolbar__panel meta-toolbar__panel--filter" @keydown.escape="showFilterPanel = false">
@@ -83,7 +83,7 @@
       <!-- Group By (nested / multi-level: ordered 1-3 levels) -->
       <div class="meta-toolbar__dropdown">
         <button class="meta-toolbar__btn" @click="showGroupPanel = !showGroupPanel">
-          <span class="meta-toolbar__btn-icon">&#x229E;</span> {{ l('toolbar.group') }}
+          <el-icon class="meta-toolbar__btn-icon"><component :is="ICON.group" /></el-icon> {{ l('toolbar.group') }}
           <span v-if="activeGroupFieldIds.length" class="meta-toolbar__badge">{{ activeGroupFieldIds.length }}</span>
         </button>
         <div v-if="showGroupPanel" class="meta-toolbar__panel meta-toolbar__panel--group" @keydown.escape="showGroupPanel = false">
@@ -118,8 +118,8 @@
 
       <!-- Undo/Redo -->
       <span class="meta-toolbar__divider" aria-hidden="true"></span>
-      <button class="meta-toolbar__btn" :disabled="!canUndo" :title="l('toolbar.undoTitle')" :aria-label="l('toolbar.undo')" @click="emit('undo')">&#x21A9;</button>
-      <button class="meta-toolbar__btn" :disabled="!canRedo" :title="l('toolbar.redoTitle')" :aria-label="l('toolbar.redo')" @click="emit('redo')">&#x21AA;</button>
+      <button class="meta-toolbar__btn" :disabled="!canUndo" :title="l('toolbar.undoTitle')" :aria-label="l('toolbar.undo')" @click="emit('undo')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.undo" /></el-icon></button>
+      <button class="meta-toolbar__btn" :disabled="!canRedo" :title="l('toolbar.redoTitle')" :aria-label="l('toolbar.redo')" @click="emit('redo')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.redo" /></el-icon></button>
       <!--
         Slice 3 personal-views "reset to shared" (design-lock multitable-personal-views-slice3-fe-toggle-
         design-lock-20260706.md §3 P1 + G-FE-3 / G-FE-4): rendered ONLY while the personal toggle is ON for
@@ -136,7 +136,7 @@
     </div>
     <div class="meta-toolbar__right">
       <div class="meta-toolbar__search" :class="{ 'meta-toolbar__search--active': !!searchText }" role="search">
-        <span class="meta-toolbar__search-icon" aria-hidden="true">&#x1F50D;</span>
+        <el-icon class="meta-toolbar__search-icon" aria-hidden="true"><component :is="ICON.search" /></el-icon>
         <input class="meta-toolbar__search-input" type="search" :placeholder="l('toolbar.searchPlaceholder')" :aria-label="l('toolbar.searchAria')" :value="searchText" @input="emit('update:search-text', ($event.target as HTMLInputElement).value)" />
         <button v-if="searchText" class="meta-toolbar__search-clear" :aria-label="l('toolbar.clearSearch')" @click="emit('update:search-text', '')">&times;</button>
       </div>
@@ -144,7 +144,7 @@
       <span class="meta-toolbar__divider" aria-hidden="true"></span>
       <!-- Row density -->
       <div class="meta-toolbar__dropdown">
-        <button class="meta-toolbar__btn" :title="l('toolbar.rowHeight')" :aria-label="l('toolbar.rowHeight')" @click="showDensityPanel = !showDensityPanel">&#x2195; {{ l('toolbar.rows') }}</button>
+        <button class="meta-toolbar__btn" :title="l('toolbar.rowHeight')" :aria-label="l('toolbar.rowHeight')" @click="showDensityPanel = !showDensityPanel"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.rowHeight" /></el-icon> {{ l('toolbar.rows') }}</button>
         <div v-if="showDensityPanel" class="meta-toolbar__panel meta-toolbar__panel--density" @keydown.escape="showDensityPanel = false">
           <label v-for="d in DENSITIES" :key="d.value" class="meta-toolbar__field-toggle">
             <input type="radio" name="density" :checked="rowDensity === d.value" @change="emit('set-row-density', d.value); showDensityPanel = false" />
@@ -152,11 +152,11 @@
           </label>
         </div>
       </div>
-      <button class="meta-toolbar__btn" :title="l('toolbar.autoFitColumns')" :aria-label="l('toolbar.autoFitColumns')" @click="emit('auto-fit-columns')">&#x2194; {{ l('toolbar.fit') }}</button>
-      <button class="meta-toolbar__btn" :title="l('toolbar.print')" :aria-label="l('toolbar.printGrid')" @click="emit('print')">&#x1F5A8; {{ l('toolbar.print') }}</button>
-      <button v-if="canCreateRecord" class="meta-toolbar__btn" :title="l('toolbar.importRecords')" :aria-label="l('toolbar.importRecords')" @click="emit('import')">&#x2B71; {{ l('toolbar.import') }}</button>
-      <button v-if="canExport" class="meta-toolbar__btn" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">&#x2B73; {{ l('toolbar.exportCsv') }}</button>
-      <button v-if="canExport" class="meta-toolbar__btn" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">&#x2B73; {{ l('toolbar.exportXlsx') }}</button>
+      <button class="meta-toolbar__btn" :title="l('toolbar.autoFitColumns')" :aria-label="l('toolbar.autoFitColumns')" @click="emit('auto-fit-columns')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.fit" /></el-icon> {{ l('toolbar.fit') }}</button>
+      <button class="meta-toolbar__btn" :title="l('toolbar.print')" :aria-label="l('toolbar.printGrid')" @click="emit('print')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.print" /></el-icon> {{ l('toolbar.print') }}</button>
+      <button v-if="canCreateRecord" class="meta-toolbar__btn" :title="l('toolbar.importRecords')" :aria-label="l('toolbar.importRecords')" @click="emit('import')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.import" /></el-icon> {{ l('toolbar.import') }}</button>
+      <button v-if="canExport" class="meta-toolbar__btn" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.export" /></el-icon> {{ l('toolbar.exportCsv') }}</button>
+      <button v-if="canExport" class="meta-toolbar__btn" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.export" /></el-icon> {{ l('toolbar.exportXlsx') }}</button>
       <button v-if="canCreateRecord" class="meta-toolbar__btn meta-toolbar__btn--primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</button>
     </div>
   </div>
@@ -175,6 +175,38 @@ import {
   rowCount,
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
+import { ElIcon } from 'element-plus'
+import {
+  Menu as IconFields,
+  Sort as IconSort,
+  Filter as IconFilter,
+  Operation as IconGroup,
+  RefreshLeft as IconUndo,
+  RefreshRight as IconRedo,
+  Search as IconSearch,
+  Rank as IconRowHeight,
+  ScaleToOriginal as IconFit,
+  Printer as IconPrint,
+  Upload as IconImport,
+  Download as IconExport,
+} from '@element-plus/icons-vue'
+
+// Reusable monochrome icon map for toolbar buttons (UI-P1 slice-1). Keyed by toolbar action so the
+// template can reference `ICON.sort` etc. instead of scattering per-icon imports around the markup.
+const ICON = {
+  fields: IconFields,
+  sort: IconSort,
+  filter: IconFilter,
+  group: IconGroup,
+  undo: IconUndo,
+  redo: IconRedo,
+  search: IconSearch,
+  rowHeight: IconRowHeight,
+  fit: IconFit,
+  print: IconPrint,
+  import: IconImport,
+  export: IconExport,
+} as const
 
 const props = withDefaults(defineProps<{
   fields: MetaField[]
@@ -334,7 +366,7 @@ function onAddFilterGroup() {
 .meta-toolbar__btn--primary:hover:not(:disabled) { background: var(--el-color-primary-dark-2, #1e4fc0); color: #fff; }
 .meta-toolbar__btn--reset-personal { color: #067647; border-color: #6ce9a6; background: #ecfdf3; }
 .meta-toolbar__btn--reset-personal:hover { background: #d1fadf; }
-.meta-toolbar__btn-icon { font-size: 14px; }
+.meta-toolbar__btn-icon { font-size: 15px; color: currentColor; }
 .meta-toolbar__badge { font-size: 10px; background: var(--ms-color-primary, #245bdb); color: #fff; padding: 0 5px; border-radius: 8px; min-width: 16px; text-align: center; }
 .meta-toolbar__dropdown { position: relative; }
 .meta-toolbar__panel { position: absolute; top: 100%; left: 0; z-index: 20; min-width: 200px; background: var(--ms-bg-card, #fff); border: 1px solid var(--ms-border-light, #e7e8ec); border-radius: var(--ms-radius-sm, 6px); box-shadow: var(--ms-shadow-pop, 0 4px 12px rgba(0,0,0,.1)); padding: 8px; margin-top: 4px; }
