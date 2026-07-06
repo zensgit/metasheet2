@@ -52,7 +52,9 @@ export function parseCsvHeaderFromText(
   options?: { delimiter?: string; headerRowIndex?: number | null },
 ): string[] {
   if (typeof text !== 'string' || !text.trim()) return []
-  const delimiter = options?.delimiter && options.delimiter.length > 0 ? options.delimiter : ','
+  // Backend iterateCsvRows splits on the delimiter's FIRST char only — mirror
+  // that (review P3-1) so a two-char delimiter cannot flip green/red.
+  const delimiter = options?.delimiter && options.delimiter.length > 0 ? options.delimiter[0] : ','
   const explicitIndex = Number.isInteger(options?.headerRowIndex) && (options!.headerRowIndex as number) >= 0
     ? (options!.headerRowIndex as number)
     : null
@@ -84,9 +86,15 @@ export function parseCsvHeaderFromText(
   return rows.find(row => row.some(Boolean)) ?? []
 }
 
+export interface AttendanceImportRecognizedColumn {
+  column: string
+  /** true = matches an import mapping alias (imports as a record field); false = header/identity key family match */
+  viaVocabulary: boolean
+}
+
 export interface AttendanceImportHeaderRecognition {
-  /** columns that will import (mapping alias / date / context match) */
-  recognized: string[]
+  /** columns the importer recognizes (mapping alias / date / context match) */
+  recognized: AttendanceImportRecognizedColumn[]
   /** columns the importer will ignore (still visible to rule matching) */
   unknown: string[]
   missingDate: boolean
@@ -113,7 +121,7 @@ export function recognizeImportHeader(
   const dateKeys = new Set<string>(IMPORT_HEADER_DATE_KEYS)
   const contextKeys = new Set<string>(IMPORT_HEADER_CONTEXT_KEYS)
 
-  const recognized: string[] = []
+  const recognized: AttendanceImportRecognizedColumn[] = []
   const unknown: string[] = []
   let hasDate = false
   let hasContext = false
@@ -121,7 +129,8 @@ export function recognizeImportHeader(
     const key = normalizeHeaderLookupKey(column)
     if (dateKeys.has(key)) hasDate = true
     if (contextKeys.has(key)) hasContext = true
-    if (dateKeys.has(key) || contextKeys.has(key) || sourceKeys.has(key)) recognized.push(column)
+    if (sourceKeys.has(key)) recognized.push({ column, viaVocabulary: true })
+    else if (dateKeys.has(key) || contextKeys.has(key)) recognized.push({ column, viaVocabulary: false })
     else unknown.push(column)
   }
   return { recognized, unknown, missingDate: !hasDate, missingContext: !hasContext }

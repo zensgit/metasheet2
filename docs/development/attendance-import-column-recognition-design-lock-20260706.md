@@ -24,6 +24,12 @@ CSV 文件字段下方全宽面板（`data-testid="attendance-import-recognition
 文案给修复指引）→ 绿 chips（已识别，悬浮显示落点含义）→ 灰 chips（将忽略，提示"可用于规则匹配"）。
 样式全 UF `--ms-*`（success/danger/text-3/border-light）。
 
+## 2b. v1 已知限制（对抗审阅 2026-07-06 判定：display-only、偏"多报警"安全侧、不阻断）
+
+- **显式表头行 + 前导空行**：前端按全部行计数，后端 `iterateCsvRows` 丢弃单字段空行——双重命中（手填表头行且文件有前导空行）时行号语义可能错位；后端自身三条 header 路径也互不一致，v1 不追求完美镜像。
+- **绿 chip 语义 = 后端诊断（normalized）而非精确导入（exact）**：上下文键族里的英文 target 名（如 `firstInAt`）通过表头检测但不经 `applyFieldMappings` 落字段——chip 悬浮语义区分「将作为记录字段导入」vs「用于表头识别/人员匹配」以避免过度承诺；行标签为「已识别」而非「将导入」。
+- 分隔符取首字符（镜像后端 `delimiter[0]`）。
+
 ## 3. 边界（OUT）
 
 - composable/orphan Section 的面板渲染：共享模块已就绪，随 Section 挂载切片走（同 #3708 D3 决策）。

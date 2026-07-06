@@ -6044,12 +6044,15 @@
                     </template>
                   </div>
                   <div v-if="importCsvRecognition.recognized.length" class="attendance__import-recognition-row">
-                    <span class="attendance__import-recognition-label">{{ tr('Will import', '将导入') }} ({{ importCsvRecognition.recognized.length }}):</span>
+                    <span class="attendance__import-recognition-label">{{ tr('Recognized', '已识别') }} ({{ importCsvRecognition.recognized.length }}):</span>
                     <span
-                      v-for="column in importCsvRecognition.recognized"
-                      :key="`rec-${column}`"
+                      v-for="item in importCsvRecognition.recognized"
+                      :key="`rec-${item.column}`"
                       class="attendance__import-recognition-chip attendance__import-recognition-chip--ok"
-                    >{{ column }}</span>
+                      :title="item.viaVocabulary
+                        ? tr('Imports as a record field', '将作为记录字段导入')
+                        : tr('Used for header detection / user matching', '用于表头识别/人员匹配')"
+                    >{{ item.column }}</span>
                   </div>
                   <div v-if="importCsvRecognition.unknown.length" class="attendance__import-recognition-row">
                     <span class="attendance__import-recognition-label">{{ tr('Ignored (still usable by rules)', '将忽略（仍可用于规则匹配）') }} ({{ importCsvRecognition.unknown.length }}):</span>
@@ -6057,6 +6060,7 @@
                       v-for="column in importCsvRecognition.unknown"
                       :key="`unk-${column}`"
                       class="attendance__import-recognition-chip"
+                      :title="tr('Not imported as a field; visible to rule matching', '不作为字段导入；规则匹配可见')"
                     >{{ column }}</span>
                   </div>
                 </div>
@@ -18259,17 +18263,25 @@ async function handleImportCsvChange(event: Event) {
 
 // Column recognition (column-recognition design-lock): read-only vocabulary
 // fetch — unlike loadImportTemplate it must NOT touch payload/mode/profiles.
+let importMappingColumnsFetch: Promise<void> | null = null
 async function ensureImportMappingColumns(): Promise<void> {
   if (importMappingColumnsRaw.value.length > 0) return
-  try {
-    const response = await apiFetch('/api/attendance/import/template')
-    const data = await response.json().catch(() => ({} as any))
-    if (response.ok && data?.ok && Array.isArray(data.data?.mapping?.columns)) {
-      importMappingColumnsRaw.value = data.data.mapping.columns
-    }
-  } catch {
-    // vocabulary unavailable — recognition degrades to required-key checks
+  if (!importMappingColumnsFetch) {
+    importMappingColumnsFetch = (async () => {
+      try {
+        const response = await apiFetch('/api/attendance/import/template')
+        const data = await response.json().catch(() => ({} as any))
+        if (response.ok && data?.ok && Array.isArray(data.data?.mapping?.columns)) {
+          importMappingColumnsRaw.value = data.data.mapping.columns
+        }
+      } catch {
+        // vocabulary unavailable — recognition degrades to required-key checks
+      } finally {
+        importMappingColumnsFetch = null
+      }
+    })()
   }
+  await importMappingColumnsFetch
 }
 
 async function analyzeImportCsvHeader(file: File): Promise<void> {

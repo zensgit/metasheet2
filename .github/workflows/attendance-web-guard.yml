@@ -37,7 +37,14 @@
 # useAttendanceAdminImportWorkflow.spec.ts (xlsx/xls spreadsheet rejection at CSV import
 # file selection — extension + PK/OLE2 magic bytes, no import API call, actionable zh
 # guidance; plus the pre-existing import preview/commit regression coverage — see
-# docs/development/attendance-import-xlsx-guard-design-lock-20260706.md). The full
+# docs/development/attendance-import-xlsx-guard-design-lock-20260706.md),
+# attendance-import-template-columns.spec.ts (field-picker template builder: grouping/
+# dedupe/Chinese-first naming + backend fixture-sync of the default selection — see
+# docs/development/attendance-import-section-ux-design-lock-20260706.md), and
+# attendance-import-header-recognition.spec.ts (selection-time column recognition:
+# quote-aware header parse + green/grey/missing-required classification, key families
+# fixture-synced to the backend — see
+# docs/development/attendance-import-column-recognition-design-lock-20260706.md). The full
 # `@metasheet/web` vitest suite still has historical/flaky failures, so wiring the whole
 # suite as a required gate now would be red on arrival. Keep expanding the `vitest run`
 # filter (or move to the full web suite) as more web specs are cleaned up.

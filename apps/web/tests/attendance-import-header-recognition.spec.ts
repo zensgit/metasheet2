@@ -32,6 +32,11 @@ describe('importHeaderRecognition', () => {
         .toEqual(['日期', '姓名', '工号'])
     })
 
+    it('uses only the first delimiter char, mirroring the backend splitter (review P3-1)', () => {
+      expect(parseCsvHeaderFromText('日期::姓名\n', { delimiter: '::' }))
+        .toEqual(['日期', '', '姓名'])
+    })
+
     it('honors an explicit header row index', () => {
       const text = '导出说明,,\n日期,姓名,工号\nx,y,z\n'
       expect(parseCsvHeaderFromText(text, { headerRowIndex: 1 })).toEqual(['日期', '姓名', '工号'])
@@ -51,7 +56,11 @@ describe('importHeaderRecognition', () => {
     it('classifies mapping-alias, key-family, and unknown columns', () => {
       const result = recognizeImportHeader(['日期', '姓名', '加班小时', '自定义列'], VOCAB)
       expect(result).toEqual({
-        recognized: ['日期', '姓名', '加班小时'],
+        recognized: [
+          { column: '日期', viaVocabulary: false },
+          { column: '姓名', viaVocabulary: false },
+          { column: '加班小时', viaVocabulary: true },
+        ],
         unknown: ['自定义列'],
         missingDate: false,
         missingContext: false,
@@ -60,7 +69,10 @@ describe('importHeaderRecognition', () => {
 
     it('normalizes header lookups like the backend (case/space/underscore)', () => {
       const result = recognizeImportHeader(['Work_Date', ' PLAN-DETAIL '], VOCAB)
-      expect(result?.recognized).toEqual(['Work_Date', 'PLAN-DETAIL'])
+      expect(result?.recognized).toEqual([
+        { column: 'Work_Date', viaVocabulary: false },
+        { column: 'PLAN-DETAIL', viaVocabulary: true },
+      ])
       expect(result?.missingDate).toBe(false)
     })
 
@@ -78,7 +90,10 @@ describe('importHeaderRecognition', () => {
 
     it('degrades to key families when the vocabulary is empty, keeping flags exact', () => {
       const result = recognizeImportHeader(['日期', '姓名', '加班小时'], [])
-      expect(result?.recognized).toEqual(['日期', '姓名'])
+      expect(result?.recognized).toEqual([
+        { column: '日期', viaVocabulary: false },
+        { column: '姓名', viaVocabulary: false },
+      ])
       expect(result?.unknown).toEqual(['加班小时'])
       expect(result?.missingDate).toBe(false)
       expect(result?.missingContext).toBe(false)
