@@ -186,7 +186,12 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
     })
   })
 
-  test('returns 400 with aggregated fieldErrors when multiple fields fail validation', async () => {
+  test('returns 400 with aggregated fieldErrors when multiple EXISTING fields fail validation', async () => {
+    // W1-3: both fields here EXIST and are visible/writable (pass the new layer-3 pre-check), so the
+    // request reaches RecordService.patchRecord's own per-field validation, which still aggregates
+    // multiple simultaneous failures into one 400 — unchanged. (A field id the layer-3 gate itself
+    // rejects — e.g. unknown/hidden/readonly — never reaches this validation at all; see the two
+    // dedicated W1-3 tests below for that new, earlier-and-generic 403 behavior.)
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, _params) => {
@@ -202,6 +207,7 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
           return {
             rows: [
               { id: 'fld_tag', name: 'Tag', type: 'select', property: { options: [{ value: 'a' }, { value: 'b' }] }, order: 1 },
+              { id: 'fld_priority', name: 'Priority', type: 'select', property: { options: [{ value: 'lo' }, { value: 'hi' }] }, order: 2 },
             ],
           }
         }
@@ -215,18 +221,52 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
       .patch('/api/multitable/records/rec_1')
       .send({
         sheetId: 'sheet_ops',
-        data: { fld_tag: 'not-allowed', fld_missing: 'x' },
+        data: { fld_tag: 'not-allowed', fld_priority: 'not-allowed-either' },
       })
       .expect(400)
 
     expect(response.body.error.code).toBe('VALIDATION_ERROR')
     expect(response.body.error.fieldErrors).toEqual({
       fld_tag: 'Invalid select option',
-      fld_missing: 'Unknown field',
+      fld_priority: 'Invalid select option',
     })
   })
 
-  test('returns 403 FIELD_READONLY when all field errors are "Field is readonly"', async () => {
+  test('W1-3: an UNKNOWN field id is rejected by the layer-3 gate (403), never reaching the spine\'s "Unknown field" validation — parity with grid /patch\'s existence-oracle-safe posture', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, _params) => {
+        if (sql.includes('FROM spreadsheet_permissions')) return { rows: [] }
+        if (sql.includes('field_permissions')) return { rows: [] }
+        if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          return { rows: [{ id: 'rec_1', sheet_id: 'sheet_ops' }] }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          return { rows: [{ id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }] }
+        }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .patch('/api/multitable/records/rec_1')
+      .send({ sheetId: 'sheet_ops', data: { fld_missing: 'x' } })
+      .expect(403)
+
+    expect(response.body.error.code).toBe('FORBIDDEN')
+    expect(response.body.error.message).toContain('fld_missing')
+  })
+
+  test('W1-3: a STRUCTURALLY read-only field (lookup) is now rejected by the earlier layer-3 gate (generic 403), not the spine\'s FIELD_READONLY shape — parity with grid /patch', async () => {
+    // Before W1-3, PATCH /records/:recordId had no layer-3 gate, so this reached RecordService
+    // .patchRecord's own property-level check and produced the specific FIELD_READONLY shape. Grid
+    // /patch's pre-existing gate ALREADY intercepts a structurally-read-only field the same generic way
+    // (its forbiddenWriteFieldIds check folds property-level readOnly into the SAME `readOnly` boolean via
+    // deriveFieldPermissions) — this test now pins that this route matches that pre-existing behavior.
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, _params) => {
@@ -259,9 +299,8 @@ describe('Multitable PATCH /records/:recordId (record-service extraction)', () =
       })
       .expect(403)
 
-    expect(response.body.error.code).toBe('FIELD_READONLY')
-    expect(response.body.error.message).toBe('Readonly field update rejected')
-    expect(response.body.error.fieldErrors).toEqual({ fld_lookup: 'Field is readonly' })
+    expect(response.body.error.code).toBe('FORBIDDEN')
+    expect(response.body.error.message).toContain('fld_lookup')
   })
 
   test('returns 409 VERSION_CONFLICT when expectedVersion disagrees with row', async () => {
