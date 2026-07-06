@@ -4256,36 +4256,50 @@ defineExpose({
 .mt-workbench__actions { display: flex; gap: 6px; padding: 4px 16px 0; }
 .mt-workbench__capability-banner {
   margin: 8px 16px 0;
-  padding: 8px 12px;
-  border: 1px solid #d9d9d9;
-  border-radius: 10px;
-  background: #fafafa;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--ms-border-light, #e7e8ec);
+  border-radius: 999px;
+  background: var(--ms-bg-page, #f5f6f8);
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
-  color: #595959;
+  line-height: 1.6;
+  color: var(--ms-text-2, #646a73);
+  max-width: 100%;
 }
-.mt-workbench__capability-banner strong { font-weight: 600; color: inherit; }
-.mt-workbench__capability-banner--admin {
-  border-color: #87e8de;
-  background: #f6ffed;
-  color: #135200;
+.mt-workbench__capability-banner::before {
+  content: '\1F512';
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.7;
 }
+.mt-workbench__capability-banner strong {
+  font-weight: 600;
+  color: var(--ms-text-1, #1f2329);
+}
+.mt-workbench__capability-banner span {
+  color: var(--ms-text-2, #646a73);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mt-workbench__capability-banner--admin,
 .mt-workbench__capability-banner--global-rbac {
-  border-color: #b7eb8f;
-  background: #f6ffed;
-  color: #237804;
+  border-color: var(--ms-border-light, #e7e8ec);
+  background: var(--ms-bg-page, #f5f6f8);
+  color: var(--ms-text-2, #646a73);
 }
 .mt-workbench__capability-banner--sheet-grant {
-  border-color: #91d5ff;
-  background: #e6f4ff;
-  color: #0958d9;
+  border-color: var(--el-color-primary-light-9, #eef3ff);
+  background: var(--el-color-primary-light-9, #eef3ff);
+  color: var(--el-color-primary-dark-2, #1e4fc0);
 }
 .mt-workbench__capability-banner--sheet-scope {
-  border-color: #ffd591;
-  background: #fff7e6;
-  color: #ad6800;
+  border-color: var(--ms-border-light, #e7e8ec);
+  background: var(--ms-bg-page, #f5f6f8);
+  color: var(--ms-text-2, #646a73);
 }
 .mt-workbench__presence-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #91caff; border-radius: 12px; background: #e6f4ff; color: #0958d9; font-size: 12px; }
 .mt-workbench__presence-chip strong { font-weight: 600; color: #003eb3; }
