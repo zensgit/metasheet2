@@ -64,9 +64,12 @@
 
 ```text
 A 能力关键路径
-  ⬜ A1 #3652 probe(owner,实体机,~10min)
-  🔒 A2 BL1 契约(门:owner opt-in)
-  🔒 A3 BL2 runtime(门:单独 opt-in)
+  ✅ A1 #3652 probe(owner,实体机)— 三轮回贴定性 BL0/caseB;#3683 客户 K3 文档补齐完整契约
+  ✅ A2 BL1 契约(owner opt-in "开 BL1")— #3689 7b9647f78 契约模块 + #3691 dev-verification MD
+       附:pre-BL2 硬件验证 PASS(#3683,2026-07-06)——FPercentItemID 过滤/Data.DATA 容器/
+       FBOMNumber 字段真机证过,BL1 唯一不确定点(byMaterialExampleInDocs=false)已消
+  🔒 A3 BL2 runtime(门:单独 opt-in;验证门已 PASS,只差 owner "开 BL2";
+       须落实 #3691 §4 两约束:完整字段锁 + runtime operator/body 钉死)
   🔒 A4 BL3 打包+standalone 冒烟(门:单独 opt-in;owner 跑)
   🔒 A5 BL4 组合复跑(门:BL2+BL3 PASS)
 B 质量收尾
@@ -82,6 +85,10 @@ C 治理收尾
 ```
 
 > checklist 同步(2026-07-06):B1 已随 #3660 落地(该 PR 未回改本表)+ C2 分析半完成——本次补记以保权威地图与 main 一致。
+>
+> checklist 同步 #2(2026-07-06 晚):A1/A2 补记完成——BL1 契约 #3689 + dev-verification MD #3691
+> 落地,且实体机 pre-BL2 硬件验证 PASS(#3683)。A 层剩余全部为 owner opt-in 门(A3"开 BL2"即可
+> 开工)。B/C 层剩余(B2/B5/C1/C2 残余)全部为 owner 决定项,无"我方可单独执行"的未完成件。
 
 **建议起手序**(并行三轨):A1(owner 实体机)∥ B1+B3(我,今天可完)∥ B2/C1 两个 owner 决定
 (异步定即可)。A 层其余按 BL 门渐进;全部勾完后出最终《收尾报告 MD》并关线。
