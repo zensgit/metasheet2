@@ -37,7 +37,7 @@
               :class="{ 'approval-inbox__row--active': selectedApprovalId === approval.id }"
             >
               <td class="mono">{{ approval.id }}</td>
-              <td>{{ approval.status }}</td>
+              <td><StatusTag domain="approvalInstance" :status="approval.status" /></td>
               <td>{{ formatPendingVersion(approval) }}</td>
               <td>{{ formatDate(approval.updated_at || approval.created_at) }}</td>
               <td>
@@ -116,6 +116,7 @@ import { computed, onMounted, ref } from 'vue'
 import type { ApprovalHistoryEntry } from './plm/plmPanelModels'
 import { useLocale } from '../composables/useLocale'
 import { apiFetch } from '../utils/api'
+import StatusTag from '../components/status/StatusTag.vue'
 import {
   buildApprovalInboxActionPayload,
   canActOnApprovalInboxEntry,

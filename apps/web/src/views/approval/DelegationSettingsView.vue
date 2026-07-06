@@ -30,9 +30,7 @@
       </el-table-column>
       <el-table-column label="状态" width="150">
         <template #default="{ row }">
-          <el-tag :type="DELEGATION_STATUS_TAG_TYPE[delegationDisplayStatus(row).status]" size="small">
-            {{ delegationDisplayStatus(row).status }}
-          </el-tag>
+          <StatusTag domain="delegation" :status="delegationDisplayStatus(row).status" />
           <span v-if="delegationDisplayStatus(row).expiringSoon" class="expiring-soon-hint">即将到期</span>
         </template>
       </el-table-column>
@@ -95,7 +93,8 @@ import {
   type DelegationRecord,
   type DelegationForm,
 } from '../../approvals/delegations'
-import { delegationDisplayStatus, DELEGATION_STATUS_TAG_TYPE } from '../../approvals/delegationStatus'
+import { delegationDisplayStatus } from '../../approvals/delegationStatus'
+import StatusTag from '../../components/status/StatusTag.vue'
 
 const { canManageTemplates: canManage } = useApprovalPermissions()
 const delegations = ref<DelegationRecord[]>([])

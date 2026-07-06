@@ -198,9 +198,7 @@
           </el-table-column>
           <el-table-column label="状态" width="100">
             <template #default="{ row }">
-              <el-tag :type="statusTagType(row.status)" size="small" :data-status="row.status">
-                {{ statusLabel(row.status) }}
-              </el-tag>
+              <StatusTag domain="approvalInstance" :status="row.status" />
             </template>
           </el-table-column>
           <el-table-column label="发起时间" width="180">
@@ -321,9 +319,7 @@
           </el-table-column>
           <el-table-column label="状态" width="100">
             <template #default="{ row }">
-              <el-tag :type="statusTagType(row.status)" size="small" :data-status="row.status">
-                {{ statusLabel(row.status) }}
-              </el-tag>
+              <StatusTag domain="approvalInstance" :status="row.status" />
             </template>
           </el-table-column>
           <el-table-column label="发起时间" width="180">
@@ -414,9 +410,7 @@
           </el-table-column>
           <el-table-column label="状态" width="100">
             <template #default="{ row }">
-              <el-tag :type="statusTagType(row.status)" size="small" :data-status="row.status">
-                {{ statusLabel(row.status) }}
-              </el-tag>
+              <StatusTag domain="approvalInstance" :status="row.status" />
             </template>
           </el-table-column>
           <el-table-column label="发起时间" width="180">
@@ -485,9 +479,7 @@
           </el-table-column>
           <el-table-column label="状态" width="100">
             <template #default="{ row }">
-              <el-tag :type="statusTagType(row.status)" size="small" :data-status="row.status">
-                {{ statusLabel(row.status) }}
-              </el-tag>
+              <StatusTag domain="approvalInstance" :status="row.status" />
             </template>
           </el-table-column>
           <el-table-column label="发起时间" width="180">
@@ -645,6 +637,7 @@ import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import ApprovalMobileList from './ApprovalMobileList.vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
+import StatusTag from '../../components/status/StatusTag.vue'
 
 const router = useRouter()
 const store = useApprovalStore()
@@ -1002,28 +995,10 @@ const attendanceRequestsSection = 'attendance-overview-requests'
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function statusTagType(status: string) {
-  const map: Record<string, string> = {
-    pending: 'warning',
-    approved: 'success',
-    rejected: 'danger',
-    revoked: 'info',
-    cancelled: 'info',
-  }
-  return map[status] ?? ''
-}
-
-function statusLabel(status: string) {
-  const map: Record<string, string> = {
-    pending: '待处理',
-    approved: '已通过',
-    rejected: '已驳回',
-    revoked: '已撤回',
-    cancelled: '已取消',
-  }
-  return map[status] ?? status
-}
-
+// UF-3: status coloring/labels now come from <StatusTag domain="approvalInstance"> (see
+// utils/statusDomains.ts) — the local statusTagType/statusLabel maps this file used to declare
+// were one of six independent status-color implementations audited in the UI foundation
+// design-lock and are removed here.
 function formatDate(dateStr: string) {
   if (!dateStr) return '-'
   return new Date(dateStr).toLocaleString('zh-CN')

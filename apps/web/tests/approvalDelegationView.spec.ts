@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, inject, nextTick, provide, reactive, type App as VueApp, type Slot } from 'vue'
 import type { DelegationRecord } from '../src/approvals/delegations'
+import { useLocale } from '../src/composables/useLocale'
 
 // B2-05 — DelegationSettingsView (admin 委托设置) MOUNTED-component coverage. Neither
 // approvalDelegationForm.spec.ts nor approvalDelegationRoute.spec.ts (the only pre-existing specs
@@ -181,6 +182,12 @@ describe('DelegationSettingsView (admin 委托设置) — B2-05 status tag + dis
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // UF-3: the status cell is now locale-aware (<StatusTag domain="delegation">, via
+    // useLocale()/isZh) rather than the previous hardcoded-Chinese-always
+    // `delegationDisplayStatus().status` literal. This suite's fixtures/assertions are Chinese,
+    // so pin the locale explicitly rather than relying on jsdom's default `navigator.language`.
+    useLocale().setLocale('zh-CN')
+
     canManageTemplates.value = true
     listDelegationsSpy.mockReset()
     disableDelegationSpy.mockReset().mockResolvedValue(undefined)
@@ -243,7 +250,9 @@ describe('DelegationSettingsView (admin 委托设置) — B2-05 status tag + dis
     for (const [index, label, tagType] of expectations) {
       const cell = statusCell(index)
       expect(cell.textContent, `row ${index} label`).toContain(label)
-      expect(cell.querySelector('[data-el-tag-type]')?.getAttribute('data-el-tag-type'), `row ${index} tag type`).toBe(tagType)
+      // UF-3: the status cell now renders <StatusTag domain="delegation"> (not `<el-tag>`) —
+      // select its tone by `data-tone` instead of the ElTag test stub's `data-el-tag-type`.
+      expect(cell.querySelector('[data-tone]')?.getAttribute('data-tone'), `row ${index} tag type`).toBe(tagType)
     }
   })
 

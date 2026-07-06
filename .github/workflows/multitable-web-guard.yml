@@ -67,6 +67,14 @@ on:
       - 'apps/web/tests/multitable-field-visibility.spec.ts'
       - 'apps/web/tests/multitable-required-if.spec.ts'
       - 'apps/web/tests/multitable-conditional-formatting.spec.ts'
+      # UF-3 — status-color convergence: the automation run/step status badges now render via the
+      # shared StatusTag/statusDomains map instead of AutomationExecutionsView's own hex badge CSS.
+      - 'apps/web/src/views/AutomationExecutionsView.vue'
+      - 'apps/web/src/components/status/StatusTag.vue'
+      - 'apps/web/src/utils/statusDomains.ts'
+      - 'apps/web/tests/statusTag.spec.ts'
+      - 'apps/web/tests/AutomationExecutionsView.spec.ts'
+      - 'apps/web/tests/parallelBranchRunsView.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
   push:
     branches: [main]
@@ -122,6 +130,14 @@ on:
       - 'apps/web/tests/multitable-field-visibility.spec.ts'
       - 'apps/web/tests/multitable-required-if.spec.ts'
       - 'apps/web/tests/multitable-conditional-formatting.spec.ts'
+      # UF-3 — status-color convergence: the automation run/step status badges now render via the
+      # shared StatusTag/statusDomains map instead of AutomationExecutionsView's own hex badge CSS.
+      - 'apps/web/src/views/AutomationExecutionsView.vue'
+      - 'apps/web/src/components/status/StatusTag.vue'
+      - 'apps/web/src/utils/statusDomains.ts'
+      - 'apps/web/tests/statusTag.spec.ts'
+      - 'apps/web/tests/AutomationExecutionsView.spec.ts'
+      - 'apps/web/tests/parallelBranchRunsView.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
 
 jobs:
@@ -178,4 +194,7 @@ jobs:
         # "hidden field is never conditionally required" invariant (MetaFormView `validate()`) could
         # land green and silently block public-form submission. See docs/development/
         # multitable-formview-conditional-guard-{design,verification}-20260705.md.
-        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-history-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule multitable-person-picker multitable-cell-renderer-person-inactive meta-toolbar-filter-builder meta-filter-group meta-grid-table multitable-grid multitable-restore-preview-dialog multitable-restore-batch-dialog multitable-config-history-modal multitable-workbench-restore-wiring multitable-config-revert-refresh multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-field-visibility multitable-required-if multitable-conditional-formatting --reporter=dot
+        # UF-3: status-color convergence — statusTag (StatusTag.vue + statusDomains.ts unit/mount
+        # coverage), AutomationExecutionsView + parallelBranchRunsView (automationRun domain status
+        # badges, run + step level, including the parallel-branch readability regression).
+        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-history-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule multitable-person-picker multitable-cell-renderer-person-inactive meta-toolbar-filter-builder meta-filter-group meta-grid-table multitable-grid multitable-restore-preview-dialog multitable-restore-batch-dialog multitable-config-history-modal multitable-workbench-restore-wiring multitable-config-revert-refresh multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-field-visibility multitable-required-if multitable-conditional-formatting statusTag AutomationExecutionsView parallelBranchRunsView --reporter=dot
