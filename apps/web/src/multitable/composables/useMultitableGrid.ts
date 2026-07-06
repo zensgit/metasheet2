@@ -497,6 +497,10 @@ export function useMultitableGrid(opts: {
   const accumulationCapped = ref(false)
   const error = ref<string | null>(null)
   const conflict = ref<GridConflictState | null>(null)
+  // W3-5: the batchId of the most recent successful commit (patchCell / bulkPatch), so a caller can
+  // surface a "view in history" deep-link without re-deriving it. Cleared on a failed commit (never
+  // stale-points at a PRIOR successful batch after a later failure); null before any commit this session.
+  const lastBatchId = ref<string | null>(null)
   // Monotonic request id shared by loadViewData (reset/replace) AND loadMore (append). A reset bumps it,
   // so any in-flight append re-checking it AFTER its await bails instead of appending stale, cross-filter
   // rows onto the freshly-reset set. This is the single guard that keeps the masked/filtered/sorted
@@ -1068,6 +1072,9 @@ export function useMultitableGrid(opts: {
         changes: [{ recordId, fieldId, value, expectedVersion: version }],
       })
       applyPatchResult(result)
+      // W3-5: record the commit's batchId (undefined for a server that predates the seam) so a caller can
+      // offer a "view in history" deep-link for THIS commit only — never carries a prior commit's id forward.
+      lastBatchId.value = result.batchId ?? null
       // Push to undo history
       editHistory.value = editHistory.value.slice(0, historyIndex.value + 1)
       editHistory.value.push({ recordId, fieldId, oldValue, newValue: value, version, oldLinkSummaries, newLinkSummaries: nextLinkSummaries })
@@ -1076,6 +1083,7 @@ export function useMultitableGrid(opts: {
       // Revert optimistic update
       if (row) row.data[fieldId] = oldValue
       setLinkSummaries(recordId, fieldId, oldLinkSummaries)
+      lastBatchId.value = null
       if (e?.code === 'VERSION_CONFLICT') {
         conflict.value = {
           recordId,
@@ -1159,6 +1167,7 @@ export function useMultitableGrid(opts: {
       changes,
     })
     applyPatchResult(result)
+    lastBatchId.value = result.batchId ?? null
     const updated = (result.updated ?? []).map((u) => u.recordId)
     const failed = (result.failed ?? []).map((failure) => ({
       recordId: failure.recordId,
@@ -1376,7 +1385,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
+    fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, lastBatchId, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
     // A1 infinite-scroll accumulation state
     loadingMore, accumulationCapped,
     sortRules, filterRules, filterConjunction, nestedFilterNodes, filterGroups, sortFilterDirty,

@@ -16061,6 +16061,12 @@ export function univerMetaRouter(): Router {
           ...(result.linkSummaries ? { linkSummaries: result.linkSummaries } : {}),
           ...(result.attachmentSummaries ? { attachmentSummaries: result.attachmentSummaries } : {}),
           ...(result.relatedRecords ? { relatedRecords: result.relatedRecords } : {}),
+          // W3-5: echo the batchId so a REST/grid caller can deep-link into the History Center for exactly
+          // this commit. NOTE (scope, not fixed here): only meaningful for this single patchRecords call —
+          // the `partialSuccess` branch above calls patchRecords ONCE PER RECORD with no shared batchId, so
+          // each record there mints its OWN batch (unlike the AI bulk-commit route, which explicitly shares
+          // one). That is a pre-existing gap in this route, out of scope for this additive change.
+          ...(result.batchId ? { batchId: result.batchId } : {}),
         },
       })
     } catch (err) {

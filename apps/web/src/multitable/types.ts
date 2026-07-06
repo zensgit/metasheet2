@@ -712,6 +712,9 @@ export interface PatchResult {
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
   relatedRecords?: Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }>
+  /** W3-5: the server-minted batchId this commit's revision(s) were grouped under — absent only if the
+   *  server predates the seam. Lets a caller deep-link into the History Center for this exact commit. */
+  batchId?: string
 }
 
 // --- Form submit ---

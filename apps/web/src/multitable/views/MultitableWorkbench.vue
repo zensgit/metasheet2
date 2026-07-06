@@ -62,7 +62,7 @@
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true">&#x1F517; {{ wb('toolbar.shareForm', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true">&#x1F511; {{ wb('toolbar.apiWebhooks', isZh) }}</button>
       <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" @click="showTrash = true">&#x1F5D1; {{ wb('toolbar.trash', isZh) }}</button>
-      <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="showHistory = true">&#x1F570; {{ isZh ? '历史' : 'History' }}</button>
+      <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true">&#x1F570; {{ isZh ? '历史' : 'History' }}</button>
       <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory">&#x2699; {{ isZh ? '配置历史' : 'Config history' }}</button>
     </div>
     <ResetToPointPicker
@@ -533,7 +533,8 @@
       :base-id="activeBaseId || ''"
       :sheet-id="workbench.activeSheetId.value"
       :fields="propertyVisibleGridFields"
-      @close="showHistory = false"
+      :initial-batch-id="historyDeepLinkBatchId"
+      @close="closeHistory"
     />
     <MetaConfigHistoryModal
       :visible="configHistory.visible"
@@ -663,7 +664,7 @@ import MetaCalendarView from '../components/MetaCalendarView.vue'
 import MetaTimelineView from '../components/MetaTimelineView.vue'
 import MetaGanttView from '../components/MetaGanttView.vue'
 import MetaHierarchyView from '../components/MetaHierarchyView.vue'
-import MetaToast from '../components/MetaToast.vue'
+import MetaToast, { type ToastAction } from '../components/MetaToast.vue'
 import MetaImportModal from '../components/MetaImportModal.vue'
 import MetaBulkEditDialog from '../components/MetaBulkEditDialog.vue'
 import MetaMentionPopover from '../components/MetaMentionPopover.vue'
@@ -942,6 +943,18 @@ const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
 const showTrash = ref(false)
 const showHistory = ref(false)
+// W3-5: set by a commit toast's "view in history" action — deep-links the History Center straight to the
+// batch that toast is about. Cleared on close so re-opening the modal manually (toolbar button) shows the
+// normal unfiltered list, not a stale deep-link from a previous toast.
+const historyDeepLinkBatchId = ref<string | null>(null)
+function openHistoryForBatch(batchId: string) {
+  historyDeepLinkBatchId.value = batchId
+  showHistory.value = true
+}
+function closeHistory() {
+  showHistory.value = false
+  historyDeepLinkBatchId.value = null
+}
 
 // T9-R4: config/schema-change history view. The server gates per entity type — the FE renders what it returns
 // (faithful client; no client-side security filtering). The entity-type filter only narrows within the gated set.
@@ -1108,8 +1121,16 @@ function showError(msg: string) {
   toastRef.value?.showError(msg)
 }
 
-function showSuccess(msg: string) {
-  toastRef.value?.showSuccess(msg)
+function showSuccess(msg: string, action?: ToastAction) {
+  toastRef.value?.showSuccess(msg, action)
+}
+
+// W3-5: a commit toast's "View in history" action — deep-links straight to the batch this commit wrote.
+// Omitted (no action) when the server response carried no batchId (e.g. a server predating the seam, or a
+// no-op commit where nothing was actually written).
+function historyLinkAction(batchId: string | null): ToastAction | undefined {
+  if (!batchId) return undefined
+  return { label: wb('toast.viewInHistory', isZh.value), onClick: () => openHistoryForBatch(batchId) }
 }
 
 function ensureCanCreateRecord(): boolean {
@@ -2244,7 +2265,7 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
       data: { ...deepLinkedRecord.value.data, [fieldId]: value },
     }
   }
-  showSuccess(wb('toast.recordUpdated', isZh.value))
+  showSuccess(wb('toast.recordUpdated', isZh.value), historyLinkAction(grid.lastBatchId.value))
 }
 
 async function onFormSubmit(data: Record<string, unknown>) {

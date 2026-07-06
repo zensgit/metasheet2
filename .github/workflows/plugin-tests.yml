@@ -208,6 +208,7 @@ jobs:
             tests/integration/multitable-crossbase-mirror-writethrough-realdb.test.ts \
             tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts \
             tests/integration/multitable-fieldperm-write-gate-patch-realdb.test.ts \
+            tests/integration/multitable-patch-batchid-echo-realdb.test.ts \
             tests/integration/multitable-permmatrix-b3-mgmt-403-matrix-realdb.test.ts \
             tests/integration/multitable-w13-fieldperm-writegate-bridge-realdb.test.ts \
             tests/integration/multitable-w13-fieldperm-writegate-singlerecord-realdb.test.ts \
