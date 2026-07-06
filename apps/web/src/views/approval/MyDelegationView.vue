@@ -39,7 +39,10 @@
     <el-dialog v-model="dialogOpen" title="新建我的委托" width="480px">
       <el-form label-width="92px">
         <el-form-item label="被委托人">
-          <el-input v-model="form.delegateeUserId" placeholder="被委托人用户 ID" data-testid="my-delegation-delegatee" />
+          <ApprovalUserPicker
+            :model-value="form.delegateeUserId || null"
+            @update:model-value="form.delegateeUserId = $event ?? ''"
+          />
         </el-form-item>
         <el-form-item label="范围">
           <el-select v-model="form.scope" data-testid="my-delegation-scope">
@@ -78,6 +81,7 @@ import {
   type OwnDelegationForm,
 } from '../../approvals/delegations'
 import { delegationDisplayStatus, DELEGATION_STATUS_TAG_TYPE } from '../../approvals/delegationStatus'
+import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 
 const delegations = ref<DelegationRecord[]>([])
 const loading = ref(false)

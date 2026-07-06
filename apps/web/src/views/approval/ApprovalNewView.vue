@@ -135,21 +135,12 @@
               />
             </el-select>
 
-            <!-- user (placeholder picker) -->
-            <el-select
+            <!-- user (B3-04 D-2: real participant directory picker) -->
+            <ApprovalUserPicker
               v-else-if="field.type === 'user'"
-              v-model="formData[field.id]"
-              placeholder="选择用户"
-              filterable
-              style="width: 100%"
-            >
-              <template #prefix>
-                <el-icon><Search /></el-icon>
-              </template>
-              <el-option label="张三" value="user_1" />
-              <el-option label="李四" value="user_2" />
-              <el-option label="王五" value="user_3" />
-            </el-select>
+              :model-value="(formData[field.id] as string | null | undefined) ?? null"
+              @update:model-value="formData[field.id] = $event"
+            />
 
             <!-- detail / sub-form (明细): editable rows × leaf-column cells. `formData[field.id]`
                  is an array of row objects keyed by sub-field id; each cell reuses the matching
@@ -237,17 +228,11 @@
                         :value="opt.value"
                       />
                     </el-select>
-                    <el-select
+                    <ApprovalUserPicker
                       v-else-if="column.type === 'user'"
-                      v-model="row[column.id]"
-                      placeholder="选择用户"
-                      filterable
-                      style="width: 100%"
-                    >
-                      <el-option label="张三" value="user_1" />
-                      <el-option label="李四" value="user_2" />
-                      <el-option label="王五" value="user_3" />
-                    </el-select>
+                      :model-value="(row[column.id] as string | null | undefined) ?? null"
+                      @update:model-value="row[column.id] = $event"
+                    />
                     <el-input v-else v-model="row[column.id]" :placeholder="column.label" />
                     </template>
                   </template>
@@ -339,7 +324,7 @@ import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
-import { ArrowLeft, Search } from '@element-plus/icons-vue'
+import { ArrowLeft } from '@element-plus/icons-vue'
 import type { FormField, FormSchema } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
@@ -350,6 +335,7 @@ import { useAuth } from '../../composables/useAuth'
 import { useAutoSumTotal } from '../../approvals/useAutoSumTotal'
 import { isRowDerivationActive } from '../../approvals/lineDerivation'
 import { numberFieldProps } from '../../approvals/numberFieldProps'
+import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import {
   createEmptyDetailRow,
   isDetailCellVisible,

@@ -54,6 +54,25 @@ vi.mock('vue-router', async () => {
 })
 
 // ---------------------------------------------------------------------------
+// B3-04 D-2 — participant directory picker mock (see approval-e2e-lifecycle.spec.ts for the
+// fuller rationale). ApprovalUserPicker (used by the transfer dialog below) fetches its options
+// through `searchApprovalDirectoryUsers`; the fixture preserves the SAME id (user_3) the deleted
+// hardcoded 王五 option used to hardcode, so the existing `select.value = 'user_3'` assertion
+// keeps working unchanged.
+// ---------------------------------------------------------------------------
+vi.mock('../src/approvals/api', async () => {
+  const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
+  return {
+    ...actual,
+    searchApprovalDirectoryUsers: vi.fn().mockResolvedValue([
+      { id: 'user_2', name: '李四', email: '' },
+      { id: 'user_3', name: '王五', email: '' },
+      { id: 'user_4', name: '赵六', email: '' },
+    ]),
+  }
+})
+
+// ---------------------------------------------------------------------------
 // Approval store mock
 // ---------------------------------------------------------------------------
 const mockActiveApproval = ref<any>(null)
