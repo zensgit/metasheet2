@@ -45,10 +45,16 @@ function isBomListByMaterialPlan(plan) {
 // inputs (the plan's requiredNamedInputs) ride BESIDE the frozen contract, never inside it, so the S2-a
 // top-key allowlist stays untouched.
 const READ_SOURCE_PROBE_BODY_INPUT_KEY = 'inputs'
-const READ_SOURCE_PROBE_INPUT_KEYS = Object.freeze(['key'])
+const READ_SOURCE_PROBE_INPUT_KEYS = Object.freeze(['key', 'pageIndex'])
 // A named key input is a bound business VALUE (e.g. a material number): bounded, control-char-free, and —
 // like the read-smoke key — never echoed into any error or evidence.
 const READ_SOURCE_PROBE_KEY_MAX_LENGTH = 128
+// Bounded LIST page input (#3703, owner-approved 2026-07-06 — the data-plane half of the same bounded
+// pageIndex authorization already shipped for the evidence-only read-smoke route in #3709): list_page
+// configured reads may name a page, integer 1..10 only, so an authorized operator can walk bounded pages
+// through the EXISTING fieldMap data plane. Not a filter/body/field surface; rejected on any other mode;
+// the adapter re-guards the same bound.
+const READ_SOURCE_PROBE_MAX_PAGE_INDEX = 10
 
 class ReadSourceProbeRuntimeError extends Error {
   constructor(reason) {
@@ -83,17 +89,32 @@ function normalizeReadSourceProbeInputs(plan, inputs) {
   if (!Object.keys(source).every((key) => READ_SOURCE_PROBE_INPUT_KEYS.includes(key))) {
     throw new ReadSourceProbeContractError('inputs_unexpected_field')
   }
+  // Bounded LIST page input (#3703): list_page only; integer 1..MAX only; fail-closed on any other mode
+  // (never silently dropped) and on any non-conforming value.
+  let pageIndex
+  if (source.pageIndex !== undefined) {
+    if (plan.mode !== 'list_page') {
+      throw new ReadSourceProbeContractError('page_index_not_allowed')
+    }
+    if (typeof source.pageIndex !== 'number' || !Number.isInteger(source.pageIndex)
+      || source.pageIndex < 1 || source.pageIndex > READ_SOURCE_PROBE_MAX_PAGE_INDEX) {
+      throw new ReadSourceProbeContractError('page_index_invalid')
+    }
+    pageIndex = source.pageIndex
+  }
   if (plan.requiredNamedInputs.includes('key')) {
     if (!isBoundedProbeKeyValue(source.key)) {
       throw new ReadSourceProbeContractError('key_required')
     }
-    return Object.freeze({ key: String(source.key).trim() })
+    const normalized = { key: String(source.key).trim() }
+    if (pageIndex !== undefined) normalized.pageIndex = pageIndex
+    return Object.freeze(normalized)
   }
   // Fail-closed the other way too: a key supplied to a keyless plan is rejected, not silently dropped.
   if (source.key !== undefined) {
     throw new ReadSourceProbeContractError('key_not_allowed')
   }
-  return Object.freeze({})
+  return Object.freeze(pageIndex !== undefined ? { pageIndex } : {})
 }
 
 // Split the route body into { contract, inputs }, normalize the contract through the S2-a normalizer
@@ -151,6 +172,9 @@ function buildReadSourceProbeOverlayPreset(plan) {
 function buildReadSourceProbeRequest(plan, inputs) {
   if (plan.mode === 'list_page') {
     const request = { object: plan.object, limit: plan.rowCap, options: { k3ReadMode: 'list' } }
+    // Bounded page input (#3703): contract-validated 1..MAX above; the adapter re-guards the same bound
+    // (K3_WISE_READ_LIST_PAGE_INDEX_INVALID). Absent → adapter default page 1 (shipped behavior unchanged).
+    if (inputs.pageIndex !== undefined) request.options.listPageIndex = inputs.pageIndex
     Object.defineProperty(request.options, READ_SMOKE_LIST_REQUEST_MARKER, { value: true, enumerable: true })
     return request
   }
