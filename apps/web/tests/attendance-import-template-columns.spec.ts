@@ -18,6 +18,9 @@ const MAPPING_COLUMNS = [
   { sourceField: '异常原因', targetField: 'exceptionReason' },
   { sourceField: '迟到分钟', targetField: 'lateMinutes' },
   { sourceField: '加班小时', targetField: 'overtimeHours' },
+  { sourceField: 'leave_hours', targetField: 'leaveMinutes' },
+  { sourceField: 'overtime_duration', targetField: 'overtimeMinutes' },
+  { sourceField: '离职时间', targetField: 'resignTime' },
   { sourceField: '班次', targetField: 'shiftName' },
   { sourceField: '考勤组', targetField: 'attendanceGroup' },
   { sourceField: '部门', targetField: 'department' },
@@ -38,7 +41,17 @@ describe('importTemplateColumns', () => {
     expect(byKey['status']?.options.map(option => option.columnName)).toEqual(['考勤结果', '异常原因'])
     expect(byKey['durations']?.options.map(option => option.key)).toEqual(['lateMinutes', 'overtimeHours'])
     expect(byKey['shift-group']?.options.map(option => option.columnName)).toEqual(['班次', '考勤组'])
+    expect(byKey['people']?.options.map(option => option.columnName)).toEqual(['部门', '离职时间'])
     expect(byKey['approval']?.options).toHaveLength(1)
+  })
+
+  it('excludes English-only near-duplicate targets so generated headers stay Chinese', () => {
+    const groups = groupSupportedImportColumns(MAPPING_COLUMNS)
+    const keys = allSelectableImportFieldKeys(groups)
+    expect(keys).not.toContain('leaveMinutes')
+    expect(keys).not.toContain('overtimeMinutes')
+    const header = buildTemplateHeaderFromSelection(groups, keys)
+    expect(header.filter(column => /[A-Za-z_]/.test(column))).toEqual([])
   })
 
   it('skips empty/unknown mapping rows and empty input', () => {

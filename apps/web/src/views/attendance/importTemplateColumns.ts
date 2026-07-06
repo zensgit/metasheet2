@@ -55,7 +55,11 @@ const GROUP_DEFS: Array<{ key: string; labelEn: string; labelZh: string; targets
     key: 'durations',
     labelEn: 'Durations & hours',
     labelZh: '时长与工时',
-    targets: ['workHours', 'workMinutes', 'lateMinutes', 'earlyLeaveMinutes', 'leaveHours', 'leaveMinutes', 'overtimeHours', 'overtimeMinutes'],
+    // leaveMinutes/overtimeMinutes are deliberately absent: they only carry
+    // English API aliases (leave_hours/overtime_duration) and duplicate the
+    // 请假小时/加班小时 semantics — including them would leak English column
+    // names into the generated Chinese template.
+    targets: ['workHours', 'workMinutes', 'lateMinutes', 'earlyLeaveMinutes', 'leaveHours', 'overtimeHours'],
   },
   {
     key: 'shift-group',
@@ -67,7 +71,7 @@ const GROUP_DEFS: Array<{ key: string; labelEn: string; labelZh: string; targets
     key: 'people',
     labelEn: 'People profile',
     labelZh: '人员画像',
-    targets: ['department', 'role', 'entryTime'],
+    targets: ['department', 'role', 'entryTime', 'resignTime'],
   },
   {
     key: 'approval',
@@ -106,6 +110,7 @@ const FIELD_MEANINGS: Record<string, { en: string; zh: string }> = {
   department: { en: 'Department (also drives rules)', zh: '部门（可参与规则匹配）' },
   role: { en: 'Role/position (also drives rules)', zh: '职位（可参与规则匹配）' },
   entryTime: { en: 'Entry (hire) date', zh: '入职时间' },
+  resignTime: { en: 'Resignation date', zh: '离职时间' },
   approvalSummary: { en: 'Linked approval summary', zh: '关联的审批单摘要' },
 }
 

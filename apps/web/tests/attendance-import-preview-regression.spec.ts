@@ -444,6 +444,28 @@ describe('Attendance import preview regression', () => {
     expect(container!.textContent).toContain('CSV template downloaded.')
   })
 
+  it('one-click download never destroys a hand-edited payload: errors instead of auto-loading', async () => {
+    const apiFetchMock = mockTemplateEndpoint()
+    stubObjectUrl()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    const setupState = (vm as any).$?.setupState as Record<string, unknown>
+    const editedPayload = '{"source":"manual","rows":['
+    ;(setupState.importForm as { payload: string }).payload = editedPayload
+    await flushUi(2)
+    apiFetchMock.mockClear()
+
+    const importSection = findImportSection(container!)
+    findButton(importSection, 'Download CSV template').click()
+    await flushUi(6)
+
+    expect(apiFetchMock.mock.calls.some(call => String(call[0]).startsWith('/api/attendance/import/template'))).toBe(false)
+    expect((setupState.importForm as { payload: string }).payload).toBe(editedPayload)
+    expect(container!.textContent).toContain('Payload JSON has content but no template columns')
+  })
+
   it('advanced options collapse by default; core fields stay visible; toggle expands', async () => {
     mockTemplateEndpoint()
 

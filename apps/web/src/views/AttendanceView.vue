@@ -18032,8 +18032,22 @@ async function loadImportTemplate() {
 
 async function downloadImportTemplateCsv() {
   // One-click (import-section-ux design-lock D2): auto-load the template first
-  // instead of erroring, so the download works from a cold panel.
+  // instead of erroring, so the download works from a cold panel. Guard: only
+  // when the payload is untouched — loadImportTemplate overwrites
+  // importForm.payload, and a hand-edited (or mid-edit, unparseable) payload
+  // must never be silently destroyed by a template download.
   if (!importTemplateGuide.value) {
+    const rawPayload = String(importForm.payload ?? '').trim()
+    if (rawPayload && rawPayload !== '{}') {
+      setStatus(
+        tr(
+          'Payload JSON has content but no template columns — fix or clear it, or click "Load template" to replace it.',
+          '负载 JSON 已有内容但无法生成模板——请修正/清空后再试，或点「加载模板」覆盖当前负载。',
+        ),
+        'error',
+      )
+      return
+    }
     await loadImportTemplate()
   }
   const guide = importTemplateGuide.value
