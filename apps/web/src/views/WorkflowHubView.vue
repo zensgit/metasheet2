@@ -2,21 +2,21 @@
   <section class="workflow-hub">
     <header class="workflow-hub__header">
       <div>
-        <h1>Workflow Hub</h1>
-        <p>面向平台流程的草稿目录、模板入口和设计器起点。</p>
+        <h1>{{ workflowHubLabel('header.title', isZh) }}</h1>
+        <p>{{ workflowHubLabel('header.subtitle', isZh) }}</p>
       </div>
       <div class="workflow-hub__actions">
         <button class="btn btn--ghost" type="button" @click="saveCurrentView">
-          Save view
+          {{ workflowHubLabel('actions.saveView', isZh) }}
         </button>
         <button class="btn btn--ghost" type="button" @click="saveCurrentTeamView">
-          Save team view
+          {{ workflowHubLabel('actions.saveTeamView', isZh) }}
         </button>
         <button class="btn btn--ghost" type="button" :disabled="isRefreshing" @click="refreshAll({ force: true })">
-          {{ isRefreshing ? 'Refreshing...' : 'Refresh' }}
+          {{ isRefreshing ? workflowHubLabel('actions.refreshing', isZh) : workflowHubLabel('actions.refresh', isZh) }}
         </button>
         <router-link class="btn btn--primary" :to="{ name: 'workflow-designer' }">
-          New workflow
+          {{ workflowHubLabel('actions.newWorkflow', isZh) }}
         </router-link>
       </div>
     </header>
@@ -24,11 +24,11 @@
     <section class="workflow-hub__saved" v-if="savedViews.length">
       <div class="workflow-hub__saved-header">
         <div>
-          <h2>Saved Views</h2>
-          <p>把当前过滤视角保存成可复用入口。</p>
+          <h2>{{ workflowHubLabel('savedViews.title', isZh) }}</h2>
+          <p>{{ workflowHubLabel('savedViews.subtitle', isZh) }}</p>
         </div>
         <button class="btn btn--ghost" type="button" @click="saveCurrentView">
-          Save current view
+          {{ workflowHubLabel('savedViews.saveCurrent', isZh) }}
         </button>
       </div>
       <div class="workflow-hub__saved-list">
@@ -38,17 +38,17 @@
               <h3>{{ view.name }}</h3>
               <p>{{ describeSavedView(view.state) }}</p>
             </div>
-            <span class="chip">Saved</span>
+            <span class="chip">{{ workflowHubLabel('savedViews.chip', isZh) }}</span>
           </div>
           <div class="workflow-hub__meta-row">
-            <span>Updated: {{ formatDateTime(view.updatedAt) }}</span>
+            <span>{{ workflowHubLabel('savedViews.updatedPrefix', isZh) }} {{ formatDateTime(view.updatedAt) }}</span>
           </div>
           <div class="workflow-hub__template-actions">
             <button class="btn btn--primary btn--mini" type="button" @click="applySavedView(view.id)">
-              Apply view
+              {{ workflowHubLabel('savedViews.apply', isZh) }}
             </button>
             <button class="btn btn--ghost btn--mini" type="button" @click="deleteSavedView(view.id, view.name)">
-              Delete
+              {{ workflowHubLabel('savedViews.delete', isZh) }}
             </button>
           </div>
         </article>
@@ -58,11 +58,11 @@
     <section class="workflow-hub__saved" v-if="teamViews.length || teamViewsError">
       <div class="workflow-hub__saved-header">
         <div>
-          <h2>Team Views</h2>
-          <p>把当前 Workflow Hub 视角保存成租户内可复用入口。</p>
+          <h2>{{ workflowHubLabel('teamViews.title', isZh) }}</h2>
+          <p>{{ workflowHubLabel('teamViews.subtitle', isZh) }}</p>
         </div>
         <button class="btn btn--ghost" type="button" :disabled="teamViewsLoading" @click="saveCurrentTeamView">
-          {{ teamViewsLoading ? 'Saving...' : 'Save team view' }}
+          {{ teamViewsLoading ? workflowHubLabel('teamViews.saving', isZh) : workflowHubLabel('actions.saveTeamView', isZh) }}
         </button>
       </div>
       <p v-if="teamViewsError" class="workflow-hub__error">{{ teamViewsError }}</p>
@@ -73,15 +73,15 @@
               <h3>{{ view.name }}</h3>
               <p>{{ describeTeamView(view) }}</p>
             </div>
-            <span class="chip" data-tone="team">Team</span>
+            <span class="chip" data-tone="team">{{ workflowHubLabel('teamViews.chip', isZh) }}</span>
           </div>
           <div class="workflow-hub__meta-row">
-            <span>Owner: {{ view.ownerUserId || 'system' }}</span>
-            <span>Updated: {{ formatDateTime(view.updatedAt) }}</span>
+            <span>{{ workflowHubLabel('teamViews.ownerPrefix', isZh) }} {{ view.ownerUserId || workflowHubLabel('teamViews.systemOwner', isZh) }}</span>
+            <span>{{ workflowHubLabel('savedViews.updatedPrefix', isZh) }} {{ formatDateTime(view.updatedAt) }}</span>
           </div>
           <div class="workflow-hub__template-actions">
             <button class="btn btn--primary btn--mini" type="button" @click="applyTeamView(view.id)">
-              Apply view
+              {{ workflowHubLabel('savedViews.apply', isZh) }}
             </button>
             <button
               v-if="view.canManage"
@@ -90,7 +90,7 @@
               :disabled="teamViewsLoading"
               @click="deleteTeamView(view.id, view.name)"
             >
-              Delete
+              {{ workflowHubLabel('savedViews.delete', isZh) }}
             </button>
           </div>
         </article>
@@ -101,8 +101,8 @@
       <article class="workflow-hub__card">
         <div class="workflow-hub__card-header">
           <div>
-            <h2>Workflow Drafts</h2>
-            <p>从 draft model 直接读取，可按状态、名称和更新时间筛选。</p>
+            <h2>{{ workflowHubLabel('workflowCard.title', isZh) }}</h2>
+            <p>{{ workflowHubLabel('workflowCard.subtitle', isZh) }}</p>
           </div>
           <span class="workflow-hub__count">{{ workflowPagination.total }}</span>
         </div>
@@ -112,59 +112,59 @@
             v-model="workflowSearch"
             class="workflow-hub__input"
             type="search"
-            placeholder="Search workflows"
+            :placeholder="workflowHubLabel('workflowCard.searchPlaceholder', isZh)"
             @keydown.enter="refreshWorkflows(0)"
           />
           <select v-model="workflowStatus" class="workflow-hub__select" @change="refreshWorkflows(0)">
-            <option value="">All status</option>
-            <option value="draft">Draft</option>
-            <option value="published">Published</option>
-            <option value="archived">Archived</option>
+            <option value="">{{ workflowHubLabel('statusFilter.all', isZh) }}</option>
+            <option value="draft">{{ workflowHubLabel('statusFilter.draft', isZh) }}</option>
+            <option value="published">{{ workflowHubLabel('statusFilter.published', isZh) }}</option>
+            <option value="archived">{{ workflowHubLabel('statusFilter.archived', isZh) }}</option>
           </select>
           <select v-model="workflowSortBy" class="workflow-hub__select" @change="refreshWorkflows(0)">
-            <option value="updated_at">Recently updated</option>
-            <option value="created_at">Recently created</option>
-            <option value="name">Name</option>
+            <option value="updated_at">{{ workflowHubLabel('sortBy.recentlyUpdated', isZh) }}</option>
+            <option value="created_at">{{ workflowHubLabel('sortBy.recentlyCreated', isZh) }}</option>
+            <option value="name">{{ workflowHubLabel('sortBy.name', isZh) }}</option>
           </select>
           <button class="btn btn--ghost" type="button" :disabled="workflowLoading" @click="refreshWorkflows(0)">
-            {{ workflowLoading ? 'Loading...' : 'Apply' }}
+            {{ workflowLoading ? workflowHubLabel('workflowCard.loading', isZh) : workflowHubLabel('workflowCard.apply', isZh) }}
           </button>
         </div>
 
         <p v-if="workflowError" class="workflow-hub__error">{{ workflowError }}</p>
 
-        <div v-if="workflowLoading" class="workflow-hub__empty">Loading workflow drafts...</div>
+        <div v-if="workflowLoading" class="workflow-hub__empty">{{ workflowHubLabel('workflowCard.loadingDrafts', isZh) }}</div>
         <div v-else-if="!workflowItems.length" class="workflow-hub__empty">
-          No workflow drafts matched the current filters.
+          {{ workflowHubLabel('workflowCard.noMatch', isZh) }}
         </div>
         <table v-else class="workflow-hub__table">
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Status</th>
-              <th>Role</th>
-              <th>Category</th>
-              <th>Updated</th>
-              <th>Actions</th>
+              <th>{{ workflowHubLabel('workflowCard.colName', isZh) }}</th>
+              <th>{{ workflowHubLabel('workflowCard.colStatus', isZh) }}</th>
+              <th>{{ workflowHubLabel('workflowCard.colRole', isZh) }}</th>
+              <th>{{ workflowHubLabel('workflowCard.colCategory', isZh) }}</th>
+              <th>{{ workflowHubLabel('workflowCard.colUpdated', isZh) }}</th>
+              <th>{{ workflowHubLabel('workflowCard.colActions', isZh) }}</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="workflow in workflowItems" :key="workflow.id">
               <td>
-                <div class="workflow-hub__primary">{{ workflow.name || 'Unnamed workflow' }}</div>
-                <div class="workflow-hub__secondary">{{ workflow.description || 'No description' }}</div>
+                <div class="workflow-hub__primary">{{ workflow.name || workflowHubLabel('workflowCard.unnamed', isZh) }}</div>
+                <div class="workflow-hub__secondary">{{ workflow.description || workflowHubLabel('workflowCard.noDescription', isZh) }}</div>
               </td>
-              <td><span class="chip" :data-tone="workflow.status">{{ workflow.status }}</span></td>
-              <td><span class="chip" :data-tone="workflow.role || 'viewer'">{{ workflow.role || 'viewer' }}</span></td>
+              <td><span class="chip" :data-tone="workflow.status">{{ workflowStatusChipLabel(workflow.status, isZh) }}</span></td>
+              <td><span class="chip" :data-tone="workflow.role || 'viewer'">{{ workflowRoleChipLabel(workflow.role || 'viewer', isZh) }}</span></td>
               <td>{{ workflow.category || '-' }}</td>
               <td>{{ formatDateTime(workflow.updatedAt) }}</td>
               <td>
                 <div class="workflow-hub__table-actions">
                   <router-link class="btn btn--ghost btn--mini" :to="{ name: 'workflow-designer', params: { id: workflow.id } }">
-                    Open
+                    {{ workflowHubLabel('action.open', isZh) }}
                   </router-link>
                   <button class="btn btn--ghost btn--mini" type="button" :disabled="workflowLoading" @click="duplicateDraft(workflow.id, workflow.name)">
-                    Duplicate
+                    {{ workflowHubLabel('action.duplicate', isZh) }}
                   </button>
                   <button
                     v-if="workflow.status !== 'archived'"
@@ -173,7 +173,7 @@
                     :disabled="workflowLoading || workflow.status === 'archived' || workflow.role === 'viewer'"
                     @click="archiveDraft(workflow.id, workflow.name)"
                   >
-                    Archive
+                    {{ workflowHubLabel('action.archive', isZh) }}
                   </button>
                   <button
                     v-else
@@ -182,7 +182,7 @@
                     :disabled="workflowLoading || workflow.role === 'viewer'"
                     @click="restoreDraft(workflow.id, workflow.name)"
                   >
-                    Restore
+                    {{ workflowHubLabel('action.restore', isZh) }}
                   </button>
                 </div>
               </td>
@@ -194,10 +194,10 @@
           <span>{{ workflowRangeLabel }}</span>
           <div class="workflow-hub__pager-actions">
             <button class="btn btn--ghost btn--mini" type="button" :disabled="workflowLoading || workflowPagination.offset === 0" @click="refreshWorkflows(Math.max(0, workflowPagination.offset - workflowPagination.limit))">
-              Previous
+              {{ workflowHubLabel('pager.previous', isZh) }}
             </button>
             <button class="btn btn--ghost btn--mini" type="button" :disabled="workflowLoading || workflowPagination.offset + workflowPagination.returned >= workflowPagination.total" @click="refreshWorkflows(workflowPagination.offset + workflowPagination.limit)">
-              Next
+              {{ workflowHubLabel('pager.next', isZh) }}
             </button>
           </div>
         </footer>
@@ -206,8 +206,8 @@
       <article class="workflow-hub__card">
         <div class="workflow-hub__card-header">
           <div>
-            <h2>Template Catalog</h2>
-            <p>支持 builtin / database 来源过滤，可直接进入 designer 实例化。</p>
+            <h2>{{ workflowHubLabel('templateCard.title', isZh) }}</h2>
+            <p>{{ workflowHubLabel('templateCard.subtitle', isZh) }}</p>
           </div>
           <span class="workflow-hub__count">{{ templatePagination.total }}</span>
         </div>
@@ -215,8 +215,8 @@
         <section v-if="recentTemplateItems.length" class="workflow-hub__recent">
           <div class="workflow-hub__recent-header">
             <div>
-              <h3>Recent Templates</h3>
-              <p>把最近使用过的模板前置成高频入口。</p>
+              <h3>{{ workflowHubLabel('recentTemplates.title', isZh) }}</h3>
+              <p>{{ workflowHubLabel('recentTemplates.subtitle', isZh) }}</p>
             </div>
           </div>
           <div class="workflow-hub__recent-list">
@@ -224,20 +224,20 @@
               <div class="workflow-hub__template-top">
                 <div>
                   <h3>{{ template.name }}</h3>
-                  <p>{{ template.description || 'No description' }}</p>
+                  <p>{{ template.description || workflowHubLabel('templateCard.noDescription', isZh) }}</p>
                 </div>
-                <span class="chip" :data-tone="template.source">{{ template.source }}</span>
+                <span class="chip" :data-tone="template.source">{{ templateSourceChipLabel(template.source, isZh) }}</span>
               </div>
               <div class="workflow-hub__meta-row">
                 <span>{{ template.category }}</span>
-                <span>Last used: {{ formatDateTime(template.usedAt) }}</span>
+                <span>{{ workflowHubLabel('recentTemplates.lastUsedPrefix', isZh) }} {{ formatDateTime(template.usedAt) }}</span>
               </div>
               <div class="workflow-hub__template-actions">
                 <router-link
                   class="btn btn--primary btn--mini"
                   :to="{ name: 'workflow-designer', query: { templateId: template.id } }"
                 >
-                  Use again
+                  {{ workflowHubLabel('recentTemplates.useAgain', isZh) }}
                 </router-link>
               </div>
             </article>
@@ -249,44 +249,44 @@
             v-model="templateSearch"
             class="workflow-hub__input"
             type="search"
-            placeholder="Search templates"
+            :placeholder="workflowHubLabel('templateCard.searchPlaceholder', isZh)"
             @keydown.enter="refreshTemplates(0)"
           />
           <select v-model="templateSource" class="workflow-hub__select" @change="refreshTemplates(0)">
-            <option value="all">All sources</option>
-            <option value="builtin">Builtin</option>
-            <option value="database">Database</option>
+            <option value="all">{{ workflowHubLabel('sourceFilter.all', isZh) }}</option>
+            <option value="builtin">{{ workflowHubLabel('sourceFilter.builtin', isZh) }}</option>
+            <option value="database">{{ workflowHubLabel('sourceFilter.database', isZh) }}</option>
           </select>
           <select v-model="templateSortBy" class="workflow-hub__select" @change="refreshTemplates(0)">
-            <option value="usage_count">Usage</option>
-            <option value="name">Name</option>
-            <option value="updated_at">Updated</option>
+            <option value="usage_count">{{ workflowHubLabel('templateSortBy.usage', isZh) }}</option>
+            <option value="name">{{ workflowHubLabel('templateSortBy.name', isZh) }}</option>
+            <option value="updated_at">{{ workflowHubLabel('templateSortBy.updated', isZh) }}</option>
           </select>
           <button class="btn btn--ghost" type="button" :disabled="templateLoading" @click="refreshTemplates(0)">
-            {{ templateLoading ? 'Loading...' : 'Apply' }}
+            {{ templateLoading ? workflowHubLabel('templateCard.loading', isZh) : workflowHubLabel('templateCard.apply', isZh) }}
           </button>
         </div>
 
         <p v-if="templateError" class="workflow-hub__error">{{ templateError }}</p>
 
-        <div v-if="templateLoading" class="workflow-hub__empty">Loading templates...</div>
+        <div v-if="templateLoading" class="workflow-hub__empty">{{ workflowHubLabel('templateCard.loadingTemplates', isZh) }}</div>
         <div v-else-if="!templateItems.length" class="workflow-hub__empty">
-          No templates matched the current filters.
+          {{ workflowHubLabel('templateCard.noMatch', isZh) }}
         </div>
         <div v-else class="workflow-hub__template-list">
           <article v-for="template in templateItems" :key="template.id" class="workflow-hub__template-card">
             <div class="workflow-hub__template-top">
               <div>
                 <h3>{{ template.name }}</h3>
-                <p>{{ template.description || 'No description' }}</p>
+                <p>{{ template.description || workflowHubLabel('templateCard.noDescription', isZh) }}</p>
               </div>
-              <span class="chip" :data-tone="template.source">{{ template.source }}</span>
+              <span class="chip" :data-tone="template.source">{{ templateSourceChipLabel(template.source, isZh) }}</span>
             </div>
             <div class="workflow-hub__meta-row">
               <span>{{ template.category }}</span>
-              <span>Required: {{ template.requiredVariables.length }}</span>
-              <span>Optional: {{ template.optionalVariables.length }}</span>
-              <span>Usage: {{ template.usageCount }}</span>
+              <span>{{ workflowHubLabel('templateCard.requiredPrefix', isZh) }} {{ template.requiredVariables.length }}</span>
+              <span>{{ workflowHubLabel('templateCard.optionalPrefix', isZh) }} {{ template.optionalVariables.length }}</span>
+              <span>{{ workflowHubLabel('templateCard.usagePrefix', isZh) }} {{ template.usageCount }}</span>
             </div>
             <div v-if="template.tags.length" class="workflow-hub__tag-list">
               <span v-for="tag in template.tags" :key="tag" class="tag">{{ tag }}</span>
@@ -296,7 +296,7 @@
                 class="btn btn--primary btn--mini"
                 :to="{ name: 'workflow-designer', query: { templateId: template.id } }"
               >
-                Use template
+                {{ workflowHubLabel('templateCard.useTemplate', isZh) }}
               </router-link>
             </div>
           </article>
@@ -306,10 +306,10 @@
           <span>{{ templateRangeLabel }}</span>
           <div class="workflow-hub__pager-actions">
             <button class="btn btn--ghost btn--mini" type="button" :disabled="templateLoading || templatePagination.offset === 0" @click="refreshTemplates(Math.max(0, templatePagination.offset - templatePagination.limit))">
-              Previous
+              {{ workflowHubLabel('pager.previous', isZh) }}
             </button>
             <button class="btn btn--ghost btn--mini" type="button" :disabled="templateLoading || templatePagination.offset + templatePagination.returned >= templatePagination.total" @click="refreshTemplates(templatePagination.offset + templatePagination.limit)">
-              Next
+              {{ workflowHubLabel('pager.next', isZh) }}
             </button>
           </div>
         </footer>
@@ -363,7 +363,24 @@ import {
   shouldRestoreWorkflowHubSessionState,
   writeWorkflowHubSessionState,
 } from './workflowHubSessionState'
+import { useLocale } from '../composables/useLocale'
+import {
+  templateSourceChipLabel,
+  workflowHubArchiveConfirm,
+  workflowHubDeleteTeamViewConfirm,
+  workflowHubDeleteViewConfirm,
+  workflowHubDuplicatePrompt,
+  workflowHubLabel,
+  workflowHubRangeLabel,
+  workflowHubRestoreConfirm,
+  workflowHubSharedByLabel,
+  workflowHubSwitchedToTeamViewLabel,
+  workflowHubSwitchedToViewLabel,
+  workflowRoleChipLabel,
+  workflowStatusChipLabel,
+} from './workflowHubLabels'
 
+const { isZh } = useLocale()
 const router = useRouter()
 const route = useRoute()
 const initialRouteState = parseWorkflowHubRouteState(route.query)
@@ -401,17 +418,17 @@ const templatePagination = ref<WorkflowDesignerPagination>({
 const isRefreshing = computed(() => workflowLoading.value || templateLoading.value)
 
 const workflowRangeLabel = computed(() => {
-  if (!workflowPagination.value.total) return '0 items'
+  if (!workflowPagination.value.total) return workflowHubLabel('pager.zeroItems', isZh.value)
   const start = workflowPagination.value.offset + 1
   const end = workflowPagination.value.offset + workflowPagination.value.returned
-  return `${start}-${end} / ${workflowPagination.value.total}`
+  return workflowHubRangeLabel(start, end, workflowPagination.value.total, isZh.value)
 })
 
 const templateRangeLabel = computed(() => {
-  if (!templatePagination.value.total) return '0 items'
+  if (!templatePagination.value.total) return workflowHubLabel('pager.zeroItems', isZh.value)
   const start = templatePagination.value.offset + 1
   const end = templatePagination.value.offset + templatePagination.value.returned
-  return `${start}-${end} / ${templatePagination.value.total}`
+  return workflowHubRangeLabel(start, end, templatePagination.value.total, isZh.value)
 })
 
 async function syncHubQuery(workflowOffset = workflowPagination.value.offset, templateOffset = templatePagination.value.offset) {
@@ -509,7 +526,7 @@ async function refreshWorkflows(offset = workflowPagination.value.offset, option
     }
     persistSessionState(result.pagination.offset, templatePagination.value.offset)
   } catch (error) {
-    workflowError.value = error instanceof Error ? error.message : 'Failed to load workflow drafts'
+    workflowError.value = error instanceof Error ? error.message : workflowHubLabel('error.loadWorkflowDrafts', isZh.value)
     workflowItems.value = []
     workflowPagination.value = {
       ...workflowPagination.value,
@@ -563,7 +580,7 @@ async function refreshTemplates(offset = templatePagination.value.offset, option
     }
     persistSessionState(workflowPagination.value.offset, result.pagination.offset)
   } catch (error) {
-    templateError.value = error instanceof Error ? error.message : 'Failed to load workflow templates'
+    templateError.value = error instanceof Error ? error.message : workflowHubLabel('error.loadWorkflowTemplates', isZh.value)
     templateItems.value = []
     templatePagination.value = {
       ...templatePagination.value,
@@ -599,7 +616,7 @@ async function refreshTeamViews() {
     const result = await listWorkflowHubTeamViews()
     teamViews.value = result.items
   } catch (error) {
-    teamViewsError.value = error instanceof Error ? error.message : 'Failed to load team views'
+    teamViewsError.value = error instanceof Error ? error.message : workflowHubLabel('error.loadTeamViews', isZh.value)
     teamViews.value = []
   } finally {
     teamViewsLoading.value = false
@@ -608,37 +625,38 @@ async function refreshTeamViews() {
 
 function describeSavedView(state: WorkflowHubRouteState) {
   const parts: string[] = []
-  if (state.workflowSearch) parts.push(`WF:${state.workflowSearch}`)
-  if (state.workflowStatus) parts.push(`Status:${state.workflowStatus}`)
-  if (state.templateSearch) parts.push(`TPL:${state.templateSearch}`)
-  if (state.templateSource !== 'all') parts.push(`Source:${state.templateSource}`)
-  if (state.workflowOffset > 0) parts.push(`WF Page:${state.workflowOffset / workflowPagination.value.limit + 1}`)
-  if (state.templateOffset > 0) parts.push(`TPL Page:${state.templateOffset / templatePagination.value.limit + 1}`)
-  return parts.length ? parts.join(' · ') : 'Default workflow hub view'
+  if (state.workflowSearch) parts.push(`${workflowHubLabel('label.workflowSearchPrefix', isZh.value)}${state.workflowSearch}`)
+  if (state.workflowStatus) parts.push(`${workflowHubLabel('label.statusPrefix', isZh.value)}${state.workflowStatus}`)
+  if (state.templateSearch) parts.push(`${workflowHubLabel('label.templateSearchPrefix', isZh.value)}${state.templateSearch}`)
+  if (state.templateSource !== 'all') parts.push(`${workflowHubLabel('label.sourcePrefix', isZh.value)}${state.templateSource}`)
+  if (state.workflowOffset > 0) parts.push(`${workflowHubLabel('label.workflowPagePrefix', isZh.value)}${state.workflowOffset / workflowPagination.value.limit + 1}`)
+  if (state.templateOffset > 0) parts.push(`${workflowHubLabel('label.templatePagePrefix', isZh.value)}${state.templateOffset / templatePagination.value.limit + 1}`)
+  return parts.length ? parts.join(' · ') : workflowHubLabel('label.defaultView', isZh.value)
 }
 
 function describeTeamView(view: WorkflowHubTeamView) {
   const summary = describeSavedView(view.state)
-  return summary === 'Default workflow hub view'
-    ? `Shared by ${view.ownerUserId || 'system'}`
-    : `${summary} · Shared by ${view.ownerUserId || 'system'}`
+  const owner = view.ownerUserId || workflowHubLabel('teamViews.systemOwner', isZh.value)
+  return summary === workflowHubLabel('label.defaultView', isZh.value)
+    ? workflowHubSharedByLabel(owner, isZh.value)
+    : `${summary} · ${workflowHubSharedByLabel(owner, isZh.value)}`
 }
 
 async function saveCurrentView() {
   try {
     const promptResult = await ElMessageBox.prompt(
-      '为当前 Workflow Hub 视角输入名称。',
-      '保存视图',
+      workflowHubLabel('dialog.saveView.prompt', isZh.value),
+      workflowHubLabel('dialog.saveView.title', isZh.value),
       {
-        confirmButtonText: '保存',
-        cancelButtonText: '取消',
-        inputPlaceholder: '例如：Parallel Templates',
+        confirmButtonText: workflowHubLabel('dialog.saveView.confirm', isZh.value),
+        cancelButtonText: workflowHubLabel('dialog.saveView.cancel', isZh.value),
+        inputPlaceholder: workflowHubLabel('dialog.saveView.placeholder', isZh.value),
       },
     )
     const trimmed = promptResult.value.trim()
     if (!trimmed) return
     savedViews.value = saveWorkflowHubSavedView(trimmed, currentRouteState())
-    ElMessage.success('视图已保存')
+    ElMessage.success(workflowHubLabel('dialog.saveView.success', isZh.value))
   } catch {
     return
   }
@@ -647,12 +665,12 @@ async function saveCurrentView() {
 async function saveCurrentTeamView() {
   try {
     const promptResult = await ElMessageBox.prompt(
-      '为当前 Workflow Hub 视角输入团队视图名称。',
-      '保存团队视图',
+      workflowHubLabel('dialog.saveTeamView.prompt', isZh.value),
+      workflowHubLabel('dialog.saveTeamView.title', isZh.value),
       {
-        confirmButtonText: '保存',
-        cancelButtonText: '取消',
-        inputPlaceholder: '例如：Team Parallel Templates',
+        confirmButtonText: workflowHubLabel('dialog.saveView.confirm', isZh.value),
+        cancelButtonText: workflowHubLabel('dialog.saveView.cancel', isZh.value),
+        inputPlaceholder: workflowHubLabel('dialog.saveTeamView.placeholder', isZh.value),
       },
     )
     const trimmed = promptResult.value.trim()
@@ -662,7 +680,7 @@ async function saveCurrentTeamView() {
     const saved = await saveWorkflowHubTeamView(trimmed, currentRouteState())
     teamViews.value = [saved, ...teamViews.value.filter((item) => item.id !== saved.id)]
       .sort((left, right) => (right.updatedAt || '').localeCompare(left.updatedAt || ''))
-    ElMessage.success('团队视图已保存')
+    ElMessage.success(workflowHubLabel('dialog.saveTeamView.success', isZh.value))
   } catch (error) {
     if (error instanceof Error) {
       ElMessage.error(error.message)
@@ -679,7 +697,7 @@ async function applySavedView(viewId: string) {
   applyRouteState(target.state)
   await syncHubQuery(target.state.workflowOffset, target.state.templateOffset)
   await refreshAll()
-  ElMessage.success(`已切换到视图 “${target.name}”`)
+  ElMessage.success(workflowHubSwitchedToViewLabel(target.name, isZh.value))
 }
 
 async function applyTeamView(viewId: string) {
@@ -689,14 +707,14 @@ async function applyTeamView(viewId: string) {
   applyRouteState(target.state)
   await syncHubQuery(target.state.workflowOffset, target.state.templateOffset)
   await refreshAll({ force: true })
-  ElMessage.success(`已切换到团队视图 “${target.name}”`)
+  ElMessage.success(workflowHubSwitchedToTeamViewLabel(target.name, isZh.value))
 }
 
 async function deleteSavedView(viewId: string, viewName: string) {
   try {
-    await ElMessageBox.confirm(`删除视图 “${viewName}” 后将无法恢复，是否继续？`, '删除视图', {
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
+    await ElMessageBox.confirm(workflowHubDeleteViewConfirm(viewName, isZh.value), workflowHubLabel('dialog.deleteView.title', isZh.value), {
+      confirmButtonText: workflowHubLabel('dialog.deleteView.confirm', isZh.value),
+      cancelButtonText: workflowHubLabel('dialog.deleteView.cancel', isZh.value),
       type: 'warning',
     })
   } catch {
@@ -704,14 +722,14 @@ async function deleteSavedView(viewId: string, viewName: string) {
   }
 
   savedViews.value = removeWorkflowHubSavedView(viewId)
-  ElMessage.success('视图已删除')
+  ElMessage.success(workflowHubLabel('dialog.deleteView.success', isZh.value))
 }
 
 async function deleteTeamView(viewId: string, viewName: string) {
   try {
-    await ElMessageBox.confirm(`删除团队视图 “${viewName}” 后，租户内其他同事也将无法再使用，是否继续？`, '删除团队视图', {
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
+    await ElMessageBox.confirm(workflowHubDeleteTeamViewConfirm(viewName, isZh.value), workflowHubLabel('dialog.deleteTeamView.title', isZh.value), {
+      confirmButtonText: workflowHubLabel('dialog.deleteView.confirm', isZh.value),
+      cancelButtonText: workflowHubLabel('dialog.deleteView.cancel', isZh.value),
       type: 'warning',
     })
   } catch {
@@ -722,9 +740,9 @@ async function deleteTeamView(viewId: string, viewName: string) {
     teamViewsLoading.value = true
     await deleteWorkflowHubTeamView(viewId)
     teamViews.value = teamViews.value.filter((item) => item.id !== viewId)
-    ElMessage.success('团队视图已删除')
+    ElMessage.success(workflowHubLabel('dialog.deleteTeamView.success', isZh.value))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '删除团队视图失败')
+    ElMessage.error(error instanceof Error ? error.message : workflowHubLabel('dialog.deleteTeamView.errorFallback', isZh.value))
   } finally {
     teamViewsLoading.value = false
   }
@@ -735,12 +753,12 @@ async function duplicateDraft(workflowId: string, workflowName: string) {
 
   try {
     const promptResult = await ElMessageBox.prompt(
-      `为 “${workflowName || '未命名工作流'}” 输入副本名称；留空则使用系统默认命名。`,
-      '复制工作流',
+      workflowHubDuplicatePrompt(workflowName, isZh.value),
+      workflowHubLabel('dialog.duplicate.title', isZh.value),
       {
-        confirmButtonText: '复制',
-        cancelButtonText: '取消',
-        inputPlaceholder: '例如：审批流程 - 业务线 A',
+        confirmButtonText: workflowHubLabel('dialog.duplicate.confirm', isZh.value),
+        cancelButtonText: workflowHubLabel('dialog.saveView.cancel', isZh.value),
+        inputPlaceholder: workflowHubLabel('dialog.duplicate.placeholder', isZh.value),
       },
     )
     const trimmed = promptResult.value.trim()
@@ -757,9 +775,9 @@ async function duplicateDraft(workflowId: string, workflowName: string) {
     if (result.workflowId) {
       await router.push({ name: 'workflow-designer', params: { id: result.workflowId } })
     }
-    ElMessage.success(result.message || '工作流已复制')
+    ElMessage.success(result.message || workflowHubLabel('dialog.duplicate.successFallback', isZh.value))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '复制工作流失败')
+    ElMessage.error(error instanceof Error ? error.message : workflowHubLabel('dialog.duplicate.errorFallback', isZh.value))
   } finally {
     workflowLoading.value = false
   }
@@ -767,9 +785,9 @@ async function duplicateDraft(workflowId: string, workflowName: string) {
 
 async function restoreDraft(workflowId: string, workflowName: string) {
   try {
-    await ElMessageBox.confirm(`恢复后 “${workflowName || '未命名工作流'}” 将重新回到 draft 列表，是否继续？`, '恢复工作流', {
-      confirmButtonText: '恢复',
-      cancelButtonText: '取消',
+    await ElMessageBox.confirm(workflowHubRestoreConfirm(workflowName, isZh.value), workflowHubLabel('dialog.restore.title', isZh.value), {
+      confirmButtonText: workflowHubLabel('dialog.restore.confirm', isZh.value),
+      cancelButtonText: workflowHubLabel('dialog.saveView.cancel', isZh.value),
       type: 'info',
     })
   } catch {
@@ -781,9 +799,9 @@ async function restoreDraft(workflowId: string, workflowName: string) {
     const result = await restoreWorkflowDraft(workflowId)
     invalidateWorkflowDraftCatalogCache()
     await refreshWorkflows(workflowPagination.value.offset, { force: true })
-    ElMessage.success(result.message || '工作流已恢复')
+    ElMessage.success(result.message || workflowHubLabel('dialog.restore.successFallback', isZh.value))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '恢复工作流失败')
+    ElMessage.error(error instanceof Error ? error.message : workflowHubLabel('dialog.restore.errorFallback', isZh.value))
   } finally {
     workflowLoading.value = false
   }
@@ -791,9 +809,9 @@ async function restoreDraft(workflowId: string, workflowName: string) {
 
 async function archiveDraft(workflowId: string, workflowName: string) {
   try {
-    await ElMessageBox.confirm(`归档后将从默认草稿列表移出 “${workflowName || '未命名工作流'}”，是否继续？`, '归档工作流', {
-      confirmButtonText: '归档',
-      cancelButtonText: '取消',
+    await ElMessageBox.confirm(workflowHubArchiveConfirm(workflowName, isZh.value), workflowHubLabel('dialog.archive.title', isZh.value), {
+      confirmButtonText: workflowHubLabel('dialog.archive.confirm', isZh.value),
+      cancelButtonText: workflowHubLabel('dialog.saveView.cancel', isZh.value),
       type: 'warning',
     })
   } catch {
@@ -805,9 +823,9 @@ async function archiveDraft(workflowId: string, workflowName: string) {
     const result = await archiveWorkflowDraft(workflowId)
     invalidateWorkflowDraftCatalogCache()
     await refreshWorkflows(workflowPagination.value.offset, { force: true })
-    ElMessage.success(result.message || '工作流已归档')
+    ElMessage.success(result.message || workflowHubLabel('dialog.archive.successFallback', isZh.value))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '归档工作流失败')
+    ElMessage.error(error instanceof Error ? error.message : workflowHubLabel('dialog.archive.errorFallback', isZh.value))
   } finally {
     workflowLoading.value = false
   }
@@ -815,7 +833,7 @@ async function archiveDraft(workflowId: string, workflowName: string) {
 
 function formatDateTime(value?: string) {
   if (!value) return '-'
-  return new Date(value).toLocaleString('zh-CN', {
+  return new Date(value).toLocaleString(isZh.value ? 'zh-CN' : 'en-US', {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -834,7 +852,7 @@ onMounted(async () => {
     applyRouteState(sessionState)
     await syncHubQuery(sessionState.workflowOffset, sessionState.templateOffset)
     await refreshAll({ force: true })
-    ElMessage.success('已恢复上次 Workflow Hub 会话')
+    ElMessage.success(workflowHubLabel('session.restored', isZh.value))
     return
   }
 
