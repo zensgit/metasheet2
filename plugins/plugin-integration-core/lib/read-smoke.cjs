@@ -306,6 +306,9 @@ function buildReadSmokeRequest(preset, contractOrKey) {
       enumerable: true,
     })
     if (contract.key !== undefined) request.options.listKey = contract.key
+    // Bounded page selection (#3703): already contract-validated 1..MAX; rides as a dedicated option the
+    // adapter re-guards. Absent → adapter default page 1 (shipped behavior unchanged).
+    if (contract.pageIndex !== undefined) request.options.listPageIndex = contract.pageIndex
     return request
   }
   if (mode === 'bom') {
@@ -464,7 +467,11 @@ function readSmokeSafeErrorCode(value) {
 // body/response/credential/config can never ride in (strict key allowlist); unknown preset/object/mode → a
 // coarse reason; the key is never echoed in an error.
 const READ_SMOKE_CONTRACT_TOP_KEYS = Object.freeze(['presetId', 'key', 'intent'])
-const READ_SMOKE_CONTRACT_INTENT_KEYS = Object.freeze(['object', 'mode', 'key'])
+const READ_SMOKE_CONTRACT_INTENT_KEYS = Object.freeze(['object', 'mode', 'key', 'pageIndex'])
+// BL4 candidate-discovery follow-up (#3703, owner-approved 2026-07-06): LIST reads may name a BOUNDED page.
+// An integer page number only — never a filter/body/field surface; anything outside 1..MAX fails closed at
+// the contract AND again at the adapter scope guard. Detail/BOM modes reject the key outright.
+const READ_SMOKE_LIST_MAX_PAGE_INDEX = 10
 
 class ReadSmokeContractError extends Error {
   constructor(reason, message) {
@@ -516,16 +523,32 @@ function normalizeReadSmokeContract(input) {
   if (!Array.isArray(preset.allowedModes) || !preset.allowedModes.includes(mode)) {
     throw new ReadSmokeContractError('mode_not_allowed', 'mode is not allowlisted for this preset')
   }
+  const rawPageIndex = hasIntent ? input.intent.pageIndex : undefined
   if (mode === 'list') {
     if (!hasIntent) {
       throw new ReadSmokeContractError('intent_required', 'list mode requires the intent shape')
     }
+    const contract = { presetId: preset.presetId, object, mode }
+    // Bounded page selection (#3703): a plain integer 1..MAX only — no strings, no floats, no zero/negative,
+    // no unbounded scan. Fail-closed on anything else; the adapter re-guards the same bound.
+    if (rawPageIndex !== undefined) {
+      if (typeof rawPageIndex !== 'number' || !Number.isInteger(rawPageIndex)
+        || rawPageIndex < 1 || rawPageIndex > READ_SMOKE_LIST_MAX_PAGE_INDEX) {
+        throw new ReadSmokeContractError('page_index_invalid', `pageIndex must be an integer 1..${READ_SMOKE_LIST_MAX_PAGE_INDEX}`)
+      }
+      contract.pageIndex = rawPageIndex
+    }
     if (rawKey === undefined) {
-      return { presetId: preset.presetId, object, mode }
+      return contract
     }
     const key = typeof rawKey === 'string' ? rawKey.trim() : ''
     if (!key) throw new ReadSmokeContractError('key_required', 'a non-empty key is required when supplied')
-    return { presetId: preset.presetId, object, mode, key }
+    contract.key = key
+    return contract
+  }
+  // Fail-closed the other way: a pageIndex supplied to a non-list mode is rejected, not silently dropped.
+  if (rawPageIndex !== undefined) {
+    throw new ReadSmokeContractError('page_index_not_allowed', 'pageIndex is only allowed for list mode')
   }
 
   // Key is runtime-only and never echoed; require a non-empty string for single-record detail reads.
@@ -545,4 +568,5 @@ module.exports = {
   readSmokeResponseShapeContainerEvidence,
   ReadSmokeContractError,
   normalizeReadSmokeContract,
+  READ_SMOKE_LIST_MAX_PAGE_INDEX,
 }
