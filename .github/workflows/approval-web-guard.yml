@@ -57,8 +57,10 @@ on:
       - 'apps/web/tests/lineDerivation.test.ts'
       - 'apps/web/src/views/approval/ApprovalMobileList.vue'
       - 'apps/web/src/views/approval/ApprovalCenterView.vue'
+      - 'apps/web/src/views/approval/ApprovalCenterTable.vue'
       - 'apps/web/tests/approvalMobileI18n.spec.ts'
       - 'apps/web/tests/approvalMobileResponsive.spec.ts'
+      - 'apps/web/tests/approvalCenterTable.spec.ts'
       # UF-3 — status-color convergence: the shared StatusTag/statusDomains map now renders the
       # approvalInstance status tag (ApprovalCenterView/ApprovalMobileList/ApprovalDetailView
       # header/ApprovalInboxView) and the delegation status tag (MyDelegationView/
@@ -125,8 +127,10 @@ on:
       - 'apps/web/tests/lineDerivation.test.ts'
       - 'apps/web/src/views/approval/ApprovalMobileList.vue'
       - 'apps/web/src/views/approval/ApprovalCenterView.vue'
+      - 'apps/web/src/views/approval/ApprovalCenterTable.vue'
       - 'apps/web/tests/approvalMobileI18n.spec.ts'
       - 'apps/web/tests/approvalMobileResponsive.spec.ts'
+      - 'apps/web/tests/approvalCenterTable.spec.ts'
       # UF-3 — status-color convergence: the shared StatusTag/statusDomains map now renders the
       # approvalInstance status tag (ApprovalCenterView/ApprovalMobileList/ApprovalDetailView
       # header/ApprovalInboxView) and the delegation status tag (MyDelegationView/
@@ -219,4 +223,9 @@ jobs:
         # UF-3b: approvalTemplate status domain — statusTag's new domain cases (published/draft/
         # archived tone+label) and approval-e2e-permissions (TemplateDetailView header StatusTag
         # regression via data-status selector; had no gate before this wiring, 40 tests).
-        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions --reporter=dot
+        # UF-5: ApprovalCenterTable — the shared table body ApprovalCenterView's four tabs all
+        # render now (had no gate before this wiring); approvalCenterTable.spec.ts locks column
+        # rendering from `rows`, row-click/selection-change re-emission, the per-tab difference
+        # props (showSelection/selectable/showWaitColumn/actionsWidth), the `actions` slot
+        # presence/absence toggling the 操作 column, and the empty state.
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable --reporter=dot
