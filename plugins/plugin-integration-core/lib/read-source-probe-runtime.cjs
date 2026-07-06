@@ -20,7 +20,26 @@ const {
   readSourceProbeEvidence,
 } = require('./read-source-probe-contract.cjs')
 const { applyReadSmokePresetOverlay } = require('./read-smoke.cjs')
-const { READ_SMOKE_LIST_REQUEST_MARKER, READ_SMOKE_BOM_REQUEST_MARKER } = require('./read-smoke-marker.cjs')
+const {
+  READ_SMOKE_LIST_REQUEST_MARKER,
+  READ_SMOKE_BOM_REQUEST_MARKER,
+  READ_SMOKE_BOM_LIST_BY_MATERIAL_REQUEST_MARKER,
+} = require('./read-smoke-marker.cjs')
+// BL2 (#1709): by-material BOM-list preset identity + registered error family. The contract layer
+// (read-source-probe-contract) has already fail-closed any drifted preset config before a plan exists,
+// so a plan matching this identity is guaranteed contract-locked here.
+const {
+  K3WISE_BOM_LIST_BY_MATERIAL_PRESET,
+  K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES,
+} = require('./read-source-bom-list-by-material-contract.cjs')
+
+const K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODE_SET = new Set(K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES)
+
+function isBomListByMaterialPlan(plan) {
+  return plan.mode === K3WISE_BOM_LIST_BY_MATERIAL_PRESET.mode
+    && plan.requiredKind === K3WISE_BOM_LIST_BY_MATERIAL_PRESET.requiredKind
+    && plan.object === K3WISE_BOM_LIST_BY_MATERIAL_PRESET.object
+}
 
 // Route-level body keys: the S2-a contract (config, boundedSmoke) plus `inputs` — execution-time named
 // inputs (the plan's requiredNamedInputs) ride BESIDE the frozen contract, never inside it, so the S2-a
@@ -114,6 +133,12 @@ function buildReadSourceProbeOverlayPreset(plan) {
     objectOverlay.readMode = 'bom'
     if (plan.keyField) objectOverlay.readBomParentKeyField = plan.keyField
   }
+  // BL2: the by-material BOM-list preset is the ONLY resolver_lookup shape with its own adapter read
+  // mode. Everything K3-facing beyond path/method (body root, field list, filter operator, SelectPage)
+  // is pinned INSIDE the adapter mode — the overlay carries no filter/body configuration at all.
+  if (isBomListByMaterialPlan(plan)) {
+    objectOverlay.readMode = 'bom_list_by_material'
+  }
   return {
     readConfigOverlay: {
       objects: {
@@ -135,6 +160,14 @@ function buildReadSourceProbeRequest(plan, inputs) {
     const request = { object: plan.object, options }
     Object.defineProperty(request.options, READ_SMOKE_BOM_REQUEST_MARKER, { value: true, enumerable: true })
     return request
+  }
+  // BL2: by-material BOM-list lookup. The key rides as a dedicated option (numeric FItemID; the adapter
+  // fail-closes a non-digits key before any K3 call), never as a raw filter/body — the request carries
+  // NO endpoint, filter expression, field list, or container path (BL0 request-contract lock).
+  if (isBomListByMaterialPlan(plan)) {
+    const options = { k3ReadMode: 'bom_list_by_material', bomListMaterialKey: inputs.key }
+    Object.defineProperty(options, READ_SMOKE_BOM_LIST_BY_MATERIAL_REQUEST_MARKER, { value: true, enumerable: true })
+    return { object: plan.object, limit: plan.rowCap, options }
   }
   // single_record / resolver_lookup: keyed detail read. keyField and the key input are both guaranteed
   // (S1 mode-required field + requiredNamedInputs validation above).
@@ -181,6 +214,10 @@ function classifyProbeErrorCode(error) {
   const code = typeof error?.code === 'string'
     ? error.code
     : (typeof error?.details?.code === 'string' ? error.details.code : '')
+  // BL2: the by-material BOM-list family passes through as EXACT registered members (BL0 taxonomy) so a
+  // second-hop list failure keeps its own family in evidence. Set membership only — a family-looking but
+  // unregistered token falls through to the generic classification below, never a prefix pass.
+  if (K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODE_SET.has(code)) return code
   if (/LOGIN|TOKEN|AUTH|CREDENTIAL/.test(code)) return 'READ_SOURCE_PROBE_AUTH_FAILED'
   if (/BUSINESS/.test(code)) return 'READ_SOURCE_PROBE_RESPONSE_UNRECOGNIZED'
   if (name === 'AdapterValidationError' || name === 'UnsupportedAdapterOperationError') return 'READ_SOURCE_PROBE_REJECTED'

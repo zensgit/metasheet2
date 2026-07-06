@@ -99,10 +99,82 @@ function isBomListByMaterialPresetConfig(config) {
   )
 }
 
+// ── BL2 additions (still pure metadata/predicates; no require, no runtime) ───────────────────────────
+//
+// BL2 review lock 1 (owner review of #3689, recorded in the BL1 dev-verification MD §4): the identity
+// predicate above is NOT a full contract validation. Before any runtime consumes a config that carries
+// this preset's identity, the FULL confirmed contract must hold — otherwise a config that "looks like
+// the preset" but whose key fields drifted would ride the by-material runtime with a wrong filter
+// column / container / output field. This check is values-free: it compares config STRUCTURE against
+// the preset constants and returns a coarse drift token (never a config value).
+
+// The confirmed key is the material's numeric FItemID (BL0 lock: "If the confirmed contract requires
+// numeric FItemID, non-numeric input fails before any K3 call"). Digits only, bounded — the runtime
+// composes the K3 filter with the bare validated number, so no quoting/escaping surface exists at all.
+const K3_WISE_BOM_LIST_BY_MATERIAL_KEY_PATTERN = /^[0-9]{1,20}$/
+
+function isBomListByMaterialKeyValid(value) {
+  // Safe-integer bound: a precision-lossy large double (e.g. 1e20) can stringify into a digits-only run
+  // that no longer equals the caller's intended id — reject it rather than filter on a corrupted key.
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 && K3_WISE_BOM_LIST_BY_MATERIAL_KEY_PATTERN.test(String(value))
+  if (typeof value !== 'string') return false
+  return K3_WISE_BOM_LIST_BY_MATERIAL_KEY_PATTERN.test(value.trim())
+}
+
+// Full-field contract lock. `config` is an S1-normalized read-source config that already matched the
+// identity predicate. Returns null when every preset-owned field matches the confirmed contract, else a
+// coarse values-free drift token. filterDialect / requestBodyRoot / selectPage / the filter operator and
+// body field list are NOT checked here because the config cannot express them at all — they are pinned
+// as constants inside the BL2 adapter read mode (the stronger lock).
+function bomListByMaterialContractViolation(config) {
+  if (!isBomListByMaterialPresetConfig(config)) return 'preset_identity_mismatch'
+  if (config.keyField !== K3WISE_BOM_LIST_BY_MATERIAL_PRESET.filterField) return 'filter_field_drift'
+  if (config.keyEncoding !== 'numeric_id') return 'key_encoding_drift'
+  if (config.readMethod !== K3WISE_BOM_LIST_BY_MATERIAL_PRESET.readMethod) return 'read_method_drift'
+  // The deployed system's base-URL prefix (e.g. /K3API) is registered external-system config; the preset
+  // owns the trailing endpoint. Anything not ending in the confirmed endpoint is a drift.
+  const readPath = typeof config.readPath === 'string' ? config.readPath : ''
+  if (readPath !== `/${K3WISE_BOM_LIST_BY_MATERIAL_PRESET.readPath}` && !readPath.endsWith(`/${K3WISE_BOM_LIST_BY_MATERIAL_PRESET.readPath}`)) {
+    return 'read_path_drift'
+  }
+  const containers = config.containerPaths
+  if (!Array.isArray(containers) || containers.length !== 1 || containers[0] !== K3WISE_BOM_LIST_BY_MATERIAL_PRESET.rowContainerPath) {
+    return 'row_container_drift'
+  }
+  // unique_only_fail_closed (owner c126/c127) maps to the resolver vocabulary's exactly_one — no sorted
+  // auto-pick, no discriminator auto-pick (automaticSelectionByStatusVersionDate=false).
+  if (config.resolverRule !== 'exactly_one') return 'resolver_rule_drift'
+  const fieldMap = config.fieldMap
+  if (!Array.isArray(fieldMap) || fieldMap.length !== 1 || !fieldMap[0] || fieldMap[0].source !== K3WISE_BOM_LIST_BY_MATERIAL_PRESET.outputField) {
+    return 'output_field_drift'
+  }
+  return null
+}
+
+// BL0 error-taxonomy mapping: when the shared resolver evaluator fails a by-material lookup, the generic
+// resolver code is remapped to this preset's registered family so a second-hop list failure never collapses
+// into a generic resolver/composition failure during standalone diagnosis. EXACT keys only — an unmapped
+// producer code is left to the caller's safe fallback, never prefix-matched.
+const K3_WISE_BOM_LIST_BY_MATERIAL_RESOLVER_CODE_MAP = Object.freeze({
+  READ_SOURCE_RESOLVER_NO_MATCH: 'K3_WISE_BOM_LIST_BY_MATERIAL_NOT_FOUND',
+  READ_SOURCE_RESOLVER_AMBIGUOUS: 'K3_WISE_BOM_LIST_BY_MATERIAL_AMBIGUOUS',
+  // Cap reached = uniqueness cannot be proven within the bounded read — same fail-closed family bucket.
+  READ_SOURCE_RESOLVER_CAP_REACHED: 'K3_WISE_BOM_LIST_BY_MATERIAL_AMBIGUOUS',
+  READ_SOURCE_RESOLVER_FIELD_MISSING: 'K3_WISE_BOM_LIST_BY_MATERIAL_FIELD_MISSING',
+  READ_SOURCE_RESOLVER_SHAPE_MISMATCH: 'K3_WISE_BOM_LIST_BY_MATERIAL_SHAPE_MISMATCH',
+  READ_SOURCE_RESOLVER_CONTAINER_NOT_FOUND: 'K3_WISE_BOM_LIST_BY_MATERIAL_SHAPE_MISMATCH',
+  READ_SOURCE_RESOLVER_RULE_NOT_SUPPORTED: K3_WISE_BOM_LIST_BY_MATERIAL_FAILED,
+  READ_SOURCE_RESOLVER_RULE_INVALID: K3_WISE_BOM_LIST_BY_MATERIAL_FAILED,
+  READ_SOURCE_RESOLVER_FAILED: K3_WISE_BOM_LIST_BY_MATERIAL_FAILED,
+})
+
 module.exports = {
   K3WISE_BOM_LIST_BY_MATERIAL_PRESET,
   K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES,
   K3_WISE_BOM_LIST_BY_MATERIAL_FAILED,
+  K3_WISE_BOM_LIST_BY_MATERIAL_RESOLVER_CODE_MAP,
   safeBomListByMaterialErrorCode,
   isBomListByMaterialPresetConfig,
+  isBomListByMaterialKeyValid,
+  bomListByMaterialContractViolation,
 }

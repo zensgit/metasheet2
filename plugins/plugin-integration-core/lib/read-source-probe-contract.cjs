@@ -8,6 +8,13 @@
 
 const { validateReadSourceConfig } = require('./read-source-config.cjs')
 const { readSmokeResponseShapeContainerEvidence } = require('./read-smoke.cjs')
+// BL2 (#1709, BL0 design-lock): the by-material BOM-list preset's registered coarse-code family + the
+// full-field contract lock. The BL1 module stays pure (it requires nothing); this contract layer consumes it.
+const {
+  K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES,
+  isBomListByMaterialPresetConfig,
+  bomListByMaterialContractViolation,
+} = require('./read-source-bom-list-by-material-contract.cjs')
 
 const READ_SOURCE_PROBE_TIMEOUT_MS = 5000
 const READ_SOURCE_PROBE_ROW_CAP = 10
@@ -48,6 +55,9 @@ const READ_SOURCE_PROBE_ERROR_CODES = Object.freeze([
   'READ_SOURCE_PROBE_SHAPE_MISMATCH',
   'READ_SOURCE_PROBE_TIMEOUT',
   ...READ_SOURCE_RESOLVER_ERROR_CODES,
+  // BL2: the by-material BOM-list family — registered EXACT values (BL0 taxonomy) so a second-hop list
+  // failure surfaces as its own family instead of collapsing into a generic probe/resolver failure.
+  ...K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES,
 ])
 const READ_SOURCE_PROBE_ERROR_CODE_SET = new Set(READ_SOURCE_PROBE_ERROR_CODES)
 const READ_SOURCE_PROBE_ERROR_TYPES = Object.freeze([
@@ -156,6 +166,17 @@ function normalizeReadSourceProbeContract(input) {
   }
 
   const config = assertS1NormalizedConfig(input.config)
+  // BL2 full-field contract lock (owner review of #3689, constraint 1). This is the single choke point
+  // both the S2-b probe and the configured read pass through, so a config carrying the by-material
+  // BOM-list preset identity with ANY drifted key field (filter column, container path, endpoint, output
+  // field, resolver rule, key encoding) fails closed HERE — before any overlay, adapter, or outbound
+  // call — with a values-free coarse token. Identity-negative configs are untouched.
+  if (isBomListByMaterialPresetConfig(config)) {
+    const violation = bomListByMaterialContractViolation(config)
+    if (violation !== null) {
+      throw new ReadSourceProbeContractError(`bom_list_by_material_${violation}`)
+    }
+  }
   const containers = buildProbeContainers(config)
   const plan = {
     systemId: config.systemId,
