@@ -23,6 +23,11 @@ import {
   markDingTalkApprovalCardDeliverySent,
 } from '../../src/integrations/dingtalk/approval-card-deliveries'
 import { normalizeStoredSecretValue } from '../../src/security/encrypted-secrets'
+import {
+  generateApprovalCardLinkSecret,
+  resolveApprovalCardLinkSecret,
+} from '../../src/integrations/dingtalk/approval-card-config'
+import { updateDirectoryIntegration } from '../../src/directory/directory-sync'
 import { createHmac } from 'crypto'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -162,6 +167,51 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
       expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token: storedToken, viewerUserId: APPROVER })).status).toBe('ok')
       // The env-signed token no longer matches — stored source is authoritative when env is unset.
       expect(await verifyApprovalCardLinkToken(deliveryId, tokenFor(deliveryId), q)).toBe(false)
+    } finally {
+      await q('DELETE FROM directory_integrations WHERE id = $1', [integrationId]).catch(() => {})
+      if (prev === undefined) delete process.env.APPROVAL_CARD_LINK_SECRET
+      else process.env.APPROVAL_CARD_LINK_SECRET = prev
+    }
+  })
+
+  test('CFG-2 closed loop: generate → resolver → sign → wrapper verifies; generic integration save does NOT wipe the secret', async () => {
+    const instanceId = await newInstance()
+    const deliveryId = await newSentDelivery(instanceId)
+    const prev = process.env.APPROVAL_CARD_LINK_SECRET
+    delete process.env.APPROVAL_CARD_LINK_SECRET
+    const fixtureName = `cdw-cfg2-${TS}`
+    const inserted = await q(
+      `INSERT INTO directory_integrations (name, provider, status, corp_id, config, updated_at)
+       VALUES ($1, 'dingtalk', 'active', $2, $3::jsonb, now())
+       RETURNING id`,
+      [fixtureName, `corp_cfg2_${TS}`, JSON.stringify({ appKey: 'cfg2-key', appSecret: normalizeStoredSecretValue('cfg2-secret') })],
+    )
+    const integrationId = (inserted.rows[0] as { id: string }).id
+    try {
+      // Generate server-side: response carries presence only, never the value.
+      const status = await generateApprovalCardLinkSecret(integrationId, q)
+      expect(status?.linkSecret).toMatchObject({ configured: true, source: 'stored', valuePrinted: false })
+      expect(JSON.stringify(status)).not.toMatch(/[0-9a-f]{64}/)
+
+      // Same-source closed loop: what the resolver yields signs a token the wrapper verifies.
+      const secret = await resolveApprovalCardLinkSecret(q)
+      expect(secret).toMatch(/^[0-9a-f]{64}$/)
+      const token = createHmac('sha256', secret).update(deliveryId).digest('hex').slice(0, 32)
+      expect(await verifyApprovalCardLinkToken(deliveryId, token, q)).toBe(true)
+      expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token, viewerUserId: APPROVER })).status).toBe('ok')
+
+      // WIPE REGRESSION (carry-through proof): the generic integration-form save rebuilds the
+      // config JSONB from a whitelist — without carry-through it would silently drop the secret
+      // and every in-flight card link would die. RED-before: remove the carry-through in
+      // updateDirectoryIntegration and this assertion fails.
+      const updatedSummary = await updateDirectoryIntegration(integrationId, {
+        name: fixtureName,
+        corpId: `corp_cfg2_${TS}`,
+        appKey: 'cfg2-key',
+      } as never)
+      expect(updatedSummary?.config.approvalCardLinkSecretConfigured).toBe(true)
+      expect(await resolveApprovalCardLinkSecret(q)).toBe(secret)
+      expect(await verifyApprovalCardLinkToken(deliveryId, token, q)).toBe(true)
     } finally {
       await q('DELETE FROM directory_integrations WHERE id = $1', [integrationId]).catch(() => {})
       if (prev === undefined) delete process.env.APPROVAL_CARD_LINK_SECRET

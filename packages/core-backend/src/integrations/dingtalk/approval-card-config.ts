@@ -14,8 +14,10 @@
  * - FAIL-CLOSED: any miss (no env, no row, decrypt failure, query failure) resolves to '' —
  *   the card action refuses to send and the wrapper refuses to verify. Never a fallback secret.
  */
+import { randomBytes } from 'crypto'
+
 import { query } from '../../db/pg'
-import { decryptStoredSecretValue } from '../../security/encrypted-secrets'
+import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../../security/encrypted-secrets'
 
 const DEFAULT_PROVIDER = 'dingtalk'
 export const APPROVAL_CARD_LINK_SECRET_CONFIG_KEY = 'approvalCardLinkSecret'
@@ -90,4 +92,154 @@ export async function resolveApprovalCardPublicAppUrl(queryFn: QueryFn = query):
   } catch {
     return null
   }
+}
+
+/* ================================================================
+ * CFG-2 (card-config lock §3.2): admin self-service write surface.
+ * The secret is generated SERVER-SIDE, stored encrypted, and NEVER
+ * returned by any function below — responses carry booleans only.
+ * ================================================================ */
+
+type ConfigSource = 'env' | 'stored' | 'missing'
+
+export type ApprovalCardConfigStatus = {
+  integration: { id: string; name: string; status: string }
+  linkSecret: {
+    configured: boolean
+    source: ConfigSource
+    /** env wins at runtime — the UI must warn that a stored value is inert while env is set. */
+    envOverrideActive: boolean
+    valuePrinted: false
+  }
+  publicAppUrl: {
+    /** The stored URL (plain, not a secret) — null when unset. */
+    storedValue: string | null
+    source: ConfigSource
+    envOverrideActive: boolean
+  }
+}
+
+type IntegrationConfigRow = {
+  id: string
+  name: string
+  status: string
+  config: unknown
+}
+
+async function loadIntegrationById(queryFn: QueryFn, integrationId: string): Promise<IntegrationConfigRow | null> {
+  const normalizedId = normalizeText(integrationId)
+  if (!normalizedId) return null
+  const result = await queryFn(
+    `SELECT id, name, status, config
+       FROM directory_integrations
+      WHERE id = $1 AND provider = $2
+      LIMIT 1`,
+    [normalizedId, DEFAULT_PROVIDER],
+  )
+  return (result.rows[0] ?? null) as IntegrationConfigRow | null
+}
+
+function buildStatus(row: IntegrationConfigRow): ApprovalCardConfigStatus {
+  const config = parseJsonRecord(row.config)
+  const envSecret = (process.env.APPROVAL_CARD_LINK_SECRET ?? '').trim()
+  const storedSecret = normalizeText(config[APPROVAL_CARD_LINK_SECRET_CONFIG_KEY])
+  const envUrl = process.env.PUBLIC_APP_URL?.trim() || process.env.APP_BASE_URL?.trim() || ''
+  const storedUrl = normalizeText(config[APPROVAL_CARD_PUBLIC_APP_URL_CONFIG_KEY])
+  return {
+    integration: { id: row.id, name: row.name, status: row.status },
+    linkSecret: {
+      configured: Boolean(envSecret || storedSecret),
+      source: envSecret ? 'env' : storedSecret ? 'stored' : 'missing',
+      envOverrideActive: Boolean(envSecret),
+      valuePrinted: false,
+    },
+    publicAppUrl: {
+      storedValue: storedUrl || null,
+      source: envUrl ? 'env' : storedUrl ? 'stored' : 'missing',
+      envOverrideActive: Boolean(envUrl),
+    },
+  }
+}
+
+export async function getApprovalCardConfigStatus(
+  integrationId: string,
+  queryFn: QueryFn = query,
+): Promise<ApprovalCardConfigStatus | null> {
+  const row = await loadIntegrationById(queryFn, integrationId)
+  if (!row) return null
+  return buildStatus(row)
+}
+
+/**
+ * Generate a fresh 32-byte link secret server-side and store it ENCRYPTED
+ * (normalizeStoredSecretValue — same path as appSecret). The plaintext never
+ * leaves this function; callers get presence booleans only.
+ * Rotation semantics: overwriting an existing secret invalidates in-flight
+ * card links (they fail verify) — the UI confirms before regenerate.
+ */
+export async function generateApprovalCardLinkSecret(
+  integrationId: string,
+  queryFn: QueryFn = query,
+): Promise<ApprovalCardConfigStatus | null> {
+  const row = await loadIntegrationById(queryFn, integrationId)
+  if (!row) return null
+  const secret = randomBytes(32).toString('hex')
+  const encrypted = normalizeStoredSecretValue(secret)
+  const updated = await queryFn(
+    `UPDATE directory_integrations
+        SET config = jsonb_set(COALESCE(config, '{}'::jsonb), $2, to_jsonb($3::text), true),
+            updated_at = NOW()
+      WHERE id = $1 AND provider = $4
+      RETURNING id, name, status, config`,
+    [row.id, `{${APPROVAL_CARD_LINK_SECRET_CONFIG_KEY}}`, encrypted, DEFAULT_PROVIDER],
+  )
+  const updatedRow = (updated.rows[0] ?? null) as IntegrationConfigRow | null
+  if (!updatedRow) return null
+  return buildStatus(updatedRow)
+}
+
+/**
+ * Save (or clear, with '') the stored public app URL for the decision deep link.
+ * Only http(s) absolute URLs are accepted — the stored value redirects where
+ * approval deep links point, so scheme laundering is rejected at the write.
+ */
+export async function saveApprovalCardPublicAppUrl(
+  integrationId: string,
+  publicAppUrl: string,
+  queryFn: QueryFn = query,
+): Promise<ApprovalCardConfigStatus | null> {
+  const trimmed = typeof publicAppUrl === 'string' ? publicAppUrl.trim() : ''
+  if (trimmed) {
+    let parsed: URL
+    try {
+      parsed = new URL(trimmed)
+    } catch {
+      throw new Error('publicAppUrl must be an absolute http(s) URL')
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('publicAppUrl must use http or https')
+    }
+  }
+  const row = await loadIntegrationById(queryFn, integrationId)
+  if (!row) return null
+  const updated = trimmed
+    ? await queryFn(
+      `UPDATE directory_integrations
+          SET config = jsonb_set(COALESCE(config, '{}'::jsonb), $2, to_jsonb($3::text), true),
+              updated_at = NOW()
+        WHERE id = $1 AND provider = $4
+        RETURNING id, name, status, config`,
+      [row.id, `{${APPROVAL_CARD_PUBLIC_APP_URL_CONFIG_KEY}}`, trimmed, DEFAULT_PROVIDER],
+    )
+    : await queryFn(
+      `UPDATE directory_integrations
+          SET config = COALESCE(config, '{}'::jsonb) - $2::text,
+              updated_at = NOW()
+        WHERE id = $1 AND provider = $3
+        RETURNING id, name, status, config`,
+      [row.id, APPROVAL_CARD_PUBLIC_APP_URL_CONFIG_KEY, DEFAULT_PROVIDER],
+    )
+  const updatedRow = (updated.rows[0] ?? null) as IntegrationConfigRow | null
+  if (!updatedRow) return null
+  return buildStatus(updatedRow)
 }
