@@ -1,12 +1,17 @@
 <template>
-  <div v-if="visible" class="meta-automation__overlay" @click.self="$emit('close')">
-    <div class="meta-automation">
-      <div class="meta-automation__header">
-        <h4 class="meta-automation__title">{{ l('manager.title') }}</h4>
-        <button class="meta-automation__close" type="button" @click="$emit('close')">&times;</button>
-      </div>
+  <el-drawer
+    v-if="visible"
+    :model-value="visible"
+    class="meta-automation"
+    direction="rtl"
+    size="640px"
+    @update:model-value="(value) => { if (!value) $emit('close') }"
+  >
+    <template #header>
+      <h4 class="meta-automation__title">{{ l('manager.title') }}</h4>
+    </template>
 
-      <div class="meta-automation__body">
+    <div class="meta-automation__body">
         <div v-if="error" class="meta-automation__error" role="alert">{{ error }}</div>
 
         <!-- Create / Edit form -->
@@ -719,7 +724,6 @@
           </div>
         </div>
       </div>
-    </div>
     <MetaAutomationRuleEditor
       :visible="showRuleEditor"
       :sheet-id="sheetId"
@@ -753,11 +757,12 @@
       :client="client"
       @close="showGroupDeliveryViewer = false"
     />
-  </div>
+  </el-drawer>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ElDrawer } from 'element-plus'
 import { useRouter } from 'vue-router'
 import type {
   AutomationExecution,
@@ -1928,35 +1933,7 @@ watch(
 </script>
 
 <style scoped>
-.meta-automation__overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.35);
-}
-
-.meta-automation {
-  background: #fff;
-  border-radius: 14px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
-  width: 560px;
-  max-width: 95vw;
-  max-height: 85vh;
-  display: flex;
-  flex-direction: column;
-}
-
-.meta-automation__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 18px 20px 12px;
-  border-bottom: 1px solid #e2e8f0;
-}
-
+/* UF-4: the hand-rolled fixed overlay + panel + header/close chrome is now provided by el-drawer. */
 .meta-automation__title {
   margin: 0;
   font-size: 16px;
@@ -1964,19 +1941,7 @@ watch(
   color: #0f172a;
 }
 
-.meta-automation__close {
-  border: none;
-  background: none;
-  font-size: 22px;
-  cursor: pointer;
-  color: #64748b;
-  line-height: 1;
-  padding: 0 4px;
-}
-
 .meta-automation__body {
-  padding: 16px 20px 20px;
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 12px;

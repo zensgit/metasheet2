@@ -379,7 +379,9 @@ describe('MetaAutomationManager', () => {
     ])
     expect(actionSelect.textContent).toContain('发送通知')
     expect((container.querySelector('[data-automation-field="notifyMessage"]') as HTMLInputElement).placeholder).toBe('通知内容')
-    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    // UF-4 shape adaptation: el-drawer's built-in close button carries a localized aria-label by
+    // design; the guard below still asserts the AUTHORED surface adds no aria-label noise.
+    expect(container.querySelectorAll('[aria-label]:not(.el-drawer__close-btn)')).toHaveLength(0)
     expect(container.querySelectorAll('[title]')).toHaveLength(0)
     expect(container.querySelectorAll('[placeholder]')).toHaveLength(2)
 
@@ -483,7 +485,9 @@ describe('MetaAutomationManager', () => {
     expect(summary?.textContent).toContain('消息摘要')
     expect(summary?.textContent).toContain('渲染正文')
     expect(summary?.textContent).toContain('处理 示例字段值')
-    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    // UF-4 shape adaptation: el-drawer's built-in close button carries a localized aria-label by
+    // design; the guard below still asserts the AUTHORED surface adds no aria-label noise.
+    expect(container.querySelectorAll('[aria-label]:not(.el-drawer__close-btn)')).toHaveLength(0)
     expect(container.querySelectorAll('[title]')).toHaveLength(0)
     expect(container.querySelectorAll('[placeholder]')).toHaveLength(8)
   })
@@ -769,7 +773,7 @@ describe('MetaAutomationManager', () => {
     expect(updatedSpy).toHaveBeenCalledTimes(1)
     expect(container.querySelector('[data-automation-rule="rule_new"]')?.textContent).toContain('Advanced DingTalk group')
     expect(container.querySelector('[data-automation-rule="rule_new"] .meta-automation__card-desc')?.textContent).toContain('Send DingTalk group message')
-    expect(container.querySelector('.meta-rule-editor__overlay')).toBeNull()
+    expect(container.querySelector('.meta-rule-editor')).toBeNull()
   })
 
   it('creates DingTalk person automation via the advanced rule editor', async () => {
@@ -866,7 +870,7 @@ describe('MetaAutomationManager', () => {
     expect(updatedSpy).toHaveBeenCalledTimes(1)
     expect(container.querySelector('[data-automation-rule="rule_new"]')?.textContent).toContain('Advanced DingTalk person')
     expect(container.querySelector('[data-automation-rule="rule_new"] .meta-automation__card-desc')?.textContent).toContain('Send DingTalk person message')
-    expect(container.querySelector('.meta-rule-editor__overlay')).toBeNull()
+    expect(container.querySelector('.meta-rule-editor')).toBeNull()
   })
 
   it('creates rule via form', async () => {

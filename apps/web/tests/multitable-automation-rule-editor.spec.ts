@@ -243,8 +243,9 @@ describe('MetaAutomationRuleEditor', () => {
     expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('unsaved changes'))
     expect(onClose).not.toHaveBeenCalled()
 
-    // the × close path is guarded too
-    const xBtn = container.querySelector('.meta-rule-editor__close') as HTMLButtonElement
+    // the × close path is guarded too (UF-4 shape adaptation: the hand-rolled × is now
+    // el-drawer's built-in close button, routed through the same requestClose guard)
+    const xBtn = container.querySelector('.el-drawer__close-btn') as HTMLButtonElement
     xBtn.click()
     await flushPromises()
     expect(onClose).not.toHaveBeenCalled()
@@ -576,7 +577,9 @@ describe('MetaAutomationRuleEditor', () => {
     expect(summary?.textContent).toContain('消息摘要')
     expect(summary?.textContent).toContain('渲染正文')
     expect(summary?.textContent).toContain('处理 示例字段值')
-    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    // UF-4 shape adaptation: el-drawer's built-in close button carries a localized aria-label by
+    // design; the guard below still asserts the AUTHORED surface adds no aria-label noise.
+    expect(container.querySelectorAll('[aria-label]:not(.el-drawer__close-btn)')).toHaveLength(0)
     expect(container.querySelectorAll('[title]')).toHaveLength(1)
     expect(container.querySelectorAll('[placeholder]')).toHaveLength(4)
   })
@@ -586,7 +589,9 @@ describe('MetaAutomationRuleEditor', () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flushPromises()
 
-    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
+    // UF-4 shape adaptation: el-drawer's built-in close button carries a localized aria-label by
+    // design; the guard below still asserts the AUTHORED surface adds no aria-label noise.
+    expect(container.querySelectorAll('[aria-label]:not(.el-drawer__close-btn)')).toHaveLength(0)
     expect(container.querySelectorAll('[title]')).toHaveLength(1)
     expect(container.querySelectorAll('[placeholder]')).toHaveLength(1)
   })

@@ -1,12 +1,17 @@
 <template>
-  <div v-if="visible" class="meta-rule-editor__overlay" @click.self="requestClose">
-    <div class="meta-rule-editor">
-      <div class="meta-rule-editor__header">
-        <h4 class="meta-rule-editor__title">{{ rule ? automationLabel('editor.titleEdit', isZh) : automationLabel('editor.titleNew', isZh) }}</h4>
-        <button class="meta-rule-editor__close" type="button" @click="requestClose">&times;</button>
-      </div>
+  <el-drawer
+    v-if="visible"
+    :model-value="visible"
+    class="meta-rule-editor"
+    direction="rtl"
+    size="640px"
+    :before-close="() => requestClose()"
+  >
+    <template #header>
+      <h4 class="meta-rule-editor__title">{{ rule ? automationLabel('editor.titleEdit', isZh) : automationLabel('editor.titleNew', isZh) }}</h4>
+    </template>
 
-      <div class="meta-rule-editor__body">
+    <div class="meta-rule-editor__body">
         <div v-if="error" class="meta-rule-editor__error" role="alert">{{ error }}</div>
 
         <!-- Name -->
@@ -1198,9 +1203,10 @@
             @click="addAction"
           >{{ automationLabel('editor.addAction', isZh) }}</button>
         </section>
-      </div>
+    </div>
 
-      <!-- Footer -->
+    <!-- Footer -->
+    <template #footer>
       <div class="meta-rule-editor__footer">
         <div class="meta-rule-editor__test-run-feedback">
           <div v-if="savedRuleHasDingTalkActions" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="dingtalkTestRunWarning">
@@ -1236,12 +1242,13 @@
         </button>
         <button class="meta-rule-editor__btn" type="button" @click="requestClose">{{ automationLabel('editor.cancel', isZh) }}</button>
       </div>
-    </div>
-  </div>
+    </template>
+  </el-drawer>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ElDrawer } from 'element-plus'
 import { useLocale } from '../../composables/useLocale'
 import type { MultitableApiClient } from '../api/client'
 import type {
@@ -3404,45 +3411,13 @@ function onTestRun() {
 </script>
 
 <style scoped>
-.meta-rule-editor__overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.35);
-}
-
-.meta-rule-editor {
-  background: #fff;
-  border-radius: 14px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
-  width: 640px;
-  max-width: 95vw;
-  max-height: 90vh;
-  display: flex;
-  flex-direction: column;
-}
-
-.meta-rule-editor__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 18px 20px 12px;
-  border-bottom: 1px solid #e2e8f0;
-}
-
+/* UF-4: the hand-rolled fixed overlay + panel + header/close chrome is now provided by el-drawer. */
 .meta-rule-editor__title { margin: 0; font-size: 16px; font-weight: 700; color: #0f172a; }
-.meta-rule-editor__close { border: none; background: none; font-size: 22px; cursor: pointer; color: #64748b; line-height: 1; padding: 0 4px; }
 
 .meta-rule-editor__body {
-  padding: 16px 20px;
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  flex: 1;
 }
 
 .meta-rule-editor__error { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: #fef2f2; color: #b91c1c; }
@@ -3725,8 +3700,6 @@ function onTestRun() {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 12px 20px 16px;
-  border-top: 1px solid #e2e8f0;
 }
 
 .meta-rule-editor__btn {
