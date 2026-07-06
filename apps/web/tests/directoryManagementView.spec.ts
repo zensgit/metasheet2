@@ -6030,4 +6030,258 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('根部门直属成员 1')
     expect(container?.textContent).not.toContain('根部门 1 当前仅返回 1 个直属成员')
   })
+
+  describe('CFG-3 approval card config', () => {
+    function mockInitialLoad(integration: Record<string, unknown>): void {
+      apiFetchMock
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [integration] } }))
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+        .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+        .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+    }
+
+    function mockSelectIntegrationRefresh(integration: Record<string, unknown>): void {
+      apiFetchMock
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [integration] } }))
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+        .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+        .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+    }
+
+    function createApprovalCardStatusPayload(overrides: Record<string, unknown> = {}) {
+      return {
+        ok: true,
+        data: {
+          status: {
+            integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active' },
+            linkSecret: { configured: true, source: 'stored', envOverrideActive: false, valuePrinted: false },
+            publicAppUrl: { storedValue: null, source: 'missing', envOverrideActive: false },
+            ...overrides,
+          },
+        },
+      }
+    }
+
+    it('renders the "未生成" chip and 生成随机密钥 label when approvalCardLinkSecretConfigured is false', async () => {
+      mockInitialLoad(createIntegration())
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      expect(container?.textContent).toContain('未生成')
+      expect(container?.textContent).not.toContain('密钥已生成')
+      const generateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '生成随机密钥')
+      expect(generateButton).toBeTruthy()
+      const regenerateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '重新生成密钥')
+      expect(regenerateButton).toBeFalsy()
+    })
+
+    it('renders the "密钥已生成" chip and 重新生成密钥 label, plus the saved public URL, when configured', async () => {
+      mockInitialLoad(createIntegration({
+        config: {
+          ...createIntegration().config,
+          approvalCardLinkSecretConfigured: true,
+          approvalCardPublicAppUrl: 'https://cards.example.com/',
+        },
+      }))
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      expect(container?.textContent).toContain('密钥已生成')
+      const regenerateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '重新生成密钥')
+      expect(regenerateButton).toBeTruthy()
+      const urlInput = Array.from(container!.querySelectorAll('input'))
+        .find((input) => input.getAttribute('placeholder')?.includes('一键卡片深链的对外可达地址')) as HTMLInputElement | undefined
+      expect(urlInput?.value).toBe('https://cards.example.com/')
+    })
+
+    it('requires confirmation before regenerating an already-configured secret; declining sends no request', async () => {
+      mockInitialLoad(createIntegration({
+        config: { ...createIntegration().config, approvalCardLinkSecretConfigured: true },
+      }))
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      const regenerateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '重新生成密钥')
+      expect(regenerateButton).toBeTruthy()
+      regenerateButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi()
+
+      expect(confirmSpy).toHaveBeenCalledWith('重新生成将使已发出但未处理的审批卡片链接失效，确定吗？')
+      expect(apiFetchMock).not.toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/approval-card-config/secret/generate',
+        expect.anything(),
+      )
+
+      confirmSpy.mockRestore()
+    })
+
+    it('regenerates after confirmation, calling the generate endpoint and flipping the chip after refresh', async () => {
+      mockInitialLoad(createIntegration({
+        config: { ...createIntegration().config, approvalCardLinkSecretConfigured: true },
+      }))
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(createApprovalCardStatusPayload()))
+      mockSelectIntegrationRefresh(createIntegration({
+        config: { ...createIntegration().config, approvalCardLinkSecretConfigured: true },
+      }))
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      const regenerateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '重新生成密钥')
+      regenerateButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(10)
+
+      expect(confirmSpy).toHaveBeenCalledWith('重新生成将使已发出但未处理的审批卡片链接失效，确定吗？')
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/approval-card-config/secret/generate',
+        expect.objectContaining({ method: 'POST' }),
+      )
+      expect(container?.textContent).toContain('已生成新的一键卡片密钥')
+      expect(container?.textContent).toContain('密钥已生成')
+
+      confirmSpy.mockRestore()
+    })
+
+    it('generates a secret with no confirmation when not yet configured, and never echoes the secret value (no-echo tripwire)', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(createApprovalCardStatusPayload()))
+      mockSelectIntegrationRefresh(createIntegration({
+        config: { ...createIntegration().config, approvalCardLinkSecretConfigured: true },
+      }))
+      const confirmSpy = vi.spyOn(window, 'confirm')
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      const generateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '生成随机密钥')
+      expect(generateButton).toBeTruthy()
+      generateButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(10)
+
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/approval-card-config/secret/generate',
+        expect.objectContaining({ method: 'POST' }),
+      )
+      expect(container?.textContent).toContain('密钥已生成')
+
+      // NO-ECHO TRIPWIRE: the mocked backend response and all fixtures carry only booleans/enums —
+      // no secret value ever exists to bind. Assert the rendered DOM never contains anything
+      // shaped like a 64-char hex secret or an encrypted-blob marker.
+      expect(container?.innerHTML).not.toMatch(/[0-9a-f]{64}/)
+      expect(container?.innerHTML).not.toContain('enc:')
+
+      confirmSpy.mockRestore()
+    })
+
+    it('shows an env-override hint when the generate response reports envOverrideActive', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(createApprovalCardStatusPayload({
+        linkSecret: { configured: true, source: 'env', envOverrideActive: true, valuePrinted: false },
+      })))
+      mockSelectIntegrationRefresh(createIntegration({
+        config: { ...createIntegration().config, approvalCardLinkSecretConfigured: true },
+      }))
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      const generateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '生成随机密钥')
+      generateButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(10)
+
+      expect(container?.textContent).toContain('部署环境变量已设置，页面生成的密钥暂不生效（环境变量优先）。')
+    })
+
+    it('saves the approval card public app URL via PUT with the entered value', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(createApprovalCardStatusPayload({
+        publicAppUrl: { storedValue: 'https://newcard.example.com/', source: 'stored', envOverrideActive: false },
+      })))
+      mockSelectIntegrationRefresh(createIntegration({
+        config: { ...createIntegration().config, approvalCardPublicAppUrl: 'https://newcard.example.com/' },
+      }))
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      const urlInput = Array.from(container!.querySelectorAll('input'))
+        .find((input) => input.getAttribute('placeholder')?.includes('一键卡片深链的对外可达地址')) as HTMLInputElement | undefined
+      expect(urlInput).toBeTruthy()
+      urlInput!.value = 'https://newcard.example.com/'
+      urlInput!.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi(2)
+
+      const saveButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '保存对外访问地址')
+      expect(saveButton).toBeTruthy()
+      saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(10)
+
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/approval-card-config',
+        expect.objectContaining({
+          method: 'PUT',
+          body: JSON.stringify({ publicAppUrl: 'https://newcard.example.com/' }),
+        }),
+      )
+      expect(container?.textContent).toContain('一键卡片对外访问地址已保存')
+    })
+
+    it('surfaces the backend 400 validation message when the public app URL is rejected', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse({
+        ok: false,
+        error: { code: 'APPROVAL_CARD_CONFIG_SAVE_FAILED', message: 'publicAppUrl must be an absolute http(s) URL' },
+      }, 400))
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      const urlInput = Array.from(container!.querySelectorAll('input'))
+        .find((input) => input.getAttribute('placeholder')?.includes('一键卡片深链的对外可达地址')) as HTMLInputElement | undefined
+      urlInput!.value = 'not-a-url'
+      urlInput!.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi(2)
+
+      const saveButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '保存对外访问地址')
+      saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(6)
+
+      expect(container?.textContent).toContain('publicAppUrl must be an absolute http(s) URL')
+    })
+  })
 })
