@@ -46,6 +46,9 @@ export function useMultitableWorkbench(opts?: {
   const sheets = ref<MetaSheet[]>([])
   const fields = ref<MetaField[]>([])
   const views = ref<MetaView[]>([])
+  // Slice 3: view ids the server reports as having a personal override for this actor (from /context).
+  // Drives the FE "My view" toggle's initial state so it reflects the persisted server row, not local guesswork.
+  const personalOverrideViewIds = ref<string[]>([])
 
   const activeBaseId = ref(opts?.initialBaseId ?? '')
   const activeSheetId = ref(opts?.initialSheetId ?? '')
@@ -116,11 +119,13 @@ export function useMultitableWorkbench(opts?: {
       capabilityOrigin?: MetaCapabilityOrigin | null
       fieldPermissions?: Record<string, MetaFieldPermission>
       viewPermissions?: Record<string, MetaViewPermission>
+      personalOverrideViewIds?: string[]
     },
     preferredViewId?: string | null,
   ) {
     sheets.value = filterVisibleSheets(ctx.sheets ?? sheets.value)
     views.value = ctx.views ?? []
+    personalOverrideViewIds.value = ctx.personalOverrideViewIds ?? []
     capabilities.value = ctx.capabilities ?? { ...EMPTY_CAPABILITIES }
     capabilityOrigin.value = ctx.capabilityOrigin ?? null
     fieldPermissions.value = ctx.fieldPermissions ?? {}
@@ -330,6 +335,7 @@ export function useMultitableWorkbench(opts?: {
     capabilityOrigin,
     fieldPermissions,
     viewPermissions,
+    personalOverrideViewIds,
     activeView,
     loading,
     error,

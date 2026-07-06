@@ -312,6 +312,10 @@ export interface MetaContext {
   capabilityOrigin?: MetaCapabilityOrigin
   fieldPermissions?: Record<string, MetaFieldPermission>
   viewPermissions?: Record<string, MetaViewPermission>
+  // Slice 3: view ids for which THIS actor has a persisted personal override (server-applied on the returned
+  // `views`). The FE "My view" toggle initializes from this so its state reflects the server, not local
+  // guesswork. Absent/empty ⇒ no personal rows / flag-off. Actor-scoped — never another user's rows.
+  personalOverrideViewIds?: string[]
 }
 
 // --- Record context (GET /api/multitable/records/:recordId) ---

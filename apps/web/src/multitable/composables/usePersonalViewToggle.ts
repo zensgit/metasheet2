@@ -51,6 +51,36 @@ export function usePersonalViewToggle(opts: {
   }
 
   /**
+   * Initialize toggle state from the SERVER's persisted override set (the `/context`
+   * `personalOverrideViewIds` signal) — so a saved personal row shows the toggle ON after a reload, and the
+   * UI reflects server truth rather than local guesswork. Called on every context (re)load. Flag-off ⇒ the
+   * map is cleared (G-FE-4). Views with a persisted override → ON; everything else → OFF (a local-only ON
+   * that was never customized into a row correctly does not survive a reload — no row means shared).
+   */
+  function syncFromServer(overrideViewIds: readonly string[]): void {
+    if (!opts.enabled()) { personalModeByViewId.value = {}; return }
+    const next: Record<string, boolean> = {}
+    for (const id of overrideViewIds) { if (id) next[id] = true }
+    personalModeByViewId.value = next
+  }
+
+  /**
+   * Toggle-click semantics (design-lock §1-B/§1-C): OFF *is* reset-to-shared. Clicking the toggle while it is
+   * ON DELETEs the actor's personal row + refetches (never a silent local flip that would leave a ghost row the
+   * server re-applies next load, or let OFF-state edits write shared while the user still thinks they are
+   * personal). Clicking while OFF enters personal mode locally — the row is created lazily on the first edit
+   * (PUT). This keeps the toggle and "Reset to shared" one behavior. `refetch` runs ONLY on the ON→OFF path.
+   */
+  async function handleToggleClick(viewId: string, refetch: () => Promise<unknown>): Promise<void> {
+    if (!viewId) return
+    if (isPersonalMode(viewId)) {
+      await resetToShared(viewId, refetch)
+    } else {
+      setPersonalMode(viewId, true)
+    }
+  }
+
+  /**
    * G-FE-3 — reset to shared: delete the actor's own personal row for this view, drop local personal mode,
    * then run the caller-supplied refetch (e.g. `workbench.loadSheetMeta(sheetId, { viewId })`) so the
    * rendered config becomes whatever the server now resolves — the shared config, since the override row is
@@ -58,7 +88,16 @@ export function usePersonalViewToggle(opts: {
    */
   async function resetToShared(viewId: string, refetch: () => Promise<unknown>): Promise<void> {
     if (!viewId) return
-    await opts.client.deletePersonalViewConfig(viewId)
+    try {
+      await opts.client.deletePersonalViewConfig(viewId)
+    } catch (err) {
+      // The view existing with no personal row returns 200 { deleted: false } (a no-op success), so this
+      // catch only fires on a genuine 404 (view gone / flag flipped off mid-session). In that case the
+      // actor is already on the shared config — clear local mode and refetch rather than leaving the UI
+      // stuck in personal mode. Surface any other error.
+      const status = (err as { status?: number } | null)?.status
+      if (status !== 404) throw err
+    }
     setPersonalMode(viewId, false)
     await refetch()
   }
@@ -85,6 +124,8 @@ export function usePersonalViewToggle(opts: {
     isPersonalMode,
     setPersonalMode,
     togglePersonalMode,
+    syncFromServer,
+    handleToggleClick,
     resetToShared,
     persistViewEdit,
   }

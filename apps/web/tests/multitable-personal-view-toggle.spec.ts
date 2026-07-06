@@ -123,4 +123,80 @@ describe('usePersonalViewToggle', () => {
     expect(updateShared).toHaveBeenCalledTimes(1)
     expect(client.putPersonalViewConfig).not.toHaveBeenCalled()
   })
+
+  // --- P1 review fixes: init from persisted server state + ON→OFF must delete the row ---
+
+  it('P1: syncFromServer initializes personal mode ON for views the server reports as having a persisted override', () => {
+    const client = mockClient()
+    const toggle = usePersonalViewToggle({ client, enabled: () => true })
+    // Simulates /context returning personalOverrideViewIds — a saved row must show the toggle ON after reload.
+    toggle.syncFromServer(['view_a', 'view_c'])
+    expect(toggle.isPersonalMode('view_a')).toBe(true)
+    expect(toggle.isPersonalMode('view_c')).toBe(true)
+    expect(toggle.isPersonalMode('view_b')).toBe(false)
+  })
+
+  it('P1: syncFromServer clears all modes when the session capability is off (G-FE-4 holds on reload)', () => {
+    const client = mockClient()
+    const toggle = usePersonalViewToggle({ client, enabled: () => false })
+    toggle.syncFromServer(['view_a', 'view_c']) // even if the server signal arrives, flag-off shows nothing
+    expect(toggle.isPersonalMode('view_a')).toBe(false)
+    expect(toggle.isPersonalMode('view_c')).toBe(false)
+  })
+
+  it('P1: an existing personal row (mode ON via syncFromServer) routes edits to the personal PUT, NOT shared PATCH', async () => {
+    const client = mockClient()
+    const toggle = usePersonalViewToggle({ client, enabled: () => true })
+    toggle.syncFromServer(['view_1']) // server says a personal row exists for view_1
+    const updateShared = vi.fn(async () => ({}))
+    await toggle.persistViewEdit('view_1', { sortInfo: { rules: [] } }, updateShared)
+    expect(client.putPersonalViewConfig).toHaveBeenCalledWith('view_1', { sortInfo: { rules: [] } })
+    expect(updateShared).not.toHaveBeenCalled()
+  })
+
+  it('P1: handleToggleClick ON→OFF DELETEs the personal row and refetches (not a silent local flip)', async () => {
+    const client = mockClient()
+    const toggle = usePersonalViewToggle({ client, enabled: () => true })
+    toggle.syncFromServer(['view_1']) // starts ON (persisted row)
+    const refetch = vi.fn(async () => undefined)
+
+    await toggle.handleToggleClick('view_1', refetch) // ON → OFF
+
+    expect(client.deletePersonalViewConfig).toHaveBeenCalledWith('view_1')
+    expect(refetch).toHaveBeenCalledTimes(1)
+    expect(toggle.isPersonalMode('view_1')).toBe(false)
+  })
+
+  it('P1: handleToggleClick OFF→ON enters personal mode WITHOUT deleting or refetching (row created lazily on edit)', async () => {
+    const client = mockClient()
+    const toggle = usePersonalViewToggle({ client, enabled: () => true })
+    const refetch = vi.fn(async () => undefined)
+
+    await toggle.handleToggleClick('view_1', refetch) // OFF → ON
+
+    expect(toggle.isPersonalMode('view_1')).toBe(true)
+    expect(client.deletePersonalViewConfig).not.toHaveBeenCalled()
+    expect(refetch).not.toHaveBeenCalled()
+  })
+
+  it('P1: resetToShared tolerates a no-row DELETE (404) and still clears mode + refetches', async () => {
+    const client = mockClient()
+    client.deletePersonalViewConfig = vi.fn(async () => { throw Object.assign(new Error('not found'), { status: 404 }) })
+    const toggle = usePersonalViewToggle({ client, enabled: () => true })
+    toggle.setPersonalMode('view_1', true)
+    const refetch = vi.fn(async () => undefined)
+
+    await toggle.resetToShared('view_1', refetch) // must not throw
+
+    expect(toggle.isPersonalMode('view_1')).toBe(false)
+    expect(refetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('P1: resetToShared re-throws a non-404 error (real failures are not swallowed)', async () => {
+    const client = mockClient()
+    client.deletePersonalViewConfig = vi.fn(async () => { throw Object.assign(new Error('server error'), { status: 500 }) })
+    const toggle = usePersonalViewToggle({ client, enabled: () => true })
+    toggle.setPersonalMode('view_1', true)
+    await expect(toggle.resetToShared('view_1', vi.fn(async () => undefined))).rejects.toThrow('server error')
+  })
 })

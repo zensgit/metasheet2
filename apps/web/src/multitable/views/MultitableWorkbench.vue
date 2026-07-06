@@ -751,16 +751,34 @@ const onResetDone = () => { void grid.reloadCurrentPage() }
 const canResetToShared = computed(() =>
   personalViewsEnabled.value && personalView.isPersonalMode(workbench.activeViewId.value),
 )
-function onTogglePersonalView(viewId: string) {
-  personalView.togglePersonalMode(viewId)
+// Refetch used after an ON→OFF reset: reload the effective (now shared) view config from /context, then
+// reload the grid page so the rows reflect it. Only runs on the reset path (see handleToggleClick).
+function refetchAfterReset(viewId: string) {
+  return async () => {
+    const sheetId = workbench.activeSheetId.value
+    if (sheetId) await workbench.loadSheetMeta(sheetId, { viewId })
+    await grid.reloadCurrentPage()
+  }
+}
+// Toggle semantics owned by the composable (design-lock §1-B/§1-C): ON→OFF = delete personal row + refetch;
+// OFF→ON = enter personal mode (row created lazily on first edit). The toolbar "Reset to shared" is the same
+// reset path.
+async function onTogglePersonalView(viewId: string) {
+  await personalView.handleToggleClick(viewId, refetchAfterReset(viewId))
 }
 async function onResetToShared() {
   const viewId = workbench.activeViewId.value
-  const sheetId = workbench.activeSheetId.value
-  if (!viewId || !sheetId) return
-  await personalView.resetToShared(viewId, () => workbench.loadSheetMeta(sheetId, { viewId }))
-  await grid.reloadCurrentPage()
+  if (!viewId) return
+  await personalView.resetToShared(viewId, refetchAfterReset(viewId))
 }
+// Initialize/re-sync the toggle from the server's persisted override set (/context personalOverrideViewIds) on
+// every context (re)load, so a saved personal row shows the toggle ON after refresh — mode reflects server
+// state, not local guesswork (P1). Flag-off clears it (G-FE-4, enforced inside syncFromServer).
+watch(
+  () => workbench.personalOverrideViewIds.value,
+  (ids) => personalView.syncFromServer(ids ?? []),
+  { immediate: true },
+)
 const commentsState = useMultitableComments()
 const commentPresenceState = useMultitableCommentPresence()
 const commentInboxState = useMultitableCommentInbox()

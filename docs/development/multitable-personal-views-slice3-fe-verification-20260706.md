@@ -66,6 +66,43 @@ fail-soft test with no live consumer would be vacuous. **G-FE-5 therefore ships 
 consumer in Slice 3b** (the follow-up that makes `view.fieldOrder` actually drive column order, with unknown/
 stale ids filtered against the current field list). This is a documented deferral, not a silent drop.
 
+## P1 review fixes (2026-07-06) — two load-bearing corrections
+
+**P1-a — the personal overlay is now applied on the MAIN load path (`/context`), not only `GET /views`.**
+The Workbench loads via `loadContext → ctx.views`, so the Slice 1 overlay (wired only into `GET /views`) never
+reached the main grid — a saved personal row was invisible on reload. Fixed in `univer-meta.ts` `/context`: after
+`serializedViews` is built, `fetchPersonalViewConfigsForViews(access.userId)` + `applyPersonalViewOverlay` run
+**before** `selectedView` / `fieldPermissions` / redaction, so (a) personal hidden/order/filter flow into the
+derived metadata exactly as the shared view's own facets do and (b) redaction runs on the personal `filterInfo`
+too (no personal-filter literal leak). Absent override / flag-off ⇒ `effectiveViews === serializedViews`
+(byte-identical). `/context` also returns **`personalOverrideViewIds`** — the FE-init signal of which views have a
+persisted personal row for this actor (actor-scoped; never another user's rows).
+
+Real-DB golden (`multitable-personal-views-slice3-context-overlay-realdb.test.ts`, added to the Node-20 allowlist):
+- **CTX-A**: flag ON + personal row ⇒ `/context` serves the personal overlay + names the view in `personalOverrideViewIds`.
+- **CTX-B**: flag ON no row ⇒ shared; flag OFF with a row present ⇒ shared + empty override ids (main-path G-B).
+- **CTX-ISO**: A's override is not visible to B via `/context`; B's override ids empty; A's literal absent from B's body.
+
+The two `/context` capability exact-match locks were extended with `personalViewsEnabled` (see the 650faeaea fix);
+the new top-level `personalOverrideViewIds` key does not touch any exact-match (successes assert sub-objects only).
+
+**P1-b — toggle OFF now DELETEs the actor's personal row (was a silent local flip).**
+The lock's §1-B/§1-C say OFF/reset deletes the row; the first cut left `onTogglePersonalView` a pure local flip, so
+ON→OFF left a ghost row the server would re-apply, and OFF-state edits wrote *shared* while the user believed they
+were personal. Fixed:
+- **`usePersonalViewToggle.handleToggleClick`** owns the semantics: ON→OFF = `resetToShared` (DELETE + refetch);
+  OFF→ON = enter personal mode (row created lazily on first edit). The toolbar "Reset to shared" is the same path.
+- **`syncFromServer(personalOverrideViewIds)`** initializes/re-syncs the toggle from the server's persisted set on
+  every context (re)load, so a saved row shows ON after refresh (state reflects server, not local guesswork);
+  flag-off clears it (G-FE-4 holds on reload). Wired via a `watch` on `workbench.personalOverrideViewIds`.
+- `resetToShared` tolerates a no-row DELETE (200 `{deleted:false}` for an existing view; a genuine 404 from a
+  flag flip / missing view still clears mode + refetches) and re-throws any other error.
+
+New goldens (in `multitable-personal-view-toggle.spec.ts`, now 13 tests): syncFromServer init-ON from server /
+flag-off clears; existing-row edit routes to personal PUT not shared PATCH; handleToggleClick ON→OFF deletes +
+refetches; OFF→ON no delete/refetch; resetToShared 404-tolerant vs re-throws non-404. FE suite now **24 tests
+green** (`personal-view-client` 6 + `personal-view-toggle` 13 + `tab-bar` 5).
+
 ## Enablement posture
 
 - Flag stays **OFF**. This slice is NOT enable-ready.

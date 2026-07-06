@@ -6704,10 +6704,28 @@ export function univerMetaRouter(): Router {
         hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
         config: normalizeJson(row.config),
       }))
-      const selectedView = viewId
-        ? serializedViews.find((view: UniverMetaViewConfig) => view.id === viewId) ?? null
-        : serializedViews[0] ?? null
       const viewIds = serializedViews.map((v: UniverMetaViewConfig) => v.id)
+      // Personal (per-user) view overlay on the MAIN load path — Slice 1/Slice 3 P1 fix. The Workbench
+      // loads via /context (loadContext → ctx.views), NOT GET /views, so the overlay MUST also run here or
+      // a saved personal row is invisible on the main grid. Same contract as GET /views: flag-on + actor
+      // ⇒ this actor's personal override ELSE shared (§1-C); actor = access.userId (§1-B), never a client
+      // id. Runs BEFORE selectedView / fieldPermissions / redaction so (a) personal hidden/order flow into
+      // the derived metadata exactly as the shared view's own facets do, and (b) redaction runs on the
+      // personal filterInfo too (no personal-filter literal leak). Absent override / flag-off ⇒
+      // effectiveViews === serializedViews (byte-identical). `personalOverrideViewIds` is the FE-init
+      // signal: which views have a persisted personal row, so the "My view" toggle reflects server state.
+      let effectiveViews: UniverMetaViewConfig[] = serializedViews
+      let personalOverrideViewIds: string[] = []
+      if (isPersonalViewsEnabled() && access.userId) {
+        const overlays = await fetchPersonalViewConfigsForViews(pool.query.bind(pool), viewIds, access.userId)
+        if (overlays.size > 0) {
+          personalOverrideViewIds = viewIds.filter((id: string) => overlays.has(id))
+          effectiveViews = serializedViews.map((view: UniverMetaViewConfig) => applyPersonalViewOverlay(view, overlays.get(view.id)))
+        }
+      }
+      const selectedView = viewId
+        ? effectiveViews.find((view: UniverMetaViewConfig) => view.id === viewId) ?? null
+        : effectiveViews[0] ?? null
       const viewScopeMap = access.userId ? await loadViewPermissionScopeMap(pool.query.bind(pool), viewIds, access.userId) : new Map()
       // #2052 (b): bind fieldScopeMap to effectiveSheetId (NOT resolvedSheetId) — on a base-only ?baseId=
       // request resolvedSheetId is null but the returned views bind to effectiveSheetId; gating off
@@ -6720,7 +6738,7 @@ export function univerMetaRouter(): Router {
       // #2052 (b): allowed-field set for redacting filter literals — BOTH inputs keyed to effectiveSheetId
       // (activeFields above + this fieldScopeMap), so the redaction matches the sheet whose views ship.
       const allowedFieldIds = computeAllowedFieldIds(activeFields, capabilities, fieldScopeMap)
-      const viewPermissions = deriveViewPermissions(serializedViews, capabilities, viewScopeMap)
+      const viewPermissions = deriveViewPermissions(effectiveViews, capabilities, viewScopeMap)
 
       return res.json({
         ok: true,
@@ -6743,7 +6761,11 @@ export function univerMetaRouter(): Router {
             !isSystemPeopleSheetDescription(row.description)
             && readableSheetRows.some((visibleRow) => String(visibleRow.id) === String(row.id)),
           ),
-          views: serializedViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)),
+          views: effectiveViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)),
+          // Slice 3 P1: which of the returned views have a persisted personal override for THIS actor, so the
+          // FE "My view" toggle initializes from server state (not local guesswork). Empty when flag-off / no
+          // override / no actor. Actor-scoped (§1-B) — never reflects another user's rows.
+          personalOverrideViewIds,
           // T8-2 Reset UI flag-visibility contract (#3239): a flag-derived, FE-readable signal so the Reset entry can be
           // truly HIDDEN when off (not a phantom flag read on the client). True iff MULTITABLE_ENABLE_PIT_RESET is on AND
           // the actor is a sheet-admin — mirrors the reset routes' PIT_RESET_ENABLED() + canManageSheetAccess gate.
