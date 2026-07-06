@@ -38,6 +38,39 @@
           <p v-else class="approval-new__info-desc approval-new__info-desc--empty">暂无描述</p>
         </el-card>
 
+        <!-- UX B2-07: submit-time flow preview ("会到谁手上、几步") — read-only, derived from the
+             loaded template's approvalGraph, so a requester can see the flow BEFORE filling the
+             form in. STATIC per the loaded template only: no per-form-value resolution of which
+             conditional branch will actually be taken (that live-resolve is the gated B3-05
+             enhancement) — a condition/fan-out step honestly renders "按条件进入后续分支"
+             (see `summarizeApprovalFlow`) instead of fabricating a guessed path. -->
+        <el-card
+          v-if="flowPreviewSteps.length > 0"
+          class="approval-new__flow-preview"
+          shadow="never"
+          data-testid="approval-flow-preview"
+        >
+          <template #header>
+            <span class="approval-new__flow-preview-header">审批流程</span>
+          </template>
+          <div class="approval-new__flow-preview-row">
+            <span class="approval-new__flow-preview-chip approval-new__flow-preview-chip--requester">
+              发起人
+            </span>
+            <template v-for="step in flowPreviewSteps" :key="step.key">
+              <span class="approval-new__flow-preview-arrow">→</span>
+              <span
+                class="approval-new__flow-preview-chip"
+                :class="{ 'approval-new__flow-preview-chip--conditional': step.isConditional }"
+                data-testid="approval-flow-preview-step"
+              >
+                {{ step.name }}
+                <span class="approval-new__flow-preview-chip-summary">{{ step.assigneeSummary }}</span>
+              </span>
+            </template>
+          </div>
+        </el-card>
+
         <el-divider content-position="left">填写表单</el-divider>
 
         <el-form
@@ -340,7 +373,9 @@ import {
   createEmptyDetailRow,
   isDetailCellVisible,
   pruneHiddenFormDataWithDetail,
+  validateDetailRows,
 } from '../../approvals/detailField'
+import { summarizeApprovalFlow, type ApprovalFlowStep } from '../../approvals/graphSummary'
 
 const route = useRoute()
 const router = useRouter()
@@ -357,6 +392,14 @@ const visibleFields = computed(() => {
 })
 const visibleFieldIds = computed(() => visibleFields.value.map((field) => field.id))
 
+// UX B2-07: submit-time flow preview ("审批流程") — STATIC per the loaded template (walks the
+// whole graph from `start`; no per-form-value branch resolution, see the template comment above).
+const flowPreviewSteps = computed<ApprovalFlowStep[]>(() => {
+  const graph = template.value?.approvalGraph
+  if (!graph) return []
+  return summarizeApprovalFlow(graph)
+})
+
 // Detail-row auto-sum (design-lock #3189, Gate B): when the template declares amountConsistencyCheck the
 // total field is derived from the detail rows (read-only) — auto-fill (UX) + backend total-check
 // (tamper-proof). FE-only. See useAutoSumTotal for the watch + the backend-identical mirror.
@@ -370,7 +413,11 @@ const formRules = computed<FormRules>(() => {
     // there is no way for the user to satisfy it. Excluded from validation entirely.
     if (field.required && field.type !== 'attachment') {
       rules[field.id] = [
-        { required: true, message: `请填写${field.label}`, trigger: 'blur' },
+        // B2-15: `blur` alone never reliably fires for a select / date-picker (the user picks via
+        // a click in a popper, not a native blur on a text input), so a required select/date left
+        // unset could silently pass validation until submit-time. `change` catches those; `blur`
+        // stays too so leaving a text/textarea/number field empty validates without a submit click.
+        { required: true, message: `请填写${field.label}`, trigger: ['blur', 'change'] },
       ]
     }
   }
@@ -466,12 +513,35 @@ function buildSubmitFormData(): Record<string, unknown> {
   return stripAttachmentFields(template.value.formSchema, pruned)
 }
 
+// B2-15 (item 2): on a failed `el-form` validation, the first invalid field can already be
+// scrolled past on a long form, leaving no visual cue that IT is why submit did nothing beyond the
+// toast. Element Plus marks an invalid `<el-form-item>`'s root with `.is-error`. jsdom does not
+// implement `scrollIntoView` at all — optional-chaining the METHOD itself (not just the element)
+// is the no-op guard, mirroring `PlmProductPanel.vue`'s existing convention for the same gap.
+function scrollFirstErrorIntoView(): void {
+  const firstError = document.querySelector<HTMLElement>('.el-form-item.is-error')
+  firstError?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+}
+
 async function handleSubmit() {
   if (formRef.value) {
     try {
       await formRef.value.validate()
     } catch {
       ElMessage.warning('请检查表单中的必填项')
+      scrollFirstErrorIntoView()
+      return
+    }
+  }
+
+  // B2-15 (item 3): `el-form`'s `rules` only ever cover TOP-LEVEL fields — a `detail` (子表)
+  // column's `required` has no client-side check of its own, so a missing required cell would
+  // otherwise only surface as an unreadable backend 400. Checked AFTER the top-level validate()
+  // above succeeds, so both validation layers must pass before anything is submitted.
+  if (template.value) {
+    const detailViolations = validateDetailRows(template.value.formSchema, formData)
+    if (detailViolations.length > 0) {
+      ElMessage.warning(detailViolations[0])
       return
     }
   }
@@ -598,6 +668,56 @@ watch([visibleFieldIds, template], () => {
 .approval-new__info-desc--empty {
   color: var(--el-text-color-placeholder, #c0c4cc);
   font-style: italic;
+}
+
+/* UX B2-07: submit-time flow preview — a muted, horizontal step/chip row (发起人 → node → node …),
+   deliberately NOT the authoring canvas's node-graph styling — this is a compact glance, not an
+   editing surface. */
+.approval-new__flow-preview {
+  margin-bottom: 8px;
+}
+
+.approval-new__flow-preview-header {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.approval-new__flow-preview-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.approval-new__flow-preview-chip {
+  display: inline-flex;
+  flex-direction: column;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--el-fill-color-light, #f5f7fa);
+  color: var(--el-text-color-regular, #606266);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.approval-new__flow-preview-chip--requester {
+  background: var(--el-color-primary-light-9, #ecf5ff);
+  color: var(--el-color-primary, #409eff);
+  font-weight: 500;
+}
+
+.approval-new__flow-preview-chip--conditional {
+  border: 1px dashed var(--el-color-warning, #e6a23c);
+}
+
+.approval-new__flow-preview-chip-summary {
+  font-size: 11px;
+  color: var(--el-text-color-placeholder, #909399);
+}
+
+.approval-new__flow-preview-arrow {
+  color: var(--el-text-color-placeholder, #c0c4cc);
+  font-size: 12px;
 }
 
 .approval-new__field-hint {
