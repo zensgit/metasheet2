@@ -107,7 +107,20 @@ import { useHistoryCenter } from '../composables/useHistoryCenter'
 import { historyActor, recordLabel } from '../utils/meta-record-labels'
 import type { HistoryBatchSummary, HistoryChange } from '../types'
 
-const props = defineProps<{ open: boolean; baseId: string; sheetId?: string; fields?: Array<{ id: string; name: string }> }>()
+const props = defineProps<{
+  open: boolean
+  baseId: string
+  sheetId?: string
+  fields?: Array<{ id: string; name: string }>
+  /**
+   * W3-5: a commit toast's "view in history" deep-link sets this to the batch it just wrote — on open, the
+   * modal loads the normal (unfiltered) list AND immediately expands this one batch's detail via the SAME
+   * `toggle`/`getHistoryBatch` mechanism a manual row click uses (no new filtering API). If the batch has
+   * since scrolled off the default page (or ages out under retention), the expand silently finds nothing —
+   * same as any other detail-load miss; it never throws.
+   */
+  initialBatchId?: string | null
+}>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const { isZh } = useLocale()
@@ -147,7 +160,11 @@ function toggle(batchId: string): Promise<void> {
 watch(
   () => [props.open, props.baseId] as const,
   ([open]) => {
-    if (open && props.baseId) void reload()
+    if (!open || !props.baseId) return
+    void reload().then(() => {
+      // W3-5: a deep-linked open — expand the target batch right away, same as a manual row click.
+      if (props.initialBatchId) void toggle(props.initialBatchId)
+    })
   },
   { immediate: true },
 )
