@@ -510,13 +510,34 @@ export function useMultitableGrid(opts: {
 
   // Field visibility
   const hiddenFieldIds = ref<string[]>([])
-  const visibleFields = computed(() =>
-    fields.value.filter((f) =>
+  // Slice 3b — per-view (incl. per-user personal overlay) column order. The server already resolves the
+  // effective order onto `view.fieldOrder` (applyPersonalViewOverlay); this is the FE CONSUMER that renders
+  // columns in that order. Empty ⇒ natural field order (server `field.order`), unchanged from before.
+  const fieldOrder = ref<string[]>([])
+  const visibleFields = computed(() => {
+    const base = fields.value.filter((f) =>
       !hiddenFieldIds.value.includes(f.id)
       && !isPropertyHiddenField(f)
       && fieldPermissions.value[f.id]?.visible !== false,
-    ),
-  )
+    )
+    if (fieldOrder.value.length === 0) return base
+    // Apply fieldOrder as a presentation reorder, FAIL-SOFT (G-FE-5): an id in fieldOrder that no longer
+    // maps to a currently-visible field (deleted, hidden, permission-denied, or an unknown/stale id — the
+    // backend only whitelists string[], it does not validate sheet membership) is simply skipped — no
+    // crash, no blank column. Visible fields NOT named in fieldOrder keep their natural order, appended
+    // after the ordered ones, so a partial/stale order never drops a real column.
+    const byId = new Map(base.map((f) => [f.id, f]))
+    const seen = new Set<string>()
+    const ordered: typeof base = []
+    for (const id of fieldOrder.value) {
+      const f = byId.get(id)
+      if (f && !seen.has(id)) { ordered.push(f); seen.add(id) }
+    }
+    for (const f of base) {
+      if (!seen.has(f.id)) ordered.push(f)
+    }
+    return ordered
+  })
   const readOnlyFieldIds = computed(() =>
     fields.value
       .filter((field) => fieldPermissions.value[field.id]?.readOnly === true)
@@ -736,7 +757,7 @@ export function useMultitableGrid(opts: {
     }
   }
 
-  function syncFromView(view: { filterInfo?: Record<string, unknown>; sortInfo?: Record<string, unknown>; hiddenFieldIds?: string[] }) {
+  function syncFromView(view: { filterInfo?: Record<string, unknown>; sortInfo?: Record<string, unknown>; hiddenFieldIds?: string[]; fieldOrder?: string[] }) {
     // Parse server sort
     if (view.sortInfo && Array.isArray((view.sortInfo as any).rules)) {
       sortRules.value = ((view.sortInfo as any).rules as any[]).map((r: any) => ({
@@ -756,6 +777,11 @@ export function useMultitableGrid(opts: {
       nestedFilterNodes.value = tree && tree.nodes.some(isFilterGroup) ? tree.nodes : null
     }
     if (view.hiddenFieldIds) hiddenFieldIds.value = [...view.hiddenFieldIds]
+    // Slice 3b: capture the effective (server-resolved, personal-overlay-applied) column order for this view.
+    // Only string ids are kept; membership is NOT validated here — visibleFields fail-softs stale/unknown ids.
+    fieldOrder.value = Array.isArray(view.fieldOrder)
+      ? view.fieldOrder.filter((id): id is string => typeof id === 'string')
+      : []
     // Dual-read for back-compat: prefer the NEW ordered groupInfo.fieldIds; fall back to the legacy
     // single groupInfo.fieldId so views persisted before nested grouping keep their (one) group level.
     const gi = (view as any).groupInfo as { fieldId?: unknown; fieldIds?: unknown } | undefined

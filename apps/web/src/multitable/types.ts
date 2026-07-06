@@ -79,10 +79,10 @@ export interface MetaView {
   // fallback (dual-read) for back-compat. Kanban/Gantt keep using `{ fieldId }` on their own views.
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
-  // Slice 2 (per-user field order): present only when the personal-views flag is on AND this actor has a
-  // fieldOrder override — the server already resolves/merges it (applyPersonalViewOverlay), so the FE never
-  // computes this itself. Absent otherwise (sheet-global order stands). No FE consumer renders this yet —
-  // see docs/development/multitable-personal-views-slice3-fe-verification-20260706.md for the follow-up.
+  // Slice 2/3b (per-view, incl. per-user personal overlay, column order): the server resolves/merges the
+  // effective order onto this field (applyPersonalViewOverlay) — the FE never computes the merge. Slice 3b's
+  // grid consumer (useMultitableGrid `visibleFields`) renders columns in this order, FAIL-SOFT on
+  // stale/unknown/hidden ids. Absent ⇒ natural field order (server `field.order`).
   fieldOrder?: string[]
   config?: Record<string, unknown>
 }
