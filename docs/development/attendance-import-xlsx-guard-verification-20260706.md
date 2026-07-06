@@ -37,3 +37,14 @@
 - **P3 follow-up（owner 复审提出，不挡合）**：`handleImportCsvChange` 异步 sniff 在快速连续选择两个文件时，慢返回可能覆盖新选择；下次触碰该文件顺手加 `target.files?.[0] === file` 确认后再写状态。
 - 后端 `plugins/plugin-attendance` 零改动；正常 CSV 路径逐字节不变（回归测试锁住）。
 - **客户即时话术**：请将 Excel 另存为 CSV（逗号分隔，建议 UTF-8）后重新导入；升级后选错文件会当场提示。
+
+## 5. 追加验证（2026-07-06 自主批次）：选文件异步竞态守卫（lock §7）
+
+PR #3729 MERGED（squash `0315bcf3c`）。owner 复审时点名的 P3 follow-up 落地：`handleImportCsvChange`
+在 sniff 返回后、写任何状态前确认 input 仍持有该文件（shell `target.files[0]` identity /
+composable `extractFileFromEvent` 等价语义），迟到结论（放行/拦截）一律丢弃——迟到拦截清空
+input 毁掉新选择的最坏情形被堵死。验证：可控 resolve File-like 复现慢 A 快 B（迟到拦截+迟到
+放行两变体 + 真挂载 shell 路径）；mutation 双向（摘任一守卫 → 对应测试红 → 还原绿）；201 测绿
++ typecheck 干净。对抗审阅（opus）APPROVE——其唯一 P2（"import spec 不在 CI"）经硬证据证伪
+（web-guard run 行实为 14-spec，#3729 的 run 28808742022 实跑 success），判定为 effective
+APPROVE 0 P1/P2；审阅与自审双 MD 留痕于 PR 评论。
