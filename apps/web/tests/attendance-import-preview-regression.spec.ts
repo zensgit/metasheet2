@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { apiFetch } from '../src/utils/api'
+import { useLocale } from '../src/composables/useLocale'
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -248,5 +249,104 @@ describe('Attendance import preview regression', () => {
         method: 'POST',
       }),
     )
+  })
+
+  it('blocks selecting an Excel .xlsx in the CSV import input: no import API call, actionable zh guidance', async () => {
+    const { locale, setLocale } = useLocale()
+    const previousLocale = locale.value
+    setLocale('zh-CN')
+    try {
+      const apiFetchMock = vi.mocked(apiFetch)
+      apiFetchMock.mockImplementation(async () => jsonResponse(200, {
+        ok: true,
+        data: { items: [], summary: null },
+      }))
+
+      app = createApp(AttendanceView, { mode: 'admin' })
+      const vm = app.mount(container!)
+      await flushUi(6)
+      apiFetchMock.mockClear()
+
+      const input = container!.querySelector('#attendance-import-csv') as HTMLInputElement | null
+      expect(input, 'expected csv file input').toBeTruthy()
+
+      const xlsx = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], '6月考勤(5).xlsx', {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      })
+      Object.defineProperty(input!, 'files', { value: [xlsx], configurable: true })
+      input!.dispatchEvent(new Event('change'))
+      await flushUi(6)
+
+      const importApiCalls = apiFetchMock.mock.calls.filter(call =>
+        String(call[0]).includes('/api/attendance/import'))
+      expect(importApiCalls).toHaveLength(0)
+
+      const setupState = (vm as any).$?.setupState as Record<string, unknown>
+      expect(unwrapRef<File | null>(setupState.importCsvFile)).toBeNull()
+      expect(unwrapRef<string>(setupState.importCsvFileName)).toBe('')
+      expect(container!.textContent).toContain('检测到 Excel 文件')
+      expect(container!.textContent).toContain('另存为')
+      expect(unwrapRef<Record<string, unknown> | null>(setupState.statusMeta)?.action).toBe('retry-preview-import')
+    } finally {
+      setLocale(previousLocale)
+    }
+  })
+
+  it('maps import VALIDATION_ERROR to actionable zh copy per server diagnostic, keeping the code chip', async () => {
+    const { locale, setLocale } = useLocale()
+    const previousLocale = locale.value
+    setLocale('zh-CN')
+    try {
+      const apiFetchMock = vi.mocked(apiFetch)
+      let previewRequestCount = 0
+      apiFetchMock.mockImplementation(async (path: string) => {
+        const url = String(path)
+        if (url.startsWith('/api/attendance/import/prepare')) {
+          return jsonResponse(200, {
+            ok: true,
+            data: { commitToken: 'token-validation', expiresAt: '2099-01-01T00:00:00.000Z' },
+          })
+        }
+        if (url.startsWith('/api/attendance/import/preview')) {
+          previewRequestCount += 1
+          return jsonResponse(400, {
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: previewRequestCount === 1
+                ? 'No rows to preview. CSV content did not yield any non-empty rows.'
+                : 'CSV header must include a work date column and at least one user or attendance column',
+            },
+          })
+        }
+        return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+      })
+
+      app = createApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      await flushUi(6)
+
+      const zhHeading = Array.from(container!.querySelectorAll('h4')).find(
+        candidate => candidate.textContent?.includes('导入（钉钉')
+      )
+      expect(zhHeading, 'expected zh import section heading').toBeTruthy()
+      const importSection = zhHeading!.closest('.attendance__admin-section') as HTMLElement
+
+      // Server "No rows to preview…" → row-specific zh copy + Save-As-CSV hint.
+      findButton(importSection, '预览').click()
+      await flushUi(6)
+      expect(container!.textContent).toContain('文件未解析出可导入的数据行')
+      expect(container!.textContent).toContain('另存为 → CSV')
+      expect(container!.textContent).toContain('VALIDATION_ERROR')
+
+      // Server header-missing diagnostic → header-specific zh copy.
+      findButton(importSection, '预览').click()
+      await flushUi(6)
+      expect(previewRequestCount).toBe(2)
+      expect(container!.textContent).toContain('CSV 表头缺少必需列')
+      expect(container!.textContent).toContain('VALIDATION_ERROR')
+    } finally {
+      setLocale(previousLocale)
+    }
   })
 })

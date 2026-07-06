@@ -1,6 +1,7 @@
 import { computed, reactive, ref, watch, type Ref } from 'vue'
 import { apiFetch as baseApiFetch } from '../../utils/api'
 import { normalizeImportPayloadColumns } from './attendanceImportPayload'
+import { blockedSpreadsheetMessage, detectSpreadsheetByName, inspectImportFile } from './importFileGuard'
 
 type ApiFetchFn = typeof baseApiFetch
 type Translate = (en: string, zh: string) => string
@@ -1318,8 +1319,24 @@ export function useAttendanceAdminImportWorkflow({
     importCsvFileExpiresAt.value = ''
   }
 
-  function handleImportCsvChange(event: Event) {
-    setImportCsvFile(extractFileFromEvent(event))
+  async function handleImportCsvChange(event: Event) {
+    const file = extractFileFromEvent(event)
+    if (file) {
+      const verdict = await inspectImportFile(file)
+      if (!verdict.ok) {
+        setImportCsvFile(null)
+        const blocked = blockedSpreadsheetMessage(verdict.kind)
+        reportStatus(tr(blocked.en, blocked.zh), 'error', {
+          context: 'import-preview',
+          hint: tr('Save the file as CSV, then re-select it.', '请另存为 CSV 后重新选择文件。'),
+          action: 'retry-preview-import',
+        })
+        const input = event.target as HTMLInputElement | null
+        if (input) input.value = ''
+        return
+      }
+    }
+    setImportCsvFile(file)
   }
 
   async function loadImportUserMapFile(file: File | null) {
@@ -1488,6 +1505,8 @@ export function useAttendanceAdminImportWorkflow({
       method: 'POST',
       body: file as unknown as BodyInit,
       headers: {
+        // Upstream importFileGuard already blocks spreadsheets, so normalizing a
+        // Windows .csv's application/vnd.ms-excel MIME to text/csv here is safe.
         'Content-Type': file?.type && file.type.toLowerCase().includes('csv') ? file.type : 'text/csv',
       },
     })
@@ -1523,6 +1542,15 @@ export function useAttendanceAdminImportWorkflow({
 
     try {
       const file = importCsvFile.value
+      const blockedKind = detectSpreadsheetByName(file?.name)
+      if (blockedKind) {
+        const blocked = blockedSpreadsheetMessage(blockedKind)
+        reportStatus(tr(blocked.en, blocked.zh), 'error', {
+          context: 'import-preview',
+          action: 'retry-preview-import',
+        })
+        return
+      }
       const base = parseAttendanceImportJsonConfig(importForm.payload) ?? {}
       const next: Record<string, any> = {
         ...base,

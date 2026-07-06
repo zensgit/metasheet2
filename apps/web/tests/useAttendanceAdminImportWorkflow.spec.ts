@@ -628,4 +628,78 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(workflow.importCommitTokenExpiresAt.value).toBe('')
     expect(setStatus).toHaveBeenCalledWith('Imported 2 rows. (processed=2, failed=0, elapsedMs=0)', 'info', undefined)
   })
+
+  it('blocks an Excel .xlsx at selection: no apiFetch, actionable zh error, file not stored', async () => {
+    const readFileText = vi.fn(async () => 'should-not-be-read')
+    const { workflow, apiFetch, setStatus } = createWorkflow({
+      readFileText,
+      tr: (_en: string, zh: string) => zh,
+    })
+    const xlsx = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], '6月考勤(5).xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+    const input = { files: [xlsx], value: '6月考勤(5).xlsx' }
+
+    await workflow.handleImportCsvChange({ target: input } as unknown as Event)
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(readFileText).not.toHaveBeenCalled()
+    expect(workflow.importCsvFile.value).toBeNull()
+    expect(workflow.importCsvFileName.value).toBe('')
+    expect(input.value).toBe('')
+    expect(setStatus).toHaveBeenCalledTimes(1)
+    const [message, kind, meta] = setStatus.mock.calls[0]
+    expect(kind).toBe('error')
+    expect(message).toContain('另存为')
+    expect(message).toContain('CSV')
+    expect(meta?.action).toBe('retry-preview-import')
+  })
+
+  it('blocks a spreadsheet renamed to .csv via magic bytes at selection', async () => {
+    const { workflow, apiFetch, setStatus } = createWorkflow({
+      tr: (_en: string, zh: string) => zh,
+    })
+    const renamed = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], 'data.csv', { type: 'text/csv' })
+
+    await workflow.handleImportCsvChange({ target: { files: [renamed], value: 'data.csv' } } as unknown as Event)
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(workflow.importCsvFile.value).toBeNull()
+    expect(setStatus).toHaveBeenCalledTimes(1)
+    expect(setStatus.mock.calls[0][0]).toContain('另存为')
+    expect(setStatus.mock.calls[0][1]).toBe('error')
+  })
+
+  it('still accepts a normal csv through handleImportCsvChange', async () => {
+    const { workflow, apiFetch, setStatus } = createWorkflow()
+    const csv = new File(['userId,workDate\nu-1,2026-03-12\n'], 'attendance.csv', { type: 'text/csv' })
+
+    await workflow.handleImportCsvChange({ target: { files: [csv], value: 'attendance.csv' } } as unknown as Event)
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(setStatus).not.toHaveBeenCalled()
+    expect(workflow.importCsvFile.value).toBe(csv)
+    expect(workflow.importCsvFileName.value).toBe('attendance.csv')
+  })
+
+  it('defensively blocks applyImportCsvFile when a spreadsheet file slipped into state', async () => {
+    const readFileText = vi.fn(async () => 'should-not-be-read')
+    const { workflow, apiFetch, setStatus } = createWorkflow({
+      readFileText,
+      tr: (_en: string, zh: string) => zh,
+    })
+    const xlsx = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], '6月考勤(5).xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+    workflow.setImportCsvFile(xlsx)
+
+    await workflow.applyImportCsvFile()
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(readFileText).not.toHaveBeenCalled()
+    expect(setStatus).toHaveBeenCalledTimes(1)
+    expect(setStatus.mock.calls[0][0]).toContain('另存为')
+    expect(setStatus.mock.calls[0][1]).toBe('error')
+    expect(JSON.parse(workflow.importForm.payload || '{}').csvText).toBeUndefined()
+  })
 })
