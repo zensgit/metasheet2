@@ -9638,6 +9638,11 @@ import {
   type ImportOverrideConfirmLine,
   type ImportPreviewRangeSummary,
 } from './attendance/importOverrideGuard'
+import {
+  blockedSpreadsheetMessage,
+  detectSpreadsheetByName,
+  inspectImportFile,
+} from './attendance/importFileGuard'
 import { resolveMakeupPunchRequestStatusCopy } from './attendance/makeupPunchRequestStatus'
 import {
   buildPunchRetryWithNotePayload,
@@ -18011,9 +18016,26 @@ function normalizeUserMapPayload(payload: any, keyField: string): Record<string,
   return null
 }
 
-function handleImportCsvChange(event: Event) {
+async function handleImportCsvChange(event: Event) {
   const target = event.target as HTMLInputElement
   const file = target?.files?.[0] ?? null
+  if (file) {
+    const verdict = await inspectImportFile(file)
+    if (!verdict.ok) {
+      importCsvFile.value = null
+      importCsvFileName.value = ''
+      importCsvFileId.value = ''
+      importCsvFileRowCountHint.value = null
+      importCsvFileExpiresAt.value = ''
+      const blocked = blockedSpreadsheetMessage(verdict.kind)
+      setStatus(tr(blocked.en, blocked.zh), 'error', {
+        hint: tr('Save the file as CSV, then re-select it.', '请另存为 CSV 后重新选择文件。'),
+        action: 'retry-preview-import',
+      })
+      if (target) target.value = ''
+      return
+    }
+  }
   importCsvFile.value = file
   importCsvFileName.value = file?.name ?? ''
   importCsvFileId.value = ''
@@ -18060,6 +18082,8 @@ async function uploadImportCsvFile(file: File): Promise<{ fileId: string; rowCou
     method: 'POST',
     body: file,
     headers: {
+      // Upstream importFileGuard already blocks spreadsheets, so normalizing a
+      // Windows .csv's application/vnd.ms-excel MIME to text/csv here is safe.
       'Content-Type': file?.type && file.type.toLowerCase().includes('csv') ? file.type : 'text/csv',
     },
   })
@@ -18086,6 +18110,12 @@ async function applyImportCsvFile() {
   }
   try {
     const file = importCsvFile.value
+    const blockedKind = detectSpreadsheetByName(file?.name)
+    if (blockedKind) {
+      const blocked = blockedSpreadsheetMessage(blockedKind)
+      setStatus(tr(blocked.en, blocked.zh), 'error', { action: 'retry-preview-import' })
+      return
+    }
     const base = parseJsonConfig(importForm.payload) ?? {}
     const next: Record<string, any> = {
       ...base,
@@ -19162,6 +19192,27 @@ function classifyStatusError(
       : tr('CSV upload exceeds server size limit.', 'CSV 上传超过服务端大小限制。')
     meta.hint = tr('Use a smaller file or split the CSV by date/user range, then retry.', '请缩小文件或按日期/用户拆分 CSV 后重试。')
     meta.action = 'reload-import-csv'
+  } else if (
+    (context === 'import-preview' || context === 'import-run')
+    && code === 'VALIDATION_ERROR'
+  ) {
+    // The server sends a descriptive English diagnostic ("No rows to import…" /
+    // "CSV header must include…"), but localizeRuntimeErrorMessage drops
+    // unmatched Latin-only text under a zh UI, leaving only the bare code chip.
+    // Surface an actionable message instead (meta.code stays set above, so the
+    // support-facing code chip is unchanged).
+    if (/no rows to import/i.test(originalMessage)) {
+      message = tr('The file produced no importable rows.', '文件未解析出可导入的数据行。')
+    } else if (/header must include/i.test(originalMessage)) {
+      message = tr('The CSV header is missing required columns.', 'CSV 表头缺少必需列。')
+    } else {
+      message = tr('Import content failed validation.', '导入内容校验未通过。')
+    }
+    meta.hint = tr(
+      'Make sure the file is a CSV (not Excel .xlsx/.xls) and includes date and name/user-id columns; for a DingTalk export, use Save As → CSV first.',
+      '请确认为 CSV 文件（非 Excel .xlsx/.xls），且包含「日期」与「姓名/工号」列；若是钉钉导出的 Excel，请先「另存为 → CSV」。',
+    )
+    meta.action = context === 'import-run' ? 'retry-run-import' : 'retry-preview-import'
   } else if (code === 'IMPORT_JOB_TIMEOUT') {
     message = tr('Async import job is still running in background.', '异步导入任务仍在后台运行。')
     meta.hint = tr('Use "Resume import job" to continue polling, or open the async job card for manual controls.', '可点击“恢复导入任务”继续轮询，或在异步任务卡片中手动处理。')

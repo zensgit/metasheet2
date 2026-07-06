@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { apiFetch } from '../src/utils/api'
+import { useLocale } from '../src/composables/useLocale'
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -248,5 +249,45 @@ describe('Attendance import preview regression', () => {
         method: 'POST',
       }),
     )
+  })
+
+  it('blocks selecting an Excel .xlsx in the CSV import input: no import API call, actionable zh guidance', async () => {
+    const { setLocale } = useLocale()
+    setLocale('zh-CN')
+    try {
+      const apiFetchMock = vi.mocked(apiFetch)
+      apiFetchMock.mockImplementation(async () => jsonResponse(200, {
+        ok: true,
+        data: { items: [], summary: null },
+      }))
+
+      app = createApp(AttendanceView, { mode: 'admin' })
+      const vm = app.mount(container!)
+      await flushUi(6)
+      apiFetchMock.mockClear()
+
+      const input = container!.querySelector('#attendance-import-csv') as HTMLInputElement | null
+      expect(input, 'expected csv file input').toBeTruthy()
+
+      const xlsx = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], '6月考勤(5).xlsx', {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      })
+      Object.defineProperty(input!, 'files', { value: [xlsx], configurable: true })
+      input!.dispatchEvent(new Event('change'))
+      await flushUi(6)
+
+      const importApiCalls = apiFetchMock.mock.calls.filter(call =>
+        String(call[0]).includes('/api/attendance/import'))
+      expect(importApiCalls).toHaveLength(0)
+
+      const setupState = (vm as any).$?.setupState as Record<string, unknown>
+      expect(unwrapRef<File | null>(setupState.importCsvFile)).toBeNull()
+      expect(unwrapRef<string>(setupState.importCsvFileName)).toBe('')
+      expect(container!.textContent).toContain('检测到 Excel 文件')
+      expect(container!.textContent).toContain('另存为')
+      expect(unwrapRef<Record<string, unknown> | null>(setupState.statusMeta)?.action).toBe('retry-preview-import')
+    } finally {
+      setLocale('en')
+    }
   })
 })
