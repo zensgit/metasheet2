@@ -144,11 +144,13 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
     const storedSecret = `cdw-stored-secret-${TS}`
     const prev = process.env.APPROVAL_CARD_LINK_SECRET
     delete process.env.APPROVAL_CARD_LINK_SECRET
-    // Far-future updated_at so the resolver's "active first, most recent" pick lands on this row
-    // even in the shared plugin-tests database; removed in finally (shared-DB fixture discipline).
+    // Freshest updated_at (now()) so the resolver's "active first, most recent" pick lands on this
+    // row in the shared plugin-tests database; removed in finally (shared-DB fixture discipline).
+    // Deliberately NOT far-future: if a crash ever skips the finally, a now() row cannot
+    // permanently shadow later-updated real integrations.
     const inserted = await q(
       `INSERT INTO directory_integrations (name, provider, status, corp_id, config, updated_at)
-       VALUES ($1, 'dingtalk', 'active', $2, $3::jsonb, '2099-01-01T00:00:00Z')
+       VALUES ($1, 'dingtalk', 'active', $2, $3::jsonb, now())
        RETURNING id`,
       [`cdw-card-config-${TS}`, `corp_cdw_${TS}`, JSON.stringify({ approvalCardLinkSecret: normalizeStoredSecretValue(storedSecret) })],
     )
