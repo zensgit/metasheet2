@@ -522,6 +522,37 @@ describe('Attendance import preview regression', () => {
     expect(warning!.textContent).toContain('No date column found')
   })
 
+  it('race guard: a stale sniff verdict cannot clobber a newer selection in the shell handler', async () => {
+    mockTemplateEndpoint()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+
+    let releaseSlow!: (buffer: ArrayBuffer) => void
+    const slowFile = {
+      name: 'slow.csv',
+      slice: () => ({ arrayBuffer: () => new Promise<ArrayBuffer>(resolve => { releaseSlow = resolve }) }),
+    }
+    const fastFile = new File(['姓名,日期\n张三,2026-06-01\n'], 'fast.csv', { type: 'text/csv' })
+
+    const sharedInput = { files: [slowFile], value: 'slow.csv' }
+    const pending = setupState.handleImportCsvChange({ target: sharedInput })
+    sharedInput.files = [fastFile]
+    sharedInput.value = 'fast.csv'
+    await setupState.handleImportCsvChange({ target: sharedInput })
+
+    releaseSlow(new Uint8Array([0x50, 0x4b, 0x03, 0x04]).buffer)
+    await pending
+    await flushUi(4)
+
+    expect(unwrapRef<File | null>(setupState.importCsvFile)).toBe(fastFile)
+    expect(unwrapRef<string>(setupState.importCsvFileName)).toBe('fast.csv')
+    expect(sharedInput.value).toBe('fast.csv')
+    expect(container!.textContent).not.toContain('This looks like an Excel file')
+  })
+
   it('advanced options collapse by default; core fields stay visible; toggle expands', async () => {
     mockTemplateEndpoint()
 

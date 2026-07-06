@@ -18238,6 +18238,10 @@ async function handleImportCsvChange(event: Event) {
   importCsvRecognition.value = null
   if (file) {
     const verdict = await inspectImportFile(file)
+    // Rapid re-selection race (xlsx-guard lock §7): the sniff is async — if the
+    // input no longer holds this file, a newer selection owns the state now;
+    // drop this stale verdict (accepting OR blocking) instead of clobbering it.
+    if ((target?.files?.[0] ?? null) !== file) return
     if (!verdict.ok) {
       importCsvFile.value = null
       importCsvFileName.value = ''

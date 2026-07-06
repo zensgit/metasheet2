@@ -1323,6 +1323,10 @@ export function useAttendanceAdminImportWorkflow({
     const file = extractFileFromEvent(event)
     if (file) {
       const verdict = await inspectImportFile(file)
+      // Rapid re-selection race (xlsx-guard lock §7): if the input no longer
+      // holds this file, a newer selection owns the state — drop this stale
+      // verdict (accepting OR blocking) instead of clobbering it.
+      if (extractFileFromEvent(event) !== file) return
       if (!verdict.ok) {
         setImportCsvFile(null)
         const blocked = blockedSpreadsheetMessage(verdict.kind)

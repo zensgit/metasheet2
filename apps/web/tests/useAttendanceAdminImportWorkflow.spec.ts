@@ -670,6 +670,53 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(setStatus.mock.calls[0][1]).toBe('error')
   })
 
+  it('race guard: a stale BLOCKED verdict cannot clobber a newer selection', async () => {
+    const { workflow, setStatus } = createWorkflow({ tr: (_en: string, zh: string) => zh })
+    let releaseSlow!: (buffer: ArrayBuffer) => void
+    const slowFile = {
+      name: 'slow.csv',
+      slice: () => ({ arrayBuffer: () => new Promise<ArrayBuffer>(resolve => { releaseSlow = resolve }) }),
+    } as unknown as File
+    const fastFile = new File(['userId,workDate\nu-1,2026-03-12\n'], 'fast.csv', { type: 'text/csv' })
+
+    const sharedInput = { files: [slowFile], value: 'slow.csv' }
+    const pending = workflow.handleImportCsvChange({ target: sharedInput } as unknown as Event)
+    sharedInput.files = [fastFile]
+    sharedInput.value = 'fast.csv'
+    await workflow.handleImportCsvChange({ target: sharedInput } as unknown as Event)
+    expect(workflow.importCsvFile.value).toBe(fastFile)
+
+    releaseSlow(new Uint8Array([0x50, 0x4b, 0x03, 0x04]).buffer)
+    await pending
+
+    expect(workflow.importCsvFile.value).toBe(fastFile)
+    expect(workflow.importCsvFileName.value).toBe('fast.csv')
+    expect(sharedInput.value).toBe('fast.csv')
+    expect(setStatus).not.toHaveBeenCalled()
+  })
+
+  it('race guard: a stale ACCEPT verdict cannot overwrite the newer file either', async () => {
+    const { workflow } = createWorkflow()
+    let releaseSlow!: (buffer: ArrayBuffer) => void
+    const slowFile = {
+      name: 'slow.csv',
+      slice: () => ({ arrayBuffer: () => new Promise<ArrayBuffer>(resolve => { releaseSlow = resolve }) }),
+    } as unknown as File
+    const fastFile = new File(['userId,workDate\nu-1,2026-03-12\n'], 'fast.csv', { type: 'text/csv' })
+
+    const sharedInput = { files: [slowFile], value: 'slow.csv' }
+    const pending = workflow.handleImportCsvChange({ target: sharedInput } as unknown as Event)
+    sharedInput.files = [fastFile]
+    sharedInput.value = 'fast.csv'
+    await workflow.handleImportCsvChange({ target: sharedInput } as unknown as Event)
+
+    releaseSlow(new TextEncoder().encode('userId,w').buffer as ArrayBuffer)
+    await pending
+
+    expect(workflow.importCsvFile.value).toBe(fastFile)
+    expect(workflow.importCsvFileName.value).toBe('fast.csv')
+  })
+
   it('still accepts a normal csv through handleImportCsvChange', async () => {
     const { workflow, apiFetch, setStatus } = createWorkflow()
     const csv = new File(['userId,workDate\nu-1,2026-03-12\n'], 'attendance.csv', { type: 'text/csv' })
