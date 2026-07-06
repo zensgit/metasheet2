@@ -19,6 +19,15 @@ describe('resolveStatusDisplay (pure)', () => {
     expect(resolveStatusDisplay('approvalInstance', 'cancelled', true)).toEqual({ tone: 'info', label: '已取消' })
   })
 
+  it('maps approvalTemplate tones: published -> success, draft -> warning, archived -> info', () => {
+    expect(resolveStatusDisplay('approvalTemplate', 'published', true)).toEqual({ tone: 'success', label: '已发布' })
+    expect(resolveStatusDisplay('approvalTemplate', 'draft', true)).toEqual({ tone: 'warning', label: '草稿' })
+    expect(resolveStatusDisplay('approvalTemplate', 'archived', true)).toEqual({ tone: 'info', label: '已归档' })
+    expect(resolveStatusDisplay('approvalTemplate', 'published', false)).toEqual({ tone: 'success', label: 'Published' })
+    expect(resolveStatusDisplay('approvalTemplate', 'draft', false)).toEqual({ tone: 'warning', label: 'Draft' })
+    expect(resolveStatusDisplay('approvalTemplate', 'archived', false)).toEqual({ tone: 'info', label: 'Archived' })
+  })
+
   it('maps delegation tones exactly per the existing DELEGATION_STATUS_TAG_TYPE semantics', () => {
     expect(resolveStatusDisplay('delegation', '未开始', true)).toEqual({ tone: 'info', label: '未开始' })
     expect(resolveStatusDisplay('delegation', '生效中', true)).toEqual({ tone: 'success', label: '生效中' })
@@ -48,6 +57,7 @@ describe('resolveStatusDisplay (pure)', () => {
   it('fail-safe: an unknown status per domain renders tone "neutral" and the raw status as label (never throws, never blank)', () => {
     expect(resolveStatusDisplay('approvalInstance', 'draft', true)).toEqual({ tone: 'neutral', label: 'draft' })
     expect(resolveStatusDisplay('approvalInstance', 'totally-unknown-status', false)).toEqual({ tone: 'neutral', label: 'totally-unknown-status' })
+    expect(resolveStatusDisplay('approvalTemplate', 'not-a-real-template-status', true)).toEqual({ tone: 'neutral', label: 'not-a-real-template-status' })
     expect(resolveStatusDisplay('delegation', 'not-a-real-delegation-status', true)).toEqual({ tone: 'neutral', label: 'not-a-real-delegation-status' })
     expect(resolveStatusDisplay('automationRun', 'not-a-real-automation-status', false)).toEqual({ tone: 'neutral', label: 'not-a-real-automation-status' })
     expect(() => resolveStatusDisplay('approvalInstance', '', true)).not.toThrow()
@@ -128,6 +138,9 @@ describe('StatusTag.vue (mounted)', () => {
       ['approvalInstance', 'rejected'],
       ['approvalInstance', 'pending'],
       ['approvalInstance', 'revoked'],
+      ['approvalTemplate', 'published'],
+      ['approvalTemplate', 'draft'],
+      ['approvalTemplate', 'archived'],
       ['delegation', '未开始'],
       ['delegation', '生效中'],
       ['delegation', '已过期'],

@@ -130,13 +130,7 @@
       </el-table-column>
       <el-table-column label="状态" width="100">
         <template #default="{ row }">
-          <el-tag
-            :type="templateStatusTagType(row.status)"
-            size="small"
-            :effect="row.status === 'published' ? 'dark' : 'light'"
-          >
-            {{ templateStatusLabel(row.status) }}
-          </el-tag>
+          <StatusTag domain="approvalTemplate" :status="row.status" size="sm" />
         </template>
       </el-table-column>
       <el-table-column label="最近更新" width="180">
@@ -194,6 +188,7 @@
 <script setup lang="ts">
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
+import StatusTag from '../../components/status/StatusTag.vue'
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
@@ -218,24 +213,6 @@ const categories = ref<string[]>([])
 const cloningId = ref<string | null>(null)
 const currentPage = ref(1)
 const pageSize = ref(10)
-
-function templateStatusTagType(status: string) {
-  const map: Record<string, string> = {
-    published: 'success',
-    draft: 'warning',
-    archived: 'info',
-  }
-  return map[status] ?? ''
-}
-
-function templateStatusLabel(status: string) {
-  const map: Record<string, string> = {
-    published: '已发布',
-    draft: '草稿',
-    archived: '已归档',
-  }
-  return map[status] ?? status
-}
 
 function visibilityScopeLabel(scope: ApprovalTemplateListItemDTO['visibilityScope']) {
   if (!scope || scope.type === 'all') return '全员可见'

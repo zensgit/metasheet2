@@ -8,13 +8,7 @@
       @back="goBack"
     >
       <template v-if="template" #meta>
-        <el-tag
-          :type="statusTagType(template.status)"
-          size="large"
-          :effect="template.status === 'published' ? 'dark' : 'light'"
-        >
-          {{ statusLabel(template.status) }}
-        </el-tag>
+        <StatusTag domain="approvalTemplate" :status="template.status" />
       </template>
       <template v-if="template" #actions>
         <el-button
@@ -361,6 +355,7 @@
 import { computed, onMounted, ref } from 'vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
+import StatusTag from '../../components/status/StatusTag.vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Flag,
@@ -540,24 +535,6 @@ async function saveVisibility() {
   } finally {
     visibilitySaving.value = false
   }
-}
-
-function statusTagType(status: string) {
-  const map: Record<string, string> = {
-    published: 'success',
-    draft: 'warning',
-    archived: 'info',
-  }
-  return map[status] ?? ''
-}
-
-function statusLabel(status: string) {
-  const map: Record<string, string> = {
-    published: '已发布',
-    draft: '草稿',
-    archived: '已归档',
-  }
-  return map[status] ?? status
 }
 
 function fieldTypeLabel(type: FormFieldType) {
