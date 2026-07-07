@@ -1,44 +1,56 @@
 <template>
-  <section class="integration-workbench">
-    <header class="integration-workbench__header">
-      <div>
-        <p class="integration-workbench__eyebrow">Data Factory</p>
-        <h1>数据工厂</h1>
-        <p class="integration-workbench__lead">连接任意 CRM / PLM / ERP / SRM / HTTP / SQL 系统，把数据落到多维表清洗后，先 dry-run，再导出或 Save-only 推送。</p>
-      </div>
-      <div class="integration-workbench__header-links">
-        <router-link class="integration-workbench__k3-link" to="/integrations/k3-wise">K3 WISE 预设模板</router-link>
-        <router-link class="integration-workbench__k3-link" to="/help/integration" data-testid="integration-help-link">
-          {{ bi('帮助', 'Help') }}
-        </router-link>
-      </div>
-    </header>
+  <PageShell width="wide">
+    <section class="integration-workbench">
+      <p class="integration-workbench__eyebrow">Data Factory</p>
+      <PageHeader title="数据工厂" subtitle="连接任意 CRM / PLM / ERP / SRM / HTTP / SQL 系统，把数据落到多维表清洗后，先 dry-run，再导出或 Save-only 推送。">
+        <template #actions>
+          <div class="integration-workbench__header-links">
+            <router-link class="integration-workbench__k3-link" to="/integrations/k3-wise">K3 WISE 预设模板</router-link>
+            <router-link class="integration-workbench__k3-link" to="/help/integration" data-testid="integration-help-link">
+              {{ bi('帮助', 'Help') }}
+            </router-link>
+          </div>
+        </template>
+      </PageHeader>
 
-    <nav class="integration-workbench__flow" aria-label="data factory flow" data-testid="data-factory-flow">
-      <div v-for="step in flowSteps" :key="step.title" class="integration-workbench__flow-step">
-        <strong>{{ step.title }}</strong>
-        <span>{{ step.description }}</span>
+      <nav class="integration-workbench__flow" aria-label="data factory flow" data-testid="data-factory-flow">
+        <div v-for="step in flowSteps" :key="step.title" class="integration-workbench__flow-step">
+          <strong>{{ step.title }}</strong>
+          <span>{{ step.description }}</span>
+        </div>
+      </nav>
+      <div class="integration-workbench__quick-flow" data-testid="data-factory-quick-flow">
+        <strong>操作路径</strong>
+        <span>1. 选来源系统 -> 2. 选来源数据集 -> 3. 选目标系统 -> 4. 选目标数据集 -> 5. 配映射 -> 6. Dry-run -> 7. 推送</span>
       </div>
-    </nav>
-    <div class="integration-workbench__quick-flow" data-testid="data-factory-quick-flow">
-      <strong>操作路径</strong>
-      <span>1. 选来源系统 -> 2. 选来源数据集 -> 3. 选目标系统 -> 4. 选目标数据集 -> 5. 配映射 -> 6. Dry-run -> 7. 推送</span>
-    </div>
 
-    <div v-if="statusMessage" class="integration-workbench__status" :data-kind="statusKind">
-      {{ statusMessage }}
-    </div>
+      <div v-if="statusMessage" class="integration-workbench__status" :data-kind="statusKind">
+        {{ statusMessage }}
+      </div>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>连接系统 / 数据源</h2>
+      <div class="integration-workbench__body">
+        <IntegrationWorkbenchRail
+          :groups="railGroups"
+          :active-group-id="activeRailGroupId"
+          :tr="bi"
+          @select="scrollToRailGroup"
+        />
+        <div class="integration-workbench__sections">
+
+    <section id="int-sec-connection" class="integration-workbench__panel">
+      <el-card shadow="never">
+        <template #header>
+          <div class="integration-workbench__panel-head">
+            <div>
+              <h2>连接系统 / 数据源</h2>
           <p>普通用户选择已配置连接；SQL 通道是高级连接，只用于 allowlist 表、视图或中间表。</p>
         </div>
         <button type="button" class="integration-workbench__button" data-testid="refresh-systems" @click="refreshBootstrap">
           刷新连接
         </button>
       </div>
+        </template>
+
 
       <div class="integration-workbench__onboarding" data-testid="connection-onboarding">
         <div>
@@ -258,45 +270,65 @@
           <input v-model="workspaceInput" data-testid="workspace-id" placeholder="可选" />
         </label>
       </div>
+      </el-card>
     </section>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>读取源配置(顾问自助)</h2>
+    <section id="int-sec-read-source" class="integration-workbench__panel">
+      <el-card shadow="never">
+        <template #header>
+          <div class="integration-workbench__panel-head">
+            <div>
+              <h2>读取源配置(顾问自助)</h2>
           <p>标准化第三方 API 只读读取源:S1 结构校验 → 定位容器探测 → 内容寻址保存版本 → 审批。运行时只消费已审批版本;本面板不含写入 / 删除。</p>
         </div>
       </div>
+        </template>
+
       <IntegrationReadSourceConfigPanel :scope="currentScope()" :systems="systems" />
+      </el-card>
     </section>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>读取源组合配置(顾问/管理员自助)</h2>
+    <section id="int-sec-combination-config" class="integration-workbench__panel">
+      <el-card shadow="never">
+        <template #header>
+          <div class="integration-workbench__panel-head">
+            <div>
+              <h2>读取源组合配置(顾问/管理员自助)</h2>
           <p>选择两个已审批的 resolver_lookup 读取源,组装成两跳组合:保存版本(内容寻址,幂等)→ 审批后运行时才可选用。本面板不含写入外部系统的能力。</p>
         </div>
       </div>
+        </template>
+
       <IntegrationReadSourceCompositionAuthoringPanel :scope="currentScope()" />
+      </el-card>
     </section>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>读取源组合运行(顾问/操作员自助)</h2>
+    <section id="int-sec-combination-run" class="integration-workbench__panel">
+      <el-card shadow="never">
+        <template #header>
+          <div class="integration-workbench__panel-head">
+            <div>
+              <h2>读取源组合运行(顾问/操作员自助)</h2>
           <p>选择已审批的组合链,提供首个业务 key 后运行:中间键由平台派生,证据 values-free,数据仅末跳输出。本面板不含配置编写或写入。</p>
         </div>
       </div>
+        </template>
+
       <IntegrationReadSourceCompositionPanel :scope="currentScope()" />
+      </el-card>
     </section>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>选择系统与数据集</h2>
+    <section id="int-sec-object-template" class="integration-workbench__panel">
+      <el-card shadow="never">
+        <template #header>
+          <div class="integration-workbench__panel-head">
+            <div>
+              <h2>选择系统与数据集</h2>
           <p>来源对象决定从哪里取数，目标模板决定写到哪里。先选系统，再加载可选数据集或模板。</p>
         </div>
       </div>
+        </template>
+
       <div class="integration-workbench__grid integration-workbench__grid--systems">
         <div class="integration-workbench__system-column">
           <h2>1. 来源对象选择</h2>
@@ -459,15 +491,20 @@
           切换到 {{ stagingDatasetCopy[recommendedStagingSourceObject]?.name || recommendedStagingSourceObject }}
         </button>
       </div>
+      </el-card>
     </section>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>数据集与多维表清洗</h2>
+    <section id="int-sec-cleaning-dataset" class="integration-workbench__panel">
+      <el-card shadow="never">
+        <template #header>
+          <div class="integration-workbench__panel-head">
+            <div>
+              <h2>数据集与多维表清洗</h2>
           <p>数据源和目标系统只负责读写；业务清洗、审核、修正发生在多维表里。未安装清洗表时，可在这里创建 staging 多维表。</p>
         </div>
       </div>
+        </template>
+
 
       <div class="integration-workbench__dataset-grid" data-testid="dataset-cards">
         <article class="integration-workbench__dataset-card" data-testid="source-dataset-card">
@@ -602,18 +639,23 @@
         </button>
       </div>
       <pre v-if="stagingInstallResultText" data-testid="staging-install-result">{{ stagingInstallResultText }}</pre>
+      </el-card>
     </section>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>清洗映射规则</h2>
+    <section id="int-sec-cleaning-rules" class="integration-workbench__panel">
+      <el-card shadow="never">
+        <template #header>
+          <div class="integration-workbench__panel-head">
+            <div>
+              <h2>清洗映射规则</h2>
           <p>一行就是一条清洗内容：从来源字段取值，经过白名单转换后写入目标字段。默认映射可直接用，也允许新增自定义清洗项。</p>
         </div>
         <button type="button" class="integration-workbench__button" data-testid="add-mapping" @click="addMapping">
           新增自定义清洗项
         </button>
       </div>
+        </template>
+
 
       <div class="integration-workbench__mapping-list" data-testid="mapping-rule-list">
         <details v-for="(mapping, index) in mappings" :key="mapping.id" class="integration-workbench__mapping-card" open>
@@ -676,18 +718,23 @@
           </div>
         </details>
       </div>
+      </el-card>
     </section>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>运行与推送</h2>
+    <section id="int-sec-run-push" class="integration-workbench__panel">
+      <el-card shadow="never">
+        <template #header>
+          <div class="integration-workbench__panel-head">
+            <div>
+              <h2>运行与推送</h2>
           <p>先保存清洗流程，再做 dry-run；确认无误后才 Save-only 推送到目标系统。默认不会 Submit / Audit。</p>
         </div>
         <button type="button" class="integration-workbench__button" data-testid="save-pipeline" :disabled="savingPipeline || !canSavePipeline" @click="savePipeline">
           {{ savingPipeline ? '保存中' : '保存清洗流程' }}
         </button>
       </div>
+        </template>
+
 
       <div class="integration-workbench__grid">
         <label>
@@ -1179,18 +1226,23 @@
       </div>
 
       <pre data-testid="pipeline-result">{{ pipelineResultText }}</pre>
+      </el-card>
     </section>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>运行监控</h2>
+    <section id="int-sec-monitoring" class="integration-workbench__panel">
+      <el-card shadow="never">
+        <template #header>
+          <div class="integration-workbench__panel-head">
+            <div>
+              <h2>运行监控</h2>
           <p>{{ observationSummary }}。展示最近 5 条 run（状态 / 写入 / 失败 + 行级结果）与 open dead letters（可重放），便于清洗后回看失败原因。</p>
         </div>
         <button type="button" class="integration-workbench__button" data-testid="refresh-observation" :disabled="observingPipeline" @click="refreshPipelineObservation(false)">
           {{ observingPipeline ? '刷新中' : '刷新监控' }}
         </button>
       </div>
+        </template>
+
 
       <div class="integration-workbench__observation">
         <div>
@@ -1348,9 +1400,11 @@
           </ol>
         </div>
       </div>
+      </el-card>
     </section>
 
-    <section class="integration-workbench__panel integration-workbench__preview">
+    <section id="int-sec-preview" class="integration-workbench__panel integration-workbench__preview">
+      <el-card shadow="never">
       <div>
         <h2>样例记录</h2>
         <textarea v-model="sampleRecordText" data-testid="sample-record" spellcheck="false"></textarea>
@@ -1443,14 +1497,20 @@
           <p class="integration-workbench__hint">仅显示字段名与来源，不含字段值。</p>
         </div>
       </div>
+      </el-card>
     </section>
-  </section>
+        </div>
+      </div>
+    </section>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { useLocale } from '../composables/useLocale'
+import PageShell from '../components/layout/PageShell.vue'
+import PageHeader from '../components/layout/PageHeader.vue'
 import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../services/integration/errorCodeLabels'
 import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
 import { getDataSourceSchema, listDataSources } from '../data-sources/api'
@@ -1528,6 +1588,9 @@ import IntegrationReadSourceConfigPanel from '../components/integration/Integrat
 import IntegrationReadSourceCompositionPanel from '../components/integration/IntegrationReadSourceCompositionPanel.vue'
 import IntegrationReadSourceCompositionAuthoringPanel from '../components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
 import PlmBomReviewPanel from '../components/plm/PlmBomReviewPanel.vue'
+import IntegrationWorkbenchRail, {
+  type IntegrationWorkbenchRailGroup,
+} from '../components/integration/IntegrationWorkbenchRail.vue'
 
 type WorkbenchSide = 'source' | 'target'
 type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'dictMap'
@@ -1648,6 +1711,73 @@ const { locale } = useLocale()
 function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }
+
+// IU-2a (design-lock §2 IU-2): sticky left rail — six fixed groups mirroring the design-lock's
+// 连接管理/读取源/组合/清洗映射/运行与推送/监控与死信 taxonomy. Anchor-navigation only in this slice:
+// clicking scrolls the target section into view; the active highlight tracks scroll position via
+// IntersectionObserver (feature-detected below — jsdom/older browsers without it simply never
+// update the highlight, no crash). Every section stays rendered (no v-if/show-hide) — that is the
+// zero-behavior-change invariant this slice is built on.
+//
+// Some rail groups cover more than one physical <section> (e.g. "组合" spans the composition
+// config + run panels; "清洗映射" spans object/template selection, dataset cleaning, mapping
+// rules, and the JSON/field-rule/payload-preview panel at the very end of the DOM). The rail
+// button scrolls to the FIRST section id in its group; `sectionGroupIds` below drives the active
+// highlight for every section id that belongs to a group, regardless of DOM position.
+const railGroups = computed<IntegrationWorkbenchRailGroup[]>(() => [
+  { id: 'connection', label: bi('连接管理', 'Connections'), targetId: 'int-sec-connection' },
+  { id: 'read-source', label: bi('读取源', 'Read Sources'), targetId: 'int-sec-read-source' },
+  { id: 'combination', label: bi('组合', 'Composition'), targetId: 'int-sec-combination-config' },
+  { id: 'cleaning-mapping', label: bi('清洗映射', 'Cleansing & Mapping'), targetId: 'int-sec-object-template' },
+  { id: 'run-push', label: bi('运行与推送', 'Run & Push'), targetId: 'int-sec-run-push' },
+  { id: 'monitoring', label: bi('监控与死信', 'Monitoring & Dead Letters'), targetId: 'int-sec-monitoring' },
+])
+
+const sectionGroupIds: Record<string, string> = {
+  'int-sec-connection': 'connection',
+  'int-sec-read-source': 'read-source',
+  'int-sec-combination-config': 'combination',
+  'int-sec-combination-run': 'combination',
+  'int-sec-object-template': 'cleaning-mapping',
+  'int-sec-cleaning-dataset': 'cleaning-mapping',
+  'int-sec-cleaning-rules': 'cleaning-mapping',
+  'int-sec-run-push': 'run-push',
+  'int-sec-monitoring': 'monitoring',
+  'int-sec-preview': 'cleaning-mapping',
+}
+
+const activeRailGroupId = ref('connection')
+let workbenchSectionObserver: IntersectionObserver | null = null
+
+function scrollToRailGroup(group: IntegrationWorkbenchRailGroup): void {
+  activeRailGroupId.value = group.id
+  if (typeof document === 'undefined') return
+  document.getElementById(group.targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+onMounted(() => {
+  if (typeof document === 'undefined' || typeof IntersectionObserver === 'undefined') return
+  const elements = Object.keys(sectionGroupIds)
+    .map((id) => document.getElementById(id))
+    .filter((el): el is HTMLElement => el !== null)
+  if (elements.length === 0) return
+  workbenchSectionObserver = new IntersectionObserver(
+    (entries) => {
+      const visible = entries.filter((entry) => entry.isIntersecting)
+      if (visible.length === 0) return
+      const mostVisible = visible.reduce((a, b) => (a.intersectionRatio >= b.intersectionRatio ? a : b))
+      const groupId = sectionGroupIds[mostVisible.target.id]
+      if (groupId) activeRailGroupId.value = groupId
+    },
+    { rootMargin: '-96px 0px -60% 0px', threshold: [0, 0.25, 0.5, 0.75, 1] },
+  )
+  elements.forEach((el) => workbenchSectionObserver?.observe(el))
+})
+
+onBeforeUnmount(() => {
+  workbenchSectionObserver?.disconnect()
+  workbenchSectionObserver = null
+})
 
 const stagingDatasetCopy: Record<string, { area: string; name: string; description: string }> = {
   plm_raw_items: {
@@ -4963,16 +5093,16 @@ watch(selectedTableActionId, (actionId) => {
   padding: 1px 8px;
   border-radius: 10px;
   font-size: 12px;
-  background: #eef2ff;
-  color: #3730a3;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
 }
 
 .integration-workbench__table-action {
   margin: 16px 0;
   padding: 14px;
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fbff;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__table-action h3 {
@@ -4988,9 +5118,9 @@ watch(selectedTableActionId, (actionId) => {
   display: grid;
   gap: 6px;
   padding: 12px;
-  border: 1px solid #d7deea;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fbff;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__capability-entry > div {
@@ -5001,13 +5131,13 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__capability-entry strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__capability-entry p,
 .integration-workbench__capability-entry small {
   margin: 0;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.45;
 }
@@ -5023,9 +5153,9 @@ watch(selectedTableActionId, (actionId) => {
   display: grid;
   gap: 8px;
   padding: 10px;
-  border: 1px solid #f3c8a8;
+  border: 1px solid var(--el-color-warning-light-7);
   border-radius: 6px;
-  background: #fff7ed;
+  background: var(--el-color-warning-light-9);
 }
 
 .integration-workbench__bounded-preview > div:first-child {
@@ -5036,7 +5166,7 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__bounded-preview strong {
-  color: #7c2d12;
+  color: var(--el-color-warning-dark-2);
 }
 
 .integration-workbench__mini-list {
@@ -5049,32 +5179,27 @@ watch(selectedTableActionId, (actionId) => {
 
 .integration-workbench__mini-list li {
   padding: 8px;
-  border: 1px solid #f3d8bd;
+  border: 1px solid var(--el-color-warning-light-7);
   border-radius: 6px;
-  background: #fffaf5;
-  color: #5b3417;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
+/* IU-2a: outer container box model (max-width/margin/padding) now lives on PageShell
+   (width="wide"); this class stays as the descendant-selector scope for h2/input/select/
+   textarea/code/pre/panel rules below. */
 .integration-workbench {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 24px;
-  color: #17202a;
+  color: var(--ms-text-1);
 }
 
-.integration-workbench__header,
 .integration-workbench__panel-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-}
-
-.integration-workbench__header {
-  margin-bottom: 18px;
 }
 
 /* IU-6c: header help-center link — new wrapper styling only, tokens per UF-1. */
@@ -5083,6 +5208,25 @@ watch(selectedTableActionId, (actionId) => {
   align-items: center;
   gap: var(--ms-space-2);
   flex-wrap: wrap;
+}
+
+/* IU-2a: rail + sections layout — the workbench body now splits into a sticky left rail
+   (IntegrationWorkbenchRail.vue) and the scrollable section stack. */
+.integration-workbench__body {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ms-space-5);
+}
+
+.integration-workbench__sections {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 960px) {
+  .integration-workbench__body {
+    flex-direction: column;
+  }
 }
 
 .integration-workbench__flow {
@@ -5095,9 +5239,9 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__flow-step,
 .integration-workbench__dataset-card,
 .integration-workbench__staging-card {
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--ms-bg-card);
 }
 
 .integration-workbench__flow-step {
@@ -5107,12 +5251,12 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__flow-step strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
   font-size: 13px;
 }
 
 .integration-workbench__flow-step span {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -5124,16 +5268,16 @@ watch(selectedTableActionId, (actionId) => {
   gap: 8px;
   margin: -4px 0 16px;
   padding: 10px 12px;
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fbff;
-  color: #3c4b60;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.45;
 }
 
 .integration-workbench__quick-flow strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__quick-flow span {
@@ -5142,39 +5286,30 @@ watch(selectedTableActionId, (actionId) => {
 
 .integration-workbench__eyebrow {
   margin: 0 0 6px;
-  color: #54637a;
+  color: var(--ms-text-2);
   font-size: 13px;
   font-weight: 700;
   text-transform: uppercase;
 }
 
-.integration-workbench h1,
 .integration-workbench h2 {
   margin: 0;
-}
-
-.integration-workbench h1 {
-  font-size: 28px;
-}
-
-.integration-workbench h2 {
   font-size: 17px;
 }
 
-.integration-workbench__lead,
 .integration-workbench__panel p {
   margin: 8px 0 0;
-  color: #5c6878;
+  color: var(--ms-text-2);
   line-height: 1.5;
 }
 
 .integration-workbench__k3-link,
 .integration-workbench__button,
 .integration-workbench__icon-button {
-  border: 1px solid #bfccd9;
+  border: 1px solid var(--ms-border);
   border-radius: 6px;
-  background: #ffffff;
-  color: #233246;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   cursor: pointer;
   font-weight: 700;
   text-decoration: none;
@@ -5192,7 +5327,7 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__button:hover,
 .integration-workbench__icon-button:hover,
 .integration-workbench__k3-link:hover {
-  border-color: #357abd;
+  border-color: var(--ms-color-primary);
 }
 
 .integration-workbench__button:disabled,
@@ -5202,34 +5337,34 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__button--danger {
-  border-color: #c77777;
-  color: #8f1d1d;
+  border-color: var(--el-color-danger-light-3);
+  color: var(--el-color-danger);
 }
 
 .integration-workbench__status {
   margin-bottom: 14px;
   padding: 10px 12px;
   border-radius: 6px;
-  background: #eef4fb;
-  color: #24476b;
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__status[data-kind="error"] {
-  background: #fff0f0;
-  color: #9b1c1c;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
 }
 
 .integration-workbench__status[data-kind="success"] {
-  background: #edf7ef;
-  color: #17622f;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .integration-workbench__panel {
   margin-bottom: 16px;
   padding: 16px;
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--ms-bg-card);
 }
 
 .integration-workbench__adapter-list {
@@ -5247,20 +5382,20 @@ watch(selectedTableActionId, (actionId) => {
   gap: 16px;
   margin-top: 14px;
   padding: 12px;
-  border: 1px solid #d7deea;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__onboarding strong,
 .integration-workbench__readiness strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__onboarding p,
 .integration-workbench__readiness p {
   margin: 4px 0 0;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -5277,30 +5412,30 @@ watch(selectedTableActionId, (actionId) => {
   gap: 12px;
   margin-top: 14px;
   padding: 12px;
-  border: 1px solid #d7deea;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #fbfcfe;
+  background: var(--ms-bg-card);
 }
 
 .integration-workbench__connection-manager strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__connection-manager p {
   margin: 4px 0 0;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.5;
 }
 
 .integration-workbench__details {
-  border-top: 1px solid #e4ebf2;
+  border-top: 1px solid var(--el-border-color-lighter);
   padding-top: 10px;
 }
 
 .integration-workbench__details summary {
   cursor: pointer;
-  color: #1f3551;
+  color: var(--ms-text-1);
   font-weight: 700;
 }
 
@@ -5312,10 +5447,10 @@ watch(selectedTableActionId, (actionId) => {
   gap: 12px;
   margin-top: 14px;
   padding: 10px 12px;
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #ffffff;
-  color: #233246;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   cursor: pointer;
   font: inherit;
   font-weight: 700;
@@ -5323,7 +5458,7 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__inventory-toggle span {
-  color: #357abd;
+  color: var(--ms-color-primary);
   font-size: 13px;
 }
 
@@ -5346,14 +5481,14 @@ watch(selectedTableActionId, (actionId) => {
   display: grid;
   gap: 4px;
   padding: 10px;
-  border: 1px solid #e4ebf2;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
-  background: #ffffff;
+  background: var(--ms-bg-card);
 }
 
 .integration-workbench__inventory-list span,
 .integration-workbench__inventory-list small {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -5363,14 +5498,14 @@ watch(selectedTableActionId, (actionId) => {
   align-items: center;
   gap: 6px;
   padding: 5px 8px;
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 999px;
-  color: #35465c;
+  color: var(--ms-text-1);
   font-size: 13px;
 }
 
 .integration-workbench__adapter small {
-  color: #8a4d00;
+  color: var(--el-color-warning-dark-2);
   font-weight: 700;
 }
 
@@ -5388,7 +5523,7 @@ watch(selectedTableActionId, (actionId) => {
 
 .integration-workbench__hint {
   margin-top: 10px;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -5396,8 +5531,8 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__hint--strong {
   padding: 10px 12px;
   border-radius: 6px;
-  background: #fff8e8;
-  color: #744600;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
 }
 
 .integration-workbench__connection-row {
@@ -5413,40 +5548,40 @@ watch(selectedTableActionId, (actionId) => {
   max-width: 100%;
   padding: 5px 8px;
   border-radius: 999px;
-  background: #eef2f7;
-  color: #3c4b60;
+  background: var(--el-fill-color-light);
+  color: var(--ms-text-2);
   font-size: 12px;
   font-weight: 700;
 }
 
 .integration-workbench__badge[data-status="active"] {
-  background: #edf7ef;
-  color: #17622f;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .integration-workbench__badge[data-status="error"] {
-  background: #fff0f0;
-  color: #9b1c1c;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
 }
 
 .integration-workbench__badge[data-status="warning"] {
-  background: #fff8e8;
-  color: #744600;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
 }
 
 .integration-workbench__badge[data-status="enabled"] {
-  background: #edf7ef;
-  color: #17622f;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .integration-workbench__badge[data-status="upgrade"] {
-  background: #fff8e8;
-  color: #744600;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
 }
 
 .integration-workbench__badge[data-status="loading"] {
-  background: #eef2f7;
-  color: #3c4b60;
+  background: var(--el-fill-color-light);
+  color: var(--ms-text-2);
 }
 
 .integration-workbench__grid {
@@ -5467,9 +5602,9 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__watermark-config {
   grid-column: 1 / -1;
   padding: 12px;
-  border: 1px solid #d7deea;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__dataset-grid {
@@ -5491,20 +5626,20 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__dataset-kind {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
   font-weight: 700;
 }
 
 .integration-workbench__dataset-card strong,
 .integration-workbench__staging-card strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__dataset-card p,
 .integration-workbench__staging-card p {
   margin: 0;
-  color: #5c6878;
+  color: var(--ms-text-2);
   line-height: 1.5;
 }
 
@@ -5517,7 +5652,7 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__metric-row span,
 .integration-workbench__staging-card small {
   display: inline-flex;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
 }
 
@@ -5539,12 +5674,12 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__staging-note {
   grid-column: 1 / -1;
   display: block;
-  color: #5c6878;
+  color: var(--ms-text-2);
   line-height: 1.45;
 }
 
 .integration-workbench__staging-note--warning {
-  color: #92400e;
+  color: var(--el-color-warning-dark-2);
 }
 
 .integration-workbench__system-column {
@@ -5555,7 +5690,7 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench label {
   display: grid;
   gap: 6px;
-  color: #35465c;
+  color: var(--ms-text-1);
   font-size: 13px;
   font-weight: 700;
 }
@@ -5565,10 +5700,10 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench textarea {
   width: 100%;
   box-sizing: border-box;
-  border: 1px solid #bfccd9;
+  border: 1px solid var(--ms-border);
   border-radius: 6px;
   padding: 8px 10px;
-  color: #17202a;
+  color: var(--ms-text-1);
   font: inherit;
 }
 
@@ -5582,9 +5717,9 @@ watch(selectedTableActionId, (actionId) => {
   min-height: 84px;
   margin: 0;
   padding: 10px 12px;
-  border: 1px solid #e4ebf2;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
   list-style: none;
 }
 
@@ -5594,16 +5729,16 @@ watch(selectedTableActionId, (actionId) => {
   justify-content: space-between;
   gap: 8px;
   padding: 4px 0;
-  color: #42536a;
+  color: var(--ms-text-2);
 }
 
 .integration-workbench code {
-  color: #1f5f99;
+  color: var(--ms-color-primary);
   font-size: 12px;
 }
 
 .integration-workbench__schema-list strong {
-  color: #9b1c1c;
+  color: var(--el-color-danger);
   font-size: 12px;
 }
 
@@ -5620,9 +5755,9 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__mapping-card {
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #fbfcfe;
+  background: var(--ms-bg-card);
 }
 
 .integration-workbench__mapping-card summary {
@@ -5630,13 +5765,13 @@ watch(selectedTableActionId, (actionId) => {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   padding: 10px 12px;
-  color: #1f3551;
+  color: var(--ms-text-1);
   cursor: pointer;
   font-weight: 700;
 }
 
 .integration-workbench__mapping-card summary small {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-weight: 600;
 }
 
@@ -5651,12 +5786,12 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__mapping-table th,
 .integration-workbench__mapping-table td {
   padding: 8px;
-  border-bottom: 1px solid #e4ebf2;
+  border-bottom: 1px solid var(--el-border-color-lighter);
   text-align: left;
 }
 
 .integration-workbench__mapping-table th {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
 }
 
@@ -5704,7 +5839,7 @@ watch(selectedTableActionId, (actionId) => {
   width: max-content;
   border: 0;
   background: transparent;
-  color: #1f5f99;
+  color: var(--ms-color-primary);
   cursor: pointer;
   font: inherit;
   font-weight: 700;
@@ -5713,7 +5848,7 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__field-help {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
   font-weight: 500;
   line-height: 1.45;
@@ -5722,13 +5857,13 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__run-explainer {
   margin-top: 14px;
   padding: 12px;
-  border: 1px solid #d7deea;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__run-explainer strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__run-explainer ul {
@@ -5736,7 +5871,7 @@ watch(selectedTableActionId, (actionId) => {
   gap: 6px;
   margin: 8px 0 0;
   padding-left: 18px;
-  color: #5c6878;
+  color: var(--ms-text-2);
   line-height: 1.5;
 }
 
@@ -5770,28 +5905,28 @@ watch(selectedTableActionId, (actionId) => {
   display: grid;
   gap: 4px;
   padding: 8px;
-  border: 1px solid #e4ebf2;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
-  background: #ffffff;
+  background: var(--ms-bg-card);
 }
 
 .integration-workbench__readiness li[data-ready="true"] {
-  border-color: #b9dfc4;
-  background: #f3fbf5;
+  border-color: var(--el-color-success-light-7);
+  background: var(--el-color-success-light-9);
 }
 
 .integration-workbench__readiness li > span {
-  color: #7a4a00;
+  color: var(--el-color-warning-dark-2);
   font-size: 12px;
   font-weight: 700;
 }
 
 .integration-workbench__readiness li[data-ready="true"] > span {
-  color: #17622f;
+  color: var(--el-color-success-dark-2);
 }
 
 .integration-workbench__readiness small {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -5803,9 +5938,9 @@ watch(selectedTableActionId, (actionId) => {
   gap: 12px;
   margin-top: 14px;
   padding: 12px;
-  border: 1px solid #d7deea;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__export strong,
@@ -5815,7 +5950,7 @@ watch(selectedTableActionId, (actionId) => {
 
 .integration-workbench__export p {
   margin-top: 4px;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -5834,16 +5969,16 @@ watch(selectedTableActionId, (actionId) => {
 
 .integration-workbench__muted {
   margin: -4px 0 10px;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.5;
 }
 
 .integration-workbench__empty {
   padding: 12px;
-  border: 1px dashed #cbd5e1;
+  border: 1px dashed var(--ms-border);
   border-radius: 6px;
-  color: #5c6878;
+  color: var(--ms-text-2);
 }
 
 .integration-workbench__empty--actionable {
@@ -5851,7 +5986,7 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__empty strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__empty p {
@@ -5870,13 +6005,13 @@ watch(selectedTableActionId, (actionId) => {
   display: grid;
   gap: 4px;
   padding: 10px;
-  border: 1px solid #e4ebf2;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__record-list small {
-  color: #5c6878;
+  color: var(--ms-text-2);
 }
 
 .integration-workbench__run-head {
@@ -5891,16 +6026,16 @@ watch(selectedTableActionId, (actionId) => {
   flex-wrap: wrap;
   gap: 8px;
   font-size: 12px;
-  color: #5c6878;
+  color: var(--ms-text-2);
 }
 
 .integration-workbench__run-metric--write {
-  color: #1f6f43;
+  color: var(--el-color-success-dark-2);
   font-weight: 600;
 }
 
 .integration-workbench__run-metric--fail {
-  color: #8f1d1d;
+  color: var(--el-color-danger);
   font-weight: 600;
 }
 
@@ -5910,30 +6045,30 @@ watch(selectedTableActionId, (actionId) => {
   letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: 4px;
-  background: #e7eef6;
-  color: #24476b;
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__run-status--succeeded {
-  background: #e3f3e8;
-  color: #1f6f43;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .integration-workbench__run-status--partial {
-  background: #fdf3e0;
-  color: #8a5a12;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
 }
 
 .integration-workbench__run-status--failed,
 .integration-workbench__run-status--cancelled {
-  background: #fbe7e7;
-  color: #8f1d1d;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
 }
 
 .integration-workbench__run-error {
   margin: 0;
   font-size: 12px;
-  color: #8f1d1d;
+  color: var(--el-color-danger);
 }
 
 .integration-workbench__run-summaries {
@@ -5979,13 +6114,13 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__provenance-attrs {
   margin: 2px 0 0;
   font-size: 12px;
-  color: #5a6473;
+  color: var(--ms-text-2);
   word-break: break-word;
 }
 
 .integration-workbench__badge--retryable {
-  background: #e3f3e8;
-  color: #1f6f43;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .integration-workbench__button--ghost {
@@ -5996,7 +6131,7 @@ watch(selectedTableActionId, (actionId) => {
   border: none;
   background: none;
   padding: 0;
-  color: #357abd;
+  color: var(--ms-color-primary);
   cursor: pointer;
   font: inherit;
   text-decoration: underline;
@@ -6019,16 +6154,15 @@ watch(selectedTableActionId, (actionId) => {
   overflow: auto;
   margin: 12px 0 0;
   padding: 12px;
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 6px;
-  background: #111827;
-  color: #e5edf7;
+  background: var(--ms-text-1);
+  color: var(--el-color-primary-light-9);
   font-size: 12px;
   line-height: 1.5;
 }
 
 @media (max-width: 900px) {
-  .integration-workbench__header,
   .integration-workbench__panel-head,
   .integration-workbench__preview,
   .integration-workbench__observation,
@@ -6045,7 +6179,6 @@ watch(selectedTableActionId, (actionId) => {
     grid-template-columns: 1fr;
   }
 
-  .integration-workbench__header,
   .integration-workbench__panel-head {
     display: grid;
   }

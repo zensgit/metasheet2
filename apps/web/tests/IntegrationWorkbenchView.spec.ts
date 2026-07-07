@@ -1,5 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App as VueApp, type Component } from 'vue'
+import { createApp, defineComponent, h, nextTick, type App as VueApp, type Component } from 'vue'
+
+// IU-2a: minimal ElCard stub — IntegrationWorkbenchView.vue now wraps each section in
+// `<el-card shadow="never">` with the panel-head (title/description/action button) in the
+// `#header` slot. Real Element Plus is not globally installed in this test's `createApp()`
+// instances, so `<el-card>` needs a local stub registered as `ElCard` (Vue resolves the
+// kebab-case template tag against the PascalCase component name) that renders both slots —
+// dropping the header slot would silently delete every panel's title/description/action
+// button from the test DOM.
+const ElCard = defineComponent({
+  name: 'ElCard',
+  props: { shadow: { type: String, required: false, default: undefined } },
+  setup(_props, { slots }) {
+    return () => h('div', { class: 'el-card' }, [
+      slots.header ? h('div', { class: 'el-card__header' }, slots.header()) : null,
+      h('div', { class: 'el-card__body' }, slots.default?.()),
+    ])
+  },
+})
 
 const apiFetchMock = vi.fn()
 const apiGetMock = vi.fn()
@@ -424,6 +442,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -856,6 +875,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -972,6 +992,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     // eslint-disable-next-line vue/one-component-per-file
     app.component('RouterLink', {
       props: {
@@ -1116,6 +1137,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -1156,6 +1178,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -1260,6 +1283,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -1354,6 +1378,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -1413,6 +1438,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -1475,6 +1501,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -1542,6 +1569,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -1598,6 +1626,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -1644,6 +1673,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -1756,6 +1786,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -1860,6 +1891,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -1954,6 +1986,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -2038,6 +2071,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -2094,6 +2128,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -2142,6 +2177,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -2189,6 +2225,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -2240,6 +2277,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -2318,6 +2356,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -2459,6 +2498,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     // eslint-disable-next-line vue/one-component-per-file
     app.component('RouterLink', {
       props: { to: { type: [String, Object], required: false, default: '' } },
@@ -2558,6 +2598,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     // eslint-disable-next-line vue/one-component-per-file
     app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
@@ -2622,6 +2663,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     // eslint-disable-next-line vue/one-component-per-file
     app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
@@ -2698,6 +2740,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     // eslint-disable-next-line vue/one-component-per-file
     app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
@@ -2791,6 +2834,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     // eslint-disable-next-line vue/one-component-per-file
     app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
@@ -2851,6 +2895,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     // eslint-disable-next-line vue/one-component-per-file
     app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
@@ -2911,6 +2956,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     // eslint-disable-next-line vue/one-component-per-file
     app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
@@ -2978,6 +3024,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     // eslint-disable-next-line vue/one-component-per-file
     app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
@@ -3087,6 +3134,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
     await flushUi(8)
@@ -3221,6 +3269,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
     await flushUi(8)
@@ -3364,6 +3413,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) { return () => h('a', slots.default?.()) },
@@ -3428,6 +3478,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
     await flushUi(8)
@@ -3499,6 +3550,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) { return () => h('a', slots.default?.()) },
@@ -3569,6 +3621,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) { return () => h('a', slots.default?.()) },
@@ -3621,6 +3674,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
     await flushUi(8)
@@ -3686,6 +3740,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
     await flushUi(8)
@@ -3748,6 +3803,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
     await flushUi(8)
@@ -3796,6 +3852,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
     await flushUi(8)
@@ -3852,6 +3909,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
     await flushUi(8)
@@ -3935,6 +3993,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -4047,6 +4106,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -4202,6 +4262,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -4376,6 +4437,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -4548,6 +4610,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -4664,6 +4727,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -4746,6 +4810,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -4843,6 +4908,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
@@ -4913,6 +4979,7 @@ describe('IntegrationWorkbenchView', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(View as Component)
+    app.component('ElCard', ElCard)
     app.component('router-link', {
       props: ['to'],
       setup(_props, { slots }) {
