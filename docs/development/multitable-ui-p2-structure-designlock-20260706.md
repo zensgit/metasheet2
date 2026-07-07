@@ -1,6 +1,6 @@
-# 多维表 UI 升级 P2 — 结构与共享原语 · 设计锁（PROPOSED）
+# 多维表 UI 升级 P2 — 结构与共享原语 · 设计锁（RATIFIED）
 
-> 状态：**PROPOSED — 待 owner ratify**。本锁只定原则与分档边界，不含实现。
+> 状态：**RATIFIED 2026-07-07**（owner ratified via #3742; P2-1a primitives landed via #3744）。本锁只定原则与分档边界，不含实现。
 > 前置：UF-1 设计令牌（`apps/web/src/styles/tokens.css`，RATIFIED #3697）+ 多维表 UI P0/P1/P1b 已落 main（tokens/减负/全图标 SVG）。
 > 模型分档：设计裁量 = Fable 5；实现切片 = Sonnet 5；共享原语大重构的对抗审阅 = Opus。
 
