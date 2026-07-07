@@ -3,13 +3,16 @@
  * Design-lock: docs/development/multitable-openapi-token-auth-designlock-20260619.md (§4 OAPI-1 continuation).
  *
  * The narrow comments:read set (GET /api/comments, /api/comments/summary,
- * /api/multitable/:spreadsheetId/comments/presence) composes the OAPI guard with the EXISTING rbacGuard:
- *   apiTokenAuth → requireScope('comments:read') → rbacGuard('comments','read') = min(token scope, creator RBAC).
+ * /api/multitable/:spreadsheetId/comments/presence) composes the OAPI guard with the EXISTING rbacGuard
+ * AND (since G-8 / decision A′) the per-sheet read gate:
+ *   apiTokenAuth → requireScope('comments:read') → rbacGuard('comments','read') → ensureSheetReadable
+ *   = min(token scope, creator RBAC, creator per-sheet read).
  * Runs through the FULL MetaSheetServer (global JWT gate + allowlist) so the gate bypass-protection is
  * proven end-to-end, not just at the matcher. Proves:
- *   - comments:read token whose creator HAS comments RBAC → 200;
+ *   - comments:read token whose creator HAS comments RBAC + sheet read → 200;
  *   - records:read token (wrong scope) → 403 (requireScope);
  *   - comments:read token whose creator LACKS comments RBAC → 403 (rbacGuard still applies — the min spine);
+ *   - comments:read token whose creator HAS comments RBAC but NO sheet read → 403 (G-8 sheet-visibility gate);
  *   - revoked token → 401; no token → 401;
  *   - presence forces includeViewers=false on the token path (no viewer-identity egress);
  *   - a comments:read token on a DEFERRED comment route (/api/comments/inbox) → 401 (allowlist denies → JWT
@@ -25,8 +28,9 @@ import { ApiTokenService } from '../../src/multitable/api-token-service'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
-const CREATOR_C = `oapi_cmt_creator_${TS}` // has comments:read RBAC
-const CREATOR_M = `oapi_cmt_nombac_${TS}`  // has multitable:read, NOT comments RBAC
+const CREATOR_C = `oapi_cmt_creator_${TS}` // has comments:read RBAC + multitable:read (per-sheet read) → legit comment reader
+const CREATOR_M = `oapi_cmt_nombac_${TS}`  // has multitable:read, NOT comments RBAC → 403 (rbacGuard)
+const CREATOR_N = `oapi_cmt_noread_${TS}`  // has comments:read but NO sheet read → 403 (G-8 sheet-visibility gate)
 const SHEET = `oapi_cmt_sheet_${TS}`
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
@@ -50,24 +54,32 @@ describeIfDatabase('OAPI-1 comments:read API-token routes (real DB, full server)
   let tokRecordsC = ''  // records:read (wrong scope), creator C
   let tokRevokedC = ''  // comments:read, creator C, revoked
   let tokCommentsM = '' // comments:read, creator M (LACKS comments RBAC)
+  let tokCommentsN = '' // comments:read, creator N (HAS comments RBAC but NO sheet read → G-8 gate)
 
   beforeAll(async () => {
     expect(await canListen()).toBe(true)
-    // creator WITH comments RBAC (legacy users.permissions path in userHasPermission)
+    // creator WITH comments RBAC AND per-sheet read (multitable:read) — a legit comment reader post-G-8.
+    // (G-8 / decision A′: a comment token now needs min(scope, creator RBAC, creator sheet-read).)
     await q(`INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
              VALUES ($1,$2,$3,'x','member',$4::jsonb, TRUE, FALSE)
              ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions`,
-      [CREATOR_C, `${CREATOR_C}@t.local`, 'CmtRBAC', JSON.stringify(['comments:read'])])
+      [CREATOR_C, `${CREATOR_C}@t.local`, 'CmtRBAC', JSON.stringify(['comments:read', 'multitable:read'])])
     // creator WITHOUT comments RBAC
     await q(`INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
              VALUES ($1,$2,$3,'x','member',$4::jsonb, TRUE, FALSE)
              ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions`,
       [CREATOR_M, `${CREATOR_M}@t.local`, 'NoCmtRBAC', JSON.stringify(['multitable:read'])])
+    // creator WITH comments RBAC but NO sheet read — the G-8 sheet-visibility gate must 403 this token.
+    await q(`INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+             VALUES ($1,$2,$3,'x','member',$4::jsonb, TRUE, FALSE)
+             ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions`,
+      [CREATOR_N, `${CREATOR_N}@t.local`, 'CmtNoRead', JSON.stringify(['comments:read'])])
 
     const svc = new ApiTokenService(db)
     tokCommentsC = (await svc.createToken(CREATOR_C, { name: 'c-read', scopes: ['comments:read'] })).plainTextToken
     tokRecordsC = (await svc.createToken(CREATOR_C, { name: 'r-read', scopes: ['records:read'] })).plainTextToken
     tokCommentsM = (await svc.createToken(CREATOR_M, { name: 'm-read', scopes: ['comments:read'] })).plainTextToken
+    tokCommentsN = (await svc.createToken(CREATOR_N, { name: 'n-read', scopes: ['comments:read'] })).plainTextToken
     const revoked = await svc.createToken(CREATOR_C, { name: 'revoked', scopes: ['comments:read'] })
     tokRevokedC = revoked.plainTextToken
     await svc.revokeToken(revoked.token.id, CREATOR_C)
@@ -78,8 +90,8 @@ describeIfDatabase('OAPI-1 comments:read API-token routes (real DB, full server)
   })
 
   afterAll(async () => {
-    await db.deleteFrom('multitable_api_tokens').where('created_by', 'in', [CREATOR_C, CREATOR_M]).execute().catch(() => {})
-    await q('DELETE FROM users WHERE id = ANY($1)', [[CREATOR_C, CREATOR_M]]).catch(() => {})
+    await db.deleteFrom('multitable_api_tokens').where('created_by', 'in', [CREATOR_C, CREATOR_M, CREATOR_N]).execute().catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1)', [[CREATOR_C, CREATOR_M, CREATOR_N]]).catch(() => {})
     if (server) await server.stop()
   })
 
@@ -100,6 +112,15 @@ describeIfDatabase('OAPI-1 comments:read API-token routes (real DB, full server)
   test('creator RBAC STILL APPLIES — comments:read token whose creator LACKS comments RBAC → 403 (rbacGuard)', async () => {
     // the min spine: token scope alone is NOT enough; the creator must also hold the RBAC permission.
     expect((await get(base, '/api/comments', tokCommentsM)).status).toBe(403)
+  })
+
+  test('G-8 SHEET-READ GATE (decision A′) — comments:read token whose creator has comments RBAC but NO sheet read → 403', async () => {
+    // Post-G-8 the contract is min(token scope, creator RBAC, creator per-sheet read). CREATOR_N holds
+    // comments:read (passes rbacGuard) but no multitable:read / sheet grant, so ensureSheetReadable denies
+    // it on the target sheet — the token-flavored version of the cross-sheet comment leak is now closed.
+    expect((await get(base, `/api/comments?spreadsheetId=${SHEET}`, tokCommentsN)).status).toBe(403)
+    expect((await get(base, `/api/comments/summary?spreadsheetId=${SHEET}`, tokCommentsN)).status).toBe(403)
+    expect((await get(base, `/api/multitable/${SHEET}/comments/presence`, tokCommentsN)).status).toBe(403)
   })
 
   test('revoked token → 401; no token → 401', async () => {

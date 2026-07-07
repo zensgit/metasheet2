@@ -58,13 +58,15 @@ describeIfDatabase('OAPI-2a comments:write token comment-create (real DB, full s
 
   beforeAll(async () => {
     expect(await canListen()).toBe(true)
-    // Admin creator so rbacGuard('comments','write') passes for the success path; the comments-RBAC min-spine
-    // is already covered by the OAPI-1 comments golden. (rbacGuard runs AFTER requireScope for the 403 case.)
+    // Creator holds comments:write (→ rbacGuard('comments','write') passes) AND multitable:read (→ the G-8
+    // sheet-read gate `ensureSheetReadable` passes, since decision A′ makes a comment WRITE token require
+    // min(scope, creator RBAC, creator sheet-read); a comment writer must be able to read the target sheet).
+    // The comments-RBAC min-spine + the no-sheet-read 403 differential are covered by the OAPI-1 golden.
     await q(
       `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
        VALUES ($1,$2,$3,'x','member',$4::jsonb, TRUE, TRUE)
-       ON CONFLICT (id) DO UPDATE SET is_admin = TRUE`,
-      [CREATOR, `${CREATOR}@t.local`, 'CmtWriter', JSON.stringify(['comments:write'])],
+       ON CONFLICT (id) DO UPDATE SET is_admin = TRUE, permissions = EXCLUDED.permissions`,
+      [CREATOR, `${CREATOR}@t.local`, 'CmtWriter', JSON.stringify(['comments:write', 'multitable:read'])],
     )
 
     const svc = new ApiTokenService(db)
