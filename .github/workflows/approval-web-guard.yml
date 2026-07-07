@@ -104,6 +104,11 @@ on:
       - 'apps/web/src/styles/form-layout-utilities.css'
       - 'apps/web/.eslintrc.cjs'
       - 'apps/web/tests/ui-foundation-style-guard.spec.ts'
+      # UF-8 — state-texture pack: shared EmptyState + first-paint skeletons + ElMessageBox
+      # confirms + machine-value naming. uiFoundationTexture.spec.ts mounts EmptyState and
+      # tripwires the two views' el-skeleton blocks.
+      - 'apps/web/src/components/status/EmptyState.vue'
+      - 'apps/web/tests/uiFoundationTexture.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -195,6 +200,11 @@ on:
       - 'apps/web/src/styles/form-layout-utilities.css'
       - 'apps/web/.eslintrc.cjs'
       - 'apps/web/tests/ui-foundation-style-guard.spec.ts'
+      # UF-8 — state-texture pack: shared EmptyState + first-paint skeletons + ElMessageBox
+      # confirms + machine-value naming. uiFoundationTexture.spec.ts mounts EmptyState and
+      # tripwires the two views' el-skeleton blocks.
+      - 'apps/web/src/components/status/EmptyState.vue'
+      - 'apps/web/tests/uiFoundationTexture.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -282,4 +292,4 @@ jobs:
         # files and asserts zero static style= attributes and zero hex/rgb() literals inside
         # <style> blocks (var() references + transparent/inherit/currentColor/none allowed);
         # had no gate before this wiring.
-        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView ui-foundation-style-guard --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView ui-foundation-style-guard uiFoundationTexture --reporter=dot

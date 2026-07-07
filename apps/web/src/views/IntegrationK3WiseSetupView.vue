@@ -385,13 +385,14 @@
             </div>
             <div v-if="deadLetters.length === 0" class="k3-setup__empty">暂无 open dead letters。</div>
             <template v-else>
-              <div v-for="deadLetter in deadLetters" :key="deadLetter.id" class="k3-setup__record">
+              <div v-for="deadLetter in deadLetters" :key="deadLetter.id" class="k3-setup__record" :data-testid="`k3-dead-letter-${deadLetter.id}`">
                 <div class="k3-setup__record-main">
-                  <strong>{{ deadLetter.errorCode }}</strong>
+                  <strong :data-testid="`k3-dead-letter-label-${deadLetter.id}`">{{ deadLetterErrorLabel(deadLetter) }}</strong>
                   <span class="k3-setup__badge" :data-status="deadLetter.status">{{ deadLetter.status }}</span>
                 </div>
                 <small>{{ deadLetter.id }} · retry {{ deadLetter.retryCount }}</small>
-                <small class="k3-setup__saved-error">{{ deadLetter.errorMessage }}</small>
+                <small v-if="deadLetterErrorHint(deadLetter)" class="k3-setup__saved-error">{{ deadLetterErrorHint(deadLetter) }}</small>
+                <small :data-testid="`k3-dead-letter-code-${deadLetter.id}`">errorCode: {{ deadLetter.errorCode }}</small>
                 <small v-if="deadLetter.payloadRedacted">payload redacted</small>
               </div>
             </template>
@@ -924,6 +925,8 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useLocale } from '../composables/useLocale'
+import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../services/integration/errorCodeLabels'
 import {
   K3_WISE_SQLSERVER_KIND,
   K3_WISE_WEBAPI_KIND,
@@ -982,6 +985,8 @@ import {
   normalizeIntegrationProjectId,
 } from '../services/integration/workbench'
 
+const { locale } = useLocale()
+
 const form = reactive(createDefaultK3WiseSetupForm())
 const webApiSystems = ref<IntegrationExternalSystem[]>([])
 const sqlSystems = ref<IntegrationExternalSystem[]>([])
@@ -1013,6 +1018,15 @@ const webApiLastTest = ref<{
 } | null>(null)
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
+// IU-1 (RATIFIED addendum): same treatment as IntegrationWorkbenchView's dead-letter list — the raw
+// `errorMessage` free-text field must NEVER reach the DOM (see that view's comment for the scrub-gap
+// rationale). Humanized label is prominent; raw `errorCode` (values-free, safe) stays in a secondary spot.
+function deadLetterErrorLabel(deadLetter: IntegrationDeadLetter): string {
+  return integrationErrorCodeDisplayLabel(deadLetter.errorCode, locale.value)
+}
+function deadLetterErrorHint(deadLetter: IntegrationDeadLetter): string | null {
+  return integrationErrorCodeHint(deadLetter.errorCode, locale.value)
+}
 const stagingDescriptors = ref<IntegrationStagingDescriptor[]>([])
 const templatePreviewTarget = ref<K3WisePipelineTarget>('material')
 

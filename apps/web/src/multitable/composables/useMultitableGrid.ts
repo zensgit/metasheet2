@@ -16,6 +16,7 @@ import type {
 } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 import { isPropertyHiddenField } from '../utils/field-permissions'
+import { writePersonalConfigMerged } from '../utils/personal-config-write'
 import { metaCoreLabel } from '../utils/meta-core-labels'
 import { resolveRollupFieldProperty, rollupResultType } from '../utils/field-config'
 
@@ -801,9 +802,13 @@ export function useMultitableGrid(opts: {
   // Slice 3 G-FE-2 write-routing: the ONE switch every in-place config edit below funnels through. ON (for
   // this viewId) → PUT personal-config (actor-scoped, no identity in the request — see client.ts); OFF/absent
   // → the shared updateView path, byte-identical to pre-Slice-3 behavior.
+  //
+  // Slice 3d: the personal write is ADDITIVE (read-merge-write) — a single-facet edit (e.g. { sortInfo }) must
+  // not wipe the actor's other personal facets, because the backend PUT replaces the whole row. See
+  // utils/personal-config-write.ts. The shared (updateView) path is unchanged.
   async function persistViewConfig(vid: string, input: PersonalViewConfigOverlay) {
     if (opts.isPersonalMode?.(vid)) {
-      await client.putPersonalViewConfig(vid, input)
+      await writePersonalConfigMerged(client, vid, input)
     } else {
       await client.updateView(vid, input)
     }
@@ -1385,7 +1390,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, lastBatchId, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
+    fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, lastBatchId, page, hiddenFieldIds, fieldOrder, visibleFields, readOnlyFieldIds,
     // A1 infinite-scroll accumulation state
     loadingMore, accumulationCapped,
     sortRules, filterRules, filterConjunction, nestedFilterNodes, filterGroups, sortFilterDirty,

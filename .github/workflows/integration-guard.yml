@@ -9,8 +9,11 @@
 #   1. the plugin's own CJS test chain (`pnpm --filter plugin-integration-core test`) — 35 pure suites
 #      covering read-source config/probe/resolver/composition/write-target;
 #   2. the integration web specs that carry the values-free / mirror-parity guarantees: the two vocab
-#      mirror tripwires, the read-source config / composition run / composition authoring panels, and
-#      the composition service layer.
+#      mirror tripwires, the read-source config / composition run / composition authoring panels, the
+#      composition service layer, the IU-1 error-code label module + its mirror tripwire, the two
+#      dead-letter display views (Workbench + K3 WISE setup) that carry the IU-1 RATIFIED
+#      errorMessage-never-renders-raw addendum, the IU-6b field-hint module, and the IU-6c help-center
+#      view (whose error-code table is a single-source tripwire on the IU-1 label module).
 # Expand the spec list as more integration web specs are added.
 name: Integration Guard
 
@@ -20,15 +23,25 @@ on:
       - 'plugins/plugin-integration-core/**'
       - 'apps/web/src/services/integration/readSourceConfigs.ts'
       - 'apps/web/src/services/integration/readSourceCompositions.ts'
+      - 'apps/web/src/services/integration/errorCodeLabels.ts'
+      - 'apps/web/src/services/integration/fieldHints.ts'
       - 'apps/web/src/components/integration/IntegrationReadSourceConfigPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
+      - 'apps/web/src/views/IntegrationWorkbenchView.vue'
+      - 'apps/web/src/views/IntegrationK3WiseSetupView.vue'
+      - 'apps/web/src/views/IntegrationHelpView.vue'
       - 'apps/web/tests/composition-vocab-mirror.spec.ts'
       - 'apps/web/tests/multitable-resolver-vocab-mirror.spec.ts'
+      - 'apps/web/tests/integrationErrorCodeLabels.spec.ts'
+      - 'apps/web/tests/fieldHints.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceConfigPanel.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionPanel.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts'
       - 'apps/web/tests/readSourceCompositions.service.spec.ts'
+      - 'apps/web/tests/IntegrationWorkbenchView.spec.ts'
+      - 'apps/web/tests/IntegrationK3WiseSetupView.spec.ts'
+      - 'apps/web/tests/IntegrationHelpView.spec.ts'
       - '.github/workflows/integration-guard.yml'
   push:
     branches: [main]
@@ -36,15 +49,25 @@ on:
       - 'plugins/plugin-integration-core/**'
       - 'apps/web/src/services/integration/readSourceConfigs.ts'
       - 'apps/web/src/services/integration/readSourceCompositions.ts'
+      - 'apps/web/src/services/integration/errorCodeLabels.ts'
+      - 'apps/web/src/services/integration/fieldHints.ts'
       - 'apps/web/src/components/integration/IntegrationReadSourceConfigPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
+      - 'apps/web/src/views/IntegrationWorkbenchView.vue'
+      - 'apps/web/src/views/IntegrationK3WiseSetupView.vue'
+      - 'apps/web/src/views/IntegrationHelpView.vue'
       - 'apps/web/tests/composition-vocab-mirror.spec.ts'
       - 'apps/web/tests/multitable-resolver-vocab-mirror.spec.ts'
+      - 'apps/web/tests/integrationErrorCodeLabels.spec.ts'
+      - 'apps/web/tests/fieldHints.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceConfigPanel.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionPanel.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts'
       - 'apps/web/tests/readSourceCompositions.service.spec.ts'
+      - 'apps/web/tests/IntegrationWorkbenchView.spec.ts'
+      - 'apps/web/tests/IntegrationK3WiseSetupView.spec.ts'
+      - 'apps/web/tests/IntegrationHelpView.spec.ts'
       - '.github/workflows/integration-guard.yml'
 
 jobs:
@@ -90,4 +113,4 @@ jobs:
         run: pnpm --filter plugin-integration-core test
 
       - name: Run integration web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationK3WiseSetupView IntegrationHelpView --reporter=dot

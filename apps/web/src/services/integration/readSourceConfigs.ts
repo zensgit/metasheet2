@@ -424,6 +424,18 @@ export const READ_SOURCE_PROBE_ERROR_CODES: ReadonlySet<string> = new Set([
   'READ_SOURCE_PROBE_SHAPE_MISMATCH',
   'READ_SOURCE_PROBE_TIMEOUT',
   ...RESOLVER_ERROR_CODES,
+  // BL2 (#3695): the K3 BOM/GetList-by-material coarse-code family joined the server's registered probe
+  // vocabulary (read-source-probe-contract.cjs spreads K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES). Client
+  // mirror sync — without these, a by-material second-hop failure code arriving in probe/composition
+  // evidence is scrubbed to the generic fallback BEFORE the IU-1 label layer can humanize it.
+  'K3_WISE_BOM_LIST_BY_MATERIAL_NOT_CONFIGURED',
+  'K3_WISE_BOM_LIST_BY_MATERIAL_KEY_INVALID',
+  'K3_WISE_BOM_LIST_BY_MATERIAL_REJECTED',
+  'K3_WISE_BOM_LIST_BY_MATERIAL_FAILED',
+  'K3_WISE_BOM_LIST_BY_MATERIAL_SHAPE_MISMATCH',
+  'K3_WISE_BOM_LIST_BY_MATERIAL_NOT_FOUND',
+  'K3_WISE_BOM_LIST_BY_MATERIAL_AMBIGUOUS',
+  'K3_WISE_BOM_LIST_BY_MATERIAL_FIELD_MISSING',
 ])
 const READ_SOURCE_PROBE_ERROR_TYPES = new Set([
   'Error',

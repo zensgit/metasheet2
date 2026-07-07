@@ -1267,7 +1267,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
-import { ElButton, ElCheckbox, ElCheckboxGroup, ElDrawer, ElInput, ElOption, ElSelect } from 'element-plus'
+import { ElButton, ElCheckbox, ElCheckboxGroup, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { useLocale } from '../../composables/useLocale'
 import type { MultitableApiClient } from '../api/client'
 import type {
@@ -2400,11 +2400,27 @@ watch(
   { immediate: true },
 )
 
+// UF-8: ElMessageBox.confirm replaces window.confirm (design-lock §3.6 "确认一律 ElMessageBox").
+// CFG-3 precedent (DirectoryManagementView.vue confirmApprovalCardSecretRegenerate): service-style
+// import works even off the EP-managed overlay chrome; the promise rejects on cancel/overlay-click.
+async function confirmDiscardChanges(): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(
+      automationLabel('editor.discardConfirm', isZh.value),
+      automationLabel('editor.discardConfirmTitle', isZh.value),
+      { type: 'warning', confirmButtonText: automationLabel('editor.discardConfirmButton', isZh.value), cancelButtonText: automationLabel('editor.cancel', isZh.value) },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
 // B1-07: discard protection — all three close paths (overlay click, ×, cancel) route here.
 // A successful save is closed by the parent on the 'save' emit and never passes through this guard.
-function requestClose(): void {
+async function requestClose(): Promise<void> {
   const dirty = JSON.stringify(draft.value) !== draftSnapshot.value
-  if (dirty && !window.confirm(automationLabel('editor.discardConfirm', isZh.value))) return
+  if (dirty && !(await confirmDiscardChanges())) return
   emit('close')
 }
 
@@ -3416,9 +3432,23 @@ async function onSave() {
   }
 }
 
-function onTestRun() {
+// UF-8: ElMessageBox.confirm replaces window.confirm (design-lock §3.6).
+async function confirmDingTalkTestRun(): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(
+      dingTalkTestRunConfirmMessage(),
+      automationLabel('testRun.confirmTitle', isZh.value),
+      { type: 'warning', confirmButtonText: automationLabel('testRun.button', isZh.value), cancelButtonText: automationLabel('editor.cancel', isZh.value) },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function onTestRun(): Promise<void> {
   if (saving.value || props.testRunState?.status === 'running' || !props.rule?.id) return
-  if (savedRuleHasDingTalkActions.value && !window.confirm(dingTalkTestRunConfirmMessage())) return
+  if (savedRuleHasDingTalkActions.value && !(await confirmDingTalkTestRun())) return
   emit('test', props.rule.id)
 }
 </script>

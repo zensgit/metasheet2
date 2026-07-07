@@ -156,6 +156,9 @@
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
+        <div v-else-if="isFirstPaintLoading(store.pendingApprovals)" class="approval-center__skeleton" data-testid="pending-skeleton">
+          <el-skeleton :rows="5" animated />
+        </div>
         <ApprovalCenterTable
           v-else
           ref="pendingTableRef"
@@ -227,6 +230,9 @@
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
+        <div v-else-if="isFirstPaintLoading(store.myApprovals)" class="approval-center__skeleton" data-testid="mine-skeleton">
+          <el-skeleton :rows="5" animated />
+        </div>
         <ApprovalCenterTable
           v-else
           :rows="store.myApprovals"
@@ -277,6 +283,9 @@
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
+        <div v-else-if="isFirstPaintLoading(store.ccApprovals)" class="approval-center__skeleton" data-testid="cc-skeleton">
+          <el-skeleton :rows="5" animated />
+        </div>
         <ApprovalCenterTable
           v-else
           :rows="store.ccApprovals"
@@ -305,6 +314,9 @@
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
+        <div v-else-if="isFirstPaintLoading(store.completedApprovals)" class="approval-center__skeleton" data-testid="completed-skeleton">
+          <el-skeleton :rows="5" animated />
+        </div>
         <ApprovalCenterTable
           v-else
           :rows="store.completedApprovals"
@@ -533,6 +545,14 @@ function waitClass(createdAt: string): string {
 // attendance module (their row-click routes away), so excluding them keeps the batch honest.
 function isRowBatchSelectable(row: UnifiedApprovalDTO): boolean {
   return row.status === 'pending' && !isAttendanceApproval(row)
+}
+
+// UF-8 (design-lock §3.6 "状态 = 首屏骨架屏"): first paint only — `store.loading` is a single
+// shared flag across all 4 tabs, so this checks the ACTIVE tab's own row list. Once any data has
+// arrived (or the tab was already loaded), a subsequent refresh keeps the existing `v-loading`
+// spinner-over-table behavior (ApprovalCenterTable), never re-showing the skeleton.
+function isFirstPaintLoading(rows: UnifiedApprovalDTO[]): boolean {
+  return store.loading && rows.length === 0
 }
 
 function handlePendingSelectionChange(rows: UnifiedApprovalDTO[]): void {
@@ -913,6 +933,14 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* UF-8 (design-lock §3.6): first-paint skeleton for the pending/mine/cc/completed tabs — only
+   shown while `store.loading` is true AND the active tab has no rows yet (see
+   `isFirstPaintLoading`); a later refresh with data already on screen keeps the existing
+   ApprovalCenterTable `v-loading` spinner-over-table behavior untouched. */
+.approval-center__skeleton {
+  padding: var(--ms-space-4) 0;
+}
+
 .approval-center__toolbar {
   display: flex;
   align-items: center;

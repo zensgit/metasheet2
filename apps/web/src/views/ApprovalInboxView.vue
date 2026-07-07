@@ -19,7 +19,7 @@
 
         <p v-if="error" class="approval-inbox__error">{{ error }}</p>
         <div v-else-if="loading" class="approval-inbox__empty">{{ t.loadingApprovals }}</div>
-        <div v-else-if="!approvals.length" class="approval-inbox__empty">{{ t.noApprovals }}</div>
+        <EmptyState v-else-if="!approvals.length" :title="t.noApprovals" />
         <table v-else class="approval-inbox__table">
           <thead>
             <tr>
@@ -82,8 +82,8 @@
         <p v-if="actionStatus" class="approval-inbox__status">{{ actionStatus }}</p>
         <p v-if="historyError" class="approval-inbox__error">{{ historyError }}</p>
         <div v-else-if="historyLoading" class="approval-inbox__empty">{{ t.loadingHistory }}</div>
-        <div v-else-if="!selectedApprovalId" class="approval-inbox__empty">{{ t.selectApproval }}</div>
-        <div v-else-if="!history.length" class="approval-inbox__empty">{{ t.noHistory }}</div>
+        <EmptyState v-else-if="!selectedApprovalId" :title="t.selectApproval" />
+        <EmptyState v-else-if="!history.length" :title="t.noHistory" />
         <table v-else class="approval-inbox__table">
           <thead>
             <tr>
@@ -117,6 +117,7 @@ import type { ApprovalHistoryEntry } from './plm/plmPanelModels'
 import { useLocale } from '../composables/useLocale'
 import { apiFetch } from '../utils/api'
 import StatusTag from '../components/status/StatusTag.vue'
+import EmptyState from '../components/status/EmptyState.vue'
 import {
   buildApprovalInboxActionPayload,
   canActOnApprovalInboxEntry,

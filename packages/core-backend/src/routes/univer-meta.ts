@@ -15985,6 +15985,13 @@ export function univerMetaRouter(): Router {
         recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
       }
 
+      // LOCK-12: one bulk `/patch` request = one History Center batch. Minted ONCE here (before the
+      // all-or-nothing / partialSuccess branch split) and threaded explicitly into EVERY patchRecords
+      // call below — including each per-record call in the partialSuccess branch — so every record this
+      // request actually applies shares one batch_id, regardless of how many patchRecords calls it takes
+      // to apply them. Skipped/denied records are simply never written under it (no oracle change).
+      const batchId = randomUUID()
+
       if (parsed.data.partialSuccess === true) {
         const updated: Array<{ recordId: string; version: number }> = []
         const records: Array<{ recordId: string; data: Record<string, unknown> }> = []
@@ -16008,6 +16015,9 @@ export function univerMetaRouter(): Router {
               sheetScope,
               access,
               oapiAudit: buildOapiAuditContext(req, 'upsert', 'records:write'),
+              // LOCK-12: shared across every per-record call in this loop (see batchId comment above) —
+              // all surviving records in this partial-success request land in ONE History Center batch.
+              batchId,
             })
             updated.push(...result.updated)
             if (result.records) records.push(...(result.records as Array<{ recordId: string; data: Record<string, unknown> }>))
@@ -16051,6 +16061,9 @@ export function univerMetaRouter(): Router {
         sheetScope,
         access,
         oapiAudit: buildOapiAuditContext(req, 'upsert', 'records:write'),
+        // LOCK-12: same shared batchId minted above — a no-op change for this single-call branch (it was
+        // already one batch), kept explicit for symmetry with the partialSuccess branch.
+        batchId,
       })
 
       return res.json({
@@ -16062,10 +16075,10 @@ export function univerMetaRouter(): Router {
           ...(result.attachmentSummaries ? { attachmentSummaries: result.attachmentSummaries } : {}),
           ...(result.relatedRecords ? { relatedRecords: result.relatedRecords } : {}),
           // W3-5: echo the batchId so a REST/grid caller can deep-link into the History Center for exactly
-          // this commit. NOTE (scope, not fixed here): only meaningful for this single patchRecords call —
-          // the `partialSuccess` branch above calls patchRecords ONCE PER RECORD with no shared batchId, so
-          // each record there mints its OWN batch (unlike the AI bulk-commit route, which explicitly shares
-          // one). That is a pre-existing gap in this route, out of scope for this additive change.
+          // this commit. LOCK-12: the `partialSuccess` branch above now shares this SAME batchId across
+          // every per-record patchRecords call, so a bulk paste/fill with some records skipped/denied still
+          // lands its surviving records in one History Center batch (see the batchId comment above the
+          // branch split).
           ...(result.batchId ? { batchId: result.batchId } : {}),
         },
       })

@@ -85,6 +85,8 @@ export type AutomationLabelKey =
   | 'editor.saving'
   | 'editor.cancel'
   | 'editor.discardConfirm'
+  | 'editor.discardConfirmTitle'
+  | 'editor.discardConfirmButton'
   | 'editor.actions'
   | 'editor.actionStepHint'
   | 'editor.addField'
@@ -158,6 +160,7 @@ export type AutomationLabelKey =
   | 'parallelBranch.addBranch'
   | 'testRun.warning'
   | 'testRun.confirmSuffix'
+  | 'testRun.confirmTitle'
   | 'testRun.unsavedHint'
   | 'testRun.button'
   | 'testRun.running'
@@ -182,6 +185,7 @@ export type AutomationLabelKey =
   | 'manager.viewLogs'
   | 'manager.viewDeliveries'
   | 'manager.delete'
+  | 'manager.deleteConfirmTitle'
   | 'manager.cardPublicForm'
   | 'manager.cardInternalProcessing'
   | 'manager.cardOpenPublicForm'
@@ -292,6 +296,7 @@ export type AutomationLabelKey =
   | 'runs.loadingDetail'
   | 'runs.resume'
   | 'runs.resumeConfirm'
+  | 'runs.resumeConfirmTitle'
   | 'runs.resumeError.notFound'
   | 'runs.resumeError.alreadyResumed'
   | 'runs.resumeError.ruleChanged'
@@ -342,6 +347,8 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'editor.saving',
   'editor.cancel',
   'editor.discardConfirm',
+  'editor.discardConfirmTitle',
+  'editor.discardConfirmButton',
   'editor.actions',
   'editor.actionStepHint',
   'editor.addField',
@@ -412,6 +419,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'parallelBranch.addBranch',
   'testRun.warning',
   'testRun.confirmSuffix',
+  'testRun.confirmTitle',
   'testRun.unsavedHint',
   'testRun.button',
   'testRun.running',
@@ -436,6 +444,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'manager.viewLogs',
   'manager.viewDeliveries',
   'manager.delete',
+  'manager.deleteConfirmTitle',
   'manager.cardPublicForm',
   'manager.cardInternalProcessing',
   'manager.cardOpenPublicForm',
@@ -546,6 +555,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.loadingDetail',
   'runs.resume',
   'runs.resumeConfirm',
+  'runs.resumeConfirmTitle',
   'runs.resumeError.notFound',
   'runs.resumeError.alreadyResumed',
   'runs.resumeError.ruleChanged',
@@ -599,6 +609,8 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     en: 'You have unsaved changes; closing will discard them. Continue?',
     zh: '有未保存的更改，关闭将丢弃这些更改。是否继续？',
   },
+  'editor.discardConfirmTitle': { en: 'Discard changes?', zh: '放弃更改？' },
+  'editor.discardConfirmButton': { en: 'Discard', zh: '放弃' },
   'editor.actions': { en: 'Actions', zh: '动作' },
   'editor.actionStepHint': { en: '(1-3 steps)', zh: '（1-3 步）' },
   'editor.addField': { en: '+ Field', zh: '+ 字段' },
@@ -705,6 +717,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'parallelBranch.addBranch': { en: '+ Branch', zh: '+ 分支' },
   'testRun.warning': { en: 'Test Run executes the saved rule and can send real DingTalk messages to configured groups or users.', zh: '测试运行会执行已保存规则，并可能向已配置的钉钉群或用户发送真实消息。' },
   'testRun.confirmSuffix': { en: 'Unsaved changes are not included. Continue?', zh: '未保存的更改不会包含在内。是否继续？' },
+  'testRun.confirmTitle': { en: 'Run test?', zh: '运行测试？' },
   'testRun.unsavedHint': { en: 'Save this automation before running a test.', zh: '请先保存此自动化，再运行测试。' },
   'testRun.button': { en: 'Test Run', zh: '测试运行' },
   'testRun.running': { en: 'Running...', zh: '正在运行...' },
@@ -729,6 +742,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.viewLogs': { en: 'View Logs', zh: '查看日志' },
   'manager.viewDeliveries': { en: 'View Deliveries', zh: '查看投递记录' },
   'manager.delete': { en: 'Delete', zh: '删除' },
+  'manager.deleteConfirmTitle': { en: 'Delete rule', zh: '删除规则' },
   'manager.cardPublicForm': { en: 'Public form', zh: '公开表单' },
   'manager.cardInternalProcessing': { en: 'Internal processing', zh: '内部处理' },
   'manager.cardOpenPublicForm': { en: 'Open public form', zh: '打开公开表单' },
@@ -842,6 +856,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     en: 'Resume this run? It continues the remaining actions and may cause external side effects.',
     zh: '恢复这条执行？将继续执行剩余动作，可能产生外部副作用。',
   },
+  'runs.resumeConfirmTitle': { en: 'Resume run?', zh: '恢复执行？' },
   'runs.resumeError.notFound': { en: 'Resume token not found.', zh: '恢复令牌不存在。' },
   'runs.resumeError.alreadyResumed': { en: 'This run was already resumed.', zh: '该执行已被恢复。' },
   'runs.resumeError.ruleChanged': { en: 'The rule changed since it was suspended; cannot resume safely.', zh: '规则在挂起后已变更，无法安全恢复。' },
