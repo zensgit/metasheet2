@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, h, nextTick, type App as VueApp } from 'vue'
 
 const apiFetchMock = vi.fn()
@@ -444,6 +445,23 @@ describe('IntegrationReadSourceConfigPanel', () => {
     // mentions the concrete first action (probe → save), not a generic "no data" placeholder.
     expect(firstStep.textContent).toMatch(/probe/i)
     expect(firstStep.textContent).toMatch(/save version/i)
+
+    // zh variant coverage (quality-gate finding on IU-6: the en assertions above never see the zh
+    // copy, so it could rot to a generic placeholder unnoticed). Switch locale via the composable's
+    // setter (the module-level ref is resolved once at import — localStorage alone won't flip it),
+    // remount, and assert the concrete first action is mentioned in zh too.
+    const { setLocale } = useLocale()
+    setLocale('zh-CN')
+    try {
+      mockListOnly([])
+      const zhRoot = mountPanel()
+      await flushUi()
+      const zhFirstStep = q(zhRoot, 'rsc-empty-first-step')
+      expect(zhFirstStep.textContent).toContain('定位容器探测')
+      expect(zhFirstStep.textContent).toContain('保存版本')
+    } finally {
+      setLocale('en')
+    }
   })
 
   it('gates fields per mode and blocks probe/save until required fields are present', async () => {
