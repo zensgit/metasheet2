@@ -8,11 +8,21 @@ import { describe, expect, it } from 'vitest'
 // fails because you ADDED a hex color, use a token instead; if it fails
 // because you migrated some (count dropped), lower MAX_BARE_HEX to the new
 // count so the ratchet holds the gain.
-const MAX_BARE_HEX = 301
+const MAX_BARE_HEX = 285
+
+// PR/issue references in comments (e.g. "#2333") are valid hex-digit runs, so
+// comments must be stripped before counting — otherwise citing a PR number in
+// a comment would trip the ratchet as a false positive.
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|\s)\/\/[^\n]*/gm, '$1')
+    .replace(/<!--[\s\S]*?-->/g, '')
+}
 
 describe('AttendanceView bare-hex ratchet', () => {
   it(`has at most ${MAX_BARE_HEX} bare hex colors (monotonically decreasing)`, () => {
-    const source = readFileSync(resolve(__dirname, '../src/views/AttendanceView.vue'), 'utf8')
+    const source = stripComments(readFileSync(resolve(__dirname, '../src/views/AttendanceView.vue'), 'utf8'))
     const matches = source.match(/#[0-9a-fA-F]{3,8}\b/g) ?? []
     expect(matches.length).toBeLessThanOrEqual(MAX_BARE_HEX)
   })
