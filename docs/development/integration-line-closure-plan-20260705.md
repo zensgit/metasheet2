@@ -75,8 +75,10 @@ A 能力关键路径
        multitable-onprem-bom-list-bl3-20260706-1e18f85d5;实体机 PASS 双证据(happy path
        candidateCount=1 + 多 BOM 父物料 AMBIGUOUS policyConsistent,8 码族实战首验);
        runtimeValidated 受控翻真 #3702 ef2ad42ff
-  🔄 A5 BL4 组合复跑(owner opt-in "开 BL4" 2026-07-06)— 执行单 #3703(沿用 BL3 包,
-       hop-2 复用 #3701 已审批配置);等实体机复跑证据;PASS → runbook 附录回填 + close-out
+  ✅ A5 BL4 组合复跑 PASS(2026-07-06)— #3703 实体机端到端证据:数据面翻页 3 页命中单 BOM
+       候选(#3709+#3727 有界 pageIndex 双半)→ 组合 happy path PASS(compositionEvidenceOk=true);
+       fail-closed 双证据(组合级 AMBIGUOUS + 候选清查分桶);执行单 #3701/#3703 已关闭。
+       → 本线三层 DoD 全绿,最终报告 = integration-line-final-closure-report-20260706.md
 B 质量收尾
   ✅ B1 integration CI guard lane(我)— #3660 00108b4b8;lane 合后在 main 实跑 green
   ✅ B2 W1 处置(owner 授权闭环 2026-07-06「不在电脑前,全部完成」mandate 下按收尾一致原则执行)

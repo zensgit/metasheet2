@@ -456,3 +456,21 @@ out the composition arc's remaining real-hardware verification gap noted in
 `integration-read-source-resolver-composition-cr0-cr3-dev-verification-20260705.md`
 §8, exactly as the standalone read line's own entity-machine runbook closed
 out its arc on 2026-07-02.
+
+
+## 附录:2026-07-06 复跑记录(BL4 PASS)
+
+2026-07-05 首跑败于二跳(BL0/caseB:缺 BOM/GetList-by-material standalone 读)。经 BL 阶梯
+(BL0 锁 #3603 → BL1 契约 #3689 → BL2 runtime #3695 → BL3 standalone 冒烟 PASS #3701)补齐能力后,
+2026-07-06 复跑 **PASS**(#3703,release `multitable-onprem-bom-list-bl4b-20260706-eecd0c209`):
+
+```text
+compositionRunHttp=200 · compositionEvidenceOk=true · BL4HappyPath=PASS
+chainProven=materialNumber→FItemID→FBOMNumber(实体机组合路径端到端)
+样本发现=有界 pageIndex 数据面翻页(#3709 evidence 面 + #3727 数据面,1..10 硬界)
+fail-closed 证据=多 BOM 父物料经组合路径正确返回 K3_WISE_BOM_LIST_BY_MATERIAL_AMBIGUOUS
+边界=全程 values-free,中间值 FItemID 与最终 FBOMNumber 未出实体机屏幕
+```
+
+本 runbook 的"非实体机 PASS"限制条款自此解除;完整台账见
+`integration-line-final-closure-report-20260706.md`。
