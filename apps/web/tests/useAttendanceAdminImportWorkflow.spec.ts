@@ -147,7 +147,7 @@ describe('useAttendanceAdminImportWorkflow', () => {
 
     expect(downloadText).toHaveBeenCalledWith(
       'attendance-import-template-attendance.csv',
-      'userId,workDate,firstInAt\nuser-1,2026-03-23,2026-03-23T09:00:00Z\n',
+      '\ufeffuserId,workDate,firstInAt\nuser-1,2026-03-23,2026-03-23T09:00:00Z\n',
       'text/csv;charset=utf-8',
     )
     expect(setStatus).toHaveBeenLastCalledWith('CSV template downloaded.', 'info', undefined)
@@ -196,7 +196,7 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(apiFetch).toHaveBeenNthCalledWith(2, '/api/attendance/import/template')
     expect(downloadText).toHaveBeenCalledWith(
       'attendance-import-template-dingtalk_csv.csv',
-      'userId,workDate,firstInAt\n,,\n',
+      '\ufeffuserId,workDate,firstInAt\n,,\n',
       'text/csv;charset=utf-8',
     )
     expect(setStatus).toHaveBeenLastCalledWith('CSV template downloaded.', 'info', undefined)

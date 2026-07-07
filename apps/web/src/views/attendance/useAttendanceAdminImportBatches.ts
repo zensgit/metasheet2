@@ -1,5 +1,6 @@
 import { ref, type Ref } from 'vue'
 import { apiFetch as baseApiFetch } from '../../utils/api'
+import { withCsvBom } from './csvExport'
 
 type ApiFetchFn = typeof baseApiFetch
 type Translate = (en: string, zh: string) => string
@@ -921,7 +922,9 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
       }
 
       if (serverResponse.ok) {
-        const csvText = await serverResponse.text()
+        // Response.text() strips a UTF-8 BOM during decode (per spec), so the
+        // backend's BOM never survives this path — re-add it (review #3776 P2-1).
+        const csvText = withCsvBom(await serverResponse.text())
         const stamp = clock().toISOString().slice(0, 10)
         downloadCsv(`attendance-import-${batchId.slice(0, 8)}-${exportType}-${stamp}.csv`, csvText)
         setImportStatus(tr('CSV exported.', 'CSV 已导出。'))
@@ -993,7 +996,7 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
       const stamp = clock().toISOString().slice(0, 10)
       downloadCsv(
         `attendance-import-${batchId.slice(0, 8)}-${onlyAnomalies ? 'anomalies' : 'items'}-${stamp}.csv`,
-        lines.join('\n'),
+        withCsvBom(lines.join('\n')),
       )
       setImportStatus(tr(`CSV exported (${rows.length}/${allItems.length}).`, `CSV 已导出（${rows.length}/${allItems.length}）。`))
     } catch (error: unknown) {

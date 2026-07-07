@@ -9758,6 +9758,7 @@ import {
   groupSupportedImportColumns,
   type AttendanceImportMappingColumnLike,
 } from './attendance/importTemplateColumns'
+import { withCsvBom } from './attendance/csvExport'
 import {
   parseCsvHeaderFromText,
   readBlobHeadText,
@@ -18149,7 +18150,7 @@ async function downloadImportTemplateCsv() {
     return
   }
   const csv = `${columns.map(escapeCsvCell).join(',')}\n${columns.map(() => '').join(',')}\n`
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const blob = new Blob([withCsvBom(csv)], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   const source = normalizeText(selectedImportProfile.value?.source ?? guide.source) || 'attendance'
@@ -18163,7 +18164,7 @@ async function downloadImportTemplateCsv() {
 }
 
 function triggerImportCsvDownload(filename: string, csv: string) {
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const blob = new Blob([withCsvBom(csv)], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   try {
@@ -19316,7 +19317,7 @@ async function exportImportOverrideBackup(): Promise<void> {
 }
 
 function downloadCsvText(filename: string, csvText: string) {
-  const blob = new Blob([csvText], { type: 'text/csv' })
+  const blob = new Blob([withCsvBom(csvText)], { type: 'text/csv' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
@@ -21613,7 +21614,7 @@ async function exportCsv() {
     const disposition = response.headers.get('content-disposition')
     const match = disposition?.match(/filename="?([^";]+)"?/)
     const filename = match?.[1] || 'attendance-export.csv'
-    const blob = new Blob([text], { type: 'text/csv' })
+    const blob = new Blob([withCsvBom(text)], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
