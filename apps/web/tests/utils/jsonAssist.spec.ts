@@ -32,6 +32,10 @@ describe('analyzeJsonText', () => {
     const result = analyzeJsonText(text)
     expect(result.status).toBe('invalid')
     expect(result.line).toBe(3)
+    // No-leak tripwire on the WITH-position return path (path parity with the SENTINEL case, which
+    // exercises the no-position path): the analysis object carries ONLY numbers/status, never a
+    // forwarded error message (V8 embeds an input snippet in error.message).
+    expect(Object.keys(result).sort()).toEqual(['column', 'line', 'status'])
   })
 
   it('falls back to invalid with no line/column when the parser gives no position', () => {
