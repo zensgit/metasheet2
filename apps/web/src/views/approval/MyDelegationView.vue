@@ -19,7 +19,7 @@
       </el-table-column>
       <el-table-column label="状态" width="150">
         <template #default="{ row }">
-          <StatusTag domain="delegation" :status="delegationDisplayStatus(row).status" />
+          <StatusTag domain="delegation" :status="delegationDisplayStatus(row).status" force-locale="zh" />
           <span v-if="delegationDisplayStatus(row).expiringSoon" class="expiring-soon-hint">即将到期</span>
         </template>
       </el-table-column>

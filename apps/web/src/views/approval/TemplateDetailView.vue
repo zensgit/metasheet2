@@ -8,7 +8,7 @@
       @back="goBack"
     >
       <template v-if="template" #meta>
-        <StatusTag domain="approvalTemplate" :status="template.status" />
+        <StatusTag domain="approvalTemplate" :status="template.status" force-locale="zh" />
       </template>
       <template v-if="template" #actions>
         <el-button

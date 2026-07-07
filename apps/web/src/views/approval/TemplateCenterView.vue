@@ -130,7 +130,7 @@
       </el-table-column>
       <el-table-column label="状态" width="100">
         <template #default="{ row }">
-          <StatusTag domain="approvalTemplate" :status="row.status" size="sm" />
+          <StatusTag domain="approvalTemplate" :status="row.status" size="sm" force-locale="zh" />
         </template>
       </el-table-column>
       <el-table-column label="最近更新" width="180">
