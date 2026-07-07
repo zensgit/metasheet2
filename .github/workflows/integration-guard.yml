@@ -28,6 +28,7 @@ on:
       - 'apps/web/src/components/integration/IntegrationReadSourceConfigPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
+      - 'apps/web/src/components/integration/IntegrationWorkbenchRail.vue'
       - 'apps/web/src/views/IntegrationWorkbenchView.vue'
       - 'apps/web/src/views/IntegrationK3WiseSetupView.vue'
       - 'apps/web/src/views/IntegrationHelpView.vue'
@@ -40,6 +41,7 @@ on:
       - 'apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts'
       - 'apps/web/tests/readSourceCompositions.service.spec.ts'
       - 'apps/web/tests/IntegrationWorkbenchView.spec.ts'
+      - 'apps/web/tests/IntegrationWorkbenchRail.spec.ts'
       - 'apps/web/tests/IntegrationK3WiseSetupView.spec.ts'
       - 'apps/web/tests/IntegrationHelpView.spec.ts'
       - '.github/workflows/integration-guard.yml'
@@ -54,6 +56,7 @@ on:
       - 'apps/web/src/components/integration/IntegrationReadSourceConfigPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
+      - 'apps/web/src/components/integration/IntegrationWorkbenchRail.vue'
       - 'apps/web/src/views/IntegrationWorkbenchView.vue'
       - 'apps/web/src/views/IntegrationK3WiseSetupView.vue'
       - 'apps/web/src/views/IntegrationHelpView.vue'
@@ -66,6 +69,7 @@ on:
       - 'apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts'
       - 'apps/web/tests/readSourceCompositions.service.spec.ts'
       - 'apps/web/tests/IntegrationWorkbenchView.spec.ts'
+      - 'apps/web/tests/IntegrationWorkbenchRail.spec.ts'
       - 'apps/web/tests/IntegrationK3WiseSetupView.spec.ts'
       - 'apps/web/tests/IntegrationHelpView.spec.ts'
       - '.github/workflows/integration-guard.yml'
@@ -113,4 +117,4 @@ jobs:
         run: pnpm --filter plugin-integration-core test
 
       - name: Run integration web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationK3WiseSetupView IntegrationHelpView --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationK3WiseSetupView IntegrationHelpView --reporter=dot

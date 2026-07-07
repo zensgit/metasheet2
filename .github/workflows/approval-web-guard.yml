@@ -101,6 +101,9 @@ on:
       - 'apps/web/src/views/WorkflowDesigner.vue'
       - 'apps/web/src/multitable/components/MetaAutomationManager.vue'
       - 'apps/web/src/multitable/components/MetaAutomationRuleEditor.vue'
+      # IU-2a — Workbench chrome slice added to the UF-6 hex/rgb + static-style= guard set.
+      - 'apps/web/src/views/IntegrationWorkbenchView.vue'
+      - 'apps/web/src/components/integration/IntegrationWorkbenchRail.vue'
       - 'apps/web/src/styles/form-layout-utilities.css'
       - 'apps/web/.eslintrc.cjs'
       - 'apps/web/tests/ui-foundation-style-guard.spec.ts'
@@ -197,6 +200,9 @@ on:
       - 'apps/web/src/views/WorkflowDesigner.vue'
       - 'apps/web/src/multitable/components/MetaAutomationManager.vue'
       - 'apps/web/src/multitable/components/MetaAutomationRuleEditor.vue'
+      # IU-2a — Workbench chrome slice added to the UF-6 hex/rgb + static-style= guard set.
+      - 'apps/web/src/views/IntegrationWorkbenchView.vue'
+      - 'apps/web/src/components/integration/IntegrationWorkbenchRail.vue'
       - 'apps/web/src/styles/form-layout-utilities.css'
       - 'apps/web/.eslintrc.cjs'
       - 'apps/web/tests/ui-foundation-style-guard.spec.ts'
