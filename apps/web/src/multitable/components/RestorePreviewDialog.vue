@@ -32,16 +32,16 @@
         </div>
 
         <div class="restore-preview__footer">
-          <button type="button" class="restore-preview__btn" @click="onCancel">{{ l('record.restorePreviewCancel') }}</button>
-          <button
-            type="button"
+          <MtButton class="restore-preview__btn" @click="onCancel">{{ l('record.restorePreviewCancel') }}</MtButton>
+          <MtButton
+            variant="primary"
             class="restore-preview__btn restore-preview__btn--primary"
             :disabled="!canConfirm"
             data-test="restore-preview-confirm"
             @click="onConfirm"
           >
             {{ l('record.restorePreviewExecute') }}
-          </button>
+          </MtButton>
         </div>
       </div>
     </div>
@@ -52,6 +52,7 @@
 import { computed } from 'vue'
 
 import type { RestorePreviewChange } from '../api/client'
+import { MtButton } from '../ui'
 import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 
 const props = defineProps<{
@@ -160,21 +161,5 @@ function onCancel(): void {
   gap: 8px;
   padding: 12px 16px;
   border-top: 1px solid var(--border, #e2e8f0);
-}
-.restore-preview__btn {
-  padding: 6px 14px;
-  border-radius: 6px;
-  border: 1px solid var(--border, #cbd5e1);
-  background: var(--surface, #fff);
-  cursor: pointer;
-}
-.restore-preview__btn--primary {
-  background: var(--primary, #2563eb);
-  color: #fff;
-  border-color: var(--primary, #2563eb);
-}
-.restore-preview__btn--primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 </style>
