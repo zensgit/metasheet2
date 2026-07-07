@@ -30,8 +30,8 @@
           ></textarea>
           <div v-if="parseError" class="meta-import__error">{{ parseError }}</div>
           <div class="meta-import__actions">
-            <button class="meta-import__btn" :disabled="isImporting" @click="requestClose">{{ l('import.cancel') }}</button>
-            <button class="meta-import__btn meta-import__btn--primary" :disabled="!rawText.trim()" @click="parseAndPreview">{{ l('import.preview') }}</button>
+            <MtButton class="meta-import__btn" :disabled="isImporting" @click="requestClose">{{ l('import.cancel') }}</MtButton>
+            <MtButton class="meta-import__btn meta-import__btn--primary" variant="primary" :disabled="!rawText.trim()" @click="parseAndPreview">{{ l('import.preview') }}</MtButton>
           </div>
         </div>
 
@@ -173,6 +173,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import MetaLinkPicker from './MetaLinkPicker.vue'
+import { MtButton } from '../ui'
 import { useLocale } from '../../composables/useLocale'
 import type { LinkedRecordSummary, MetaField } from '../types'
 import { buildImportedRecords, parseDelimitedText } from '../import/delimited'
