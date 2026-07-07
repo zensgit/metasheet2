@@ -28,8 +28,9 @@
 - ✅ **W1-1 formula freshness / live-reactive audit design-lock** — 已交付(audit `multitable-formula-freshness-audit-20260705.md` + design-lock `multitable-formula-freshness-designlock-20260705.md`;`LOCK-F` F1/F3 已在 `index.ts` Yjs bridge 落地、F4 故意留桩 + golden GF9、N4/N5 doc-only 锁定)。
   > 2026-07-07 独立 8-agent 代码级复审重导出同 4 条结论;唯一"新缺口"(recycle-bin undelete 无重算)**已被 N4 裁定**:undelete/reset 写入的是 PIT T-自洽物化值,**doc-only 锁定、不加重算**——再开"补算 slice"会**推翻已批 owner 决策**,故如实关闭,不建 slice。
   口径存档(勿复用为待办):写路径 REST spine 重算 **已存在**(`record-write-service.ts` Step 4c);(a) on-save vs live-reactive = 产品口径(无半成品 live 路径)· (b) Yjs 同表重算 = 有(taint parity),跨表 fan-out = F4/GF9 故意留桩 · (c) restore 家族过 spine,唯 undelete 快照回放 = N4 doc-only · (d) 单跳边界 = C1 RFC + FOL-3 已锁。
-- ⬜ **W1-2 权限金矩阵主体 spec**(spec=Fable 5 → 套件生成=Sonnet 5)
-  Tier-B #5 主体(#3574 仅 slice 1):row×field×base×OAPI 组合矩阵 spec 先行;显式排除历史窗口正在点亮的 flag 面,避免 golden 追逐移动目标。
+- ✅ **W1-2 权限金矩阵主体 spec** — 已交付(`multitable-w1-2-permission-matrix-spec-20260705.md`;row×field×base×OAPI 组合矩阵 + G-1…G-8 格子清单,§72-75)。Tier-B #5 主体(#3574 仅 slice 1)。
+- ⬜ **W1-2-B B1–B4 权限 golden 生成**(Sonnet 5,套件生成;由上 spec §72-75 驱动)
+  从已交付 spec 生成 G-1…G-8 golden:B1 侧门×写修饰符(最高险,先行)· B2 oracle/泄漏 · B3 管理面 403 矩阵 · B4 差分性质与评论。**注**:多为 **real-DB bridge-specific 权限矩阵**(现只有旧 `d3d1/d3d2` 功能 golden),无本地 real-DB 时走 throwaway-CI observed-RED;**显式排除历史窗口正在点亮的 flag 面**,避免 golden 追逐移动目标。
 
 ## W2 — build 车道(各自 lock ratify 后解锁)
 
