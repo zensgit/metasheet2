@@ -37,241 +37,48 @@
         />
         <div class="integration-workbench__sections">
 
-    <section id="int-sec-connection" class="integration-workbench__panel">
-      <el-card shadow="never">
-        <template #header>
-          <div class="integration-workbench__panel-head">
-            <div>
-              <h2>连接系统 / 数据源</h2>
-          <p>普通用户选择已配置连接；SQL 通道是高级连接，只用于 allowlist 表、视图或中间表。</p>
-        </div>
-        <button type="button" class="integration-workbench__button" data-testid="refresh-systems" @click="refreshBootstrap">
-          刷新连接
-        </button>
-      </div>
-        </template>
-
-
-      <div class="integration-workbench__onboarding" data-testid="connection-onboarding">
-        <div>
-          <strong>新增或管理连接</strong>
-          <p>这是页面内连接设置区，不会跳到独立设置页。业务用户可从 K3 WISE 预设开始，实施人员再展开 SQL / 高级连接。</p>
-        </div>
-        <div class="integration-workbench__onboarding-actions">
-          <router-link class="integration-workbench__button" to="/integrations/k3-wise" data-testid="k3-preset-entry">
-            使用 K3 WISE 预设
-          </router-link>
-          <button type="button" class="integration-workbench__button" data-testid="connect-new-system" @click="showConnectionGuide">
-            新增连接草稿
-          </button>
-          <button type="button" class="integration-workbench__button" data-testid="show-sql-setup" @click="showSqlSetup">
-            展开 SQL / 高级连接
-          </button>
-        </div>
-      </div>
-
-      <button
-        type="button"
-        class="integration-workbench__inventory-toggle"
-        data-testid="toggle-inventory-overview"
-        :aria-expanded="inventoryExpanded ? 'true' : 'false'"
-        @click="inventoryExpanded = !inventoryExpanded"
-      >
-        {{ inventorySummary }} <span>{{ inventoryExpanded ? '收起' : '展开' }}</span>
-      </button>
-
-      <div v-if="inventoryExpanded" class="integration-workbench__inventory" data-testid="inventory-overview">
-        <div>
-          <h3>已配置连接</h3>
-          <p class="integration-workbench__muted">在这里编辑、复制、停用 / 启用或删除连接；删除仅限未被清洗流程引用的连接。</p>
-          <div v-if="systems.length === 0" class="integration-workbench__empty" data-testid="connections-empty-state">
-            <strong data-testid="connections-empty-what">{{ bi(
-              '这里是你已连接的外部系统（CRM / PLM / ERP / SRM / HTTP / SQL）。',
-              'This lists the external systems you have connected (CRM / PLM / ERP / SRM / HTTP / SQL).',
-            ) }}</strong>
-            <p data-testid="connections-empty-first-step">{{ bi(
-              '第一步：使用 K3 WISE 预设快速开始，或点击上方"新增连接草稿"创建一个连接。',
-              'First step: start quickly with the K3 WISE preset, or click "new connection draft" above to create one.',
-            ) }}</p>
-          </div>
-          <ul v-else class="integration-workbench__inventory-list">
-            <li v-for="system in systems" :key="system.id">
-              <strong>{{ system.name }}</strong>
-              <span>{{ system.kind }} · {{ system.role }} · {{ connectionStatusLabel(system) }}</span>
-              <small v-if="runtimeBlockerForSystem(system)">{{ runtimeBlockerForSystem(system) }}</small>
-              <div class="integration-workbench__actions integration-workbench__actions--inline">
-                <button type="button" class="integration-workbench__icon-button" :data-testid="`edit-connection-${system.id}`" @click="editConnection(system)">
-                  编辑
-                </button>
-                <button type="button" class="integration-workbench__icon-button" :data-testid="`copy-connection-${system.id}`" @click="copyConnection(system)">
-                  复制
-                </button>
-                <button v-if="system.status !== 'inactive'" type="button" class="integration-workbench__icon-button" :data-testid="`deactivate-connection-${system.id}`" @click="deactivateConnection(system)">
-                  停用
-                </button>
-                <button v-else type="button" class="integration-workbench__icon-button" :data-testid="`activate-connection-${system.id}`" @click="activateConnection(system)">
-                  启用
-                </button>
-                <button type="button" class="integration-workbench__icon-button" :data-testid="`delete-connection-${system.id}`" :disabled="deletingConnectionId === system.id" title="只能删除未被 pipeline 引用的连接" @click="deleteConnection(system)">
-                  {{ deletingConnectionId === system.id ? '删除中' : '删除' }}
-                </button>
-              </div>
-            </li>
-          </ul>
-        </div>
-        <div>
-          <h3>可用适配器</h3>
-          <ul class="integration-workbench__inventory-list">
-            <li v-for="adapter in adapters" :key="adapter.kind">
-              <strong>{{ adapter.label }}</strong>
-              <span>{{ adapter.kind }} · {{ adapter.roles.join('/') }}</span>
-              <small>{{ adapter.advanced ? '高级 / 实施人员使用' : '普通连接' }}</small>
-            </li>
-          </ul>
-        </div>
-        <div>
-          <h3>Staging 多维表</h3>
-          <ul class="integration-workbench__inventory-list">
-            <li v-for="descriptor in stagingDatasetCards" :key="descriptor.id">
-              <strong>{{ descriptor.name }}</strong>
-              <span>{{ descriptor.area }} · {{ descriptor.fieldCount }} 个字段</span>
-              <small>{{ descriptor.openLink ? '可打开多维表' : '等待安装后返回打开链接' }}</small>
-            </li>
-          </ul>
-        </div>
-      </div>
-
-      <div class="integration-workbench__adapter-list">
-        <span
-          v-for="adapter in visibleAdapters"
-          :key="adapter.kind"
-          class="integration-workbench__adapter"
-          :data-advanced="adapter.advanced ? 'true' : 'false'"
-        >
-          {{ adapter.label }}
-          <small v-if="adapter.advanced">高级</small>
-        </span>
-      </div>
-
-      <label class="integration-workbench__advanced-toggle">
-        <input v-model="showAdvancedConnectors" type="checkbox" data-testid="show-advanced-connectors" />
-        <span>显示 SQL / 高级连接（实施人员或管理员使用）</span>
-      </label>
-      <div v-if="!showAdvancedConnectors && hiddenAdvancedSystemCount > 0" class="integration-workbench__hint" data-testid="advanced-hidden-hint">
-        已隐藏 {{ hiddenAdvancedSystemCount }} 个高级连接。SQL 通道默认不进入业务用户连接列表。
-      </div>
-      <div v-if="showAdvancedConnectors" class="integration-workbench__hint" data-testid="advanced-visible-hint">
-        高级连接只用于 allowlist 表/视图读取或中间表写入；不要把核心业务表直写暴露给普通用户。
-      </div>
-
-      <div class="integration-workbench__connection-manager" data-testid="connection-manager">
-        <div>
-          <strong>{{ connectionDraftTitle }}</strong>
-          <p>这是内嵌连接设置面板：保存后会回到上方“已配置连接”和下方来源/目标选择器。真实账号、密码、Token 仍通过各系统预设向导或后端凭证库处理。</p>
-        </div>
-        <div class="integration-workbench__grid integration-workbench__grid--compact">
-          <label>
-            <span>连接名称</span>
-            <input v-model="connectionDraft.name" data-testid="connection-draft-name" placeholder="例如 K3 WISE WebAPI" />
-          </label>
-          <label>
-            <span>连接类型</span>
-            <select v-model="connectionDraft.kind" data-testid="connection-draft-kind">
-              <option value="">请选择 adapter</option>
-              <option v-for="adapter in connectionDraftAdapterOptions" :key="adapter.kind" :value="adapter.kind">
-                {{ adapter.label }} · {{ adapter.kind }}
-              </option>
-            </select>
-          </label>
-          <label>
-            <span>连接角色</span>
-            <select v-model="connectionDraft.role" data-testid="connection-draft-role">
-              <option value="source">数据源 source</option>
-              <option value="target">目标 target</option>
-              <option value="bidirectional">双向 bidirectional</option>
-            </select>
-          </label>
-          <label>
-            <span>状态</span>
-            <select v-model="connectionDraft.status" data-testid="connection-draft-status">
-              <option value="active">active</option>
-              <option value="inactive">inactive</option>
-              <option value="error">error</option>
-            </select>
-          </label>
-        </div>
-        <div v-if="isDataSourceBridgeKind" class="integration-workbench__grid integration-workbench__grid--compact" data-testid="data-source-bridge-picker">
-          <label>
-            <span>数据源(只读)</span>
-            <select v-model="connectionDraft.dataSourceId" data-testid="data-source-bridge-id" @change="onBridgeDataSourceChange">
-              <option value="">请选择已配置的数据源</option>
-              <option v-for="ds in bridgeDataSources" :key="ds.id" :value="ds.id">{{ ds.name }} · {{ ds.type }}</option>
-            </select>
-          </label>
-          <label>
-            <span>对象(表 / 视图)</span>
-            <select
-              v-model="connectionDraft.dataSourceObject"
-              data-testid="data-source-bridge-object"
-              :disabled="bridgeDataSourceObjectsLoading || !connectionDraft.dataSourceId || bridgeDataSourceObjectOptions.length === 0"
-            >
-              <option value="">{{ bridgeDataSourceObjectOptions.length > 0 ? '请选择表 / 视图' : '请先加载表 / 视图列表' }}</option>
-              <option v-for="object in bridgeDataSourceObjectOptions" :key="object.value" :value="object.value">
-                {{ object.label }}
-              </option>
-            </select>
-          </label>
-          <p v-if="bridgeDataSourceObjectsLoading" class="integration-workbench__hint" data-testid="data-source-bridge-object-loading">正在加载表 / 视图列表...</p>
-          <p v-if="!bridgeDataSourceObjectsLoading && connectionDraft.dataSourceId && bridgeDataSourceObjectOptions.length === 0 && !bridgeDataSourceObjectsError" class="integration-workbench__hint" data-testid="data-source-bridge-object-empty">没有可选表 / 视图；请回 /data-sources 检查权限或 schema。</p>
-          <p v-if="selectedBridgeObjectSummary" class="integration-workbench__hint" data-testid="data-source-bridge-object-summary">{{ selectedBridgeObjectSummary }}</p>
-          <p class="integration-workbench__hint" data-testid="data-source-bridge-hint">凭据由 /data-sources 管理,这里只引用 dataSourceId,不复制账号密码。</p>
-          <p v-if="bridgeDataSourcesError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="data-source-bridge-error">{{ bridgeDataSourcesError }}</p>
-          <p v-if="bridgeDataSourceObjectsError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="data-source-bridge-object-error">{{ bridgeDataSourceObjectsError }}</p>
-        </div>
-        <div v-if="connectionDraftDuplicateWarning" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="connection-duplicate-warning">
-          {{ connectionDraftDuplicateWarning }}
-        </div>
-        <div v-if="connectionDraftRoleWarning" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="connection-role-warning">
-          {{ connectionDraftRoleWarning }}
-        </div>
-        <details v-if="!isDataSourceBridgeKind" class="integration-workbench__details">
-          <summary>高级 JSON 配置（不会显示或保存凭证）</summary>
-          <div class="integration-workbench__grid integration-workbench__grid--compact">
-            <label>
-              <span>config JSON</span>
-              <textarea v-model="connectionDraft.configText" data-testid="connection-draft-config"></textarea>
-            </label>
-            <label>
-              <span>capabilities JSON</span>
-              <textarea v-model="connectionDraft.capabilitiesText" data-testid="connection-draft-capabilities"></textarea>
-            </label>
-          </div>
-        </details>
-        <div v-if="connectionDraftJsonError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="connection-json-error">
-          {{ connectionDraftJsonError }}
-        </div>
-        <div class="integration-workbench__actions">
-          <button type="button" class="integration-workbench__button" data-testid="save-connection-draft" :disabled="savingConnectionDraft || !canSaveConnectionDraft" @click="saveConnectionDraft">
-            {{ savingConnectionDraft ? '保存中' : '保存连接设置' }}
-          </button>
-          <button type="button" class="integration-workbench__button" data-testid="reset-connection-draft" @click="resetConnectionDraft">
-            清空草稿
-          </button>
-        </div>
-      </div>
-
-      <div class="integration-workbench__grid">
-        <label>
-          <span>Tenant ID</span>
-          <input v-model="scope.tenantId" data-testid="tenant-id" />
-        </label>
-        <label>
-          <span>Workspace ID</span>
-          <input v-model="workspaceInput" data-testid="workspace-id" placeholder="可选" />
-        </label>
-      </div>
-      </el-card>
-    </section>
+    <IntegrationConnectionSection
+      :bi="bi"
+      :refresh-bootstrap="refreshBootstrap"
+      :show-connection-guide="showConnectionGuide"
+      :show-sql-setup="showSqlSetup"
+      :inventory-summary="inventorySummary"
+      :systems="systems"
+      :connection-status-label="connectionStatusLabel"
+      :runtime-blocker-for-system="runtimeBlockerForSystem"
+      :edit-connection="editConnection"
+      :copy-connection="copyConnection"
+      :deactivate-connection="deactivateConnection"
+      :activate-connection="activateConnection"
+      :delete-connection="deleteConnection"
+      :deleting-connection-id="deletingConnectionId"
+      :adapters="adapters"
+      :staging-dataset-cards="stagingDatasetCards"
+      :visible-adapters="visibleAdapters"
+      :hidden-advanced-system-count="hiddenAdvancedSystemCount"
+      :connection-draft-title="connectionDraftTitle"
+      :connection-draft="connectionDraft"
+      :connection-draft-adapter-options="connectionDraftAdapterOptions"
+      :is-data-source-bridge-kind="isDataSourceBridgeKind"
+      :on-bridge-data-source-change="onBridgeDataSourceChange"
+      :bridge-data-sources="bridgeDataSources"
+      :bridge-data-source-objects-loading="bridgeDataSourceObjectsLoading"
+      :bridge-data-source-object-options="bridgeDataSourceObjectOptions"
+      :bridge-data-source-objects-error="bridgeDataSourceObjectsError"
+      :selected-bridge-object-summary="selectedBridgeObjectSummary"
+      :bridge-data-sources-error="bridgeDataSourcesError"
+      :connection-draft-duplicate-warning="connectionDraftDuplicateWarning"
+      :connection-draft-role-warning="connectionDraftRoleWarning"
+      :connection-draft-json-error="connectionDraftJsonError"
+      :saving-connection-draft="savingConnectionDraft"
+      :can-save-connection-draft="canSaveConnectionDraft"
+      :save-connection-draft="saveConnectionDraft"
+      :reset-connection-draft="resetConnectionDraft"
+      :scope="scope"
+      v-model:inventory-expanded="inventoryExpanded"
+      v-model:show-advanced-connectors="showAdvancedConnectors"
+      v-model:workspace-input="workspaceInput"
+    />
 
     <section id="int-sec-read-source" class="integration-workbench__panel">
       <el-card shadow="never">
@@ -318,181 +125,45 @@
       </el-card>
     </section>
 
-    <section id="int-sec-object-template" class="integration-workbench__panel">
-      <el-card shadow="never">
-        <template #header>
-          <div class="integration-workbench__panel-head">
-            <div>
-              <h2>选择系统与数据集</h2>
-          <p>来源对象决定从哪里取数，目标模板决定写到哪里。先选系统，再加载可选数据集或模板。</p>
-        </div>
-      </div>
-        </template>
-
-      <div class="integration-workbench__grid integration-workbench__grid--systems">
-        <div class="integration-workbench__system-column">
-          <h2>1. 来源对象选择</h2>
-          <label>
-            <span>数据源系统</span>
-            <select v-model="sourceSystemId" data-testid="source-system" @change="handleSourceSystemChange">
-              <option value="">请选择数据源系统</option>
-              <option
-                v-for="system in sourceSystems"
-                :key="system.id"
-                :value="system.id"
-                :disabled="isSourceOptionDisabled(system)"
-                :data-disabled="isSourceOptionDisabled(system) ? 'true' : 'false'"
-                :data-testid="`source-system-option-${system.id}`"
-              >
-                {{ system.name }} · {{ system.kind }}
-              </option>
-            </select>
-          </label>
-          <div class="integration-workbench__hint" data-testid="source-selector-explanation">
-            {{ sourceSelectorExplanation }}
-          </div>
-          <div
-            v-if="selectedPlmApprovalCapabilityEntry"
-            class="integration-workbench__capability-entry"
-            :data-state="selectedPlmApprovalCapabilityEntry.state"
-            :data-action-status="selectedPlmApprovalCapabilityEntry.actionStatus || 'none'"
-            data-testid="plm-approval-capability-entry"
-          >
-            <div>
-              <span class="integration-workbench__badge" :data-status="selectedPlmApprovalCapabilityEntry.state">
-                {{ selectedPlmApprovalCapabilityEntry.badge }}
-              </span>
-              <strong>{{ selectedPlmApprovalCapabilityEntry.title }}</strong>
-            </div>
-            <p>{{ selectedPlmApprovalCapabilityEntry.detail }}</p>
-            <small v-if="selectedPlmApprovalCapabilityEntry.apiVersion">
-              {{ PLM_APPROVAL_AUTOMATION_FEATURE_KEY }} · API {{ selectedPlmApprovalCapabilityEntry.apiVersion }}
-            </small>
-          </div>
-          <div
-            v-if="selectedPlmBomMultitableCapabilityEntry"
-            class="integration-workbench__capability-entry"
-            :data-state="selectedPlmBomMultitableCapabilityEntry.state"
-            data-testid="plm-bom-multitable-capability-entry"
-          >
-            <div>
-              <span class="integration-workbench__badge" :data-status="selectedPlmBomMultitableCapabilityEntry.state">
-                {{ selectedPlmBomMultitableCapabilityEntry.badge }}
-              </span>
-              <strong>{{ selectedPlmBomMultitableCapabilityEntry.title }}</strong>
-            </div>
-            <p>{{ selectedPlmBomMultitableCapabilityEntry.detail }}</p>
-            <small v-if="selectedPlmBomMultitableCapabilityEntry.apiVersion">
-              {{ PLM_BOM_MULTITABLE_FEATURE_KEY }} · API {{ selectedPlmBomMultitableCapabilityEntry.apiVersion }}
-            </small>
-            <PlmBomReviewPanel
-              v-if="selectedPlmBomMultitableCapabilityEntry.state === 'enabled' && selectedSourcePlmDataSourceId"
-              :data-source-id="selectedSourcePlmDataSourceId"
-            />
-          </div>
-          <div v-if="!hasRunnableSourceSystem" class="integration-workbench__empty integration-workbench__empty--actionable" data-testid="source-empty-state">
-            <strong>还没有可读取的数据源。</strong>
-            <p>连接 PLM、HTTP API 或启用 SQL 只读通道后，可将数据导入 staging 多维表再清洗。</p>
-            <div class="integration-workbench__actions">
-              <router-link class="integration-workbench__button" to="/integrations/k3-wise">使用 K3 WISE 预设</router-link>
-              <button type="button" class="integration-workbench__button" data-testid="show-staging-setup" @click="showStagingSetup">创建 staging 多维表作为来源</button>
-              <button type="button" class="integration-workbench__button" @click="showSqlSetup">启用 SQL 只读通道</button>
-            </div>
-          </div>
-          <div v-if="sourceRuntimeBlocker" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="source-runtime-blocker">
-            {{ sourceRuntimeBlocker }}
-          </div>
-          <div v-if="k3WebApiReadGateNotice" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="k3-webapi-read-gate-notice">
-            {{ k3WebApiReadGateNotice }}
-          </div>
-          <div v-if="sqlChannelDisabledHint" class="integration-workbench__hint" data-testid="sql-channel-disabled-hint">
-            {{ sqlChannelDisabledHint }}
-          </div>
-          <div class="integration-workbench__connection-row">
-            <span class="integration-workbench__badge" :data-status="sourceConnectionStatus">{{ sourceConnectionLabel }}</span>
-            <button type="button" class="integration-workbench__button" data-testid="test-source-system" @click="testSystem('source')">
-              测试来源连接
-            </button>
-            <button type="button" class="integration-workbench__button" data-testid="load-source-objects" @click="loadObjects('source')">
-              加载来源对象
-            </button>
-          </div>
-          <label>
-            <span>来源数据集（从哪里取数）</span>
-            <select v-model="sourceObjectName" data-testid="source-object" @change="handleSourceObjectChange">
-              <option value="">请选择来源数据集</option>
-              <option v-for="object in sourceObjects" :key="object.name" :value="object.name">
-                {{ object.label || object.name }}
-              </option>
-            </select>
-          </label>
-          <ul class="integration-workbench__schema-list">
-            <li v-for="field in sourceSchema.fields" :key="field.name">
-              {{ field.label || field.name }} <code>{{ field.name }}</code>
-            </li>
-          </ul>
-        </div>
-
-        <div class="integration-workbench__system-column">
-          <h2>2. 目标模板选择</h2>
-          <label>
-            <span>目标系统</span>
-            <select v-model="targetSystemId" data-testid="target-system">
-              <option value="">请选择目标系统</option>
-              <option v-for="system in targetSystems" :key="system.id" :value="system.id">
-                {{ system.name }} · {{ system.kind }}
-              </option>
-            </select>
-          </label>
-          <div class="integration-workbench__hint" data-testid="target-selector-explanation">
-            {{ targetSelectorExplanation }}
-          </div>
-          <div class="integration-workbench__connection-row">
-            <span class="integration-workbench__badge" :data-status="targetConnectionStatus">{{ targetConnectionLabel }}</span>
-            <button type="button" class="integration-workbench__button" data-testid="test-target-system" @click="testSystem('target')">
-              测试目标连接
-            </button>
-            <button type="button" class="integration-workbench__button" data-testid="load-target-objects" @click="loadObjects('target')">
-              加载目标模板
-            </button>
-          </div>
-          <label>
-            <span>目标数据集 / 模板（写到哪里）</span>
-            <select v-model="targetObjectName" data-testid="target-object" @change="loadSchema('target')">
-              <option value="">请选择目标数据集</option>
-              <option v-for="object in targetObjects" :key="object.name" :value="object.name">
-                {{ object.label || object.name }}
-              </option>
-            </select>
-          </label>
-          <ul class="integration-workbench__schema-list">
-            <li v-for="field in targetSchema.fields" :key="field.name">
-              {{ field.label || field.name }} <code>{{ field.name }}</code>
-              <strong v-if="field.required">必填</strong>
-            </li>
-          </ul>
-        </div>
-      </div>
-      <div v-if="sameSystemNotice" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="same-system-notice">
-        {{ sameSystemNotice }}
-      </div>
-      <div v-if="protocolSplitNotice" class="integration-workbench__hint" data-testid="protocol-split-notice">
-        {{ protocolSplitNotice }}
-      </div>
-      <div v-if="stagingTargetMismatchNotice" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="source-target-mismatch-notice">
-        <span>{{ stagingTargetMismatchNotice }}</span>
-        <button
-          v-if="recommendedStagingSourceObject"
-          type="button"
-          class="integration-workbench__button"
-          data-testid="use-recommended-staging-source"
-          @click="useRecommendedStagingSource"
-        >
-          切换到 {{ stagingDatasetCopy[recommendedStagingSourceObject]?.name || recommendedStagingSourceObject }}
-        </button>
-      </div>
-      </el-card>
-    </section>
+    <IntegrationObjectTemplateSection
+      :source-systems="sourceSystems"
+      :is-source-option-disabled="isSourceOptionDisabled"
+      :handle-source-system-change="handleSourceSystemChange"
+      :source-selector-explanation="sourceSelectorExplanation"
+      :selected-plm-approval-capability-entry="selectedPlmApprovalCapabilityEntry"
+      :selected-plm-bom-multitable-capability-entry="selectedPlmBomMultitableCapabilityEntry"
+      :selected-source-plm-data-source-id="selectedSourcePlmDataSourceId"
+      :has-runnable-source-system="hasRunnableSourceSystem"
+      :show-staging-setup="showStagingSetup"
+      :show-sql-setup="showSqlSetup"
+      :source-runtime-blocker="sourceRuntimeBlocker"
+      :k3-web-api-read-gate-notice="k3WebApiReadGateNotice"
+      :sql-channel-disabled-hint="sqlChannelDisabledHint"
+      :source-connection-status="sourceConnectionStatus"
+      :source-connection-label="sourceConnectionLabel"
+      :test-system="testSystem"
+      :load-objects="loadObjects"
+      :handle-source-object-change="handleSourceObjectChange"
+      :source-objects="sourceObjects"
+      :source-schema="sourceSchema"
+      :target-systems="targetSystems"
+      :target-selector-explanation="targetSelectorExplanation"
+      :target-connection-status="targetConnectionStatus"
+      :target-connection-label="targetConnectionLabel"
+      :load-schema="loadSchema"
+      :target-objects="targetObjects"
+      :target-schema="targetSchema"
+      :same-system-notice="sameSystemNotice"
+      :protocol-split-notice="protocolSplitNotice"
+      :staging-target-mismatch-notice="stagingTargetMismatchNotice"
+      :recommended-staging-source-object="recommendedStagingSourceObject"
+      :staging-dataset-copy="stagingDatasetCopy"
+      :use-recommended-staging-source="useRecommendedStagingSource"
+      v-model:source-system-id="sourceSystemId"
+      v-model:source-object-name="sourceObjectName"
+      v-model:target-system-id="targetSystemId"
+      v-model:target-object-name="targetObjectName"
+    />
 
     <IntegrationCleaningDatasetSection
       :source-dataset-title="sourceDatasetTitle"
@@ -1068,102 +739,25 @@
       :toggle-dead-letter-provenance="toggleDeadLetterProvenance"
     />
 
-    <section id="int-sec-preview" class="integration-workbench__panel integration-workbench__preview">
-      <el-card shadow="never">
-      <div>
-        <h2>样例记录</h2>
-        <textarea v-model="sampleRecordText" data-testid="sample-record" spellcheck="false"></textarea>
-        <h2>目标模板 JSON</h2>
-        <textarea
-          v-model="payloadTemplateText"
-          data-testid="payload-template"
-          spellcheck="false"
-          placeholder='{ "FNumber": "&lt;code&gt;", "FName": "&lt;name&gt;" }'
-        ></textarea>
-        <small class="integration-workbench__hint">可选。填写后使用 DF-T1 no-write payloadTemplate 预览；留空则保持 legacy preview。</small>
-        <h2>引用映射来源(各 domain 绑定 staging 表)</h2>
-        <div v-if="referenceMappingDomains.length > 0" data-testid="reference-mapping-picker">
-          <div
-            v-for="domain in referenceMappingDomains"
-            :key="domain"
-            class="integration-workbench__ref-mapping-row"
-            :data-testid="`ref-mapping-row-${domain}`"
-          >
-            <code>{{ domain }}</code>
-            <select
-              :data-testid="`ref-mapping-system-${domain}`"
-              :value="referenceMappingBindings[domain]?.systemId || ''"
-              @change="onRefMappingSystemChange(domain, ($event.target as HTMLSelectElement).value)"
-            >
-              <option value="">— staging 系统 —</option>
-              <option v-for="system in stagingSystems" :key="system.id" :value="system.id">{{ system.name }}</option>
-            </select>
-            <input
-              :data-testid="`ref-mapping-object-${domain}`"
-              :value="referenceMappingBindings[domain]?.object || ''"
-              placeholder="对象/表名"
-              @input="onRefMappingObjectChange(domain, ($event.target as HTMLInputElement).value)"
-            />
-          </div>
-        </div>
-        <small class="integration-workbench__hint">将 reference 字段授权为「从映射表解析」并选 domain 后,这里按 domain 绑定其 staging 映射表(系统按名称选,对象填表名);预览会实时 bulk-read 解析。sourceCode 列在上方字段规则里填。</small>
-        <button
-          type="button"
-          class="integration-workbench__button"
-          data-testid="derive-template-draft"
-          :disabled="derivingDraft"
-          @click="deriveTemplateDraft"
-        >{{ derivingDraft ? '派生中…' : '从模板派生字段规则草案' }}</button>
-        <p v-if="deriveError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="derive-error">{{ deriveError }}</p>
-        <MetaIntegrationFieldRuleAuthoring
-          v-if="authoredFieldRules.length > 0"
-          v-model="authoredFieldRules"
-          :gated-fields="authoredGatedFields"
-        />
-      </div>
-      <div>
-        <div class="integration-workbench__panel-head">
-          <div>
-            <h2>Payload 预览</h2>
-            <p>预览只做纯计算，不写数据库，也不会调用 ERP/CRM/PLM/SRM。</p>
-          </div>
-          <button type="button" class="integration-workbench__button" data-testid="preview-payload" @click="previewPayload">
-            生成 JSON 预览
-          </button>
-        </div>
-        <p
-          v-if="sourceReadOnlyBoundaryNotice"
-          class="integration-workbench__hint integration-workbench__hint--strong"
-          data-testid="source-readonly-boundary-notice"
-        >
-          {{ sourceReadOnlyBoundaryNotice }}
-        </p>
-        <pre data-testid="payload-preview">{{ previewText }}</pre>
-        <div
-          v-if="previewProvenance"
-          class="integration-workbench__provenance"
-          data-testid="preview-provenance"
-        >
-          <h3 class="integration-workbench__provenance-title">字段来源</h3>
-          <p class="integration-workbench__provenance-stats" data-testid="preview-provenance-stats">
-            <span
-              v-for="stat in previewProvenance.stats"
-              :key="stat.source"
-              class="integration-workbench__provenance-badge"
-              :data-source="stat.source"
-            >{{ provenanceSourceLabel(stat.source) }}: {{ stat.count }}</span>
-          </p>
-          <ul class="integration-workbench__provenance-list">
-            <li v-for="entry in previewProvenance.entries" :key="entry.field" :data-field="entry.field">
-              <code>{{ entry.field }}</code>
-              <span class="integration-workbench__provenance-badge" :data-source="entry.source">{{ provenanceSourceLabel(entry.source) }}</span>
-            </li>
-          </ul>
-          <p class="integration-workbench__hint">仅显示字段名与来源，不含字段值。</p>
-        </div>
-      </div>
-      </el-card>
-    </section>
+    <IntegrationPayloadPreviewSection
+      :reference-mapping-domains="referenceMappingDomains"
+      :reference-mapping-bindings="referenceMappingBindings"
+      :staging-systems="stagingSystems"
+      :on-ref-mapping-system-change="onRefMappingSystemChange"
+      :on-ref-mapping-object-change="onRefMappingObjectChange"
+      :deriving-draft="derivingDraft"
+      :derive-error="deriveError"
+      :derive-template-draft="deriveTemplateDraft"
+      :authored-gated-fields="authoredGatedFields"
+      :source-read-only-boundary-notice="sourceReadOnlyBoundaryNotice"
+      :preview-payload="previewPayload"
+      :preview-text="previewText"
+      :preview-provenance="previewProvenance"
+      :provenance-source-label="provenanceSourceLabel"
+      v-model:sample-record-text="sampleRecordText"
+      v-model:payload-template-text="payloadTemplateText"
+      v-model:authored-field-rules="authoredFieldRules"
+    />
         </div>
       </div>
     </section>
@@ -1259,6 +853,9 @@ import IntegrationWorkbenchRail, {
 import IntegrationMonitoringSection from '../components/integration/IntegrationMonitoringSection.vue'
 import IntegrationCleaningDatasetSection from '../components/integration/IntegrationCleaningDatasetSection.vue'
 import IntegrationMappingRulesSection from '../components/integration/IntegrationMappingRulesSection.vue'
+import IntegrationObjectTemplateSection from '../components/integration/IntegrationObjectTemplateSection.vue'
+import IntegrationPayloadPreviewSection from '../components/integration/IntegrationPayloadPreviewSection.vue'
+import IntegrationConnectionSection from '../components/integration/IntegrationConnectionSection.vue'
 
 type WorkbenchSide = 'source' | 'target'
 type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'dictMap'
