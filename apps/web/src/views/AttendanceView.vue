@@ -6027,10 +6027,13 @@
                   <input
                     id="attendance-import-csv"
                     type="file"
-                    accept=".csv,text/csv"
+                    accept=".csv,.xlsx,text/csv"
                     @change="handleImportCsvChange"
                   />
                   <small v-if="importCsvFileName" class="attendance__field-hint">{{ tr('Selected', '已选择') }}: {{ importCsvFileName }}</small>
+                  <small v-if="importCsvConvertedSheetName" class="attendance__field-hint" data-testid="attendance-import-converted-hint">
+                    {{ tr('Converted from Excel — sheet', '已从 Excel 转换——工作表') }}: {{ importCsvConvertedSheetName }}
+                  </small>
                 </label>
                 <div
                   v-if="importCsvRecognition"
@@ -9761,6 +9764,11 @@ import {
   recognizeImportHeader,
   type AttendanceImportHeaderRecognition,
 } from './attendance/importHeaderRecognition'
+import {
+  convertXlsxFileToCsvText,
+  isDirectConvertibleXlsxName,
+  xlsxConvertFailureMessage,
+} from './attendance/importXlsxConvert'
 import { resolveMakeupPunchRequestStatusCopy } from './attendance/makeupPunchRequestStatus'
 import {
   buildPunchRetryWithNotePayload,
@@ -13163,6 +13171,10 @@ const importMappingProfiles = ref<AttendanceImportMappingProfile[]>([])
 // /api/attendance/import/template (previously discarded) → grouped options.
 const importMappingColumnsRaw = ref<AttendanceImportMappingColumnLike[]>([])
 const importCsvRecognition = ref<AttendanceImportHeaderRecognition | null>(null)
+// X1 xlsx direct import (xlsx-direct design-lock, RATIFIED): converted CSV
+// text for a selected .xlsx — feeds the existing csvText pipeline untouched.
+const importCsvConvertedText = ref('')
+const importCsvConvertedSheetName = ref('')
 const importFieldGroups = computed(() => groupSupportedImportColumns(importMappingColumnsRaw.value))
 const importTemplateFieldKeys = ref<Set<string>>(new Set(IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS))
 const importTemplateHeaderPreview = computed(() =>
@@ -18265,6 +18277,8 @@ async function handleImportCsvChange(event: Event) {
   const target = event.target as HTMLInputElement
   const file = target?.files?.[0] ?? null
   importCsvRecognition.value = null
+  importCsvConvertedText.value = ''
+  importCsvConvertedSheetName.value = ''
   if (file) {
     const verdict = await inspectImportFile(file)
     // Rapid re-selection race (xlsx-guard lock §7): the sniff is async — if the
@@ -18272,6 +18286,37 @@ async function handleImportCsvChange(event: Event) {
     // drop this stale verdict (accepting OR blocking) instead of clobbering it.
     if ((target?.files?.[0] ?? null) !== file) return
     if (!verdict.ok) {
+      // X1 (xlsx-direct lock, D1=A/D2): a plain `.xlsx` converts in-browser to
+      // CSV text and feeds the existing pipeline; .xls/.xlsm/.xlsb and renamed
+      // spreadsheets keep the save-as guidance below.
+      if (verdict.kind === 'xlsx' && isDirectConvertibleXlsxName(file.name)) {
+        const converted = await convertXlsxFileToCsvText(file)
+        if ((target?.files?.[0] ?? null) !== file) return
+        if (converted.ok) {
+          importCsvFile.value = file
+          importCsvFileName.value = file.name
+          importCsvFileId.value = ''
+          importCsvFileRowCountHint.value = null
+          importCsvFileExpiresAt.value = ''
+          importCsvConvertedText.value = converted.csvText
+          importCsvConvertedSheetName.value = converted.sheetName
+          setStatus(tr(
+            `Excel converted: sheet "${converted.sheetName}"${converted.sheetCount > 1 ? ` (first non-empty of ${converted.sheetCount})` : ''} is ready as CSV.`,
+            `Excel 已转换：工作表「${converted.sheetName}」${converted.sheetCount > 1 ? `（共 ${converted.sheetCount} 表，取首个非空）` : ''}已就绪为 CSV。`,
+          ))
+          void analyzeImportCsvHeader(file, converted.csvText)
+          return
+        }
+        const failure = xlsxConvertFailureMessage(converted.reason)
+        importCsvFile.value = null
+        importCsvFileName.value = ''
+        importCsvFileId.value = ''
+        importCsvFileRowCountHint.value = null
+        importCsvFileExpiresAt.value = ''
+        setStatus(tr(failure.en, failure.zh), 'error', { action: 'retry-preview-import' })
+        if (target) target.value = ''
+        return
+      }
       importCsvFile.value = null
       importCsvFileName.value = ''
       importCsvFileId.value = ''
@@ -18317,9 +18362,12 @@ async function ensureImportMappingColumns(): Promise<void> {
   await importMappingColumnsFetch
 }
 
-async function analyzeImportCsvHeader(file: File): Promise<void> {
+async function analyzeImportCsvHeader(file: File, textOverride?: string): Promise<void> {
   try {
-    const [text] = await Promise.all([readBlobHeadText(file), ensureImportMappingColumns()])
+    const [text] = await Promise.all([
+      textOverride !== undefined ? Promise.resolve(textOverride) : readBlobHeadText(file),
+      ensureImportMappingColumns(),
+    ])
     if (importCsvFile.value !== file) return
     const rowIndexRaw = Number(importCsvHeaderRow.value)
     const header = parseCsvHeaderFromText(text, {
@@ -18402,7 +18450,8 @@ async function applyImportCsvFile() {
   try {
     const file = importCsvFile.value
     const blockedKind = detectSpreadsheetByName(file?.name)
-    if (blockedKind) {
+    // X1: a converted .xlsx is legitimate here — its CSV text substitutes below.
+    if (blockedKind && !importCsvConvertedText.value) {
       const blocked = blockedSpreadsheetMessage(blockedKind)
       setStatus(tr(blocked.en, blocked.zh), 'error', { action: 'retry-preview-import' })
       return
@@ -18427,9 +18476,16 @@ async function applyImportCsvFile() {
     }
     if (Object.keys(csvOptions).length) next.csvOptions = csvOptions
 
-    const shouldUpload = importDebugOptions.forceUploadCsv || file.size >= IMPORT_CSV_UPLOAD_THRESHOLD_BYTES
+    // X1: for a converted .xlsx the effective payload is the CSV text, so both
+    // the size split and the upload body must use it, not the binary workbook.
+    const convertedText = importCsvConvertedText.value
+    const effectiveSize = convertedText ? convertedText.length : file.size
+    const shouldUpload = importDebugOptions.forceUploadCsv || effectiveSize >= IMPORT_CSV_UPLOAD_THRESHOLD_BYTES
     if (shouldUpload) {
-      const uploaded = await uploadImportCsvFile(file)
+      const uploadFile = convertedText
+        ? new File([convertedText], file.name.replace(/\.xlsx$/i, '.csv'), { type: 'text/csv' })
+        : file
+      const uploaded = await uploadImportCsvFile(uploadFile)
       importCsvFileId.value = uploaded.fileId
       importCsvFileRowCountHint.value = Number.isFinite(uploaded.rowCount) && uploaded.rowCount > 0 ? uploaded.rowCount : null
       importCsvFileExpiresAt.value = uploaded.expiresAt
@@ -18442,7 +18498,7 @@ async function applyImportCsvFile() {
         )
       )
     } else {
-      const csvText = await file.text()
+      const csvText = convertedText || await file.text()
       importCsvFileId.value = ''
       importCsvFileRowCountHint.value = null
       importCsvFileExpiresAt.value = ''

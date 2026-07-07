@@ -3,6 +3,7 @@ import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { apiFetch } from '../src/utils/api'
 import { useLocale } from '../src/composables/useLocale'
+import * as XLSX from 'xlsx'
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -251,7 +252,7 @@ describe('Attendance import preview regression', () => {
     )
   })
 
-  it('blocks selecting an Excel .xlsx in the CSV import input: no import API call, actionable zh guidance', async () => {
+  it('blocks selecting a macro workbook (.xlsm) in the CSV import input: no import API call, actionable zh guidance', async () => {
     const { locale, setLocale } = useLocale()
     const previousLocale = locale.value
     setLocale('zh-CN')
@@ -270,8 +271,8 @@ describe('Attendance import preview regression', () => {
       const input = container!.querySelector('#attendance-import-csv') as HTMLInputElement | null
       expect(input, 'expected csv file input').toBeTruthy()
 
-      const xlsx = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], '6月考勤(5).xlsx', {
-        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      const xlsx = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], '6月考勤(5).xlsm', {
+        type: 'application/vnd.ms-excel.sheet.macroEnabled.12',
       })
       Object.defineProperty(input!, 'files', { value: [xlsx], configurable: true })
       input!.dispatchEvent(new Event('change'))
@@ -572,5 +573,45 @@ describe('Attendance import preview regression', () => {
     await flushUi(2)
     expect(advanced!.style.display).not.toBe('none')
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('X1: selecting a real .xlsx converts to CSV — status, hint, recognition, and Load CSV all run on the converted text', async () => {
+    mockTemplateEndpoint()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+      ['日期', '工号', '姓名', '加班小时', '自定义列'],
+      ['2026-06-01', 'EMP001', '张三', '1', 'x'],
+    ]), '打卡日报')
+    const buffer = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer
+    const file = new File([buffer], '6月考勤(5).xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+    const input = container!.querySelector('#attendance-import-csv') as HTMLInputElement
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    input.dispatchEvent(new Event('change'))
+    for (let i = 0; i < 60; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+      await flushUi(2)
+      if (container!.querySelector('[data-testid="attendance-import-recognition"]')) break
+    }
+
+    expect(container!.textContent).toContain('Excel converted')
+    expect(container!.querySelector('[data-testid="attendance-import-converted-hint"]')?.textContent).toContain('打卡日报')
+    const panel = container!.querySelector('[data-testid="attendance-import-recognition"]')
+    expect(panel, 'recognition runs on converted text').toBeTruthy()
+    expect(panel!.textContent).toContain('加班小时')
+    expect(container!.querySelector('[data-testid="attendance-import-recognition-warning"]')).toBeNull()
+
+    findButton(findImportSection(container!), 'Load CSV').click()
+    await flushUi(6)
+    const payload = JSON.parse((setupState.importForm as { payload: string }).payload)
+    expect(String(payload.csvText)).toContain('日期,工号,姓名,加班小时,自定义列')
+    expect(String(payload.csvText)).toContain('2026-06-01,EMP001,张三,1,x')
   })
 })
