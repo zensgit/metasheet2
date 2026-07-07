@@ -58,14 +58,15 @@
         </div>
 
         <div class="meta-bulk-edit__actions">
-          <button class="meta-bulk-edit__btn" :disabled="busy" @click="onCancel">{{ b('bulk.cancel') }}</button>
-          <button
+          <MtButton class="meta-bulk-edit__btn" :disabled="busy" @click="onCancel">{{ b('bulk.cancel') }}</MtButton>
+          <MtButton
+            variant="primary"
             class="meta-bulk-edit__btn meta-bulk-edit__btn--primary"
             :disabled="!canSubmit || busy"
             @click="onApply"
           >
             {{ submitLabel }}
-          </button>
+          </MtButton>
         </div>
       </div>
     </div>
@@ -75,6 +76,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import { MtButton } from '../ui'
 import type { MetaField } from '../types'
 import {
   bulkClearHintPrefix,
@@ -181,10 +183,8 @@ function onCancel() {
 .meta-bulk-edit__value-wrap { border: 1px solid #dcdfe6; border-radius: 4px; padding: 4px; min-height: 36px; }
 .meta-bulk-edit__error { color: #f56c6c; background: #fef0f0; padding: 8px 10px; border-radius: 4px; font-size: 13px; }
 .meta-bulk-edit__success { color: #67c23a; background: #f0f9eb; padding: 8px 10px; border-radius: 4px; font-size: 13px; }
-.meta-bulk-edit__actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid #ebedf0; }
-.meta-bulk-edit__btn { background: #fff; border: 1px solid #dcdfe6; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 14px; }
-.meta-bulk-edit__btn:hover:not(:disabled) { border-color: #c0c4cc; }
-.meta-bulk-edit__btn:disabled { opacity: .55; cursor: not-allowed; }
-.meta-bulk-edit__btn--primary { background: #409eff; color: #fff; border-color: #409eff; }
-.meta-bulk-edit__btn--primary:hover:not(:disabled) { background: #66b1ff; border-color: #66b1ff; }
+.meta-bulk-edit__actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--ms-border-light, #ebedf0); }
+/* .meta-bulk-edit__btn / --primary: the action controls are now <MtButton> (token-styled, variant="primary"
+   for apply); their bespoke hardcoded-hex button CSS was removed (P2-1c). Classes kept on the elements
+   only for selector stability. */
 </style>
