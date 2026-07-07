@@ -30981,5 +30981,19 @@ const holidaySectionBindings = {
     flex-direction: column;
     align-items: stretch;
   }
+
+  /* UI-P1 768px 紧凑自助面 (ui-p1-768 design-lock): touch-friendly landing for
+     the mobile/container self-service surface. */
+  .attendance__filters .attendance__field {
+    width: 100%;
+  }
+
+  .attendance__summary--stat {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .attendance__hero-timeline {
+    flex-wrap: wrap;
+  }
 }
 </style>
