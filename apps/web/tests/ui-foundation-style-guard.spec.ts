@@ -43,6 +43,12 @@ const TARGET_FILES = [
   // literals onto var(--ms-*)/--el-* and adds the new rail component clean from the start.
   'src/views/IntegrationWorkbenchView.vue',
   'src/components/integration/IntegrationWorkbenchRail.vue',
+  // IU-2b (docs/development/integration-ux-workbench-redesign-design-lock-20260706.md §2 IU-2,
+  // stage B — per-section extraction): the three new section components copy CSS rules verbatim
+  // from the (already token-only, UF-6-clean) parent, so they start clean too.
+  'src/components/integration/IntegrationMonitoringSection.vue',
+  'src/components/integration/IntegrationCleaningDatasetSection.vue',
+  'src/components/integration/IntegrationMappingRulesSection.vue',
 ] as const
 
 // Per-file allowlist for counts that are legitimately un-clearable. Keep this EMPTY unless a
