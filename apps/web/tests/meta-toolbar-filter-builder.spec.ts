@@ -79,13 +79,17 @@ function mountToolbar(initial: Partial<ToolbarState> = {}) {
   return { state, container }
 }
 
+// UI-P2-1c slice-5: the filter panel now renders inside MtPopover, which Teleports its content to
+// `document.body` — a sibling of the toolbar's own mount container, not a descendant of it. So the
+// panel must be looked up via `document`, not `root`, once it's open (the trigger button itself is
+// still inside `root`).
 async function openFilterPanel(root: HTMLElement): Promise<HTMLElement> {
   const button = Array.from(root.querySelectorAll('button'))
     .find((candidate) => candidate.textContent?.includes('Filter')) as HTMLButtonElement | undefined
   expect(button).toBeTruthy()
   button?.click()
   await nextTick()
-  const panel = root.querySelector('.meta-toolbar__panel--filter') as HTMLElement | null
+  const panel = document.querySelector('.meta-toolbar__panel--filter') as HTMLElement | null
   expect(panel).toBeTruthy()
   return panel!
 }
@@ -246,7 +250,8 @@ async function openFilterPanelI18n(root: HTMLElement): Promise<HTMLElement> {
   expect(button).toBeTruthy()
   button?.click()
   await nextTick()
-  const panel = root.querySelector('.meta-toolbar__panel--filter') as HTMLElement | null
+  // Teleported by MtPopover to document.body (see openFilterPanel above) — look up via document.
+  const panel = document.querySelector('.meta-toolbar__panel--filter') as HTMLElement | null
   expect(panel).toBeTruthy()
   return panel!
 }
