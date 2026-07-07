@@ -424,6 +424,15 @@ describe('Attendance import preview regression', () => {
     await flushUi(2)
     expect(createObjectURL).toHaveBeenCalledTimes(1)
     expect(container!.textContent).toContain('CSV template downloaded (9 columns).')
+    const downloadedBlob = createObjectURL.mock.calls[0][0] as Blob
+    // readAsText strips the BOM during decode (per spec) — check raw bytes.
+    const downloadedBytes = await new Promise<Uint8Array>((resolve) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer))
+      reader.readAsArrayBuffer(downloadedBlob)
+    })
+    expect([downloadedBytes[0], downloadedBytes[1], downloadedBytes[2]], 'download carries the Excel BOM (EF BB BF)')
+      .toEqual([0xef, 0xbb, 0xbf])
   })
 
   it('one-click template download: works from a cold panel by auto-loading first', async () => {

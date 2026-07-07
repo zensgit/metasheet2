@@ -44,3 +44,12 @@
 ## 5. 完成口径
 
 实现 → opus 对抗审阅 0 P1/P2 → 三红线（fresh-green + up-to-date）→ 验证 MD。FE 串行车道（触碰 `AttendanceView.vue`）。
+
+## 6. 追加修正案（2026-07-07 客户报障）：CSV 下载 BOM
+
+客户实测：下载的 CSV 模板 Excel 打开乱码、WPS 正常——BOM-less UTF-8 被 Excel 按 ANSI/GBK 猜。
+修法：共享 `withCsvBom`（FE `csvExport.ts` / 后端 index.cjs 同名 helper），**全部考勤 CSV 下载出口**
+加 `﻿`——FE 4（选列模板/起步模板/`downloadCsvText` 备份导出/服务端导出转存）+ composable 2
+（server-text/fallback）+ 后端 5（template.csv ×2 / 导入批次导出 / 计薪周期导出 / 记录报表导出）。
+导入/上传 payload 不动（解析侧 `normalizeCsvHeaderValue`/`parseCsvHeaderFromText` 本就剥 BOM，
+下载→回填→上传往返安全）。幂等（已有 BOM 不重复加）。

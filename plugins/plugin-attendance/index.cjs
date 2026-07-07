@@ -5452,6 +5452,12 @@ function buildImportTemplateCsv(profile) {
   return `${header}\n${row}\n`
 }
 
+// CSV download BOM (import-section-ux lock §6 addendum): Excel misreads
+// BOM-less UTF-8 CSV as ANSI/GBK (乱码); WPS auto-detects. Download exits only.
+function withCsvBom(text) {
+  return String(text ?? '').startsWith('\ufeff') ? text : `\ufeff${text}`
+}
+
 function buildImportTemplateFilename(profile) {
   const seed = String(profile?.id || profile?.source || 'attendance')
     .trim()
@@ -31767,7 +31773,7 @@ module.exports = {
 
           res.setHeader('Content-Type', 'text/csv; charset=utf-8')
           res.setHeader('Content-Disposition', `attachment; filename="${buildImportTemplateFilename(profile)}"`)
-          res.send(csvText)
+          res.send(withCsvBom(csvText))
           return
         }
         res.json({
@@ -31795,7 +31801,7 @@ module.exports = {
 
         res.setHeader('Content-Type', 'text/csv; charset=utf-8')
         res.setHeader('Content-Disposition', `attachment; filename="${buildImportTemplateFilename(profile)}"`)
-        res.send(csvText)
+        res.send(withCsvBom(csvText))
 	      })
 	    )
 
@@ -35394,7 +35400,7 @@ module.exports = {
 	          const filename = `attendance-import-${String(batchId).slice(0, 8)}-${type}-${stamp}.csv`
 	          res.setHeader('Content-Type', 'text/csv; charset=utf-8')
 	          res.setHeader('Content-Disposition', `attachment; filename=\"${filename}\"`)
-	          res.send(lines.join('\n'))
+	          res.send(withCsvBom(lines.join('\n')))
 	        } catch (error) {
 	          if (error instanceof HttpError) {
 	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
@@ -36404,7 +36410,7 @@ module.exports = {
 
           res.setHeader('Content-Type', 'text/csv; charset=utf-8')
           res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
-          res.status(200).send(csv)
+          res.status(200).send(withCsvBom(csv))
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -41941,7 +41947,7 @@ module.exports = {
           res.setHeader('Content-Type', 'text/csv')
           res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
           setAttendanceReportFieldConfigHeaders(res, reportFieldConfig)
-          res.status(200).send(csv)
+          res.status(200).send(withCsvBom(csv))
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })

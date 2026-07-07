@@ -3,6 +3,7 @@ import { apiFetch as baseApiFetch } from '../../utils/api'
 import { normalizeImportPayloadColumns } from './attendanceImportPayload'
 import { blockedSpreadsheetMessage, detectSpreadsheetByName, inspectImportFile } from './importFileGuard'
 import { convertXlsxFileToCsvText, isDirectConvertibleXlsxName, xlsxConvertFailureMessage } from './importXlsxConvert'
+import { withCsvBom } from './csvExport'
 
 type ApiFetchFn = typeof baseApiFetch
 type Translate = (en: string, zh: string) => string
@@ -1456,7 +1457,7 @@ export function useAttendanceAdminImportWorkflow({
         const csvText = await response.text()
         if (csvText.trim()) {
           const source = normalizeIdentifier(selectedImportProfile.value?.source ?? importTemplateGuide.value?.source ?? 'attendance') ?? 'attendance'
-          downloadText(`attendance-import-template-${source}.csv`, csvText, 'text/csv;charset=utf-8')
+          downloadText(`attendance-import-template-${source}.csv`, withCsvBom(csvText), 'text/csv;charset=utf-8')
           reportStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
           return
         }
@@ -1497,7 +1498,7 @@ export function useAttendanceAdminImportWorkflow({
     }
 
     const source = normalizeIdentifier(guide.source) ?? 'attendance'
-    downloadText(`attendance-import-template-${source}.csv`, csvText, 'text/csv;charset=utf-8')
+    downloadText(`attendance-import-template-${source}.csv`, withCsvBom(csvText), 'text/csv;charset=utf-8')
     reportStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
   }
 
