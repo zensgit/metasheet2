@@ -40,6 +40,19 @@
              least one field (see `applyResubmitPrefill`) — a requester fixing a rejected/revoked/
              cancelled submission should know the form was pre-populated, not silently discover it. -->
         <el-alert
+          v-if="draftRestoreVisible"
+          type="info"
+          :closable="false"
+          class="approval-new__draft-alert"
+          data-testid="approval-draft-restore"
+        >
+          <template #title>
+            检测到上次未提交的草稿，是否恢复？
+            <el-button size="small" type="primary" data-testid="approval-draft-restore-apply" @click="applyDraftRestore">恢复草稿</el-button>
+            <el-button size="small" data-testid="approval-draft-restore-discard" @click="discardDraftRestore">丢弃</el-button>
+          </template>
+        </el-alert>
+        <el-alert
           v-if="prefillNoticeVisible"
           title="已从上一次申请预填，请检查后提交"
           type="info"
@@ -392,6 +405,7 @@ import { useAutoSumTotal } from '../../approvals/useAutoSumTotal'
 import { isRowDerivationActive } from '../../approvals/lineDerivation'
 import { numberFieldProps } from '../../approvals/numberFieldProps'
 import { amountToChineseWords } from '../../approvals/amountInWords'
+import { clearFormDraft, formDraftKey, formSchemaSignature, loadFormDraft, saveFormDraft } from '../../approvals/formDraft'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import {
   createEmptyDetailRow,
@@ -414,6 +428,57 @@ const formData = reactive<Record<string, unknown>>({})
 // UX B2-13 (再次提交): true once a `?fromInstance=` prefill actually applied at least one field —
 // see `applyResubmitPrefill` below. Drives the "已从上一次申请预填" notice.
 const prefillNoticeVisible = ref(false)
+
+// G-B2-14: localStorage draft autosave/restore (per user+template; pure helpers in
+// approvals/formDraft.ts). The machinery arms only once BOTH the template and the user id are
+// known; a resubmit-prefill (B2-13) takes precedence — the restore offer is skipped entirely.
+const draftUserId = ref<string | null>(null)
+const draftRestoreVisible = ref(false)
+const pendingDraft = ref<Record<string, unknown> | null>(null)
+let draftSaveTimer: ReturnType<typeof setTimeout> | null = null
+let draftArmed = false
+
+function draftStorageKey(): string | null {
+  const templateId = route.params.templateId as string
+  if (!draftUserId.value || !templateId || !template.value) return null
+  return formDraftKey(draftUserId.value, templateId)
+}
+
+function offerDraftRestore(): void {
+  const key = draftStorageKey()
+  if (!key || !template.value) return
+  const draft = loadFormDraft(window.localStorage, key, formSchemaSignature(template.value.formSchema))
+  if (!draft) return
+  pendingDraft.value = draft
+  draftRestoreVisible.value = true
+}
+
+function applyDraftRestore(): void {
+  if (pendingDraft.value) Object.assign(formData, pendingDraft.value)
+  pendingDraft.value = null
+  draftRestoreVisible.value = false
+}
+
+function discardDraftRestore(): void {
+  const key = draftStorageKey()
+  if (key) clearFormDraft(window.localStorage, key)
+  pendingDraft.value = null
+  draftRestoreVisible.value = false
+}
+
+function scheduleDraftSave(): void {
+  if (!draftArmed) return
+  if (draftSaveTimer) clearTimeout(draftSaveTimer)
+  draftSaveTimer = setTimeout(() => {
+    const key = draftStorageKey()
+    if (!key || !template.value) return
+    // Same attachment-stripping the submit path uses — refs never persist.
+    const data = stripAttachmentFields(template.value.formSchema, { ...formData })
+    saveFormDraft(window.localStorage, key, formSchemaSignature(template.value.formSchema), data)
+  }, 800)
+}
+
+watch(formData, scheduleDraftSave, { deep: true })
 // UX B2-13: folded into the SAME `v-loading` overlay as the template/submit loads (below) so the
 // form can't be interacted with — and submitted un-prefilled — during the brief window between
 // the template finishing its own load and the source-instance prefill fetch resolving.
@@ -591,6 +656,11 @@ async function handleSubmit() {
       formData: buildSubmitFormData(),
     })
     ElMessage.success('审批已提交')
+    // G-B2-14: a successful submit consumes the draft.
+    {
+      const key = draftStorageKey()
+      if (key) clearFormDraft(window.localStorage, key)
+    }
     // B1-08: best-effort 最近使用 record — must never delay or fail the navigation.
     const submittedTemplate = template.value
     if (submittedTemplate) {
@@ -655,6 +725,15 @@ onMounted(async () => {
     }
   }
   await applyResubmitPrefill()
+  // G-B2-14: arm the draft machinery once user id resolves; the restore offer only appears when
+  // NO resubmit prefill claimed the form (prefill wins — it is an explicit user intent).
+  try {
+    draftUserId.value = await useAuth().getCurrentUserId()
+  } catch {
+    draftUserId.value = null // drafting silently unavailable without an identity
+  }
+  if (!prefillNoticeVisible.value) offerDraftRestore()
+  draftArmed = true
 })
 
 function syncVisibleFormState() {
