@@ -9711,9 +9711,18 @@ export function univerMetaRouter(): Router {
   // writes happen in ONE transaction; a single denied/forbidden/locked/conflicted target aborts the whole Reset with
   // zero writes/deletes/revisions.
   const PIT_RESET_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true'
+  const PIT_RESET_RETENTION_BLOCKED = () => String(process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED ?? '').trim() === '1'
+  const sendPitResetRetentionBlocked = (res: Response) => res.status(409).json({
+    ok: false,
+    error: {
+      code: 'RESET_RETENTION_CONFLICT',
+      message: 'Reset-to-T is refused while meta revision retention is enabled; disable MULTITABLE_META_REVISION_RETENTION_ENABLED before using PIT reset.',
+    },
+  })
 
   router.post('/sheets/:sheetId/reset-preview', async (req: Request, res: Response) => {
     if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
+    if (PIT_RESET_RETENTION_BLOCKED()) return sendPitResetRetentionBlocked(res)
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const parsed = z.object({ asOf: z.string().min(1) }).safeParse(req.body)
     if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and asOf are required' } })
@@ -9754,6 +9763,7 @@ export function univerMetaRouter(): Router {
 
   router.post('/sheets/:sheetId/reset-execute', async (req: Request, res: Response) => {
     if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
+    if (PIT_RESET_RETENTION_BLOCKED()) return sendPitResetRetentionBlocked(res)
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     // D4: a typed two-step confirm — Reset (destructive) cannot be triggered by a stray Revert-shaped call.
     const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1), confirm: z.literal('reset') }).safeParse(req.body)
