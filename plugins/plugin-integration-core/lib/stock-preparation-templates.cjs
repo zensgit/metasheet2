@@ -408,6 +408,113 @@ function summarizeTemplateForEvidence(template) {
   }
 }
 
+function normalizeStockPreparationMvpTableTemplate(input) {
+  if (!isPlainObject(input)) {
+    throw new StockPreparationTemplateError('mvp table template must be a plain object')
+  }
+  assertNoContentKeys(input, 'mvpTable')
+  const fields = Array.isArray(input.fields) ? input.fields.map(normalizeField) : []
+  if (fields.length === 0) {
+    throw new StockPreparationTemplateError('mvp table fields must be a non-empty array', { field: 'fields' })
+  }
+  const byId = new Map(fields.map((field) => [field.id, field]))
+  if (byId.size !== fields.length) {
+    throw new StockPreparationTemplateError('mvp table field ids must be unique', { field: 'fields' })
+  }
+  const keyFields = Array.isArray(input.keyFields)
+    ? input.keyFields.map((value, index) => assertSafeSchemaString(value, `keyFields[${index}]`))
+    : []
+  if (!keyFields.length) {
+    throw new StockPreparationTemplateError('mvp table keyFields must be a non-empty array', { field: 'keyFields' })
+  }
+  for (const keyField of keyFields) {
+    if (!byId.has(keyField)) {
+      throw new StockPreparationTemplateError(`mvp table key field ${keyField} must exist`, {
+        field: 'keyFields',
+        missing: keyField,
+      })
+    }
+  }
+  const requiredFields = Array.isArray(input.requiredFields)
+    ? input.requiredFields.map((value, index) => assertSafeSchemaString(value, `requiredFields[${index}]`))
+    : keyFields.slice()
+  for (const required of requiredFields) {
+    const field = byId.get(required)
+    if (!field) {
+      throw new StockPreparationTemplateError(`mvp table required field ${required} must exist`, {
+        field: 'requiredFields',
+        missing: required,
+      })
+    }
+    if (field.required !== true) {
+      throw new StockPreparationTemplateError(`mvp table required field ${required} must be marked required`, {
+        field: required,
+      })
+    }
+  }
+  return {
+    id: assertSafeSchemaString(input.id, 'id'),
+    objectId: assertSafeSchemaString(input.objectId || input.id, 'objectId'),
+    label: assertSafeSchemaString(input.label || input.name || input.id, 'label'),
+    version: optionalString(input.version, 'version') || 'v1',
+    role: optionalString(input.role, 'role') || 'supporting',
+    keyFields,
+    requiredFields,
+    fields,
+  }
+}
+
+function buildSheetStructureFromMvpTableTemplate(template) {
+  const normalized = normalizeStockPreparationMvpTableTemplate(template)
+  return {
+    objectId: normalized.objectId,
+    label: normalized.label,
+    keyFields: normalized.keyFields.slice(),
+    fields: normalized.fields.map((field, order) => {
+      const out = {
+        id: field.id,
+        name: field.label,
+        type: field.type,
+        order,
+      }
+      if (field.required) out.property = { validation: [{ type: 'required' }] }
+      return out
+    }),
+    rows: [],
+  }
+}
+
+function summarizeMvpTableTemplatesForEvidence(templates) {
+  const tableTemplates = templates || STOCK_PREPARATION_MVP_TABLE_TEMPLATES
+  return {
+    tableCount: tableTemplates.length,
+    tables: tableTemplates.map((template) => {
+      const normalized = normalizeStockPreparationMvpTableTemplate(template)
+      return {
+        id: normalized.id,
+        objectId: normalized.objectId,
+        version: normalized.version,
+        role: normalized.role,
+        keyFields: normalized.keyFields.slice(),
+        requiredFields: normalized.requiredFields.slice(),
+        fieldCounts: {
+          total: normalized.fields.length,
+          plmSystem: normalized.fields.filter((field) => field.ownership === 'plm_system').length,
+          humanPreserved: normalized.fields.filter((field) => field.ownership === 'human_preserved').length,
+          required: normalized.fields.filter((field) => field.required === true).length,
+        },
+        optionSources: normalized.fields
+          .filter((field) => field.optionSource)
+          .map((field) => ({
+            field: field.id,
+            type: field.optionSource.type,
+            key: field.optionSource.key,
+          })),
+      }
+    }),
+  }
+}
+
 function field(id, label, type, ownership, extra = {}) {
   return { id, label, type, ownership, ...extra }
 }
@@ -486,6 +593,272 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
   ],
 }))
 
+const STOCK_PREPARATION_MVP_TABLE_TEMPLATES = Object.freeze([
+  normalizeStockPreparationMvpTableTemplate({
+    id: 'plm.stock-preparation.project.v1',
+    objectId: 'plm_stock_preparation_project',
+    label: 'Stock Preparation Project',
+    version: 'v1',
+    role: 'project',
+    keyFields: ['projectId'],
+    requiredFields: ['projectId', 'sourceProjectNo'],
+    fields: [
+      field('projectId', 'Project ID', 'string', 'plm_system', { required: true, key: true }),
+      field('sourceProjectNo', 'Source Project No', 'string', 'plm_system', { required: true }),
+      field('projectName', 'Project Name', 'string', 'plm_system'),
+      field('sourceSystem', 'Source System', 'string', 'plm_system'),
+      field('projectStatus', 'Project Status', 'select', 'plm_system', {
+        optionSource: { type: 'contract', key: 'stock_preparation_project_status_v1' },
+      }),
+      field('lastSyncRunId', 'Last Sync Run ID', 'string', 'plm_system'),
+      field('lastSyncedAt', 'Last Synced At', 'date', 'plm_system'),
+      field('owner', 'Owner', 'string', 'human_preserved'),
+    ],
+  }),
+  normalizeStockPreparationMvpTableTemplate({
+    id: 'plm.stock-preparation.bom-snapshot-batch.v1',
+    objectId: 'plm_stock_preparation_bom_snapshot_batch',
+    label: 'PLM BOM Snapshot Batch',
+    version: 'v1',
+    role: 'bom_snapshot_batch',
+    keyFields: ['snapshotBatchId'],
+    requiredFields: ['snapshotBatchId', 'projectId', 'snapshotVersion', 'syncRunId'],
+    fields: [
+      field('snapshotBatchId', 'Snapshot Batch ID', 'string', 'plm_system', { required: true, key: true }),
+      field('projectId', 'Project ID', 'string', 'plm_system', { required: true }),
+      field('sourceSystem', 'Source System', 'string', 'plm_system'),
+      field('sourceBomId', 'Source BOM ID', 'string', 'plm_system'),
+      field('snapshotVersion', 'Snapshot Version', 'number', 'plm_system', { required: true }),
+      field('syncRunId', 'Sync Run ID', 'string', 'plm_system', { required: true }),
+      field('snapshotStatus', 'Snapshot Status', 'select', 'plm_system', {
+        optionSource: { type: 'contract', key: 'stock_preparation_snapshot_status_v1' },
+      }),
+      field('createdAt', 'Created At', 'date', 'plm_system'),
+      field('createdBy', 'Created By', 'string', 'plm_system'),
+    ],
+  }),
+  normalizeStockPreparationMvpTableTemplate({
+    id: 'plm.stock-preparation.bom-snapshot-line.v1',
+    objectId: 'plm_stock_preparation_bom_snapshot_line',
+    label: 'PLM BOM Snapshot Line',
+    version: 'v1',
+    role: 'bom_snapshot_line',
+    keyFields: ['snapshotLineId'],
+    requiredFields: ['snapshotLineId', 'snapshotBatchId', 'pathKey'],
+    fields: [
+      field('snapshotLineId', 'Snapshot Line ID', 'string', 'plm_system', { required: true, key: true }),
+      field('snapshotBatchId', 'Snapshot Batch ID', 'string', 'plm_system', { required: true }),
+      field('parentDrawingNo', 'Parent Drawing No', 'string', 'plm_system'),
+      field('parentVersion', 'Parent Version', 'string', 'plm_system'),
+      field('childDrawingNo', 'Child Drawing No', 'string', 'plm_system'),
+      field('childVersion', 'Child Version', 'string', 'plm_system'),
+      field('bomLevel', 'BOM Level', 'number', 'plm_system'),
+      field('pathKey', 'Path Key', 'string', 'plm_system', { required: true }),
+      field('designQty', 'Design Quantity', 'number', 'plm_system'),
+      field('designUnit', 'Design Unit', 'string', 'plm_system'),
+      field('lineStatus', 'Line Status', 'select', 'plm_system', {
+        optionSource: { type: 'contract', key: 'stock_preparation_bom_line_status_v1' },
+      }),
+      field('sourceFingerprint', 'Source Fingerprint', 'string', 'plm_system'),
+    ],
+  }),
+  normalizeStockPreparationMvpTableTemplate({
+    id: 'plm.stock-preparation.erp-material-master.v1',
+    objectId: 'plm_stock_preparation_erp_material_master',
+    label: 'ERP/K3 Material Master Cache',
+    version: 'v1',
+    role: 'erp_material_master',
+    keyFields: ['erpMaterialId'],
+    requiredFields: ['erpMaterialId', 'erpMaterialCode', 'erpMaterialInternalId'],
+    fields: [
+      field('erpMaterialId', 'ERP Material ID', 'string', 'plm_system', { required: true, key: true }),
+      field('erpMaterialCode', 'ERP Material Code', 'string', 'plm_system', { required: true }),
+      field('erpMaterialInternalId', 'ERP/K3 Material Internal ID', 'string', 'plm_system', { required: true }),
+      field('erpMaterialName', 'ERP Material Name', 'string', 'plm_system'),
+      field('erpSpec', 'ERP Specification', 'string', 'plm_system'),
+      field('baseUnit', 'Base Unit', 'string', 'plm_system'),
+      field('inventoryUnit', 'Inventory Unit', 'string', 'plm_system'),
+      field('issueUnit', 'Issue Unit', 'string', 'plm_system'),
+      field('unitGroup', 'Unit Group', 'string', 'plm_system'),
+      field('materialStatus', 'Material Status', 'select', 'plm_system', {
+        optionSource: { type: 'contract', key: 'stock_preparation_material_status_v1' },
+      }),
+      field('lastSyncedAt', 'Last Synced At', 'date', 'plm_system'),
+    ],
+  }),
+  normalizeStockPreparationMvpTableTemplate({
+    id: 'plm.stock-preparation.material-mapping.v1',
+    objectId: 'plm_stock_preparation_material_mapping',
+    label: 'PLM to ERP Material Mapping',
+    version: 'v1',
+    role: 'material_mapping',
+    keyFields: ['mappingId'],
+    requiredFields: ['mappingId', 'plmDrawingNo', 'versionPolicy', 'matchStatus'],
+    fields: [
+      field('mappingId', 'Mapping ID', 'string', 'plm_system', { required: true, key: true }),
+      field('plmDrawingNo', 'PLM Drawing No', 'string', 'plm_system', { required: true }),
+      field('plmVersion', 'PLM Version', 'string', 'plm_system'),
+      field('plmMaterialName', 'PLM Material Name', 'string', 'plm_system'),
+      field('plmSpec', 'PLM Specification', 'string', 'plm_system'),
+      field('erpMaterialCode', 'ERP Material Code', 'string', 'plm_system'),
+      field('erpMaterialInternalId', 'ERP/K3 Material Internal ID', 'string', 'plm_system'),
+      field('erpMaterialName', 'ERP Material Name', 'string', 'plm_system'),
+      field('erpSpec', 'ERP Specification', 'string', 'plm_system'),
+      field('versionPolicy', 'Version Policy', 'select', 'plm_system', {
+        required: true,
+        optionSource: { type: 'contract', key: 'stock_preparation_version_policy_v1' },
+      }),
+      field('matchStatus', 'Match Status', 'select', 'plm_system', {
+        required: true,
+        optionSource: { type: 'contract', key: 'stock_preparation_match_status_v1' },
+      }),
+      field('matchMethod', 'Match Method', 'select', 'plm_system', {
+        optionSource: { type: 'contract', key: 'stock_preparation_match_method_v1' },
+      }),
+      field('confidence', 'Confidence', 'number', 'plm_system'),
+      field('isActive', 'Is Active', 'boolean', 'plm_system'),
+      field('confirmedBy', 'Confirmed By', 'string', 'human_preserved'),
+      field('confirmedAt', 'Confirmed At', 'date', 'human_preserved'),
+      field('notes', 'Notes', 'string', 'human_preserved'),
+    ],
+  }),
+  normalizeStockPreparationMvpTableTemplate({
+    id: 'plm.stock-preparation.unit-conversion-rule.v1',
+    objectId: 'plm_stock_preparation_unit_conversion_rule',
+    label: 'Stock Preparation Unit Conversion Rule',
+    version: 'v1',
+    role: 'unit_conversion_rule',
+    keyFields: ['conversionRuleId'],
+    requiredFields: ['conversionRuleId', 'plmUnit', 'erpIssueUnit', 'conversionFactor', 'scopeType'],
+    fields: [
+      field('conversionRuleId', 'Conversion Rule ID', 'string', 'plm_system', { required: true, key: true }),
+      field('plmUnit', 'PLM Unit', 'string', 'plm_system', { required: true }),
+      field('erpIssueUnit', 'ERP Issue Unit', 'string', 'plm_system', { required: true }),
+      field('conversionFactor', 'Conversion Factor', 'number', 'plm_system', { required: true }),
+      field('scopeType', 'Scope Type', 'select', 'plm_system', {
+        required: true,
+        optionSource: { type: 'contract', key: 'stock_preparation_unit_scope_type_v1' },
+      }),
+      field('scopeKey', 'Scope Key', 'string', 'plm_system'),
+      field('lossRate', 'Loss Rate', 'number', 'plm_system'),
+      field('roundingRule', 'Rounding Rule', 'select', 'plm_system', {
+        optionSource: { type: 'contract', key: 'stock_preparation_rounding_rule_v1' },
+      }),
+      field('minimumIssueQty', 'Minimum Issue Quantity', 'number', 'plm_system'),
+      field('source', 'Rule Source', 'select', 'plm_system', {
+        optionSource: { type: 'contract', key: 'stock_preparation_unit_rule_source_v1' },
+      }),
+      field('requiresConfirmation', 'Requires Confirmation', 'boolean', 'plm_system'),
+      field('isActive', 'Is Active', 'boolean', 'plm_system'),
+      field('effectiveFrom', 'Effective From', 'date', 'plm_system'),
+      field('effectiveTo', 'Effective To', 'date', 'plm_system'),
+      field('confirmedBy', 'Confirmed By', 'string', 'human_preserved'),
+      field('confirmedAt', 'Confirmed At', 'date', 'human_preserved'),
+    ],
+  }),
+  normalizeStockPreparationMvpTableTemplate({
+    id: 'plm.stock-preparation.line.v1',
+    objectId: 'plm_stock_preparation_line',
+    label: 'Stock Preparation Line',
+    version: 'v1',
+    role: 'stock_preparation_line',
+    keyFields: ['stockPrepLineId'],
+    requiredFields: ['stockPrepLineId', 'projectId', 'snapshotBatchId', 'snapshotLineId', 'prepStatus'],
+    fields: [
+      field('stockPrepLineId', 'Stock Preparation Line ID', 'string', 'plm_system', { required: true, key: true }),
+      field('projectId', 'Project ID', 'string', 'plm_system', { required: true }),
+      field('snapshotBatchId', 'Snapshot Batch ID', 'string', 'plm_system', { required: true }),
+      field('snapshotLineId', 'Snapshot Line ID', 'string', 'plm_system', { required: true }),
+      field('parentDrawingNo', 'Parent Drawing No', 'string', 'plm_system'),
+      field('childDrawingNo', 'Child Drawing No', 'string', 'plm_system'),
+      field('childVersion', 'Child Version', 'string', 'plm_system'),
+      field('erpMaterialCode', 'ERP Material Code', 'string', 'plm_system'),
+      field('erpMaterialInternalId', 'ERP/K3 Material Internal ID', 'string', 'plm_system'),
+      field('designQty', 'PLM Design Quantity', 'number', 'plm_system'),
+      field('designUnit', 'PLM Design Unit', 'string', 'plm_system'),
+      field('conversionFactor', 'Conversion Factor', 'number', 'plm_system'),
+      field('lossRate', 'Loss Rate', 'number', 'plm_system'),
+      field('issueQtyRaw', 'ERP Issue Quantity Raw', 'number', 'plm_system'),
+      field('issueQtyFinal', 'ERP Issue Quantity Final', 'number', 'plm_system'),
+      field('issueUnit', 'ERP Issue Unit', 'string', 'plm_system'),
+      field('mappingStatus', 'Mapping Status', 'select', 'plm_system', {
+        optionSource: { type: 'contract', key: 'stock_preparation_match_status_v1' },
+      }),
+      field('unitStatus', 'Unit Status', 'select', 'plm_system', {
+        optionSource: { type: 'contract', key: 'stock_preparation_unit_status_v1' },
+      }),
+      field('prepStatus', 'Preparation Status', 'select', 'plm_system', {
+        required: true,
+        optionSource: { type: 'contract', key: 'stock_preparation_prep_status_v1' },
+      }),
+      field('exceptionCount', 'Exception Count', 'number', 'plm_system'),
+      field('createdFromRunId', 'Created From Run ID', 'string', 'plm_system'),
+    ],
+  }),
+  normalizeStockPreparationMvpTableTemplate({
+    id: 'plm.stock-preparation.exception-confirmation.v1',
+    objectId: 'plm_stock_preparation_exception_confirmation',
+    label: 'Stock Preparation Exception Confirmation',
+    version: 'v1',
+    role: 'exception_confirmation',
+    keyFields: ['exceptionId'],
+    requiredFields: ['exceptionId', 'projectId', 'exceptionType', 'status'],
+    fields: [
+      field('exceptionId', 'Exception ID', 'string', 'plm_system', { required: true, key: true }),
+      field('projectId', 'Project ID', 'string', 'plm_system', { required: true }),
+      field('snapshotBatchId', 'Snapshot Batch ID', 'string', 'plm_system'),
+      field('snapshotLineId', 'Snapshot Line ID', 'string', 'plm_system'),
+      field('stockPrepLineId', 'Stock Preparation Line ID', 'string', 'plm_system'),
+      field('exceptionType', 'Exception Type', 'select', 'plm_system', {
+        required: true,
+        optionSource: { type: 'contract', key: 'stock_preparation_exception_type_v1' },
+      }),
+      field('severity', 'Severity', 'select', 'plm_system', {
+        optionSource: { type: 'contract', key: 'stock_preparation_exception_severity_v1' },
+      }),
+      field('status', 'Status', 'select', 'plm_system', {
+        required: true,
+        optionSource: { type: 'contract', key: 'stock_preparation_exception_status_v1' },
+      }),
+      field('message', 'Message', 'string', 'plm_system'),
+      field('resolutionAction', 'Resolution Action', 'select', 'human_preserved', {
+        optionSource: { type: 'contract', key: 'stock_preparation_resolution_action_v1' },
+      }),
+      field('resolvedBy', 'Resolved By', 'string', 'human_preserved'),
+      field('resolvedAt', 'Resolved At', 'date', 'human_preserved'),
+    ],
+  }),
+  normalizeStockPreparationMvpTableTemplate({
+    id: 'plm.stock-preparation.run.v1',
+    objectId: 'plm_stock_preparation_run',
+    label: 'Stock Preparation Sync/Generation Run',
+    version: 'v1',
+    role: 'run_record',
+    keyFields: ['runId'],
+    requiredFields: ['runId', 'runType', 'status', 'startedAt'],
+    fields: [
+      field('runId', 'Run ID', 'string', 'plm_system', { required: true, key: true }),
+      field('runType', 'Run Type', 'select', 'plm_system', {
+        required: true,
+        optionSource: { type: 'contract', key: 'stock_preparation_run_type_v1' },
+      }),
+      field('status', 'Status', 'select', 'plm_system', {
+        required: true,
+        optionSource: { type: 'contract', key: 'stock_preparation_run_status_v1' },
+      }),
+      field('startedAt', 'Started At', 'date', 'plm_system', { required: true }),
+      field('finishedAt', 'Finished At', 'date', 'plm_system'),
+      field('inputShape', 'Input Shape', 'string', 'plm_system'),
+      field('resultShape', 'Result Shape', 'string', 'plm_system'),
+      field('createdBy', 'Created By', 'string', 'plm_system'),
+    ],
+  }),
+])
+
+const STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS = Object.freeze(
+  STOCK_PREPARATION_MVP_TABLE_TEMPLATES.map((template) => template.objectId),
+)
+
 module.exports = {
   STOCK_PREPARATION_FIELD_TYPES,
   STOCK_PREPARATION_FIELD_OWNERSHIPS,
@@ -493,11 +866,16 @@ module.exports = {
   HUMAN_PRESERVED_FIELD_IDS,
   FEASIBILITY_FORBIDDEN_MECHANISMS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
+  STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS,
   StockPreparationTemplateError,
   normalizeStockPreparationTemplate,
+  normalizeStockPreparationMvpTableTemplate,
   normalizeBomReadFeasibilityGate,
   buildSheetStructureFromTemplate,
+  buildSheetStructureFromMvpTableTemplate,
   summarizeTemplateForEvidence,
+  summarizeMvpTableTemplatesForEvidence,
   __internals: {
     isPlainObject,
     assertNoContentKeys,
