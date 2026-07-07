@@ -429,10 +429,37 @@ export async function fetchDingTalkCurrentUser(accessToken: string): Promise<Din
   }
 }
 
-export async function fetchDingTalkAppAccessToken(
+// App access-token cache (dingtalk-app-token-cache design-lock, 2026-07-07):
+// tokens are valid ~7200s but every caller used to refetch per request,
+// multiplying load on the SHARED gettoken quota (directory-sync, work
+// notifications, automation executor, attendance delivery worker, E1
+// container login). Keyed by appKey|baseUrl; expires_in minus a 120s margin
+// (conservative 3300s fallback); failures are never cached; concurrent
+// callers share one in-flight request. Known trade-off (lock §2): a secret
+// rotated mid-TTL keeps failing until expiry/invalidate/restart.
+const APP_TOKEN_EXPIRY_MARGIN_MS = 120 * 1000
+const APP_TOKEN_FALLBACK_TTL_MS = 3300 * 1000
+const appTokenCache = new Map<string, { token: string; expiresAt: number }>()
+const appTokenInFlight = new Map<string, Promise<string>>()
+
+function appTokenCacheKey(config: DingTalkDirectoryConfig): string {
+  return `${config.appKey}|${normalizeDirectoryBaseUrl(config.baseUrl)}`
+}
+
+export function invalidateDingTalkAppAccessTokenCache(config?: DingTalkDirectoryConfig): void {
+  if (config) appTokenCache.delete(appTokenCacheKey(config))
+  else appTokenCache.clear()
+}
+
+export function __resetDingTalkAppAccessTokenCacheForTests(): void {
+  appTokenCache.clear()
+  appTokenInFlight.clear()
+}
+
+async function fetchDingTalkAppAccessTokenUncached(
   config: DingTalkDirectoryConfig,
   options?: DingTalkRequestOptions,
-): Promise<string> {
+): Promise<{ token: string; expiresInSeconds: number | null }> {
   const baseUrl = normalizeDirectoryBaseUrl(config.baseUrl)
   const payload = await requestDingTalkDirectoryJson(
     `/gettoken?appkey=${encodeURIComponent(config.appKey)}&appsecret=${encodeURIComponent(config.appSecret)}`,
@@ -457,7 +484,38 @@ export async function fetchDingTalkAppAccessToken(
     throw new Error(normalizeErrorMessage(payload, 'Failed to obtain DingTalk app access token'))
   }
 
-  return token
+  const expiresRaw = Number(payload.expires_in ?? payload.expiresIn)
+  return { token, expiresInSeconds: Number.isFinite(expiresRaw) && expiresRaw > 0 ? expiresRaw : null }
+}
+
+export async function fetchDingTalkAppAccessToken(
+  config: DingTalkDirectoryConfig,
+  options?: DingTalkRequestOptions,
+): Promise<string> {
+  const key = appTokenCacheKey(config)
+  const cached = appTokenCache.get(key)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.token
+  }
+  appTokenCache.delete(key)
+
+  const inFlight = appTokenInFlight.get(key)
+  if (inFlight) return inFlight
+
+  const request = (async () => {
+    const { token, expiresInSeconds } = await fetchDingTalkAppAccessTokenUncached(config, options)
+    const ttlMs = expiresInSeconds !== null
+      ? Math.max(expiresInSeconds * 1000 - APP_TOKEN_EXPIRY_MARGIN_MS, 30 * 1000)
+      : APP_TOKEN_FALLBACK_TTL_MS
+    appTokenCache.set(key, { token, expiresAt: Date.now() + ttlMs })
+    return token
+  })()
+  appTokenInFlight.set(key, request)
+  try {
+    return await request
+  } finally {
+    appTokenInFlight.delete(key)
+  }
 }
 
 export async function listDingTalkDepartments(

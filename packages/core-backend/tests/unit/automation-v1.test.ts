@@ -5,6 +5,7 @@ import { AutomationScheduler, cronHasNoMatchingDay, nextCronOccurrenceMs, parseC
 import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, ALL_TRIGGER_TYPES } from '../../src/multitable/automation-triggers'
 import type { AutomationTrigger, AutomationTriggerType } from '../../src/multitable/automation-triggers'
 import { EventBus } from '../../src/integration/events/event-bus'
+import { __resetDingTalkAppAccessTokenCacheForTests } from '../../src/integrations/dingtalk/client'
 import { ALL_ACTION_TYPES, type AutomationAction } from '../../src/multitable/automation-actions'
 
 // ── DB mock for AutomationLogService ──────────────────────────────────────
@@ -104,6 +105,23 @@ function createExecution(overrides: Partial<AutomationExecution> = {}): Automati
     duration: 10,
     ...overrides,
   }
+}
+
+// The DingTalk app access-token cache is process-global (dingtalk client), so
+// a token fetched by an earlier test would otherwise be served from cache and
+// the next test's expected gettoken fetch would not fire — reset before every
+// test so each starts from a fresh token fetch.
+beforeEach(() => {
+  __resetDingTalkAppAccessTokenCacheForTests()
+})
+
+// Find the DingTalk person-message send request by endpoint rather than a fixed
+// mock.calls index, so the assertion survives changes to how many preceding
+// requests (e.g. token fetches) happen before the send.
+function findDingTalkPersonSend(fetchFn: ReturnType<typeof vi.fn>): [string, RequestInit] {
+  const call = fetchFn.mock.calls.find((c) => String(c[0] ?? '').includes('asyncsend'))
+  if (!call) throw new Error('expected a DingTalk asyncsend request')
+  return call as [string, RequestInit]
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -1273,7 +1291,7 @@ describe('AutomationExecutor', () => {
     expect(result.steps[0].actionType).toBe('send_dingtalk_person_message')
     expect(fetchFn).toHaveBeenCalledTimes(2)
     expect(String(queryFn.mock.calls[0]?.[0] ?? '')).toContain("type = 'form'")
-    const [, sendInit] = fetchFn.mock.calls[1] as [string, RequestInit]
+    const [, sendInit] = findDingTalkPersonSend(fetchFn)
     const payload = JSON.parse(sendInit.body as string)
     expect(payload.userid_list).toBe('dt-user-1,dt-user-2')
     expect(payload.msg.markdown.text).toContain('/multitable/public-form/sheet_1/view_form?publicToken=public-token')
@@ -1418,7 +1436,7 @@ describe('AutomationExecutor', () => {
 
     expect(result.status).toBe('success')
     expect(fetchFn).toHaveBeenCalledTimes(2)
-    const [, sendInit] = fetchFn.mock.calls[1] as [string, RequestInit]
+    const [, sendInit] = findDingTalkPersonSend(fetchFn)
     const payload = JSON.parse(sendInit.body as string)
     expect(payload.userid_list).toBe('dt-user-1,dt-user-2')
     expect(result.steps[0].output).toMatchObject({
@@ -1489,7 +1507,7 @@ describe('AutomationExecutor', () => {
 
     expect(result.status).toBe('success')
     expect(fetchFn).toHaveBeenCalledTimes(2)
-    const [, sendInit] = fetchFn.mock.calls[1] as [string, RequestInit]
+    const [, sendInit] = findDingTalkPersonSend(fetchFn)
     const payload = JSON.parse(sendInit.body as string)
     expect(payload.userid_list).toBe('dt-user-1,dt-user-2')
     expect(result.steps[0].output).toMatchObject({
@@ -1544,7 +1562,7 @@ describe('AutomationExecutor', () => {
       skippedRecipientCount: 1,
       skippedUserIds: ['user_2'],
     })
-    const [, sendInit] = fetchFn.mock.calls[1] as [string, RequestInit]
+    const [, sendInit] = findDingTalkPersonSend(fetchFn)
     expect(JSON.parse(sendInit.body as string).userid_list).toBe('dt-user-1')
     const insertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
     expect(insertCalls).toHaveLength(2)
@@ -1641,7 +1659,7 @@ describe('AutomationExecutor', () => {
 
     expect(result.status).toBe('success')
     expect(fetchFn).toHaveBeenCalledTimes(2)
-    const [, sendInit] = fetchFn.mock.calls[1] as [string, RequestInit]
+    const [, sendInit] = findDingTalkPersonSend(fetchFn)
     const payload = JSON.parse(sendInit.body as string)
     expect(payload.userid_list).toBe('dt-user-1,dt-user-2')
     expect(result.steps[0].output).toMatchObject({
