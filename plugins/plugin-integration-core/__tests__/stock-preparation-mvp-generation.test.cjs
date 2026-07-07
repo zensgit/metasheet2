@@ -159,6 +159,38 @@ function main() {
 
   assertSingleException(generate({ unitConversionRules: [] }), EXCEPTION_TYPES.UNIT_MISSING)
 
+  // Review P2 (series review 2026-07-07): the requiresConfirmation guard was untested — an
+  // UNCONFIRMED unit rule (requiresConfirmation=true, no confirmedBy/confirmedAt) must surface as a
+  // UNIT_MISSING exception, never silently generate a draft line (design line 38).
+  assertSingleException(generate({
+    unitConversionRules: [
+      {
+        ...clone(baseInput().unitConversionRules[0]),
+        conversionRuleId: 'rule_unconfirmed',
+        requiresConfirmation: true,
+        confirmedBy: undefined,
+        confirmedAt: undefined,
+      },
+    ],
+  }), EXCEPTION_TYPES.UNIT_MISSING)
+
+  // And the confirmed counterpart passes through (guard is about confirmation state, not the flag).
+  {
+    const confirmed = generate({
+      unitConversionRules: [
+        {
+          ...clone(baseInput().unitConversionRules[0]),
+          conversionRuleId: 'rule_confirmed',
+          requiresConfirmation: true,
+          confirmedBy: 'operator_a',
+          confirmedAt: '2026-07-07T00:00:00.000Z',
+        },
+      ],
+    })
+    assert.equal(confirmed.exceptions.length, 0)
+    assert.equal(confirmed.lines.length, 1)
+  }
+
   assertSingleException(generate({
     unitConversionRules: [
       {
