@@ -12,10 +12,15 @@ const {
   HUMAN_PRESERVED_FIELD_IDS,
   FEASIBILITY_FORBIDDEN_MECHANISMS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS,
+  STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   StockPreparationTemplateError,
   normalizeStockPreparationTemplate,
+  normalizeStockPreparationMvpTableTemplate,
   normalizeBomReadFeasibilityGate,
   buildSheetStructureFromTemplate,
+  buildSheetStructureFromMvpTableTemplate,
+  summarizeMvpTableTemplatesForEvidence,
   summarizeTemplateForEvidence,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 
@@ -90,6 +95,89 @@ function main() {
   assert.ok(!JSON.stringify(evidence).includes('Widget'), 'evidence has no business row value')
   assert.deepEqual(evidence.humanPreservedFields, [...HUMAN_PRESERVED_FIELD_IDS])
   assert.deepEqual(evidence.feasibilityGate.relationDescriptorKinds.sort(), ['children_by_parent', 'root_by_project'])
+
+  // Slice #3753: the expanded MVP model is schema-only and covers the business
+  // tables needed before live PLM/K3 sync is introduced.
+  const mvpTemplates = STOCK_PREPARATION_MVP_TABLE_TEMPLATES
+  const byObjectId = Object.fromEntries(mvpTemplates.map((entry) => [entry.objectId, entry]))
+  assert.deepEqual(STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS, [
+    'plm_stock_preparation_project',
+    'plm_stock_preparation_bom_snapshot_batch',
+    'plm_stock_preparation_bom_snapshot_line',
+    'plm_stock_preparation_erp_material_master',
+    'plm_stock_preparation_material_mapping',
+    'plm_stock_preparation_unit_conversion_rule',
+    'plm_stock_preparation_line',
+    'plm_stock_preparation_exception_confirmation',
+    'plm_stock_preparation_run',
+  ])
+  assert.equal(mvpTemplates.length, 9, 'MVP model has the planned table count')
+
+  for (const mvpTemplate of mvpTemplates) {
+    assert.equal(mvpTemplate.version, 'v1', `${mvpTemplate.objectId} is versioned`)
+    assert.ok(mvpTemplate.keyFields.length > 0, `${mvpTemplate.objectId} has a key`)
+    const fieldIds = new Set(mvpTemplate.fields.map((field) => field.id))
+    for (const keyField of mvpTemplate.keyFields) {
+      assert.ok(fieldIds.has(keyField), `${mvpTemplate.objectId} key exists as a field`)
+    }
+    for (const required of mvpTemplate.requiredFields) {
+      assert.equal(mvpTemplate.fields.find((field) => field.id === required)?.required, true, `${mvpTemplate.objectId}.${required} is required`)
+    }
+    const mvpStructure = buildSheetStructureFromMvpTableTemplate(mvpTemplate)
+    assert.equal(mvpStructure.objectId, mvpTemplate.objectId)
+    assert.deepEqual(mvpStructure.rows, [], `${mvpTemplate.objectId} carries no rows`)
+  }
+
+  const materialMapping = byObjectId.plm_stock_preparation_material_mapping
+  const mappingFields = Object.fromEntries(materialMapping.fields.map((field) => [field.id, field]))
+  for (const id of ['plmDrawingNo', 'plmVersion', 'erpMaterialCode', 'erpMaterialInternalId', 'versionPolicy', 'matchStatus']) {
+    assert.ok(mappingFields[id], `material mapping has ${id}`)
+  }
+  assert.deepEqual(mappingFields.versionPolicy.optionSource, { type: 'contract', key: 'stock_preparation_version_policy_v1' })
+  assert.deepEqual(mappingFields.matchStatus.optionSource, { type: 'contract', key: 'stock_preparation_match_status_v1' })
+  assert.notEqual(mappingFields.erpMaterialCode.required, true, 'unmatched mapping rows can omit ERP material code')
+  assert.notEqual(mappingFields.erpMaterialInternalId.required, true, 'unmatched mapping rows can omit ERP/K3 internal id')
+  assert.equal(mappingFields.confirmedBy.ownership, 'human_preserved', 'mapping confirmation user is human-confirmed metadata')
+
+  const bomLine = byObjectId.plm_stock_preparation_bom_snapshot_line
+  const bomLineFields = Object.fromEntries(bomLine.fields.map((field) => [field.id, field]))
+  assert.notEqual(bomLineFields.designQty.required, true, 'snapshot lines can preserve invalid or missing source quantity')
+  assert.notEqual(bomLineFields.designUnit.required, true, 'snapshot lines can preserve missing source unit for exception handling')
+
+  const unitRule = byObjectId.plm_stock_preparation_unit_conversion_rule
+  const unitFields = Object.fromEntries(unitRule.fields.map((field) => [field.id, field]))
+  for (const id of ['plmUnit', 'erpIssueUnit', 'conversionFactor', 'scopeType', 'lossRate', 'roundingRule', 'minimumIssueQty']) {
+    assert.ok(unitFields[id], `unit conversion rule has ${id}`)
+  }
+  assert.equal(unitFields.plmUnit.required, true)
+  assert.equal(unitFields.erpIssueUnit.required, true)
+  assert.equal(unitFields.conversionFactor.type, 'number')
+
+  const prepLine = byObjectId.plm_stock_preparation_line
+  const prepFields = Object.fromEntries(prepLine.fields.map((field) => [field.id, field]))
+  for (const id of ['designQty', 'designUnit', 'issueQtyRaw', 'issueQtyFinal', 'issueUnit', 'mappingStatus', 'unitStatus', 'prepStatus']) {
+    assert.ok(prepFields[id], `stock preparation line has ${id}`)
+  }
+  assert.deepEqual(prepFields.prepStatus.optionSource, { type: 'contract', key: 'stock_preparation_prep_status_v1' })
+
+  const exceptionTable = byObjectId.plm_stock_preparation_exception_confirmation
+  const exceptionFields = Object.fromEntries(exceptionTable.fields.map((field) => [field.id, field]))
+  for (const id of ['exceptionType', 'severity', 'status', 'resolutionAction', 'resolvedBy', 'resolvedAt']) {
+    assert.ok(exceptionFields[id], `exception confirmation has ${id}`)
+  }
+  assert.equal(exceptionFields.resolutionAction.ownership, 'human_preserved')
+
+  const runTable = byObjectId.plm_stock_preparation_run
+  const runFields = Object.fromEntries(runTable.fields.map((field) => [field.id, field]))
+  assert.ok(runFields.inputShape, 'run table records values-free input shape')
+  assert.ok(runFields.resultShape, 'run table records values-free result shape')
+
+  const mvpEvidence = summarizeMvpTableTemplatesForEvidence()
+  assert.equal(mvpEvidence.tableCount, 9)
+  assert.ok(!JSON.stringify(mvpEvidence).includes('P2026-001'), 'MVP evidence has no project value')
+  assert.ok(!JSON.stringify(mvpEvidence).includes('9.03.02.16'), 'MVP evidence has no material value')
+  assert.ok(!JSON.stringify(mvpEvidence).includes('Widget'), 'MVP evidence has no row value')
+  assert.ok(mvpEvidence.tables.every((entry) => !('rows' in entry)), 'MVP evidence carries no rows')
 
   // Schema-only manifest rejects content-like keys at top level and field level.
   for (const contentKey of ['rows', 'records', 'data', 'values', 'content', 'sample', 'payload', 'payloadTemplate', 'rawSql', 'sql', 'query', 'storedProcedure']) {
@@ -251,6 +339,40 @@ function main() {
     })),
     StockPreparationTemplateError,
     'secret-shaped option source rejected',
+  )
+
+  // MVP table templates use the same schema-only boundary.
+  assert.throws(
+    () => normalizeStockPreparationMvpTableTemplate({
+      ...materialMapping,
+      rows: [{ plmDrawingNo: '9.03.02.16' }],
+    }),
+    StockPreparationTemplateError,
+    'MVP template top-level rows rejected',
+  )
+  assert.throws(
+    () => normalizeStockPreparationMvpTableTemplate({
+      ...materialMapping,
+      fields: materialMapping.fields.concat({ id: 'bad', label: 'Bad', type: 'string', ownership: 'plm_system', default: 'customer value' }),
+    }),
+    StockPreparationTemplateError,
+    'MVP template field default rejected',
+  )
+  assert.throws(
+    () => normalizeStockPreparationMvpTableTemplate({
+      ...materialMapping,
+      keyFields: ['missingKey'],
+    }),
+    StockPreparationTemplateError,
+    'MVP missing key field rejected',
+  )
+  assert.throws(
+    () => normalizeStockPreparationMvpTableTemplate({
+      ...materialMapping,
+      requiredFields: ['plmDrawingNo', 'plmVersion'],
+    }),
+    StockPreparationTemplateError,
+    'MVP required field must be marked required',
   )
 
   console.log('stock-preparation-templates.test.cjs OK')
