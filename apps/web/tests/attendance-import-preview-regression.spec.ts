@@ -623,4 +623,183 @@ describe('Attendance import preview regression', () => {
     expect(String(payload.csvText)).toContain('日期,工号,姓名,加班小时,自定义列')
     expect(String(payload.csvText)).toContain('2026-06-01,EMP001,张三,1,x')
   })
+
+  function mockTemplateEndpointWithPrefs(savedKeys: string[]) {
+    const prefsPuts: Array<Record<string, unknown>> = []
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/template-prefs')) {
+        if (init?.method === 'PUT') {
+          prefsPuts.push(JSON.parse(String(init.body ?? '{}')))
+          return jsonResponse(200, { ok: true, data: { selectedKeys: [] } })
+        }
+        return jsonResponse(200, { ok: true, data: { selectedKeys: savedKeys } })
+      }
+      if (url.startsWith('/api/attendance/import/template')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: {
+              source: 'dingtalk_csv',
+              mode: 'override',
+              columns: ['日期', '工号', '姓名'],
+              requiredFields: ['日期'],
+            },
+            mappingProfiles: [],
+            mapping: {
+              columns: [
+                { sourceField: '上班1打卡时间', targetField: 'firstInAt' },
+                { sourceField: '下班1打卡时间', targetField: 'lastOutAt' },
+                { sourceField: '考勤结果', targetField: 'status' },
+                { sourceField: '加班小时', targetField: 'overtimeHours' },
+              ],
+            },
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+    return { apiFetchMock, prefsPuts }
+  }
+
+  it('PR-B: saved picker prefs restore on template load, ghost keys dropped', async () => {
+    mockTemplateEndpointWithPrefs(['overtimeHours', 'ghostKey'])
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(8)
+
+    const preview = (container!.querySelector('[data-testid="attendance-import-header-preview"]') as HTMLElement).textContent ?? ''
+    expect(preview).toBe('日期,工号,姓名,加班小时')
+    // The header builder drops unknown keys anyway — the intersection guard is
+    // locked at the SELECTION-SET level, where a ghost key would otherwise hide.
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+    const selected = Array.from(unwrapRef<Set<string>>(setupState.importTemplateFieldKeys))
+    expect(selected).toEqual(['overtimeHours'])
+  })
+
+  it('PR-B: toggling persists the selection; reset clears the server record', async () => {
+    const { prefsPuts } = mockTemplateEndpointWithPrefs([])
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(8)
+
+    const picker = container!.querySelector('[data-testid="attendance-import-field-picker"]') as HTMLElement
+    const overtime = Array.from(picker.querySelectorAll('label')).find(
+      candidate => candidate.textContent?.trim() === '加班小时'
+    )
+    ;(overtime!.querySelector('input') as HTMLInputElement).click()
+    await flushUi(2)
+    expect(prefsPuts.length).toBeGreaterThan(0)
+    expect(prefsPuts.at(-1)?.selectedKeys).toContain('overtimeHours')
+
+    findButton(picker, 'Reset to default').click()
+    await flushUi(2)
+    expect(prefsPuts.at(-1)?.selectedKeys).toEqual([])
+  })
+
+  it('PR-B hardening: a late restore cannot overwrite what the user just clicked (generation guard)', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    let releasePrefs!: (value: unknown) => void
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/template-prefs')) {
+        if (init?.method === 'PUT') return jsonResponse(200, { ok: true, data: { selectedKeys: [] } })
+        return new Promise((resolve) => { releasePrefs = resolve }) as Promise<Response>
+      }
+      if (url.startsWith('/api/attendance/import/template')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: { source: 'dingtalk_csv', mode: 'override', columns: ['日期', '工号', '姓名'], requiredFields: ['日期'] },
+            mappingProfiles: [],
+            mapping: { columns: [
+              { sourceField: '上班1打卡时间', targetField: 'firstInAt' },
+              { sourceField: '加班小时', targetField: 'overtimeHours' },
+            ] },
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(6)
+
+    // GET is still pending; the user toggles a field now.
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+    setupState.toggleImportTemplateField('overtimeHours')
+    await flushUi(2)
+    const before = Array.from(unwrapRef<Set<string>>(setupState.importTemplateFieldKeys)).sort()
+
+    // Late restore arrives with a different server-side selection — must be dropped.
+    releasePrefs(jsonResponse(200, { ok: true, data: { selectedKeys: ['firstInAt'] } }))
+    await flushUi(4)
+    const after = Array.from(unwrapRef<Set<string>>(setupState.importTemplateFieldKeys)).sort()
+    expect(after).toEqual(before)
+    expect(after).toContain('overtimeHours')
+  })
+
+  it('PR-B hardening: rapid toggles serialize PUTs last-write-wins (no reorder persistence)', async () => {
+    const puts: Array<{ payload: Record<string, unknown>; release: (v: unknown) => void }> = []
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/template-prefs')) {
+        if (init?.method === 'PUT') {
+          return new Promise((resolve) => {
+            puts.push({ payload: JSON.parse(String(init.body ?? '{}')), release: resolve })
+          }) as Promise<Response>
+        }
+        return jsonResponse(200, { ok: true, data: { selectedKeys: [] } })
+      }
+      if (url.startsWith('/api/attendance/import/template')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: { source: 'dingtalk_csv', mode: 'override', columns: ['日期'], requiredFields: ['日期'] },
+            mappingProfiles: [],
+            mapping: { columns: [
+              { sourceField: '上班1打卡时间', targetField: 'firstInAt' },
+              { sourceField: '下班1打卡时间', targetField: 'lastOutAt' },
+              { sourceField: '加班小时', targetField: 'overtimeHours' },
+            ] },
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(6)
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+
+    // three rapid changes while the first PUT is held open
+    setupState.toggleImportTemplateField('overtimeHours')
+    setupState.toggleImportTemplateField('firstInAt')
+    setupState.toggleImportTemplateField('lastOutAt')
+    await flushUi(2)
+
+    expect(puts).toHaveLength(1)
+    puts[0].release(jsonResponse(200, { ok: true, data: { selectedKeys: [] } }))
+    await flushUi(4)
+
+    // queued last-write-wins: exactly one follow-up PUT carrying the FINAL set
+    expect(puts).toHaveLength(2)
+    const finalSet = Array.from(unwrapRef<Set<string>>(setupState.importTemplateFieldKeys)).sort()
+    expect((puts[1].payload.selectedKeys as string[]).slice().sort()).toEqual(finalSet)
+    puts[1].release(jsonResponse(200, { ok: true, data: { selectedKeys: [] } }))
+  })
 })
