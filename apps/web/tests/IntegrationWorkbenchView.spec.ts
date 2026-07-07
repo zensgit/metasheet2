@@ -113,6 +113,43 @@ describe('IntegrationWorkbenchView', () => {
     container = null
   })
 
+  // IU-2a quality gate: the rail↔view WIRING is pinned here (the rail component's own spec uses
+  // fixture groups, so without this a dropped group — or the whole rail — in the view would pass
+  // every existing test). Six groups, each anchoring an existing section id.
+  it('wires the six rail groups to real section anchors', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      throw new Error(`unexpected URL ${url}`)
+    })
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi(8)
+    const root = container
+    const expected: Array<[string, string]> = [
+      ['connection', 'int-sec-connection'],
+      ['read-source', 'int-sec-read-source'],
+      ['combination', 'int-sec-combination-config'],
+      ['cleaning-mapping', 'int-sec-object-template'],
+      ['run-push', 'int-sec-run-push'],
+      ['monitoring', 'int-sec-monitoring'],
+    ]
+    for (const [groupId, sectionId] of expected) {
+      const item = root.querySelector(`[data-testid="integration-rail-${groupId}"]`)
+      expect(item, `rail group ${groupId} must render`).not.toBeNull()
+      expect(root.querySelector(`#${sectionId}`), `section ${sectionId} must exist for ${groupId}`).not.toBeNull()
+    }
+    expect(root.querySelectorAll('[data-testid^="integration-rail-"]').length).toBe(6)
+  })
+
   it('loads systems, object schemas, and previews a template payload', async () => {
     const previewBodies: Array<Record<string, unknown>> = []
     const pipelineBodies: Array<Record<string, unknown>> = []
