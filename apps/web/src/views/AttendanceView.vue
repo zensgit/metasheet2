@@ -24,13 +24,19 @@
             }}
           </p>
         </div>
-        <div v-if="showOverview" class="attendance__actions">
-          <button class="attendance__btn attendance__btn--primary" :disabled="punching" @click="punch('check_in')">
-            {{ punching ? tr('Working...', '处理中...') : tr('Check In', '上班打卡') }}
-          </button>
-          <button class="attendance__btn" :disabled="punching" @click="punch('check_out')">
-            {{ punching ? tr('Working...', '处理中...') : tr('Check Out', '下班打卡') }}
-          </button>
+        <div v-if="showOverview" class="attendance__hero-punch" data-testid="attendance-hero-punch">
+          <div class="attendance__hero-clock">
+            <span class="attendance__hero-time" data-testid="attendance-hero-time">{{ heroClockTime }}</span>
+            <span class="attendance__hero-date">{{ heroClockDate }}</span>
+          </div>
+          <div class="attendance__actions attendance__hero-actions">
+            <button class="attendance__btn attendance__btn--primary attendance__btn--hero" :disabled="punching" @click="punch('check_in')">
+              {{ punching ? tr('Working...', '处理中...') : tr('Check In', '上班打卡') }}
+            </button>
+            <button class="attendance__btn attendance__btn--hero-secondary" :disabled="punching" @click="punch('check_out')">
+              {{ punching ? tr('Working...', '处理中...') : tr('Check Out', '下班打卡') }}
+            </button>
+          </div>
         </div>
         <div v-else class="attendance__chip-list attendance__chip-list--header">
           <span class="attendance__status-chip">
@@ -9703,7 +9709,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceCalendarPolicyQuickAdd from './attendance/AttendanceCalendarPolicyQuickAdd.vue'
 import AttendanceCalendarPolicyPreviewPanel from './attendance/AttendanceCalendarPolicyPreviewPanel.vue'
@@ -11358,6 +11364,29 @@ function readImportDebugOptions(): AttendanceImportDebugOptions {
 
 const loading = ref(false)
 const punching = ref(false)
+
+// UI-P0′ hero punch card (attendance-ui-p0-hero-punch design-lock): live
+// clock, display-only — punch handlers/copy/classes above are untouched.
+const heroClockNow = ref(new Date())
+let heroClockTimer: ReturnType<typeof setInterval> | null = null
+onMounted(() => {
+  heroClockTimer = setInterval(() => { heroClockNow.value = new Date() }, 1000)
+})
+onUnmounted(() => {
+  if (heroClockTimer) clearInterval(heroClockTimer)
+})
+const heroClockTime = computed(() => {
+  const now = heroClockNow.value
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+})
+const heroClockDate = computed(() => {
+  const now = heroClockNow.value
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const weekdayZh = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][now.getDay()]
+  const weekdayEn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][now.getDay()]
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} · ${tr(weekdayEn, weekdayZh)}`
+})
 // Punch outcome clarity (frontend-only, 2026-07-05 design-lock, G2): inline
 // outdoor-punch note retry state. See
 // docs/development/attendance-punch-outcome-clarity-design-lock-20260705.md.
@@ -30567,5 +30596,74 @@ const holidaySectionBindings = {
 .attendance__import-recognition-chip--ok {
   border-color: var(--ms-color-success);
   color: var(--ms-color-success);
+}
+
+/* UI-P0′ hero punch card (attendance-ui-p0-hero-punch design-lock 20260706).
+   All values from UF --ms-* tokens; new hardcoded hex here would be a defect. */
+.attendance__hero-punch {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-5);
+  padding: var(--ms-space-4) var(--ms-space-5);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
+.attendance__hero-clock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-1);
+  min-width: 132px;
+}
+
+.attendance__hero-time {
+  font-size: 32px;
+  font-weight: var(--ms-font-weight-title);
+  line-height: 1.1;
+  color: var(--ms-text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.attendance__hero-date {
+  font-size: 12px;
+  color: var(--ms-text-3);
+}
+
+.attendance__hero-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-3);
+}
+
+.attendance__btn--hero {
+  min-height: 56px;
+  min-width: 160px;
+  font-size: 16px;
+  font-weight: var(--ms-font-weight-title);
+  border-radius: var(--ms-radius-md);
+}
+
+.attendance__btn--hero-secondary {
+  min-height: 56px;
+  min-width: 132px;
+  font-size: 15px;
+  border-radius: var(--ms-radius-md);
+  border-color: var(--ms-color-primary);
+  color: var(--ms-color-primary);
+}
+
+@media (max-width: 768px) {
+  .attendance__hero-punch {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--ms-space-3);
+  }
+
+  .attendance__hero-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 </style>
