@@ -1529,4 +1529,41 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.textContent).not.toContain('Makeup-punch quota for this cycle has been used.')
     expect(container!.textContent).not.toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
   })
+
+  it('UI-P0 hero punch card: live clock renders and punch buttons keep their contract', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async () => jsonResponse(200, { ok: true, data: { items: [], summary: null } }))
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(4)
+
+    const hero = container!.querySelector('[data-testid="attendance-hero-punch"]') as HTMLElement | null
+    expect(hero, 'expected hero punch card in overview mode').toBeTruthy()
+    const time = hero!.querySelector('[data-testid="attendance-hero-time"]') as HTMLElement
+    expect(time.textContent).toMatch(/^\d{2}:\d{2}:\d{2}$/)
+
+    const checkIn = Array.from(hero!.querySelectorAll('button')).find(
+      candidate => candidate.textContent?.trim() === 'Check In'
+    )
+    expect(checkIn, 'Check In stays findable by copy').toBeTruthy()
+    expect(checkIn!.classList.contains('attendance__btn')).toBe(true)
+    expect(checkIn!.classList.contains('attendance__btn--primary')).toBe(true)
+    expect(checkIn!.classList.contains('attendance__btn--hero')).toBe(true)
+    const checkOut = Array.from(hero!.querySelectorAll('button')).find(
+      candidate => candidate.textContent?.trim() === 'Check Out'
+    )
+    expect(checkOut, 'Check Out stays findable by copy').toBeTruthy()
+  })
+
+  it('UI-P0 hero punch card: absent outside overview mode', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async () => jsonResponse(200, { ok: true, data: { items: [], summary: null } }))
+
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi(4)
+
+    expect(container!.querySelector('[data-testid="attendance-hero-punch"]')).toBeNull()
+  })
 })
