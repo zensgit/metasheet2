@@ -42,5 +42,7 @@
 ## Checklist
 
 - ✅ D-0 本锁（owner 权限口径修正已并入）
-- ⬜ D-1 端点 + 守卫 + 测试
-- ⬜ D-2 四处前端接线 + tripwire
+- ✅ D-1 端点 + 守卫 + 测试（#3664）
+- ✅ D-2 四处前端接线 + tripwire（#3672；含 rbacGuardAny read/write/act 三权任一的 owner 修正）
+
+> **as-built 对账（2026-07-07）**：D-1/D-2 落地时未翻转，随对账 PR 补翻（见 approval-ux-parity-completion-verification-20260706.md）。
