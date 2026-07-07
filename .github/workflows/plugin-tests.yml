@@ -452,6 +452,7 @@ jobs:
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
+            tests/integration/attendance-import-template-prefs.test.ts \
             tests/integration/attendance-notification-deliveries.test.ts \
             tests/integration/attendance-comp-time-expiry-reminder.test.ts \
             tests/integration/attendance-shift-swap.test.ts \
