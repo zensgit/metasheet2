@@ -536,7 +536,10 @@ function assertLocalUserLoginAllowed(localUser: LocalUserRow): void {
 
 async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow> {
   const userId = crypto.randomUUID()
-  const email = dtUser.email || `dingtalk_${dtUser.openId}@placeholder.local`
+  // unionId first (review #3771 P2-1): the container surface has no openId, and
+  // `dingtalk_undefined@…` collides on the users.email UNIQUE index from the
+  // second emailless provisioned user onward. unionId is guaranteed non-empty.
+  const email = dtUser.email || `dingtalk_${dtUser.unionId || dtUser.openId}@placeholder.local`
   const name = dtUser.nick || 'DingTalk User'
   const passwordHash = await bcrypt.hash(
     crypto.randomBytes(32).toString('base64url'),

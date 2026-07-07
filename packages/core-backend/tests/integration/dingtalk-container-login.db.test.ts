@@ -46,14 +46,14 @@ const UNION_PROVISION = `union_${RUN}_prov`
 const UNION_GOLDEN = `union_${RUN}_golden`
 const USER_GOLDEN = `user_${RUN}_golden`
 
-function primeContainerChain(unionId: string, userId = `emp_${unionId}`) {
+function primeContainerChain(unionId: string, userId = `emp_${unionId}`, options: { email?: string | undefined; omitEmail?: boolean } = {}) {
   clientMocks.fetchDingTalkAppAccessToken.mockResolvedValue('app-token')
   clientMocks.getDingTalkUserInfoByAuthCode.mockResolvedValue({ userId, unionId: undefined, source: {} })
   clientMocks.getDingTalkUserDetail.mockResolvedValue({
     userId,
     name: `Name ${unionId}`,
     unionId,
-    email: `${unionId}@example.com`,
+    email: options.omitEmail ? undefined : (options.email ?? `${unionId}@example.com`),
     mobile: '13800000000',
     avatarUrl: '',
     departmentIds: [],
@@ -171,6 +171,7 @@ describeIfDb('E1 — dingtalk container login (real DB)', () => {
       `SELECT external_key, provider_open_id FROM user_external_identities WHERE provider = 'dingtalk' AND provider_union_id = $1`,
       [UNION_GOLDEN],
     )
+    expect(after1.rows).toHaveLength(1)
     expect(after1.rows[0].external_key).toBe(`${CORP}:${UNION_GOLDEN}`)
     expect(after1.rows[0].provider_open_id).toBeNull()
 
@@ -191,6 +192,7 @@ describeIfDb('E1 — dingtalk container login (real DB)', () => {
       `SELECT external_key, provider_open_id FROM user_external_identities WHERE provider = 'dingtalk' AND provider_union_id = $1`,
       [UNION_GOLDEN],
     )
+    expect(after2.rows).toHaveLength(1)
     expect(after2.rows[0].external_key).toBe(`${CORP}:${OPEN_ID}`)
     expect(after2.rows[0].provider_open_id).toBe(OPEN_ID)
 
@@ -202,7 +204,31 @@ describeIfDb('E1 — dingtalk container login (real DB)', () => {
       `SELECT external_key, provider_open_id FROM user_external_identities WHERE provider = 'dingtalk' AND provider_union_id = $1`,
       [UNION_GOLDEN],
     )
+    expect(after3.rows).toHaveLength(1)
     expect(after3.rows[0].external_key).toBe(`${CORP}:${OPEN_ID}`)
     expect(after3.rows[0].provider_open_id).toBe(OPEN_ID)
+  })
+
+  it('P2-1 (#3771): two emailless container users provision with distinct placeholder emails', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    const UNION_A = `union_${RUN}_noeml_a`
+    const UNION_B = `union_${RUN}_noeml_b`
+
+    primeContainerChain(UNION_A, undefined, { omitEmail: true })
+    const first = await exchangeEnterpriseAuthCodeForUser('code-noemail-a')
+    expect(first.isNewUser).toBe(true)
+
+    primeContainerChain(UNION_B, undefined, { omitEmail: true })
+    const second = await exchangeEnterpriseAuthCodeForUser('code-noemail-b')
+    expect(second.isNewUser).toBe(true)
+    expect(second.localUserId).not.toBe(first.localUserId)
+
+    const emails = await q(
+      `SELECT email FROM users WHERE id = ANY($1::text[]) ORDER BY email`,
+      [[first.localUserId, second.localUserId]],
+    )
+    expect(emails.rows).toHaveLength(2)
+    expect(emails.rows[0].email).toContain(UNION_A.toLowerCase())
+    expect(emails.rows[1].email).toContain(UNION_B.toLowerCase())
   })
 })

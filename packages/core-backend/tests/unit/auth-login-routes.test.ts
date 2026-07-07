@@ -59,6 +59,14 @@ const dingtalkOauthMocks = vi.hoisted(() => ({
 }))
 
 const dingtalkClientMocks = vi.hoisted(() => ({
+  DingTalkBusinessError: class DingTalkBusinessError extends Error {
+    errcode: number
+    constructor(message: string, errcode = 40078) {
+      super(message)
+      this.name = 'DingTalkBusinessError'
+      this.errcode = errcode
+    }
+  },
   DingTalkRequestError: class DingTalkRequestError extends Error {
     statusCode: number
     responseBody: Record<string, unknown> | null
@@ -120,6 +128,7 @@ vi.mock('../../src/rbac/service', () => ({
 }))
 
 vi.mock('../../src/integrations/dingtalk/client', () => ({
+  DingTalkBusinessError: dingtalkClientMocks.DingTalkBusinessError,
   DingTalkRequestError: dingtalkClientMocks.DingTalkRequestError,
 }))
 
@@ -1486,6 +1495,51 @@ describe('auth login routes', () => {
 
       expect(response.statusCode).toBe(403)
       expect((response.body as Record<string, any>).code).toBe('grant_required')
+    })
+  })
+
+  describe('E1 container hardening (review #3771)', () => {
+    it('accepts lenient truthy flag values while staying fail-closed otherwise', async () => {
+      vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', ' TRUE ')
+      dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
+        new dingtalkOauthMocks.DingTalkLoginPolicyError('x', { statusCode: 403, code: 'grant_required' }),
+      )
+      const response = await invokeRoute('post', '/dingtalk/container', { body: { authCode: 'c' } })
+      expect(response.statusCode).toBe(403)
+
+      vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'on')
+      const closed = await invokeRoute('post', '/dingtalk/container', { body: { authCode: 'c' } })
+      expect(closed.statusCode).toBe(404)
+    })
+
+    it('rate-limits repeated failing attempts per IP before the outbound exchange', async () => {
+      vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
+      dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockClear()
+      dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
+        new dingtalkOauthMocks.DingTalkLoginPolicyError('nope', { statusCode: 403, code: 'grant_required' }),
+      )
+      let last: { statusCode: number; body: unknown } | undefined
+      for (let i = 0; i < 6; i += 1) {
+        last = await invokeRoute('post', '/dingtalk/container', {
+          headers: { 'x-forwarded-for': '10.9.9.9' },
+          body: { authCode: `code-${i}` },
+        })
+      }
+      expect(last!.statusCode).toBe(429)
+      expect(dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mock.calls.length).toBeLessThan(6)
+    })
+
+    it('maps a DingTalk business rejection (invalid authCode) to 401 invalid_auth_code', async () => {
+      vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
+      dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
+        new dingtalkClientMocks.DingTalkBusinessError('invalid code', 40078),
+      )
+      const response = await invokeRoute('post', '/dingtalk/container', {
+        headers: { 'x-forwarded-for': '10.9.9.10' },
+        body: { authCode: 'bad' },
+      })
+      expect(response.statusCode).toBe(401)
+      expect((response.body as Record<string, any>).code).toBe('invalid_auth_code')
     })
   })
 })

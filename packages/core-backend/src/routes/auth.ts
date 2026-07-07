@@ -35,7 +35,7 @@ import { listUserPermissions } from '../rbac/service'
 import { secretManager } from '../security/SecretManager'
 import { isPlmEnabled, resolveEffectiveProductMode } from '../config/product-mode'
 import { getBcryptSaltRounds, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
-import { DingTalkRequestError } from '../integrations/dingtalk/client'
+import { DingTalkBusinessError, DingTalkRequestError } from '../integrations/dingtalk/client'
 
 const logger = new Logger('AuthRouter')
 
@@ -1318,7 +1318,8 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
  */
 authRouter.post('/dingtalk/container', async (req: Request, res: Response) => {
   try {
-    if (String(process.env.DINGTALK_CONTAINER_LOGIN_ENABLED ?? '').toLowerCase() !== 'true') {
+    const flag = String(process.env.DINGTALK_CONTAINER_LOGIN_ENABLED ?? '').trim().toLowerCase()
+    if (!['true', '1', 'yes'].includes(flag)) {
       return res.status(404).json({
         success: false,
         error: 'DingTalk container login is not enabled',
@@ -1333,7 +1334,23 @@ authRouter.post('/dingtalk/container', async (req: Request, res: Response) => {
       })
     }
 
+    // Review #3771 P2-2: unlike /dingtalk/callback (validateState fails junk
+    // before any outbound call), every well-formed container request reaches
+    // DingTalk's SHARED gettoken quota — rate-limit per IP before the exchange.
+    const rateKey = `dingtalk-container:${getClientIP(req)}`
+    const rateConfig = getAuthRateLimitConfig()
+    const rate = checkRateLimit(rateKey, rateConfig.maxLoginAttempts, rateConfig)
+    if (!rate.allowed) {
+      logger.warn(`Rate limit exceeded for DingTalk container login: ${getClientIP(req)}`)
+      return res.status(429).json({
+        success: false,
+        error: 'Too many login attempts. Please try again later.',
+        retryAfter: rate.retryAfter,
+      })
+    }
+
     const result = await exchangeEnterpriseAuthCodeForUser(authCode)
+    resetRateLimit(rateKey)
     const permissions = await loadAuthPermissions(result.localUserId)
     const user: User = {
       id: result.localUserId,
@@ -1365,17 +1382,27 @@ authRouter.post('/dingtalk/container', async (req: Request, res: Response) => {
     })
   } catch (error) {
     logger.error('DingTalk container login error', error instanceof Error ? error : undefined)
+    // DingTalkBusinessError here is DingTalk refusing the payload (typically an
+    // invalid/expired authCode) — the caller's fault, not an upstream outage.
     const statusCode = error instanceof DingTalkLoginPolicyError
       ? error.statusCode
-      : error instanceof DingTalkRequestError
-        ? 502
-        : 500
+      : error instanceof DingTalkBusinessError
+        ? 401
+        : error instanceof DingTalkRequestError
+          ? 502
+          : 500
     const message = error instanceof DingTalkLoginPolicyError
       ? error.message
-      : error instanceof DingTalkRequestError
-        ? error.message
-        : 'DingTalk authentication failed'
-    const code = error instanceof DingTalkLoginPolicyError ? error.code : undefined
+      : error instanceof DingTalkBusinessError
+        ? 'DingTalk rejected the container auth code'
+        : error instanceof DingTalkRequestError
+          ? error.message
+          : 'DingTalk authentication failed'
+    const code = error instanceof DingTalkLoginPolicyError
+      ? error.code
+      : error instanceof DingTalkBusinessError
+        ? 'invalid_auth_code'
+        : undefined
 
     return res.status(statusCode).json({
       success: false,

@@ -44,3 +44,10 @@
 ## 5. 完成口径
 
 实现 → opus 对抗审阅 0 P1/P2 → 三红线 → 验证 MD。backend 泳道（与 FE 车道并行无冲突）。
+
+## 6. 审阅硬化记录（2026-07-07 对抗审阅 #3771）
+
+- P2-1 emailless 占位邮箱碰撞（`dingtalk_undefined@…` UNIQUE 冲突 → 500 锁死）：占位改 unionId（硬失败保证非空）+ 真 DB 双 emailless 回归。
+- P2-2 未认证端点无限流（每个 well-formed 请求放大到共享 gettoken QPS）：复用 `checkRateLimit` per-IP，成功即 reset；flood 单测锁。
+- P3-1 flag 解析宽容化（trim + true/1/yes，仍 fail-closed）；NIT 无效 authCode → 401 `invalid_auth_code`（`DingTalkBusinessError` 映射）；golden 补行数断言。
+- **P3-2 defer**：app access token 每请求新取无缓存——E 系列后续 rung 统一处理（缓存亦进一步削弱限流放大面）。
