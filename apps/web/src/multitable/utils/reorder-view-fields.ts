@@ -1,4 +1,5 @@
-import type { MetaField, PersonalViewConfigOverlay } from '../types'
+import type { MetaField } from '../types'
+import { writePersonalConfigMerged, type PersonalConfigWriteClient } from './personal-config-write'
 
 /**
  * Slice 3c — the column-reorder WRITE path, split by personal-vs-shared so the two never cross (design-lock
@@ -16,10 +17,10 @@ import type { MetaField, PersonalViewConfigOverlay } from '../types'
  * and drags — and produces the new visible id list as the personal `fieldOrder`. Shared reorder operates over
  * `grid.fields` to preserve the existing sheet-global `field.order` semantics.
  */
-export interface ReorderClient {
+// The reorder client is the shared personal-config write client (get/put) plus the shared-order updateField —
+// so the personal write can be handed straight to writePersonalConfigMerged with no shape duplication.
+export interface ReorderClient extends PersonalConfigWriteClient {
   updateField(fieldId: string, input: { order: number }): Promise<unknown>
-  getPersonalViewConfig(viewId: string): Promise<{ config: PersonalViewConfigOverlay | null }>
-  putPersonalViewConfig(viewId: string, overlay: PersonalViewConfigOverlay): Promise<unknown>
 }
 
 /** Move `fromId` to `toId`'s slot within `ids`. Returns null if either id is absent (no-op). */
@@ -56,18 +57,11 @@ export async function reorderViewFields(params: ReorderViewFieldsParams): Promis
     const order = moveWithin(params.visibleFieldIds, params.fromId, params.toId)
     if (!order) return
     params.onPersonalOrder(order) // optimistic — the grid re-renders columns immediately
-    let base: PersonalViewConfigOverlay = {}
-    try {
-      // A view with no personal row yet returns { config: null } (row created lazily on first write).
-      base = (await params.client.getPersonalViewConfig(params.viewId))?.config ?? {}
-    } catch (err) {
-      // FAIL-CLOSED: only a 404 (no row / flag off / view gone) is a safe "start from empty". Any OTHER
-      // failure (500 / network / transient auth) must NOT proceed — writing { ...{}, fieldOrder } would
-      // REPLACE the row and wipe the actor's other personal facets (would break constraint 2). Re-throw.
-      if ((err as { status?: number } | null)?.status !== 404) throw err
-      base = {}
-    }
-    await params.client.putPersonalViewConfig(params.viewId, { ...base, fieldOrder: order })
+    // Constraint 2 write goes through the SINGLE shared read-merge-write entry point (fail-closed on non-404).
+    // One implementation of "merge this patch over the actor's current personal config" serves both the reorder
+    // path and the in-place facet edits — so the fail-closed guard can never drift on just one side (post-3c/3d
+    // dedup; see utils/personal-config-write.ts).
+    await writePersonalConfigMerged(params.client, params.viewId, { fieldOrder: order })
     return
   }
 
