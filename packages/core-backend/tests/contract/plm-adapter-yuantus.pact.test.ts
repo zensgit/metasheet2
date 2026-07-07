@@ -118,10 +118,14 @@ const PLM_ADAPTER_PACT_PATHS = [
   { method: 'GET', path: '/api/v1/bom/multitable/01H000000000000000000000P1/context' },
   // PLM-COLLAB P3 (方案1) governed BOM multitable write-back: re-added in its AMENDED form now that
   // the Yuantus provider (#905) honors a GOVERNED, Idempotency-Key-gated write-back (entitlement
-  // plm.bom_multitable_writeback). It MUST sit at the END of the adapter-owned list — immediately
-  // before the V1.2 parent-host embed-token — so the concatenated PACT_PATHS order matches the
-  // corresponding placement of the interaction in the pact JSON. PLMAdapter.ts owns the callsite.
+  // plm.bom_multitable_writeback). PLMAdapter.ts owns the callsite.
   { method: 'PATCH', path: '/api/v1/bom/multitable/01H000000000000000000000W1/lines/01H000000000000000000000W3' },
+  // ECO Phase 3 (Yuantus provider #973): the locked-BOM revision-intent seam the Phase-0
+  // discriminated 409 (eco_required) points at. POST with NO body and NO Idempotency-Key —
+  // idempotency is the provider's attach-before-create (at most one open intent per part).
+  // It MUST sit at the END of the adapter-owned list — immediately before the V1.2 parent-host
+  // embed-token — so the concatenated PACT_PATHS order matches the pact JSON placement.
+  { method: 'POST', path: '/api/v1/bom/multitable/01H000000000000000000000L1/eco-intent' },
 ] as const
 
 const PARENT_HOST_PACT_PATHS = [
@@ -140,6 +144,11 @@ const ERROR_CONTRACT_PACT_PATHS = [
   // write-back — no new consumer callsite.
   { method: 'PATCH', path: '/api/v1/bom/multitable/01H000000000000000000000W4/lines/01H000000000000000000000W6' },
   { method: 'PATCH', path: '/api/v1/bom/multitable/01H000000000000000000000W7/lines/01H000000000000000000000W9' },
+  // ECO Phase 3: the intent seam's own discriminated 409 namespace, pinned via its most
+  // consumer-branched code — not_locked (the CTA resets to the direct-edit path on it). The
+  // sibling code eco_intent_rejected shares the same envelope and stays consumer-tested only
+  // (its recovery is a generic retry; pinning one code freezes the namespace shape).
+  { method: 'POST', path: '/api/v1/bom/multitable/01H000000000000000000000L2/eco-intent' },
 ] as const
 
 const PACT_PATHS = [
@@ -221,6 +230,7 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       '/api/v1/integrations/capabilities',
       '/api/v1/bom/multitable/${partId}/context',
       '/api/v1/bom/multitable/${partId}/lines/${bomLineId}',
+      '/api/v1/bom/multitable/${partId}/eco-intent',
     ]
     for (const ep of endpointsToFind) {
       expect(
@@ -287,6 +297,42 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       ok: true,
       bom_line_id: '01H000000000000000000000W3',
     })
+  })
+
+  // ECO Phase 3 (Yuantus provider #973): the locked-BOM revision-intent seam.
+  it('ECO Phase 3: the eco-intent contract is body-less, key-less, entitlement-stated, minimal-enveloped', () => {
+    const pact = loadPact()
+    const success = pact.interactions.find(
+      i => i.request.method === 'POST' && i.request.path === '/api/v1/bom/multitable/01H000000000000000000000L1/eco-intent',
+    )
+    expect(success).toBeDefined()
+
+    // provider state names the intent entitlement + the locked precondition
+    expect(success!.providerStates![0].name).toContain('plm.bom_eco_revision')
+    expect(success!.providerStates![0].name).toContain('lifecycle-locked')
+
+    // NO body, NO Idempotency-Key (provider attach-before-create owns idempotency), NO Content-Type
+    expect(success!.request.body).toBeUndefined()
+    const headers = (success!.request.headers ?? {}) as Record<string, string>
+    expect(Object.keys(headers)).not.toContain('Idempotency-Key')
+    expect(Object.keys(headers)).not.toContain('Content-Type')
+
+    // minimal success envelope: the three consumer-branched keys only (source/target_version_id
+    // stay provider-additive, deliberately unpinned)
+    expect(success!.response.status).toBe(200)
+    expect(Object.keys(success!.response.body as Record<string, unknown>).sort()).toEqual([
+      'attached', 'eco_id', 'state',
+    ])
+
+    // the intent seam's own 409 namespace: not_locked pinned as a dedicated error fixture,
+    // discriminated by detail.code alone (exact value, message type-matched)
+    const notLocked = pact.interactions.find(
+      i => i.request.method === 'POST' && i.request.path === '/api/v1/bom/multitable/01H000000000000000000000L2/eco-intent',
+    )
+    expect(notLocked).toBeDefined()
+    expect(notLocked!.response.status).toBe(409)
+    const detail = (notLocked!.response.body as { detail: Record<string, unknown> }).detail
+    expect(detail.code).toBe('not_locked')
   })
 
   // ECO Phase 0: the discriminated-409 error contract (Yuantus provider #968 taskbook + #969 impl).
