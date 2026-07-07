@@ -962,6 +962,25 @@ export async function loadApprovalProjectionParticipantSheetIds(
 }
 
 /**
+ * T36-1 review P1: record-level read deny for the Yjs auth gate. Sheet-level `canRead` is not
+ * enough once participants exist — a participant on ONE projection row must not subscribe to
+ * OTHER rows' Y.Docs (the doc seeder loads the record's full `data`). Gates internally on
+ * `loadRowLevelReadDenyEnabled` so generic flag-off sheets pay zero extra queries; callers pass
+ * non-admin actors only (admins bypass at the call site, same convention as every deny consumer).
+ * DENY-WINS: any unexpected error propagates (the adapter's auth check fails closed to no-access).
+ */
+export async function isRecordReadDeniedForUser(
+  query: QueryFn,
+  sheetId: string,
+  recordId: string,
+  userId: string,
+): Promise<boolean> {
+  if (!sheetId || !recordId) return true
+  if (!(await loadRowLevelReadDenyEnabled(query, sheetId))) return false
+  return (await loadDeniedRecordIds(query, sheetId, userId)).has(recordId)
+}
+
+/**
  * T36-1 (Plan A): for a projection sheet, the record ids `userId` may NOT read — every row where
  * they are neither the requester nor the terminal decider. NULL/missing participant fields never
  * match the actor, so corrupt rows land in the denied set (fail-closed, lock §3). Returns empty
@@ -1279,6 +1298,13 @@ export async function hasRecordPermissionAssignments(
   // (never a 500). record_permissions above stays unconditional (it is not flag-gated); only the 2b rule
   // check is gated here.
   if (!(await loadRowLevelReadDenyEnabled(query, sheetId))) return false
+  // T36-1 review P1: the MAIN record-read surfaces (view/list/single-GET/record-history/AI
+  // preview) gate their row filtering on THIS predicate — and a projection sheet has neither
+  // record_permissions rows nor conditional rules, so without this branch the entire filter
+  // block is skipped and a participant reads every other user's projection rows. Projection
+  // sheets therefore ALWAYS report assignments (their per-row participant scopes are synthesized
+  // by loadRecordPermissionScopeMap / loadDeniedRecordIds).
+  if ((await loadApprovalProjectionSheetIds(query, [sheetId])).has(sheetId)) return true
   try {
     const r = await query(
       `SELECT 1 FROM meta_sheets WHERE id = $1 AND jsonb_array_length(COALESCE(conditional_read_rules, '[]'::jsonb)) > 0 LIMIT 1`,

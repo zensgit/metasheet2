@@ -11,6 +11,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { Request } from 'express'
 import { pool } from '../../src/db/pg'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import {
   resolveSheetCapabilities,
   filterReadableSheetRowsForAccess,
@@ -18,8 +20,11 @@ import {
   loadDeniedRecordIds,
   loadRecordPermissionScopeMap,
   loadApprovalProjectionParticipantSheetIds,
+  isRecordReadDeniedForUser,
 } from '../../src/multitable/permission-service'
 import { resolveSheetCapabilitiesForUser } from '../../src/multitable/sheet-capabilities'
+import { hasRecordPermissionAssignments } from '../../src/multitable/permission-service'
+import { requireRecordReadable } from '../../src/routes/univer-meta'
 import { resolveRequestAccess } from '../../src/multitable/access'
 import { APPROVAL_PROJECTION_BASE_ID } from '../../src/multitable/approval-projection-constants'
 
@@ -113,12 +118,20 @@ describeIfDb('T36-1 — projection per-row participant read (Plan A)', () => {
     expect(scopes.get(REC_MINE_REQ)?.accessLevel ?? 'unset').not.toBe('none')
   })
 
-  it('listing: participant sees the projection sheet (base surfaces); stranger does not', async () => {
-    const rows = [{ id: PROJ_SHEET, base_id: APPROVAL_PROJECTION_BASE_ID }]
-    const partVisible = await filterReadableSheetRowsForAccess(q, rows, await resolveRequestAccess(participantReq))
-    expect(partVisible.map((r) => r.id)).toEqual([PROJ_SHEET])
-    const strangerVisible = await filterReadableSheetRowsForAccess(q, rows, await resolveRequestAccess(strangerReq))
-    expect(strangerVisible).toEqual([])
+  it('listing: participant sees the projection sheet (base surfaces); stranger does not; sibling projection sheet without their rows stays hidden', async () => {
+    const SIBLING = `${PROJ_SHEET}_sibling`
+    await q(`INSERT INTO meta_sheets (id, base_id, name, description) VALUES ($1,$2,'ProjT361Sib','') ON CONFLICT (id) DO NOTHING`,
+      [SIBLING, APPROVAL_PROJECTION_BASE_ID])
+    try {
+      const rows = [{ id: PROJ_SHEET, base_id: APPROVAL_PROJECTION_BASE_ID }, { id: SIBLING, base_id: APPROVAL_PROJECTION_BASE_ID }]
+      const partVisible = await filterReadableSheetRowsForAccess(q, rows, await resolveRequestAccess(participantReq))
+      // Participant status is PER-SHEET: sheet B of the same base without their rows stays hidden.
+      expect(partVisible.map((r) => r.id)).toEqual([PROJ_SHEET])
+      const strangerVisible = await filterReadableSheetRowsForAccess(q, rows, await resolveRequestAccess(strangerReq))
+      expect(strangerVisible).toEqual([])
+    } finally {
+      await q(`DELETE FROM meta_sheets WHERE id = $1`, [SIBLING]).catch(() => {})
+    }
   })
 
   it('Yjs/OAPI choke (resolveSheetCapabilitiesForUser): read parity with the REST choke', async () => {
@@ -127,6 +140,51 @@ describeIfDb('T36-1 — projection per-row participant read (Plan A)', () => {
     expect(part.capabilities.canEditRecord).toBe(false)
     const stranger = await resolveSheetCapabilitiesForUser(q, PROJ_SHEET, STRANGER)
     expect(stranger.capabilities.canRead).toBe(false)
+  })
+
+  it('WIRE (review P1): the main record-read gate row-filters projection sheets — participant reads own record, 403 on others', async () => {
+    // The view/list/single-GET surfaces gate their row filtering on hasRecordPermissionAssignments,
+    // which is false for projection sheets by nature (no record_permissions rows, no conditional
+    // rules) — without the projection branch the whole filter block is skipped and this test's
+    // 403 assertions go RED (the exact fake-green the choke-only tests missed).
+    expect(await hasRecordPermissionAssignments(q, PROJ_SHEET)).toBe(true)
+
+    const own = await requireRecordReadable(participantReq, q, PROJ_SHEET, REC_MINE_REQ)
+    expect('status' in own).toBe(false) // readable — no error envelope
+
+    const other = await requireRecordReadable(participantReq, q, PROJ_SHEET, REC_OTHER)
+    expect('status' in other && (other as { status: number }).status).toBe(403)
+
+    const corrupt = await requireRecordReadable(participantReq, q, PROJ_SHEET, REC_CORRUPT)
+    expect('status' in corrupt && (corrupt as { status: number }).status).toBe(403)
+
+    const stranger = await requireRecordReadable(strangerReq, q, PROJ_SHEET, REC_OTHER)
+    expect('status' in stranger && (stranger as { status: number }).status).toBe(403)
+
+    const admin = await requireRecordReadable(adminReq, q, PROJ_SHEET, REC_OTHER)
+    expect('status' in admin).toBe(false) // admin unaffected
+  })
+
+  it('Yjs record auth (review P1): own record subscribable, others/corrupt records denied at record level', async () => {
+    // The Yjs doc seeder loads a record's FULL data — sheet-level canRead is not sufficient.
+    expect(await isRecordReadDeniedForUser(q, PROJ_SHEET, REC_MINE_REQ, PARTICIPANT)).toBe(false)
+    expect(await isRecordReadDeniedForUser(q, PROJ_SHEET, REC_MINE_DEC, PARTICIPANT)).toBe(false)
+    expect(await isRecordReadDeniedForUser(q, PROJ_SHEET, REC_OTHER, PARTICIPANT)).toBe(true)
+    expect(await isRecordReadDeniedForUser(q, PROJ_SHEET, REC_CORRUPT, PARTICIPANT)).toBe(true)
+    // Missing ids fail closed.
+    expect(await isRecordReadDeniedForUser(q, PROJ_SHEET, '', PARTICIPANT)).toBe(true)
+    expect(await isRecordReadDeniedForUser(q, '', REC_OTHER, PARTICIPANT)).toBe(true)
+  })
+
+  it('Yjs record auth (review P1): index.ts authChecker wires the record-level deny (source tripwire)', () => {
+    // The authChecker is a closure inside the server bootstrap — pin the wiring statically so a
+    // refactor cannot silently drop the record-level rung while sheet-level canRead stays green.
+    const src = readFileSync(resolve(__dirname, '../../src/index.ts'), 'utf8')
+    const checkerStart = src.indexOf('setAuthChecker')
+    expect(checkerStart).toBeGreaterThan(-1)
+    const checkerBody = src.slice(checkerStart, checkerStart + 2400)
+    expect(checkerBody).toContain('isRecordReadDeniedForUser')
+    expect(checkerBody).toContain("canRead: false, canWrite: false")
   })
 
   it('admin: full read, no row denial (regression of the #3537 admin path)', async () => {
