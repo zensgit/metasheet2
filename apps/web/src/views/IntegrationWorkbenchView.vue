@@ -494,232 +494,44 @@
       </el-card>
     </section>
 
-    <section id="int-sec-cleaning-dataset" class="integration-workbench__panel">
-      <el-card shadow="never">
-        <template #header>
-          <div class="integration-workbench__panel-head">
-            <div>
-              <h2>数据集与多维表清洗</h2>
-          <p>数据源和目标系统只负责读写；业务清洗、审核、修正发生在多维表里。未安装清洗表时，可在这里创建 staging 多维表。</p>
-        </div>
-      </div>
-        </template>
+    <IntegrationCleaningDatasetSection
+      :source-dataset-title="sourceDatasetTitle"
+      :source-dataset-description="sourceDatasetDescription"
+      :source-schema="sourceSchema"
+      :source-connection-label="sourceConnectionLabel"
+      :selected-staging-descriptor="selectedStagingDescriptor"
+      :staging-descriptors="stagingDescriptors"
+      :get-staging-area-label="getStagingAreaLabel"
+      :target-dataset-title="targetDatasetTitle"
+      :target-dataset-description="targetDatasetDescription"
+      :target-schema="targetSchema"
+      :required-target-field-count="requiredTargetFieldCount"
+      :staging-dataset-cards="stagingDatasetCards"
+      :installing-staging="installingStaging"
+      :staging-project-id="stagingProjectId"
+      :staging-project-id-scope-status="stagingProjectIdScopeStatus"
+      :staging-project-id-scope-warning="stagingProjectIdScopeWarning"
+      :staging-install-result-text="stagingInstallResultText"
+      :install-staging-tables="installStagingTables"
+      :use-staging-as-source="useStagingAsSource"
+      :use-staging-as-target="useStagingAsTarget"
+      :focus-staging-install="focusStagingInstall"
+      :on-staging-project-id-input="onStagingProjectIdInput"
+      :normalize-staging-project-id-to-scope="normalizeStagingProjectIdToScope"
+      v-model:staging-base-id="stagingBaseId"
+    />
 
-
-      <div class="integration-workbench__dataset-grid" data-testid="dataset-cards">
-        <article class="integration-workbench__dataset-card" data-testid="source-dataset-card">
-          <div class="integration-workbench__dataset-head">
-            <span class="integration-workbench__dataset-kind">数据源</span>
-            <strong>{{ sourceDatasetTitle }}</strong>
-          </div>
-          <p>{{ sourceDatasetDescription }}</p>
-          <div class="integration-workbench__metric-row">
-            <span>{{ sourceSchema.fields.length }} 个字段</span>
-            <span>{{ sourceConnectionLabel }}</span>
-          </div>
-        </article>
-
-        <article class="integration-workbench__dataset-card" data-testid="staging-dataset-card">
-          <div class="integration-workbench__dataset-head">
-            <span class="integration-workbench__dataset-kind">多维表清洗区</span>
-            <strong>{{ selectedStagingDescriptor?.name || '未绑定 staging 表' }}</strong>
-          </div>
-          <p>原始区、清洗区和回写区都在多维表中呈现，业务人员不需要直接维护 JSON。</p>
-          <div class="integration-workbench__metric-row">
-            <span>{{ stagingDescriptors.length }} 张表</span>
-            <span>{{ selectedStagingDescriptor ? getStagingAreaLabel(selectedStagingDescriptor.id) : '待选择' }}</span>
-          </div>
-        </article>
-
-        <article class="integration-workbench__dataset-card" data-testid="target-dataset-card">
-          <div class="integration-workbench__dataset-head">
-            <span class="integration-workbench__dataset-kind">目标系统</span>
-            <strong>{{ targetDatasetTitle }}</strong>
-          </div>
-          <p>{{ targetDatasetDescription }}</p>
-          <div class="integration-workbench__metric-row">
-            <span>{{ targetSchema.fields.length }} 个字段</span>
-            <span>{{ requiredTargetFieldCount }} 个必填</span>
-          </div>
-        </article>
-      </div>
-
-      <div v-if="stagingDescriptors.length" class="integration-workbench__staging-list" data-testid="staging-dataset-list">
-        <article v-for="descriptor in stagingDatasetCards" :key="descriptor.id" class="integration-workbench__staging-card">
-          <div>
-            <strong>{{ descriptor.name }}</strong>
-            <p>{{ descriptor.description }}</p>
-            <small>{{ descriptor.id }} · {{ descriptor.fieldCount }} 个字段 · {{ descriptor.area }}</small>
-          </div>
-          <div class="integration-workbench__actions integration-workbench__actions--inline">
-            <a
-              v-if="descriptor.openLink"
-              class="integration-workbench__button"
-              :href="descriptor.openLink"
-              target="_blank"
-              rel="noopener noreferrer"
-              :data-testid="`open-staging-${descriptor.id}`"
-            >
-              打开多维表（新建记录入口）
-            </a>
-            <button
-              v-else
-              type="button"
-              class="integration-workbench__button"
-              :disabled="installingStaging"
-              :data-testid="`refresh-staging-link-${descriptor.id}`"
-              @click="installStagingTables"
-            >
-              {{ installingStaging ? '生成中' : '生成打开链接' }}
-            </button>
-            <button
-              type="button"
-              class="integration-workbench__button"
-              :disabled="!descriptor.openLink"
-              :data-testid="`use-staging-source-${descriptor.id}`"
-              @click="useStagingAsSource(descriptor.id)"
-            >
-              作为 Dry-run 来源
-            </button>
-            <button
-              type="button"
-              class="integration-workbench__button"
-              :disabled="!descriptor.openLink"
-              :data-testid="`use-multitable-target-${descriptor.id}`"
-              @click="useStagingAsTarget(descriptor.id)"
-            >
-              作为目标多维表
-            </button>
-          </div>
-          <small v-if="descriptor.openLink" class="integration-workbench__staging-note">
-            使用此 /multitable 链接进入真正的多维表工具栏，再点击 + New Record 验证必填字段 toast。
-          </small>
-          <small v-else class="integration-workbench__staging-note integration-workbench__staging-note--warning">
-            不要手写 /grid 或 /spreadsheets/{{ descriptor.id }}；先生成后端返回的 /multitable sheet/view 打开链接。
-          </small>
-        </article>
-      </div>
-      <div v-else class="integration-workbench__empty integration-workbench__empty--actionable" data-testid="staging-empty">
-        <strong>暂未加载 staging 契约。</strong>
-        <p>点击「创建清洗表」即可生成 staging 多维表；创建完成后可在 staging 卡片上「作为 Dry-run 来源」。</p>
-        <div class="integration-workbench__actions">
-          <button type="button" class="integration-workbench__button" data-testid="staging-empty-focus-install" @click="focusStagingInstall">创建清洗表</button>
-        </div>
-      </div>
-
-      <div class="integration-workbench__grid integration-workbench__grid--compact">
-        <label>
-          <span>Project ID（高级，可选）</span>
-          <input
-            :value="stagingProjectId"
-            data-testid="staging-project-id"
-            placeholder="留空自动使用 tenant:integration-core"
-            @input="onStagingProjectIdInput"
-            @change="onStagingProjectIdInput"
-            @blur="onStagingProjectIdInput"
-          />
-          <small class="integration-workbench__staging-note" data-testid="staging-project-id-scope-status">
-            {{ stagingProjectIdScopeStatus }}
-          </small>
-        </label>
-        <label>
-          <span>Base ID（可选）</span>
-          <input v-model="stagingBaseId" data-testid="staging-base-id" placeholder="留空使用默认 base" />
-        </label>
-      </div>
-      <div v-if="stagingProjectIdScopeWarning" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="staging-project-id-scope-warning">
-        {{ stagingProjectIdScopeWarning }}
-        <button type="button" class="integration-workbench__button" data-testid="normalize-staging-project-id" @click="normalizeStagingProjectIdToScope">
-          规范化为 integration 作用域
-        </button>
-      </div>
-      <div class="integration-workbench__actions">
-        <button type="button" class="integration-workbench__button" data-testid="install-staging" :disabled="installingStaging" @click="installStagingTables">
-          {{ installingStaging ? '创建中' : '创建清洗表' }}
-        </button>
-      </div>
-      <pre v-if="stagingInstallResultText" data-testid="staging-install-result">{{ stagingInstallResultText }}</pre>
-      </el-card>
-    </section>
-
-    <section id="int-sec-cleaning-rules" class="integration-workbench__panel">
-      <el-card shadow="never">
-        <template #header>
-          <div class="integration-workbench__panel-head">
-            <div>
-              <h2>清洗映射规则</h2>
-          <p>一行就是一条清洗内容：从来源字段取值，经过白名单转换后写入目标字段。默认映射可直接用，也允许新增自定义清洗项。</p>
-        </div>
-        <button type="button" class="integration-workbench__button" data-testid="add-mapping" @click="addMapping">
-          新增自定义清洗项
-        </button>
-      </div>
-        </template>
-
-
-      <div class="integration-workbench__mapping-list" data-testid="mapping-rule-list">
-        <details v-for="(mapping, index) in mappings" :key="mapping.id" class="integration-workbench__mapping-card" open>
-          <summary :data-testid="`mapping-summary-${index}`">
-            <span>{{ mappingSummary(mapping, index) }}</span>
-            <small>{{ mappingDetail(mapping) }}</small>
-          </summary>
-          <div class="integration-workbench__mapping-editor">
-            <label>
-              <span>源字段</span>
-              <select
-                v-if="hasSourceFieldOptions"
-                v-model="mapping.sourceField"
-                :data-testid="`source-field-${index}`"
-              >
-                <option value="">请选择来源字段</option>
-                <option
-                  v-for="option in sourceFieldOptionsForMapping(mapping)"
-                  :key="`${option.stale ? 'stale' : 'schema'}:${option.value}`"
-                  :value="option.value"
-                >
-                  {{ sourceFieldOptionText(option) }}
-                </option>
-              </select>
-              <input v-else v-model="mapping.sourceField" :data-testid="`source-field-${index}`" placeholder="例如 code" />
-              <small v-if="hasSourceFieldOptions" class="integration-workbench__field-help" :data-testid="`source-field-picker-help-${index}`">
-                字段来自来源 schema；这里只保存字段名，不显示行值。
-              </small>
-            </label>
-            <label>
-              <span>目标字段</span>
-              <input v-model="mapping.targetField" :data-testid="`target-field-${index}`" placeholder="例如 FNumber" />
-            </label>
-            <label>
-              <span>转换</span>
-              <select v-model="mapping.transformFn" :data-testid="`transform-fn-${index}`">
-                <option v-for="option in transformOptions" :key="option.value" :value="option.value">
-                  {{ option.label }}
-                </option>
-              </select>
-              <small class="integration-workbench__field-help">只允许 trim、upper、lower、toNumber、dictMap；不允许用户脚本或 raw SQL。</small>
-              <textarea
-                v-if="mapping.transformFn === 'dictMap'"
-                v-model="mapping.dictMapText"
-                :data-testid="`dict-map-${index}`"
-                placeholder="EA=Pcs&#10;KG=Kg"
-              ></textarea>
-            </label>
-            <div>
-              <label class="integration-workbench__mapping-check">
-                <input v-model="mapping.required" type="checkbox" :data-testid="`required-${index}`" />
-                <span>必填；缺值会进入 dead letter，不中断整批。</span>
-              </label>
-              <div class="integration-workbench__mapping-rules">
-                <input v-model="mapping.minValueText" :data-testid="`validation-min-${index}`" placeholder="最小值 min" />
-                <input v-model="mapping.maxValueText" :data-testid="`validation-max-${index}`" placeholder="最大值 max" />
-              </div>
-            </div>
-            <button type="button" class="integration-workbench__icon-button" @click="removeMapping(index)">删除</button>
-          </div>
-        </details>
-      </div>
-      </el-card>
-    </section>
+    <IntegrationMappingRulesSection
+      :mappings="mappings"
+      :has-source-field-options="hasSourceFieldOptions"
+      :source-field-options-for-mapping="sourceFieldOptionsForMapping"
+      :source-field-option-text="sourceFieldOptionText"
+      :transform-options="transformOptions"
+      :mapping-summary="mappingSummary"
+      :mapping-detail="mappingDetail"
+      :add-mapping="addMapping"
+      :remove-mapping="removeMapping"
+    />
 
     <section id="int-sec-run-push" class="integration-workbench__panel">
       <el-card shadow="never">
@@ -1229,179 +1041,32 @@
       </el-card>
     </section>
 
-    <section id="int-sec-monitoring" class="integration-workbench__panel">
-      <el-card shadow="never">
-        <template #header>
-          <div class="integration-workbench__panel-head">
-            <div>
-              <h2>运行监控</h2>
-          <p>{{ observationSummary }}。展示最近 5 条 run（状态 / 写入 / 失败 + 行级结果）与 open dead letters（可重放），便于清洗后回看失败原因。</p>
-        </div>
-        <button type="button" class="integration-workbench__button" data-testid="refresh-observation" :disabled="observingPipeline" @click="refreshPipelineObservation(false)">
-          {{ observingPipeline ? '刷新中' : '刷新监控' }}
-        </button>
-      </div>
-        </template>
-
-
-      <div class="integration-workbench__observation">
-        <div>
-          <h3>最近运行</h3>
-          <div v-if="pipelineRuns.length === 0" class="integration-workbench__empty" data-testid="pipeline-runs-empty">
-            <strong data-testid="pipeline-runs-empty-what">{{ bi(
-              '这里展示最近的清洗流程运行记录（状态 / 读取 / 清洗 / 写入 / 失败行数）。',
-              'This shows recent pipeline run records (status / rows read / cleaned / written / failed).',
-            ) }}</strong>
-            <p data-testid="pipeline-runs-empty-first-step">{{ bi(
-              '第一步：在上方"运行与推送"区保存清洗流程后执行一次 Dry-run 或 Save-only 推送，运行记录会出现在这里。',
-              'First step: save the pipeline above, then run a Dry-run or Save-only push — the run record will then appear here.',
-            ) }}</p>
-          </div>
-          <ol v-else class="integration-workbench__record-list" data-testid="pipeline-runs">
-            <li v-for="run in pipelineRuns" :key="run.id" :data-testid="`pipeline-run-${run.id}`">
-              <div class="integration-workbench__run-head">
-                <strong :class="`integration-workbench__run-status integration-workbench__run-status--${run.status}`" :data-testid="`run-status-${run.id}`">{{ run.status }}</strong>
-                <span>{{ run.mode }}</span>
-                <span v-if="run.triggeredBy">by {{ run.triggeredBy }}</span>
-              </div>
-              <div class="integration-workbench__run-metrics">
-                <span>read {{ run.rowsRead }}</span>
-                <span>clean {{ run.rowsCleaned }}</span>
-                <span class="integration-workbench__run-metric--write">write {{ run.rowsWritten }}</span>
-                <span class="integration-workbench__run-metric--fail">fail {{ run.rowsFailed }}</span>
-                <span v-if="run.durationMs != null">{{ run.durationMs }}ms</span>
-              </div>
-              <small>{{ run.startedAt || run.createdAt || run.id }}<template v-if="run.finishedAt"> → {{ run.finishedAt }}</template></small>
-              <p v-if="run.errorSummary" class="integration-workbench__run-error" :data-testid="`run-error-${run.id}`">{{ run.errorSummary }}</p>
-              <div v-if="runRowSummaries(run).length > 0" class="integration-workbench__run-summaries">
-                <button type="button" class="integration-workbench__link-button" :data-testid="`toggle-run-summaries-${run.id}`" @click="toggleRunSummaries(run.id)">
-                  {{ isRunExpanded(run.id) ? '收起行级结果' : `展开行级结果（${runRowSummaries(run).length}）` }}
-                </button>
-                <pre v-if="isRunExpanded(run.id)" :data-testid="`run-row-summaries-${run.id}`">{{ JSON.stringify(runRowSummaries(run), null, 2) }}</pre>
-              </div>
-            </li>
-          </ol>
-        </div>
-        <div>
-          <h3>Open Dead Letters</h3>
-          <div v-if="deadLetters.length === 0" class="integration-workbench__empty" data-testid="dead-letters-empty">
-            <strong data-testid="dead-letters-empty-what">{{ bi(
-              'Dead letter 是清洗流程运行中未能成功写入的行，按原因分组，便于排查后再决定是否重放。',
-              'Dead letters are rows that failed to write during a pipeline run, grouped by reason so you can investigate before deciding whether to replay.',
-            ) }}</strong>
-            <p data-testid="dead-letters-empty-first-step">{{ bi(
-              '当前没有 open dead letters；出现失败行时会自动列在这里，可点击"准备 Replay"重跑。',
-              'There are no open dead letters right now; failed rows will be listed here automatically, and you can click "prepare replay" to re-run them.',
-            ) }}</p>
-          </div>
-          <ol v-else class="integration-workbench__record-list" data-testid="dead-letters">
-            <li v-for="deadLetter in deadLetters" :key="deadLetter.id" :data-testid="`dead-letter-${deadLetter.id}`">
-              <strong :data-testid="`dead-letter-label-${deadLetter.id}`">{{ deadLetterErrorLabel(deadLetter) }}</strong>
-              <span v-if="deadLetterErrorHint(deadLetter)">{{ deadLetterErrorHint(deadLetter) }}</span>
-              <small :data-testid="`dead-letter-code-${deadLetter.id}`">errorCode: {{ deadLetter.errorCode }}</small>
-              <small>
-                {{ deadLetter.status }} · {{ deadLetter.createdAt || deadLetter.id }}<template v-if="deadLetter.retryCount"> · retries {{ deadLetter.retryCount }}</template><template v-if="deadLetter.idempotencyKey"> · key {{ deadLetter.idempotencyKey }}</template>
-              </small>
-              <div class="integration-workbench__dead-letter-actions">
-                <span
-                  :class="['integration-workbench__badge', isDeadLetterReplayable(deadLetter) ? 'integration-workbench__badge--retryable' : '']"
-                  :data-testid="`dead-letter-retryable-${deadLetter.id}`"
-                >{{ isDeadLetterReplayable(deadLetter) ? '可重放' : '不可重放' }}</span>
-                <template v-if="isDeadLetterReplayable(deadLetter)">
-                  <button
-                    v-if="confirmReplayDeadLetterId !== deadLetter.id"
-                    type="button"
-                    class="integration-workbench__button integration-workbench__button--ghost"
-                    :data-testid="`replay-dead-letter-${deadLetter.id}`"
-                    :disabled="replayingDeadLetterId === deadLetter.id"
-                    @click="requestReplay(deadLetter.id)"
-                  >准备 Replay</button>
-                  <template v-else>
-                    <button
-                      type="button"
-                      class="integration-workbench__button integration-workbench__button--danger"
-                      :data-testid="`confirm-replay-dead-letter-${deadLetter.id}`"
-                      :disabled="replayingDeadLetterId === deadLetter.id"
-                      @click="replayDeadLetter(deadLetter)"
-                    >{{ replayingDeadLetterId === deadLetter.id ? 'Replay 中…' : '确认 Replay（会真实写入）' }}</button>
-                    <button
-                      type="button"
-                      class="integration-workbench__link-button"
-                      :data-testid="`cancel-replay-dead-letter-${deadLetter.id}`"
-                      :disabled="replayingDeadLetterId === deadLetter.id"
-                      @click="cancelReplay"
-                    >取消</button>
-                  </template>
-                </template>
-              </div>
-              <div class="integration-workbench__dead-letter-provenance">
-                <button
-                  type="button"
-                  class="integration-workbench__link-button"
-                  :data-testid="`toggle-dead-letter-provenance-${deadLetter.id}`"
-                  :disabled="!canViewRowProvenance(deadLetter)"
-                  :title="canViewRowProvenance(deadLetter) ? '查看该行(rowId)跨 run 的写入血缘（只读）' : '该 dead letter 无 idempotency key（rowId），无法查询血缘'"
-                  @click="toggleDeadLetterProvenance(deadLetter)"
-                >{{ isRowProvenanceExpanded(deadLetter.id) ? '收起血缘' : '查看跨-run 血缘' }}</button>
-                <span
-                  v-if="!canViewRowProvenance(deadLetter)"
-                  class="integration-workbench__hint"
-                  :data-testid="`dead-letter-provenance-unavailable-${deadLetter.id}`"
-                >无 rowId（idempotency key），不可查血缘</span>
-                <div
-                  v-if="isRowProvenanceExpanded(deadLetter.id)"
-                  class="integration-workbench__provenance-timeline"
-                  :data-testid="`dead-letter-provenance-${deadLetter.id}`"
-                >
-                  <div
-                    v-if="isRowProvenanceLoading(deadLetter.id)"
-                    class="integration-workbench__hint"
-                    :data-testid="`dead-letter-provenance-loading-${deadLetter.id}`"
-                  >血缘加载中…</div>
-                  <div
-                    v-else-if="rowProvenanceError(deadLetter.id)"
-                    class="integration-workbench__hint integration-workbench__hint--strong"
-                    :data-testid="`dead-letter-provenance-error-${deadLetter.id}`"
-                  >{{ rowProvenanceError(deadLetter.id) }}</div>
-                  <ol
-                    v-else-if="rowProvenanceTimeline(deadLetter.id).length > 0"
-                    class="integration-workbench__record-list"
-                    :data-testid="`dead-letter-provenance-timeline-${deadLetter.id}`"
-                  >
-                    <li
-                      v-for="(entry, index) in rowProvenanceTimeline(deadLetter.id)"
-                      :key="`${entry.runId}-${entry.eventIndex}`"
-                      :data-testid="`provenance-entry-${deadLetter.id}-${index}`"
-                    >
-                      <div class="integration-workbench__provenance-event-head">
-                        <strong>{{ entry.eventType }}</strong>
-                        <span
-                          class="integration-workbench__run-status"
-                          :class="`integration-workbench__run-status--${entry.runStatus}`"
-                        >run {{ entry.runStatus }}</span>
-                        <span>{{ entry.runCreatedAt || entry.at }}</span>
-                      </div>
-                      <small>runId {{ entry.runId }} · pipeline {{ entry.pipelineId }} · {{ entry.runMode }}</small>
-                      <p
-                        v-if="rowProvenanceAttrsSummary(entry.attrs)"
-                        class="integration-workbench__provenance-attrs"
-                      >{{ rowProvenanceAttrsSummary(entry.attrs) }}</p>
-                    </li>
-                  </ol>
-                  <div
-                    v-else
-                    class="integration-workbench__empty"
-                    :data-testid="`dead-letter-provenance-empty-${deadLetter.id}`"
-                  >暂无血缘事件。</div>
-                  <p class="integration-workbench__hint">只读：仅展示脱敏后的事件，不含 payload 原文，不触发任何写入/重放。</p>
-                </div>
-              </div>
-            </li>
-          </ol>
-        </div>
-      </div>
-      </el-card>
-    </section>
+    <IntegrationMonitoringSection
+      :observation-summary="observationSummary"
+      :observing-pipeline="observingPipeline"
+      :pipeline-runs="pipelineRuns"
+      :dead-letters="deadLetters"
+      :bi="bi"
+      :run-row-summaries="runRowSummaries"
+      :is-run-expanded="isRunExpanded"
+      :dead-letter-error-label="deadLetterErrorLabel"
+      :dead-letter-error-hint="deadLetterErrorHint"
+      :is-dead-letter-replayable="isDeadLetterReplayable"
+      :confirm-replay-dead-letter-id="confirmReplayDeadLetterId"
+      :replaying-dead-letter-id="replayingDeadLetterId"
+      :can-view-row-provenance="canViewRowProvenance"
+      :is-row-provenance-expanded="isRowProvenanceExpanded"
+      :is-row-provenance-loading="isRowProvenanceLoading"
+      :row-provenance-error="rowProvenanceError"
+      :row-provenance-timeline="rowProvenanceTimeline"
+      :row-provenance-attrs-summary="rowProvenanceAttrsSummary"
+      :refresh-pipeline-observation="refreshPipelineObservation"
+      :toggle-run-summaries="toggleRunSummaries"
+      :request-replay="requestReplay"
+      :cancel-replay="cancelReplay"
+      :replay-dead-letter="replayDeadLetter"
+      :toggle-dead-letter-provenance="toggleDeadLetterProvenance"
+    />
 
     <section id="int-sec-preview" class="integration-workbench__panel integration-workbench__preview">
       <el-card shadow="never">
@@ -1591,6 +1256,9 @@ import PlmBomReviewPanel from '../components/plm/PlmBomReviewPanel.vue'
 import IntegrationWorkbenchRail, {
   type IntegrationWorkbenchRailGroup,
 } from '../components/integration/IntegrationWorkbenchRail.vue'
+import IntegrationMonitoringSection from '../components/integration/IntegrationMonitoringSection.vue'
+import IntegrationCleaningDatasetSection from '../components/integration/IntegrationCleaningDatasetSection.vue'
+import IntegrationMappingRulesSection from '../components/integration/IntegrationMappingRulesSection.vue'
 
 type WorkbenchSide = 'source' | 'target'
 type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'dictMap'
