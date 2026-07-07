@@ -623,4 +623,84 @@ describe('Attendance import preview regression', () => {
     expect(String(payload.csvText)).toContain('日期,工号,姓名,加班小时,自定义列')
     expect(String(payload.csvText)).toContain('2026-06-01,EMP001,张三,1,x')
   })
+
+  function mockTemplateEndpointWithPrefs(savedKeys: string[]) {
+    const prefsPuts: Array<Record<string, unknown>> = []
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/template-prefs')) {
+        if (init?.method === 'PUT') {
+          prefsPuts.push(JSON.parse(String(init.body ?? '{}')))
+          return jsonResponse(200, { ok: true, data: { selectedKeys: [] } })
+        }
+        return jsonResponse(200, { ok: true, data: { selectedKeys: savedKeys } })
+      }
+      if (url.startsWith('/api/attendance/import/template')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: {
+              source: 'dingtalk_csv',
+              mode: 'override',
+              columns: ['日期', '工号', '姓名'],
+              requiredFields: ['日期'],
+            },
+            mappingProfiles: [],
+            mapping: {
+              columns: [
+                { sourceField: '上班1打卡时间', targetField: 'firstInAt' },
+                { sourceField: '下班1打卡时间', targetField: 'lastOutAt' },
+                { sourceField: '考勤结果', targetField: 'status' },
+                { sourceField: '加班小时', targetField: 'overtimeHours' },
+              ],
+            },
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+    return { apiFetchMock, prefsPuts }
+  }
+
+  it('PR-B: saved picker prefs restore on template load, ghost keys dropped', async () => {
+    mockTemplateEndpointWithPrefs(['overtimeHours', 'ghostKey'])
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(8)
+
+    const preview = (container!.querySelector('[data-testid="attendance-import-header-preview"]') as HTMLElement).textContent ?? ''
+    expect(preview).toBe('日期,工号,姓名,加班小时')
+    // The header builder drops unknown keys anyway — the intersection guard is
+    // locked at the SELECTION-SET level, where a ghost key would otherwise hide.
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+    const selected = Array.from(unwrapRef<Set<string>>(setupState.importTemplateFieldKeys))
+    expect(selected).toEqual(['overtimeHours'])
+  })
+
+  it('PR-B: toggling persists the selection; reset clears the server record', async () => {
+    const { prefsPuts } = mockTemplateEndpointWithPrefs([])
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(8)
+
+    const picker = container!.querySelector('[data-testid="attendance-import-field-picker"]') as HTMLElement
+    const overtime = Array.from(picker.querySelectorAll('label')).find(
+      candidate => candidate.textContent?.trim() === '加班小时'
+    )
+    ;(overtime!.querySelector('input') as HTMLInputElement).click()
+    await flushUi(2)
+    expect(prefsPuts.length).toBeGreaterThan(0)
+    expect(prefsPuts.at(-1)?.selectedKeys).toContain('overtimeHours')
+
+    findButton(picker, 'Reset to default').click()
+    await flushUi(2)
+    expect(prefsPuts.at(-1)?.selectedKeys).toEqual([])
+  })
 })

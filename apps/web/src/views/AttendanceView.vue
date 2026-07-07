@@ -13180,17 +13180,47 @@ const importFieldGroups = computed(() => groupSupportedImportColumns(importMappi
 const importTemplateFieldKeys = ref<Set<string>>(new Set(IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS))
 const importTemplateHeaderPreview = computed(() =>
   buildTemplateHeaderFromSelection(importFieldGroups.value, importTemplateFieldKeys.value))
+// Per-user picker memory (template-prefs design-lock §3, PR-B): restore on
+// open (intersected with the current vocabulary so ghost keys drop out),
+// save on change, clear on reset. All calls are silent — prefs must never
+// block the picker.
+async function restoreImportTemplateFieldPrefs() {
+  try {
+    const response = await apiFetch(`/api/attendance/import/template-prefs?orgId=${encodeURIComponent(normalizedOrgId() ?? '')}`)
+    const data = await response.json().catch(() => ({} as any))
+    const saved = Array.isArray(data?.data?.selectedKeys) ? data.data.selectedKeys : []
+    if (!response.ok || saved.length === 0) return
+    const available = new Set(allSelectableImportFieldKeys(importFieldGroups.value))
+    const restored = saved.filter((key: unknown): key is string => typeof key === 'string' && available.has(key))
+    if (restored.length > 0) importTemplateFieldKeys.value = new Set(restored)
+  } catch {
+    // silent — defaults stay
+  }
+}
+function persistImportTemplateFieldPrefs(keys: ReadonlySet<string>) {
+  void apiFetch('/api/attendance/import/template-prefs', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orgId: normalizedOrgId(), selectedKeys: Array.from(keys) }),
+  }).catch(() => undefined)
+}
 function toggleImportTemplateField(key: string) {
   const next = new Set(importTemplateFieldKeys.value)
   if (next.has(key)) next.delete(key)
   else next.add(key)
   importTemplateFieldKeys.value = next
+  persistImportTemplateFieldPrefs(next)
 }
 function selectAllImportTemplateFields() {
-  importTemplateFieldKeys.value = new Set(allSelectableImportFieldKeys(importFieldGroups.value))
+  const next = new Set(allSelectableImportFieldKeys(importFieldGroups.value))
+  importTemplateFieldKeys.value = next
+  persistImportTemplateFieldPrefs(next)
 }
 function resetImportTemplateFields() {
   importTemplateFieldKeys.value = new Set(IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS)
+  // Clear semantics: [] drops the server row so future default-set upgrades
+  // flow to the user instead of being pinned by an old save.
+  persistImportTemplateFieldPrefs(new Set())
 }
 const selectedImportProfile = computed(() => {
   if (!importProfileId.value) return null
@@ -18109,6 +18139,7 @@ async function loadImportTemplate() {
     importForm.payload = JSON.stringify(payloadExample, null, 2)
     importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles) ? data.data.mappingProfiles : []
     importMappingColumnsRaw.value = Array.isArray(data.data?.mapping?.columns) ? data.data.mapping.columns : []
+    void restoreImportTemplateFieldPrefs()
     setStatus(tr('Import template loaded.', '导入模板已加载。'))
   } catch (error) {
     setStatus(readErrorMessage(error, tr('Failed to load import template', '加载导入模板失败')), 'error')
