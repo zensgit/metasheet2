@@ -1044,7 +1044,9 @@ export interface MetaConfigRevision {
 }
 
 // T9-W: the would-be revert of a recorded config change (server-computed; the FE renders it as-is).
-export interface ConfigRestorePreview {
+export type ConfigRestoreExecuteConfirm = 'uncreate' | 'undelete' | 'revert-permission'
+
+export interface ConfigRestoreUpdatePreview {
   revisionId: string
   entityType: string
   entityId: string
@@ -1058,6 +1060,46 @@ export interface ConfigRestorePreview {
   /** the server-minted preview identity, REQUIRED by execute (preview-first; a client-computed hash is rejected). */
   previewToken: string
 }
+
+export interface ConfigRestoreUncreatePreview {
+  revisionId: string
+  previewToken: string
+  uncreate: {
+    entityType: string
+    entityId: string
+    entityName?: string
+    note?: string
+  }
+}
+
+export interface ConfigRestoreUndeletePreview {
+  revisionId: string
+  previewToken: string
+  undelete: {
+    entityType: string
+    entityId: string
+    entityName?: string
+    note?: string
+    idCollision?: boolean
+  }
+}
+
+export interface ConfigRestorePermissionRevertPreview {
+  revisionId: string
+  previewToken: string
+  permissionRevert: {
+    scope: string
+    direction: 'de-escalation' | 'escalation' | 'noop' | string
+    supported?: boolean
+    note?: string
+  }
+}
+
+export type ConfigRestorePreview =
+  | ConfigRestoreUpdatePreview
+  | ConfigRestoreUncreatePreview
+  | ConfigRestoreUndeletePreview
+  | ConfigRestorePermissionRevertPreview
 
 export interface AiShortcutPreviewData {
   status: 'succeeded'
@@ -1320,9 +1362,34 @@ export interface AiUsageSummary {
   }
 }
 
+function normalizeConfigRestorePreview(
+  revisionId: string,
+  data: {
+    preview?: ConfigRestoreUpdatePreview
+    uncreate?: ConfigRestoreUncreatePreview['uncreate']
+    undelete?: ConfigRestoreUndeletePreview['undelete']
+    permissionRevert?: ConfigRestorePermissionRevertPreview['permissionRevert']
+    previewToken: string
+  },
+): ConfigRestorePreview {
+  if (data.uncreate) return { revisionId, previewToken: data.previewToken, uncreate: data.uncreate }
+  if (data.undelete) return { revisionId, previewToken: data.previewToken, undelete: data.undelete }
+  if (data.permissionRevert) return { revisionId, previewToken: data.previewToken, permissionRevert: data.permissionRevert }
+  if (data.preview) return { ...data.preview, revisionId: data.preview.revisionId ?? revisionId, previewToken: data.previewToken }
+  throw new Error('Invalid config restore preview response')
+}
+
+function configRestoreConfirmForPreview(preview: ConfigRestorePreview): ConfigRestoreExecuteConfirm | undefined {
+  if ('uncreate' in preview) return 'uncreate'
+  if ('undelete' in preview) return 'undelete'
+  if ('permissionRevert' in preview) return 'revert-permission'
+  return undefined
+}
+
 export class MultitableApiClient {
   private fetch: FetchFn
   private readonly isZhOption?: ApiErrorLocaleOption
+  private readonly configRestoreConfirmByToken = new Map<string, ConfigRestoreExecuteConfirm>()
 
   constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
     this.fetch = opts?.fetchFn ?? defaultFetchFn()
@@ -1969,19 +2036,37 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ revisionId }),
     })
-    const data = await this.parseJson<{ preview: ConfigRestorePreview; previewToken: string }>(res)
-    return { ...data.preview, previewToken: data.previewToken } // fold the server-minted token into the preview the modal holds
+    const data = await this.parseJson<{
+      preview?: ConfigRestoreUpdatePreview
+      uncreate?: ConfigRestoreUncreatePreview['uncreate']
+      undelete?: ConfigRestoreUndeletePreview['undelete']
+      permissionRevert?: ConfigRestorePermissionRevertPreview['permissionRevert']
+      previewToken: string
+    }>(res)
+    const preview = normalizeConfigRestorePreview(revisionId, data)
+    const confirm = configRestoreConfirmForPreview(preview)
+    if (confirm) this.configRestoreConfirmByToken.set(preview.previewToken, confirm)
+    else this.configRestoreConfirmByToken.delete(preview.previewToken)
+    return preview
   }
 
   // T9-W: execute a config-restore (forward-only write). The server-minted previewToken binds it to the preview and
   // is REQUIRED — a client-computed hash alone is rejected (preview-first); a stale token → 409.
-  async executeConfigRestore(sheetId: string, revisionId: string, previewToken: string): Promise<void> {
+  async executeConfigRestore(
+    sheetId: string,
+    revisionId: string,
+    previewToken: string,
+    confirm?: ConfigRestoreExecuteConfirm,
+  ): Promise<void> {
+    const effectiveConfirm = confirm ?? this.configRestoreConfirmByToken.get(previewToken)
+    const body = effectiveConfirm ? { revisionId, previewToken, confirm: effectiveConfirm } : { revisionId, previewToken }
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/config-restore-execute`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ revisionId, previewToken }),
+      body: JSON.stringify(body),
     })
     await this.parseJson<{ restored: unknown }>(res)
+    this.configRestoreConfirmByToken.delete(previewToken)
   }
 
   // T8-2: preview a sheet-wide Reset-to-T (DESTRUCTIVE — records created after T → recycle bin; survivors reverted).
