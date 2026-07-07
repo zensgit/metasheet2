@@ -130,6 +130,15 @@
               v-bind="numberFieldProps(field)"
               class="ms-w-100pct"
             />
+            <!-- G-B2-16: 大写回显 — ONLY under the template-declared amount total (no label
+                 guessing); derived from the same value the backend total-check sees. -->
+            <div
+              v-if="field.type === 'number' && isAutoSummedTotal(field.id) && amountWordsFor(field.id)"
+              class="approval-new__amount-words"
+              data-testid="approval-amount-words"
+            >
+              大写：{{ amountWordsFor(field.id) }}
+            </div>
 
             <!-- date -->
             <el-date-picker
@@ -382,6 +391,7 @@ import { useAuth } from '../../composables/useAuth'
 import { useAutoSumTotal } from '../../approvals/useAutoSumTotal'
 import { isRowDerivationActive } from '../../approvals/lineDerivation'
 import { numberFieldProps } from '../../approvals/numberFieldProps'
+import { amountToChineseWords } from '../../approvals/amountInWords'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import {
   createEmptyDetailRow,
@@ -427,6 +437,11 @@ const flowPreviewSteps = computed<ApprovalFlowStep[]>(() => {
 // total field is derived from the detail rows (read-only) — auto-fill (UX) + backend total-check
 // (tamper-proof). FE-only. See useAutoSumTotal for the watch + the backend-identical mirror.
 const { isAutoSummedTotal } = useAutoSumTotal(template, formData)
+
+// G-B2-16: uppercase caption for the declared amount total.
+function amountWordsFor(fieldId: string): string {
+  return amountToChineseWords(formData[fieldId])
+}
 
 const formRules = computed<FormRules>(() => {
   const rules: FormRules = {}
@@ -763,6 +778,12 @@ watch([visibleFieldIds, template], () => {
   font-weight: 400;
   color: var(--el-text-color-secondary);
   margin-top: 2px;
+}
+
+.approval-new__amount-words {
+  margin-top: var(--ms-space-1);
+  font-size: 12px;
+  color: var(--ms-text-3);
 }
 
 .approval-new__form {
