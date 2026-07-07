@@ -35,10 +35,12 @@
         </button>
       </div>
 
-      <div v-if="loading" class="automation-runs__empty">{{ automationLabel('log.loading', isZh) }}</div>
-      <div v-else-if="!loadError && runs.length === 0" class="automation-runs__empty" data-empty="true">
-        {{ automationLabel('log.empty', isZh) }}
-      </div>
+      <EmptyState v-if="loading" :title="automationLabel('log.loading', isZh)" />
+      <EmptyState
+        v-else-if="!loadError && runs.length === 0"
+        data-empty="true"
+        :title="automationLabel('log.empty', isZh)"
+      />
 
       <div
         v-for="run in runs"
@@ -50,8 +52,8 @@
         <div class="automation-runs__summary">
           <span class="automation-runs__time">{{ formatTime(run.triggeredAt) }}</span>
           <StatusTag domain="automationRun" :status="run.status" />
-          <span class="automation-runs__rule" data-field="ruleId">{{ run.ruleId }}</span>
-          <span v-if="run.sheetId" class="automation-runs__sheet" data-field="sheetId">{{ run.sheetId }}</span>
+          <span class="automation-runs__rule" data-field="ruleId"><code class="automation-runs__code">{{ run.ruleId }}</code></span>
+          <span v-if="run.sheetId" class="automation-runs__sheet" data-field="sheetId"><code class="automation-runs__code">{{ run.sheetId }}</code></span>
           <span class="automation-runs__trigger" data-field="triggeredBy">{{ run.triggeredBy }}</span>
           <span class="automation-runs__duration">{{ run.duration ?? '-' }}ms</span>
         </div>
@@ -117,6 +119,7 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
 import { multitableClient, type MultitableApiClient } from '../multitable/api/client'
@@ -124,6 +127,7 @@ import type { AutomationRunView, AutomationRunStepView, WorkflowJobStatus } from
 import { automationLabel, automationStatusLabel, type AutomationLabelKey } from '../multitable/utils/meta-automation-labels'
 import { redactString, redactValue, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
 import StatusTag from '../components/status/StatusTag.vue'
+import EmptyState from '../components/status/EmptyState.vue'
 
 const props = defineProps<{ client?: MultitableApiClient }>()
 const client = props.client ?? multitableClient
@@ -254,6 +258,20 @@ function mapResumeError(err: unknown): string {
   return redactString(msg) || automationLabel('runs.resumeError.generic', isZh.value)
 }
 
+// UF-8: ElMessageBox.confirm replaces window.confirm (design-lock §3.6).
+async function confirmResumeStep(): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(
+      automationLabel('runs.resumeConfirm', isZh.value),
+      automationLabel('runs.resumeConfirmTitle', isZh.value),
+      { type: 'warning', confirmButtonText: automationLabel('runs.resume', isZh.value), cancelButtonText: automationLabel('editor.cancel', isZh.value) },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
  * A6-2: resume a suspended step. Confirm-gated (the remaining actions re-run, with possible external
  * side effects — same mental model as A5 retry's confirmSideEffects). The token is used internally and
@@ -261,7 +279,7 @@ function mapResumeError(err: unknown): string {
  */
 async function resumeStep(step: AutomationRunStepView) {
   if (resuming.value || !step.suspend?.resumeToken) return
-  if (!window.confirm(automationLabel('runs.resumeConfirm', isZh.value))) return
+  if (!(await confirmResumeStep())) return
   const runId = expandedId.value
   resumeError.value = null
   resuming.value = step.id
@@ -321,6 +339,10 @@ if (isAdmin) void loadData()
 .automation-runs__time { color: var(--ms-text-2); min-width: 150px; }
 .automation-runs__rule { color: var(--ms-text-2); font-weight: 600; }
 .automation-runs__sheet { color: var(--ms-text-2); }
+/* UF-8: ruleId/sheetId stay raw IDs (no rule/sheet-name lookup available on the list payload
+   without a new API call, which is out of scope for a presentation-only slice) — honest <code>
+   fallback names them as machine values instead of plain inline text (design-lock §3.5). */
+.automation-runs__code { font-family: monospace; font-size: 11px; background: var(--ms-bg-page); padding: 1px 4px; border-radius: var(--ms-radius-sm); }
 .automation-runs__trigger { color: var(--ms-text-2); }
 .automation-runs__duration { margin-left: auto; color: var(--ms-text-3); }
 /* UF-3: the run/step status badges are now <StatusTag domain="automationRun"> (utils/

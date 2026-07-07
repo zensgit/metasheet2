@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
+import { ElMessageBox } from 'element-plus'
 
 const routerPushMock = vi.hoisted(() => vi.fn())
 
@@ -918,7 +919,8 @@ describe('MetaAutomationManager', () => {
   })
 
   it('deletes rule after confirmation naming the rule', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    // UF-8: window.confirm → ElMessageBox.confirm (design-lock §3.6).
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { client, fetchFn } = mockClient([fakeRule()])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
@@ -928,8 +930,9 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     // B1-06: the confirm names the rule, states its run counts (stats already loaded), and irreversibility
-    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Notify on create'))
-    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('This cannot be undone'))
+    expect(confirmSpy.mock.calls[0]?.[0]).toContain('Notify on create')
+    expect(confirmSpy.mock.calls[0]?.[0]).toContain('This cannot be undone')
+    expect(confirmSpy).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.objectContaining({ type: 'warning' }))
     const deleteCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'DELETE')
     expect(deleteCalls.length).toBe(1)
     expect(container.querySelectorAll('[data-automation-rule]').length).toBe(0)
@@ -937,7 +940,7 @@ describe('MetaAutomationManager', () => {
   })
 
   it('B1-06: cancelling the delete confirmation keeps the rule and issues no DELETE', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
     const { client, fetchFn } = mockClient([fakeRule()])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()

@@ -55,7 +55,13 @@
       </template>
     </el-alert>
 
-    <div v-loading="store.loading" class="approval-detail__content-wrapper">
+    <div v-loading="store.loading && !!approval" class="approval-detail__content-wrapper">
+      <!-- UF-8 (design-lock §3.6): first paint only — no `approval` yet AND still loading. Once
+           data arrives, `v-loading` above takes over for subsequent refreshes (unchanged markup). -->
+      <div v-if="!approval && store.loading" class="approval-detail__skeleton" data-testid="detail-skeleton">
+        <el-skeleton :rows="3" animated />
+        <el-skeleton class="approval-detail__skeleton-timeline" :rows="6" animated />
+      </div>
       <div v-if="approval" class="approval-detail__body">
         <!-- Left: form snapshot -->
         <div class="approval-detail__form">
@@ -187,7 +193,7 @@
                           退回至: {{ nodeLabel(item.metadata.targetNodeKey as string) }}
                         </span>
                         <span v-if="item.metadata?.nodeKey" class="approval-detail__meta-badge">
-                          节点: {{ item.metadata.nodeKey }}
+                          节点: {{ nodeLabel(item.metadata.nodeKey as string) }}
                         </span>
                       </div>
                     </div>
@@ -233,7 +239,7 @@
                       退回至: {{ nodeLabel(item.metadata.targetNodeKey as string) }}
                     </span>
                     <span v-if="item.metadata?.nodeKey" class="approval-detail__meta-badge">
-                      节点: {{ item.metadata.nodeKey }}
+                      节点: {{ nodeLabel(item.metadata.nodeKey as string) }}
                     </span>
                   </div>
                 </div>
@@ -1481,6 +1487,15 @@ onMounted(async () => {
 
 .approval-detail__content-wrapper {
   min-height: 200px;
+}
+
+/* UF-8: first-paint skeleton (form snapshot + timeline), see the wrapper's v-if/v-loading split. */
+.approval-detail__skeleton {
+  padding: var(--ms-space-4) 0;
+}
+
+.approval-detail__skeleton-timeline {
+  margin-top: var(--ms-space-4);
 }
 
 .approval-detail__body {
