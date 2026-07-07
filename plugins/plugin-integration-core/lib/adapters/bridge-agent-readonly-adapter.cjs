@@ -25,6 +25,21 @@ class BridgeAgentReadonlyAdapterError extends Error {
   }
 }
 
+// BA-UI-1 (docs/development/bridge-agent-admin-page-design-lock-20260707.md §4): the closed set of
+// error CODES this adapter itself assigns (as opposed to a code an operator's own Bridge Agent HTTP
+// response body may supply via `bridgeErrorCode(data)` below, which is NOT closed/adapter-controlled).
+// Exported so the web client can mirror + label this exact vocabulary
+// (apps/web/src/services/integration/errorCodeLabels.ts BRIDGE_AGENT_ERROR_CODES) with the same
+// mirror-tripwire discipline used for the other adapter-owned code families in that module — never a
+// hand-typed guess. Any OTHER code (agent-supplied or a raw error.name) stays deliberately unregistered
+// there and degrades to the generic "unknown error" label client-side.
+const BRIDGE_AGENT_READONLY_ADAPTER_ERROR_CODES = [
+  'BRIDGE_AGENT_UNREACHABLE',
+  'BRIDGE_AGENT_TIMEOUT',
+  'BRIDGE_AGENT_REQUEST_FAILED',
+  'BRIDGE_AGENT_TEST_FAILED',
+]
+
 const DEFAULT_BASE_URL = 'http://127.0.0.1:19091/'
 const DEFAULT_AUTH_HEADER = 'X-MetaSheet-Bridge-Secret'
 const DEFAULT_SAMPLE_LIMIT = 3
@@ -466,6 +481,7 @@ const BRIDGE_READONLY_ADAPTER_METADATA = {
 }
 
 module.exports = {
+  BRIDGE_AGENT_READONLY_ADAPTER_ERROR_CODES,
   BRIDGE_READONLY_ADAPTER_METADATA,
   BridgeAgentReadonlyAdapterError,
   createBridgeAgentReadonlyAdapter,
