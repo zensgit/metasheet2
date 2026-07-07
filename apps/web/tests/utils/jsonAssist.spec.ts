@@ -52,6 +52,10 @@ describe('analyzeJsonText', () => {
     // (the only thing a caller could render) contains no substring of the secret.
     expect(JSON.stringify(result)).not.toContain(secret)
     expect(JSON.stringify(result)).not.toContain('sk-SECRET-TOKEN')
+    // Structural no-leak tripwire (quality-gate finding): the substring scan above is Node-version
+    // dependent (V8's SyntaxError snippet window may or may not cover the secret). The EXACT key set
+    // is version-independent — any extra field (e.g. a forwarded error message) turns this red.
+    expect(Object.keys(result).sort()).toEqual(['column', 'line', 'status'])
   })
 })
 
