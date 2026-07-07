@@ -13184,10 +13184,17 @@ const importTemplateHeaderPreview = computed(() =>
 // open (intersected with the current vocabulary so ghost keys drop out),
 // save on change, clear on reset. All calls are silent — prefs must never
 // block the picker.
+// Review #3782 P3-1: any user interaction (or a newer restore) bumps the
+// generation, so a late-arriving GET can never overwrite what the user just
+// clicked. P3-2: PUTs are serialized last-write-wins, so rapid toggles cannot
+// persist a stale selection via HTTP reordering.
+let importTemplatePrefsGeneration = 0
 async function restoreImportTemplateFieldPrefs() {
+  const generation = ++importTemplatePrefsGeneration
   try {
     const response = await apiFetch(`/api/attendance/import/template-prefs?orgId=${encodeURIComponent(normalizedOrgId() ?? '')}`)
     const data = await response.json().catch(() => ({} as any))
+    if (generation !== importTemplatePrefsGeneration) return
     const saved = Array.isArray(data?.data?.selectedKeys) ? data.data.selectedKeys : []
     if (!response.ok || saved.length === 0) return
     const available = new Set(allSelectableImportFieldKeys(importFieldGroups.value))
@@ -13197,12 +13204,35 @@ async function restoreImportTemplateFieldPrefs() {
     // silent — defaults stay
   }
 }
+let importTemplatePrefsPutInFlight = false
+let importTemplatePrefsPutQueued: string[] | null = null
+async function flushImportTemplatePrefsPut(payload: string[]): Promise<void> {
+  importTemplatePrefsPutInFlight = true
+  try {
+    await apiFetch('/api/attendance/import/template-prefs', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orgId: normalizedOrgId(), selectedKeys: payload }),
+    })
+  } catch {
+    // silent — prefs must never block the picker
+  } finally {
+    importTemplatePrefsPutInFlight = false
+    if (importTemplatePrefsPutQueued) {
+      const next = importTemplatePrefsPutQueued
+      importTemplatePrefsPutQueued = null
+      void flushImportTemplatePrefsPut(next)
+    }
+  }
+}
 function persistImportTemplateFieldPrefs(keys: ReadonlySet<string>) {
-  void apiFetch('/api/attendance/import/template-prefs', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ orgId: normalizedOrgId(), selectedKeys: Array.from(keys) }),
-  }).catch(() => undefined)
+  importTemplatePrefsGeneration += 1
+  const payload = Array.from(keys)
+  if (importTemplatePrefsPutInFlight) {
+    importTemplatePrefsPutQueued = payload
+    return
+  }
+  void flushImportTemplatePrefsPut(payload)
 }
 function toggleImportTemplateField(key: string) {
   const next = new Set(importTemplateFieldKeys.value)

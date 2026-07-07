@@ -703,4 +703,103 @@ describe('Attendance import preview regression', () => {
     await flushUi(2)
     expect(prefsPuts.at(-1)?.selectedKeys).toEqual([])
   })
+
+  it('PR-B hardening: a late restore cannot overwrite what the user just clicked (generation guard)', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    let releasePrefs!: (value: unknown) => void
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/template-prefs')) {
+        if (init?.method === 'PUT') return jsonResponse(200, { ok: true, data: { selectedKeys: [] } })
+        return new Promise((resolve) => { releasePrefs = resolve }) as Promise<Response>
+      }
+      if (url.startsWith('/api/attendance/import/template')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: { source: 'dingtalk_csv', mode: 'override', columns: ['日期', '工号', '姓名'], requiredFields: ['日期'] },
+            mappingProfiles: [],
+            mapping: { columns: [
+              { sourceField: '上班1打卡时间', targetField: 'firstInAt' },
+              { sourceField: '加班小时', targetField: 'overtimeHours' },
+            ] },
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(6)
+
+    // GET is still pending; the user toggles a field now.
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+    setupState.toggleImportTemplateField('overtimeHours')
+    await flushUi(2)
+    const before = Array.from(unwrapRef<Set<string>>(setupState.importTemplateFieldKeys)).sort()
+
+    // Late restore arrives with a different server-side selection — must be dropped.
+    releasePrefs(jsonResponse(200, { ok: true, data: { selectedKeys: ['firstInAt'] } }))
+    await flushUi(4)
+    const after = Array.from(unwrapRef<Set<string>>(setupState.importTemplateFieldKeys)).sort()
+    expect(after).toEqual(before)
+    expect(after).toContain('overtimeHours')
+  })
+
+  it('PR-B hardening: rapid toggles serialize PUTs last-write-wins (no reorder persistence)', async () => {
+    const puts: Array<{ payload: Record<string, unknown>; release: (v: unknown) => void }> = []
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/template-prefs')) {
+        if (init?.method === 'PUT') {
+          return new Promise((resolve) => {
+            puts.push({ payload: JSON.parse(String(init.body ?? '{}')), release: resolve })
+          }) as Promise<Response>
+        }
+        return jsonResponse(200, { ok: true, data: { selectedKeys: [] } })
+      }
+      if (url.startsWith('/api/attendance/import/template')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: { source: 'dingtalk_csv', mode: 'override', columns: ['日期'], requiredFields: ['日期'] },
+            mappingProfiles: [],
+            mapping: { columns: [
+              { sourceField: '上班1打卡时间', targetField: 'firstInAt' },
+              { sourceField: '下班1打卡时间', targetField: 'lastOutAt' },
+              { sourceField: '加班小时', targetField: 'overtimeHours' },
+            ] },
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(6)
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+
+    // three rapid changes while the first PUT is held open
+    setupState.toggleImportTemplateField('overtimeHours')
+    setupState.toggleImportTemplateField('firstInAt')
+    setupState.toggleImportTemplateField('lastOutAt')
+    await flushUi(2)
+
+    expect(puts).toHaveLength(1)
+    puts[0].release(jsonResponse(200, { ok: true, data: { selectedKeys: [] } }))
+    await flushUi(4)
+
+    // queued last-write-wins: exactly one follow-up PUT carrying the FINAL set
+    expect(puts).toHaveLength(2)
+    const finalSet = Array.from(unwrapRef<Set<string>>(setupState.importTemplateFieldKeys)).sort()
+    expect((puts[1].payload.selectedKeys as string[]).slice().sort()).toEqual(finalSet)
+    puts[1].release(jsonResponse(200, { ok: true, data: { selectedKeys: [] } }))
+  })
 })
