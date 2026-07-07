@@ -5990,6 +5990,37 @@
                       </button>
                     </div>
                   </div>
+                  <div v-if="importFieldGroups.length" class="attendance__template-guide-card attendance__template-guide-card--full attendance__column-formats" data-testid="attendance-import-column-formats">
+                    <div class="attendance__template-guide-title">{{ tr('Column formats', '列格式说明') }}</div>
+                    <small class="attendance__field-hint">{{ tr('Each column: whether it is required, the accepted format, and an example.', '每列：是否必填、可接受的格式、以及示例。') }}</small>
+                    <div class="attendance__column-formats-scroll">
+                      <table class="attendance__template-table attendance__column-formats-table">
+                        <thead>
+                          <tr>
+                            <th>{{ tr('Column', '列名') }}</th>
+                            <th>{{ tr('Required', '必填') }}</th>
+                            <th>{{ tr('Format', '格式') }}</th>
+                            <th>{{ tr('Example', '示例') }}</th>
+                            <th>{{ tr('Notes', '说明') }}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="row in importColumnFormatRows" :key="row.column">
+                            <td><code>{{ row.column }}</code></td>
+                            <td>
+                              <span
+                                class="attendance__column-formats-badge"
+                                :class="`attendance__column-formats-badge--${row.requirement}`"
+                              >{{ importColumnRequirementLabel(row.requirement) }}</span>
+                            </td>
+                            <td>{{ tr(row.formatEn, row.formatZh) }}</td>
+                            <td><code>{{ row.example }}</code></td>
+                            <td>{{ tr(row.meaningEn, row.meaningZh) }}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
                 </div>
               </div>
               <div class="attendance__admin-grid">
@@ -9769,8 +9800,11 @@ import {
 import {
   IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS,
   allSelectableImportFieldKeys,
+  buildImportColumnFormatRows,
+  buildTemplateExampleRow,
   buildTemplateHeaderFromSelection,
   groupSupportedImportColumns,
+  type AttendanceImportColumnRequirement,
   type AttendanceImportMappingColumnLike,
 } from './attendance/importTemplateColumns'
 import { withCsvBom } from './attendance/csvExport'
@@ -13215,6 +13249,14 @@ const importCsvRecognition = ref<AttendanceImportHeaderRecognition | null>(null)
 const importCsvConvertedText = ref('')
 const importCsvConvertedSheetName = ref('')
 const importFieldGroups = computed(() => groupSupportedImportColumns(importMappingColumnsRaw.value))
+// Column-formats reference (column-formats design-lock): per-column required
+// flag + format + example, so the user knows how to fill each column.
+const importColumnFormatRows = computed(() => buildImportColumnFormatRows(importFieldGroups.value))
+function importColumnRequirementLabel(requirement: AttendanceImportColumnRequirement): string {
+  if (requirement === 'required') return tr('Required', '必填')
+  if (requirement === 'identity') return tr('ID (one of)', '身份·二选一')
+  return tr('Optional', '选填')
+}
 const importTemplateFieldKeys = ref<Set<string>>(new Set(IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS))
 const importTemplateHeaderPreview = computed(() =>
   buildTemplateHeaderFromSelection(importFieldGroups.value, importTemplateFieldKeys.value))
@@ -18284,11 +18326,15 @@ function downloadImportSelectedTemplateCsv() {
     setStatus(tr('Load the import template to pick fields first.', '请先加载导入模板并勾选字段。'), 'error')
     return
   }
-  const csv = `${header.map(escapeCsvCell).join(',')}\n${header.map(() => '').join(',')}\n`
+  // Ship a concrete example row per selected column (template-example-row
+  // design-lock), like the backend template.csv — so the picked-fields
+  // template shows the format by example, not an empty line.
+  const exampleRow = buildTemplateExampleRow(importColumnFormatRows.value, header)
+  const csv = `${header.map(escapeCsvCell).join(',')}\n${exampleRow.map(escapeCsvCell).join(',')}\n`
   triggerImportCsvDownload('attendance-import-template-selected.csv', csv)
   setStatus(tr(
-    `CSV template downloaded (${header.length} columns).`,
-    `CSV 模板已下载（${header.length} 列）。`,
+    `CSV template downloaded (${header.length} columns, with an example row).`,
+    `CSV 模板已下载（${header.length} 列，含示例行）。`,
   ))
 }
 
@@ -30683,6 +30729,44 @@ const holidaySectionBindings = {
   background: var(--ms-bg-page);
   padding: var(--ms-space-1) var(--ms-space-2);
   border-radius: var(--ms-radius-sm);
+}
+
+/* Column formats table (column-formats design-lock) */
+.attendance__column-formats-scroll {
+  overflow-x: auto;
+  margin-top: var(--ms-space-2);
+}
+
+.attendance__column-formats-table {
+  width: 100%;
+  font-size: 12px;
+}
+
+.attendance__column-formats-table code {
+  background: var(--ms-bg-page);
+  padding: 0 var(--ms-space-1);
+  border-radius: var(--ms-radius-sm);
+}
+
+.attendance__column-formats-badge {
+  display: inline-block;
+  padding: 0 var(--ms-space-2);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  border: 1px solid var(--ms-border-light);
+  color: var(--ms-text-3);
+}
+
+.attendance__column-formats-badge--required {
+  border-color: var(--ms-color-danger);
+  color: var(--ms-color-danger);
+}
+
+.attendance__column-formats-badge--identity {
+  border-color: var(--ms-color-warning);
+  color: var(--ms-color-warning);
 }
 
 .attendance__import-advanced-toggle {
