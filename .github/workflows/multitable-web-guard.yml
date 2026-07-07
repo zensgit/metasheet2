@@ -16,6 +16,13 @@ name: Multitable Web Guard
 on:
   pull_request:
     paths:
+      # Personal-views write path (Slice 3c/3d + dedup): the guard MUST fire when these change, or the
+      # reorder/additive read-merge-write goldens silently stop running (as happened on the dedup PR #3769,
+      # which touched only reorder-view-fields.ts and triggered no web-guard).
+      - 'apps/web/src/multitable/utils/reorder-view-fields.ts'
+      - 'apps/web/src/multitable/utils/personal-config-write.ts'
+      - 'apps/web/tests/multitable-reorder-view-fields.spec.ts'
+      - 'apps/web/tests/multitable-grid-personal-additive-write.spec.ts'
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
@@ -79,6 +86,13 @@ on:
   push:
     branches: [main]
     paths:
+      # Personal-views write path (Slice 3c/3d + dedup): the guard MUST fire when these change, or the
+      # reorder/additive read-merge-write goldens silently stop running (as happened on the dedup PR #3769,
+      # which touched only reorder-view-fields.ts and triggered no web-guard).
+      - 'apps/web/src/multitable/utils/reorder-view-fields.ts'
+      - 'apps/web/src/multitable/utils/personal-config-write.ts'
+      - 'apps/web/tests/multitable-reorder-view-fields.spec.ts'
+      - 'apps/web/tests/multitable-grid-personal-additive-write.spec.ts'
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
