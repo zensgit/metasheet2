@@ -8,7 +8,7 @@
       @back="goBack"
     >
       <template v-if="approval" #meta>
-        <StatusTag domain="approvalInstance" :status="approval.status" />
+        <StatusTag domain="approvalInstance" :status="approval.status" force-locale="zh" />
         <!-- B1-03: 已等待 aging — glanceable next to the status tag, only while still pending. -->
         <el-tag
           v-if="approval.status === 'pending'"
