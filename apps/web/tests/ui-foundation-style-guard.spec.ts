@@ -38,6 +38,11 @@ const TARGET_FILES = [
   'src/components/status/EmptyState.vue',
   'src/multitable/components/MetaAutomationManager.vue',
   'src/multitable/components/MetaAutomationRuleEditor.vue',
+  // IU-2a (docs/development/integration-ux-workbench-redesign-design-lock-20260706.md §2 IU-2,
+  // §3 hard locks "token-only"): Workbench chrome slice tokenized its 142 hardcoded hex/rgb
+  // literals onto var(--ms-*)/--el-* and adds the new rail component clean from the start.
+  'src/views/IntegrationWorkbenchView.vue',
+  'src/components/integration/IntegrationWorkbenchRail.vue',
 ] as const
 
 // Per-file allowlist for counts that are legitimately un-clearable. Keep this EMPTY unless a
