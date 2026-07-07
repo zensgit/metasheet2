@@ -68,8 +68,19 @@ export function ensureDingTalkJsApi(timeoutMs = 5000): Promise<DingTalkGlobal> {
     const existingScript = document.querySelector<HTMLScriptElement>('script[data-dingtalk-jsapi]')
     const onReady = () => {
       const dd = getDingTalkGlobal()
-      if (dd) finish(() => { clearTimeout(timer); resolve(dd) })
-      else finish(() => { clearTimeout(timer); reject(new Error('DingTalk JSAPI loaded without window.dd')) })
+      if (!dd) {
+        finish(() => { clearTimeout(timer); reject(new Error('DingTalk JSAPI loaded without window.dd')) })
+        return
+      }
+      // Wait one dd.ready tick before declaring the bridge usable (review
+      // #3795 P3-1): on the CDN-load path the script's `load` fires before the
+      // JSAPI bridge is fully wired, so a requestAuthCode right after could
+      // fail early on a real device. When dd.ready is absent, resolve directly.
+      if (typeof dd.ready === 'function') {
+        dd.ready(() => finish(() => { clearTimeout(timer); resolve(dd) }))
+      } else {
+        finish(() => { clearTimeout(timer); resolve(dd) })
+      }
     }
 
     if (existingScript) {

@@ -53,8 +53,30 @@ describe('ensureDingTalkJsApi', () => {
     await new Promise(resolve => setTimeout(resolve, 5))
     const script = document.querySelector<HTMLScriptElement>('script[data-dingtalk-jsapi]')
     expect(script, 'expected the jsapi script to be injected').toBeTruthy()
-    ;(window as unknown as { dd?: unknown }).dd = { runtime: {} }
+    ;(window as unknown as { dd?: unknown }).dd = {
+      runtime: {},
+      ready: (cb: () => void) => cb(),
+    }
     script!.dispatchEvent(new Event('load'))
+    await expect(promise).resolves.toMatchObject({ runtime: {} })
+  })
+
+  it('awaits dd.ready before resolving the CDN-load path (review P3-1)', async () => {
+    const promise = ensureDingTalkJsApi(2000)
+    await new Promise(resolve => setTimeout(resolve, 5))
+    const script = document.querySelector<HTMLScriptElement>('script[data-dingtalk-jsapi]')!
+    let readyCb: (() => void) | null = null
+    ;(window as unknown as { dd?: unknown }).dd = {
+      runtime: {},
+      ready: (cb: () => void) => { readyCb = cb },
+    }
+    script.dispatchEvent(new Event('load'))
+    // dd.ready has not fired yet — the promise must still be pending.
+    let settled = false
+    void promise.then(() => { settled = true }, () => { settled = true })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(settled).toBe(false)
+    readyCb!()
     await expect(promise).resolves.toMatchObject({ runtime: {} })
   })
 })
