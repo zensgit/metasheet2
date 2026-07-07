@@ -758,6 +758,11 @@
       v-model:payload-template-text="payloadTemplateText"
       v-model:authored-field-rules="authoredFieldRules"
     />
+
+    <!-- BA-UI-1 (docs/development/bridge-agent-admin-page-design-lock-20260707.md): read-only
+         Bridge Agent observability. Self-contained section (owns its own service calls to the three
+         existing read-only generic routes); the view only hands down the shared systems list + scope. -->
+    <IntegrationBridgeAgentSection :systems="systems" :scope="currentScope()" />
         </div>
       </div>
     </section>
@@ -856,6 +861,7 @@ import IntegrationMappingRulesSection from '../components/integration/Integratio
 import IntegrationObjectTemplateSection from '../components/integration/IntegrationObjectTemplateSection.vue'
 import IntegrationPayloadPreviewSection from '../components/integration/IntegrationPayloadPreviewSection.vue'
 import IntegrationConnectionSection from '../components/integration/IntegrationConnectionSection.vue'
+import IntegrationBridgeAgentSection from '../components/integration/IntegrationBridgeAgentSection.vue'
 
 type WorkbenchSide = 'source' | 'target'
 type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'dictMap'
@@ -996,6 +1002,10 @@ const railGroups = computed<IntegrationWorkbenchRailGroup[]>(() => [
   { id: 'cleaning-mapping', label: bi('清洗映射', 'Cleansing & Mapping'), targetId: 'int-sec-object-template' },
   { id: 'run-push', label: bi('运行与推送', 'Run & Push'), targetId: 'int-sec-run-push' },
   { id: 'monitoring', label: bi('监控与死信', 'Monitoring & Dead Letters'), targetId: 'int-sec-monitoring' },
+  // BA-UI-1 (docs/development/bridge-agent-admin-page-design-lock-20260707.md): 7th rail group —
+  // ADD-ONLY extension of the IU-2a six (the design-lock says the observability page rides the
+  // IU-2 skeleton as a new section, not a separate shell).
+  { id: 'bridge-agent', label: bi('Bridge Agent 观测', 'Bridge Agent'), targetId: 'int-sec-bridge-agent' },
 ])
 
 const sectionGroupIds: Record<string, string> = {
@@ -1009,6 +1019,7 @@ const sectionGroupIds: Record<string, string> = {
   'int-sec-run-push': 'run-push',
   'int-sec-monitoring': 'monitoring',
   'int-sec-preview': 'cleaning-mapping',
+  'int-sec-bridge-agent': 'bridge-agent',
 }
 
 const activeRailGroupId = ref('connection')

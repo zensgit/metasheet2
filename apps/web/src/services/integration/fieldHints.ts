@@ -48,6 +48,11 @@ export type IntegrationFieldHintKey =
   | 'composition.step2ConfigId'
   | 'composition.name'
   | 'composition.sourceTarget'
+  // --- BA-UI-1 Bridge Agent read-only observability section ---
+  | 'bridgeAgent.instancePicker'
+  | 'bridgeAgent.credentialStatus'
+  | 'bridgeAgent.objectAllowlist'
+  | 'bridgeAgent.schemaPreview'
 
 export type IntegrationFieldHintEntry = { zh: string; en: string }
 
@@ -127,6 +132,22 @@ export const INTEGRATION_FIELD_HINTS: Record<IntegrationFieldHintKey, Integratio
   'composition.sourceTarget': {
     zh: '第一跳输出字段名，将作为第二跳读取源的业务键输入；两跳之间的交接完全由平台完成，不经过浏览器。',
     en: "The first hop's output field name, used as the business-key input to the second hop's read source; the handoff between hops happens entirely on the platform, never through the browser.",
+  },
+  'bridgeAgent.instancePicker': {
+    zh: '一个实例对应一个已注册的 Bridge Agent 连接（endpoint）；选择后下方对象列表与 schema 预览针对该实例查询。',
+    en: 'An instance is one registered Bridge Agent connection (endpoint); the object list and schema preview below query the selected instance.',
+  },
+  'bridgeAgent.credentialStatus': {
+    zh: '仅显示"已配置/未配置"布尔状态；实际的 host、鉴权密钥等凭据始终由后端持有，前端从不回显。',
+    en: 'Shows only a configured/not-configured boolean; the actual host, auth secret, and other credentials are always held by the backend and never echoed to the browser.',
+  },
+  'bridgeAgent.objectAllowlist': {
+    zh: '这里列出的对象即 Bridge Agent 本机配置里的 allowlist；不在此列表中的对象无法被读取，也没有编辑入口。',
+    en: 'The objects listed here are exactly the Bridge Agent host config\'s allowlist; objects outside this list cannot be read and have no edit entry point.',
+  },
+  'bridgeAgent.schemaPreview': {
+    zh: 'schema 预览只展示字段名、类型与是否必填；本页不发起任何取数请求，永远不会显示业务行数据。',
+    en: 'The schema preview shows only field name, type, and required — this page never issues a data-read request and never displays business row data.',
   },
 }
 
