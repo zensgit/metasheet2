@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { withCsvBom } from '../src/views/attendance/csvExport'
 import {
   IMPORT_TEMPLATE_BASE_COLUMNS,
   IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS,
@@ -108,5 +109,11 @@ describe('importTemplateColumns', () => {
     expect(new Set(all).size).toBe(all.length)
     const header = buildTemplateHeaderFromSelection(groups, all)
     expect(header).toHaveLength(IMPORT_TEMPLATE_BASE_COLUMNS.length + all.length)
+  })
+
+  it('withCsvBom prefixes exactly once (idempotent)', () => {
+    const once = withCsvBom('日期,姓名')
+    expect(once.charCodeAt(0)).toBe(0xfeff)
+    expect(withCsvBom(once)).toBe(once)
   })
 })

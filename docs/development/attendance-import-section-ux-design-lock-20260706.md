@@ -49,7 +49,10 @@
 
 客户实测：下载的 CSV 模板 Excel 打开乱码、WPS 正常——BOM-less UTF-8 被 Excel 按 ANSI/GBK 猜。
 修法：共享 `withCsvBom`（FE `csvExport.ts` / 后端 index.cjs 同名 helper），**全部考勤 CSV 下载出口**
-加 `﻿`——FE 4（选列模板/起步模板/`downloadCsvText` 备份导出/服务端导出转存）+ composable 2
-（server-text/fallback）+ 后端 5（template.csv ×2 / 导入批次导出 / 计薪周期导出 / 记录报表导出）。
+加 BOM——FE 4（选列模板/起步模板/`downloadCsvText` 备份导出/服务端导出转存）+ import composable 2
+（server-text/fallback）+ **batches composable 2**（server 分支——`Response.text()` 按规范剥 BOM，
+后端加的到不了文件，必须前端重加（审阅 P2-1 实证）；分页 fallback 构建）+ 后端 5
+（template.csv ×2 / 导入批次导出 / 计薪周期导出 / 记录报表导出；其中 template.csv 有直链消费
+（`csvTemplateUrl`），批次导出唯一消费方是上述 FE 路径，计薪导出走 `blob()` 保字节）。
 导入/上传 payload 不动（解析侧 `normalizeCsvHeaderValue`/`parseCsvHeaderFromText` 本就剥 BOM，
 下载→回填→上传往返安全）。幂等（已有 BOM 不重复加）。

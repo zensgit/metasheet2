@@ -70,6 +70,7 @@ on:
       - 'apps/web/tests/attendance-import-template-columns.spec.ts'
       - 'apps/web/tests/attendance-import-header-recognition.spec.ts'
       - 'apps/web/tests/attendance-import-xlsx-convert.spec.ts'
+      - 'apps/web/tests/useAttendanceAdminImportBatches.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
   push:
     branches: [main]
@@ -91,6 +92,7 @@ on:
       - 'apps/web/tests/attendance-import-template-columns.spec.ts'
       - 'apps/web/tests/attendance-import-header-recognition.spec.ts'
       - 'apps/web/tests/attendance-import-xlsx-convert.spec.ts'
+      - 'apps/web/tests/useAttendanceAdminImportBatches.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
 
 jobs:
@@ -133,4 +135,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run attendance web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches --reporter=dot
