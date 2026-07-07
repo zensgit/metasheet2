@@ -29,7 +29,7 @@
           <template #header>
             <div class="approval-new__info-header">
               <h2>{{ template.name }}</h2>
-              <StatusTag domain="approvalTemplate" :status="template.status" size="sm" />
+              <StatusTag domain="approvalTemplate" :status="template.status" size="sm" force-locale="zh" />
             </div>
           </template>
           <p v-if="template.description" class="approval-new__info-desc">{{ template.description }}</p>
