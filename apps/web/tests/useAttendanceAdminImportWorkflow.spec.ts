@@ -799,4 +799,29 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(setStatus.mock.calls[0][1]).toBe('error')
     expect(input.value).toBe('')
   })
+
+  it('X1 P2-1: a direct setImportCsvFile(csv) after an xlsx conversion must not reuse the stale converted text', async () => {
+    const readFileText = vi.fn(async () => 'userId,workDate\nu-9,2026-06-02\n')
+    const { workflow, setStatus } = createWorkflow({ readFileText })
+    const xlsx = buildXlsxFile([
+      ['日期', '姓名'],
+      ['2026-06-01', '张三'],
+    ])
+    await workflow.handleImportCsvChange({ target: { files: [xlsx], value: xlsx.name } } as unknown as Event)
+    expect(workflow.importCsvConvertedText.value).toContain('2026-06-01,张三')
+
+    const csv = new File(['userId,workDate\nu-9,2026-06-02\n'], 'fresh.csv', { type: 'text/csv' })
+    workflow.setImportCsvFile(csv)
+    expect(workflow.importCsvConvertedText.value).toBe('')
+    expect(workflow.importCsvConvertedSheetName.value).toBe('')
+
+    workflow.importForm.payload = JSON.stringify({ source: 'manual' }, null, 2)
+    await workflow.applyImportCsvFile()
+
+    const payload = JSON.parse(workflow.importForm.payload)
+    expect(readFileText).toHaveBeenCalledWith(csv)
+    expect(payload.csvText).toBe('userId,workDate\nu-9,2026-06-02\n')
+    expect(String(payload.csvText)).not.toContain('张三')
+    expect(setStatus).toHaveBeenCalledWith(expect.stringContaining('CSV loaded'), 'info', undefined)
+  })
 })

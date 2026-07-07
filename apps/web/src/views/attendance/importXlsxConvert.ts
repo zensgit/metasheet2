@@ -88,12 +88,15 @@ export async function convertXlsxFileToCsvText(file: File): Promise<AttendanceXl
     }
     return { ok: false, reason: 'empty' }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (/password|encrypted|ECMA-376|agile/i.test(message)) {
-      return { ok: false, reason: 'encrypted' }
-    }
-    return { ok: false, reason: 'unreadable' }
+    return { ok: false, reason: classifyXlsxReadError(error) }
   }
+}
+
+/** Maps a SheetJS read failure to a user-facing failure state (unit-locked). */
+export function classifyXlsxReadError(error: unknown): AttendanceXlsxConvertFailure {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/password|encrypted|ECMA-376|agile/i.test(message)) return 'encrypted'
+  return 'unreadable'
 }
 
 /** v1 scope (lock D2): only a plain `.xlsx` extension converts. */

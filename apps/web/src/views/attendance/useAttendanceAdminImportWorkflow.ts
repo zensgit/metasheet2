@@ -1317,10 +1317,11 @@ export function useAttendanceAdminImportWorkflow({
 
   function setImportCsvFile(file: File | null) {
     importCsvFile.value = file
-    if (!file) {
-      importCsvConvertedText.value = ''
-      importCsvConvertedSheetName.value = ''
-    }
+    // Any (re)selection invalidates a previous xlsx conversion — the convert
+    // path writes the fresh text back AFTER calling this (review #3755 P2-1:
+    // clearing only on null let a stale conversion shadow a directly-set CSV).
+    importCsvConvertedText.value = ''
+    importCsvConvertedSheetName.value = ''
     importCsvFileName.value = file?.name ?? ''
     importCsvFileId.value = ''
     importCsvFileRowCountHint.value = null
