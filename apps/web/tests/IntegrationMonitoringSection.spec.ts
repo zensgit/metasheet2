@@ -87,6 +87,11 @@ describe('IntegrationMonitoringSection (unit)', () => {
     expect(container?.querySelector('#int-sec-monitoring')).toBeTruthy()
     expect(container?.querySelector('[data-testid="pipeline-runs-empty"]')).toBeTruthy()
     expect(container?.querySelector('[data-testid="dead-letters-empty"]')).toBeTruthy()
+    // IU-6 guided empty-state copy (what-this-is + first-step) rides through the IU-2b extraction —
+    // pin both sub-testids here (the parent view spec doesn't assert them, so without this the
+    // extracted component could drop the guidance and stay green — quality-gate finding).
+    expect(container?.querySelector('[data-testid="dead-letters-empty-what"]')?.textContent?.trim().length ?? 0).toBeGreaterThan(0)
+    expect(container?.querySelector('[data-testid="dead-letters-empty-first-step"]')?.textContent?.trim().length ?? 0).toBeGreaterThan(0)
   })
 
   it('renders a pipeline run row and forwards the refresh click to the prop function', async () => {
