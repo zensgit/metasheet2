@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { READ_SOURCE_PROBE_ERROR_CODES as CLIENT_PROBE_ERROR_CODES } from '../src/services/integration/readSourceConfigs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
@@ -39,16 +40,21 @@ describe('errorCodeLabels coverage (mirror tripwire)', () => {
   })
 
   it('every server probe code (union set) has a label', () => {
-    // NOTE: as of this writing the server's READ_SOURCE_PROBE_ERROR_CODES spreads in BOTH the 9
-    // resolver codes AND the 8 K3 WISE BOM-list-by-material codes (BL2), so the union is 28, not the
-    // 20 originally cited in the design-lock research doc (11 probe-own + 9 resolver) — the doc itself
-    // warned the cited line numbers/counts might have shifted since. This is a PRE-EXISTING drift
-    // between the server vocabulary and the client mirror in readSourceConfigs.ts (which still only
-    // spreads in the 9 resolver codes, not the 8 BOM-list codes) — out of scope to fix here (IU-1 is
-    // labels-only, zero behavior change), but every code in the server's CURRENT union set must still
-    // have a label in this module, which is asserted below.
+    // The server's READ_SOURCE_PROBE_ERROR_CODES spreads in BOTH the 9 resolver codes AND the 8
+    // K3 WISE BOM-list-by-material codes (BL2) — union 28.
     expect(SERVER_PROBE_ERROR_CODES.length).toBe(28)
     for (const code of SERVER_PROBE_ERROR_CODES) expectLabeled(code)
+  })
+
+  it('client probe-code mirror covers the full server union (no client-side scrubbing of registered codes)', () => {
+    // Mirror-drift tripwire (quality-gate finding on IU-1): the client allowlist in readSourceConfigs.ts
+    // must contain EVERY server-registered probe/resolver/BOM-list code — otherwise a registered code
+    // arriving in probe/composition evidence is scrubbed to the generic fallback BEFORE the label layer
+    // sees it, and its label is dead code. A future server-side family addition fails here until the
+    // client mirror (and its labels) are synced.
+    for (const code of SERVER_PROBE_ERROR_CODES) {
+      expect(CLIENT_PROBE_ERROR_CODES.has(code), `client mirror missing ${code}`).toBe(true)
+    }
   })
 
   it('every server composition code (8) has a label', () => {

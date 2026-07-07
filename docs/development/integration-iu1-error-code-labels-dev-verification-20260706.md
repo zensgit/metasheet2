@@ -169,3 +169,16 @@ resolved), generic-unknown-fallback tests, and a locale-switching test.
 - `apps/web/tests/IntegrationK3WiseSetupView.spec.ts`
 - `.github/workflows/integration-guard.yml`
 - `docs/development/integration-iu1-error-code-labels-dev-verification-20260706.md` (this file)
+
+
+## 附:质量闸补强(主循环审阅,2026-07-06)
+
+- **mutation 4/4 KILLED**:①重插 raw errorMessage 渲染 → 哨兵测试红;②删一条 label →
+  mirror-tripwire 红;③未知码改直出 → generic-unknown 测试红;④client mirror 删一码 →
+  新增 mirror-drift tripwire 红。各 KILLED 后复绿 sanity 通过。
+- **mirror drift 修复(闸内发现,随本 PR)**:client `readSourceConfigs.ts` 的
+  `READ_SOURCE_PROBE_ERROR_CODES` allowlist 补齐 BL2 的 8 个 `K3_WISE_BOM_LIST_BY_MATERIAL_*`
+  码(server 契约 #3695 起已含)——否则该族码在 probe/组合证据里先被客户端洗成 generic,
+  IU-1 标签成死代码。新增 tripwire:client mirror 必须覆盖 server 全 union(未来 server 侧
+  加族,客户端不同步则 CI 红)。
+- 全 guard 面 132/132 绿;`vue-tsc -b` 干净。
