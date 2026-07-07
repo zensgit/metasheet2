@@ -1,19 +1,27 @@
 <template>
   <div class="meta-toolbar" role="toolbar" :aria-label="l('toolbar.aria')">
     <div class="meta-toolbar__left">
-      <!-- Hide Fields -->
-      <div class="meta-toolbar__dropdown">
-        <button class="meta-toolbar__btn" @click="showFieldPicker = !showFieldPicker">
-          <el-icon class="meta-toolbar__btn-icon"><component :is="ICON.fields" /></el-icon> {{ l('toolbar.fields') }}
-          <span v-if="hiddenCount" class="meta-toolbar__badge">{{ hiddenCount }}</span>
-        </button>
-        <div v-if="showFieldPicker" class="meta-toolbar__panel" @keydown.escape="showFieldPicker = false">
+      <!--
+        Hide Fields (UI-P2-1c slice-3: migrated to shared MtPopover, NOT MtMenu — this is a
+        multi-toggle field list, so toggling one field must NOT close the panel, unlike MtMenu's
+        select-and-close row semantics). Open/close + click-outside/Escape now come from MtPopover;
+        the toggle rows stay native <label>/<input type="checkbox"> (not MtMenuItem).
+      -->
+      <MtPopover v-model:open="showFieldPicker">
+        <template #trigger>
+          <MtButton :title="l('toolbar.fields')" :aria-label="l('toolbar.fields')">
+            <template #icon><el-icon><component :is="ICON.fields" /></el-icon></template>
+            {{ l('toolbar.fields') }}
+            <span v-if="hiddenCount" class="meta-toolbar__badge">{{ hiddenCount }}</span>
+          </MtButton>
+        </template>
+        <div class="meta-toolbar__field-panel">
           <label v-for="field in fields" :key="field.id" class="meta-toolbar__field-toggle">
             <input type="checkbox" :checked="!hiddenFieldIds.includes(field.id)" @change="emit('toggle-field', field.id)" />
             <span>{{ field.name }}</span>
           </label>
         </div>
-      </div>
+      </MtPopover>
 
       <!-- Sort -->
       <div class="meta-toolbar__dropdown">
@@ -199,10 +207,12 @@ import MetaFilterGroup from './MetaFilterGroup.vue'
 // UI-P2-1c: migrate standalone action buttons (undo/redo/fit/print/import/export/new-record) onto
 // the shared UI primitives (multitable-ui-p2-structure-designlock-20260706.md §2 P2-1). Slice-2
 // additionally migrates the row-density dropdown onto MtMenu/MtMenuItem (built on MtPopover), so
-// its open/close + click-outside/Escape no longer need a hand-rolled `showDensityPanel` ref. The
-// remaining dropdown triggers that open a `.meta-toolbar__panel` (fields/sort/filter/group) are NOT
-// touched in this slice — each is a more complex builder deferred to a later slice.
-import { MtButton, MtIconButton, MtMenu, MtMenuItem } from '../ui'
+// its open/close + click-outside/Escape no longer need a hand-rolled `showDensityPanel` ref.
+// Slice-3 migrates the hide-fields dropdown onto MtPopover directly (NOT MtMenu — it's a
+// multi-toggle list, so selecting a row must not auto-close it). The remaining dropdown triggers
+// that open a `.meta-toolbar__panel` (sort/filter/group) are NOT touched in this slice — each is a
+// more complex builder deferred to a later slice.
+import { MtButton, MtIconButton, MtMenu, MtMenuItem, MtPopover } from '../ui'
 import { seedFilterCondition } from '../utils/filter-condition-seed'
 import {
   metaCoreLabel,
@@ -406,6 +416,10 @@ function onAddFilterGroup() {
 .meta-toolbar__dropdown { position: relative; }
 .meta-toolbar__panel { position: absolute; top: 100%; left: 0; z-index: 20; min-width: 200px; background: var(--ms-bg-card, #fff); border: 1px solid var(--ms-border-light, #e7e8ec); border-radius: var(--ms-radius-sm, 6px); box-shadow: var(--ms-shadow-pop, 0 4px 12px rgba(0,0,0,.1)); padding: 8px; margin-top: 4px; }
 .meta-toolbar__panel--filter { min-width: 420px; }
+/* Hide-fields panel (UI-P2-1c slice-3): hosted inside MtPopover's own `.mt-popover` surface (which
+   only pads top/bottom), so this class supplies the horizontal breathing room the old
+   `.meta-toolbar__panel { padding: 8px }` gave the toggle rows — same 8px, all sides. */
+.meta-toolbar__field-panel { padding: var(--ms-space-2); min-width: 200px; box-sizing: border-box; }
 .meta-toolbar__field-toggle { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; cursor: pointer; }
 .meta-toolbar__sort-rule, .meta-toolbar__filter-rule { display: flex; gap: 4px; margin-bottom: 4px; align-items: center; }
 .meta-toolbar__sort-rule select, .meta-toolbar__filter-rule select { padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
