@@ -31812,6 +31812,7 @@ module.exports = {
 	      return null
 	    }
 	    const TEMPLATE_PREFS_MAX_KEYS = 64
+	    const TEMPLATE_PREFS_MAX_KEY_LENGTH = 128
 
 	    context.api.http.addRoute(
 	      'GET',
@@ -31858,6 +31859,10 @@ module.exports = {
 	          : []
 	        if (Array.isArray(raw) && raw.some((key) => typeof key !== 'string')) {
 	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'selectedKeys must contain strings only' } })
+	          return
+	        }
+	        if (cleaned.some((key) => key.length > TEMPLATE_PREFS_MAX_KEY_LENGTH)) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `selectedKeys entries must be at most ${TEMPLATE_PREFS_MAX_KEY_LENGTH} characters` } })
 	          return
 	        }
 	        if (cleaned.length > TEMPLATE_PREFS_MAX_KEYS) {

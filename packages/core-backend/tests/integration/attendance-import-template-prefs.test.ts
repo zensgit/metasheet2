@@ -152,5 +152,7 @@ describeDb('import template prefs (real DB, route-level, actor-scoped)', () => {
     expect(badShape.status).toBe(400)
     const badItem = await putPrefs(tokenA, { selectedKeys: ['ok', 42] })
     expect(badItem.status).toBe(400)
+    const longKey = await putPrefs(tokenA, { selectedKeys: ['x'.repeat(129)] })
+    expect(longKey.status).toBe(400)
   })
 })
