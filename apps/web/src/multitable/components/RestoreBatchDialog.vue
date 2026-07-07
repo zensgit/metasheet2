@@ -74,20 +74,20 @@
 
         <div class="restore-batch__footer">
           <template v-if="phase === 'preview'">
-            <button type="button" class="restore-batch__btn" @click="onCancel">{{ l('record.batchRestoreCancel') }}</button>
-            <button
-              type="button"
+            <MtButton class="restore-batch__btn" @click="onCancel">{{ l('record.batchRestoreCancel') }}</MtButton>
+            <MtButton
+              variant="primary"
               class="restore-batch__btn restore-batch__btn--primary"
               :disabled="!canConfirm"
               data-test="batch-restore-confirm"
               @click="onConfirm"
             >
               {{ l('record.batchRestoreConfirm') }}
-            </button>
+            </MtButton>
           </template>
-          <button v-else type="button" class="restore-batch__btn restore-batch__btn--primary" data-test="batch-restore-done" @click="onDone">
+          <MtButton v-else variant="primary" class="restore-batch__btn restore-batch__btn--primary" data-test="batch-restore-done" @click="onDone">
             {{ l('record.batchRestoreDone') }}
-          </button>
+          </MtButton>
         </div>
       </div>
     </div>
@@ -97,6 +97,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
+import { MtButton } from '../ui'
 import type { RestoreBatchPreviewRecord, RestoreBatchExecuteRecord } from '../api/client'
 import { recordLabel, batchSkipReasonLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 
@@ -244,21 +245,5 @@ function onDone(): void {
   gap: 8px;
   padding: 12px 16px;
   border-top: 1px solid var(--border, #e2e8f0);
-}
-.restore-batch__btn {
-  padding: 6px 14px;
-  border-radius: 6px;
-  border: 1px solid var(--border, #cbd5e1);
-  background: var(--surface, #fff);
-  cursor: pointer;
-}
-.restore-batch__btn--primary {
-  background: var(--primary, #2563eb);
-  color: #fff;
-  border-color: var(--primary, #2563eb);
-}
-.restore-batch__btn--primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 </style>

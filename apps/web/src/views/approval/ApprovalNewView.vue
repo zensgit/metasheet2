@@ -420,7 +420,7 @@ const visibleFieldIds = computed(() => visibleFields.value.map((field) => field.
 const flowPreviewSteps = computed<ApprovalFlowStep[]>(() => {
   const graph = template.value?.approvalGraph
   if (!graph) return []
-  return summarizeApprovalFlow(graph)
+  return summarizeApprovalFlow(graph, template.value?.formSchema ?? null)
 })
 
 // Detail-row auto-sum (design-lock #3189, Gate B): when the template declares amountConsistencyCheck the

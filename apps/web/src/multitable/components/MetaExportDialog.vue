@@ -67,14 +67,15 @@
         </div>
 
         <div class="meta-export__actions">
-          <button class="meta-export__btn" @click="onCancel">{{ l('export.cancel') }}</button>
-          <button
+          <MtButton class="meta-export__btn" @click="onCancel">{{ l('export.cancel') }}</MtButton>
+          <MtButton
             class="meta-export__btn meta-export__btn--primary"
+            variant="primary"
             :disabled="!canExport"
             @click="onConfirm"
           >
             {{ l('export.confirm') }}
-          </button>
+          </MtButton>
         </div>
       </div>
     </div>
@@ -85,6 +86,7 @@
 import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { metaCoreLabel, selectedCount, type MetaCoreLabelKey } from '../utils/meta-core-labels'
+import { MtButton } from '../ui'
 
 export interface ExportColumn {
   id: string
@@ -185,9 +187,4 @@ function onCancel() {
 .meta-export__hint { font-size: 13px; margin: 0; }
 .meta-export__hint--warn { color: #e6a23c; }
 .meta-export__actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid #ebedf0; }
-.meta-export__btn { background: #fff; border: 1px solid #dcdfe6; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 14px; }
-.meta-export__btn:hover:not(:disabled) { border-color: #c0c4cc; }
-.meta-export__btn:disabled { opacity: .55; cursor: not-allowed; }
-.meta-export__btn--primary { background: #409eff; color: #fff; border-color: #409eff; }
-.meta-export__btn--primary:hover:not(:disabled) { background: #66b1ff; border-color: #66b1ff; }
 </style>

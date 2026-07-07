@@ -752,6 +752,19 @@ export interface BomMultitableLineUpdateOptions {
   ifMatch?: string;
 }
 
+// ECO Phase 3: response of the provider's locked-BOM revision-intent seam
+// (POST /api/v1/bom/multitable/{part_id}/eco-intent). `attached: true` means an already-open
+// bom-ECO for this part was reused (the provider's attach-before-create anti-sprawl — that is
+// also the idempotency story: a double-click attaches instead of spawning a second ECO, so the
+// request deliberately carries NO Idempotency-Key header and NO body).
+export interface BomEcoRevisionIntentResult {
+  eco_id: string;
+  state: string;
+  attached: boolean;
+  source_version_id?: string | null;
+  target_version_id?: string | null;
+}
+
 // Field guard for the governed BOM multi-table context. Validates EVERY field declared on
 // BomMultitableLine / BomMultitablePart / BomMultitableContext — both the structural keys
 // (bom_line_id, part_id, level, path, ...) AND the displayed cells (item_number, name, state,
@@ -1215,6 +1228,18 @@ export class PLMAdapter extends HTTPAdapter {
               entitled: true,
               cache_scope: { supported: 'global', entitled: 'tenant' },
               scenarios: ['bom_review'],
+            },
+            // ECO Phase 3: mock the lit bom_eco_revision SKU so mock-mode dev can exercise the
+            // locked-BOM "发起 ECO 修订" CTA end to end (the CTA pre-gates on this descriptor,
+            // per Phase-0 Lock 3: availability discovery is the capabilities advisory).
+            bom_eco_revision: {
+              supported: true,
+              api_version: 'v1',
+              entitled: true,
+              cache_scope: { supported: 'global', entitled: 'tenant' },
+              scenarios: ['bom_review'],
+              actions: ['eco_revision_intent'],
+              action_status: 'governed',
             },
           },
         },
@@ -2265,6 +2290,36 @@ export class PLMAdapter extends HTTPAdapter {
       method: 'PATCH',
       data: payload,
       headers,
+    })
+  }
+
+  // ECO Phase 3 consumer callsite: opt-in that opens (or attaches to) a PENDING ECO revision
+  // for a lifecycle-LOCKED part — the door the Phase-0 discriminated 409 (`eco_required: true`)
+  // points at. Provider contract (POST /api/v1/bom/multitable/{part_id}/eco-intent, no body):
+  // 200 {eco_id, state, attached, source_version_id, target_version_id};
+  // 409 {detail:{code: 'not_locked' | 'eco_intent_rejected', message}}; entitlement-first 403.
+  // Idempotency = the provider's attach-before-create (at most ONE open intent per part), so no
+  // Idempotency-Key header is minted here (mirrors the provider docstring, NOT the write PATCH).
+  async requestBomEcoRevisionIntent(partId: string): Promise<QueryResult<BomEcoRevisionIntentResult>> {
+    if (this.mockMode) {
+      return {
+        data: [
+          {
+            eco_id: `mock-eco-${partId}`,
+            state: 'progress',
+            attached: false,
+            source_version_id: 'mock-v1',
+            target_version_id: 'mock-v2',
+          },
+        ],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('BOM ECO revision intent is not supported for this PLM API mode') }
+    }
+    return this.select<BomEcoRevisionIntentResult>(`/api/v1/bom/multitable/${partId}/eco-intent`, {
+      method: 'POST',
     })
   }
 

@@ -1,4 +1,7 @@
+import { summarizeConditionBranch } from './conditionSummary'
 import type {
+  ConditionNodeConfig,
+  FormSchema,
   ApprovalAssigneeSource,
   ApprovalNode,
   ApprovalNodeConfig,
@@ -42,7 +45,7 @@ export function assigneeSourceSummary(source: ApprovalAssigneeSource): string {
  * fixed one-line description; `start` (never an "upcoming" node in a valid DAG) falls through to
  * `''`.
  */
-export function nodeAssigneeSourceSummary(node: ApprovalNode): string {
+export function nodeAssigneeSourceSummary(node: ApprovalNode, schema?: FormSchema | null): string {
   if (node.type === 'approval') {
     const cfg = node.config as ApprovalNodeConfig
     const sources = cfg.assigneeSources ?? []
@@ -56,7 +59,17 @@ export function nodeAssigneeSourceSummary(node: ApprovalNode): string {
     const cfg = node.config as CcNodeConfig
     return `抄送${cfg.targetType === 'role' ? '角色' : '成员'}`
   }
-  if (node.type === 'condition') return '按条件进入后续分支'
+  if (node.type === 'condition') {
+    // G-B2-19: with a schema in hand, the honest generic line gains the readable branch
+    // predicates (capped at two — this is a one-line flow chip, not the authoring editor).
+    const branches = (node.config as ConditionNodeConfig | undefined)?.branches ?? []
+    if (schema && branches.length > 0) {
+      const shown = branches.slice(0, 2).map((branch) => summarizeConditionBranch(branch, schema))
+      const suffix = branches.length > 2 ? '；…' : ''
+      return `按条件进入后续分支：${shown.join('；')}${suffix}`
+    }
+    return '按条件进入后续分支'
+  }
   if (node.type === 'parallel') return '进入并行分支'
   if (node.type === 'end') return '流程结束'
   return ''

@@ -57,6 +57,14 @@ const TARGET_FILES = [
   // BA-UI-1 (docs/development/bridge-agent-admin-page-design-lock-20260707.md): the Bridge Agent
   // read-only observability section is born token-only (var(--ms-*)/--el-* exclusively).
   'src/components/integration/IntegrationBridgeAgentSection.vue',
+  // IU-2d (docs/development/integration-ux-workbench-redesign-design-lock-20260706.md §2 IU-2,
+  // stage D — run-push decomposition into five focused sub-panels): same
+  // verbatim-copy-from-token-only-parent pattern.
+  'src/components/integration/IntegrationPipelineRunSection.vue',
+  'src/components/integration/IntegrationStockPrepPanel.vue',
+  'src/components/integration/IntegrationExternalWritePanel.vue',
+  'src/components/integration/IntegrationTableActionsPanel.vue',
+  'src/components/integration/IntegrationFieldOptionSyncPanel.vue',
 ] as const
 
 // Per-file allowlist for counts that are legitimately un-clearable. Keep this EMPTY unless a
