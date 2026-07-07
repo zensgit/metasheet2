@@ -49,6 +49,11 @@ const TARGET_FILES = [
   'src/components/integration/IntegrationMonitoringSection.vue',
   'src/components/integration/IntegrationCleaningDatasetSection.vue',
   'src/components/integration/IntegrationMappingRulesSection.vue',
+  // IU-2c (docs/development/integration-ux-workbench-redesign-design-lock-20260706.md §2 IU-2,
+  // stage C — round 2 per-section extraction): same verbatim-copy-from-token-only-parent pattern.
+  'src/components/integration/IntegrationObjectTemplateSection.vue',
+  'src/components/integration/IntegrationPayloadPreviewSection.vue',
+  'src/components/integration/IntegrationConnectionSection.vue',
 ] as const
 
 // Per-file allowlist for counts that are legitimately un-clearable. Keep this EMPTY unless a
