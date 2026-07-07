@@ -1567,4 +1567,67 @@ describe('Attendance self-service dashboard', () => {
 
     expect(container!.querySelector('[data-testid="attendance-hero-punch"]')).toBeNull()
   })
+
+  it('UI-P1: hero today timeline renders both punches from the current-day record', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const timeline = container!.querySelector('[data-testid="attendance-hero-timeline"]') as HTMLElement | null
+    expect(timeline, 'expected today timeline in hero card').toBeTruthy()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const timeOf = (iso: string) => { const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}` }
+    expect(timeline!.textContent).toContain(timeOf('2026-04-15T09:18:00+08:00'))
+    expect(timeline!.textContent).toContain(timeOf('2026-04-15T17:42:00+08:00'))
+    expect(timeline!.querySelectorAll('.attendance__hero-timeline-node--pending')).toHaveLength(0)
+  })
+
+  it('UI-P1: stat cards keep their copy and color late/early as warning', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const summary = container!.querySelector('.attendance__summary--workbench') as HTMLElement
+    expect(summary.textContent).toContain('Latest punch')
+    expect(summary.textContent).toContain('Work minutes')
+    expect(summary.textContent).toContain('Late / Early')
+    expect(summary.textContent).toContain('Attention items')
+    const warning = summary.querySelector('.attendance__summary-value--warning') as HTMLElement | null
+    expect(warning, 'late/early 18/18 should color as warning').toBeTruthy()
+    expect(warning!.textContent).toContain('18 / 18')
+  })
+
+  it('UI-P1: no timeline when the active record is not from today', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    const baseImpl = apiFetchMock.getMockImplementation()!
+    apiFetchMock.mockImplementation(async (input: unknown, init?: unknown) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/records?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: 'record-yesterday',
+              work_date: '2026-04-14',
+              first_in_at: '2026-04-14T09:00:00+08:00',
+              last_out_at: '2026-04-14T18:06:00+08:00',
+              work_minutes: 486,
+              late_minutes: 0,
+              early_leave_minutes: 0,
+              status: 'adjusted',
+              meta: {},
+            }],
+            total: 1,
+          },
+        })
+      }
+      return baseImpl(input as never, init as never)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="attendance-hero-timeline"]')).toBeNull()
+  })
 })
