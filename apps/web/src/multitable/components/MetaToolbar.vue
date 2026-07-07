@@ -55,13 +55,30 @@
         </div>
       </MtPopover>
 
-      <!-- Filter -->
-      <div class="meta-toolbar__dropdown">
-        <button class="meta-toolbar__btn" @click="showFilterPanel = !showFilterPanel">
-          <el-icon class="meta-toolbar__btn-icon"><component :is="ICON.filter" /></el-icon> {{ l('toolbar.filter') }}
-          <span v-if="filterRules.length + filterGroups.length" class="meta-toolbar__badge">{{ filterRules.length + filterGroups.length }}</span>
-        </button>
-        <div v-if="showFilterPanel" class="meta-toolbar__panel meta-toolbar__panel--filter" @keydown.escape="showFilterPanel = false">
+      <!--
+        Filter (UI-P2-1c slice-5: migrated to shared MtPopover — the MOST COMPLEX builder here
+        (nested field/operator/value controls, recursive AND/OR condition groups via
+        MetaFilterConditionRow/MetaFilterGroup), so the panel content is preserved verbatim (same
+        sub-components + same props/events, NOT MtMenuItem rows); only the open/close mechanics
+        move from a hand-rolled `showFilterPanel` ref + `.meta-toolbar__panel` to MtPopover's
+        `v-model:open` + built-in click-outside/Escape. The panel's own `@keydown.escape` handler is
+        dropped — MtPopover's document-level Escape listener now covers it.
+        NESTED-OVERLAY note: every inner field/operator/value control rendered by
+        MetaFilterConditionRow and MetaFilterGroup (recursively) is a native <select>/<input> — none
+        of them Teleports its own menu outside MtPopover's panel — so MtPopover's
+        `panelRef.contains(target)` outside-click check always sees these interactions as "inside"
+        and the popover safely stays open through editing (verified by
+        meta-toolbar-filter-builder-mtpopover-migration.spec.ts).
+      -->
+      <MtPopover v-model:open="showFilterPanel">
+        <template #trigger>
+          <MtButton :title="l('toolbar.filter')" :aria-label="l('toolbar.filter')">
+            <template #icon><el-icon><component :is="ICON.filter" /></el-icon></template>
+            {{ l('toolbar.filter') }}
+            <span v-if="filterRules.length + filterGroups.length" class="meta-toolbar__badge">{{ filterRules.length + filterGroups.length }}</span>
+          </MtButton>
+        </template>
+        <div class="meta-toolbar__filter-panel meta-toolbar__panel--filter">
           <div v-if="(filterRules.length + filterGroups.length) > 1" class="meta-toolbar__conjunction">
             <span>{{ l('toolbar.where') }}</span>
             <select :value="filterConjunction" @change="emit('set-conjunction', ($event.target as HTMLSelectElement).value as 'and'|'or')">
@@ -96,7 +113,7 @@
           <button v-if="filterRules.length || filterGroups.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ applyButtonLabel }}</button>
           <p v-if="filterRules.length && sortFilterDirty" class="meta-toolbar__apply-hint">{{ l('toolbar.stagedHint') }}</p>
         </div>
-      </div>
+      </MtPopover>
 
       <!-- Group By (nested / multi-level: ordered 1-3 levels) -->
       <div class="meta-toolbar__dropdown">
@@ -221,9 +238,11 @@ import MetaFilterGroup from './MetaFilterGroup.vue'
 // Slice-3 migrates the hide-fields dropdown onto MtPopover directly (NOT MtMenu — it's a
 // multi-toggle list, so selecting a row must not auto-close it). Slice-4 migrates the sort dropdown
 // onto MtPopover the same way (NOT MtMenu — it's a complex add/remove/update/apply builder, so its
-// panel content is preserved verbatim). The remaining dropdown triggers that open a
-// `.meta-toolbar__panel` (filter/group) are NOT touched in this slice — each is a more complex
-// builder deferred to a later slice.
+// panel content is preserved verbatim). Slice-5 migrates the filter dropdown the same way — the
+// most complex builder (nested field/operator/value controls + recursive AND/OR condition groups
+// via MetaFilterConditionRow/MetaFilterGroup), content preserved verbatim. The remaining dropdown
+// trigger that opens a `.meta-toolbar__panel` (group) is NOT touched in this slice — deferred to a
+// later slice.
 import { MtButton, MtIconButton, MtMenu, MtMenuItem, MtPopover } from '../ui'
 import { seedFilterCondition } from '../utils/filter-condition-seed'
 import {
@@ -437,6 +456,12 @@ function onAddFilterGroup() {
    inside MtPopover's own `.mt-popover` surface (which only pads top/bottom), so this class supplies
    the horizontal breathing room the old `.meta-toolbar__panel { padding: 8px }` gave the rows. */
 .meta-toolbar__sort-panel { padding: var(--ms-space-2); min-width: 200px; box-sizing: border-box; }
+/* Filter builder panel (UI-P2-1c slice-5): same rationale as the hide-fields/sort panels above —
+   hosted inside MtPopover's own `.mt-popover` surface (which only pads top/bottom), so this class
+   supplies the horizontal breathing room the old `.meta-toolbar__panel { padding: 8px }` gave the
+   builder rows. Combined with the pre-existing `.meta-toolbar__panel--filter` class (kept for its
+   `min-width: 420px`, and so it stays a stable selector for the filter-builder tests). */
+.meta-toolbar__filter-panel { padding: var(--ms-space-2); box-sizing: border-box; }
 .meta-toolbar__sort-rule, .meta-toolbar__filter-rule { display: flex; gap: 4px; margin-bottom: 4px; align-items: center; }
 .meta-toolbar__sort-rule select, .meta-toolbar__filter-rule select { padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
 .meta-toolbar__filter-value { flex: 1; min-width: 80px; padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
