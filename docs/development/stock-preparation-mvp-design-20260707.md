@@ -1,5 +1,12 @@
 # Stock Preparation MVP Design
 
+> **治理交叉引用(审阅补记 2026-07-07)**:本 MVP 设计叠加在已落地的备料 C0-C6 链之上
+> (templates / target-provisioning / option-sync / bom-expansion / conflict-planner+policies /
+> apply-writer / table-actions,均在 plugin-integration-core)。**C4 apply/write(ERP/K3 实写)
+> 维持 owner-gated 未授权(#2253)**——本文各 Delivery Phase 的任何"生成/写回"表述均指
+> multitable 内部表操作,不构成对外部写门的解锁;外部写解锁须 owner 显式批准并走其自身阶梯。
+
+
 Date: 2026-07-07
 
 ## Purpose
@@ -492,4 +499,3 @@ business table.
 - Should stock preparation line confirmation happen by project, by BOM snapshot,
   or by production order?
 - Which exceptions are blocking versus warning for the first customer rollout?
-
