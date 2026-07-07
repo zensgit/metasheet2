@@ -463,6 +463,20 @@ describe('Attendance import preview regression', () => {
     expect(apiFetchMock.mock.calls.some(call => String(call[0]).startsWith('/api/attendance/import/template'))).toBe(true)
     expect(createObjectURL).toHaveBeenCalledTimes(1)
     expect(container!.textContent).toContain('CSV template downloaded.')
+
+    // The fallback download exit also ships an example row (#3793 NIT-3
+    // harmonization) — not an empty line.
+    const fallbackBlob = createObjectURL.mock.calls[0][0] as Blob
+    const fallbackBytes = await new Promise<Uint8Array>((resolve) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer))
+      reader.readAsArrayBuffer(fallbackBlob)
+    })
+    const fallbackLines = new TextDecoder('utf-8').decode(fallbackBytes).replace(/^\ufeff/, '').split('\n').filter(Boolean)
+    expect(fallbackLines).toHaveLength(2)
+    expect(fallbackLines[1]).toContain('2026-06-01')
+    expect(fallbackLines[1]).toContain('EMP001')
+    expect(fallbackLines[1]).toContain('2026-06-01 09:00')
   })
 
   it('one-click download never destroys a hand-edited payload: errors instead of auto-loading', async () => {
