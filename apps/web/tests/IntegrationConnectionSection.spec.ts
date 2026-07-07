@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App as VueApp, type Component } from 'vue'
+import { createApp, defineComponent, h, nextTick, reactive, type App as VueApp, type Component } from 'vue'
 import IntegrationConnectionSection from '../src/components/integration/IntegrationConnectionSection.vue'
 import type { IntegrationAdapterMetadata, WorkbenchExternalSystem } from '../src/services/integration/workbench'
 import type { ConnectionDraft } from '../src/components/integration/integrationWorkbenchSectionTypes'
@@ -149,5 +149,66 @@ describe('IntegrationConnectionSection (unit)', () => {
     }
     await nextTick()
     expect(connectionDraft.name).toBe('K3 WISE WebAPI')
+  })
+
+  // IU-5a (design-lock §2 IU-5, sites 1 "connection-draft-config" + 2
+  // "connection-draft-capabilities"): the JsonAssist strip is a side-mount next to the raw
+  // textareas above — these tests are additive, the assertions above are untouched.
+  it('renders a JsonAssist strip beside both the config and capabilities JSON textareas', async () => {
+    await mountSection(baseProps())
+    expect(container?.querySelector('[data-testid="connection-draft-config-json-assist"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="connection-draft-config-json-format"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="connection-draft-config-json-status"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="connection-draft-capabilities-json-assist"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="connection-draft-capabilities-json-format"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="connection-draft-capabilities-json-status"]')).toBeTruthy()
+    // The raw textareas keep their own data-testids exactly as before — JsonAssist never
+    // replaces them.
+    expect(container?.querySelector('[data-testid="connection-draft-config"]')?.tagName).toBe('TEXTAREA')
+    expect(container?.querySelector('[data-testid="connection-draft-capabilities"]')?.tagName).toBe('TEXTAREA')
+  })
+
+  it('formats the config JSON via the JsonAssist format button, mutating connectionDraft in place', async () => {
+    // `reactive()` here mirrors the parent view's real `connectionDraft` (a `reactive(...)`
+    // object per this file's own extraction-comment above) — plain-object props (as the earlier,
+    // pre-existing "mutates connectionDraft…" test above uses) only prove the raw JS write
+    // happened, not that the DOM/sibling JsonAssist reacted to it; a genuine reactive proxy is
+    // needed to observe the format button's downstream effect.
+    const connectionDraft = reactive<ConnectionDraft>({ ...emptyConnectionDraft, configText: '{"a":1,"b":2}' })
+    await mountSection(baseProps({ connectionDraft }))
+    const formatButton = container?.querySelector<HTMLButtonElement>('[data-testid="connection-draft-config-json-format"]')
+    expect(formatButton?.disabled).toBe(false)
+    formatButton?.click()
+    await nextTick()
+    expect(connectionDraft.configText).toBe('{\n  "a": 1,\n  "b": 2\n}')
+  })
+
+  it('flips the config JsonAssist status line to invalid when the textarea is edited to malformed JSON', async () => {
+    const connectionDraft = reactive<ConnectionDraft>({ ...emptyConnectionDraft })
+    await mountSection(baseProps({ connectionDraft }))
+    const textarea = container?.querySelector<HTMLTextAreaElement>('[data-testid="connection-draft-config"]')
+    expect(textarea).toBeTruthy()
+    if (textarea) {
+      textarea.value = '{"a": 1,}'
+      textarea.dispatchEvent(new Event('input'))
+    }
+    await nextTick()
+    const status = container?.querySelector('[data-testid="connection-draft-config-json-status"]')
+    expect(status?.getAttribute('data-status')).toBe('invalid')
+  })
+
+  it('does not render the K3 WISE setup-wizard hint for a non-K3 kind', async () => {
+    const connectionDraft: ConnectionDraft = { ...emptyConnectionDraft, kind: 'http' }
+    await mountSection(baseProps({ connectionDraft }))
+    expect(container?.querySelector('[data-testid="connection-draft-k3-setup-hint"]')).toBeFalsy()
+  })
+
+  it('renders the K3 WISE setup-wizard hint + link when the erp:k3-wise-webapi kind is selected', async () => {
+    const connectionDraft: ConnectionDraft = { ...emptyConnectionDraft, kind: 'erp:k3-wise-webapi' }
+    await mountSection(baseProps({ connectionDraft }))
+    const hint = container?.querySelector('[data-testid="connection-draft-k3-setup-hint"]')
+    expect(hint).toBeTruthy()
+    const link = container?.querySelector<HTMLAnchorElement>('[data-testid="connection-draft-k3-setup-link"]')
+    expect(link).toBeTruthy()
   })
 })

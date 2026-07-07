@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App as VueApp, type Component } from 'vue'
+import { createApp, defineComponent, h, nextTick, reactive, type App as VueApp, type Component } from 'vue'
 import IntegrationPayloadPreviewSection from '../src/components/integration/IntegrationPayloadPreviewSection.vue'
 import type { WorkbenchExternalSystem } from '../src/services/integration/workbench'
 
@@ -41,6 +41,42 @@ describe('IntegrationPayloadPreviewSection (unit)', () => {
     app.component('ElCard', ElCard)
     app.mount(container)
     await nextTick()
+  }
+
+  // IU-5a: `mountSection` above hands the child a *static* props object — fine for asserting a
+  // single emit (`onUpdate:x` spy called once), but a plain-object/static-prop host can never
+  // show a downstream sibling (JsonAssist) picking up a v-model change, because the host itself
+  // never re-renders on emit (see jsonAssist.spec.ts's sibling-propagation note for why). The
+  // real parent view (IntegrationWorkbenchView.vue) *does* re-render on emit, since its
+  // `sampleRecordText`/`payloadTemplateText` are refs bound via `v-model:sample-record-text=`
+  // etc. — this helper reproduces that same live two-way loop locally so the
+  // "textarea edit -> JsonAssist status" tests exercise genuine reactivity, not a frozen snapshot.
+  async function mountSectionControlled(
+    overrides: Record<string, unknown> = {},
+  ): Promise<{ state: { sampleRecordText: string; payloadTemplateText: string } }> {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    const state = reactive({
+      sampleRecordText: (overrides.sampleRecordText as string | undefined) ?? '{}',
+      payloadTemplateText: (overrides.payloadTemplateText as string | undefined) ?? '',
+    })
+    const staticProps = baseProps(overrides)
+    const Host = defineComponent({
+      setup() {
+        return () => h(IntegrationPayloadPreviewSection as unknown as Component, {
+          ...staticProps,
+          sampleRecordText: state.sampleRecordText,
+          'onUpdate:sampleRecordText': (value: string) => { state.sampleRecordText = value },
+          payloadTemplateText: state.payloadTemplateText,
+          'onUpdate:payloadTemplateText': (value: string) => { state.payloadTemplateText = value },
+        })
+      },
+    })
+    app = createApp(Host)
+    app.component('ElCard', ElCard)
+    app.mount(container)
+    await nextTick()
+    return { state }
   }
 
   const noopFn = (..._args: unknown[]): unknown => undefined
@@ -98,5 +134,52 @@ describe('IntegrationPayloadPreviewSection (unit)', () => {
     }
     await nextTick()
     expect(onRefMappingObjectChange).toHaveBeenCalledWith('plm_material', 'staging_table')
+  })
+
+  // IU-5a (design-lock §2 IU-5, sites 3 "sample-record" + 4 "payload-template"): JsonAssist is a
+  // side-mount next to the raw textareas above — these tests are additive, the assertions above
+  // are untouched.
+  it('renders a JsonAssist strip beside both the sample-record and payload-template textareas', async () => {
+    await mountSection(baseProps())
+    expect(container?.querySelector('[data-testid="sample-record-json-assist"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="sample-record-json-format"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="sample-record-json-status"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="payload-template-json-assist"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="payload-template-json-format"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="payload-template-json-status"]')).toBeTruthy()
+    // The raw textareas keep their own data-testids exactly as before — JsonAssist never
+    // replaces them.
+    expect(container?.querySelector('[data-testid="sample-record"]')?.tagName).toBe('TEXTAREA')
+    expect(container?.querySelector('[data-testid="payload-template"]')?.tagName).toBe('TEXTAREA')
+  })
+
+  it('formats the sample-record JSON via the JsonAssist format button and emits update:sampleRecordText', async () => {
+    const onUpdateSampleRecordText = vi.fn(noopFn)
+    await mountSection(baseProps({ sampleRecordText: '{"materialCode":"X","qty":1}', 'onUpdate:sampleRecordText': onUpdateSampleRecordText }))
+    const formatButton = container?.querySelector<HTMLButtonElement>('[data-testid="sample-record-json-format"]')
+    expect(formatButton?.disabled).toBe(false)
+    formatButton?.click()
+    await nextTick()
+    expect(onUpdateSampleRecordText).toHaveBeenCalledWith('{\n  "materialCode": "X",\n  "qty": 1\n}')
+  })
+
+  it('flips the payload-template JsonAssist status to invalid when the textarea holds malformed JSON', async () => {
+    await mountSectionControlled()
+    const textarea = container?.querySelector<HTMLTextAreaElement>('[data-testid="payload-template"]')
+    expect(textarea).toBeTruthy()
+    if (textarea) {
+      textarea.value = '{"FNumber": ,}'
+      textarea.dispatchEvent(new Event('input'))
+    }
+    await nextTick()
+    const status = container?.querySelector('[data-testid="payload-template-json-status"]')
+    expect(status?.getAttribute('data-status')).toBe('invalid')
+  })
+
+  it('shows the values-free placeholder example on the payload-template status line while empty', async () => {
+    await mountSection(baseProps({ payloadTemplateText: '' }))
+    const status = container?.querySelector('[data-testid="payload-template-json-status"]')
+    expect(status?.getAttribute('data-status')).toBe('empty')
+    expect(status?.textContent).toContain('FNumber')
   })
 })

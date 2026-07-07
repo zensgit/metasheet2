@@ -13,7 +13,10 @@
 #      composition service layer, the IU-1 error-code label module + its mirror tripwire, the two
 #      dead-letter display views (Workbench + K3 WISE setup) that carry the IU-1 RATIFIED
 #      errorMessage-never-renders-raw addendum, the IU-6b field-hint module, and the IU-6c help-center
-#      view (whose error-code table is a single-source tripwire on the IU-1 label module).
+#      view (whose error-code table is a single-source tripwire on the IU-1 label module), and the
+#      IU-5a JsonAssist helper (shared format/validate strip for connection-config/capabilities +
+#      sample-record/payload-template JSON textareas) whose own no-echo sentinel guarantees a
+#      JSON.parse SyntaxError's offending-text snippet is never rendered into the status line.
 # Expand the spec list as more integration web specs are added.
 name: Integration Guard
 
@@ -44,6 +47,8 @@ on:
       - 'apps/web/src/components/integration/IntegrationTableActionsPanel.vue'
       - 'apps/web/src/components/integration/IntegrationFieldOptionSyncPanel.vue'
       - 'apps/web/src/components/integration/integrationWorkbenchSectionTypes.ts'
+      - 'apps/web/src/components/integration/JsonAssist.vue'
+      - 'apps/web/src/utils/jsonAssist.ts'
       - 'apps/web/src/views/IntegrationWorkbenchView.vue'
       - 'apps/web/src/views/IntegrationK3WiseSetupView.vue'
       - 'apps/web/src/views/IntegrationHelpView.vue'
@@ -73,6 +78,8 @@ on:
       - 'apps/web/tests/IntegrationFieldOptionSyncPanel.spec.ts'
       - 'apps/web/tests/IntegrationK3WiseSetupView.spec.ts'
       - 'apps/web/tests/IntegrationHelpView.spec.ts'
+      - 'apps/web/tests/JsonAssist.spec.ts'
+      - 'apps/web/tests/utils/jsonAssist.spec.ts'
       - '.github/workflows/integration-guard.yml'
   push:
     branches: [main]
@@ -101,6 +108,8 @@ on:
       - 'apps/web/src/components/integration/IntegrationTableActionsPanel.vue'
       - 'apps/web/src/components/integration/IntegrationFieldOptionSyncPanel.vue'
       - 'apps/web/src/components/integration/integrationWorkbenchSectionTypes.ts'
+      - 'apps/web/src/components/integration/JsonAssist.vue'
+      - 'apps/web/src/utils/jsonAssist.ts'
       - 'apps/web/src/views/IntegrationWorkbenchView.vue'
       - 'apps/web/src/views/IntegrationK3WiseSetupView.vue'
       - 'apps/web/src/views/IntegrationHelpView.vue'
@@ -130,6 +139,8 @@ on:
       - 'apps/web/tests/IntegrationFieldOptionSyncPanel.spec.ts'
       - 'apps/web/tests/IntegrationK3WiseSetupView.spec.ts'
       - 'apps/web/tests/IntegrationHelpView.spec.ts'
+      - 'apps/web/tests/JsonAssist.spec.ts'
+      - 'apps/web/tests/utils/jsonAssist.spec.ts'
       - '.github/workflows/integration-guard.yml'
 
 jobs:
@@ -178,3 +189,4 @@ jobs:
         run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView --reporter=dot
         run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel IntegrationK3WiseSetupView IntegrationHelpView --reporter=dot
         run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints readSourceModePresets IntegrationReadSourceConfigPanel IntegrationReadSourceWizard IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationK3WiseSetupView IntegrationHelpView --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationK3WiseSetupView IntegrationHelpView JsonAssist --reporter=dot
