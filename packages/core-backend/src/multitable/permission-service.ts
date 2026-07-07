@@ -46,7 +46,8 @@ import {
 import { filterPermissionCodesByNamespaceAdmission } from '../rbac/namespace-admission'
 import {
   APPROVAL_PROJECTION_BASE_ID,
-  restrictApprovalProjectionCapabilities,
+  restrictApprovalProjectionCapabilitiesPerRow,
+  isApprovalProjectionBaseId,
 } from './approval-projection-constants'
 import {
   parseConditionalRules,
@@ -916,11 +917,102 @@ export async function loadFieldPermissionScopeMap(
 export async function loadRowLevelReadDenyEnabled(query: QueryFn, sheetId: string): Promise<boolean> {
   if (!sheetId) return false
   try {
-    const r = await query('SELECT row_level_read_permissions_enabled AS enabled FROM meta_sheets WHERE id = $1', [sheetId])
-    return (r.rows[0] as { enabled?: boolean } | undefined)?.enabled === true
+    // T36-1 (per-row visibility lock, Plan A): projection sheets are ALWAYS row-level-read-gated —
+    // participants read only their own rows via loadDeniedRecordIds' projection branch. Folding the
+    // switch into this single predicate activates the deny choke on EVERY read surface the W1-2
+    // permission-matrix goldens already lock to it (5 records:read routes, export, history), with
+    // the existing admin bypass at each call site untouched.
+    const r = await query(
+      'SELECT row_level_read_permissions_enabled AS enabled, base_id FROM meta_sheets WHERE id = $1',
+      [sheetId],
+    )
+    const row = r.rows[0] as { enabled?: boolean; base_id?: string } | undefined
+    if (isApprovalProjectionBaseId(row?.base_id)) return true
+    return row?.enabled === true
   } catch {
     return false
   }
+}
+
+/**
+ * T36-1 (Plan A): of the given sheet ids, the approval-projection sheets where `userId` is a
+ * PARTICIPANT in ≥1 row (row's own requesterId/approverId — zero new storage). Fail-closed: any
+ * error → empty set → the caller treats the actor as a non-participant (full fence).
+ */
+export async function loadApprovalProjectionParticipantSheetIds(
+  query: QueryFn,
+  sheetIds: string[],
+  userId: string,
+): Promise<Set<string>> {
+  if (sheetIds.length === 0 || !userId) return new Set()
+  try {
+    const result = await query(
+      `SELECT DISTINCT s.id
+         FROM meta_sheets s
+         JOIN meta_records r ON r.sheet_id = s.id
+        WHERE s.id = ANY($1::text[])
+          AND s.base_id = $2
+          AND (r.data->>'requesterId' = $3 OR r.data->>'approverId' = $3)`,
+      [sheetIds, APPROVAL_PROJECTION_BASE_ID, userId],
+    )
+    return new Set((result.rows as Array<{ id: string }>).map((row) => row.id))
+  } catch {
+    return new Set()
+  }
+}
+
+/**
+ * T36-1 review P1: record-level read deny for the Yjs auth gate. Sheet-level `canRead` is not
+ * enough once participants exist — a participant on ONE projection row must not subscribe to
+ * OTHER rows' Y.Docs (the doc seeder loads the record's full `data`). Gates internally on
+ * `loadRowLevelReadDenyEnabled` so generic flag-off sheets pay zero extra queries; callers pass
+ * non-admin actors only (admins bypass at the call site, same convention as every deny consumer).
+ * DENY-WINS: any unexpected error propagates (the adapter's auth check fails closed to no-access).
+ */
+export async function isRecordReadDeniedForUser(
+  query: QueryFn,
+  sheetId: string,
+  recordId: string,
+  userId: string,
+): Promise<boolean> {
+  if (!sheetId || !recordId) return true
+  if (!(await loadRowLevelReadDenyEnabled(query, sheetId))) return false
+  return (await loadDeniedRecordIds(query, sheetId, userId)).has(recordId)
+}
+
+/**
+ * T36-1 (Plan A): for a projection sheet, the record ids `userId` may NOT read — every row where
+ * they are neither the requester nor the terminal decider. NULL/missing participant fields never
+ * match the actor, so corrupt rows land in the denied set (fail-closed, lock §3). Returns empty
+ * for non-projection sheets so the generic deny paths are untouched. On an unexpected query error
+ * this THROWS (matching loadDeniedRecordIds' rethrow contract) — the whole read fails rather than
+ * ever serving unfiltered projection rows (fail-closed, lock §3).
+ */
+export async function loadApprovalProjectionDeniedRecordIds(
+  query: QueryFn,
+  sheetId: string,
+  userId: string,
+): Promise<{ isProjection: boolean; denied: Set<string> }> {
+  if (!sheetId) return { isProjection: false, denied: new Set() }
+  const projectionIds = await loadApprovalProjectionSheetIds(query, [sheetId])
+  if (!projectionIds.has(sheetId)) return { isProjection: false, denied: new Set() }
+  // COALESCE closes the SQL three-valued-logic hole: a row with a MISSING participant field
+  // yields NULL comparisons, and `NOT (NULL OR NULL)` is NULL — the corrupt row would silently
+  // escape the denied set (fail-OPEN). With COALESCE to '' it can never equal a real user id, so
+  // corrupt rows are always denied (lock §3 fail-closed). An empty/absent actor id denies every
+  // row for the same reason ('' is matched against COALESCE'd '' explicitly guarded out below).
+  const normalizedUserId = typeof userId === 'string' ? userId.trim() : ''
+  if (!normalizedUserId) {
+    const all = await query('SELECT id FROM meta_records WHERE sheet_id = $1', [sheetId])
+    return { isProjection: true, denied: new Set((all.rows as Array<{ id: string }>).map((row) => row.id)) }
+  }
+  const result = await query(
+    `SELECT id FROM meta_records
+      WHERE sheet_id = $1
+        AND NOT (COALESCE(data->>'requesterId', '') = $2 OR COALESCE(data->>'approverId', '') = $2)`,
+    [sheetId, normalizedUserId],
+  )
+  return { isProjection: true, denied: new Set((result.rows as Array<{ id: string }>).map((row) => row.id)) }
 }
 
 export async function loadRecordPermissionScopeMap(
@@ -999,6 +1091,21 @@ export async function loadRecordPermissionScopeMap(
         scopes.set(rid, { recordId: rid, accessLevel: 'none' })
       }
     }
+    // T36-1 (Plan A): on a projection sheet, non-participant rows get a synthetic 'none' scope
+    // (DENY-WINS, same shape as rule-deny). Admins bypass at the call sites, unchanged.
+    const projection = await loadApprovalProjectionDeniedRecordIds(query, sheetId, userId)
+    if (projection.isProjection) {
+      const requested = new Set(recordIds)
+      for (const rid of projection.denied) {
+        if (!requested.has(rid)) continue
+        const existing = scopes.get(rid)
+        if (existing) {
+          if (rank.none > rank[existing.accessLevel]) existing.accessLevel = 'none'
+        } else {
+          scopes.set(rid, { recordId: rid, accessLevel: 'none' })
+        }
+      }
+    }
   }
   return scopes
 }
@@ -1055,6 +1162,13 @@ export async function loadDeniedRecordIds(query: QueryFn, sheetId: string, userI
   // rule-denied record is masked/excluded EXACTLY like a grant-denied one by every surface that
   // consumes this set (admin-bypass + no-cardinality-leak inherited from #18). DENY-WINS by union.
   for (const id of await loadRuleDeniedRecordIds(query, sheetId)) denied.add(id)
+  // (c) T36-1 projection per-row (Plan A): on a projection sheet, every row where the actor is
+  // neither requester nor terminal decider is denied — unioned in like (a)/(b), so all W1-2-locked
+  // consumers (records:read routes, export, history) narrow participants to their own rows.
+  const projection = await loadApprovalProjectionDeniedRecordIds(query, sheetId, userId)
+  if (projection.isProjection) {
+    for (const id of projection.denied) denied.add(id)
+  }
   return denied
 }
 
@@ -1184,6 +1298,13 @@ export async function hasRecordPermissionAssignments(
   // (never a 500). record_permissions above stays unconditional (it is not flag-gated); only the 2b rule
   // check is gated here.
   if (!(await loadRowLevelReadDenyEnabled(query, sheetId))) return false
+  // T36-1 review P1: the MAIN record-read surfaces (view/list/single-GET/record-history/AI
+  // preview) gate their row filtering on THIS predicate — and a projection sheet has neither
+  // record_permissions rows nor conditional rules, so without this branch the entire filter
+  // block is skipped and a participant reads every other user's projection rows. Projection
+  // sheets therefore ALWAYS report assignments (their per-row participant scopes are synthesized
+  // by loadRecordPermissionScopeMap / loadDeniedRecordIds).
+  if ((await loadApprovalProjectionSheetIds(query, [sheetId])).has(sheetId)) return true
   try {
     const r = await query(
       `SELECT 1 FROM meta_sheets WHERE id = $1 AND jsonb_array_length(COALESCE(conditional_read_rules, '[]'::jsonb)) > 0 LIMIT 1`,
@@ -1445,9 +1566,16 @@ export async function filterReadableSheetRowsForAccess<T extends { id: string }>
   // A: exclude approval projection sheets from a non-admin's readable/listing set (admins returned above).
   // This is the shared sheet-listing gate (base list + sheet lists), so it also hides the projection BASE
   // from a non-admin's base list (a base surfaces only if it has ≥1 readable sheet).
+  // T36-1 (Plan A): PARTICIPANTS (≥1 projection row carrying their id) keep their sheets in the
+  // listing — their rows are then narrowed by the row-deny choke. Non-participants keep the full
+  // fence: the sheet (and hence the base) never surfaces. Fail-closed: participant lookup errors
+  // resolve to non-participant.
   const projectionSheetIds = await loadApprovalProjectionSheetIds(query, sheetRows.map((row) => String(row.id)))
+  const participantSheetIds = projectionSheetIds.size > 0
+    ? await loadApprovalProjectionParticipantSheetIds(query, Array.from(projectionSheetIds), access.userId)
+    : new Set<string>()
   return sheetRows.filter((row) =>
-    !projectionSheetIds.has(String(row.id)) &&
+    (!projectionSheetIds.has(String(row.id)) || participantSheetIds.has(String(row.id))) &&
     canReadWithSheetGrant(
       effectiveCapabilities,
       scopeMap.get(String(row.id)),
@@ -1484,10 +1612,12 @@ export async function resolveSheetCapabilities(
   const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
   const sheetScope = scopeMap.get(sheetId)
   let capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, access.isAdminRole)
-  // A: the approval projection base is admin-only — a non-admin with global `multitable:read` is denied
-  // read/export/write on its sheets + records (fail-closed at this shared read choke).
+  // A + T36-1 (Plan A): the approval projection base stays admin-only on the write/manage plane;
+  // a non-admin PARTICIPANT keeps the read plane (rows narrowed to their own by the row-deny
+  // choke), any other non-admin keeps the original full fence (fail-closed on lookup errors).
   if (!access.isAdminRole && (await loadApprovalProjectionSheetIds(query, [sheetId])).has(sheetId)) {
-    capabilities = restrictApprovalProjectionCapabilities(capabilities, true, false)
+    const isParticipant = (await loadApprovalProjectionParticipantSheetIds(query, [sheetId], access.userId)).has(sheetId)
+    capabilities = restrictApprovalProjectionCapabilitiesPerRow(capabilities, true, false, isParticipant)
   }
   return {
     access,

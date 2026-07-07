@@ -56,3 +56,33 @@ export function restrictApprovalProjectionCapabilities<T extends { canRead: bool
   }
   return denied as T
 }
+
+/**
+ * T36-1 (per-row visibility lock, RATIFIED Plan A): the read-plane capability keys a PARTICIPANT
+ * (projection row carries their id as requesterId or approverId) keeps on a projection sheet.
+ * Export stays read-parity (the W1-2 G-7 export⊆read differential holds because export rides the
+ * same row-deny choke). Everything else — write / fields / views / comments / automation — stays
+ * denied for every non-admin: the projection is a system-owned read model.
+ */
+const PROJECTION_PARTICIPANT_READ_KEYS = new Set(['canRead', 'canExport'])
+
+/**
+ * Participant-aware variant of the fence: admins unaffected; non-admin PARTICIPANTS keep the
+ * read plane (rows are then narrowed to their own by the row-deny choke); non-admin
+ * NON-participants get the original full fence (no drift from the ratified admin-only behavior —
+ * they never learn the sheet exists). Pure — the caller decides participant status (via
+ * `loadApprovalProjectionParticipantSheetIds`, fail-closed to non-participant on any error).
+ */
+export function restrictApprovalProjectionCapabilitiesPerRow<T extends { canRead: boolean }>(
+  capabilities: T,
+  isProjectionSheet: boolean,
+  isAdminRole: boolean,
+  isParticipant: boolean,
+): T {
+  if (!isProjectionSheet || isAdminRole) return capabilities
+  const denied: Record<string, unknown> = { ...capabilities }
+  for (const key of PROJECTION_DENY_CAPABILITY_KEYS) {
+    if (key in denied) denied[key] = isParticipant && PROJECTION_PARTICIPANT_READ_KEYS.has(key) ? denied[key] : false
+  }
+  return denied as T
+}

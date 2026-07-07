@@ -71,6 +71,10 @@ export default defineConfig({
       'tests/integration/automation-dingtalk-approval-card-action.test.ts',
       // A-4 card-delivery wrapper: DATABASE_URL-gated. Same two-point wiring (no skip-green).
       'tests/integration/approval-card-delivery-wrapper.db.test.ts',
+      // T36-1: projection per-row participant read + the #3537 fence goldens (both were previously
+      // wired into NO workflow — skip-green; now run in plugin-tests' approval real-DB step).
+      'tests/integration/approval-projection-visibility.db.test.ts',
+      'tests/integration/approval-projection-participant-read.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
