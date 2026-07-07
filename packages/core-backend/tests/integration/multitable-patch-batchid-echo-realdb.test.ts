@@ -14,9 +14,11 @@
  *     matching every record's persisted `batch_id` — mirrors the AI-route sharing golden (G2), but for the
  *     plain grid PATCH path.
  *
- * Out of scope (left exactly as-is, LOCK-12): the `partialSuccess` branch of `/patch` calls
- * `patchRecords` ONCE PER RECORD with no shared batchId — each record there mints its OWN batch. That is a
- * pre-existing gap noted in the route's own W3-5b comment, not something this suite touches.
+ * Not covered here (see `multitable-lock12-partialsuccess-shared-batch-realdb.test.ts` instead): the
+ * `partialSuccess` branch of `/patch` calls `patchRecords` ONCE PER RECORD, but as of the LOCK-12 fix it
+ * threads ONE server-minted batchId into every one of those calls, so all applied records in a single
+ * partial-success `/patch` request still share ONE History Center batch (skipped/denied records simply
+ * aren't in it). This suite only exercises the all-or-nothing (non-partialSuccess) branch.
  *
  * Runs only with DATABASE_URL (sentinel fails-not-skips in CI, matching this repo's real-DB suites).
  */
