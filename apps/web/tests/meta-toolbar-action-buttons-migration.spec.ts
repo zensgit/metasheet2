@@ -11,13 +11,20 @@ import { useLocale } from '../src/composables/useLocale'
 // emits the exact same event (same name, same — absent — payload) it emitted before migration, and
 // disabled ones must still carry the native `disabled` attribute so a click never fires the emit.
 
-let app: App<Element> | null = null
-let container: HTMLDivElement | null = null
+// Track EVERY mount, not a single shared app/container: several tests mount the toolbar twice (the
+// present-vs-absent-by-prop cases), and a shared global would leave the first tree in document.body
+// after teardown — DOM pollution that risks false-pass / cross-talk once later slices migrate more
+// toolbar controls. afterEach unmounts ALL of them and asserts no toolbar DOM survives.
+const mounts: Array<{ app: App<Element>; container: HTMLDivElement }> = []
 
 beforeEach(() => { useLocale().setLocale('en') })
 afterEach(() => {
-  app?.unmount(); app = null
-  container?.remove(); container = null
+  while (mounts.length) {
+    const m = mounts.pop()!
+    m.app.unmount()
+    m.container.remove()
+  }
+  expect(document.querySelectorAll('.meta-toolbar').length).toBe(0) // residue guard: no leaked toolbar
   useLocale().setLocale('en')
 })
 
@@ -26,13 +33,14 @@ const FIELDS: MetaField[] = [
 ]
 
 function mountToolbar(props: Record<string, unknown>) {
-  container = document.createElement('div'); document.body.appendChild(container)
-  app = createApp({ setup: () => () => h(MetaToolbar, {
+  const container = document.createElement('div'); document.body.appendChild(container)
+  const app = createApp({ setup: () => () => h(MetaToolbar, {
     fields: FIELDS, hiddenFieldIds: [], sortRules: [], filterRules: [], filterConjunction: 'and',
     canCreateRecord: true, canExport: true, canUndo: true, canRedo: true, sortFilterDirty: false,
     ...props,
   }) })
   app.mount(container)
+  mounts.push({ app, container })
   return container
 }
 
