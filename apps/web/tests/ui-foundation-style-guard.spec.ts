@@ -5,10 +5,11 @@ import { describe, expect, it } from 'vitest'
 // UI foundation design-lock (docs/development/ui-foundation-design-lock-20260706.md §6 UF-6):
 // "ESLint 禁 style="（存量 57 处清零）+ 表单布局工具类；同时加「新增硬编码 hex」lint"。
 //
-// Mechanism note: the installed eslint-plugin-vue version has no `vue/no-static-inline-styles`
-// rule (checked — see the UF-6 landing commit body), and there is no built-in ESLint rule for
-// "hex/rgb literal inside a <style> block" at all. So this fs-level source guard IS the gate for
-// both halves of UF-6, not a supplement to an ESLint rule.
+// Mechanism note: `vue/no-static-inline-styles` IS configured (apps/web/.eslintrc.cjs override,
+// scoped to this same file set) — but apps/web's `lint` script runs an explicit file list that
+// today covers only 2 of these 21 files, and no ESLint rule can police "hex/rgb literal inside a
+// <style> block" at all. So this fs-level source guard is the CI-enforced gate for both halves
+// of UF-6; the ESLint rule is IDE feedback + future-glob insurance.
 //
 // Scope = the exact UF surface set named in the design-lock: the approval views, the shared
 // automation rule editor/manager, the workflow hub/designer, and the shared layout/status
