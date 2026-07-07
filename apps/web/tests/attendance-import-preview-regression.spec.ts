@@ -423,7 +423,7 @@ describe('Attendance import preview regression', () => {
     findButton(picker!, 'Download template (selected fields)').click()
     await flushUi(2)
     expect(createObjectURL).toHaveBeenCalledTimes(1)
-    expect(container!.textContent).toContain('CSV template downloaded (9 columns).')
+    expect(container!.textContent).toContain('CSV template downloaded (9 columns, with an example row).')
     const downloadedBlob = createObjectURL.mock.calls[0][0] as Blob
     // readAsText strips the BOM during decode (per spec) — check raw bytes.
     const downloadedBytes = await new Promise<Uint8Array>((resolve) => {
@@ -433,6 +433,13 @@ describe('Attendance import preview regression', () => {
     })
     expect([downloadedBytes[0], downloadedBytes[1], downloadedBytes[2]], 'download carries the Excel BOM (EF BB BF)')
       .toEqual([0xef, 0xbb, 0xbf])
+    // The download now carries a second (example) row, not an empty line.
+    const downloadedText = new TextDecoder('utf-8').decode(downloadedBytes)
+    const lines = downloadedText.replace(/^﻿/, '').split('\n').filter(Boolean)
+    expect(lines).toHaveLength(2)
+    expect(lines[1]).toContain('2026-06-01')
+    expect(lines[1]).toContain('EMP001')
+    expect(lines[1]).toContain('张三')
   })
 
   it('one-click template download: works from a cold panel by auto-loading first', async () => {

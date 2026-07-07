@@ -9801,6 +9801,7 @@ import {
   IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS,
   allSelectableImportFieldKeys,
   buildImportColumnFormatRows,
+  buildTemplateExampleRow,
   buildTemplateHeaderFromSelection,
   groupSupportedImportColumns,
   type AttendanceImportColumnRequirement,
@@ -18325,11 +18326,15 @@ function downloadImportSelectedTemplateCsv() {
     setStatus(tr('Load the import template to pick fields first.', '请先加载导入模板并勾选字段。'), 'error')
     return
   }
-  const csv = `${header.map(escapeCsvCell).join(',')}\n${header.map(() => '').join(',')}\n`
+  // Ship a concrete example row per selected column (template-example-row
+  // design-lock), like the backend template.csv — so the picked-fields
+  // template shows the format by example, not an empty line.
+  const exampleRow = buildTemplateExampleRow(importColumnFormatRows.value, header)
+  const csv = `${header.map(escapeCsvCell).join(',')}\n${exampleRow.map(escapeCsvCell).join(',')}\n`
   triggerImportCsvDownload('attendance-import-template-selected.csv', csv)
   setStatus(tr(
-    `CSV template downloaded (${header.length} columns).`,
-    `CSV 模板已下载（${header.length} 列）。`,
+    `CSV template downloaded (${header.length} columns, with an example row).`,
+    `CSV 模板已下载（${header.length} 列，含示例行）。`,
   ))
 }
 
