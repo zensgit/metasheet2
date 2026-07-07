@@ -37,6 +37,10 @@ function rawJsonResponse(data: unknown): Response {
 async function flushUi(cycles = 5): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
+    // Macrotask hop: drain timer-scheduled continuations too. Microtask+nextTick alone is enough on
+    // newer Node schedulers but NOT on Node 20 (the CI runtime) — these specs' first CI run exposed
+    // that the fetch-mock chains need a timer turn before the view leaves its loading state.
+    await new Promise((resolve) => setTimeout(resolve, 0))
     await nextTick()
   }
 }
