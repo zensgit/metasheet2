@@ -102,8 +102,13 @@ on:
       - 'apps/web/src/multitable/components/MetaAutomationManager.vue'
       - 'apps/web/src/multitable/components/MetaAutomationRuleEditor.vue'
       # IU-2a — Workbench chrome slice added to the UF-6 hex/rgb + static-style= guard set.
+      # IU-2b — the three extracted section components copy CSS verbatim from the (already
+      # token-only) parent, so they join the same guard set from day one.
       - 'apps/web/src/views/IntegrationWorkbenchView.vue'
       - 'apps/web/src/components/integration/IntegrationWorkbenchRail.vue'
+      - 'apps/web/src/components/integration/IntegrationMonitoringSection.vue'
+      - 'apps/web/src/components/integration/IntegrationCleaningDatasetSection.vue'
+      - 'apps/web/src/components/integration/IntegrationMappingRulesSection.vue'
       - 'apps/web/src/styles/form-layout-utilities.css'
       - 'apps/web/.eslintrc.cjs'
       - 'apps/web/tests/ui-foundation-style-guard.spec.ts'
@@ -201,8 +206,13 @@ on:
       - 'apps/web/src/multitable/components/MetaAutomationManager.vue'
       - 'apps/web/src/multitable/components/MetaAutomationRuleEditor.vue'
       # IU-2a — Workbench chrome slice added to the UF-6 hex/rgb + static-style= guard set.
+      # IU-2b — the three extracted section components copy CSS verbatim from the (already
+      # token-only) parent, so they join the same guard set from day one.
       - 'apps/web/src/views/IntegrationWorkbenchView.vue'
       - 'apps/web/src/components/integration/IntegrationWorkbenchRail.vue'
+      - 'apps/web/src/components/integration/IntegrationMonitoringSection.vue'
+      - 'apps/web/src/components/integration/IntegrationCleaningDatasetSection.vue'
+      - 'apps/web/src/components/integration/IntegrationMappingRulesSection.vue'
       - 'apps/web/src/styles/form-layout-utilities.css'
       - 'apps/web/.eslintrc.cjs'
       - 'apps/web/tests/ui-foundation-style-guard.spec.ts'
