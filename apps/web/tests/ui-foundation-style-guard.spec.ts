@@ -68,6 +68,9 @@ const TARGET_FILES = [
   // IU-3 (docs/development/integration-iu3-read-source-wizard-design-lock-20260707.md, #3797):
   // brand-new wizard component, clean from the start (no legacy hex to migrate).
   'src/components/integration/IntegrationReadSourceWizard.vue',
+  // Integration lane F (same design-lock §3 hard locks, UF-1 token-only): the K3 WISE setup
+  // view's 107 hardcoded hex literals were mapped onto var(--ms-*)/--el-* tokens.
+  'src/views/IntegrationK3WiseSetupView.vue',
 ] as const
 
 // Per-file allowlist for counts that are legitimately un-clearable. Keep this EMPTY unless a

@@ -121,6 +121,8 @@ on:
       - 'apps/web/src/components/integration/IntegrationExternalWritePanel.vue'
       - 'apps/web/src/components/integration/IntegrationTableActionsPanel.vue'
       - 'apps/web/src/components/integration/IntegrationFieldOptionSyncPanel.vue'
+      # Integration lane F — K3 WISE setup view fully tokenized (107 hex -> 0), joins the guard set.
+      - 'apps/web/src/views/IntegrationK3WiseSetupView.vue'
       - 'apps/web/src/styles/form-layout-utilities.css'
       - 'apps/web/.eslintrc.cjs'
       - 'apps/web/tests/ui-foundation-style-guard.spec.ts'
@@ -237,6 +239,8 @@ on:
       - 'apps/web/src/components/integration/IntegrationExternalWritePanel.vue'
       - 'apps/web/src/components/integration/IntegrationTableActionsPanel.vue'
       - 'apps/web/src/components/integration/IntegrationFieldOptionSyncPanel.vue'
+      # Integration lane F — K3 WISE setup view fully tokenized (107 hex -> 0), joins the guard set.
+      - 'apps/web/src/views/IntegrationK3WiseSetupView.vue'
       - 'apps/web/src/styles/form-layout-utilities.css'
       - 'apps/web/.eslintrc.cjs'
       - 'apps/web/tests/ui-foundation-style-guard.spec.ts'
