@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest'
 import { withCsvBom } from '../src/views/attendance/csvExport'
 import {
   IMPORT_TEMPLATE_BASE_COLUMNS,
+  buildImportColumnFormatRows,
+  formatSpecForDataType,
   IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS,
   allSelectableImportFieldKeys,
   buildTemplateHeaderFromSelection,
@@ -115,5 +117,61 @@ describe('importTemplateColumns', () => {
     const once = withCsvBom('日期,姓名')
     expect(once.charCodeAt(0)).toBe(0xfeff)
     expect(withCsvBom(once)).toBe(once)
+  })
+
+  describe('formatSpecForDataType', () => {
+    it('maps each backend dataType to a format + example', () => {
+      expect(formatSpecForDataType('date')).toEqual({ formatEn: 'YYYY-MM-DD', formatZh: 'YYYY-MM-DD', example: '2026-06-01' })
+      expect(formatSpecForDataType('datetime').example).toBe('2026-06-01 09:00')
+      expect(formatSpecForDataType('time').formatZh).toContain('HH:mm')
+      expect(formatSpecForDataType('hours').example).toBe('8.5')
+      expect(formatSpecForDataType('minutes').example).toBe('15')
+      expect(formatSpecForDataType('number').example).toBe('0')
+      expect(formatSpecForDataType('string').formatZh).toBe('文本')
+      expect(formatSpecForDataType(undefined).example).toBe('—')
+    })
+  })
+
+  describe('column format options carry dataType-derived format + curated example', () => {
+    const COLS = [
+      { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'datetime' },
+      { sourceField: '加班小时', targetField: 'overtimeHours', dataType: 'hours' },
+      { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+      { sourceField: '考勤组', targetField: 'attendanceGroup', dataType: 'string' },
+    ]
+    it('threads dataType into each option and curates string examples', () => {
+      const groups = groupSupportedImportColumns(COLS)
+      const opt = (key: string) => groups.flatMap(g => g.options).find(o => o.key === key)!
+      expect(opt('firstInAt').formatZh).toContain('HH:mm')
+      expect(opt('firstInAt').example).toBe('2026-06-01 09:00')
+      expect(opt('overtimeHours').example).toBe('8.5')
+      expect(opt('status').example).toBe('正常')
+      expect(opt('attendanceGroup').example).toBe('总部日班')
+    })
+  })
+
+  describe('buildImportColumnFormatRows', () => {
+    const groups = groupSupportedImportColumns([
+      { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'datetime' },
+      { sourceField: '加班小时', targetField: 'overtimeHours', dataType: 'hours' },
+    ])
+    it('leads with required/identity base columns then optional supported columns', () => {
+      const rows = buildImportColumnFormatRows(groups)
+      const byCol = Object.fromEntries(rows.map(r => [r.column, r]))
+      expect(byCol['日期'].requirement).toBe('required')
+      expect(byCol['日期'].formatZh).toBe('YYYY-MM-DD')
+      expect(byCol['日期'].example).toBe('2026-06-01')
+      expect(byCol['工号'].requirement).toBe('identity')
+      expect(byCol['姓名'].requirement).toBe('identity')
+      expect(byCol['上班1打卡时间'].requirement).toBe('optional')
+      expect(byCol['上班1打卡时间'].example).toBe('2026-06-01 09:00')
+      expect(byCol['加班小时'].requirement).toBe('optional')
+      // base columns come first
+      expect(rows.slice(0, 3).map(r => r.column)).toEqual(['日期', '工号', '姓名'])
+    })
+    it('does not duplicate a supported column that shares a base column name', () => {
+      const rows = buildImportColumnFormatRows(groups)
+      expect(rows.filter(r => r.column === '日期')).toHaveLength(1)
+    })
   })
 })

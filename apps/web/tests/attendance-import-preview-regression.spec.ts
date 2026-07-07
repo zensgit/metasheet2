@@ -802,4 +802,57 @@ describe('Attendance import preview regression', () => {
     expect((puts[1].payload.selectedKeys as string[]).slice().sort()).toEqual(finalSet)
     puts[1].release(jsonResponse(200, { ok: true, data: { selectedKeys: [] } }))
   })
+
+  it('column formats table: shows required/identity/optional badges, formats, and examples', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async (path: string) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/template-prefs')) {
+        return jsonResponse(200, { ok: true, data: { selectedKeys: [] } })
+      }
+      if (url.startsWith('/api/attendance/import/template')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: { source: 'dingtalk_csv', mode: 'override', columns: ['日期', '工号', '姓名'], requiredFields: ['日期'] },
+            mappingProfiles: [],
+            mapping: { columns: [
+              { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'datetime' },
+              { sourceField: '加班小时', targetField: 'overtimeHours', dataType: 'hours' },
+              { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+            ] },
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(8)
+
+    const table = container!.querySelector('[data-testid="attendance-import-column-formats"]') as HTMLElement | null
+    expect(table, 'expected column formats table').toBeTruthy()
+    const rowText = (col: string) => {
+      const codes = Array.from(table!.querySelectorAll('tbody tr'))
+      const row = codes.find(tr => tr.querySelector('td code')?.textContent?.trim() === col)
+      return row?.textContent ?? ''
+    }
+    // required date column with its exact format + example
+    const dateRow = rowText('日期')
+    expect(dateRow).toContain('Required')
+    expect(dateRow).toContain('YYYY-MM-DD')
+    expect(dateRow).toContain('2026-06-01')
+    // identity pair
+    expect(rowText('工号')).toContain('ID (one of)')
+    expect(rowText('姓名')).toContain('ID (one of)')
+    // optional supported column with dataType-derived format + example
+    const overtimeRow = rowText('加班小时')
+    expect(overtimeRow).toContain('Optional')
+    expect(overtimeRow).toContain('8.5')
+    // datetime format
+    expect(rowText('上班1打卡时间')).toContain('HH:mm')
+  })
 })

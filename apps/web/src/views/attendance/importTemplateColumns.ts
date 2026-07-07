@@ -9,6 +9,7 @@
 export interface AttendanceImportMappingColumnLike {
   sourceField?: unknown
   targetField?: unknown
+  dataType?: unknown
 }
 
 export interface AttendanceImportFieldOption {
@@ -20,6 +21,13 @@ export interface AttendanceImportFieldOption {
   aliases: string[]
   meaningEn: string
   meaningZh: string
+  /** backend dataType (date/datetime/time/hours/minutes/number/string) */
+  dataType: string
+  /** required cell format, from the dataType (column-formats design-lock) */
+  formatEn: string
+  formatZh: string
+  /** a concrete example value for the column */
+  example: string
 }
 
 export interface AttendanceImportFieldGroup {
@@ -121,6 +129,48 @@ function normalizeCell(value: unknown): string {
 }
 
 /**
+ * Cell-format spec per backend dataType, anchored to the real import parser
+ * (normalizeCsvWorkDate / parseImportedDateTime). Column-formats design-lock §1.
+ */
+export function formatSpecForDataType(dataType: string | null | undefined): { formatEn: string; formatZh: string; example: string } {
+  switch (dataType) {
+    case 'date':
+      return { formatEn: 'YYYY-MM-DD', formatZh: 'YYYY-MM-DD', example: '2026-06-01' }
+    case 'datetime':
+    case 'time':
+      return { formatEn: 'YYYY-MM-DD HH:mm (or HH:mm)', formatZh: 'YYYY-MM-DD HH:mm（或纯 HH:mm）', example: '2026-06-01 09:00' }
+    case 'hours':
+      return { formatEn: 'Hours (decimals allowed)', formatZh: '小时数（可小数）', example: '8.5' }
+    case 'minutes':
+      return { formatEn: 'Whole minutes', formatZh: '整数分钟', example: '15' }
+    case 'number':
+      return { formatEn: 'Number', formatZh: '数字', example: '0' }
+    case 'string':
+      return { formatEn: 'Text', formatZh: '文本', example: '正常' }
+    default:
+      return { formatEn: 'Text', formatZh: '文本', example: '—' }
+  }
+}
+
+/** Curated realistic examples for text columns (overrides the generic string default). */
+const STRING_EXAMPLE_OVERRIDES: Record<string, string> = {
+  status: '正常',
+  exceptionReason: '迟到',
+  punchResultIn1: '正常',
+  punchResultOut1: '正常',
+  punchResultIn2: '正常',
+  punchResultOut2: '正常',
+  punchResultIn3: '正常',
+  punchResultOut3: '正常',
+  shiftName: '白班',
+  attendanceClass: '标准班',
+  attendanceGroup: '总部日班',
+  department: '技术部',
+  role: '工程师',
+  approvalSummary: '年假 1 天',
+}
+
+/**
  * Group the raw mapping columns into selectable, deduped, Chinese-first field
  * options. Aliases sharing a targetField merge into one option; the displayed
  * (and generated) column name prefers the first Chinese alias.
@@ -128,14 +178,15 @@ function normalizeCell(value: unknown): string {
 export function groupSupportedImportColumns(
   columns: readonly AttendanceImportMappingColumnLike[] | null | undefined,
 ): AttendanceImportFieldGroup[] {
-  const byTarget = new Map<string, { aliases: string[]; cjk: string | null }>()
+  const byTarget = new Map<string, { aliases: string[]; cjk: string | null; dataType: string }>()
   for (const column of Array.isArray(columns) ? columns : []) {
     const source = normalizeCell(column?.sourceField)
     const target = normalizeCell(column?.targetField)
     if (!source || !target) continue
-    const entry = byTarget.get(target) ?? { aliases: [], cjk: null }
+    const entry = byTarget.get(target) ?? { aliases: [], cjk: null, dataType: '' }
     if (!entry.aliases.includes(source)) entry.aliases.push(source)
     if (!entry.cjk && CJK_RE.test(source)) entry.cjk = source
+    if (!entry.dataType) entry.dataType = normalizeCell(column?.dataType)
     byTarget.set(target, entry)
   }
 
@@ -146,12 +197,17 @@ export function groupSupportedImportColumns(
       const entry = byTarget.get(target)
       if (!entry) continue
       const meaning = FIELD_MEANINGS[target] ?? { en: `Field ${target}`, zh: `字段 ${target}` }
+      const spec = formatSpecForDataType(entry.dataType)
       options.push({
         key: target,
         columnName: entry.cjk ?? entry.aliases[0],
         aliases: entry.aliases,
         meaningEn: meaning.en,
         meaningZh: meaning.zh,
+        dataType: entry.dataType,
+        formatEn: spec.formatEn,
+        formatZh: spec.formatZh,
+        example: entry.dataType === 'string' ? (STRING_EXAMPLE_OVERRIDES[target] ?? spec.example) : spec.example,
       })
     }
     if (options.length > 0) {
@@ -193,4 +249,58 @@ export function buildTemplateHeaderFromSelection(
 /** All selectable keys across groups (for 全选). */
 export function allSelectableImportFieldKeys(groups: readonly AttendanceImportFieldGroup[]): string[] {
   return groups.flatMap(group => group.options.map(option => option.key))
+}
+
+// ── Column format reference (column-formats design-lock) ──────────────────────
+
+export type AttendanceImportColumnRequirement = 'required' | 'identity' | 'optional'
+
+export interface AttendanceImportColumnFormatRow {
+  column: string
+  requirement: AttendanceImportColumnRequirement
+  formatEn: string
+  formatZh: string
+  example: string
+  meaningEn: string
+  meaningZh: string
+}
+
+/**
+ * Base columns every template carries, with their required semantics anchored
+ * to the backend header gate (IMPORT_HEADER_DATE_KEYS + CONTEXT_KEYS): the date
+ * is required; 工号/姓名 are the identity pair (at least one required).
+ */
+const IMPORT_TEMPLATE_BASE_COLUMN_SPECS: readonly AttendanceImportColumnFormatRow[] = [
+  { column: '日期', requirement: 'required', formatEn: 'YYYY-MM-DD', formatZh: 'YYYY-MM-DD', example: '2026-06-01', meaningEn: 'Attendance date (required)', meaningZh: '考勤日期（必填）' },
+  { column: '工号', requirement: 'identity', formatEn: 'Text', formatZh: '文本', example: 'EMP001', meaningEn: 'Employee no. (工号 or 姓名 required)', meaningZh: '员工工号（工号/姓名至少填一个）' },
+  { column: '姓名', requirement: 'identity', formatEn: 'Text', formatZh: '文本', example: '张三', meaningEn: 'Name (工号 or 姓名 required)', meaningZh: '姓名（工号/姓名至少填一个）' },
+]
+
+/**
+ * Build the column-format reference: base columns (with their required marks)
+ * first, then every supported field (all optional) in group order. Powers the
+ * "列格式说明" table so a user knows each column's format, example, and whether
+ * it is required.
+ */
+export function buildImportColumnFormatRows(
+  groups: readonly AttendanceImportFieldGroup[],
+): AttendanceImportColumnFormatRow[] {
+  const rows: AttendanceImportColumnFormatRow[] = [...IMPORT_TEMPLATE_BASE_COLUMN_SPECS]
+  const seen = new Set(rows.map(row => row.column))
+  for (const group of groups) {
+    for (const option of group.options) {
+      if (seen.has(option.columnName)) continue
+      seen.add(option.columnName)
+      rows.push({
+        column: option.columnName,
+        requirement: 'optional',
+        formatEn: option.formatEn,
+        formatZh: option.formatZh,
+        example: option.example,
+        meaningEn: option.meaningEn,
+        meaningZh: option.meaningZh,
+      })
+    }
+  }
+  return rows
 }
