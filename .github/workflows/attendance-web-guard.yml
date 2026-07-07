@@ -76,6 +76,8 @@ on:
       - 'apps/web/tests/useAttendanceAdminImportBatches.spec.ts'
       - 'apps/web/src/utils/dingtalkContainer.ts'
       - 'apps/web/tests/dingtalk-container.spec.ts'
+      - 'apps/web/src/views/LoginView.vue'
+      - 'apps/web/tests/LoginView.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
   push:
     branches: [main]
@@ -100,6 +102,8 @@ on:
       - 'apps/web/tests/useAttendanceAdminImportBatches.spec.ts'
       - 'apps/web/src/utils/dingtalkContainer.ts'
       - 'apps/web/tests/dingtalk-container.spec.ts'
+      - 'apps/web/src/views/LoginView.vue'
+      - 'apps/web/tests/LoginView.spec.ts'
       - '.github/workflows/attendance-web-guard.yml'
 
 jobs:
@@ -142,4 +146,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run attendance web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-admin-anchor-nav AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView --reporter=dot
