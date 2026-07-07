@@ -3904,6 +3904,58 @@
       }
     },
     {
+      "description": "request an ECO revision intent for a lifecycle-locked part (attach-before-create)",
+      "providerStates": [
+        {
+          "name": "tenant-1 holds an active plm.bom_eco_revision license and part 01H000000000000000000000L1 is lifecycle-locked in state 'Released' with no open bom-ECO"
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/bom/multitable/01H000000000000000000000L1/eco-intent",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "eco_id": "01H000000000000000000000E9",
+          "state": "progress",
+          "attached": false
+        },
+        "matchingRules": {
+          "body": {
+            "$.eco_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.attached": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
       "description": "mint a MetaSheet BOM review embed token for the Yuantus parent host",
       "providerStates": [
         {
@@ -4155,6 +4207,45 @@
           "detail": {
             "code": "idempotency_conflict",
             "message": "Idempotency-Key reused for a different write"
+          }
+        },
+        "matchingRules": {
+          "body": {
+            "$.detail.message": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "attempt an ECO revision intent for a part that is NOT lifecycle-locked",
+      "providerStates": [
+        {
+          "name": "tenant-1 holds an active plm.bom_eco_revision license and part 01H000000000000000000000L2 is editable (Draft)"
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/bom/multitable/01H000000000000000000000L2/eco-intent",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        }
+      },
+      "response": {
+        "status": 409,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "detail": {
+            "code": "not_locked",
+            "message": "Part is not lifecycle-locked (state 'Draft'); use the direct edit path"
           }
         },
         "matchingRules": {

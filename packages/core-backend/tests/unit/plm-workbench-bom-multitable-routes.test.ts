@@ -432,3 +432,182 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
     expect(res.body.reason).toBe('precondition-failed')
   })
 })
+
+// ── ECO Phase 3: locked-BOM revision-intent relay ────────────────────────────────────────────
+const INTENT_URL = '/api/plm-workbench/data-sources/ds-1/bom-multitable/P1/eco-intent'
+
+const BOM_ENTITLED = { supported: true, api_version: 'v1', entitled: true }
+const ECO_INTENT_FEATURE = {
+  supported: true,
+  api_version: 'v1',
+  entitled: true,
+  actions: ['eco_revision_intent'],
+  action_status: 'governed',
+}
+
+function intentAdapter(overrides: Record<string, unknown> = {}) {
+  return {
+    getIntegrationCapabilities: vi.fn().mockResolvedValue({
+      available: true,
+      manifest: manifest(BOM_ENTITLED, { bom_eco_revision: ECO_INTENT_FEATURE }),
+    }),
+    getBomMultitableContext: vi.fn(),
+    requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({
+      data: [{ eco_id: 'ECO-1', state: 'progress', attached: false, source_version_id: 'v1', target_version_id: 'v2' }],
+    }),
+    ...overrides,
+  }
+}
+
+describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
+  const app = express()
+  app.use(express.json())
+  app.use(plmWorkbenchRouter)
+
+  beforeEach(() => {
+    dsMocks.getDataSource.mockReset()
+  })
+
+  it('404 when the data source does not exist', async () => {
+    dsMocks.getDataSource.mockImplementation(() => { throw new Error('nope') })
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(404)
+  })
+
+  it('404 for an adapter lacking requestBomEcoRevisionIntent (duck-type, no capability call)', async () => {
+    const getIntegrationCapabilities = vi.fn()
+    dsMocks.getDataSource.mockReturnValue({ getIntegrationCapabilities, getBomMultitableContext: vi.fn() })
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(404)
+    expect(getIntegrationCapabilities).not.toHaveBeenCalled()
+  })
+
+  it('503 unavailable (never 500) when the capability call throws; intent never called', async () => {
+    const requestBomEcoRevisionIntent = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(intentAdapter({
+      getIntegrationCapabilities: vi.fn().mockRejectedValue(new Error('boom')),
+      requestBomEcoRevisionIntent,
+    }))
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(503)
+    expect(res.body.reason).toBe('unavailable')
+    expect(requestBomEcoRevisionIntent).not.toHaveBeenCalled()
+  })
+
+  it('404 unsupported when bom_eco_revision is absent from the manifest; intent never called', async () => {
+    const requestBomEcoRevisionIntent = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(intentAdapter({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({ available: true, manifest: manifest(BOM_ENTITLED) }),
+      requestBomEcoRevisionIntent,
+    }))
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(404)
+    expect(res.body.reason).toBe('unsupported')
+    expect(requestBomEcoRevisionIntent).not.toHaveBeenCalled()
+  })
+
+  it('403 not-entitled when supported but unentitled; intent never called', async () => {
+    const requestBomEcoRevisionIntent = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(intentAdapter({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest(BOM_ENTITLED, { bom_eco_revision: { ...ECO_INTENT_FEATURE, entitled: false } }),
+      }),
+      requestBomEcoRevisionIntent,
+    }))
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(403)
+    expect(res.body.reason).toBe('not-entitled')
+    expect(requestBomEcoRevisionIntent).not.toHaveBeenCalled()
+  })
+
+  it('404 unsupported when the descriptor omits the eco_revision_intent action; intent never called', async () => {
+    const requestBomEcoRevisionIntent = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(intentAdapter({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest(BOM_ENTITLED, { bom_eco_revision: { ...ECO_INTENT_FEATURE, actions: [] } }),
+      }),
+      requestBomEcoRevisionIntent,
+    }))
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(404)
+    expect(res.body.reason).toBe('unsupported')
+    expect(requestBomEcoRevisionIntent).not.toHaveBeenCalled()
+  })
+
+  it('relays the provider success envelope (eco_id/state/attached) verbatim', async () => {
+    const adapter = intentAdapter()
+    dsMocks.getDataSource.mockReturnValue(adapter)
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      eco_id: 'ECO-1', state: 'progress', attached: false, source_version_id: 'v1', target_version_id: 'v2',
+    })
+    expect(adapter.requestBomEcoRevisionIntent).toHaveBeenCalledWith('P1')
+  })
+
+  it('surfaces the discriminated not_locked 409 reason', async () => {
+    const notLocked = Object.assign(new Error('409'), {
+      response: { status: 409, data: { detail: { code: 'not_locked', message: 'editable' } } },
+    })
+    dsMocks.getDataSource.mockReturnValue(intentAdapter({
+      requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: notLocked }),
+    }))
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(409)
+    expect(res.body.reason).toBe('not_locked')
+  })
+
+  it('surfaces the discriminated eco_intent_rejected 409 reason', async () => {
+    const rejected = Object.assign(new Error('409'), {
+      response: { status: 409, data: { detail: { code: 'eco_intent_rejected', message: 'race' } } },
+    })
+    dsMocks.getDataSource.mockReturnValue(intentAdapter({
+      requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: rejected }),
+    }))
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(409)
+    expect(res.body.reason).toBe('eco_intent_rejected')
+  })
+
+  it('degrades an UNKNOWN 409 code to provider-rejected (fail-closed, never leaks raw)', async () => {
+    const weird = Object.assign(new Error('409'), {
+      response: { status: 409, data: { detail: { code: 'lifecycle_locked', message: 'wrong namespace' } } },
+    })
+    dsMocks.getDataSource.mockReturnValue(intentAdapter({
+      requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: weird }),
+    }))
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(409)
+    expect(res.body.reason).toBe('provider-rejected')
+  })
+
+  it('passes through a provider 403 as provider-rejected (entitlement drift at the provider)', async () => {
+    const forbidden = Object.assign(new Error('403'), { response: { status: 403, data: { detail: 'nope' } } })
+    dsMocks.getDataSource.mockReturnValue(intentAdapter({
+      requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: forbidden }),
+    }))
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(403)
+    expect(res.body.reason).toBe('provider-rejected')
+  })
+
+  it('502 provider-unavailable for a transport error with no response', async () => {
+    dsMocks.getDataSource.mockReturnValue(intentAdapter({
+      requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [], error: new Error('ECONNREFUSED') }),
+    }))
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(502)
+    expect(res.body.reason).toBe('provider-unavailable')
+  })
+
+  it('502 malformed-response when the provider payload lacks the contract keys', async () => {
+    dsMocks.getDataSource.mockReturnValue(intentAdapter({
+      requestBomEcoRevisionIntent: vi.fn().mockResolvedValue({ data: [{ eco_id: 'ECO-1' }] }),
+    }))
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(502)
+    expect(res.body.reason).toBe('malformed-response')
+  })
+})

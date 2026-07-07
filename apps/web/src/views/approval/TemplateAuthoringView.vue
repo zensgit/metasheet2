@@ -545,7 +545,7 @@
                 data-testid="approval-condition-branch"
               >
                 <div class="template-authoring__condition-branch-head">
-                  <span>分支 → {{ branch.edgeKey }}</span>
+                  <span>分支「{{ liveBranchSummary(branch) }}」→ {{ branch.edgeKey }}</span>
                   <el-select
                     :model-value="branch.predicateMode"
                     size="small"
@@ -1157,6 +1157,7 @@ import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
+import { summarizeConditionBranch, summarizeConditionNode } from '../../approvals/conditionSummary'
 import {
   createTemplate,
   dryRunApprovalConditionFormula,
@@ -1293,14 +1294,8 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
   const config = node.config as Record<string, unknown>
   if (node.type === 'condition') {
     const cfg = config as unknown as ConditionNodeConfig
-    const lines = (cfg.branches ?? []).map((branch) => {
-      const rules = (branch.rules ?? [])
-        .map((rule) => `${rule.fieldId} ${rule.operator}${rule.value === undefined ? '' : ` ${JSON.stringify(rule.value)}`}`)
-        .join(` ${branch.conjunction ?? 'and'} `)
-      return `分支 → ${branch.edgeKey}：${rules || '（无规则）'}`
-    })
-    if (cfg.defaultEdgeKey) lines.push(`默认分支 → ${cfg.defaultEdgeKey}`)
-    return lines
+    // G-B2-19: readable predicates（「金额 > 5000」）lead; edge keys stay as secondary provenance.
+    return summarizeConditionNode(cfg, buildFormSchema(draft.value))
   }
   if (node.type === 'parallel') {
     const cfg = config as unknown as ParallelNodeConfig
@@ -1328,6 +1323,20 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
 // The editable model lives on `draft.conditionEdits[nodeKey]`, seeded 1:1 from the preserved
 // condition nodes. The controls below mutate ONLY rules / conjunction / defaultEdgeKey;
 // `buildApprovalGraph` re-applies them onto a COPY of the graph (all other nodes + edges untouched).
+// G-B2-19: live readable summary for a branch being edited (adapter from the edit model to the
+// persisted ConditionBranch shape; display only).
+function liveBranchSummary(branch: ConditionBranchEdit): string {
+  return summarizeConditionBranch(
+    {
+      edgeKey: branch.edgeKey,
+      rules: branch.rules.map((rule) => ({ fieldId: rule.fieldId, operator: rule.operator, ...(rule.value === undefined ? {} : { value: rule.value }) })),
+      conjunction: branch.conjunction,
+      ...(branch.predicateMode === 'formula' && branch.formulaExpression ? { formula: { expression: branch.formulaExpression } } : {}),
+    },
+    buildFormSchema(draft.value),
+  )
+}
+
 function conditionEditFor(nodeKey: string): ConditionNodeEdit | undefined {
   return draft.value.conditionEdits?.[nodeKey]
 }

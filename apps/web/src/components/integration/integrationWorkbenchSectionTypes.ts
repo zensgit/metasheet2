@@ -99,3 +99,42 @@ export interface IntegrationScopeState {
   tenantId: string
   workspaceId: string | null
 }
+
+// IU-2d additions below (run-push decomposition: pipeline-run / stock-prep / external-write /
+// table-actions / field-option-sync panels).
+
+export type WatermarkType = 'updated_at' | 'monotonic_id'
+
+// Shape of each entry in `dryRunReadinessItems`/`savePipelineReadinessItems` (anonymous array
+// literals in the view) — one readiness checklist row.
+export interface ReadinessItem {
+  id: string
+  label: string
+  ready: boolean
+  detail: string
+}
+
+// Shape returned by the view's local `metricRowsFromCounts(...)` helper and the several
+// `*Metrics` computeds that build the same `{ id, label, value }` rows by hand
+// (`stockPreparationTargetMetrics`, `tableActionBoundedPreviewMetrics`, etc.).
+export interface MetricRow {
+  id: string
+  label: string
+  value: string
+}
+
+// One expanded duplicate-key group row rendered by the table-actions panel's
+// conflict-policy sub-editor.
+export interface DuplicateExpandedGroupView {
+  ordinal: string
+  fingerprint: string
+  rowCount: string
+  parentShape: string
+  quantityShape: string
+  attributeShape: string
+  stableDiscriminator: string
+  currentPolicy: string
+  currentScope: string
+  draftPolicy: string
+  resolutionLabel: string
+}

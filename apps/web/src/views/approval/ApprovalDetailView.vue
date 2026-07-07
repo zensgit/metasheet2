@@ -940,7 +940,7 @@ const upcomingTimelineNodes = computed<UpcomingApprovalNode[]>(() => {
   if (!currentNodeKey) return []
   const graph = pinnedGraph.value
   if (!graph) return []
-  return buildUpcomingNodes(graph, currentNodeKey)
+  return buildUpcomingNodes(graph, currentNodeKey, approval.value?.formSchema ?? null)
 })
 
 const actionDialogVisible = ref(false)

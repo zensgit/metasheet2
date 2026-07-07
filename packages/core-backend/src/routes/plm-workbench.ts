@@ -32,6 +32,7 @@ import type {
   BomMultitableContextResult,
   BomMultitableLinePatch,
   BomMultitableLineUpdateResult,
+  BomEcoRevisionIntentResult,
 } from '../data-adapters/PLMAdapter'
 
 // Typed wrapper for temporary tables not yet in main Database interface
@@ -822,6 +823,52 @@ function isPlmBomWritebackAdapter(adapter: unknown): adapter is PlmBomWritebackA
   )
 }
 
+// ECO Phase 3: the locked-BOM revision-intent seam (attach-or-create a PENDING bom-ECO).
+interface PlmBomEcoIntentAdapter extends PlmBomReviewAdapter {
+  requestBomEcoRevisionIntent(
+    partId: string,
+  ): Promise<{ data?: BomEcoRevisionIntentResult[]; error?: Error }>
+}
+
+function isPlmBomEcoIntentAdapter(adapter: unknown): adapter is PlmBomEcoIntentAdapter {
+  const candidate = adapter as PlmBomEcoIntentAdapter | null
+  return (
+    isPlmBomReviewAdapter(adapter)
+    && typeof candidate?.requestBomEcoRevisionIntent === 'function'
+  )
+}
+
+// The intent endpoint's own discriminated-409 namespace (distinct from the write PATCH's
+// lifecycle_locked/idempotency_conflict): `not_locked` = the part is editable, use the direct
+// edit path; `eco_intent_rejected` = the provider declined (concurrent open ECO race /
+// non-versionable part). Unknown/absent code degrades to 'provider-rejected' (fail-closed,
+// same idiom as providerConflictReasonCode).
+const PROVIDER_ECO_INTENT_409_CODES = new Set(['not_locked', 'eco_intent_rejected'])
+
+function providerEcoIntentConflictCode(error: unknown): string | null {
+  const candidate = error as { response?: { data?: unknown } } | null
+  const data = candidate?.response?.data
+  if (!data || typeof data !== 'object') return null
+  const detail = (data as { detail?: unknown }).detail
+  if (!detail || typeof detail !== 'object') return null
+  const code = (detail as { code?: unknown }).code
+  return typeof code === 'string' && PROVIDER_ECO_INTENT_409_CODES.has(code) ? code : null
+}
+
+function relayProviderEcoIntentError(error: unknown): { status: number; reason: string } {
+  const status = providerErrorStatus(error)
+  // 409 = discriminated by the intent endpoint's own namespace: `not_locked` (editable part —
+  // use the direct edit path) vs `eco_intent_rejected` (provider declined). Unknown/absent code
+  // degrades to the legacy flattened reason (same fail-closed rule as the write PATCH).
+  if (status === 409) {
+    return { status: 409, reason: providerEcoIntentConflictCode(error) ?? 'provider-rejected' }
+  }
+  if (status && [400, 403, 404, 422].includes(status)) {
+    return { status, reason: 'provider-rejected' }
+  }
+  return { status: 502, reason: 'provider-unavailable' }
+}
+
 function normalizeBomLineWritebackPatch(value: unknown): BomMultitableLinePatch | null {
   const record = value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -1049,6 +1096,97 @@ router.patch(
     if (!payload || payload.ok !== true || typeof payload.bom_line_id !== 'string') {
       return res.status(502).json({
         error: 'BOM write-back returned a malformed response',
+        data_source_id: dataSourceId,
+        reason: 'malformed-response',
+      })
+    }
+    return res.json(payload)
+  },
+)
+
+// ECO Phase 3 consumer CTA relay: opt-in that opens/attaches a PENDING ECO revision for a
+// lifecycle-LOCKED part. Pre-gates on the capabilities advisory descriptor `bom_eco_revision`
+// (supported + entitled + actions includes `eco_revision_intent` — Phase-0 Lock 3: availability
+// discovery is the advisory, never the error payload). Provider owns idempotency
+// (attach-before-create), so no Idempotency-Key here. Never a raw 500.
+router.post(
+  '/api/plm-workbench/data-sources/:id/bom-multitable/:partId/eco-intent',
+  authenticate,
+  param('id').isString(),
+  param('partId').isString(),
+  validate,
+  async (req: Request, res: Response) => {
+    const dataSourceId = req.params.id
+    const partId = req.params.partId
+    let adapter: unknown
+    try {
+      adapter = getDataSourceManager().getDataSource(dataSourceId)
+    } catch {
+      return res
+        .status(404)
+        .json({ error: 'Data source not found', data_source_id: dataSourceId })
+    }
+    if (!isPlmBomEcoIntentAdapter(adapter)) {
+      return res.status(404).json({
+        error: 'BOM ECO revision intent is not supported for this data source',
+        data_source_id: dataSourceId,
+      })
+    }
+
+    let capabilities: IntegrationCapabilitiesResult
+    try {
+      capabilities = await adapter.getIntegrationCapabilities()
+    } catch {
+      return res.status(503).json({
+        error: 'PLM capabilities unavailable',
+        data_source_id: dataSourceId,
+        reason: 'unavailable',
+      })
+    }
+    const feature = capabilities.available ? capabilities.manifest.features.bom_eco_revision : undefined
+    if (!feature || feature.supported !== true) {
+      return res.status(404).json({
+        error: 'BOM ECO revision is not supported',
+        data_source_id: dataSourceId,
+        reason: 'unsupported',
+      })
+    }
+    if (feature.entitled !== true) {
+      return res.status(403).json({
+        error: 'BOM ECO revision is not entitled',
+        data_source_id: dataSourceId,
+        reason: 'not-entitled',
+      })
+    }
+    // Advisory action pre-gate: the descriptor must actually advertise the intent action
+    // (a provider that lights the SKU but withdraws the action must hide the CTA path).
+    const actions = Array.isArray(feature.actions) ? feature.actions : []
+    if (!actions.includes('eco_revision_intent')) {
+      return res.status(404).json({
+        error: 'ECO revision intent action is not advertised',
+        data_source_id: dataSourceId,
+        reason: 'unsupported',
+      })
+    }
+
+    const result = await adapter.requestBomEcoRevisionIntent(partId)
+    if (result.error) {
+      const relayed = relayProviderEcoIntentError(result.error)
+      return res.status(relayed.status).json({
+        error: result.error.message || 'ECO revision intent failed',
+        data_source_id: dataSourceId,
+        reason: relayed.reason,
+      })
+    }
+    const payload = result.data?.[0]
+    if (
+      !payload
+      || typeof payload.eco_id !== 'string'
+      || typeof payload.state !== 'string'
+      || typeof payload.attached !== 'boolean'
+    ) {
+      return res.status(502).json({
+        error: 'ECO revision intent returned a malformed response',
         data_source_id: dataSourceId,
         reason: 'malformed-response',
       })
