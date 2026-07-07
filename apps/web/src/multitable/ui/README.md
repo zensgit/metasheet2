@@ -1,15 +1,15 @@
-# multitable/ui — shared UI primitives (P2-1a)
+# multitable/ui — shared UI primitives (P2-1a + P2-1b)
 
 Design-lock: `docs/development/multitable-ui-p2-structure-designlock-20260706.md` §2 P2-1.
 
 These are stateless, presentation-only primitives meant to replace the per-SFC bespoke-CSS
-buttons/badges scattered across `apps/web/src/multitable/components/` and `views/`. They consume
-**only** UF-1 design tokens (`apps/web/src/styles/tokens.css`, `--ms-*` / `--el-*`) — never a new
-hardcoded hex, never a new token vocabulary.
+buttons/badges/menus/panels scattered across `apps/web/src/multitable/components/` and `views/`.
+They consume **only** UF-1 design tokens (`apps/web/src/styles/tokens.css`, `--ms-*` / `--el-*`) —
+never a new hardcoded hex, never a new token vocabulary.
 
-This slice (P2-1a) is **additive only**: no existing component has been migrated to use these yet.
-Migration is a separate, later slice (P2-1c), one SFC's buttons/badges at a time, presentation-only
-and click/emit-count-preserving.
+Both slices are **additive only**: no existing component has been migrated to use these yet.
+Migration is a separate, later slice (P2-1c), one SFC's buttons/badges/panels at a time,
+presentation-only and click/emit-count-preserving.
 
 ## MtButton
 
@@ -114,9 +114,110 @@ Props:
 | `dot` | `boolean` | `false` | renders a small solid dot instead of the count |
 | `tone` | `'info' \| 'primary' \| 'success' \| 'warning' \| 'danger'` | `'info'` | maps to `--ms-color-*` / `--el-color-*-light-9` |
 
+## MtPopover
+
+A token-styled floating panel anchored to a trigger slot, Teleport'd to `body` (never clipped by
+an ancestor's `overflow: hidden`) — mirrors the existing `ContextMenu.vue` idiom (Teleport +
+click-outside + Escape) but anchors to a trigger element instead of raw `x`/`y` coordinates.
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+import { MtPopover, MtButton } from '@/multitable/ui'
+
+const open = ref(false)
+</script>
+
+<template>
+  <MtPopover v-model:open="open">
+    <template #trigger>
+      <MtButton>Open</MtButton>
+    </template>
+    <div style="padding: 8px 12px;">Popover content</div>
+  </MtPopover>
+</template>
+```
+
+Props:
+
+| Prop | Type | Default | Notes |
+|---|---|---|---|
+| `open` | `boolean` | `false` | controlled — pair with `v-model:open` |
+| `placement` | `'bottom-start' \| 'bottom-end' \| 'top-start' \| 'top-end'` | `'bottom-start'` | anchor corner relative to the trigger |
+
+Slots: `trigger` (scoped with `{ open }`), default (panel content).
+Emits: `update:open(value: boolean)` — fired when the trigger is clicked (toggles), a click lands
+outside both the trigger and the panel, or Escape is pressed while open.
+
+## MtMenu / MtMenuItem
+
+A trigger + dropdown list of `MtMenuItem` rows, built on `MtPopover` (so it inherits Teleport-safety
++ click-outside + Escape for free instead of re-implementing `ContextMenu.vue`'s mechanics a second
+time). Composition is **slot-based**, not a data-driven `items` array — put `MtMenuItem`s (and any
+dividers you want) directly in the default slot, same as any other menu-of-rows component.
+Selecting an item closes the menu automatically (via an internal provide/inject contract in
+`menuContext.ts` — MtMenu never inspects its slotted vnodes to do this).
+
+```vue
+<script setup lang="ts">
+import { MtMenu, MtMenuItem, MtIconButton } from '@/multitable/ui'
+import { Delete, Edit } from '@element-plus/icons-vue'
+</script>
+
+<template>
+  <MtMenu>
+    <template #trigger>
+      <MtIconButton title="More actions" :icon="MoreFilled" />
+    </template>
+    <MtMenuItem @select="onRename">
+      <template #icon><el-icon><Edit /></el-icon></template>
+      Rename
+    </MtMenuItem>
+    <MtMenuItem disabled @select="onDelete">
+      <template #icon><el-icon><Delete /></el-icon></template>
+      Delete
+    </MtMenuItem>
+  </MtMenu>
+</template>
+```
+
+`MtMenu` props: `placement` (same type as `MtPopover`, default `'bottom-start'`).
+`MtMenu` slots: `trigger`, default (menu items).
+
+`MtMenuItem` props: `disabled?: boolean` (default `false`) — a disabled item never emits `select`
+and never closes the menu.
+`MtMenuItem` slots: default (label), `icon` (optional, leading).
+`MtMenuItem` emits: `select(evt: MouseEvent)`.
+
+## MtPanel
+
+A small token-styled container card for grouping content — border/radius/background, optional
+shadow.
+
+```vue
+<script setup lang="ts">
+import { MtPanel } from '@/multitable/ui'
+</script>
+
+<template>
+  <MtPanel shadow padding="sm">
+    <div>Grouped content</div>
+  </MtPanel>
+</template>
+```
+
+Props:
+
+| Prop | Type | Default | Notes |
+|---|---|---|---|
+| `padding` | `'none' \| 'sm' \| 'md'` | `'md'` | inner padding, from the `--ms-space-*` scale |
+| `shadow` | `boolean` | `false` | adds `--ms-shadow-card` |
+
+Slots: default (content).
+
 ## Token discipline
 
-Every color declaration in these three components is a `var(--ms-*)` or `var(--el-*)` reference —
+Every color declaration in these components is a `var(--ms-*)` or `var(--el-*)` reference —
 no hex/rgb literals, including as `var(..., #fallback)` fallbacks (the UF-6 style guard closes that
 exact escape hatch for its target file set; these new files hold to the same discipline even though
 they are not yet in that guard's list). Non-color sizing (font-size, gap) that has no dedicated token
