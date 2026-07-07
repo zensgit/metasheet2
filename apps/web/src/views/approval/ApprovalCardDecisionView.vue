@@ -22,7 +22,7 @@
       <header class="card-decision__header">
         <h1 data-testid="card-decision-title">{{ summary.approval.title ?? '审批待办' }}</h1>
         <p v-if="summary.approval.requestNo" class="card-decision__meta">编号：{{ summary.approval.requestNo }}</p>
-        <p class="card-decision__meta">节点：{{ summary.nodeKey }}</p>
+        <p class="card-decision__meta">节点：<code class="card-decision__code">{{ summary.nodeKey }}</code></p>
       </header>
 
       <!-- Terminal / stale states render the REAL ledger state instead of dead buttons. -->
@@ -249,6 +249,18 @@ onMounted(load)
   color: var(--el-text-color-secondary);
   font-size: 13px;
   margin: 2px 0;
+}
+
+/* UF-8: the card-delivery summary carries only the raw nodeKey (this page deliberately has no
+   template-store import — see cardDecision.ts — so there is no node name to resolve without a
+   new API call, out of scope for a presentation-only slice); honest <code> fallback names it as
+   a machine value instead of plain inline text (design-lock §3.5). */
+.card-decision__code {
+  font-family: monospace;
+  font-size: 12px;
+  background: var(--ms-bg-page);
+  padding: 1px 4px;
+  border-radius: var(--ms-radius-sm);
 }
 
 .card-decision__label {

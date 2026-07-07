@@ -20,8 +20,15 @@
     <el-alert v-if="!canManage" type="info" :closable="false" title="需要审批模板管理权限才能配置委托" />
 
     <el-table v-loading="loading" :data="delegations" data-testid="delegation-table" :empty-text="includeInactive ? '暂无委托' : '暂无生效委托'">
-      <el-table-column label="委托人" prop="delegatorUserId" />
-      <el-table-column label="被委托人" prop="delegateeUserId" />
+      <!-- UF-8: no display-name field on DelegationRecord (raw user IDs only) — a name/picker
+           lookup is the flagged B3-04-tail follow-up, out of scope for this presentation-only
+           slice. Honest <code> fallback names these as machine values (design-lock §3.5). -->
+      <el-table-column label="委托人">
+        <template #default="{ row }"><code class="delegation-code">{{ row.delegatorUserId }}</code></template>
+      </el-table-column>
+      <el-table-column label="被委托人">
+        <template #default="{ row }"><code class="delegation-code">{{ row.delegateeUserId }}</code></template>
+      </el-table-column>
       <el-table-column label="范围">
         <template #default="{ row }">{{ row.scope === 'template' ? `指定模板：${row.scopeTemplateId}` : '全部审批' }}</template>
       </el-table-column>
@@ -183,5 +190,12 @@ onMounted(load)
   margin-top: 2px;
   font-size: 12px;
   color: var(--el-color-warning);
+}
+.delegation-code {
+  font-family: monospace;
+  font-size: 12px;
+  background: var(--ms-bg-page);
+  padding: 1px 4px;
+  border-radius: var(--ms-radius-sm);
 }
 </style>

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
+import { ElMessageBox } from 'element-plus'
 
 function flushPromises() {
   return new Promise<void>((resolve) => setTimeout(resolve, 0)).then(() => nextTick())
@@ -214,7 +215,7 @@ describe('MetaAutomationRuleEditor', () => {
   })
 
   it('B1-07: closes without confirm when the draft is untouched', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm')
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm')
     const onClose = vi.fn()
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onClose })
     await flushPromises()
@@ -228,7 +229,9 @@ describe('MetaAutomationRuleEditor', () => {
   })
 
   it('B1-07: a dirty draft asks before discarding — cancel keeps the editor, confirm closes it', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    // UF-8: window.confirm → ElMessageBox.confirm (design-lock §3.6). The promise
+    // rejects on cancel/overlay-click and resolves ('confirm') on the confirm button.
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
     const onClose = vi.fn()
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onClose })
     await flushPromises()
@@ -241,7 +244,11 @@ describe('MetaAutomationRuleEditor', () => {
     const cancelBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Cancel') as HTMLButtonElement
     cancelBtn.click()
     await flushPromises()
-    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('unsaved changes'))
+    expect(confirmSpy).toHaveBeenCalledWith(
+      expect.stringContaining('unsaved changes'),
+      expect.any(String),
+      expect.objectContaining({ type: 'warning' }),
+    )
     expect(onClose).not.toHaveBeenCalled()
 
     // the × close path is guarded too (UF-4 shape adaptation: the hand-rolled × is now
@@ -255,7 +262,7 @@ describe('MetaAutomationRuleEditor', () => {
     // el-drawer's `before-close` — not the Cancel button (which calls requestClose directly).
     // A bypassed `before-close` (e.g. `(done) => done()`) closes the drawer WITHOUT emitting
     // close, so this exact assertion is what turns red under that mutation.
-    confirmSpy.mockReturnValue(true)
+    confirmSpy.mockResolvedValue('confirm' as never)
     xBtn.click()
     await flushPromises()
     expect(confirmSpy).toHaveBeenCalledTimes(3)
@@ -500,7 +507,7 @@ describe('MetaAutomationRuleEditor', () => {
   it('localizes test-run warning and confirm text while leaving runtime status messages raw', async () => {
     useLocale().setLocale('zh-CN')
     const tested = vi.fn()
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { container } = mount({
       visible: true,
       sheetId: 'sheet_1',
@@ -532,7 +539,11 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     expect(tested).toHaveBeenCalledWith('rule_1')
-    expect(confirmSpy).toHaveBeenCalledWith('测试运行会执行已保存规则，并可能向已配置的钉钉群或用户发送真实消息。未保存的更改不会包含在内。是否继续？')
+    expect(confirmSpy).toHaveBeenCalledWith(
+      '测试运行会执行已保存规则，并可能向已配置的钉钉群或用户发送真实消息。未保存的更改不会包含在内。是否继续？',
+      expect.any(String),
+      expect.objectContaining({ type: 'warning' }),
+    )
   })
 
   it('localizes zh-CN DingTalk group editor chrome while preserving raw template values', async () => {
@@ -1681,7 +1692,7 @@ describe('MetaAutomationRuleEditor', () => {
 
   it('warns that DingTalk Test Run can send real messages and emits the saved rule id', async () => {
     const tested = vi.fn()
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { container } = mount({
       visible: true,
       sheetId: 'sheet_1',
@@ -1711,13 +1722,13 @@ describe('MetaAutomationRuleEditor', () => {
     await flushPromises()
 
     expect(tested).toHaveBeenCalledWith('rule_1')
-    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('can send real DingTalk messages'))
-    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Unsaved changes are not included'))
+    expect(confirmSpy.mock.calls[0]?.[0]).toContain('can send real DingTalk messages')
+    expect(confirmSpy.mock.calls[0]?.[0]).toContain('Unsaved changes are not included')
   })
 
   it('requires confirmation when saved V1 actions contain DingTalk but legacy actionType does not', async () => {
     const tested = vi.fn()
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { container } = mount({
       visible: true,
       sheetId: 'sheet_1',
@@ -1749,7 +1760,7 @@ describe('MetaAutomationRuleEditor', () => {
 
   it('does not emit DingTalk Test Run when confirmation is canceled', async () => {
     const tested = vi.fn()
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
     const { container } = mount({
       visible: true,
       sheetId: 'sheet_1',
@@ -1782,7 +1793,7 @@ describe('MetaAutomationRuleEditor', () => {
 
   it('requires confirmation based on the saved rule even when the draft action changes', async () => {
     const tested = vi.fn()
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { container } = mount({
       visible: true,
       sheetId: 'sheet_1',
@@ -1820,7 +1831,7 @@ describe('MetaAutomationRuleEditor', () => {
 
   it('does not require confirmation for non-DingTalk Test Run', async () => {
     const tested = vi.fn()
-    const confirmSpy = vi.spyOn(window, 'confirm')
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm')
     const { container } = mount({
       visible: true,
       sheetId: 'sheet_1',

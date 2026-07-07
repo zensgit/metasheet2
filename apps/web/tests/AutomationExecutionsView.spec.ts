@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ElMessageBox } from 'element-plus'
 import { createApp, h, nextTick } from 'vue'
 import AutomationExecutionsView from '../src/views/AutomationExecutionsView.vue'
 import { useLocale } from '../src/composables/useLocale'
@@ -169,7 +170,7 @@ describe('AutomationExecutionsView (A3 admin runs view)', () => {
   })
 
   it('A6-2: a suspended step shows a confirm-gated Resume → resumeAutomation(token) + reloads detail; token never rendered', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const client = makeClient({
       listAutomationRuns: vi.fn().mockResolvedValue([SUSPENDED_LIST]),
       getAutomationRun: vi.fn().mockResolvedValue(SUSPENDED_DETAIL),
@@ -192,7 +193,7 @@ describe('AutomationExecutionsView (A3 admin runs view)', () => {
   })
 
   it('A6-2: cancelling the resume confirm does NOT call resumeAutomation', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
     const client = makeClient({
       listAutomationRuns: vi.fn().mockResolvedValue([SUSPENDED_LIST]),
       getAutomationRun: vi.fn().mockResolvedValue(SUSPENDED_DETAIL),
@@ -210,7 +211,7 @@ describe('AutomationExecutionsView (A3 admin runs view)', () => {
   })
 
   it('A6-2: a discriminated resume error (409 RULE_CHANGED) maps to an INLINE message, not a toast', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const err = Object.assign(new Error('x'), { code: 'RULE_CHANGED' })
     const client = makeClient({
       listAutomationRuns: vi.fn().mockResolvedValue([SUSPENDED_LIST]),

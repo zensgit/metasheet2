@@ -134,9 +134,7 @@
         <p v-if="workflowError" class="workflow-hub__error">{{ workflowError }}</p>
 
         <div v-if="workflowLoading" class="workflow-hub__empty">{{ workflowHubLabel('workflowCard.loadingDrafts', isZh) }}</div>
-        <div v-else-if="!workflowItems.length" class="workflow-hub__empty">
-          {{ workflowHubLabel('workflowCard.noMatch', isZh) }}
-        </div>
+        <EmptyState v-else-if="!workflowItems.length" :title="workflowHubLabel('workflowCard.noMatch', isZh)" />
         <table v-else class="workflow-hub__table">
           <thead>
             <tr>
@@ -270,9 +268,7 @@
         <p v-if="templateError" class="workflow-hub__error">{{ templateError }}</p>
 
         <div v-if="templateLoading" class="workflow-hub__empty">{{ workflowHubLabel('templateCard.loadingTemplates', isZh) }}</div>
-        <div v-else-if="!templateItems.length" class="workflow-hub__empty">
-          {{ workflowHubLabel('templateCard.noMatch', isZh) }}
-        </div>
+        <EmptyState v-else-if="!templateItems.length" :title="workflowHubLabel('templateCard.noMatch', isZh)" />
         <div v-else class="workflow-hub__template-list">
           <article v-for="template in templateItems" :key="template.id" class="workflow-hub__template-card">
             <div class="workflow-hub__template-top">
@@ -364,6 +360,7 @@ import {
   writeWorkflowHubSessionState,
 } from './workflowHubSessionState'
 import { useLocale } from '../composables/useLocale'
+import EmptyState from '../components/status/EmptyState.vue'
 import {
   templateSourceChipLabel,
   workflowHubArchiveConfirm,

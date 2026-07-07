@@ -764,7 +764,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
-import { ElButton, ElCheckbox, ElDrawer, ElInput, ElOption, ElSelect } from 'element-plus'
+import { ElButton, ElCheckbox, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { useRouter } from 'vue-router'
 import type {
   AutomationExecution,
@@ -1820,11 +1820,24 @@ async function onToggle(rule: AutomationRule) {
   }
 }
 
+// UF-8: ElMessageBox.confirm replaces window.confirm (design-lock §3.6).
+async function confirmDeleteRule(rule: AutomationRule): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(
+      automationDeleteRuleConfirmMessage(rule.name, ruleStats.value[rule.id], isZh.value),
+      automationLabel('manager.deleteConfirmTitle', isZh.value),
+      { type: 'warning', confirmButtonText: automationLabel('manager.delete', isZh.value), cancelButtonText: automationLabel('editor.cancel', isZh.value) },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function onDelete(rule: AutomationRule) {
   // B1-06: irreversible + takes the rule's execution-history entry point with it — confirm first,
-  // with cumulative run counts as blast radius when stats are already loaded. window.confirm is the
-  // established pattern here (the rule editor's DingTalk test-run confirm uses the same).
-  if (!window.confirm(automationDeleteRuleConfirmMessage(rule.name, ruleStats.value[rule.id], isZh.value))) return
+  // with cumulative run counts as blast radius when stats are already loaded.
+  if (!(await confirmDeleteRule(rule))) return
   try {
     await deleteRule(props.sheetId, rule.id)
     emit('updated')
