@@ -31799,6 +31799,97 @@ module.exports = {
 	      })
 	    )
 
+	    // Per-user field-picker memory (attendance-import-template-prefs design-lock
+	    // §2, RATIFIED 2026-07-07). Governance: the actor is ALWAYS req.user — the
+	    // legacy x-user-id header fallback in getUserId() is deliberately NOT used
+	    // here (personal-views lock §7 Q1 anti-pattern). org stays a legitimate
+	    // client dimension (multi-org admins), mirroring getOrgId().
+	    const getTemplatePrefsActorId = (req) => {
+	      const user = req.user
+	      const raw = user?.id ?? user?.sub ?? user?.userId
+	      if (typeof raw === 'string' && raw.trim().length > 0) return raw.trim()
+	      if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+	      return null
+	    }
+	    const TEMPLATE_PREFS_MAX_KEYS = 64
+	    const TEMPLATE_PREFS_MAX_KEY_LENGTH = 128
+
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/import/template-prefs',
+	      withAttendanceImportPermission(async (req, res) => {
+	        const actorId = getTemplatePrefsActorId(req)
+	        if (!actorId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authenticated user required' } })
+	          return
+	        }
+	        const orgId = getOrgId(req)
+	        const rows = await db.query(
+	          `SELECT selected_keys FROM attendance_import_template_prefs WHERE org_id = $1 AND user_id = $2`,
+	          [orgId, actorId]
+	        )
+	        const stored = rows?.[0]?.selected_keys
+	        const selectedKeys = Array.isArray(stored)
+	          ? stored.filter((key) => typeof key === 'string' && key.trim().length > 0)
+	          : []
+	        res.json({ ok: true, data: { selectedKeys } })
+	      })
+	    )
+
+	    context.api.http.addRoute(
+	      'PUT',
+	      '/api/attendance/import/template-prefs',
+	      withAttendanceImportPermission(async (req, res) => {
+	        const actorId = getTemplatePrefsActorId(req)
+	        if (!actorId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authenticated user required' } })
+	          return
+	        }
+	        const orgId = getOrgId(req)
+	        const raw = req.body?.selectedKeys
+	        if (raw !== null && raw !== undefined && !Array.isArray(raw)) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'selectedKeys must be an array of field keys (or null/[] to clear)' } })
+	          return
+	        }
+	        const cleaned = Array.isArray(raw)
+	          ? Array.from(new Set(raw
+	              .filter((key) => typeof key === 'string')
+	              .map((key) => key.trim())
+	              .filter((key) => key.length > 0)))
+	          : []
+	        if (Array.isArray(raw) && raw.some((key) => typeof key !== 'string')) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'selectedKeys must contain strings only' } })
+	          return
+	        }
+	        if (cleaned.some((key) => key.length > TEMPLATE_PREFS_MAX_KEY_LENGTH)) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `selectedKeys entries must be at most ${TEMPLATE_PREFS_MAX_KEY_LENGTH} characters` } })
+	          return
+	        }
+	        if (cleaned.length > TEMPLATE_PREFS_MAX_KEYS) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `selectedKeys exceeds the ${TEMPLATE_PREFS_MAX_KEYS}-key limit` } })
+	          return
+	        }
+	        if (cleaned.length === 0) {
+	          // Clear semantics (恢复默认): drop the row so future default-set
+	          // upgrades flow to the user instead of being pinned by an old save.
+	          await db.query(
+	            `DELETE FROM attendance_import_template_prefs WHERE org_id = $1 AND user_id = $2`,
+	            [orgId, actorId]
+	          )
+	          res.json({ ok: true, data: { selectedKeys: [] } })
+	          return
+	        }
+	        await db.query(
+	          `INSERT INTO attendance_import_template_prefs (org_id, user_id, selected_keys, updated_at)
+	           VALUES ($1, $2, $3::jsonb, NOW())
+	           ON CONFLICT (org_id, user_id)
+	           DO UPDATE SET selected_keys = EXCLUDED.selected_keys, updated_at = NOW()`,
+	          [orgId, actorId, JSON.stringify(cleaned)]
+	        )
+	        res.json({ ok: true, data: { selectedKeys: cleaned } })
+	      })
+	    )
+
 	    // Upload a CSV file (raw body) and receive a server-side csvFileId reference.
 	    // Intended for extreme-scale imports where embedding csvText in JSON hits body limits.
 	    context.api.http.addRoute(
