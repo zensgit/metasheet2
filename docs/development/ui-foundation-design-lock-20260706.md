@@ -71,12 +71,19 @@ EP 衍生色（light-N）按 EP 官方 mix 公式由主值生成，写死进 tok
 - ✅ **UF-3** `StatusTag` 组件 + 状态域映射表（审批实例/委托/自动化运行 三域先行；
   **模板域 = UF-3b 补刀**），替换全部 6 处局部实现；顺带修复收件箱无色状态 +
   委托页不分 locale 恒中文两个缺陷——#3710
-- ⬜ **UF-4** 自动化管理器/规则编辑器迁回 EP（叠层自绘弹窗 → `el-drawer`/整页；原生控件 → EP；
-  逻辑零改动）——设计判断最重的一刀
-- ⬜ **UF-5** 审批中心 4 份复制表格收敛为共享列定义 + 统一表格密度
-- ⬜ **UF-6** ESLint 禁 `style=`（存量 57 处清零）+ 表单布局工具类；同时加「新增硬编码 hex」lint
-- ⬜ **UF-7** i18n 机制收敛为 key-table 一种；修中英混排面与英文枚举裸显
-- ⬜ **UF-8** 状态质感包：骨架屏、共享空态、`window.confirm`→`ElMessageBox`、机器值名称化
+- ✅ **UF-4** 自动化管理器/规则编辑器迁回 EP（叠层自绘弹窗 → 嵌套 `el-drawer`；51 原生控件 → EP；
+  逻辑/payload 零改动，对抗审阅 APPROVE + before-close 守卫变异加锁）——#3723
+- ✅ **UF-5** 审批中心 4 份复制表格收敛为 `ApprovalCenterTable`（净删 298 行，7 个既有 spec 文件
+  零改动通过）——#3717
+- ✅ **UF-6** 存量清零 + `ui-foundation-style-guard.spec.ts` 21 文件 fs 级双闸（静态 `style=` /
+  `<style>` 内 hex/rgb 字面量）进 CI + `vue/no-static-inline-styles` IDE 反馈 +
+  `form-layout-utilities.css`——#3740
+- ✅ **UF-7** i18n 收敛：WorkflowHubView（全仓最重混排面）走 `workflowHubLabels.ts` key-table +
+  `useLocale`，双向 locale 正确；其余面盘点确认无混排（单语一致面纪律性不动）——#3724
+- ✅ **UF-8** 状态质感包：首屏骨架屏（中心/详情）、共享 `EmptyState`、UF 面 `window.confirm`
+  清零（→`ElMessageBox`）、机器值名称化/`<code>` 降级——#3747
+- ⬜ **UF-3b 后续**（诚实缺口，非本阶梯分母）：StatusTag 在纯中文 admin 视图内 en locale 下的
+  英文徽标（UF-7b）；integration/multitable 面的 `window.confirm` 与 hex（各自线的 UF 化另立）
 
 顺序约束：UF-1 先行（其余全依赖 token）；UF-2/UF-3 可并行；UF-4 独立大刀在 UF-1 后任意时点；
 UF-5..UF-8 空闲带宽穿插。
