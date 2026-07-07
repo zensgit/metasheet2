@@ -229,6 +229,18 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Data Factory', titleZh: '数据工厂', requiresAuth: true, permissions: ['integration:write'] }
   },
   {
+    // IU-6c (design-lock docs/development/integration-ux-workbench-redesign-design-lock-20260706.md,
+    // #3739): read-only help center for the Data Factory / integration surface. No write path, no
+    // integration:write gate — mirrors the /data-sources info-page pattern (requiresAuth only) rather
+    // than the workbench's write-tier gate, since the content here (when-to-use guidance, error-code
+    // reference, FAQ) is useful to any authenticated user who hits an error, including someone without
+    // integration:write who is just trying to understand a failure.
+    path: '/help/integration',
+    name: 'integration-help',
+    component: () => import('../views/IntegrationHelpView.vue'),
+    meta: { title: 'Integration Help', titleZh: '集成帮助中心', requiresAuth: true },
+  },
+  {
     path: '/integrations/k3-wise',
     name: AppRouteNames.INTEGRATION_K3_WISE,
     component: () => import('../views/IntegrationK3WiseSetupView.vue'),

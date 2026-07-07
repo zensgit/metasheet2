@@ -112,7 +112,9 @@ export type IntegrationErrorCode =
   // Dead-letter known mainline (10) — see DEAD_LETTER_MAINLINE_ERROR_CODES above
   | (typeof DEAD_LETTER_MAINLINE_ERROR_CODES)[number]
 
-const INTEGRATION_ERROR_CODE_LABELS: Record<IntegrationErrorCode, IntegrationErrorLabel> = {
+// Exported (IU-6c, design-lock §2 IU-6c): the help-center error-code table renders straight off this
+// map so a future label addition/removal shows up there automatically — SINGLE SOURCE, no copy-paste.
+export const INTEGRATION_ERROR_CODE_LABELS: Record<IntegrationErrorCode, IntegrationErrorLabel> = {
   // --- Resolver (9) ---
   READ_SOURCE_RESOLVER_CONTAINER_NOT_FOUND: {
     zh: '未找到用于解析的数据容器',
@@ -378,4 +380,20 @@ export function integrationErrorCodeHint(
   const label = integrationErrorCodeLabel(code, locale)
   if (!label?.hint) return null
   return locale === 'zh-CN' ? label.hint.zh : label.hint.en
+}
+
+export type IntegrationErrorCodeEntry = { code: IntegrationErrorCode } & IntegrationErrorLabel
+
+/**
+ * All registered codes as a flat, display-ready array — the single-source feed for the IU-6c help
+ * center's error-code table. Iterates `INTEGRATION_ERROR_CODE_LABELS`'s own keys ONLY (no server call,
+ * no duplication of the label text), so any future addition/removal to that map is reflected here with
+ * zero further edits. Order matches declaration order in the map (grouped by family, per the module
+ * header's family list).
+ */
+export function integrationErrorCodeEntries(): IntegrationErrorCodeEntry[] {
+  return (Object.keys(INTEGRATION_ERROR_CODE_LABELS) as IntegrationErrorCode[]).map((code) => ({
+    code,
+    ...INTEGRATION_ERROR_CODE_LABELS[code],
+  }))
 }

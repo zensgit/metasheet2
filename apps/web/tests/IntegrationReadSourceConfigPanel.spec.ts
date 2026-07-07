@@ -426,6 +426,26 @@ describe('IntegrationReadSourceConfigPanel', () => {
     expect(root.querySelector('[data-testid="rsc-retire-cfg_ret"]')).toBeNull()
   })
 
+  // IU-6a (design-lock docs/development/integration-ux-workbench-redesign-design-lock-20260706.md
+  // #3739): the saved-configs empty state must guide, not just say "nothing here" — one line for
+  // "what is this list" and one line for "what's the first step".
+  it('renders a guided empty state (what-this-is + first-step) when there are no saved configs', async () => {
+    mockListOnly([])
+    const root = mountPanel()
+    await flushUi()
+
+    const empty = q(root, 'rsc-empty')
+    expect(empty).not.toBeNull()
+    const what = q(root, 'rsc-empty-what')
+    const firstStep = q(root, 'rsc-empty-first-step')
+    expect(what.textContent?.trim().length ?? 0).toBeGreaterThan(0)
+    expect(firstStep.textContent?.trim().length ?? 0).toBeGreaterThan(0)
+    // Default test-env locale is 'en' (see localstorage.ts setup) — assert the guidance actually
+    // mentions the concrete first action (probe → save), not a generic "no data" placeholder.
+    expect(firstStep.textContent).toMatch(/probe/i)
+    expect(firstStep.textContent).toMatch(/save version/i)
+  })
+
   it('gates fields per mode and blocks probe/save until required fields are present', async () => {
     mockListOnly()
     const root = mountPanel()
