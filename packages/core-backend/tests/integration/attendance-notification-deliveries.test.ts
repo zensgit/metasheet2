@@ -678,6 +678,25 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         content: 'Tap to open attendance.',
       }])
 
+      // Case 2b (review P3): APP_BASE_URL alone (no PUBLIC_APP_URL) also powers
+      // the deep link — the fallback branch of the base-URL resolver.
+      process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = 'true'
+      delete process.env.PUBLIC_APP_URL
+      process.env.APP_BASE_URL = 'https://fallback.example.test'
+      await insertDelivery()
+      const fallbackSink = { text: [] as unknown[], card: [] as unknown[] }
+      const fallbackWorker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [buildChannel(fallbackSink)],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-e3-appbase',
+      })
+      await expect(fallbackWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      expect(fallbackSink.text).toHaveLength(0)
+      expect(fallbackSink.card).toHaveLength(1)
+      expect((fallbackSink.card[0] as { singleUrl: string }).singleUrl)
+        .toBe('https://fallback.example.test/attendance?noticeSource=unscheduled_reminder')
+
       // Case 3: base URL present but flag OFF -> text path (the flag is load-bearing:
       // PUBLIC_APP_URL is already set in production for approval cards).
       delete process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED

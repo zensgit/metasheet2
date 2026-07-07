@@ -21,7 +21,7 @@
   `${base}/attendance?noticeSource=<encodeURIComponent(sourceType)>`——对齐 E2 路由（overview 落地）,
   query 只作来源标记不改路由行为;base 尾斜杠归一。
 - actionCard 内容:`title=buildDeliveryTitle`、`markdown=buildDeliveryContent`（**同一 content 真源,无 per-msgtype drift**）、
-  `singleTitle='打开考勤 / Open attendance'`、`singleUrl=deepLink`。
+  `singleTitle='打开考勤'`（actionCard 按钮短文案,单语）、`singleUrl=deepLink`。
 - 错误分类复用 `classifyDingTalkSendError`（actionCard 失败与 text 同状态流:retrying/failed 可见）。
 - **不做**（v1 OUT）:per-source 不同落点页（都落 overview,自助面已含打卡/异常/余额）;`dingtalk://openapp`
   microapp wrapper（真机行为 E4 验证,plain URL 在钉钉内打开走内置浏览器→E2b 免登,已足）;email channel 深链。
