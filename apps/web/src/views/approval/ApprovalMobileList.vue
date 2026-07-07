@@ -153,7 +153,7 @@ function rowSummaryLine(row: UnifiedApprovalDTO): string {
   gap: 8px;
   width: 100%;
   text-align: left;
-  background: #fff;
+  background: var(--ms-bg-card);
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 10px;
   padding: 14px 16px;
@@ -215,10 +215,10 @@ function rowSummaryLine(row: UnifiedApprovalDTO): string {
 
 /* B1-03: 已等待 aging severity — same warn/urgent palette as the desktop table. */
 .approval-mobile-list__date--warn {
-  color: #e6a23c;
+  color: var(--ms-color-warning);
 }
 
 .approval-mobile-list__date--urgent {
-  color: #f56c6c;
+  color: var(--ms-color-danger);
 }
 </style>

@@ -904,7 +904,7 @@ watch(
 .workflow-hub__template-top p,
 .workflow-hub__secondary {
   margin: 6px 0 0;
-  color: #6b7280;
+  color: var(--ms-text-2);
 }
 
 .workflow-hub__grid {
@@ -918,8 +918,8 @@ watch(
   gap: 12px;
   padding: 18px;
   border-radius: 18px;
-  border: 1px solid #dbeafe;
-  background: linear-gradient(180deg, #f8fbff 0%, #eef6ff 100%);
+  border: 1px solid var(--el-color-primary-light-8);
+  background: linear-gradient(180deg, var(--ms-bg-card) 0%, var(--el-color-primary-light-9) 100%);
 }
 
 .workflow-hub__saved-list {
@@ -929,12 +929,12 @@ watch(
 }
 
 .workflow-hub__saved-card {
-  border: 1px solid #dbeafe;
+  border: 1px solid var(--el-color-primary-light-8);
   border-radius: 14px;
   padding: 14px;
   display: grid;
   gap: 10px;
-  background: #fff;
+  background: var(--ms-bg-card);
 }
 
 .workflow-hub__actions,
@@ -950,8 +950,8 @@ watch(
 }
 
 .workflow-hub__card {
-  background: #fff;
-  border: 1px solid #e5e7eb;
+  background: var(--ms-bg-card);
+  border: 1px solid var(--ms-border-light);
   border-radius: 18px;
   padding: 20px;
   display: grid;
@@ -971,58 +971,58 @@ watch(
 }
 
 .workflow-hub__count {
-  background: #eff6ff;
-  color: #1d4ed8;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
 }
 
 .chip {
-  background: #f3f4f6;
-  color: #374151;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .chip[data-tone='draft'] {
-  background: #fff7ed;
-  color: #c2410c;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
 }
 
 .chip[data-tone='published'] {
-  background: #ecfdf5;
-  color: #047857;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .chip[data-tone='archived'] {
-  background: #f3f4f6;
-  color: #6b7280;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .chip[data-tone='owner'] {
-  background: #ede9fe;
-  color: #6d28d9;
+  background: var(--el-color-info-light-9);
+  color: var(--el-color-info-dark-2);
 }
 
 .chip[data-tone='editor'] {
-  background: #eff6ff;
-  color: #1d4ed8;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
 }
 
 .chip[data-tone='viewer'] {
-  background: #f3f4f6;
-  color: #4b5563;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .chip[data-tone='builtin'] {
-  background: #ecfccb;
-  color: #3f6212;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .chip[data-tone='database'] {
-  background: #ede9fe;
-  color: #7c3aed;
+  background: var(--el-color-info-light-9);
+  color: var(--el-color-info-dark-2);
 }
 
 .tag {
-  background: #f8fafc;
-  color: #475569;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .workflow-hub__table {
@@ -1034,7 +1034,7 @@ watch(
 .workflow-hub__table th,
 .workflow-hub__table td {
   padding: 10px 12px;
-  border-bottom: 1px solid #f1f5f9;
+  border-bottom: 1px solid var(--ms-bg-page);
   text-align: left;
   vertical-align: top;
 }
@@ -1053,8 +1053,8 @@ watch(
   gap: 12px;
   padding: 16px;
   border-radius: 16px;
-  border: 1px solid #dbeafe;
-  background: linear-gradient(180deg, #f8fbff 0%, #eef6ff 100%);
+  border: 1px solid var(--el-color-primary-light-8);
+  background: linear-gradient(180deg, var(--ms-bg-card) 0%, var(--el-color-primary-light-9) 100%);
 }
 
 .workflow-hub__recent-list {
@@ -1063,36 +1063,36 @@ watch(
 }
 
 .workflow-hub__recent-card {
-  border: 1px solid #dbeafe;
+  border: 1px solid var(--el-color-primary-light-8);
   border-radius: 14px;
   padding: 14px;
   display: grid;
   gap: 10px;
-  background: #fff;
+  background: var(--ms-bg-card);
 }
 
 .workflow-hub__template-card {
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ms-border-light);
   border-radius: 14px;
   padding: 14px;
   display: grid;
   gap: 12px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  background: linear-gradient(180deg, var(--ms-bg-card) 0%, var(--ms-bg-page) 100%);
 }
 
 .workflow-hub__meta-row {
   font-size: 12px;
-  color: #64748b;
+  color: var(--ms-text-2);
 }
 
 .workflow-hub__input,
 .workflow-hub__select {
   min-height: 38px;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--ms-border);
   border-radius: 10px;
   padding: 0 12px;
-  background: #fff;
-  color: #111827;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
 }
 
 .workflow-hub__input {
@@ -1108,13 +1108,13 @@ watch(
 .workflow-hub__error {
   padding: 18px;
   border-radius: 12px;
-  background: #f8fafc;
-  color: #475569;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .workflow-hub__error {
-  background: #fef2f2;
-  color: #b91c1c;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger-dark-2);
 }
 
 .btn {
@@ -1125,21 +1125,21 @@ watch(
   min-height: 36px;
   padding: 0 14px;
   border-radius: 10px;
-  border: 1px solid #d1d5db;
-  background: #fff;
-  color: #111827;
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   text-decoration: none;
   cursor: pointer;
 }
 
 .btn--primary {
-  background: #111827;
-  border-color: #111827;
-  color: #fff;
+  background: var(--ms-text-1);
+  border-color: var(--ms-text-1);
+  color: var(--ms-bg-card);
 }
 
 .btn--ghost {
-  background: #fff;
+  background: var(--ms-bg-card);
 }
 
 .btn--mini {

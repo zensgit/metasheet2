@@ -128,7 +128,7 @@
               :disabled="isAutoSummedTotal(field.id)"
               :controls="!isAutoSummedTotal(field.id)"
               v-bind="numberFieldProps(field)"
-              style="width: 100%"
+              class="ms-w-100pct"
             />
 
             <!-- date -->
@@ -137,7 +137,7 @@
               v-model="formData[field.id]"
               type="date"
               :placeholder="field.placeholder || `请选择${field.label}`"
-              style="width: 100%"
+              class="ms-w-100pct"
             />
 
             <!-- datetime -->
@@ -146,7 +146,7 @@
               v-model="formData[field.id]"
               type="datetime"
               :placeholder="field.placeholder || `请选择${field.label}`"
-              style="width: 100%"
+              class="ms-w-100pct"
             />
 
             <!-- select -->
@@ -154,7 +154,7 @@
               v-else-if="field.type === 'select'"
               v-model="formData[field.id]"
               :placeholder="field.placeholder || `请选择${field.label}`"
-              style="width: 100%"
+              class="ms-w-100pct"
             >
               <el-option
                 v-for="opt in (field.options || [])"
@@ -170,7 +170,7 @@
               v-model="formData[field.id]"
               multiple
               :placeholder="field.placeholder || `请选择${field.label}`"
-              style="width: 100%"
+              class="ms-w-100pct"
             >
               <el-option
                 v-for="opt in (field.options || [])"
@@ -230,27 +230,27 @@
                       :controls="false"
                       :disabled="isDetailDerivedColumnReadOnly(field, column, row)"
                       v-bind="numberFieldProps(column)"
-                      style="width: 100%"
+                      class="ms-w-100pct"
                     />
                     <el-date-picker
                       v-else-if="column.type === 'date'"
                       v-model="row[column.id]"
                       type="date"
                       :placeholder="column.label"
-                      style="width: 100%"
+                      class="ms-w-100pct"
                     />
                     <el-date-picker
                       v-else-if="column.type === 'datetime'"
                       v-model="row[column.id]"
                       type="datetime"
                       :placeholder="column.label"
-                      style="width: 100%"
+                      class="ms-w-100pct"
                     />
                     <el-select
                       v-else-if="column.type === 'select'"
                       v-model="row[column.id]"
                       :placeholder="column.label"
-                      style="width: 100%"
+                      class="ms-w-100pct"
                     >
                       <el-option
                         v-for="opt in (column.options || [])"
@@ -264,7 +264,7 @@
                       v-model="row[column.id]"
                       multiple
                       :placeholder="column.label"
-                      style="width: 100%"
+                      class="ms-w-100pct"
                     >
                       <el-option
                         v-for="opt in (column.options || [])"
@@ -766,7 +766,7 @@ watch([visibleFieldIds, template], () => {
 }
 
 .approval-new__form {
-  background: #fff;
+  background: var(--ms-bg-card);
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
   padding: 24px;

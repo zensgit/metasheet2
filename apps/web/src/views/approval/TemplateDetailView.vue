@@ -74,7 +74,7 @@
                 text
                 size="small"
                 data-testid="template-detail-category-edit-button"
-                style="margin-left: 8px"
+                class="ms-ml-8"
                 @click="beginEditCategory"
               >
                 编辑
@@ -85,7 +85,7 @@
                 v-model="categoryDraft"
                 size="small"
                 placeholder="分组标识，用于模板中心筛选，留空表示未分组"
-                style="width: 240px; margin-right: 8px"
+                class="ms-w-240 ms-mr-8"
                 maxlength="64"
                 data-testid="template-detail-category-input"
                 @keyup.enter="saveCategory"
@@ -128,7 +128,7 @@
                 text
                 size="small"
                 data-testid="template-detail-visibility-edit-button"
-                style="margin-left: 8px"
+                class="ms-ml-8"
                 @click="beginEditVisibility"
               >
                 编辑
@@ -138,7 +138,7 @@
               <el-select
                 v-model="visibilityTypeDraft"
                 size="small"
-                style="width: 120px; margin-right: 8px"
+                class="ms-w-120 ms-mr-8"
                 data-testid="template-detail-visibility-type"
               >
                 <el-option label="全员" value="all" />
@@ -150,7 +150,7 @@
                 v-model="visibilityIdsDraft"
                 size="small"
                 placeholder="逗号分隔 id，如 dept-finance, role-manager"
-                style="width: 320px; margin-right: 8px"
+                class="ms-w-320 ms-mr-8"
                 :disabled="visibilityTypeDraft === 'all'"
                 data-testid="template-detail-visibility-ids-input"
                 @keyup.enter="saveVisibility"
@@ -199,7 +199,7 @@
                 text
                 size="small"
                 data-testid="template-detail-sla-edit-button"
-                style="margin-left: 8px"
+                class="ms-ml-8"
                 @click="beginEditSla"
               >
                 编辑
@@ -211,7 +211,7 @@
                 :min="1"
                 :max="8760"
                 size="small"
-                style="width: 160px; margin-right: 8px"
+                class="ms-w-160 ms-mr-8"
                 data-testid="template-detail-sla-input"
                 placeholder="留空清除"
                 :controls="false"
@@ -247,7 +247,7 @@
           <!-- Form schema section -->
           <div class="template-detail__section">
             <h2>表单字段</h2>
-            <el-table :data="template.formSchema.fields" style="width: 100%" max-height="400" stripe>
+            <el-table :data="template.formSchema.fields" class="ms-w-100pct" max-height="400" stripe>
               <el-table-column prop="label" label="字段名" min-width="160" />
               <el-table-column label="类型" width="120">
                 <template #default="{ row }">
@@ -286,7 +286,7 @@
               description="暂无字段显隐规则"
               :image-size="60"
             />
-            <el-table v-else :data="visibilityRuleSummaries" style="width: 100%" stripe>
+            <el-table v-else :data="visibilityRuleSummaries" class="ms-w-100pct" stripe>
               <el-table-column label="字段" min-width="160">
                 <template #default="{ row }">
                   {{ row.field.label }}
@@ -699,7 +699,7 @@ onMounted(() => {
 }
 
 .template-detail__section {
-  background: #fff;
+  background: var(--ms-bg-card);
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
   padding: 20px;
