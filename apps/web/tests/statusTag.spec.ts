@@ -79,10 +79,10 @@ describe('StatusTag.vue (mounted)', () => {
     container = null
   })
 
-  function mount(domain: string, status: string, size?: 'sm' | 'md') {
+  function mount(domain: string, status: string, size?: 'sm' | 'md', forceLocale?: 'zh' | 'en') {
     container = document.createElement('div')
     document.body.appendChild(container)
-    app = createApp({ render: () => h(StatusTag, { domain, status, size }) })
+    app = createApp({ render: () => h(StatusTag, { domain, status, size, forceLocale }) })
     app.mount(container)
     return container
   }
@@ -122,6 +122,40 @@ describe('StatusTag.vue (mounted)', () => {
     setLocale('zh-CN')
     await nextTick()
     expect(el.textContent).toBe('生效中')
+  })
+
+  it('UF-7b: forceLocale="zh" renders the zh label even while the global locale is en', async () => {
+    const { setLocale } = useLocale()
+    setLocale('en')
+    const c = mount('delegation', '生效中', undefined, 'zh')
+    await nextTick()
+    const el = c.querySelector('.ms-status-tag') as HTMLElement
+    expect(el.textContent).toBe('生效中')
+    expect(el.getAttribute('data-tone')).toBe('success')
+    setLocale('zh-CN')
+  })
+
+  it('UF-7b: forceLocale="en" renders the en label even while the global locale is zh', async () => {
+    const c = mount('approvalInstance', 'approved', undefined, 'en')
+    await nextTick()
+    const el = c.querySelector('.ms-status-tag') as HTMLElement
+    expect(el.textContent).toBe('Approved')
+  })
+
+  it('UF-7b: leaving forceLocale unset keeps following useLocale() exactly as before', async () => {
+    const { setLocale } = useLocale()
+    const c = mount('approvalInstance', 'approved')
+    await nextTick()
+    const el = c.querySelector('.ms-status-tag') as HTMLElement
+    expect(el.textContent).toBe('已通过')
+
+    setLocale('en')
+    await nextTick()
+    expect(el.textContent).toBe('Approved')
+
+    setLocale('zh-CN')
+    await nextTick()
+    expect(el.textContent).toBe('已通过')
   })
 
   it('guard: the rendered inline style references only CSS custom properties, never a hardcoded hex', async () => {

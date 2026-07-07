@@ -25,6 +25,14 @@ const props = withDefaults(
     domain: StatusDomain
     status: string
     size?: 'sm' | 'md'
+    // UF-7b: escape hatch for the handful of admin views whose OTHER chrome is
+    // hardcoded-Chinese (never localized) — a StatusTag that follows the global useLocale()
+    // toggle would show an English badge inside an otherwise-monolingual-Chinese page under
+    // locale=en. Setting this pins the resolved label/tone to the given locale regardless of
+    // useLocale(); leaving it unset (the default) keeps following useLocale() exactly as
+    // before — bilingual views (ApprovalCenterView/ApprovalInboxView/AutomationExecutionsView/
+    // ApprovalMobileList/WorkflowHubView) must NOT set this.
+    forceLocale?: 'zh' | 'en'
   }>(),
   {
     size: 'md',
@@ -33,7 +41,9 @@ const props = withDefaults(
 
 const { isZh } = useLocale()
 
-const display = computed(() => resolveStatusDisplay(props.domain, props.status, isZh.value))
+const effectiveIsZh = computed(() => (props.forceLocale ? props.forceLocale === 'zh' : isZh.value))
+
+const display = computed(() => resolveStatusDisplay(props.domain, props.status, effectiveIsZh.value))
 
 function toneColors(tone: StatusTone): { background: string; color: string } {
   if (tone === 'neutral') {
