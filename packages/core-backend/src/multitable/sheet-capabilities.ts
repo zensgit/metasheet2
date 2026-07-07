@@ -5,7 +5,7 @@
  */
 
 import { listUserPermissions, isAdmin } from '../rbac/service'
-import { APPROVAL_PROJECTION_BASE_ID, restrictApprovalProjectionCapabilities } from './approval-projection-constants'
+import { APPROVAL_PROJECTION_BASE_ID, restrictApprovalProjectionCapabilitiesPerRow } from './approval-projection-constants'
 
 // ── Permission code sets ────────────────────────────────────────────
 
@@ -254,7 +254,23 @@ export async function resolveSheetCapabilitiesForUser(
       [[sheetId], APPROVAL_PROJECTION_BASE_ID],
     )
     if ((proj.rows as Array<{ id: string }>).length > 0) {
-      capabilities = restrictApprovalProjectionCapabilities(capabilities, true, false)
+      // T36-1 (Plan A): participants keep the read plane here too (this choke serves the Yjs
+      // bridge + OAPI tokens — read parity with the REST choke, W1-2 G-4). Fail-closed: any
+      // participant-lookup error → full fence.
+      let isParticipant = false
+      try {
+        const participant = await query(
+          `SELECT 1 FROM meta_records
+            WHERE sheet_id = $1
+              AND (data->>'requesterId' = $2 OR data->>'approverId' = $2)
+            LIMIT 1`,
+          [sheetId, userId],
+        )
+        isParticipant = participant.rows.length > 0
+      } catch {
+        isParticipant = false
+      }
+      capabilities = restrictApprovalProjectionCapabilitiesPerRow(capabilities, true, false, isParticipant)
     }
   }
   return {

@@ -2355,6 +2355,7 @@ export class MetaSheetServer {
         // Auth gate: uses the same sheet + record-level capability resolution as REST
         const sheetCaps = await import('./multitable/sheet-capabilities')
         const { resolveSheetCapabilitiesForUser, canWriteRecord } = sheetCaps
+        const { isRecordReadDeniedForUser } = await import('./multitable/permission-service')
         yjsWsAdapter.setAuthChecker(async (userId, recordId) => {
           try {
             const pool = poolManager.get()
@@ -2372,6 +2373,13 @@ export class MetaSheetServer {
               sheetId,
               userId,
             )
+            // T36-1 review P1: sheet-level canRead is not enough — the doc seeder loads the
+            // record's FULL data, so a row-level-denied record (projection non-participant row,
+            // or any row-deny-flagged sheet) must not be subscribable at all. DENY-WINS.
+            if (!isAdminRole && capabilities.canRead
+              && (await isRecordReadDeniedForUser(pool.query.bind(pool), sheetId, recordId, userId))) {
+              return { canRead: false, canWrite: false }
+            }
             const canWrite = canWriteRecord(capabilities, sheetScope, isAdminRole, userId, createdBy)
             return { canRead: capabilities.canRead, canWrite }
           } catch {
