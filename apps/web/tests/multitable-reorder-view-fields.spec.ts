@@ -122,4 +122,17 @@ describe('reorderViewFields — C2 preserve other personal facets (read-merge-wr
     })).resolves.toBeUndefined()
     expect(client.putPersonalViewConfig).toHaveBeenCalledWith('v1', { fieldOrder: ['b', 'a'] })
   })
+
+  it('FAIL-CLOSED: a non-404 GET failure (500 / network) ⇒ REJECTS and does NOT PUT (never overwrites other facets)', async () => {
+    const client = mockClient({
+      getPersonalViewConfig: vi.fn(async () => { throw Object.assign(new Error('server error'), { status: 500 }) }),
+    })
+    await expect(reorderViewFields({
+      fromId: 'b', toId: 'a', isPersonal: true, viewId: 'v1',
+      sharedFields: [field('a'), field('b')], visibleFieldIds: ['a', 'b'],
+      client, onSharedOrder: vi.fn(), onPersonalOrder: vi.fn(),
+    })).rejects.toThrow('server error')
+    // The whole point: on a transient read failure we must NOT blind-write { fieldOrder } and wipe the row.
+    expect(client.putPersonalViewConfig).not.toHaveBeenCalled()
+  })
 })

@@ -58,10 +58,13 @@ export async function reorderViewFields(params: ReorderViewFieldsParams): Promis
     params.onPersonalOrder(order) // optimistic — the grid re-renders columns immediately
     let base: PersonalViewConfigOverlay = {}
     try {
-      // A view with no personal row yet returns { config: null } (row created lazily on first write); a
-      // genuine 404 (flag off / view gone) is caught → treat as empty, still write the new order.
+      // A view with no personal row yet returns { config: null } (row created lazily on first write).
       base = (await params.client.getPersonalViewConfig(params.viewId))?.config ?? {}
-    } catch {
+    } catch (err) {
+      // FAIL-CLOSED: only a 404 (no row / flag off / view gone) is a safe "start from empty". Any OTHER
+      // failure (500 / network / transient auth) must NOT proceed — writing { ...{}, fieldOrder } would
+      // REPLACE the row and wipe the actor's other personal facets (would break constraint 2). Re-throw.
+      if ((err as { status?: number } | null)?.status !== 404) throw err
       base = {}
     }
     await params.client.putPersonalViewConfig(params.viewId, { ...base, fieldOrder: order })

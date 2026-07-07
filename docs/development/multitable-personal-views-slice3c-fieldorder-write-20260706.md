@@ -22,8 +22,10 @@ The backend PUT replaces the whole config row (`upsertPersonalViewConfig` does `
 naive `PUT { fieldOrder }` would wipe personal filter/sort/hidden. Slice 3c does **read-merge-write**: GET the
 current personal config, spread it, set only `fieldOrder`. Golden: an existing personal row with
 `filterInfo/sortInfo/hiddenFieldIds` + a drag ⇒ the PUT body carries all of them **plus** the new `fieldOrder`.
-No-row (`config: null`) ⇒ PUT creates it with just `fieldOrder`; a GET 404 (flag flip / view gone) ⇒ still writes,
-no throw.
+No-row (`config: null`) ⇒ PUT creates it with just `fieldOrder`; a GET **404** (flag flip / view gone) ⇒ still
+writes, no throw. A **non-404** GET failure (500 / network / transient auth) is **FAIL-CLOSED**: it re-throws and
+does NOT PUT — blind-writing `{ fieldOrder }` on a failed read would REPLACE the row and wipe the actor's other
+facets (the exact C2 violation). Golden asserts reject + `putPersonalViewConfig` not called.
 
 ## Computation
 
@@ -34,8 +36,8 @@ personal path applies the new order optimistically (`grid.fieldOrder.value = ord
 
 ## Verification
 
-- `multitable-reorder-view-fields.spec.ts` — **7 goldens green** (C1 routing both directions, C2 preserve, no-row,
-  404-tolerant, move-within, no-op on unknown id).
+- `multitable-reorder-view-fields.spec.ts` — **8 goldens green** (C1 routing both directions, C2 preserve, no-row,
+  404-tolerant, **non-404 fail-closed**, move-within, no-op on unknown id).
 - Regression: `multitable-reorder-view-fields multitable-workbench-restore-wiring multitable-grid
   multitable-config-revert-refresh` → **16 files / 147 tests pass**. vue-tsc clean.
 - Added `multitable-reorder-view-fields` to the `multitable-web-guard` run filter (the workflow already triggers
