@@ -1,6 +1,7 @@
-# Multitable formula freshness — Yjs-bridge recompute + expression-change bulk recompute — W1-1 DESIGN LOCK (PROPOSED)
+# Multitable formula freshness — Yjs-bridge recompute + expression-change bulk recompute — W1-1 DESIGN LOCK (RATIFIED & IMPLEMENTED)
 
-- **Status**: PROPOSED — awaiting owner ratification. Docs-only PR; no runtime code ships here.
+- **Status**: RATIFIED & IMPLEMENTED — runtime shipped in **#3679** (`feat(multitable): W1-1 formula freshness — Yjs-bridge recompute + expression-change bulk recompute`, MERGED 2026-07-06); owner-confirmed 2026-07-07 (via #3789 review). LOCK-F **F1/F3 live** in `index.ts` (`recalculateFormulaFieldsForActor`, taint-parity); **F4** deliberate pinned stub (golden **GF9**); **N4/N5** doc-only. The original lock was docs-only (PROPOSED); this header records the closeout so the autonomous pool filter no longer reads it as pending.
+  - _(Superseded status line: "PROPOSED — awaiting owner ratification. Docs-only PR; no runtime code ships here." — the docs-only PR merged, then implementation #3679 merged.)_
 - **Slice**: W1-1 of the multitable-window goal pool (`docs/development/multitable-window-goal-pool-todo-20260705.md`). Input: the owner-passed formula-freshness audit (Q1 GAP / Q2-c connected find). Sibling slice: W1-2 **B1 side-door goldens** locks the PERMISSION angle of the same Yjs-bridge side-door — cross-referenced, deliberately a **separate PR** (this lock = freshness/recompute semantics only).
 - **Grounded on** origin/main @ `f06d0eb70` (every anchor below re-read at this SHA, not carried from the audit).
 - **What W1-1 is NOT**: not Yjs GA/productionize, not multi-hop cascade, not typing-time preview, not a PIT-semantics change, not a bridge cross-record fan-out slice — see §5. No new tables, no migrations, no schema change, no restore-surface change.
