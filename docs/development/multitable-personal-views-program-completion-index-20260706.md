@@ -3,7 +3,8 @@
 > Single-glance state of the per-user personal-views program: every slice, its goldens, the load-bearing
 > invariants, and the enablement go/no-go inputs. The feature is **default-OFF and NOT enable-ready** — this doc
 > is the consolidated map an owner needs before deciding to flip `MULTITABLE_ENABLE_PERSONAL_VIEWS`. Produced by
-> the unattended cadence loop as a for-review docs artifact; nothing here is merged or enabled.
+> the unattended cadence loop as a for-review docs artifact. All runtime slices (1–3d) are merged **default-OFF**;
+the feature is **not enabled** — flipping the flag remains owner-gated behind the checklist §B audit.
 
 ## What the program delivers
 
@@ -30,8 +31,8 @@ permissions, or what any other user sees. Storage is a new actor-scoped table `m
 | **2** | per-user field-order overlay facet | **merged** (#3657) | field-order isolation + byte-identical + additive |
 | **3** | FE "My view" toggle + write-routing; **P1**: `/context` main-path overlay (before select/redaction) + `personalOverrideViewIds`; toggle-OFF = delete+refetch; `syncFromServer` | **merged** (#3711) | G-FE-1 (no identity leak, observed-RED) / G-FE-2 (write routing) / G-FE-3 (reset) / G-FE-4 (flag-off inert); CTX-A/CTX-B/CTX-ISO real-DB |
 | **3b** | FE `fieldOrder` render consumer (columns follow `view.fieldOrder`), fail-soft | **merged** (#3726) | G-FE-5: unknown/stale/hidden/duplicate/non-string ids ignored — no crash, no blank/dropped column |
-| **3c** | personal column-reorder **write** path (drag → personal-config, never shared `field.order`) | **for-review** (#3728) | C1 write-target routing (asserts shared `updateField` NOT called in personal mode); C2 preserve other facets (read-merge-write) |
-| **3d** | **all** in-place personal writes additive (read-merge-write) so a single-facet edit preserves the rest | **for-review** (#3731) | existing config + single-facet edit ⇒ others preserved; cross-facet durability; clear-via-undefined; grid wiring |
+| **3c** | personal column-reorder **write** path (drag → personal-config, never shared `field.order`) | **merged** (#3728) | C1 write-target routing (asserts shared `updateField` NOT called in personal mode); C2 preserve other facets (read-merge-write, **fail-closed on non-404 GET**) |
+| **3d** | **all** in-place personal writes additive (read-merge-write) so a single-facet edit preserves the rest | **merged** (#3731) | existing config + single-facet edit ⇒ others preserved; cross-facet durability; clear-via-undefined; grid wiring; **fail-closed on non-404 GET** |
 
 Design-lock §6 scoped Slices 1–3; 3b/3c/3d are the natural read/render + write completions surfaced during
 review. Each slice shipped a design ref + fail-first goldens + a verification MD under `docs/development/`.
@@ -48,11 +49,13 @@ This is a deployment audit, **not a code PR** — it needs the owner + a named o
 
 ## Open items on the owner's desk
 
-- **#3728 (Slice 3c)** and **#3731 (Slice 3d)** — both green, for-review, default-OFF. Suggested merge order:
-  **#3728 then #3731** (both touch the personal-write path; a trivial rebase may surface on #3731).
-- **Dedup cleanup (non-blocking):** once both merge, `utils/reorder-view-fields.ts` (3c) and
-  `utils/personal-config-write.ts` (3d) share the same read-merge-write — a later slice can fold them into one helper.
-- **Flag enablement:** run checklist §B when ready to turn the feature on.
+- **#3728 (Slice 3c)** and **#3731 (Slice 3d)** — **merged** (in order 3c → 3d), default-OFF. The P1 raised in
+  review (a catch-all that fail-OPENed on non-404 GET and could wipe other facets) was fixed on both before merge:
+  read-merge-write now fails CLOSED (404 → start empty; any other GET error re-throws, no PUT).
+- **Dedup cleanup (now UNBLOCKED, next buildable):** `utils/reorder-view-fields.ts` (3c) and
+  `utils/personal-config-write.ts` (3d) now share the same fail-closed read-merge-write on main — a follow-up slice
+  can fold them into one helper.
+- **Flag enablement:** run checklist §B when ready to turn the feature on (still owner-gated).
 
 ## Posture
 
