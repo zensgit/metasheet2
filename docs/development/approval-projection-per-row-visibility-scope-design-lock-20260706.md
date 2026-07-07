@@ -80,8 +80,16 @@ completedAt/currentNodeKey`）。#3537 后整个 base 对非 admin 关死（`res
 ## 7. Checklist（RATIFIED 2026-07-07 — 方案 A；T36-1/2 解锁，T36-3 独立后续）
 
 - ✅ **T36-0** 本设计锁（PROPOSED）
-- ⬜ **T36-1** 方案 A 参与者谓词接进 `filterReadableSheetRowsForAccess` 投影分支 + 真库测试（RED-before）
-- ⬜ **T36-2** 组合回归（#3537 fence 7/7 + 本刀）+ 文档 as-built
+- ✅ **T36-1** 方案 A 参与者读——#3758。as-built 比锁面更深一层：谓词不止接进
+  `filterReadableSheetRowsForAccess`（列表腿），而是挂进行级读 deny-choke 内部
+  （`loadRowLevelReadDenyEnabled` 对投影表恒真 + `loadDeniedRecordIds`/
+  `loadRecordPermissionScopeMap` 合入非参与者行，DENY-WINS）——W1-2 goldens 锁过的全部
+  读表面免费继承。两轮审阅（owner + 对抗）各抓一个 P1 均已修：主读面被
+  `hasRecordPermissionAssignments` 短路（投影表恒报 true 修复 + 真 wire 级测试）、
+  Yjs 订阅无行级复核（`isRecordReadDeniedForUser` 接进 authChecker + 接线 tripwire）。
+  另修 SQL 三值逻辑 fail-open（corrupt 行 COALESCE 关死）。RED-before 变异 3 组全证。
+- ✅ **T36-2** 组合回归 + 文档 as-built——本 PR。#3537 fence 7/7 与参与者套件 13/13 同跑绿；
+  generic deny-choke 回归 24/24；fence 测试文件借本线首次接入 CI（此前 skip-green）。
 - 🔒 **T36-3**（后续独立 slice）中间审批人/cc 可见性（方案 B 评估）
 
 ---
