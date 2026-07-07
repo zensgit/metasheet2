@@ -396,6 +396,43 @@ describe('LoginView', () => {
       expect(container.querySelector('input[type="password"]'), 'normal login form still present').toBeTruthy()
     })
 
+    it('fail-soft P2: authCode cancellation (throwing path) leaves the normal form, no token, no throw', async () => {
+      setContainer(false)  // user rejects the 免登 authorization → onFail → requestAuthCode rejects → catch
+      mocks.apiFetch.mockImplementation(async (path: string) => {
+        if (path === '/api/auth/dingtalk/launch?probe=1') {
+          return { ok: true, status: 200, json: async () => ({ success: true, data: { available: true, corpId: 'ding-corp' } }) }
+        }
+        throw new Error(`Unexpected fetch path: ${path}`)
+      })
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      app = createApp(LoginViewComponent)
+      app.mount(container)
+      for (let i = 0; i < 20; i += 1) { await flushUi(2) }
+
+      // The throwing failure (authCode rejected) must be swallowed by the catch:
+      const containerCalls = mocks.apiFetch.mock.calls.filter(c => String(c[0]).includes('/dingtalk/container'))
+      expect(containerCalls, 'authCode never obtained → /container never called').toHaveLength(0)
+      expect(window.localStorage.getItem('auth_token')).toBeNull()
+      expect(mocks.routerReplace).not.toHaveBeenCalled()
+      expect(container.querySelector('input[type="password"]'), 'normal login form still present').toBeTruthy()
+      expect(container.querySelector('[data-testid="dingtalk-container-login-progress"]'), 'progress hint cleared').toBeNull()
+    })
+
+    it('P3-4: skips container login when a token already exists', async () => {
+      setContainer(true)
+      window.localStorage.setItem('auth_token', 'existing-token')
+      window.localStorage.setItem('jwt', 'existing-token')
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      app = createApp(LoginViewComponent)
+      app.mount(container)
+      for (let i = 0; i < 15; i += 1) { await flushUi(2) }
+
+      const containerCalls = mocks.apiFetch.mock.calls.filter(c => String(c[0]).includes('/dingtalk/container'))
+      expect(containerCalls, 'already authenticated → no re-login').toHaveLength(0)
+    })
+
     it('does not attempt container login in a plain browser (no /container call, no jsapi injected)', async () => {
       container = document.createElement('div')
       document.body.appendChild(container)

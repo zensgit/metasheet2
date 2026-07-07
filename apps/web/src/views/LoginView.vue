@@ -45,7 +45,7 @@
 
         <p v-if="errorMessage" class="login-error">{{ errorMessage }}</p>
 
-        <button class="login-submit" type="submit" :disabled="submitting">
+        <button class="login-submit" type="submit" :disabled="submitting || containerLoginInProgress">
           {{ submitting ? text.submitting : text.submit }}
         </button>
 
@@ -57,7 +57,7 @@
           v-if="dingtalkAvailable"
           class="login-dingtalk"
           type="button"
-          :disabled="dingtalkSubmitting"
+          :disabled="dingtalkSubmitting || containerLoginInProgress"
           @click="onLaunchDingTalk"
         >
           {{ dingtalkSubmitting ? text.dingtalkSubmitting : text.dingtalkSubmit }}
