@@ -32,7 +32,10 @@ async function openGroupPanel(root: HTMLElement): Promise<HTMLElement> {
   const button = Array.from(root.querySelectorAll('button')).find((b) => b.textContent?.includes('Group')) as HTMLButtonElement
   button.click()
   await nextTick()
-  const panel = root.querySelector('.meta-toolbar__panel--group') as HTMLElement
+  // UI-P2-1c slice-6: the group panel now renders inside MtPopover, which Teleports its content to
+  // `document.body` (a sibling of the toolbar's own mount container). Look it up via `document`, not
+  // `root` (the trigger button itself is still inside `root`). Assertions below are unchanged.
+  const panel = document.querySelector('.meta-toolbar__panel--group') as HTMLElement
   expect(panel).toBeTruthy()
   return panel
 }

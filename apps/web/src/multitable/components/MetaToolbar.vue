@@ -115,13 +115,20 @@
         </div>
       </MtPopover>
 
-      <!-- Group By (nested / multi-level: ordered 1-3 levels) -->
-      <div class="meta-toolbar__dropdown">
-        <button class="meta-toolbar__btn" @click="showGroupPanel = !showGroupPanel">
-          <el-icon class="meta-toolbar__btn-icon"><component :is="ICON.group" /></el-icon> {{ l('toolbar.group') }}
-          <span v-if="activeGroupFieldIds.length" class="meta-toolbar__badge">{{ activeGroupFieldIds.length }}</span>
-        </button>
-        <div v-if="showGroupPanel" class="meta-toolbar__panel meta-toolbar__panel--group" @keydown.escape="showGroupPanel = false">
+      <!-- Group By (nested / multi-level: ordered 1-3 levels) — UI-P2-1c slice-6: migrated to shared
+           MtPopover (the LAST MetaToolbar dropdown). Inner controls are native <select>/<button> (no
+           Teleport), so MtPopover's `panelRef.contains(target)` treats edits as inside → the panel
+           stays open during multi-level editing. The panel's own `@keydown.escape` is dropped;
+           MtPopover's document-level Escape + click-outside now cover it. -->
+      <MtPopover v-model:open="showGroupPanel">
+        <template #trigger>
+          <MtButton :title="l('toolbar.group')" :aria-label="l('toolbar.group')">
+            <template #icon><el-icon><component :is="ICON.group" /></el-icon></template>
+            {{ l('toolbar.group') }}
+            <span v-if="activeGroupFieldIds.length" class="meta-toolbar__badge">{{ activeGroupFieldIds.length }}</span>
+          </MtButton>
+        </template>
+        <div class="meta-toolbar__group-panel meta-toolbar__panel--group">
           <div v-for="(levelId, levelIndex) in groupLevels" :key="levelIndex" class="meta-toolbar__group-level">
             <span class="meta-toolbar__group-level-prefix">{{ levelIndex === 0 ? l('toolbar.group') : l('toolbar.groupThenBy') }}</span>
             <select
@@ -149,7 +156,7 @@
             @click="onAddGroupLevel"
           >{{ l('toolbar.groupAddLevel') }}</button>
         </div>
-      </div>
+      </MtPopover>
 
       <!-- Undo/Redo (UI-P2-1c: migrated to shared MtIconButton — ghost, icon-only) -->
       <span class="meta-toolbar__divider" aria-hidden="true"></span>
@@ -462,6 +469,7 @@ function onAddFilterGroup() {
    builder rows. Combined with the pre-existing `.meta-toolbar__panel--filter` class (kept for its
    `min-width: 420px`, and so it stays a stable selector for the filter-builder tests). */
 .meta-toolbar__filter-panel { padding: var(--ms-space-2); box-sizing: border-box; }
+.meta-toolbar__group-panel { padding: var(--ms-space-2); box-sizing: border-box; }
 .meta-toolbar__sort-rule, .meta-toolbar__filter-rule { display: flex; gap: 4px; margin-bottom: 4px; align-items: center; }
 .meta-toolbar__sort-rule select, .meta-toolbar__filter-rule select { padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
 .meta-toolbar__filter-value { flex: 1; min-width: 80px; padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
