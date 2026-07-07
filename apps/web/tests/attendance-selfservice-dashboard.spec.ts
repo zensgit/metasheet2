@@ -1630,4 +1630,17 @@ describe('Attendance self-service dashboard', () => {
 
     expect(container!.querySelector('[data-testid="attendance-hero-timeline"]')).toBeNull()
   })
+
+  it('UI-P1 768px targets exist: stat-card container class + filter fields (selector-preservation guard)', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    // The 768px media rules key off these; assert the selectors' DOM targets
+    // survive (the media query itself is verified on-device per E4).
+    expect(container!.querySelector('.attendance__summary--stat'), 'stat-card container').toBeTruthy()
+    const filterFields = container!.querySelectorAll('.attendance__filters .attendance__field')
+    expect(filterFields.length, 'filter fields present').toBeGreaterThan(0)
+    expect(container!.querySelector('.attendance__hero-timeline'), 'hero timeline present').toBeTruthy()
+  })
 })
