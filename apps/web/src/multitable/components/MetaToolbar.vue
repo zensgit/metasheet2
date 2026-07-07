@@ -23,13 +23,23 @@
         </div>
       </MtPopover>
 
-      <!-- Sort -->
-      <div class="meta-toolbar__dropdown">
-        <button class="meta-toolbar__btn" @click="showSortPanel = !showSortPanel">
-          <el-icon class="meta-toolbar__btn-icon"><component :is="ICON.sort" /></el-icon> {{ l('toolbar.sort') }}
-          <span v-if="sortRules.length" class="meta-toolbar__badge">{{ sortRules.length }}</span>
-        </button>
-        <div v-if="showSortPanel" class="meta-toolbar__panel" @keydown.escape="showSortPanel = false">
+      <!--
+        Sort (UI-P2-1c slice-4: migrated to shared MtPopover — this is a COMPLEX BUILDER (add/remove/
+        update sort-rule rows + apply), not a simple toggle/menu, so the panel content is preserved
+        verbatim (native <select>s + add/remove/apply <button>s, NOT MtMenuItem rows); only the
+        open/close mechanics move from a hand-rolled `showSortPanel` ref + `.meta-toolbar__panel` to
+        MtPopover's `v-model:open` + built-in click-outside/Escape. The panel's own `@keydown.escape`
+        handler is dropped — MtPopover's document-level Escape listener now covers it.
+      -->
+      <MtPopover v-model:open="showSortPanel">
+        <template #trigger>
+          <MtButton :title="l('toolbar.sort')" :aria-label="l('toolbar.sort')">
+            <template #icon><el-icon><component :is="ICON.sort" /></el-icon></template>
+            {{ l('toolbar.sort') }}
+            <span v-if="sortRules.length" class="meta-toolbar__badge">{{ sortRules.length }}</span>
+          </MtButton>
+        </template>
+        <div class="meta-toolbar__sort-panel">
           <div v-for="(rule, idx) in sortRules" :key="idx" class="meta-toolbar__sort-rule">
             <select :value="rule.fieldId" @change="onSortFieldChange(idx, ($event.target as HTMLSelectElement).value)">
               <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
@@ -43,7 +53,7 @@
           <button v-if="fields.length" class="meta-toolbar__add" @click="emit('add-sort', { fieldId: fields[0].id, direction: 'asc' })">{{ l('toolbar.addSort') }}</button>
           <button v-if="sortRules.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ l('toolbar.apply') }}</button>
         </div>
-      </div>
+      </MtPopover>
 
       <!-- Filter -->
       <div class="meta-toolbar__dropdown">
@@ -209,9 +219,11 @@ import MetaFilterGroup from './MetaFilterGroup.vue'
 // additionally migrates the row-density dropdown onto MtMenu/MtMenuItem (built on MtPopover), so
 // its open/close + click-outside/Escape no longer need a hand-rolled `showDensityPanel` ref.
 // Slice-3 migrates the hide-fields dropdown onto MtPopover directly (NOT MtMenu — it's a
-// multi-toggle list, so selecting a row must not auto-close it). The remaining dropdown triggers
-// that open a `.meta-toolbar__panel` (sort/filter/group) are NOT touched in this slice — each is a
-// more complex builder deferred to a later slice.
+// multi-toggle list, so selecting a row must not auto-close it). Slice-4 migrates the sort dropdown
+// onto MtPopover the same way (NOT MtMenu — it's a complex add/remove/update/apply builder, so its
+// panel content is preserved verbatim). The remaining dropdown triggers that open a
+// `.meta-toolbar__panel` (filter/group) are NOT touched in this slice — each is a more complex
+// builder deferred to a later slice.
 import { MtButton, MtIconButton, MtMenu, MtMenuItem, MtPopover } from '../ui'
 import { seedFilterCondition } from '../utils/filter-condition-seed'
 import {
@@ -421,6 +433,10 @@ function onAddFilterGroup() {
    `.meta-toolbar__panel { padding: 8px }` gave the toggle rows — same 8px, all sides. */
 .meta-toolbar__field-panel { padding: var(--ms-space-2); min-width: 200px; box-sizing: border-box; }
 .meta-toolbar__field-toggle { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; cursor: pointer; }
+/* Sort builder panel (UI-P2-1c slice-4): same rationale as the hide-fields panel above — hosted
+   inside MtPopover's own `.mt-popover` surface (which only pads top/bottom), so this class supplies
+   the horizontal breathing room the old `.meta-toolbar__panel { padding: 8px }` gave the rows. */
+.meta-toolbar__sort-panel { padding: var(--ms-space-2); min-width: 200px; box-sizing: border-box; }
 .meta-toolbar__sort-rule, .meta-toolbar__filter-rule { display: flex; gap: 4px; margin-bottom: 4px; align-items: center; }
 .meta-toolbar__sort-rule select, .meta-toolbar__filter-rule select { padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
 .meta-toolbar__filter-value { flex: 1; min-width: 80px; padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
