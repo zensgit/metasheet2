@@ -143,7 +143,7 @@ function rowSummaryLine(row: UnifiedApprovalDTO): string {
 .approval-mobile-list__empty {
   padding: 32px 16px;
   text-align: center;
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
   font-size: 14px;
 }
 
@@ -154,7 +154,7 @@ function rowSummaryLine(row: UnifiedApprovalDTO): string {
   width: 100%;
   text-align: left;
   background: #fff;
-  border: 1px solid var(--el-border-color-lighter, #e4e7ed);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 10px;
   padding: 14px 16px;
   cursor: pointer;
@@ -163,7 +163,7 @@ function rowSummaryLine(row: UnifiedApprovalDTO): string {
 }
 
 .approval-mobile-list__card:active {
-  background: var(--el-fill-color-light, #f5f7fa);
+  background: var(--el-fill-color-light);
 }
 
 .approval-mobile-list__card-top {
@@ -184,7 +184,7 @@ function rowSummaryLine(row: UnifiedApprovalDTO): string {
 .approval-mobile-list__title {
   font-size: 15px;
   font-weight: 600;
-  color: var(--el-text-color-primary, #303133);
+  color: var(--el-text-color-primary);
   line-height: 1.4;
 }
 
@@ -194,7 +194,7 @@ function rowSummaryLine(row: UnifiedApprovalDTO): string {
   justify-content: space-between;
   gap: 12px;
   font-size: 13px;
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular);
 }
 
 /* B2-01: key-field summary line — muted, single-line, ellipsis-truncated (mirrors the desktop
@@ -205,12 +205,12 @@ function rowSummaryLine(row: UnifiedApprovalDTO): string {
   white-space: nowrap;
   text-overflow: ellipsis;
   font-size: 12px;
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
 }
 
 .approval-mobile-list__date {
   font-size: 12px;
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
 }
 
 /* B1-03: 已等待 aging severity — same warn/urgent palette as the desktop table. */

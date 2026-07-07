@@ -336,7 +336,7 @@ onMounted(() => {
 }
 
 .template-center__category-empty {
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 
@@ -349,7 +349,7 @@ onMounted(() => {
 }
 
 .template-center__recent-label {
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
   font-size: 13px;
 }
 

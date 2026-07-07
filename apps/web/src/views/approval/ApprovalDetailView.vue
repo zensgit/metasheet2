@@ -358,7 +358,7 @@
               data-testid="approval-remind-button"
               @click="handleRemind"
             >
-              <el-icon style="margin-right: 4px"><Bell /></el-icon>催一下
+              <el-icon class="ms-mr-4"><Bell /></el-icon>催一下
             </el-button>
             <el-popconfirm
               v-if="isRequester && !isMobileLayout"
@@ -380,7 +380,7 @@
             type="info"
             show-icon
             :closable="false"
-            style="flex: 1"
+            class="ms-flex-1"
           />
           <!-- UX B2-13: 再次提交 — own+terminal (rejected/revoked/cancelled) only; see
                `canResubmit`/`handleResubmit`. -->
@@ -553,7 +553,7 @@
             v-model="reduceSignUserId"
             filterable
             placeholder="选择要移除的加签人"
-            style="width: 100%"
+            class="ms-w-100pct"
             data-testid="approval-reduce-sign-user"
           >
             <el-option
@@ -642,7 +642,7 @@
     >
       <el-form>
         <el-form-item label="退回至节点">
-          <el-select v-model="returnTargetNodeKey" placeholder="选择退回目标节点" style="width: 100%">
+          <el-select v-model="returnTargetNodeKey" placeholder="选择退回目标节点" class="ms-w-100pct">
             <el-option
               v-for="node in returnableNodes"
               :key="node.key"
@@ -1491,8 +1491,8 @@ onMounted(async () => {
 
 .approval-detail__form,
 .approval-detail__timeline {
-  background: #fff;
-  border: 1px solid var(--el-border-color-lighter, #e4e7ed);
+  background: var(--ms-bg-card);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
   padding: 20px;
 }
@@ -1518,7 +1518,7 @@ onMounted(async () => {
 
 .approval-detail__label {
   font-size: 12px;
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
 }
 
 .approval-detail__snapshot {
@@ -1568,7 +1568,7 @@ onMounted(async () => {
 
 .approval-detail__timeline-comment {
   margin: 4px 0 0;
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular);
   font-size: 13px;
 }
 
@@ -1584,23 +1584,23 @@ onMounted(async () => {
   font-size: 11px;
   padding: 1px 6px;
   border-radius: 4px;
-  background: var(--el-fill-color-light, #f5f7fa);
-  color: var(--el-text-color-secondary, #909399);
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
 }
 
 .approval-detail__meta-badge--auto {
-  background: #e6f7ff;
-  color: #1890ff;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
 }
 
 .approval-detail__meta-badge--complete {
-  background: #f6ffed;
-  color: #52c41a;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success);
 }
 
 .approval-detail__meta-badge--return {
-  background: #fff7e6;
-  color: #fa8c16;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning);
 }
 
 .approval-detail__parallel-badge {
@@ -1610,11 +1610,11 @@ onMounted(async () => {
 }
 
 .approval-detail__timeline-group {
-  border: 1px solid var(--el-border-color-lighter, #e4e7ed);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
   padding: 12px 16px;
   margin-bottom: 12px;
-  background: var(--el-fill-color-blank, #fff);
+  background: var(--el-fill-color-blank);
 }
 
 .approval-detail__timeline-group-header {
@@ -1623,17 +1623,17 @@ onMounted(async () => {
   justify-content: space-between;
   margin-bottom: 8px;
   padding-bottom: 6px;
-  border-bottom: 1px dashed var(--el-border-color-lighter, #ebedf0);
+  border-bottom: 1px dashed var(--el-border-color-lighter);
 }
 
 .approval-detail__timeline-group-label {
   font-weight: 600;
-  color: var(--el-text-color-primary, #303133);
+  color: var(--el-text-color-primary);
 }
 
 .approval-detail__timeline-group-count {
   font-size: 12px;
-  color: var(--el-text-color-secondary, #606266);
+  color: var(--el-text-color-secondary);
 }
 
 /* UX B2-08: synthesized "current handler + upcoming nodes" rail, appended after the real
@@ -1643,7 +1643,7 @@ onMounted(async () => {
 .approval-detail__timeline-upcoming {
   margin-top: 16px;
   padding-top: 12px;
-  border-top: 1px dashed var(--el-border-color-lighter, #e4e7ed);
+  border-top: 1px dashed var(--el-border-color-lighter);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -1663,20 +1663,20 @@ onMounted(async () => {
   height: 8px;
   margin-top: 4px;
   border-radius: 50%;
-  background: var(--el-color-primary, #409eff);
+  background: var(--el-color-primary);
 }
 
 .approval-detail__timeline-upcoming-item--future .approval-detail__timeline-upcoming-dot {
-  background: var(--el-text-color-placeholder, #c0c4cc);
+  background: var(--el-text-color-placeholder);
 }
 
 .approval-detail__timeline-upcoming-item--current .approval-detail__timeline-upcoming-text {
-  color: var(--el-text-color-primary, #303133);
+  color: var(--el-text-color-primary);
   font-weight: 500;
 }
 
 .approval-detail__timeline-upcoming-item--future .approval-detail__timeline-upcoming-text {
-  color: var(--el-text-color-placeholder, #909399);
+  color: var(--el-text-color-placeholder);
 }
 
 .approval-detail__timeline-upcoming-summary {
@@ -1690,8 +1690,8 @@ onMounted(async () => {
   margin-top: 24px;
   padding: 16px 20px;
   padding-bottom: calc(8px + env(safe-area-inset-bottom));
-  background: var(--el-bg-color, #fff);
-  border: 1px solid var(--el-border-color-lighter, #e4e7ed);
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
   display: flex;
   align-items: center;

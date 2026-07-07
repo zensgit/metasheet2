@@ -2060,7 +2060,7 @@ onUnmounted(() => {
   gap: 12px;
   min-height: 148px;
   padding: 14px;
-  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
 }
 
@@ -2068,7 +2068,7 @@ onUnmounted(() => {
   margin: 6px 0 0;
   font-size: 13px;
   line-height: 1.5;
-  color: var(--el-text-color-secondary, #606266);
+  color: var(--el-text-color-secondary);
 }
 
 .template-authoring__visibility {
@@ -2082,7 +2082,7 @@ onUnmounted(() => {
   margin-top: 6px;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
 }
 
 .template-authoring__inline > .el-input {
@@ -2107,7 +2107,7 @@ onUnmounted(() => {
 
 .template-authoring__item {
   padding: 14px;
-  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
 }
 
@@ -2123,8 +2123,8 @@ onUnmounted(() => {
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 10px;
-  background: var(--el-fill-color-light, #f5f7fa);
-  color: var(--el-text-color-secondary, #606266);
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
 }
 
 .template-authoring__node-summary {
@@ -2132,7 +2132,7 @@ onUnmounted(() => {
   padding-left: 20px;
   font-size: 13px;
   line-height: 1.7;
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular);
 }
 
 /* G-2 condition editor */
@@ -2141,7 +2141,7 @@ onUnmounted(() => {
 }
 
 .template-authoring__condition-branch {
-  border: 1px dashed var(--el-border-color, #dcdfe6);
+  border: 1px dashed var(--el-border-color);
   border-radius: 6px;
   padding: 10px 12px;
   margin-bottom: 10px;
@@ -2154,7 +2154,7 @@ onUnmounted(() => {
   gap: 8px;
   margin-bottom: 8px;
   font-size: 13px;
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular);
 }
 
 .template-authoring__condition-rule {
@@ -2198,7 +2198,7 @@ onUnmounted(() => {
 .template-authoring__condition-formula-dryrun-result {
   font-size: 12px;
   line-height: 1.5;
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular);
 }
 
 .template-authoring__condition-default {
@@ -2226,15 +2226,15 @@ onUnmounted(() => {
   gap: 8px;
   padding: 8px 10px;
   border-radius: 6px;
-  background: var(--el-fill-color-lighter, #f5f7fa);
+  background: var(--el-fill-color-lighter);
 }
 
 .template-authoring__publish-checklist-item.is-ok .template-authoring__publish-checklist-icon {
-  color: var(--el-color-success, #67c23a);
+  color: var(--el-color-success);
 }
 
 .template-authoring__publish-checklist-item.is-fail .template-authoring__publish-checklist-icon {
-  color: var(--el-color-danger, #f56c6c);
+  color: var(--el-color-danger);
 }
 
 .template-authoring__publish-checklist-icon {
@@ -2244,7 +2244,7 @@ onUnmounted(() => {
 .template-authoring__publish-checklist-detail {
   flex-basis: 100%;
   font-size: 12px;
-  color: var(--el-text-color-secondary, #606266);
+  color: var(--el-text-color-secondary);
 }
 
 pre {
@@ -2272,7 +2272,7 @@ pre {
 .template-authoring__canvas {
   position: relative;
   overflow: auto;
-  border: 1px solid var(--el-border-color, #dcdfe6);
+  border: 1px solid var(--el-border-color);
   border-radius: 6px;
   background: #fafafa;
   min-height: 200px;
@@ -2280,7 +2280,7 @@ pre {
 .template-authoring__canvas-node {
   box-sizing: border-box;
   padding: 6px 10px;
-  border: 1px solid var(--el-border-color, #dcdfe6);
+  border: 1px solid var(--el-border-color);
   border-radius: 6px;
   background: #fff;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
@@ -2291,8 +2291,8 @@ pre {
   font-size: 12px;
 }
 .template-authoring__canvas-node.is-selected {
-  border-color: var(--el-color-primary, #409eff);
-  box-shadow: 0 0 0 2px var(--el-color-primary-light-5, #a0cfff);
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
 }
 .template-authoring__canvas-node-actions {
   display: flex;
