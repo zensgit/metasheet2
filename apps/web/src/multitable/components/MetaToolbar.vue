@@ -116,10 +116,10 @@
         </div>
       </div>
 
-      <!-- Undo/Redo -->
+      <!-- Undo/Redo (UI-P2-1c: migrated to shared MtIconButton — ghost, icon-only) -->
       <span class="meta-toolbar__divider" aria-hidden="true"></span>
-      <button class="meta-toolbar__btn" :disabled="!canUndo" :title="l('toolbar.undoTitle')" :aria-label="l('toolbar.undo')" @click="emit('undo')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.undo" /></el-icon></button>
-      <button class="meta-toolbar__btn" :disabled="!canRedo" :title="l('toolbar.redoTitle')" :aria-label="l('toolbar.redo')" @click="emit('redo')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.redo" /></el-icon></button>
+      <MtIconButton :icon="ICON.undo" :disabled="!canUndo" :title="l('toolbar.undoTitle')" :aria-label="l('toolbar.undo')" @click="emit('undo')" />
+      <MtIconButton :icon="ICON.redo" :disabled="!canRedo" :title="l('toolbar.redoTitle')" :aria-label="l('toolbar.redo')" @click="emit('redo')" />
       <!--
         Slice 3 personal-views "reset to shared" (design-lock multitable-personal-views-slice3-fe-toggle-
         design-lock-20260706.md §3 P1 + G-FE-3 / G-FE-4): rendered ONLY while the personal toggle is ON for
@@ -152,12 +152,29 @@
           </label>
         </div>
       </div>
-      <button class="meta-toolbar__btn" :title="l('toolbar.autoFitColumns')" :aria-label="l('toolbar.autoFitColumns')" @click="emit('auto-fit-columns')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.fit" /></el-icon> {{ l('toolbar.fit') }}</button>
-      <button class="meta-toolbar__btn" :title="l('toolbar.print')" :aria-label="l('toolbar.printGrid')" @click="emit('print')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.print" /></el-icon> {{ l('toolbar.print') }}</button>
-      <button v-if="canCreateRecord" class="meta-toolbar__btn" :title="l('toolbar.importRecords')" :aria-label="l('toolbar.importRecords')" @click="emit('import')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.import" /></el-icon> {{ l('toolbar.import') }}</button>
-      <button v-if="canExport" class="meta-toolbar__btn" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.export" /></el-icon> {{ l('toolbar.exportCsv') }}</button>
-      <button v-if="canExport" class="meta-toolbar__btn" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.export" /></el-icon> {{ l('toolbar.exportXlsx') }}</button>
-      <button v-if="canCreateRecord" class="meta-toolbar__btn meta-toolbar__btn--primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</button>
+      <!-- UI-P2-1c: standalone action buttons (icon+label) migrated to shared MtButton (ghost). -->
+      <MtButton :title="l('toolbar.autoFitColumns')" :aria-label="l('toolbar.autoFitColumns')" @click="emit('auto-fit-columns')">
+        <template #icon><el-icon><component :is="ICON.fit" /></el-icon></template>
+        {{ l('toolbar.fit') }}
+      </MtButton>
+      <MtButton :title="l('toolbar.print')" :aria-label="l('toolbar.printGrid')" @click="emit('print')">
+        <template #icon><el-icon><component :is="ICON.print" /></el-icon></template>
+        {{ l('toolbar.print') }}
+      </MtButton>
+      <MtButton v-if="canCreateRecord" :title="l('toolbar.importRecords')" :aria-label="l('toolbar.importRecords')" @click="emit('import')">
+        <template #icon><el-icon><component :is="ICON.import" /></el-icon></template>
+        {{ l('toolbar.import') }}
+      </MtButton>
+      <MtButton v-if="canExport" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">
+        <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
+        {{ l('toolbar.exportCsv') }}
+      </MtButton>
+      <MtButton v-if="canExport" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">
+        <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
+        {{ l('toolbar.exportXlsx') }}
+      </MtButton>
+      <!-- UI-P2-1c: primary CTA migrated to shared MtButton variant="primary". -->
+      <MtButton v-if="canCreateRecord" variant="primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</MtButton>
     </div>
   </div>
 </template>
@@ -169,6 +186,11 @@ import type { SortRule, FilterRule, FilterGroup, FilterConjunction } from '../co
 import { useLocale } from '../../composables/useLocale'
 import MetaFilterConditionRow from './MetaFilterConditionRow.vue'
 import MetaFilterGroup from './MetaFilterGroup.vue'
+// UI-P2-1c: migrate standalone action buttons (undo/redo/fit/print/import/export/new-record) onto
+// the shared UI primitives (multitable-ui-p2-structure-designlock-20260706.md §2 P2-1). Dropdown
+// triggers that open a `.meta-toolbar__panel` (fields/sort/filter/group/row-density) are NOT touched
+// in this slice — that migration needs MtPopover/MtMenu and is a later slice.
+import { MtButton, MtIconButton } from '../ui'
 import { seedFilterCondition } from '../utils/filter-condition-seed'
 import {
   metaCoreLabel,
