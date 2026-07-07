@@ -68,7 +68,9 @@
     <ResetToPointPicker
       v-if="workbench.activeSheetId.value"
       :pit-reset-enabled="pitResetEnabled"
+      :base-id="activeBaseId || ''"
       :sheet-id="workbench.activeSheetId.value"
+      :list-history-events="listHistoryEventsWire"
       :reset-preview="resetPreviewWire"
       :reset-execute="resetExecuteWire"
       :on-done="onResetDone"
@@ -635,7 +637,7 @@ import MetaGridTable from '../components/MetaGridTable.vue'
 import MetaExportDialog, { type ExportConfirmPayload } from '../components/MetaExportDialog.vue'
 import RestorePreviewDialog from '../components/RestorePreviewDialog.vue'
 import RestoreBatchDialog from '../components/RestoreBatchDialog.vue'
-import type { RestorePreviewChange, RestoreBatchPreviewRecord, RestoreBatchExecuteRecord } from '../api/client'
+import type { ConfigRestoreExecuteConfirm, RestorePreviewChange, RestoreBatchPreviewRecord, RestoreBatchExecuteRecord } from '../api/client'
 import { buildBatchExpectedVersions } from '../utils/batch-restore-expected-versions'
 import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
@@ -778,9 +780,13 @@ const personalView = usePersonalViewToggle({ client: workbench.client, enabled: 
 const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workbench.activeViewId, isPersonalMode: personalView.isPersonalMode })
 
 // T8-2 Reset UI T-source entry wiring (#3250/#3251 flagged the missing T-source). Gate on the flag-derived
-// pitResetEnabled signal alone (it already encodes canManageSheetAccess); pass the raw client signatures so the
-// picker owns + tests the (sheetId, asOf) composition; refresh the grid after a successful reset.
+// pitResetEnabled signal alone (it already encodes canManageSheetAccess); pass Global History listing plus the raw
+// reset client signatures so the picker owns + tests the (sheetId, asOf) composition; refresh the grid after success.
 const pitResetEnabled = computed(() => capabilitySource.value?.pitResetEnabled === true)
+const listHistoryEventsWire = (
+  baseId: string,
+  params?: Parameters<typeof workbench.client.listHistoryEvents>[1],
+) => workbench.client.listHistoryEvents(baseId, params)
 const resetPreviewWire = (sid: string, asOf: string) => workbench.client.resetPreview(sid, asOf)
 const resetExecuteWire = (sid: string, asOf: string, previewIdentity: string) => workbench.client.resetExecute(sid, asOf, previewIdentity)
 const onResetDone = () => { void grid.reloadCurrentPage() }
@@ -1020,8 +1026,8 @@ async function loadConfigHistory(entityType: string) {
 function configRestorePreview(revisionId: string) {
   return workbench.client.getConfigRestorePreview(workbench.activeSheetId.value, revisionId)
 }
-function configRestoreExecute(revisionId: string, previewToken: string) {
-  return workbench.client.executeConfigRestore(workbench.activeSheetId.value, revisionId, previewToken)
+function configRestoreExecute(revisionId: string, previewToken: string, confirm?: ConfigRestoreExecuteConfirm) {
+  return workbench.client.executeConfigRestore(workbench.activeSheetId.value, revisionId, previewToken, confirm)
 }
 async function onConfigReverted() {
   // A revert changes field name/order or view filter/config — reload sheet meta + grid so the field
