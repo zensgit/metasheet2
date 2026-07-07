@@ -1,6 +1,8 @@
-# 审批投影 per-row visibility_scope 继承 · DESIGN-LOCK（PROPOSED）— 2026-07-06
+# 审批投影 per-row visibility_scope 继承 · DESIGN-LOCK（RATIFIED — 方案 A）— 2026-07-06
 
-> **状态：PROPOSED，待 owner ratify。** 本文只是设计提案；**未获 ratify 前不实现**（staged-opt-in）。
+> **状态：RATIFIED（owner 2026-07-07，选定方案 A）。** v1 = 零迁移、只开「我发起 / 我做终态决策」
+> 的 per-row read；#3537 admin fence 的写/管理边界不动。方案 B（中间审批人/cc）留作后续独立
+> slice（届时另评估投影字段与重算一致性）。T36-1 随本 ratify 解锁。
 > **committed 文档纪律**：陈述 MetaSheet 自身原则，不出现外部产品名。
 >
 > **战略定位**：这是审批操作面达到桌面 parity 后的下一刀 fusion 大刀——把「审批结果是一张
@@ -75,15 +77,15 @@ completedAt/currentNodeKey`）。#3537 后整个 base 对非 admin 关死（`res
 - **DelegationSettingsView 管理员委托页手填 ID → 选人器**（owner 2026-07-06 指出的 UX tail）——
   非本刀，归 batch-2 G 尾（可复用 B3-04 的 `ApprovalUserPicker`，小切片）。
 
-## 7. Checklist（ratify 后解锁）
+## 7. Checklist（RATIFIED 2026-07-07 — 方案 A；T36-1/2 解锁，T36-3 独立后续）
 
 - ✅ **T36-0** 本设计锁（PROPOSED）
-- 🔒 **T36-1** 方案 A 参与者谓词接进 `filterReadableSheetRowsForAccess` 投影分支 + 真库测试（RED-before）
-- 🔒 **T36-2** 组合回归（#3537 fence 7/7 + 本刀）+ 文档 as-built
+- ⬜ **T36-1** 方案 A 参与者谓词接进 `filterReadableSheetRowsForAccess` 投影分支 + 真库测试（RED-before）
+- ⬜ **T36-2** 组合回归（#3537 fence 7/7 + 本刀）+ 文档 as-built
 - 🔒 **T36-3**（后续独立 slice）中间审批人/cc 可见性（方案 B 评估）
 
 ---
 
 **一句话**：投影行已带参与者身份、多维表已有行级读 choke、#3537 已把 base 关死——T3-6 v1 就是在同一个
 choke 里把「整表拒非 admin」改成「保留本人为参与者的行」，最小加法即让普通用户看见自己的审批结果表。
-**待 owner ratify + 选定方案 A/B 后实现。**
+**owner 已 ratify 方案 A（2026-07-07）——按 T36-1→T36-2 实现。**
