@@ -142,16 +142,26 @@
       </div>
       <span v-if="totalRows !== undefined" class="meta-toolbar__row-count">{{ rowCount(totalRows, isZh) }}</span>
       <span class="meta-toolbar__divider" aria-hidden="true"></span>
-      <!-- Row density -->
-      <div class="meta-toolbar__dropdown">
-        <button class="meta-toolbar__btn" :title="l('toolbar.rowHeight')" :aria-label="l('toolbar.rowHeight')" @click="showDensityPanel = !showDensityPanel"><el-icon class="meta-toolbar__btn-icon"><component :is="ICON.rowHeight" /></el-icon> {{ l('toolbar.rows') }}</button>
-        <div v-if="showDensityPanel" class="meta-toolbar__panel meta-toolbar__panel--density" @keydown.escape="showDensityPanel = false">
-          <label v-for="d in DENSITIES" :key="d.value" class="meta-toolbar__field-toggle">
-            <input type="radio" name="density" :checked="rowDensity === d.value" @change="emit('set-row-density', d.value); showDensityPanel = false" />
-            <span>{{ l(d.labelKey) }}</span>
-          </label>
-        </div>
-      </div>
+      <!-- Row density (UI-P2-1c slice-2: migrated to shared MtMenu/MtMenuItem, built on MtPopover) -->
+      <MtMenu>
+        <template #trigger>
+          <MtButton :title="l('toolbar.rowHeight')" :aria-label="l('toolbar.rowHeight')">
+            <template #icon><el-icon><component :is="ICON.rowHeight" /></el-icon></template>
+            {{ l('toolbar.rows') }}
+          </MtButton>
+        </template>
+        <MtMenuItem
+          v-for="d in DENSITIES"
+          :key="d.value"
+          class="meta-toolbar__density-item"
+          :class="{ 'meta-toolbar__density-item--active': rowDensity === d.value }"
+          :aria-current="rowDensity === d.value ? 'true' : undefined"
+          @select="emit('set-row-density', d.value)"
+        >
+          <template #icon><el-icon v-if="rowDensity === d.value"><component :is="ICON.check" /></el-icon></template>
+          {{ l(d.labelKey) }}
+        </MtMenuItem>
+      </MtMenu>
       <!-- UI-P2-1c: standalone action buttons (icon+label) migrated to shared MtButton (ghost). -->
       <MtButton :title="l('toolbar.autoFitColumns')" :aria-label="l('toolbar.autoFitColumns')" @click="emit('auto-fit-columns')">
         <template #icon><el-icon><component :is="ICON.fit" /></el-icon></template>
@@ -187,10 +197,12 @@ import { useLocale } from '../../composables/useLocale'
 import MetaFilterConditionRow from './MetaFilterConditionRow.vue'
 import MetaFilterGroup from './MetaFilterGroup.vue'
 // UI-P2-1c: migrate standalone action buttons (undo/redo/fit/print/import/export/new-record) onto
-// the shared UI primitives (multitable-ui-p2-structure-designlock-20260706.md §2 P2-1). Dropdown
-// triggers that open a `.meta-toolbar__panel` (fields/sort/filter/group/row-density) are NOT touched
-// in this slice — that migration needs MtPopover/MtMenu and is a later slice.
-import { MtButton, MtIconButton } from '../ui'
+// the shared UI primitives (multitable-ui-p2-structure-designlock-20260706.md §2 P2-1). Slice-2
+// additionally migrates the row-density dropdown onto MtMenu/MtMenuItem (built on MtPopover), so
+// its open/close + click-outside/Escape no longer need a hand-rolled `showDensityPanel` ref. The
+// remaining dropdown triggers that open a `.meta-toolbar__panel` (fields/sort/filter/group) are NOT
+// touched in this slice — each is a more complex builder deferred to a later slice.
+import { MtButton, MtIconButton, MtMenu, MtMenuItem } from '../ui'
 import { seedFilterCondition } from '../utils/filter-condition-seed'
 import {
   metaCoreLabel,
@@ -211,6 +223,7 @@ import {
   Printer as IconPrint,
   Upload as IconImport,
   Download as IconExport,
+  Check as IconCheck,
 } from '@element-plus/icons-vue'
 
 // Reusable monochrome icon map for toolbar buttons (UI-P1 slice-1). Keyed by toolbar action so the
@@ -228,6 +241,7 @@ const ICON = {
   print: IconPrint,
   import: IconImport,
   export: IconExport,
+  check: IconCheck,
 } as const
 
 const props = withDefaults(defineProps<{
@@ -288,7 +302,6 @@ const showFieldPicker = ref(false)
 const showSortPanel = ref(false)
 const showFilterPanel = ref(false)
 const showGroupPanel = ref(false)
-const showDensityPanel = ref(false)
 const DENSITIES: Array<{ value: RowDensity; labelKey: MetaCoreLabelKey }> = [
   { value: 'compact', labelKey: 'density.compact' },
   { value: 'normal', labelKey: 'density.normal' },
@@ -393,7 +406,6 @@ function onAddFilterGroup() {
 .meta-toolbar__dropdown { position: relative; }
 .meta-toolbar__panel { position: absolute; top: 100%; left: 0; z-index: 20; min-width: 200px; background: var(--ms-bg-card, #fff); border: 1px solid var(--ms-border-light, #e7e8ec); border-radius: var(--ms-radius-sm, 6px); box-shadow: var(--ms-shadow-pop, 0 4px 12px rgba(0,0,0,.1)); padding: 8px; margin-top: 4px; }
 .meta-toolbar__panel--filter { min-width: 420px; }
-.meta-toolbar__panel--density { min-width: 120px; }
 .meta-toolbar__field-toggle { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; cursor: pointer; }
 .meta-toolbar__sort-rule, .meta-toolbar__filter-rule { display: flex; gap: 4px; margin-bottom: 4px; align-items: center; }
 .meta-toolbar__sort-rule select, .meta-toolbar__filter-rule select { padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
@@ -429,5 +441,7 @@ function onAddFilterGroup() {
 .meta-toolbar__search-clear { border: none; background: none; color: #999; cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
 .meta-toolbar__search-clear:hover { color: #f56c6c; }
 .meta-toolbar__row-count { font-size: 11px; color: #999; white-space: nowrap; }
+/* Row-density menu (UI-P2-1c slice-2): current selection indicator, replaces the old radio `checked`. */
+.meta-toolbar__density-item--active { color: var(--ms-color-primary); font-weight: 600; }
 @media print { .meta-toolbar { display: none !important; } }
 </style>
