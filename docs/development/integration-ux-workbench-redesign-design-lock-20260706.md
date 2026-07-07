@@ -35,7 +35,10 @@ i18n:集成词汇零 label 模块(仅机器码集);帮助面:零(无 tooltip/无
 ## 2. 切片阶梯(每片单独 opt-in;✅=完成 ⬜=ratify 后可执行 🔒=前置未达)
 
 ```text
-⬜ IU-1 错误码人话化 + 证据展示层(最低成本最高感知,先行)
+✅ IU-1 错误码人话化 + 证据展示层 — #3743(26d8cd1f0),verification MD 同 PR:
+     46 码人话化(probe 11/resolver 9/组合 8/BOM 族 8/死信 10),4 展示点接线;raw errorMessage
+     泄漏口全数消除(含审阅点名的死信处 + 额外发现的 K3-setup 处);client mirror 补齐 BOM 族
+     + drift tripwire;Workbench/K3-setup spec 首进 CI + Node-20 调度兼容修复;mutation 4/4
      coarse-code → 人话 label 模块(READ_SOURCE_PROBE_* / RESOLVER_* / K3_WISE_BOM_LIST_* /
      dead-letter 码全集;走既有 useLocale 模式新增集成 label 模块,zh+en);
      probe/组合证据块用标签渲染,机器码保留在折叠详情里(排障需要)。
@@ -55,7 +58,10 @@ i18n:集成词汇零 label 模块(仅机器码集);帮助面:零(无 tooltip/无
 🔒 IU-4 组合配置向导(门:IU-3 落地)——两跳链的可视化步骤(hop1 输出 → hop2 输入连线示意)。
 🔒 IU-5 JSON textarea 逐处结构化(门:IU-2 落地;每处单独评估)
      5 处裸 JSON 各配结构化编辑器;专家 JSON 模式保留切换。
-⬜ IU-6 嵌入式帮助三层(与 IU-1 并行,docs+轻代码)
+✅ IU-6 嵌入式帮助三层 — #3750(8493b7fe8),verification MD 同 PR:
+     7 空态引导 + 19 字段 hint(独立模块供 IU-2 复用)+ /help/integration 帮助中心
+     (错误码对照表程序化消费 IU-1 模块,单一来源 tripwire);双 Node 181 测试绿;
+     mutation 4/4(闸内补 zh 文案覆盖)
      a. 空状态即引导(每列表空态 = 这是什么 + 第一步);
      b. 字段级 hint(el-tooltip,复用 runbook/dev-verification 已有知识,values-free);
      c. /help/integration 帮助中心页:何时用读取源 vs 组合、错误码对照表(消费 IU-1 的
