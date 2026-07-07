@@ -18290,7 +18290,10 @@ async function downloadImportTemplateCsv() {
     setStatus(tr('The current template does not expose CSV header guidance yet.', '当前模板尚未提供 CSV 表头指导。'), 'error')
     return
   }
-  const csv = `${columns.map(escapeCsvCell).join(',')}\n${columns.map(() => '').join(',')}\n`
+  // Harmonized with the selected-fields download (#3793 review NIT-3): ship a
+  // concrete example row instead of an empty line.
+  const exampleRow = buildTemplateExampleRow(importColumnFormatRows.value, columns)
+  const csv = `${columns.map(escapeCsvCell).join(',')}\n${exampleRow.map(escapeCsvCell).join(',')}\n`
   const blob = new Blob([withCsvBom(csv)], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
@@ -28170,7 +28173,7 @@ const holidaySectionBindings = {
 }
 
 .attendance__rotation-sequence-preview {
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--ms-border);
   background: #f9fafb;
   border-radius: 6px;
   padding: 10px 12px;
@@ -28548,7 +28551,7 @@ const holidaySectionBindings = {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 12px;
 }
 
@@ -28973,7 +28976,7 @@ const holidaySectionBindings = {
 .attendance__code {
   margin-top: 8px;
   padding: 12px;
-  background: #f5f6f8;
+  background: var(--ms-bg-page);
   border-radius: 8px;
   font-size: 12px;
   white-space: pre-wrap;
@@ -29534,7 +29537,7 @@ const holidaySectionBindings = {
   flex-direction: column;
   gap: 8px;
   padding: 12px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ms-border-light);
   border-radius: 12px;
   background: #fff;
 }
@@ -29591,7 +29594,7 @@ const holidaySectionBindings = {
   display: flex;
   flex-wrap: wrap;
   gap: 10px 16px;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 12px;
 }
 
@@ -29963,7 +29966,7 @@ const holidaySectionBindings = {
   gap: 12px;
   width: 100%;
   padding: 10px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
   background: #f9fafb;
   color: inherit;
@@ -30015,7 +30018,7 @@ const holidaySectionBindings = {
 .attendance__group-detail-header h5,
 .attendance__group-panel h6 {
   margin: 0;
-  color: #111827;
+  color: var(--ms-text-1);
 }
 
 .attendance__group-panel {
@@ -30070,7 +30073,7 @@ const holidaySectionBindings = {
 }
 
 .attendance__group-member-identity strong {
-  color: #111827;
+  color: var(--ms-text-1);
   font-size: 13px;
 }
 
@@ -30093,7 +30096,7 @@ const holidaySectionBindings = {
   z-index: 1;
   margin: 0 -14px -14px;
   padding: 12px 14px;
-  border-top: 1px solid #e5e7eb;
+  border-top: 1px solid var(--ms-border-light);
   background: rgba(255, 255, 255, 0.96);
 }
 
@@ -30110,7 +30113,7 @@ const holidaySectionBindings = {
 }
 
 .attendance__group-summary span {
-  color: #111827;
+  color: var(--ms-text-1);
   font-size: 13px;
 }
 
@@ -30172,7 +30175,7 @@ const holidaySectionBindings = {
 
 .attendance__work-time-drawer-header h6 {
   margin: 0;
-  color: #111827;
+  color: var(--ms-text-1);
 }
 
 .attendance__work-time-type-list {
@@ -30205,7 +30208,7 @@ const holidaySectionBindings = {
 
 .attendance__work-time-type-option span,
 .attendance__work-time-drawer-body strong {
-  color: #111827;
+  color: var(--ms-text-1);
   font-weight: 700;
 }
 
@@ -30243,7 +30246,7 @@ const holidaySectionBindings = {
 }
 
 .attendance__work-time-holiday-callout strong {
-  color: #111827;
+  color: var(--ms-text-1);
   font-weight: 700;
 }
 
@@ -30320,7 +30323,7 @@ const holidaySectionBindings = {
   margin-top: 12px;
   padding: 12px;
   border-radius: 12px;
-  border: 1px dashed #d1d5db;
+  border: 1px dashed var(--ms-border);
   background: #fafafa;
 }
 
@@ -30331,7 +30334,7 @@ const holidaySectionBindings = {
 .attendance__details-summary {
   cursor: pointer;
   font-weight: 600;
-  color: #111827;
+  color: var(--ms-text-1);
 }
 
 @media (max-width: 768px) {
@@ -30654,14 +30657,14 @@ const holidaySectionBindings = {
   gap: 6px;
   margin: 12px 0;
   font-size: 13px;
-  color: #4b5563;
+  color: var(--ms-text-2);
 }
 .attendance__result-edit-form textarea {
   min-height: 72px;
   resize: vertical;
 }
 .attendance__admin-subsection {
-  border-top: 1px solid var(--border, #e5e7eb);
+  border-top: 1px solid var(--border, var(--ms-border-light));
   padding-top: 12px;
   margin-top: 12px;
 }
