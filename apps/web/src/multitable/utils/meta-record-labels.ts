@@ -66,6 +66,9 @@ export type MetaRecordLabelKey =
   | 'record.configRestoreAction' | 'record.configRestoreTitle' | 'record.configRestoreWillRevert'
   | 'record.configRestoreDrift' | 'record.configRestoreGated' | 'record.configRestoreConfirm'
   | 'record.configRestoreCancel' | 'record.configRestoreError'
+  | 'record.configRestoreServerSummary' | 'record.configRestoreEntity' | 'record.configRestoreNote'
+  | 'record.configRestoreIdCollision' | 'record.configRestoreIdCollisionBlocked' | 'record.configRestoreScope'
+  | 'record.configRestoreDirection' | 'record.configRestoreBlocked'
   // FE-owned static fallback strings (the `error?.message ?? l(...)`
   // pattern from T3A2). Backend error.message remains raw when present.
   | 'record.errorHistoryLoad' | 'record.errorWatchLoad' | 'record.errorWatchUpdate'
@@ -192,6 +195,14 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.configRestoreConfirm': { en: 'Revert', zh: '确认撤销' },
   'record.configRestoreCancel': { en: 'Cancel', zh: '取消' },
   'record.configRestoreError': { en: 'Revert failed', zh: '撤销失败' },
+  'record.configRestoreServerSummary': { en: 'Server preview:', zh: '服务端预览：' },
+  'record.configRestoreEntity': { en: 'Entity', zh: '对象' },
+  'record.configRestoreNote': { en: 'Note', zh: '说明' },
+  'record.configRestoreIdCollision': { en: 'ID collision', zh: 'ID 冲突' },
+  'record.configRestoreIdCollisionBlocked': { en: 'An entity with this id already exists. Re-preview after resolving the collision.', zh: '已有对象占用此 ID。请处理冲突后重新预览。' },
+  'record.configRestoreScope': { en: 'Scope', zh: '范围' },
+  'record.configRestoreDirection': { en: 'Direction', zh: '方向' },
+  'record.configRestoreBlocked': { en: 'This preview is not executable.', zh: '此预览不可执行。' },
   'record.errorRestore': { en: 'Restore failed', zh: '恢复失败' },
   'record.errorHistoryLoad': { en: 'Failed to load history', zh: '加载历史失败' },
   'record.errorWatchLoad': { en: 'Failed to load watch status', zh: '加载关注状态失败' },
