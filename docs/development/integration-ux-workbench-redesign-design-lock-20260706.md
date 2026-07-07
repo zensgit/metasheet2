@@ -1,6 +1,7 @@
-# 数据工厂(集成)页面 UX 重排 — DESIGN-LOCK(PROPOSED)— 2026-07-06
+# 数据工厂(集成)页面 UX 重排 — DESIGN-LOCK(RATIFIED)— 2026-07-06
 
-> **状态:PROPOSED,等 owner ratify。** 本文锁原则与切片阶梯,不实现任何代码。
+> **状态:RATIFIED(owner 审阅 APPROVE 2026-07-06,P2 补写后拍板 ratify/merge)。**
+> 本文锁原则与切片阶梯,不实现任何代码。
 > 背景:数据库及系统连接线能力面已收官(integration-line-final-closure-report-20260706.md);
 > owner 提出体验目标——让用户操作界面简单方便,并考虑帮助面。本 lock 基于 2026-07-06 全量 UI
 > audit(见 §1 事实基线)。
@@ -38,6 +39,10 @@ i18n:集成词汇零 label 模块(仅机器码集);帮助面:零(无 tooltip/无
      coarse-code → 人话 label 模块(READ_SOURCE_PROBE_* / RESOLVER_* / K3_WISE_BOM_LIST_* /
      dead-letter 码全集;走既有 useLocale 模式新增集成 label 模块,zh+en);
      probe/组合证据块用标签渲染,机器码保留在折叠详情里(排障需要)。
+     **覆盖 errorCode + errorMessage 双面**(owner 审阅 P2,2026-07-06):标签层只消费**精确注册
+     闭词表**;未知 code 显著层降级为通用"未知错误"标签(折叠详情仍可见原始 code——code 属注册
+     闭集,安全);**raw errorMessage 一律不渲染**(任何层,含折叠),只允许映射为安全原因/固定
+     文案——当前 Workbench 直渲 deadLetter.errorMessage 属须消除的泄漏口。
      spec=Fable → 实现=Sonnet;不改任何路由/服务/wire 形状。
 ⬜ IU-2 Workbench 解构(结构性主刀,零行为变化)
      5992 行单页 → PageShell + 左 rail + 分区组件(镜像考勤 AdminCenter 模式):
@@ -63,7 +68,9 @@ i18n:集成词汇零 label 模块(仅机器码集);帮助面:零(无 tooltip/无
   后端任何面;integration-guard CI 定向 spec 持续覆盖。
 - **token-only**:新样式一律 `var(--ms-*)`(UF-1 锁);图标走 Element Plus SVG(P1a/P1b 模式)。
 - **values-free 展示纪律**:帮助文案与错误标签不得内嵌业务值示例(物料号/BOM 号等);示例一律
-  占位符形态。
+  占位符形态。**标签层只消费精确注册闭词表;未知码降级为通用未知标签;errorMessage 只允许映射为
+  安全原因/固定文案,raw message 永不显示**(owner 审阅 P2:只翻译 code 而放行 raw message 会留下
+  更大的泄漏口)。
 - **专家能力不降级**:JSON 专家模式、机器码详情、全字段面全部保留(折叠≠删除)。
 - **外部对标分析不入正式文档**:本 lock 只声明自有原则;对标材料留 /tmp 或 docs/research。
 
