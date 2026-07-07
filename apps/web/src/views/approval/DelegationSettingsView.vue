@@ -37,7 +37,7 @@
       </el-table-column>
       <el-table-column label="状态" width="150">
         <template #default="{ row }">
-          <StatusTag domain="delegation" :status="delegationDisplayStatus(row).status" />
+          <StatusTag domain="delegation" :status="delegationDisplayStatus(row).status" force-locale="zh" />
           <span v-if="delegationDisplayStatus(row).expiringSoon" class="expiring-soon-hint">即将到期</span>
         </template>
       </el-table-column>
@@ -53,13 +53,29 @@
       </el-table-column>
     </el-table>
 
+    <!-- B3-04-tail — this ADMIN dialog's 委托人/被委托人 fields now use the same real
+         ApprovalUserPicker MyDelegationView's 被委托人 field got in B3-04 D-2, replacing the raw
+         user-id text inputs. Unlike MyDelegationView (delegatee-only — delegator is forced to the
+         caller server-side), the admin can legitimately pick ANY user as delegator, so both
+         fields are pickable here. `data-testid` is overridden per-field (fallthrough onto the
+         picker's root el-select) since both pickers render in the same dialog and the component's
+         own default testid ("approval-user-picker") would collide between them; the override
+         reuses this dialog's PRE-EXISTING testids so no downstream selector needs to change. -->
     <el-dialog v-model="dialogOpen" title="新建委托" width="480px">
       <el-form label-width="92px">
         <el-form-item label="委托人">
-          <el-input v-model="form.delegatorUserId" placeholder="委托人用户 ID" data-testid="delegation-delegator" />
+          <ApprovalUserPicker
+            data-testid="delegation-delegator"
+            :model-value="form.delegatorUserId || null"
+            @update:model-value="form.delegatorUserId = $event ?? ''"
+          />
         </el-form-item>
         <el-form-item label="被委托人">
-          <el-input v-model="form.delegateeUserId" placeholder="被委托人用户 ID" data-testid="delegation-delegatee" />
+          <ApprovalUserPicker
+            data-testid="delegation-delegatee"
+            :model-value="form.delegateeUserId || null"
+            @update:model-value="form.delegateeUserId = $event ?? ''"
+          />
         </el-form-item>
         <el-form-item label="范围">
           <el-select v-model="form.scope" data-testid="delegation-scope">
@@ -91,6 +107,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { useApprovalPermissions } from '../../approvals/permissions'
+import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import {
   listDelegations,
   createDelegation,
