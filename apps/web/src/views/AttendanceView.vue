@@ -30608,7 +30608,7 @@ const holidaySectionBindings = {
   border: 1px solid var(--ms-border-light);
   border-radius: var(--ms-radius-lg);
   background: var(--ms-bg-card);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 0.06);
+  box-shadow: var(--ms-shadow-card);
 }
 
 .attendance__hero-clock {

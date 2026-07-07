@@ -1554,6 +1554,7 @@ describe('Attendance self-service dashboard', () => {
       candidate => candidate.textContent?.trim() === 'Check Out'
     )
     expect(checkOut, 'Check Out stays findable by copy').toBeTruthy()
+    expect(checkOut!.classList.contains('attendance__btn')).toBe(true)
   })
 
   it('UI-P0 hero punch card: absent outside overview mode', async () => {
