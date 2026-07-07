@@ -25,13 +25,9 @@
 
 ## W1 — 起草车道(W0 批次清空后启动;docs-only 零碰撞)
 
-- ⬜ **W1-1 formula freshness / live-reactive audit design-lock**(Fable 5,audit-first)
-  口径修正(2026-07-05,替代旧"grid 编辑触发公式重算"提法——该缺口已被超越):写路径 REST spine 的公式重算 **已存在**(`record-write-service.ts` Step 4c:物化回写 + 响应/实时补丁刷新),restore 亦经 canonical spine 触发重算(`univer-meta.ts:8880` 注释明确)。本项先 **audit** 界定剩余真缺口,再锁:
-  (a) on-save vs live-reactive(输入过程中的实时预览)的产品口径;
-  (b) **Yjs bridge 边界**——scalar CRDT flush 路径是否触发 Step 4c 或绕过;
-  (c) restore/PIT 各边缘路径的重算覆盖面;
-  (d) 跨记录/多跳传播深度(FOL fan-out 语义的跳数与失效边界)。
-  产出:audit 结论 + design-lock(若 audit 证明缺口不成立则如实关闭,不硬造 slice)。
+- ✅ **W1-1 formula freshness / live-reactive audit design-lock** — 已交付(audit `multitable-formula-freshness-audit-20260705.md` + design-lock `multitable-formula-freshness-designlock-20260705.md`;`LOCK-F` F1/F3 已在 `index.ts` Yjs bridge 落地、F4 故意留桩 + golden GF9、N4/N5 doc-only 锁定)。
+  > 2026-07-07 独立 8-agent 代码级复审重导出同 4 条结论;唯一"新缺口"(recycle-bin undelete 无重算)**已被 N4 裁定**:undelete/reset 写入的是 PIT T-自洽物化值,**doc-only 锁定、不加重算**——再开"补算 slice"会**推翻已批 owner 决策**,故如实关闭,不建 slice。
+  口径存档(勿复用为待办):写路径 REST spine 重算 **已存在**(`record-write-service.ts` Step 4c);(a) on-save vs live-reactive = 产品口径(无半成品 live 路径)· (b) Yjs 同表重算 = 有(taint parity),跨表 fan-out = F4/GF9 故意留桩 · (c) restore 家族过 spine,唯 undelete 快照回放 = N4 doc-only · (d) 单跳边界 = C1 RFC + FOL-3 已锁。
 - ⬜ **W1-2 权限金矩阵主体 spec**(spec=Fable 5 → 套件生成=Sonnet 5)
   Tier-B #5 主体(#3574 仅 slice 1):row×field×base×OAPI 组合矩阵 spec 先行;显式排除历史窗口正在点亮的 flag 面,避免 golden 追逐移动目标。
 
