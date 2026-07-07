@@ -1638,4 +1638,79 @@ describe('Approval E2E Lifecycle', () => {
       expect(container!.querySelectorAll('.el-timeline-item').length).toBe(2)
     })
   })
+
+  // =========================================================================
+  // G-B2-09 / G-B2-10 — timeline de-ID tails + next-pending entry
+  // =========================================================================
+  describe('G-B2-09/10 detail tails', () => {
+    it('cc history action renders 抄送 (not raw cc) and actors get initial-letter avatars', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      mockHistory.value = [
+        {
+          id: 'hist_cc_1',
+          action: 'cc',
+          actorId: 'user_9',
+          actorName: '王五',
+          comment: null,
+          fromStatus: 'pending',
+          toStatus: 'pending',
+          occurredAt: new Date().toISOString(),
+          metadata: { nodeKey: 'cc_1' },
+        },
+      ] as never
+      await mountDetailView()
+
+      expect(container!.textContent).toContain('抄送')
+      expect(container!.textContent).not.toMatch(/\bcc\b/)
+      const avatar = container!.querySelector('.approval-detail__actor-avatar')
+      expect(avatar?.textContent?.trim()).toBe('王')
+    })
+
+    it('after a successful approve, 下一条 → appears when another pending item exists and navigates to it', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      executeActionSpy.mockResolvedValue(mockApprovedApproval())
+      mockPendingApprovals.value = [
+        { id: 'apv_pending_1' },
+        { id: 'apv_pending_2' },
+      ] as never
+      await mountDetailView()
+
+      const approveBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '通过')
+      approveBtn!.click()
+      await flushUi()
+      const dialog = container!.querySelector('[data-dialog-visible="true"]')
+      const confirmBtn = Array.from(dialog!.querySelectorAll('button'))
+        .find((b) => b.textContent?.trim() === '确认')
+      confirmBtn!.click()
+      await flushUi()
+
+      const nextBtn = container!.querySelector('[data-testid="approval-next-pending"]') as HTMLButtonElement | null
+      expect(nextBtn).not.toBeNull()
+      nextBtn!.click()
+      await flushUi()
+      // Exclude-current rule: the target is the OTHER pending item, never the acted one.
+      expect(pushSpy).toHaveBeenCalledWith({ name: 'approval-detail', params: { id: 'apv_pending_2' } })
+    })
+
+    it('no 下一条 when the pending list only contains the current instance (exclude-current guard)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      executeActionSpy.mockResolvedValue(mockApprovedApproval())
+      mockPendingApprovals.value = [{ id: 'apv_pending_1' }] as never
+      await mountDetailView()
+
+      const approveBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '通过')
+      approveBtn!.click()
+      await flushUi()
+      const dialog = container!.querySelector('[data-dialog-visible="true"]')
+      Array.from(dialog!.querySelectorAll('button')).find((b) => b.textContent?.trim() === '确认')!.click()
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-next-pending"]')).toBeNull()
+    })
+  })
 })

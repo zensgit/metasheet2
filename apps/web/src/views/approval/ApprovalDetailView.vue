@@ -7,6 +7,18 @@
       back-label="返回列表"
       @back="goBack"
     >
+      <template #actions>
+        <!-- G-B2-10: appears only after a successful approve/reject AND with another pending
+             item available in the store list (deep-link entries with no list render nothing). -->
+        <el-button
+          v-if="showNextEntry && nextPendingApproval"
+          type="primary"
+          data-testid="approval-next-pending"
+          @click="goNextPending"
+        >
+          下一条 →
+        </el-button>
+      </template>
       <template v-if="approval" #meta>
         <StatusTag domain="approvalInstance" :status="approval.status" force-locale="zh" />
         <!-- B1-03: 已等待 aging — glanceable next to the status tag, only while still pending. -->
@@ -168,7 +180,7 @@
                   >
                     <div class="approval-detail__timeline-content">
                       <div class="approval-detail__timeline-header">
-                        <strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
+                        <span class="approval-detail__actor-avatar" aria-hidden="true">{{ actorInitial(item) }}</span><strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
                         <el-tag :type="timelineActionTagType(item.action, item.metadata)" size="small">
                           {{ actionLabel(item.action, item.metadata) }}
                         </el-tag>
@@ -214,7 +226,7 @@
               >
                 <div class="approval-detail__timeline-content">
                   <div class="approval-detail__timeline-header">
-                    <strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
+                    <span class="approval-detail__actor-avatar" aria-hidden="true">{{ actorInitial(item) }}</span><strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
                     <el-tag :type="timelineActionTagType(item.action, item.metadata)" size="small">
                       {{ actionLabel(item.action, item.metadata) }}
                     </el-tag>
@@ -677,7 +689,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
@@ -1069,8 +1081,16 @@ function actionLabel(action: string, metadata?: Record<string, unknown>) {
     sign: '签字',
     add_sign: '加签',
     reduce_sign: '减签',
+    cc: '抄送',
   }
   return map[action] ?? action
+}
+
+// G-B2-09: initial-letter avatar for timeline actors — display only, token-styled.
+function actorInitial(item: { actorName?: string | null; metadata?: Record<string, unknown> | null }): string {
+  if (item.metadata?.autoApproved) return '系'
+  const name = (item.actorName ?? '').trim()
+  return name ? Array.from(name)[0]! : '系'
 }
 
 function timelineItemType(action: string, toStatus: string): string {
@@ -1159,6 +1179,24 @@ function formatFieldValue(value: unknown): string {
 // ---------------------------------------------------------------------------
 function goBack() {
   router.push({ name: 'approval-list' })
+}
+
+// G-B2-10: after a successful approve/reject, offer the next pending item — clearing N items
+// costs N×(back+scan+click) without it. Target computed at CLICK time from the store's pending
+// list (freshest view), always excluding the just-acted instance; deep-link entries with an
+// empty/unloaded list simply render no button (no new fetch — display only).
+const showNextEntry = ref(false)
+
+const nextPendingApproval = computed(() => {
+  const currentId = route.params.id as string
+  return store.pendingApprovals.find((entry) => entry.id !== currentId) ?? null
+})
+
+function goNextPending() {
+  const next = nextPendingApproval.value
+  if (!next) return
+  showNextEntry.value = false
+  router.push({ name: 'approval-detail', params: { id: next.id } })
 }
 
 function retryLoad() {
@@ -1257,6 +1295,7 @@ async function submitAction() {
     ElMessage.success(currentAction.value === 'approve' ? '审批已通过' : '审批已驳回')
     rememberQuickPhraseIfOffered(actionComment.value)
     actionDialogVisible.value = false
+    showNextEntry.value = true
     await store.loadHistory(id)
   } catch (error) {
     // B1-04: keep the dialog open + show the server's own reason inline instead of a generic
@@ -1437,7 +1476,9 @@ async function handleRemind() {
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
-onMounted(async () => {
+// G-B2-10: extracted from onMounted so detail→detail navigation (下一条 →) reloads — the router
+// reuses this component instance on a params-only change, so onMounted alone would show stale data.
+async function loadDetailPage() {
   const id = route.params.id as string
   // Wave 2 WP3 slice 2 — fire-and-forget mark-read. Runs in parallel with the
   // detail load so the unread badge drops immediately while the detail view
@@ -1472,7 +1513,20 @@ onMounted(async () => {
     }
     await Promise.all(templateFetches)
   }
-})
+}
+
+onMounted(loadDetailPage)
+
+// Params-only navigation (下一条 →): reset the next-entry offer and reload for the new instance.
+watch(
+  () => route.params.id,
+  (next, prev) => {
+    if (typeof next === 'string' && next && next !== prev) {
+      showNextEntry.value = false
+      void loadDetailPage()
+    }
+  },
+)
 </script>
 
 <style scoped>
@@ -1505,6 +1559,21 @@ onMounted(async () => {
 }
 
 .approval-detail__form,
+.approval-detail__actor-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-right: var(--ms-space-2);
+  border-radius: 50%;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
 .approval-detail__timeline {
   background: var(--ms-bg-card);
   border: 1px solid var(--el-border-color-lighter);
