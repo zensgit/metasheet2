@@ -32,7 +32,7 @@ describe('AttendanceView bare-hex ratchet', () => {
     // These values equal UF tokens byte-for-byte; batch B1 migrated every
     // property-aligned occurrence. A reappearance means a new style hardcoded
     // a value that has a token (--ms-text-1/-2, --ms-border(-light), --ms-bg-page).
-    for (const hex of ['#111827', '#4b5563', '#d1d5db', '#f5f6f8']) {
+    for (const hex of ['#111827', '#4b5563', '#d1d5db', '#e5e7eb', '#f5f6f8']) {
       expect(source.includes(hex), `expected no bare ${hex} (use its UF token)`).toBe(false)
     }
   })
