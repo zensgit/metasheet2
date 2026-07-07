@@ -1,6 +1,6 @@
 # 多维表 AI 字段 DARK → GA 点亮阶梯 · 设计锁（PROPOSED）
 
-> 状态：**PROPOSED — 待 owner ratify**。本锁只定「怎么从 DARK 安全地分档点亮到 GA」的阶梯与闸门，**不翻任何生产 env、不发起任何 live 请求**。真正点亮的节奏、金额上限、canary 租户由 owner 在每一档显式拍板。
+> 状态：**PROPOSED — 待 owner ratify**。本锁只定「怎么从 DARK 安全地分档点亮到 GA」的阶梯与闸门，**不翻任何生产 env、不发起任何 live 请求**。真正点亮的节奏、金额上限、canary 环境、指定测试 actor(s) 与 cap 由 owner 在每一档显式拍板。
 > 前置（均已落 main）：AI provider readiness A1（DARK，无 live 路径）· usage ledger（reserve-then-settle）· S1 写入血缘 + 批次分组 · S2 prompt-config history · AI 输出=不可信写入源 design-lock（`multitable-ai-output-untrusted-write-source-designlock-20260705.md`）· bulk-fill preview→review→commit。
 > 模型分档：阶梯/闸门设计 = Fable；每档的观测/回滚/账本核对实现 = Sonnet；点亮前的对抗审阅 = Opus。
 
