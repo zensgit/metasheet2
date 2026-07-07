@@ -194,6 +194,12 @@ export interface IntegrationSystemObject {
   schema?: IntegrationObjectSchemaField[]
   template?: Record<string, unknown>
   advanced?: boolean
+  // BA-UI-1 (additive TYPING of the existing wire shape — not a wire change): the readonly Bridge
+  // Agent adapter's listObjects() has always emitted fieldCount/readonly
+  // (bridge-agent-readonly-adapter.cjs normalizeObjectsResponse); the observability section renders
+  // fieldCount. Optional — other adapters' object lists don't carry them.
+  fieldCount?: number
+  readonly?: boolean
 }
 
 export interface IntegrationObjectSchema {

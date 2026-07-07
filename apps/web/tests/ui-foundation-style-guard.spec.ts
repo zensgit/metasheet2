@@ -54,6 +54,9 @@ const TARGET_FILES = [
   'src/components/integration/IntegrationObjectTemplateSection.vue',
   'src/components/integration/IntegrationPayloadPreviewSection.vue',
   'src/components/integration/IntegrationConnectionSection.vue',
+  // BA-UI-1 (docs/development/bridge-agent-admin-page-design-lock-20260707.md): the Bridge Agent
+  // read-only observability section is born token-only (var(--ms-*)/--el-* exclusively).
+  'src/components/integration/IntegrationBridgeAgentSection.vue',
 ] as const
 
 // Per-file allowlist for counts that are legitimately un-clearable. Keep this EMPTY unless a
