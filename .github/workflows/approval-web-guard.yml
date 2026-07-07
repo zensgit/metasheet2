@@ -52,6 +52,10 @@ on:
       - 'apps/web/tests/approval-template-authoring-complex-node-config-allowlist.test.ts'
       - 'apps/web/tests/approval-graph-topology-edit.test.ts'
       - 'apps/web/tests/approval-graph-layout.test.ts'
+      # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
+      # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
+      - 'apps/web/src/approvals/conditionSummary.ts'
+      - 'apps/web/tests/approval-condition-summary.test.ts'
       - 'apps/web/tests/amountAutoSum.test.ts'
       - 'apps/web/tests/useAutoSumTotal.test.ts'
       - 'apps/web/tests/lineDerivation.test.ts'
@@ -164,6 +168,10 @@ on:
       - 'apps/web/tests/approval-template-authoring-complex-node-config-allowlist.test.ts'
       - 'apps/web/tests/approval-graph-topology-edit.test.ts'
       - 'apps/web/tests/approval-graph-layout.test.ts'
+      # G-B2-19: readable condition-branch summaries — conditionSummary.ts pure fn consumed by
+      # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
+      - 'apps/web/src/approvals/conditionSummary.ts'
+      - 'apps/web/tests/approval-condition-summary.test.ts'
       - 'apps/web/tests/amountAutoSum.test.ts'
       - 'apps/web/tests/useAutoSumTotal.test.ts'
       - 'apps/web/tests/lineDerivation.test.ts'
@@ -324,4 +332,4 @@ jobs:
         # files and asserts zero static style= attributes and zero hex/rgb() literals inside
         # <style> blocks (var() references + transparent/inherit/currentColor/none allowed);
         # had no gate before this wiring.
-        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView ui-foundation-style-guard uiFoundationTexture --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout approval-condition-summary amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView ui-foundation-style-guard uiFoundationTexture --reporter=dot
