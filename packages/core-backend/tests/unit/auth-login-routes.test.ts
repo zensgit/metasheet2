@@ -42,6 +42,7 @@ const dingtalkOauthMocks = vi.hoisted(() => ({
   buildAuthUrl: vi.fn(),
   validateState: vi.fn(),
   exchangeCodeForUser: vi.fn(),
+  exchangeEnterpriseAuthCodeForUser: vi.fn(),
   exchangeCodeForDingTalkProfile: vi.fn(),
   bindDingTalkIdentityToUser: vi.fn(),
   DingTalkLoginPolicyError: class DingTalkLoginPolicyError extends Error {
@@ -58,6 +59,14 @@ const dingtalkOauthMocks = vi.hoisted(() => ({
 }))
 
 const dingtalkClientMocks = vi.hoisted(() => ({
+  DingTalkBusinessError: class DingTalkBusinessError extends Error {
+    errcode: number
+    constructor(message: string, errcode = 40078) {
+      super(message)
+      this.name = 'DingTalkBusinessError'
+      this.errcode = errcode
+    }
+  },
   DingTalkRequestError: class DingTalkRequestError extends Error {
     statusCode: number
     responseBody: Record<string, unknown> | null
@@ -108,6 +117,7 @@ vi.mock('../../src/auth/dingtalk-oauth', () => ({
   buildAuthUrl: dingtalkOauthMocks.buildAuthUrl,
   validateState: dingtalkOauthMocks.validateState,
   exchangeCodeForUser: dingtalkOauthMocks.exchangeCodeForUser,
+  exchangeEnterpriseAuthCodeForUser: dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser,
   exchangeCodeForDingTalkProfile: dingtalkOauthMocks.exchangeCodeForDingTalkProfile,
   bindDingTalkIdentityToUser: dingtalkOauthMocks.bindDingTalkIdentityToUser,
   DingTalkLoginPolicyError: dingtalkOauthMocks.DingTalkLoginPolicyError,
@@ -118,6 +128,7 @@ vi.mock('../../src/rbac/service', () => ({
 }))
 
 vi.mock('../../src/integrations/dingtalk/client', () => ({
+  DingTalkBusinessError: dingtalkClientMocks.DingTalkBusinessError,
   DingTalkRequestError: dingtalkClientMocks.DingTalkRequestError,
 }))
 
@@ -1418,5 +1429,117 @@ describe('auth login routes', () => {
 
     expect(response.statusCode).toBe(409)
     expect((response.body as Record<string, any>).error).toContain('same email')
+  })
+
+  describe('E1 POST /dingtalk/container (容器免登)', () => {
+    it('404s with container_login_disabled when the flag is off', async () => {
+      const response = await invokeRoute('post', '/dingtalk/container', {
+        body: { authCode: 'code-1' },
+      })
+      expect(response.statusCode).toBe(404)
+      expect((response.body as Record<string, any>).code).toBe('container_login_disabled')
+      expect(dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser).not.toHaveBeenCalled()
+    })
+
+    it('400s when authCode is missing', async () => {
+      vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
+      const response = await invokeRoute('post', '/dingtalk/container', { body: {} })
+      expect(response.statusCode).toBe(400)
+      expect(dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser).not.toHaveBeenCalled()
+    })
+
+    it('mints the same-shape session token on success', async () => {
+      vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
+      dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockResolvedValue({
+        dingtalkUser: { unionId: 'union-1', nick: 'Alpha' },
+        localUserId: 'user-1',
+        localUserEmail: 'alpha@example.com',
+        localUserName: 'Alpha',
+        localUserRole: 'user',
+        isNewUser: false,
+      })
+      rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+      authServiceMocks.createToken.mockReturnValue('jwt-container-token')
+      authServiceMocks.readTokenPayload.mockReturnValue({ exp: Math.floor(Date.now() / 1000) + 3600 })
+      sessionRegistryMocks.createUserSession.mockResolvedValue(undefined)
+      pgMocks.query.mockResolvedValue({ rows: [] })
+
+      const response = await invokeRoute('post', '/dingtalk/container', {
+        headers: { 'user-agent': 'DingTalk WebView' },
+        body: { authCode: 'auth-code-9' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser).toHaveBeenCalledWith('auth-code-9')
+      const body = response.body as Record<string, any>
+      expect(body.success).toBe(true)
+      expect(body.data).toMatchObject({
+        mode: 'login',
+        token: 'jwt-container-token',
+        user: { id: 'user-1', email: 'alpha@example.com', role: 'user', permissions: ['attendance:read'] },
+      })
+    })
+
+    it('passes policy errors through with status + code', async () => {
+      vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
+      dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
+        new dingtalkOauthMocks.DingTalkLoginPolicyError('DingTalk login is not enabled for this user', {
+          statusCode: 403,
+          code: 'grant_required',
+        }),
+      )
+
+      const response = await invokeRoute('post', '/dingtalk/container', {
+        body: { authCode: 'auth-code-10' },
+      })
+
+      expect(response.statusCode).toBe(403)
+      expect((response.body as Record<string, any>).code).toBe('grant_required')
+    })
+  })
+
+  describe('E1 container hardening (review #3771)', () => {
+    it('accepts lenient truthy flag values while staying fail-closed otherwise', async () => {
+      vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', ' TRUE ')
+      dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
+        new dingtalkOauthMocks.DingTalkLoginPolicyError('x', { statusCode: 403, code: 'grant_required' }),
+      )
+      const response = await invokeRoute('post', '/dingtalk/container', { body: { authCode: 'c' } })
+      expect(response.statusCode).toBe(403)
+
+      vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'on')
+      const closed = await invokeRoute('post', '/dingtalk/container', { body: { authCode: 'c' } })
+      expect(closed.statusCode).toBe(404)
+    })
+
+    it('rate-limits repeated failing attempts per IP before the outbound exchange', async () => {
+      vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
+      dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockClear()
+      dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
+        new dingtalkOauthMocks.DingTalkLoginPolicyError('nope', { statusCode: 403, code: 'grant_required' }),
+      )
+      let last: { statusCode: number; body: unknown } | undefined
+      for (let i = 0; i < 6; i += 1) {
+        last = await invokeRoute('post', '/dingtalk/container', {
+          headers: { 'x-forwarded-for': '10.9.9.9' },
+          body: { authCode: `code-${i}` },
+        })
+      }
+      expect(last!.statusCode).toBe(429)
+      expect(dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mock.calls.length).toBeLessThan(6)
+    })
+
+    it('maps a DingTalk business rejection (invalid authCode) to 401 invalid_auth_code', async () => {
+      vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
+      dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
+        new dingtalkClientMocks.DingTalkBusinessError('invalid code', 40078),
+      )
+      const response = await invokeRoute('post', '/dingtalk/container', {
+        headers: { 'x-forwarded-for': '10.9.9.10' },
+        body: { authCode: 'bad' },
+      })
+      expect(response.statusCode).toBe(401)
+      expect((response.body as Record<string, any>).code).toBe('invalid_auth_code')
+    })
   })
 })
