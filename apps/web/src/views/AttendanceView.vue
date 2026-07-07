@@ -5990,7 +5990,7 @@
                       </button>
                     </div>
                   </div>
-                  <div v-if="importColumnFormatRows.length" class="attendance__template-guide-card attendance__template-guide-card--full attendance__column-formats" data-testid="attendance-import-column-formats">
+                  <div v-if="importFieldGroups.length" class="attendance__template-guide-card attendance__template-guide-card--full attendance__column-formats" data-testid="attendance-import-column-formats">
                     <div class="attendance__template-guide-title">{{ tr('Column formats', '列格式说明') }}</div>
                     <small class="attendance__field-hint">{{ tr('Each column: whether it is required, the accepted format, and an example.', '每列：是否必填、可接受的格式、以及示例。') }}</small>
                     <div class="attendance__column-formats-scroll">
