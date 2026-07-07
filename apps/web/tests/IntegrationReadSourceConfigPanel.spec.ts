@@ -593,6 +593,11 @@ describe('IntegrationReadSourceConfigPanel', () => {
     expect(q(root, 'rsc-evidence-error-code').textContent).toContain('READ_SOURCE_PROBE_CONTAINER_NOT_FOUND')
     expect(q(root, 'rsc-evidence-error-type').textContent).toContain('ReadSourceProbeRuntimeError')
     expect(q(root, 'rsc-evidence-located').textContent).toContain('false')
+
+    // IU-1: the humanized label renders prominently; the raw code is still present (demoted) for
+    // expert troubleshooting. Test environment defaults useLocale() to 'en'.
+    expect(q(root, 'rsc-evidence-error-label').textContent).toContain('The target data container could not be found.')
+    expect(q(root, 'rsc-evidence-error-code').textContent).toContain('READ_SOURCE_PROBE_CONTAINER_NOT_FOUND')
   })
 
   it('surfaces contract 400 as coarse code/reason without echoing values', async () => {

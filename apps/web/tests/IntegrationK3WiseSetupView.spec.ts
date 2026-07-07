@@ -92,6 +92,10 @@ function mockIntegrationApi(): void {
 async function flushUi(cycles = 4): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
+    // Macrotask hop: drain timer-scheduled continuations too. Microtask+nextTick alone is enough on
+    // newer Node schedulers but NOT on Node 20 (the CI runtime) — these specs' first CI run exposed
+    // that the fetch-mock chains need a timer turn before the view leaves its loading state.
+    await new Promise((resolve) => setTimeout(resolve, 0))
     await nextTick()
   }
 }
@@ -418,5 +422,78 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(materialLink?.getAttribute('href')).toBe('/multitable/sheet_standard_materials/view_standard_materials?baseId=base_k3')
     expect(materialLink?.textContent).toContain('打开多维表')
     expect(bomLink?.getAttribute('href')).toBe('/multitable/sheet_bom_cleanse/view_bom_cleanse?baseId=base_k3')
+  })
+
+  it('IU-1: humanizes dead-letter errorCode in the K3 setup mini-list and NEVER renders the raw errorMessage (RATIFIED addendum)', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/integration/external-systems?')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url.startsWith('/api/integration/runs?') && url.includes('pipelineId=pipe_iu1')) return jsonResponse([])
+      if (url.startsWith('/api/integration/dead-letters?') && url.includes('pipelineId=pipe_iu1')) {
+        return jsonResponse([
+          {
+            id: 'dl_k3_known',
+            tenantId: 'default',
+            workspaceId: null,
+            pipelineId: 'pipe_iu1',
+            runId: 'run_iu1',
+            idempotencyKey: 'K-1',
+            errorCode: 'VALIDATION_FAILED',
+            errorMessage: 'SENTINEL-RAW-MESSAGE-K3',
+            retryCount: 0,
+            status: 'open',
+          },
+          {
+            id: 'dl_k3_unknown',
+            tenantId: 'default',
+            workspaceId: null,
+            pipelineId: 'pipe_iu1',
+            runId: 'run_iu1',
+            idempotencyKey: 'K-2',
+            errorCode: 'TOTALLY_UNKNOWN_CODE',
+            errorMessage: 'ANOTHER-SENTINEL-K3',
+            retryCount: 0,
+            status: 'open',
+          },
+        ])
+      }
+      return jsonResponse({})
+    })
+
+    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    registerRouterLinkStub(app)
+    app.mount(container)
+    await flushUi()
+
+    const materialPipelineInput = inputByLabel(container, '物料 Pipeline ID')
+    materialPipelineInput.value = 'pipe_iu1'
+    materialPipelineInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const refreshButton = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('刷新物料状态')) as HTMLButtonElement
+    expect(refreshButton).toBeDefined()
+    expect(refreshButton.disabled).toBe(false)
+    refreshButton.click()
+    await flushUi(8)
+
+    // Test environment defaults useLocale() to 'en' (jsdom navigator.language, no localStorage override).
+    const knownLabel = container.querySelector('[data-testid="k3-dead-letter-label-dl_k3_known"]') as HTMLElement
+    expect(knownLabel).not.toBeNull()
+    expect(knownLabel.textContent).toContain('Data validation failed.')
+    expect(container.querySelector('[data-testid="k3-dead-letter-code-dl_k3_known"]')?.textContent).toContain('VALIDATION_FAILED')
+    expect(container.textContent).not.toContain('SENTINEL-RAW-MESSAGE')
+    expect(container.innerHTML).not.toContain('SENTINEL-RAW-MESSAGE')
+
+    // Unregistered code falls back to the generic unknown label in the PROMINENT slot; raw code stays
+    // in the secondary/collapsed spot (expert retention).
+    const unknownLabel = container.querySelector('[data-testid="k3-dead-letter-label-dl_k3_unknown"]') as HTMLElement
+    expect(unknownLabel).not.toBeNull()
+    expect(unknownLabel.textContent).toContain('Unknown error')
+    expect(unknownLabel.textContent).not.toContain('TOTALLY_UNKNOWN_CODE')
+    expect(container.querySelector('[data-testid="k3-dead-letter-code-dl_k3_unknown"]')?.textContent).toContain('TOTALLY_UNKNOWN_CODE')
+    expect(container.textContent).not.toContain('ANOTHER-SENTINEL-K3')
   })
 })
