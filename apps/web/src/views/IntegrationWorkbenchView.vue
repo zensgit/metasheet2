@@ -132,6 +132,7 @@
       :source-selector-explanation="sourceSelectorExplanation"
       :selected-plm-approval-capability-entry="selectedPlmApprovalCapabilityEntry"
       :selected-plm-bom-multitable-capability-entry="selectedPlmBomMultitableCapabilityEntry"
+      :selected-plm-bom-eco-intent-enabled="selectedPlmBomEcoIntentEnabled"
       :selected-source-plm-data-source-id="selectedSourcePlmDataSourceId"
       :has-runnable-source-system="hasRunnableSourceSystem"
       :show-staging-setup="showStagingSetup"
@@ -1517,6 +1518,19 @@ const selectedBomMultitableFeature = computed<PlmIntegrationCapabilityFeature | 
   if (!result?.available) return null
   const feature = result.manifest.features[PLM_BOM_MULTITABLE_FEATURE_KEY]
   return feature && typeof feature === 'object' ? feature : null
+})
+// ECO Phase 3: advisory pre-gate for the locked-BOM ECO-revision CTA. True iff the provider's
+// capabilities manifest advertises bom_eco_revision as supported + entitled AND its actions
+// include eco_revision_intent (Phase-0 Lock 3: availability discovery is the advisory, never
+// the error payload). Advisory only — the relay + provider re-gate authoritatively.
+const selectedPlmBomEcoIntentEnabled = computed<boolean>(() => {
+  const result = selectedSourcePlmCapabilities.value
+  if (!result?.available) return false
+  const feature = result.manifest.features.bom_eco_revision
+  if (!feature || typeof feature !== 'object') return false
+  if (feature.supported !== true || feature.entitled !== true) return false
+  const actions = Array.isArray(feature.actions) ? feature.actions : []
+  return actions.includes('eco_revision_intent')
 })
 const selectedPlmBomMultitableCapabilityEntry = computed<PlmBomCapabilityEntry | null>(() => {
   if (!selectedSourcePlmDataSourceId.value) return null

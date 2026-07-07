@@ -149,6 +149,23 @@ export type PlmBomMultitableLineUpdateResult =
     message: string
   }
 
+// ECO Phase 3: result of the locked-BOM revision-intent CTA. `attached: true` = an already-open
+// bom-ECO for this part was reused (provider attach-before-create; a repeat click attaches
+// instead of spawning a second ECO — that is the idempotency story, no Idempotency-Key).
+export type PlmBomEcoRevisionIntentResult =
+  | {
+    ok: true
+    eco_id: string
+    state: string
+    attached: boolean
+  }
+  | {
+    ok: false
+    status: number
+    reason: string
+    message: string
+  }
+
 export interface WorkbenchExternalSystemUpsertRequest extends IntegrationScope {
   id?: string
   projectId?: string | null
@@ -874,6 +891,52 @@ export async function updatePlmBomMultitableLine(
     status: 502,
     reason: 'malformed-response',
     message: 'BOM write-back returned a malformed response',
+  }
+}
+
+// ECO Phase 3 consumer CTA: request an ECO revision intent for a lifecycle-locked part.
+// Bare relay object (NOT parseIntegrationResponse — /api/plm-workbench/* returns bare, like
+// getPlmBomMultitableContext). Actionable errors return {ok:false, status, reason, message}
+// instead of throwing; reason surfaces the relay's vocabulary (not_locked / eco_intent_rejected /
+// unsupported / not-entitled / unavailable / provider-rejected / malformed-response).
+export async function requestPlmBomEcoRevisionIntent(
+  dataSourceId: string,
+  partId: string,
+): Promise<PlmBomEcoRevisionIntentResult> {
+  const dsId = dataSourceId.trim()
+  const pid = partId.trim()
+  if (!dsId || !pid) {
+    return { ok: false, status: 400, reason: 'invalid-request', message: 'ECO revision request is incomplete' }
+  }
+  const response = await apiFetch(
+    `/api/plm-workbench/data-sources/${encodeURIComponent(dsId)}/bom-multitable/${encodeURIComponent(pid)}/eco-intent`,
+    {
+      method: 'POST',
+      suppressUnauthorizedRedirect: true,
+    },
+  )
+  const body = await response.json().catch(() => null) as Record<string, unknown> | null
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      reason: typeof body?.reason === 'string' && body.reason.trim() ? body.reason.trim() : 'intent-failed',
+      message: typeof body?.error === 'string' && body.error.trim() ? body.error.trim() : `ECO revision intent failed (${response.status})`,
+    }
+  }
+  if (
+    body
+    && typeof body.eco_id === 'string' && body.eco_id.trim()
+    && typeof body.state === 'string'
+    && typeof body.attached === 'boolean'
+  ) {
+    return { ok: true, eco_id: body.eco_id.trim(), state: body.state, attached: body.attached }
+  }
+  return {
+    ok: false,
+    status: 502,
+    reason: 'malformed-response',
+    message: 'ECO revision intent returned a malformed response',
   }
 }
 

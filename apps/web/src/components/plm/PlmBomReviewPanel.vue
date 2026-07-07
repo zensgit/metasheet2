@@ -53,6 +53,33 @@
           该 Part 处于锁定状态（{{ context.part.state }}），已暂停行内编辑；修改需通过 PLM 的 ECO
           变更流程。
         </p>
+        <!-- ECO Phase 3 CTA: the governed door the locked state points at. Shown for BOTH lock
+             sites (the advisory pre-gate above AND the reactive write-back lifecycle_locked 409),
+             pre-gated on the capabilities advisory (bom_eco_revision + eco_revision_intent). -->
+        <div
+          v-if="ecoIntentRelevant"
+          class="bom-review__eco-intent"
+          data-testid="plm-bom-review-eco-intent"
+        >
+          <button
+            v-if="advisoryLocked || writebackLocked"
+            type="button"
+            class="bom-review__button"
+            data-testid="plm-bom-review-eco-intent-cta"
+            :disabled="ecoIntentStatus !== 'idle'"
+            @click="requestEcoIntent"
+          >
+            {{ ecoIntentStatus === 'requesting' ? '正在发起 ECO 修订…' : '发起 ECO 修订' }}
+          </button>
+          <p
+            v-if="ecoIntentMessage"
+            class="bom-review__hint"
+            :class="{ 'bom-review__hint--strong': ecoIntentStatus === 'done' }"
+            data-testid="plm-bom-review-eco-intent-message"
+          >
+            {{ ecoIntentMessage }}
+          </p>
+        </div>
         <PlmBomReviewTable
           :context="context"
           :editable="!advisoryLocked"
@@ -69,6 +96,7 @@
 import { computed, ref } from 'vue'
 import {
   getPlmBomMultitableContext,
+  requestPlmBomEcoRevisionIntent,
   updatePlmBomMultitableLine,
   type PlmBomMultitableLine,
   type PlmBomMultitableLinePatch,
@@ -76,7 +104,11 @@ import {
 } from '../../services/integration/workbench'
 import PlmBomReviewTable from './PlmBomReviewTable.vue'
 
-const props = defineProps<{ dataSourceId: string }>()
+// ecoIntentEnabled: the ECO Phase 3 CTA pre-gate, computed by the WORKBENCH view from the
+// capabilities advisory (features.bom_eco_revision supported+entitled+actions includes
+// eco_revision_intent) and passed down — the panel itself never fetches capabilities
+// (P3-C invariant: mounting the panel triggers no PLM call).
+const props = defineProps<{ dataSourceId: string; ecoIntentEnabled?: boolean }>()
 
 const partId = ref('')
 const loading = ref(false)
@@ -84,6 +116,11 @@ const result = ref<PlmBomMultitableResult | null>(null)
 const submittingLineId = ref<string | null>(null)
 const lineMessages = ref<Record<string, string>>({})
 const retryKeys = ref<Record<string, string>>({})
+// ECO Phase 3 CTA state. writebackLocked = the REACTIVE lock site (a write-back came back
+// 409 lifecycle_locked even though the advisory pre-gate missed it — custom lock state or race).
+const writebackLocked = ref(false)
+const ecoIntentStatus = ref<'idle' | 'requesting' | 'done'>('idle')
+const ecoIntentMessage = ref('')
 
 const context = computed(() =>
   result.value && result.value.available ? result.value.context : null,
@@ -102,6 +139,52 @@ const advisoryLocked = computed(() => {
   const state = context.value?.part.state
   return typeof state === 'string' && ADVISORY_LOCKED_STATES.has(state)
 })
+
+// The CTA renders only when the capability advertises the intent action AND the part is locked
+// by EITHER site (advisory pre-gate or the reactive write-back 409). Part-scoped: the intent
+// targets the ROOT part, not a line. A lingering message keeps the block visible even after a
+// not_locked reset clears the lock flags (else the explanation would vanish with the button).
+const ecoIntentRelevant = computed(() =>
+  props.ecoIntentEnabled === true
+  && (advisoryLocked.value || writebackLocked.value || ecoIntentMessage.value !== ''),
+)
+
+async function requestEcoIntent(): Promise<void> {
+  const part = context.value?.part.part_id
+  if (!part || ecoIntentStatus.value !== 'idle') return
+  ecoIntentStatus.value = 'requesting'
+  ecoIntentMessage.value = ''
+  try {
+    const outcome = await requestPlmBomEcoRevisionIntent(props.dataSourceId, part)
+    if (outcome.ok) {
+      ecoIntentStatus.value = 'done'
+      ecoIntentMessage.value = outcome.attached
+        ? `已挂接到该 Part 现有的开放 ECO（${outcome.eco_id}）；请在 PLM 中继续该 ECO 的修订与审批。`
+        : `已发起 ECO 修订（${outcome.eco_id}）；修订分支已创建，请在 PLM 中完成变更与审批。`
+      return
+    }
+    ecoIntentStatus.value = 'idle'
+    if (outcome.reason === 'not_locked') {
+      // The provider says the part is editable — the reactive lock was stale. Reset it so the
+      // CTA hides (advisory permitting) and the user goes back to the direct edit path.
+      writebackLocked.value = false
+      ecoIntentMessage.value = '该 Part 当前未处于锁定状态，可直接编辑写回，无需 ECO 修订。'
+      return
+    }
+    if (outcome.reason === 'eco_intent_rejected') {
+      ecoIntentMessage.value = '发起 ECO 修订被拒（可能存在并发变更或该 Part 不可修订），请稍后重试。'
+      return
+    }
+    if (outcome.status === 403) {
+      ecoIntentMessage.value = '当前租户未开通 ECO 修订通道，或权限不足。'
+      return
+    }
+    ecoIntentMessage.value = '发起 ECO 修订失败，请稍后重试。'
+  } catch {
+    ecoIntentStatus.value = 'idle'
+    ecoIntentMessage.value = '发起 ECO 修订失败，请稍后重试。'
+  }
+}
 
 // idle (nothing loaded) -> loading -> one of: unavailable (no support / degraded), upgrade
 // (supported but not entitled), error (entitled but the provider fetch failed transiently),
@@ -127,6 +210,10 @@ async function load(): Promise<void> {
   loading.value = true
   lineMessages.value = {}
   retryKeys.value = {}
+  // A fresh load is a fresh part/context: reset the ECO-intent CTA state machine.
+  writebackLocked.value = false
+  ecoIntentStatus.value = 'idle'
+  ecoIntentMessage.value = ''
   try {
     result.value = await getPlmBomMultitableContext(props.dataSourceId, pid)
   } catch {
@@ -210,6 +297,17 @@ async function submitLinePatch(payload: { line: PlmBomMultitableLine; patch: Plm
       }
       return
     }
+    if (outcome.status === 409 && outcome.reason === 'lifecycle_locked') {
+      // ECO Phase 3: the REACTIVE lock site — the advisory pre-gate missed this lock (custom
+      // lock state or a race), the provider's discriminated 409 is authoritative. Flip the
+      // part-level flag so the ECO-revision CTA surfaces (capability permitting).
+      writebackLocked.value = true
+      lineMessages.value = {
+        ...lineMessages.value,
+        [lineId]: writebackMessage(outcome.status, outcome.reason),
+      }
+      return
+    }
     lineMessages.value = {
       ...lineMessages.value,
       [lineId]: writebackMessage(outcome.status, outcome.reason),
@@ -230,4 +328,5 @@ async function submitLinePatch(payload: { line: PlmBomMultitableLine; patch: Plm
 .bom-review__button { white-space: nowrap; }
 .bom-review__hint--muted { opacity: 0.6; }
 .bom-review__hint--strong { font-weight: 600; }
+.bom-review__eco-intent { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 </style>
