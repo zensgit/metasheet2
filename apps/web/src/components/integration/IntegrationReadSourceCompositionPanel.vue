@@ -42,9 +42,20 @@
 
         <p v-if="listError" class="integration-read-source-composition__error" data-testid="rscomp-list-error">{{ listError }}</p>
         <p v-if="runError" class="integration-read-source-composition__error" data-testid="rscomp-error">{{ runError }}</p>
-        <p v-if="!loading && compositions.length === 0" class="integration-read-source-composition__empty" data-testid="rscomp-empty">
-          暂无已审批组合。
-        </p>
+        <div
+          v-if="!loading && compositions.length === 0"
+          class="integration-read-source-composition__empty integration-read-source-composition__empty--guided"
+          data-testid="rscomp-empty"
+        >
+          <strong data-testid="rscomp-empty-what">{{ bi(
+            '这里运行已审批的两跳读取源组合（例如从一个业务键派生到另一个关联记录）。',
+            'This runs an APPROVED two-hop read-source composition (e.g. deriving one linked record from a business key).',
+          ) }}</strong>
+          <p data-testid="rscomp-empty-first-step">{{ bi(
+            '第一步：请先在上方"读取源组合配置"面板保存并审批一条组合，审批后会出现在这里的下拉列表中。',
+            'First step: save and approve a composition in the "composition config" panel above — once approved, it will appear in the dropdown here.',
+          ) }}</p>
+        </div>
       </div>
 
       <div v-if="result" class="integration-read-source-composition__evidence" data-testid="rscomp-result">
@@ -122,6 +133,12 @@ function stepErrorLabel(errorCode: string | undefined): string | null {
   return integrationErrorCodeDisplayLabel(errorCode, locale.value)
 }
 
+// IU-6a: bilingual guidance copy helper — same locale pattern as the IU-1 error labels above (reads
+// `locale.value` synchronously; safe to call directly from the template without a dedicated computed).
+function bi(zh: string, en: string): string {
+  return locale.value === 'zh-CN' ? zh : en
+}
+
 watch(selectedId, () => {
   result.value = null
   runError.value = ''
@@ -196,6 +213,18 @@ void refresh()
 .integration-read-source-composition__empty {
   color: #888;
   font-size: 13px;
+}
+/* IU-6a guided empty state: "what this is" + "first step" — new styling only, tokens per UF-1. */
+.integration-read-source-composition__empty--guided {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-1);
+}
+.integration-read-source-composition__empty--guided strong {
+  color: var(--ms-text-1);
+}
+.integration-read-source-composition__empty--guided p {
+  margin: 0;
 }
 .integration-read-source-composition__evidence {
   border: 1px solid #e0e0e0;

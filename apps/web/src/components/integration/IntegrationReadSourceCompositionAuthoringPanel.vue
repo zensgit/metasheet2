@@ -11,7 +11,9 @@
         <h3>新建组合</h3>
 
         <label class="integration-read-source-composition-authoring__field">
-          <span>第一跳读取源(已审批 resolver_lookup)</span>
+          <el-tooltip :content="fieldHint('composition.step1ConfigId')" placement="top" data-testid="rscauth-hint-step1">
+            <span>第一跳读取源(已审批 resolver_lookup)</span>
+          </el-tooltip>
           <select v-model="draft.step1ConfigId" data-testid="rscauth-step1">
             <option value="">请选择第一跳读取源…</option>
             <option v-for="row in resolverConfigs" :key="row.id" :value="row.id">
@@ -21,7 +23,9 @@
         </label>
 
         <label class="integration-read-source-composition-authoring__field">
-          <span>第二跳读取源(已审批 resolver_lookup)</span>
+          <el-tooltip :content="fieldHint('composition.step2ConfigId')" placement="top" data-testid="rscauth-hint-step2">
+            <span>第二跳读取源(已审批 resolver_lookup)</span>
+          </el-tooltip>
           <select v-model="draft.step2ConfigId" data-testid="rscauth-step2">
             <option value="">请选择第二跳读取源…</option>
             <option v-for="row in resolverConfigs" :key="row.id" :value="row.id">
@@ -31,12 +35,16 @@
         </label>
 
         <label class="integration-read-source-composition-authoring__field">
-          <span>name(组合标识符)</span>
+          <el-tooltip :content="fieldHint('composition.name')" placement="top" data-testid="rscauth-hint-name">
+            <span>name(组合标识符)</span>
+          </el-tooltip>
           <input v-model="draft.name" data-testid="rscauth-name" placeholder="material_to_bom_v1" />
         </label>
 
         <label class="integration-read-source-composition-authoring__field">
-          <span>sourceTarget(第一跳输出字段名,交接给第二跳作为 key)</span>
+          <el-tooltip :content="fieldHint('composition.sourceTarget')" placement="top" data-testid="rscauth-hint-source-target">
+            <span>sourceTarget(第一跳输出字段名,交接给第二跳作为 key)</span>
+          </el-tooltip>
           <input v-model="draft.sourceTarget" data-testid="rscauth-source-target" placeholder="internal_id" />
         </label>
 
@@ -66,9 +74,20 @@
         </div>
 
         <p v-if="pickerError" class="integration-read-source-composition-authoring__error" data-testid="rscauth-picker-error">{{ pickerError }}</p>
-        <p v-if="!pickerLoading && resolverConfigs.length === 0" class="integration-read-source-composition-authoring__empty" data-testid="rscauth-empty">
-          暂无已审批的 resolver_lookup 读取源,请先在上方"读取源配置"面板配置并审批两个读取源。
-        </p>
+        <div
+          v-if="!pickerLoading && resolverConfigs.length === 0"
+          class="integration-read-source-composition-authoring__empty integration-read-source-composition-authoring__empty--guided"
+          data-testid="rscauth-empty"
+        >
+          <strong data-testid="rscauth-empty-what">{{ bi(
+            '这里把两个已审批的"解析定位"读取源组装成一条两跳链，用于从一个业务键派生到另一个关联记录。',
+            'This assembles two APPROVED resolver-lookup read sources into a two-hop chain, deriving one linked record from a business key.',
+          ) }}</strong>
+          <p data-testid="rscauth-empty-first-step">{{ bi(
+            '第一步：请先在上方"读取源配置"面板配置并审批两个 resolver_lookup 读取源，审批后即可在这里选用。',
+            'First step: configure and approve two resolver_lookup read sources in the "read-source config" panel above — once approved, they become selectable here.',
+          ) }}</p>
+        </div>
 
         <p v-if="actionError" class="integration-read-source-composition-authoring__error" data-testid="rscauth-error">{{ actionError }}</p>
 
@@ -135,6 +154,8 @@
 // server's requireAccess('read') vs requireAccess('write') split in read-source-compositions HTTP routes.
 import { computed, reactive, ref, watch } from 'vue'
 import { useAuth } from '../../composables/useAuth'
+import { useLocale } from '../../composables/useLocale'
+import { integrationFieldHint, type IntegrationFieldHintKey } from '../../services/integration/fieldHints'
 import type { IntegrationScope } from '../../services/integration/workbench'
 import { listReadSourceConfigs, ReadSourceApiError, type ReadSourceConfigRow } from '../../services/integration/readSourceConfigs'
 import {
@@ -156,6 +177,18 @@ const props = defineProps<{
 }>()
 
 const auth = useAuth()
+const { locale } = useLocale()
+
+// IU-6b: field-level hint copy (values-free, zh+en) for the composition step-wiring fields —
+// exact-key lookup against the dedicated fieldHints module (shared with the read-source config panel).
+function fieldHint(key: IntegrationFieldHintKey): string {
+  return integrationFieldHint(key, locale.value)
+}
+
+// IU-6a: bilingual guidance copy helper — same locale pattern as `fieldHint` above.
+function bi(zh: string, en: string): string {
+  return locale.value === 'zh-CN' ? zh : en
+}
 // Same permission the server requires for save/approve/retire (requireAccess(req, 'write') in
 // readSourceCompositionsSave/Approve/Retire) and the same string the workbench's other apply-tier
 // actions gate on (dry-run=read · apply=write/admin badge).
@@ -394,6 +427,18 @@ void refreshPickers()
 .integration-read-source-composition-authoring__empty {
   color: #888;
   font-size: 13px;
+}
+/* IU-6a guided empty state: "what this is" + "first step" — new styling only, tokens per UF-1. */
+.integration-read-source-composition-authoring__empty--guided {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-1);
+}
+.integration-read-source-composition-authoring__empty--guided strong {
+  color: var(--ms-text-1);
+}
+.integration-read-source-composition-authoring__empty--guided p {
+  margin: 0;
 }
 .integration-read-source-composition-authoring__saved {
   border: 1px solid #e0e0e0;

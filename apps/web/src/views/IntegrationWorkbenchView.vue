@@ -6,7 +6,12 @@
         <h1>数据工厂</h1>
         <p class="integration-workbench__lead">连接任意 CRM / PLM / ERP / SRM / HTTP / SQL 系统，把数据落到多维表清洗后，先 dry-run，再导出或 Save-only 推送。</p>
       </div>
-      <router-link class="integration-workbench__k3-link" to="/integrations/k3-wise">K3 WISE 预设模板</router-link>
+      <div class="integration-workbench__header-links">
+        <router-link class="integration-workbench__k3-link" to="/integrations/k3-wise">K3 WISE 预设模板</router-link>
+        <router-link class="integration-workbench__k3-link" to="/help/integration" data-testid="integration-help-link">
+          {{ bi('帮助', 'Help') }}
+        </router-link>
+      </div>
     </header>
 
     <nav class="integration-workbench__flow" aria-label="data factory flow" data-testid="data-factory-flow">
@@ -67,7 +72,16 @@
         <div>
           <h3>已配置连接</h3>
           <p class="integration-workbench__muted">在这里编辑、复制、停用 / 启用或删除连接；删除仅限未被清洗流程引用的连接。</p>
-          <div v-if="systems.length === 0" class="integration-workbench__empty">暂无连接。请使用 K3 WISE 预设或后续连接向导创建。</div>
+          <div v-if="systems.length === 0" class="integration-workbench__empty" data-testid="connections-empty-state">
+            <strong data-testid="connections-empty-what">{{ bi(
+              '这里是你已连接的外部系统（CRM / PLM / ERP / SRM / HTTP / SQL）。',
+              'This lists the external systems you have connected (CRM / PLM / ERP / SRM / HTTP / SQL).',
+            ) }}</strong>
+            <p data-testid="connections-empty-first-step">{{ bi(
+              '第一步：使用 K3 WISE 预设快速开始，或点击上方"新增连接草稿"创建一个连接。',
+              'First step: start quickly with the K3 WISE preset, or click "new connection draft" above to create one.',
+            ) }}</p>
+          </div>
           <ul v-else class="integration-workbench__inventory-list">
             <li v-for="system in systems" :key="system.id">
               <strong>{{ system.name }}</strong>
@@ -926,7 +940,14 @@
           <span class="integration-workbench__badge" data-testid="table-action-permission-note">dry-run=read · apply=write/admin</span>
         </div>
         <div v-if="tableActions.length === 0" class="integration-workbench__empty" data-testid="table-action-empty">
-          当前部署没有暴露表动作。
+          <strong data-testid="table-action-empty-what">{{ bi(
+            '参数化表动作是管理员预先配置好的安全写入操作，浏览器只填 allowlist 参数，来源/目标由服务端决定。',
+            'Parameterized table actions are safe write operations pre-configured by an admin — the browser only fills allowlisted parameters; source/target are decided server-side.',
+          ) }}</strong>
+          <p data-testid="table-action-empty-first-step">{{ bi(
+            '当前部署没有暴露表动作；如需要，请联系管理员在后端配置。',
+            'This deployment does not expose any table actions; contact an admin to configure one on the backend if needed.',
+          ) }}</p>
         </div>
         <template v-else>
           <div class="integration-workbench__grid integration-workbench__grid--compact">
@@ -1174,7 +1195,16 @@
       <div class="integration-workbench__observation">
         <div>
           <h3>最近运行</h3>
-          <div v-if="pipelineRuns.length === 0" class="integration-workbench__empty">暂无运行记录。</div>
+          <div v-if="pipelineRuns.length === 0" class="integration-workbench__empty" data-testid="pipeline-runs-empty">
+            <strong data-testid="pipeline-runs-empty-what">{{ bi(
+              '这里展示最近的清洗流程运行记录（状态 / 读取 / 清洗 / 写入 / 失败行数）。',
+              'This shows recent pipeline run records (status / rows read / cleaned / written / failed).',
+            ) }}</strong>
+            <p data-testid="pipeline-runs-empty-first-step">{{ bi(
+              '第一步：在上方"运行与推送"区保存清洗流程后执行一次 Dry-run 或 Save-only 推送，运行记录会出现在这里。',
+              'First step: save the pipeline above, then run a Dry-run or Save-only push — the run record will then appear here.',
+            ) }}</p>
+          </div>
           <ol v-else class="integration-workbench__record-list" data-testid="pipeline-runs">
             <li v-for="run in pipelineRuns" :key="run.id" :data-testid="`pipeline-run-${run.id}`">
               <div class="integration-workbench__run-head">
@@ -1202,7 +1232,16 @@
         </div>
         <div>
           <h3>Open Dead Letters</h3>
-          <div v-if="deadLetters.length === 0" class="integration-workbench__empty">暂无 open dead letters。</div>
+          <div v-if="deadLetters.length === 0" class="integration-workbench__empty" data-testid="dead-letters-empty">
+            <strong data-testid="dead-letters-empty-what">{{ bi(
+              'Dead letter 是清洗流程运行中未能成功写入的行，按原因分组，便于排查后再决定是否重放。',
+              'Dead letters are rows that failed to write during a pipeline run, grouped by reason so you can investigate before deciding whether to replay.',
+            ) }}</strong>
+            <p data-testid="dead-letters-empty-first-step">{{ bi(
+              '当前没有 open dead letters；出现失败行时会自动列在这里，可点击"准备 Replay"重跑。',
+              'There are no open dead letters right now; failed rows will be listed here automatically, and you can click "prepare replay" to re-run them.',
+            ) }}</p>
+          </div>
           <ol v-else class="integration-workbench__record-list" data-testid="dead-letters">
             <li v-for="deadLetter in deadLetters" :key="deadLetter.id" :data-testid="`dead-letter-${deadLetter.id}`">
               <strong :data-testid="`dead-letter-label-${deadLetter.id}`">{{ deadLetterErrorLabel(deadLetter) }}</strong>
@@ -1602,6 +1641,13 @@ const flowSteps = [
 ]
 const auth = useAuth()
 const { locale } = useLocale()
+
+// IU-6a: bilingual guidance copy helper — same locale pattern as the IU-1 error labels elsewhere in
+// this file (deadLetterErrorLabel/deadLetterErrorHint read `locale.value`); safe to call directly from
+// the template without a dedicated computed per string.
+function bi(zh: string, en: string): string {
+  return locale.value === 'zh-CN' ? zh : en
+}
 
 const stagingDatasetCopy: Record<string, { area: string; name: string; description: string }> = {
   plm_raw_items: {
@@ -5029,6 +5075,14 @@ watch(selectedTableActionId, (actionId) => {
 
 .integration-workbench__header {
   margin-bottom: 18px;
+}
+
+/* IU-6c: header help-center link — new wrapper styling only, tokens per UF-1. */
+.integration-workbench__header-links {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-2);
+  flex-wrap: wrap;
 }
 
 .integration-workbench__flow {
