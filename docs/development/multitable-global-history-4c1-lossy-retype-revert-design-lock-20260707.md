@@ -30,6 +30,7 @@
 ### 2.3 loss-magnitude 绑定(preview↔execute)
 - preview 把 `lossSummary` 以 **server-key HMAC**(镜像 `hashUncreatePlan`,`restore-preview-identity.ts:281-294`;注释 :270-280 讲明为何不能用 client-decodable 明文——1-bit 信息可被暴力探针)并入既有 config-restore preview token claims(`:233-246`)。
 - execute 在事务内(`FOR UPDATE` 后)**重算** lossSummary 并 verify:不一致 → **409 PLAN_DRIFT**(值在 preview 后被人改动 = 损失量变了,必须重预览);既有 410 EXPIRED / 401 INVALID 语义不变。
+- **重算范围 = 与 preview 完全相同的 actor 可读范围(同尺比对,锁定)**。undisclosed 行**不参与** drift 比对:其损失从未被量化或承诺(§2.2),execute 按其现值变换——若绑全表指纹,含 undisclosed 行的 sheet 会把「隐藏行有无活动」变成 1-bit 探针,违背 U-L8;此取舍为刻意结果,preview 的 undisclosed 文案须如实说明「越界行的变换按执行时点现值进行」。
 
 ### 2.4 写对称 cap 与执行语义
 - cap:复用 `SHEET_REVERT_MAX_RECORDS`(`univer-meta.ts:9276-9277`,默认 5000)——待扫描/变换行数超限 → 413 fail-closed(preview 与 execute 双侧),不静默截断、不 partial。
@@ -51,7 +52,8 @@
 | L2 | scalar-safe 信封内 | 走既有 schema-only 路径,**零值改写**(回归防护) |
 | L3 | oracle 三桶 | 构造 unchanged/coerced/dropped 各若干,preview 计数逐一精确 |
 | L4 | U-L8 no-oracle | 存在越读界记录时:`undisclosedPresent=true` 且无任何数字泄漏;对照组证明无法由计数差推出隐藏行数 |
-| L5 | loss-drift | preview 后改一格值 → execute 409 PLAN_DRIFT,库零变化 |
+| L5 | loss-drift | preview 后改一格**可读**值 → execute 409 PLAN_DRIFT,库零变化 |
+| L5b | undisclosed 无 drift 探针 | preview 后仅改**越界**行值 → execute **不** 409(按现值执行);证明 409 通道不构成隐藏行活动探针 |
 | L6 | cap | 超 `SHEET_REVERT_MAX_RECORDS` → 413,preview/execute 双侧,库零变化 |
 | L7 | 原子性 | execute 中途注入失败 → 定义与值全部回滚 |
 | L8 | revision 完整性 | 每个被 coerce/drop 的 cell 有 record revision;changedFieldIds 正确;masking parity 与 history 读面一致 |
