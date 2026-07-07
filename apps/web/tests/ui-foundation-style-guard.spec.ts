@@ -65,6 +65,9 @@ const TARGET_FILES = [
   'src/components/integration/IntegrationExternalWritePanel.vue',
   'src/components/integration/IntegrationTableActionsPanel.vue',
   'src/components/integration/IntegrationFieldOptionSyncPanel.vue',
+  // IU-3 (docs/development/integration-iu3-read-source-wizard-design-lock-20260707.md, #3797):
+  // brand-new wizard component, clean from the start (no legacy hex to migrate).
+  'src/components/integration/IntegrationReadSourceWizard.vue',
 ] as const
 
 // Per-file allowlist for counts that are legitimately un-clearable. Keep this EMPTY unless a
