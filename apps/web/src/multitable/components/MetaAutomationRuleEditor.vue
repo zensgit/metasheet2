@@ -150,7 +150,7 @@
                 ? '配置的审批模板完成时触发。该触发器无记录上下文：动作仅支持通知类（站内通知 / Webhook / 邮件 / 钉钉消息），不支持记录读写与发起审批，且不支持触发条件；创建者需持有审批读取权限并对该模板可见（保存与触发时均校验）。'
                 : 'Fires when the configured approval template completes. Record-less: only notification-family actions (notification / webhook / email / DingTalk) are allowed — no record actions, no start-approval, no conditions; the rule creator must hold approvals read permission and template visibility (checked at save AND at fire).' }}
             </div>
-            <div v-if="approvalCompletedBlockReason" class="meta-rule-editor__hint" data-field="approvalCompletedBlockReason" style="color: var(--ms-color-danger);">
+            <div v-if="approvalCompletedBlockReason" class="meta-rule-editor__hint meta-rule-editor__hint--danger" data-field="approvalCompletedBlockReason">
               {{ approvalCompletedBlockReason }}
             </div>
           </template>
@@ -168,7 +168,7 @@
                 ? '该模板产生新的审批待办（每位受理人一条）时触发。退回/跳转形成的新一轮待办会再次触发；同一轮重复投递自动去重。无记录上下文：动作仅支持通知类，不支持记录读写与发起审批，且不支持触发条件；创建者需持有审批读取权限并对该模板可见（保存与触发时均校验）。'
                 : 'Fires when this template produces a NEW pending approval task (one per recipient). A returned/jumped node fires again for its fresh round; duplicate deliveries of the same round dedupe. Record-less: only notification-family actions — no record actions, no start-approval, no conditions; the rule creator must hold approvals read permission and template visibility (checked at save AND at fire).' }}
             </div>
-            <div v-if="approvalTaskCreatedBlockReason" class="meta-rule-editor__hint" data-field="approvalTaskCreatedBlockReason" style="color: var(--ms-color-danger);">
+            <div v-if="approvalTaskCreatedBlockReason" class="meta-rule-editor__hint meta-rule-editor__hint--danger" data-field="approvalTaskCreatedBlockReason">
               {{ approvalTaskCreatedBlockReason }}
             </div>
           </template>
@@ -3484,6 +3484,7 @@ function onTestRun() {
 .meta-rule-editor__hint--error { color: var(--el-color-danger-dark-2); }
 
 .meta-rule-editor__hint--warning { color: var(--el-color-warning-dark-2); }
+.meta-rule-editor__hint--danger { color: var(--ms-color-danger); }
 
 .meta-rule-editor__test-run-feedback {
   flex: 1 1 280px;

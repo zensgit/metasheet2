@@ -246,7 +246,7 @@ onMounted(load)
 }
 
 .card-decision__meta {
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
   font-size: 13px;
   margin: 2px 0;
 }
@@ -254,7 +254,7 @@ onMounted(load)
 .card-decision__label {
   display: block;
   font-size: 13px;
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
   margin-bottom: 6px;
 }
 
@@ -264,7 +264,7 @@ onMounted(load)
   position: sticky;
   bottom: 0;
   padding: 8px 0 calc(8px + env(safe-area-inset-bottom));
-  background: var(--el-bg-color, #fff);
+  background: var(--el-bg-color);
 }
 
 .card-decision__actions .el-button {
@@ -273,7 +273,7 @@ onMounted(load)
 }
 
 .card-decision__hint {
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
   font-size: 12px;
   margin: 0;
 }

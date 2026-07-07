@@ -400,7 +400,7 @@ onMounted(() => {
 
 .approval-inbox__header p {
   margin: 6px 0 0;
-  color: #6b7280;
+  color: var(--ms-text-2);
 }
 
 .approval-inbox__layout {
@@ -410,8 +410,8 @@ onMounted(() => {
 }
 
 .approval-inbox__card {
-  background: #fff;
-  border: 1px solid #e5e7eb;
+  background: var(--ms-bg-card);
+  border: 1px solid var(--ms-border-light);
   border-radius: 16px;
   padding: 20px;
   display: grid;
@@ -422,8 +422,8 @@ onMounted(() => {
   min-width: 32px;
   padding: 4px 10px;
   border-radius: 999px;
-  background: #eff6ff;
-  color: #1d4ed8;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
   text-align: center;
   font-size: 12px;
   font-weight: 600;
@@ -432,12 +432,12 @@ onMounted(() => {
 .approval-inbox__comment {
   display: grid;
   gap: 8px;
-  color: #475569;
+  color: var(--ms-text-2);
 }
 
 .approval-inbox__comment input {
   min-height: 40px;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--ms-border);
   border-radius: 10px;
   padding: 0 12px;
 }
@@ -451,13 +451,13 @@ onMounted(() => {
 .approval-inbox__table th,
 .approval-inbox__table td {
   padding: 10px 12px;
-  border-bottom: 1px solid #f1f5f9;
+  border-bottom: 1px solid var(--ms-bg-page);
   text-align: left;
   vertical-align: top;
 }
 
 .approval-inbox__row--active {
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .approval-inbox__actions {
@@ -471,18 +471,18 @@ onMounted(() => {
 .approval-inbox__status {
   padding: 18px;
   border-radius: 12px;
-  background: #f8fafc;
-  color: #475569;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .approval-inbox__error {
-  background: #fef2f2;
-  color: #b91c1c;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger-dark-2);
 }
 
 .approval-inbox__status {
-  background: #ecfdf5;
-  color: #047857;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .btn {
@@ -493,15 +493,15 @@ onMounted(() => {
   min-height: 36px;
   padding: 0 14px;
   border-radius: 10px;
-  border: 1px solid #d1d5db;
-  background: #fff;
-  color: #111827;
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   text-decoration: none;
   cursor: pointer;
 }
 
 .btn--ghost {
-  background: #fff;
+  background: var(--ms-bg-card);
 }
 
 .btn--mini {

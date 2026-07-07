@@ -496,25 +496,25 @@ onMounted(() => {
   gap: 16px;
 }
 .approval-metrics__card--breach :deep(.el-card__body) {
-  background: #fff7e6;
+  background: var(--el-color-warning-light-9);
 }
 .metric-label {
   font-size: 13px;
-  color: #6b7280;
+  color: var(--ms-text-2);
   margin-bottom: 8px;
 }
 .metric-value {
   font-size: 28px;
   font-weight: 600;
-  color: #1f2937;
+  color: var(--ms-text-1);
 }
 .metric-sub {
   font-size: 12px;
-  color: #9ca3af;
+  color: var(--ms-text-3);
   margin-top: 6px;
 }
 .metric-muted {
-  color: #9ca3af;
+  color: var(--ms-text-3);
 }
 .approval-metrics__section {
   width: 100%;
@@ -534,17 +534,17 @@ onMounted(() => {
   min-width: 48px;
   height: 8px;
   border-radius: 4px;
-  background: #f0f0f0;
+  background: var(--ms-bg-page);
   overflow: hidden;
 }
 .metric-bar__fill {
   height: 100%;
   border-radius: 4px;
-  background: #f59e0b;
+  background: var(--ms-color-warning);
 }
 .metric-bar__label {
   font-size: 12px;
-  color: #4b5563;
+  color: var(--ms-text-2);
   min-width: 44px;
   text-align: right;
 }

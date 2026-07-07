@@ -144,7 +144,7 @@
           </el-form-item>
           <el-form-item label="可见范围">
             <div class="template-authoring__inline">
-              <el-select v-model="draft.visibilityType" :disabled="readOnly" style="width: 140px">
+              <el-select v-model="draft.visibilityType" :disabled="readOnly" class="ms-w-140">
                 <el-option label="全员" value="all" />
                 <el-option label="部门" value="dept" />
                 <el-option label="角色" value="role" />
@@ -207,7 +207,7 @@
               <el-input v-model="field.label" :disabled="readOnly" />
             </el-form-item>
             <el-form-item label="类型">
-              <el-select v-model="field.type" :disabled="readOnly" style="width: 100%">
+              <el-select v-model="field.type" :disabled="readOnly" class="ms-w-100pct">
                 <el-option label="文本" value="text" />
                 <el-option label="多行文本" value="textarea" />
                 <el-option label="数字" value="number" />
@@ -265,7 +265,7 @@
                   </el-table-column>
                   <el-table-column label="类型" min-width="120">
                     <template #default="{ row }">
-                      <el-select v-model="row.type" :disabled="readOnly" style="width: 100%">
+                      <el-select v-model="row.type" :disabled="readOnly" class="ms-w-100pct">
                         <el-option
                           v-for="leaf in detailLeafTypeOptions"
                           :key="leaf.value"
@@ -322,13 +322,13 @@
                     v-model="field.minRowsText"
                     :disabled="readOnly"
                     placeholder="最小行数"
-                    style="width: 120px"
+                    class="ms-w-120"
                   />
                   <el-input
                     v-model="field.maxRowsText"
                     :disabled="readOnly"
                     placeholder="最大行数"
-                    style="width: 120px"
+                    class="ms-w-120"
                   />
                 </div>
               </div>
@@ -338,7 +338,7 @@
                 <el-select
                   v-model="field.visibility.dependsOnFieldId"
                   :disabled="readOnly"
-                  style="width: 200px"
+                  class="ms-w-200"
                   data-testid="approval-field-visibility-depends"
                 >
                   <el-option label="无（始终显示）" value="" />
@@ -353,7 +353,7 @@
                   <el-select
                     v-model="field.visibility.operator"
                     :disabled="readOnly"
-                    style="width: 130px"
+                    class="ms-w-130"
                     data-testid="approval-field-visibility-operator"
                   >
                     <el-option label="等于" value="eq" />
@@ -369,7 +369,7 @@
                     type="textarea"
                     :rows="2"
                     placeholder="每行一个值"
-                    style="width: 240px"
+                    class="ms-w-240"
                     data-testid="approval-field-visibility-values"
                   />
                   <el-input
@@ -377,7 +377,7 @@
                     v-model="field.visibility.valueText"
                     :disabled="readOnly"
                     placeholder="比较值"
-                    style="width: 240px"
+                    class="ms-w-240"
                     data-testid="approval-field-visibility-value"
                   />
                 </template>
@@ -439,7 +439,7 @@
             data-testid="approval-graph-canvas"
             :style="{ position: 'relative', height: canvasLayout.height + 'px', width: canvasLayout.width + 'px' }"
           >
-            <svg class="template-authoring__canvas-edges" :width="canvasLayout.width" :height="canvasLayout.height" style="position:absolute;left:0;top:0">
+            <svg class="template-authoring__canvas-edges" :width="canvasLayout.width" :height="canvasLayout.height">
               <defs>
                 <marker id="approval-canvas-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
                   <path d="M0,0 L7,3 L0,6 Z" fill="#bbb" />
@@ -550,7 +550,7 @@
                     :model-value="branch.predicateMode"
                     size="small"
                     :disabled="readOnly"
-                    style="width: 130px"
+                    class="ms-w-130"
                     data-testid="approval-condition-predicate-mode"
                     @update:model-value="(mode: string) => setConditionBranchPredicateMode(branch, mode)"
                   >
@@ -562,7 +562,7 @@
                     v-model="branch.conjunction"
                     size="small"
                     :disabled="readOnly"
-                    style="width: 110px"
+                    class="ms-w-110"
                     data-testid="approval-condition-conjunction"
                   >
                     <el-option label="全部满足 (AND)" value="and" />
@@ -582,7 +582,7 @@
                       filterable
                       placeholder="字段"
                       :disabled="readOnly"
-                      style="width: 160px"
+                      class="ms-w-160"
                       data-testid="approval-condition-rule-field"
                     >
                       <el-option
@@ -596,7 +596,7 @@
                       v-model="rule.operator"
                       size="small"
                       :disabled="readOnly"
-                      style="width: 120px"
+                      class="ms-w-120"
                       data-testid="approval-condition-rule-operator"
                     >
                       <el-option
@@ -612,7 +612,7 @@
                       size="small"
                       placeholder="比较值"
                       :disabled="readOnly"
-                      style="width: 160px"
+                      class="ms-w-160"
                       data-testid="approval-condition-rule-value"
                       @update:model-value="(text: string) => setConditionRuleValue(rule, text)"
                     />
@@ -733,7 +733,7 @@
                   size="small"
                   clearable
                   :disabled="readOnly"
-                  style="width: 220px"
+                  class="ms-w-220"
                   placeholder="（无默认分支）"
                   data-testid="approval-condition-default-edge"
                 >
@@ -761,7 +761,7 @@
                   v-model="parallelEditFor(node.key)!.joinMode"
                   size="small"
                   :disabled="readOnly"
-                  style="width: 240px"
+                  class="ms-w-240"
                   data-testid="approval-parallel-join-mode"
                 >
                   <el-option
@@ -792,7 +792,7 @@
                   v-model="ccEditFor(node.key)!.targetType"
                   size="small"
                   :disabled="readOnly"
-                  style="width: 240px"
+                  class="ms-w-240"
                   data-testid="approval-cc-target-type"
                 >
                   <el-option
@@ -812,7 +812,7 @@
                   default-first-option
                   size="small"
                   :disabled="readOnly"
-                  style="width: 360px"
+                  class="ms-w-360"
                   placeholder="输入用户/角色 ID 后回车"
                   data-testid="approval-cc-target-ids"
                 />
@@ -833,7 +833,7 @@
                   :model-value="approvalSourceKind(node.key)"
                   size="small"
                   :disabled="readOnly"
-                  style="width: 240px"
+                  class="ms-w-240"
                   data-testid="approval-node-source-kind"
                   @update:model-value="(kind: ApprovalAssigneeSourceKind) => setApprovalSourceKind(node.key, kind)"
                 >
@@ -857,7 +857,7 @@
                   default-first-option
                   size="small"
                   :disabled="readOnly"
-                  style="width: 360px"
+                  class="ms-w-360"
                   placeholder="输入 ID 后回车"
                   data-testid="approval-node-source-ids"
                   @update:model-value="(ids: string[]) => setApprovalSourceIds(node.key, ids)"
@@ -871,7 +871,7 @@
                   :model-value="approvalSourceFieldId(node.key)"
                   size="small"
                   :disabled="readOnly"
-                  style="width: 240px"
+                  class="ms-w-240"
                   placeholder="顶层 user 字段 ID"
                   data-testid="approval-node-source-field"
                   @update:model-value="(fieldId: string) => setApprovalSourceFieldId(node.key, fieldId)"
@@ -936,7 +936,7 @@
               <el-input v-model="step.name" :disabled="readOnly" />
             </el-form-item>
             <el-form-item label="审批人来源">
-              <el-select v-model="step.sourceKind" :disabled="readOnly" style="width: 100%" data-testid="approval-step-source-kind" @change="syncStepOptions(step)">
+              <el-select v-model="step.sourceKind" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-source-kind" @change="syncStepOptions(step)">
                 <el-option label="指定用户" value="static_user" />
                 <el-option label="指定角色" value="static_role" />
                 <el-option label="发起人" value="requester" />
@@ -979,7 +979,7 @@
                 :remote-method="onUserSearch"
                 :loading="directory.usersLoading.value"
                 :disabled="readOnly"
-                style="width: 100%"
+                class="ms-w-100pct"
                 placeholder="搜索用户名 / 邮箱 / ID"
                 data-testid="approval-step-user-picker"
                 @update:model-value="(ids: string[]) => setStepIds(step, ids)"
@@ -999,7 +999,7 @@
                 multiple
                 filterable
                 :disabled="readOnly"
-                style="width: 100%"
+                class="ms-w-100pct"
                 placeholder="选择角色"
                 data-testid="approval-step-role-picker"
                 @update:model-value="(ids: string[]) => setStepIds(step, ids)"
@@ -1016,7 +1016,7 @@
               <el-input v-model="step.idsText" :disabled="readOnly" placeholder="逗号或换行分隔" data-testid="approval-step-ids-text" />
             </el-form-item>
             <el-form-item v-if="step.sourceKind === 'form_field_user'" label="表单用户字段">
-              <el-select v-model="step.fieldId" :disabled="readOnly" style="width: 100%">
+              <el-select v-model="step.fieldId" :disabled="readOnly" class="ms-w-100pct">
                 <el-option
                   v-for="field in userFields"
                   :key="field.id"
@@ -1026,14 +1026,14 @@
               </el-select>
             </el-form-item>
             <el-form-item label="审批模式">
-              <el-select v-model="step.approvalMode" :disabled="readOnly" style="width: 100%">
+              <el-select v-model="step.approvalMode" :disabled="readOnly" class="ms-w-100pct">
                 <el-option label="单人通过" value="single" />
                 <el-option label="全部通过" value="all" />
                 <el-option label="任一通过" value="any" />
               </el-select>
             </el-form-item>
             <el-form-item label="空审批人策略">
-              <el-select v-model="step.emptyAssigneePolicy" :disabled="readOnly" style="width: 100%">
+              <el-select v-model="step.emptyAssigneePolicy" :disabled="readOnly" class="ms-w-100pct">
                 <el-option label="报错" value="error" />
                 <el-option label="自动通过" value="auto-approve" />
               </el-select>
@@ -1072,7 +1072,7 @@
                 :model-value="stepFieldAccess(step, field.id)"
                 :disabled="readOnly"
                 size="small"
-                style="width: 130px"
+                class="ms-w-130"
                 :data-testid="`approval-step-field-access-${field.id}`"
                 @update:model-value="(access: NodeFieldAccess) => onStepFieldAccessChange(step, field.id, access)"
               >
@@ -2060,7 +2060,7 @@ onUnmounted(() => {
   gap: 12px;
   min-height: 148px;
   padding: 14px;
-  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
 }
 
@@ -2068,7 +2068,7 @@ onUnmounted(() => {
   margin: 6px 0 0;
   font-size: 13px;
   line-height: 1.5;
-  color: var(--el-text-color-secondary, #606266);
+  color: var(--el-text-color-secondary);
 }
 
 .template-authoring__visibility {
@@ -2082,7 +2082,7 @@ onUnmounted(() => {
   margin-top: 6px;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
 }
 
 .template-authoring__inline > .el-input {
@@ -2107,7 +2107,7 @@ onUnmounted(() => {
 
 .template-authoring__item {
   padding: 14px;
-  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
 }
 
@@ -2123,8 +2123,8 @@ onUnmounted(() => {
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 10px;
-  background: var(--el-fill-color-light, #f5f7fa);
-  color: var(--el-text-color-secondary, #606266);
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
 }
 
 .template-authoring__node-summary {
@@ -2132,7 +2132,7 @@ onUnmounted(() => {
   padding-left: 20px;
   font-size: 13px;
   line-height: 1.7;
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular);
 }
 
 /* G-2 condition editor */
@@ -2141,7 +2141,7 @@ onUnmounted(() => {
 }
 
 .template-authoring__condition-branch {
-  border: 1px dashed var(--el-border-color, #dcdfe6);
+  border: 1px dashed var(--el-border-color);
   border-radius: 6px;
   padding: 10px 12px;
   margin-bottom: 10px;
@@ -2154,7 +2154,7 @@ onUnmounted(() => {
   gap: 8px;
   margin-bottom: 8px;
   font-size: 13px;
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular);
 }
 
 .template-authoring__condition-rule {
@@ -2198,7 +2198,7 @@ onUnmounted(() => {
 .template-authoring__condition-formula-dryrun-result {
   font-size: 12px;
   line-height: 1.5;
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular);
 }
 
 .template-authoring__condition-default {
@@ -2226,15 +2226,15 @@ onUnmounted(() => {
   gap: 8px;
   padding: 8px 10px;
   border-radius: 6px;
-  background: var(--el-fill-color-lighter, #f5f7fa);
+  background: var(--el-fill-color-lighter);
 }
 
 .template-authoring__publish-checklist-item.is-ok .template-authoring__publish-checklist-icon {
-  color: var(--el-color-success, #67c23a);
+  color: var(--el-color-success);
 }
 
 .template-authoring__publish-checklist-item.is-fail .template-authoring__publish-checklist-icon {
-  color: var(--el-color-danger, #f56c6c);
+  color: var(--el-color-danger);
 }
 
 .template-authoring__publish-checklist-icon {
@@ -2244,7 +2244,7 @@ onUnmounted(() => {
 .template-authoring__publish-checklist-detail {
   flex-basis: 100%;
   font-size: 12px;
-  color: var(--el-text-color-secondary, #606266);
+  color: var(--el-text-color-secondary);
 }
 
 pre {
@@ -2272,18 +2272,23 @@ pre {
 .template-authoring__canvas {
   position: relative;
   overflow: auto;
-  border: 1px solid var(--el-border-color, #dcdfe6);
+  border: 1px solid var(--el-border-color);
   border-radius: 6px;
-  background: #fafafa;
+  background: var(--ms-bg-page);
   min-height: 200px;
+}
+.template-authoring__canvas-edges {
+  position: absolute;
+  left: 0;
+  top: 0;
 }
 .template-authoring__canvas-node {
   box-sizing: border-box;
   padding: 6px 10px;
-  border: 1px solid var(--el-border-color, #dcdfe6);
+  border: 1px solid var(--el-border-color);
   border-radius: 6px;
-  background: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  background: var(--ms-bg-card);
+  box-shadow: var(--el-box-shadow-lighter);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -2291,8 +2296,8 @@ pre {
   font-size: 12px;
 }
 .template-authoring__canvas-node.is-selected {
-  border-color: var(--el-color-primary, #409eff);
-  box-shadow: 0 0 0 2px var(--el-color-primary-light-5, #a0cfff);
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
 }
 .template-authoring__canvas-node-actions {
   display: flex;
