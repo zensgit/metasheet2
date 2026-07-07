@@ -620,6 +620,7 @@ import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
 import { useMultitableCapabilities } from '../composables/useMultitableCapabilities'
 import { usePersonalViewToggle } from '../composables/usePersonalViewToggle'
+import { reorderViewFields } from '../utils/reorder-view-fields'
 import { useMultitableComments } from '../composables/useMultitableComments'
 import { useMultitableCommentPresence } from '../composables/useMultitableCommentPresence'
 import { useMultitableCommentInbox } from '../composables/useMultitableCommentInbox'
@@ -3378,16 +3379,20 @@ function onAutoFitColumns() {
 }
 
 // --- Field reorder ---
+// Slice 3c: route by personal-vs-shared. Personal mode ON → write ONLY personal-config.fieldOrder (never the
+// shared field.order); OFF → the unchanged shared path. Logic + goldens live in utils/reorder-view-fields.ts.
 function onReorderField(fromId: string, toId: string) {
-  const arr = [...grid.fields.value]
-  const fromIdx = arr.findIndex((f) => f.id === fromId)
-  const toIdx = arr.findIndex((f) => f.id === toId)
-  if (fromIdx < 0 || toIdx < 0) return
-  const [moved] = arr.splice(fromIdx, 1)
-  arr.splice(toIdx, 0, moved)
-  grid.fields.value = arr
-  // Persist order through field.order until backend exposes a dedicated view column-order contract.
-  Promise.all(arr.map((field, index) => workbench.client.updateField(field.id, { order: index }))).catch(() => {})
+  void reorderViewFields({
+    fromId,
+    toId,
+    isPersonal: personalViewsEnabled.value && personalView.isPersonalMode(workbench.activeViewId.value),
+    viewId: workbench.activeViewId.value,
+    sharedFields: grid.fields.value,
+    visibleFieldIds: grid.visibleFields.value.map((f) => f.id),
+    client: workbench.client,
+    onSharedOrder: (arr) => { grid.fields.value = arr },
+    onPersonalOrder: (ids) => { grid.fieldOrder.value = ids },
+  })
 }
 
 // --- Bulk import ---
