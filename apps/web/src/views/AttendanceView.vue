@@ -37,6 +37,17 @@
               {{ punching ? tr('Working...', '处理中...') : tr('Check Out', '下班打卡') }}
             </button>
           </div>
+          <div v-if="heroTodayTimeline" class="attendance__hero-timeline" data-testid="attendance-hero-timeline">
+            <span class="attendance__hero-timeline-node" :class="{ 'attendance__hero-timeline-node--pending': !heroTodayTimeline.checkIn }">
+              <span class="attendance__hero-timeline-dot" />
+              {{ tr('In', '上班') }} {{ heroTodayTimeline.checkIn ?? '--:--' }}
+            </span>
+            <span class="attendance__hero-timeline-rail" />
+            <span class="attendance__hero-timeline-node" :class="{ 'attendance__hero-timeline-node--pending': !heroTodayTimeline.checkOut }">
+              <span class="attendance__hero-timeline-dot" />
+              {{ tr('Out', '下班') }} {{ heroTodayTimeline.checkOut ?? '--:--' }}
+            </span>
+          </div>
         </div>
         <div v-else class="attendance__chip-list attendance__chip-list--header">
           <span class="attendance__status-chip">
@@ -165,22 +176,26 @@
           <p class="attendance__selfservice-lead">
             {{ activeWorkbenchStatusDescription }}
           </p>
-          <div class="attendance__summary attendance__summary--workbench">
-            <div class="attendance__summary-item">
+          <div class="attendance__summary attendance__summary--workbench attendance__summary--stat">
+            <div class="attendance__summary-item attendance__summary-item--stat">
+              <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
               <span>{{ tr('Latest punch', '最近一次打卡') }}</span>
-              <strong>{{ activeWorkbenchLatestPunchLabel }}</strong>
+              <strong class="attendance__summary-value">{{ activeWorkbenchLatestPunchLabel }}</strong>
             </div>
-            <div class="attendance__summary-item">
+            <div class="attendance__summary-item attendance__summary-item--stat">
+              <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 2h4M12 2v4" /><circle cx="12" cy="14" r="7" /><path d="M12 14l2.5-2.5" /></svg>
               <span>{{ tr('Work minutes', '工时分钟') }}</span>
-              <strong>{{ activeWorkbenchRecord?.work_minutes ?? 0 }}</strong>
+              <strong class="attendance__summary-value">{{ activeWorkbenchRecord?.work_minutes ?? 0 }}</strong>
             </div>
-            <div class="attendance__summary-item">
+            <div class="attendance__summary-item attendance__summary-item--stat">
+              <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3l10 18H2z" /><path d="M12 10v5M12 18.5v.5" /></svg>
               <span>{{ tr('Late / Early', '迟到 / 早退') }}</span>
-              <strong>{{ activeWorkbenchLateEarlyLabel }}</strong>
+              <strong class="attendance__summary-value" :class="{ 'attendance__summary-value--warning': activeWorkbenchHasLateEarly }">{{ activeWorkbenchLateEarlyLabel }}</strong>
             </div>
-            <div class="attendance__summary-item">
+            <div class="attendance__summary-item attendance__summary-item--stat">
+              <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13" /><path d="M3 6h.01M3 12h.01M3 18h.01" /></svg>
               <span>{{ tr('Attention items', '需处理事项') }}</span>
-              <strong>{{ activeWorkbenchAttentionCount }}</strong>
+              <strong class="attendance__summary-value" :class="{ 'attendance__summary-value--danger': activeWorkbenchAttentionCount > 0 }">{{ activeWorkbenchAttentionCount }}</strong>
             </div>
           </div>
           <p class="attendance__field-hint attendance__field-hint--strong">
@@ -12639,6 +12654,24 @@ const activeWorkbenchRecord = computed<AttendanceRecord | null>(() =>
   records.value.find(record => record.work_date === todayWorkDateKey.value) ?? latestAttendanceRecord.value
 )
 
+// UI-P1 (ui-p1-remainder design-lock D1): today's two-node punch timeline for
+// the hero card — reuses activeWorkbenchRecord, renders only for TODAY's row.
+const heroTodayTimeline = computed(() => {
+  const record = activeWorkbenchRecord.value
+  if (!record || record.work_date !== todayWorkDateKey.value) return null
+  const timeOf = (value: string | null | undefined) => {
+    if (!value) return null
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return null
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+  }
+  return {
+    checkIn: timeOf(record.first_in_at),
+    checkOut: timeOf(record.last_out_at),
+  }
+})
+
 const activeWorkbenchLatestPunchLabel = computed(() => {
   const record = activeWorkbenchRecord.value
   if (!record) return '--'
@@ -12653,6 +12686,11 @@ const activeWorkbenchStatusDescription = computed(() =>
     )
     : describeAttendanceStatus(activeWorkbenchRecord.value?.status)
 )
+
+const activeWorkbenchHasLateEarly = computed(() => {
+  const record = activeWorkbenchRecord.value
+  return Boolean(record && ((record.late_minutes ?? 0) > 0 || (record.early_leave_minutes ?? 0) > 0))
+})
 
 const activeWorkbenchLateEarlyLabel = computed(() => {
   const record = activeWorkbenchRecord.value
@@ -30770,6 +30808,82 @@ const holidaySectionBindings = {
   border-radius: var(--ms-radius-md);
   border-color: var(--ms-color-primary);
   color: var(--ms-color-primary);
+}
+
+.attendance__hero-timeline {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-2);
+  font-size: 12px;
+  color: var(--ms-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.attendance__hero-timeline-node {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-1);
+}
+
+.attendance__hero-timeline-node--pending {
+  color: var(--ms-text-3);
+}
+
+.attendance__hero-timeline-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ms-color-success);
+}
+
+.attendance__hero-timeline-node--pending .attendance__hero-timeline-dot {
+  background: var(--ms-border);
+}
+
+.attendance__hero-timeline-rail {
+  flex: 0 0 32px;
+  height: 2px;
+  background: var(--ms-border-light);
+  border-radius: 1px;
+}
+
+/* UI-P1 stat cards (ui-p1-remainder design-lock D2) */
+.attendance__summary--stat {
+  gap: var(--ms-space-3);
+}
+
+.attendance__summary-item--stat {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-1);
+  padding: var(--ms-space-3) var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
+.attendance__summary-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--ms-color-primary);
+}
+
+.attendance__summary-value {
+  font-size: 22px;
+  line-height: 1.2;
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.attendance__summary-value--warning {
+  color: var(--ms-color-warning);
+}
+
+.attendance__summary-value--danger {
+  color: var(--ms-color-danger);
 }
 
 @media (max-width: 768px) {
