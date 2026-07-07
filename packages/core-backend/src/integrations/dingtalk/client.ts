@@ -642,6 +642,50 @@ export async function getDingTalkUserDetail(
 }
 
 /**
+ * E1 container login (attendance-e1-container-login design-lock §1.4): exchange
+ * an in-container enterprise 免登 authCode for the corp userid. Distinct grant
+ * from the v1.0 web-OAuth userAccessToken exchange above — this one runs on the
+ * APP access token (fetchDingTalkAppAccessToken) via the legacy topapi shape.
+ */
+export interface DingTalkContainerUserInfo {
+  userId: string
+  unionId?: string
+  sysLevel?: number
+  source: Record<string, unknown>
+}
+
+export async function getDingTalkUserInfoByAuthCode(
+  accessToken: string,
+  authCode: string,
+  config?: { baseUrl?: string },
+): Promise<DingTalkContainerUserInfo> {
+  const payload = await requestDingTalkDirectoryJson(
+    `/topapi/v2/user/getuserinfo?access_token=${encodeURIComponent(accessToken)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: authCode }),
+    },
+    'Failed to exchange DingTalk container auth code',
+    config?.baseUrl,
+  )
+
+  const result = readNestedPayload(payload)
+  const userId = String(result.userid ?? result.userId ?? '').trim()
+  if (!userId) {
+    throw new Error('DingTalk container auth code exchange returned no userid')
+  }
+  const unionIdRaw = result.unionid ?? result.unionId
+  const sysLevelRaw = Number(result.sys_level ?? result.sysLevel)
+  return {
+    userId,
+    unionId: typeof unionIdRaw === 'string' && unionIdRaw.trim() ? unionIdRaw.trim() : undefined,
+    sysLevel: Number.isFinite(sysLevelRaw) ? sysLevelRaw : undefined,
+    source: result,
+  }
+}
+
+/**
  * A-2b (one-tap lock #3594): action_card work notification — same corp-app channel as the markdown
  * variant, but the OA `action_card` msgtype renders a tappable button (URL jump; in-chat callback
  * buttons are the Slice-B interactive-card upgrade). Single-button form only.

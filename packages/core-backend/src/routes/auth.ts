@@ -16,6 +16,7 @@ import {
   DingTalkLoginPolicyError,
   exchangeCodeForDingTalkProfile,
   exchangeCodeForUser,
+  exchangeEnterpriseAuthCodeForUser,
   getDingTalkRuntimeStatus,
   generateState,
   isDingTalkConfigured,
@@ -1303,6 +1304,83 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
     return res.status(statusCode).json({
       success: false,
       error: message,
+    })
+  }
+})
+
+/**
+ * E1 钉钉容器内免登 (e1-container-login design-lock §1): exchange an
+ * in-container enterprise authCode (dd.runtime.permission.requestAuthCode)
+ * for our JWT. Default-off behind DINGTALK_CONTAINER_LOGIN_ENABLED; reuses
+ * the web-OAuth chain's resolveLocalUser (all policy gates identical) and
+ * issueAuthSessionToken (same claims/session). No state/nonce — that is a
+ * web-redirect CSRF concept; the authCode is single-use, verified server-side.
+ */
+authRouter.post('/dingtalk/container', async (req: Request, res: Response) => {
+  try {
+    if (String(process.env.DINGTALK_CONTAINER_LOGIN_ENABLED ?? '').toLowerCase() !== 'true') {
+      return res.status(404).json({
+        success: false,
+        error: 'DingTalk container login is not enabled',
+        code: 'container_login_disabled',
+      })
+    }
+    const authCode = typeof req.body?.authCode === 'string' ? req.body.authCode.trim() : ''
+    if (!authCode) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameter: authCode',
+      })
+    }
+
+    const result = await exchangeEnterpriseAuthCodeForUser(authCode)
+    const permissions = await loadAuthPermissions(result.localUserId)
+    const user: User = {
+      id: result.localUserId,
+      email: result.localUserEmail,
+      name: result.localUserName,
+      role: result.localUserRole,
+      permissions,
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
+    const token = await issueAuthSessionToken(user, req)
+
+    logger.info(`DingTalk container login for ${user.email} (unionId: ${result.dingtalkUser.unionId}, new: ${result.isNewUser})`)
+
+    return res.json({
+      success: true,
+      data: {
+        mode: 'login',
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          permissions: user.permissions,
+        },
+        token,
+        features: buildFeaturePayload(user),
+      },
+    })
+  } catch (error) {
+    logger.error('DingTalk container login error', error instanceof Error ? error : undefined)
+    const statusCode = error instanceof DingTalkLoginPolicyError
+      ? error.statusCode
+      : error instanceof DingTalkRequestError
+        ? 502
+        : 500
+    const message = error instanceof DingTalkLoginPolicyError
+      ? error.message
+      : error instanceof DingTalkRequestError
+        ? error.message
+        : 'DingTalk authentication failed'
+    const code = error instanceof DingTalkLoginPolicyError ? error.code : undefined
+
+    return res.status(statusCode).json({
+      success: false,
+      error: message,
+      ...(code ? { code } : {}),
     })
   }
 })

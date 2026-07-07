@@ -5,7 +5,10 @@ import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
 import {
   exchangeCodeForUserAccessToken,
+  fetchDingTalkAppAccessToken,
   fetchDingTalkCurrentUser,
+  getDingTalkUserDetail,
+  getDingTalkUserInfoByAuthCode,
   readDingTalkOauthConfig,
 } from '../integrations/dingtalk/client'
 import {
@@ -26,7 +29,9 @@ const STATE_REDIS_INDEX_KEY = 'metasheet:auth:dingtalk:state:index'
 const DINGTALK_LOGIN_DISABLED_ERROR = 'DingTalk login is disabled for this user'
 
 export interface DingTalkUserInfo {
-  openId: string
+  /** sns openId (web-OAuth). Absent on the E1 container surface — the
+   *  enterprise 免登 chain only yields corp userid + unionId. */
+  openId?: string
   unionId: string
   nick: string
   email?: string
@@ -161,10 +166,13 @@ function stateRedisKey(state: string): string {
 
 function buildExternalKey(dtUser: DingTalkUserInfo): string {
   const config = readDingTalkOauthConfig()
+  // openId when present (web-OAuth, unchanged); unionId fallback for the E1
+  // container surface (e1-container-login design-lock §2).
+  const primaryId = dtUser.openId || dtUser.unionId
   if (config.corpId) {
-    return `${config.corpId}:${dtUser.openId}`
+    return `${config.corpId}:${primaryId}`
   }
-  return dtUser.unionId || dtUser.openId
+  return dtUser.unionId || dtUser.openId || ''
 }
 
 function pruneExpiredStates(): void {
@@ -409,18 +417,24 @@ async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserI
     )
 
     if (existingByUser.rows.length > 0) {
+      // E1 (container-login design-lock §2): the container surface carries no
+      // sns openId, so a container login must never clobber the openId-derived
+      // external_key/provider_open_id written by web-OAuth — those columns only
+      // move when the incoming profile actually has an openId (one-way
+      // enrichment; alternating logins stay stable).
+      const hasOpenId = Boolean(dtUser.openId)
       await client.query(
         `UPDATE user_external_identities
-         SET external_key = $3,
-             provider_union_id = $4,
-             provider_open_id = $5,
-             corp_id = $6,
+         SET external_key = CASE WHEN $8::boolean THEN $3 ELSE COALESCE(NULLIF(external_key, ''), $3) END,
+             provider_union_id = COALESCE($4, provider_union_id),
+             provider_open_id = CASE WHEN $8::boolean THEN $5 ELSE provider_open_id END,
+             corp_id = CASE WHEN $8::boolean THEN $6 ELSE COALESCE(corp_id, $6) END,
              profile = $7::jsonb,
              bound_by = COALESCE(bound_by, $2),
              last_login_at = NOW(),
              updated_at = NOW()
          WHERE provider = $1 AND local_user_id = $2`,
-        [PROVIDER, localUserId, externalKey, dtUser.unionId || null, dtUser.openId, config.corpId, profile],
+        [PROVIDER, localUserId, externalKey, dtUser.unionId || null, dtUser.openId ?? null, config.corpId, profile, hasOpenId],
       )
       return
     }
@@ -450,7 +464,7 @@ async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserI
          bound_by = COALESCE(user_external_identities.bound_by, EXCLUDED.bound_by),
          last_login_at = NOW(),
          updated_at = NOW()`,
-      [PROVIDER, externalKey, dtUser.unionId || null, dtUser.openId, config.corpId, localUserId, profile],
+      [PROVIDER, externalKey, dtUser.unionId || null, dtUser.openId ?? null, config.corpId, localUserId, profile],
     )
   })
 }
@@ -770,6 +784,70 @@ export async function exchangeCodeForDingTalkProfile(code: string): Promise<Ding
     email: profile.email,
     mobile: profile.mobile,
     avatarUrl: profile.avatarUrl,
+  }
+}
+
+/**
+ * E1 container login (e1-container-login design-lock §1): exchange an
+ * in-container enterprise 免登 authCode for a local user. Same private
+ * resolveLocalUser — require-grant / corp allowlist / auto-link /
+ * auto-provision / disabled-user gates apply with identical semantics.
+ */
+export async function exchangeEnterpriseAuthCodeForUser(authCode: string): Promise<DingTalkExchangeResult> {
+  // Same config/corp gate as web-OAuth (assertDingTalkCorpAllowed fires inside);
+  // the client-id/secret aliases double as appKey/appSecret for the app token.
+  // E1 therefore shares web-OAuth's env prerequisites — the embed direction
+  // lock's premise is that web SSO is already configured.
+  const oauthConfig = readDingTalkOauthConfig()
+  const appConfig = {
+    appKey: oauthConfig.clientId,
+    appSecret: oauthConfig.clientSecret,
+    baseUrl: process.env.DINGTALK_BASE_URL || undefined,
+  }
+  const accessToken = await fetchDingTalkAppAccessToken(appConfig)
+  const info = await getDingTalkUserInfoByAuthCode(accessToken, authCode, appConfig)
+
+  // The container chain's only cross-surface-stable identity key is unionId
+  // (lock §2). getuserinfo may omit it; topapi/v2/user/get reliably has it.
+  let unionId = info.unionId
+  let detailName = ''
+  let detailEmail: string | undefined
+  let detailMobile: string | undefined
+  let detailAvatar: string | undefined
+  try {
+    const detail = await getDingTalkUserDetail(accessToken, info.userId, appConfig)
+    unionId = unionId || detail.unionId
+    detailName = detail.name
+    detailEmail = detail.email
+    detailMobile = detail.mobile
+    detailAvatar = detail.avatarUrl
+  } catch (error) {
+    if (!unionId) throw error
+    logger.warn('DingTalk container login: user detail lookup failed; proceeding with getuserinfo fields', error)
+  }
+  if (!unionId) {
+    throw new DingTalkLoginPolicyError(
+      'DingTalk container login could not resolve a stable identity key (unionId)',
+      { statusCode: 502, code: 'identity_key_unavailable' },
+    )
+  }
+
+  const dingtalkUser: DingTalkUserInfo = {
+    unionId,
+    nick: detailName || `dingtalk-${info.userId}`,
+    email: detailEmail,
+    mobile: detailMobile,
+    avatarUrl: detailAvatar,
+  }
+  const { localUser, isNewUser } = await resolveLocalUser(dingtalkUser)
+
+  return {
+    dingtalkUser,
+    localUserId: localUser.id,
+    localUserEmail: localUser.email,
+    localUserName: localUser.name,
+    localUserRole: localUser.role,
+    isNewUser,
   }
 }
 
