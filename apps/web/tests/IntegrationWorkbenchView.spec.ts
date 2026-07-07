@@ -1815,6 +1815,82 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('Replay 成功')
   })
 
+  it('IU-1: humanizes dead-letter errorCode and NEVER renders the raw errorMessage (RATIFIED addendum)', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') return jsonResponse([])
+      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/runs?tenantId=default&pipelineId=pipe_iu1&limit=5') return jsonResponse([])
+      if (url === '/api/integration/dead-letters?tenantId=default&pipelineId=pipe_iu1&status=open&limit=5') {
+        return jsonResponse([
+          {
+            id: 'dl_iu1_known',
+            tenantId: 'default',
+            workspaceId: null,
+            pipelineId: 'pipe_iu1',
+            runId: 'run_iu1',
+            idempotencyKey: 'K-1',
+            errorCode: 'VALIDATION_FAILED',
+            errorMessage: 'SENTINEL-RAW-MESSAGE-\u{1F645}',
+            retryCount: 0,
+            status: 'open',
+          },
+          {
+            id: 'dl_iu1_unknown',
+            tenantId: 'default',
+            workspaceId: null,
+            pipelineId: 'pipe_iu1',
+            runId: 'run_iu1',
+            idempotencyKey: 'K-2',
+            errorCode: 'TOTALLY_UNKNOWN_CODE',
+            errorMessage: 'ANOTHER-SENTINEL-RAW-MESSAGE',
+            retryCount: 0,
+            status: 'open',
+          },
+        ])
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    const View = (await import('../src/views/IntegrationWorkbenchView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_iu1'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="refresh-observation"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // Registered code humanizes; raw errorMessage never reaches the DOM anywhere.
+    // Test environment defaults useLocale() to 'en' (jsdom navigator.language, no localStorage override).
+    const knownLabel = container.querySelector('[data-testid="dead-letter-label-dl_iu1_known"]') as HTMLElement
+    expect(knownLabel).not.toBeNull()
+    expect(knownLabel.textContent).toContain('Data validation failed.')
+    expect(container.querySelector('[data-testid="dead-letter-code-dl_iu1_known"]')?.textContent).toContain('VALIDATION_FAILED')
+    expect(container.textContent).not.toContain('SENTINEL-RAW-MESSAGE')
+    expect(container.innerHTML).not.toContain('SENTINEL-RAW-MESSAGE')
+
+    // Unregistered code falls back to the generic unknown label in the PROMINENT slot; the raw code is
+    // still present in the secondary/collapsed spot (expert retention).
+    const unknownLabel = container.querySelector('[data-testid="dead-letter-label-dl_iu1_unknown"]') as HTMLElement
+    expect(unknownLabel).not.toBeNull()
+    expect(unknownLabel.textContent).toContain('Unknown error')
+    expect(unknownLabel.textContent).not.toContain('TOTALLY_UNKNOWN_CODE')
+    expect(container.querySelector('[data-testid="dead-letter-code-dl_iu1_unknown"]')?.textContent).toContain('TOTALLY_UNKNOWN_CODE')
+    expect(container.textContent).not.toContain('ANOTHER-SENTINEL-RAW-MESSAGE')
+  })
+
   it('expands a dead-letter into a read-only cross-run provenance timeline (fires by-rowId GET with rowId+pipelineId)', async () => {
     const provenanceCalls: Array<{ url: string; method?: string }> = []
     apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {

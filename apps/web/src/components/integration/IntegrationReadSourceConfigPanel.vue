@@ -203,7 +203,10 @@
             <li v-if="probeEvidence.timeoutReached !== undefined" data-testid="rsc-evidence-timeout">
               timeoutReached: {{ probeEvidence.timeoutReached ? 'true' : 'false' }}
             </li>
-            <li v-if="probeEvidence.errorCode" data-testid="rsc-evidence-error-code">errorCode: {{ probeEvidence.errorCode }}</li>
+            <li v-if="probeEvidence.errorCode" data-testid="rsc-evidence-error-label">
+              {{ probeEvidenceErrorLabel }}<template v-if="probeEvidenceErrorHint"> — {{ probeEvidenceErrorHint }}</template>
+              <small data-testid="rsc-evidence-error-code">errorCode: {{ probeEvidence.errorCode }}</small>
+            </li>
             <li v-if="probeEvidence.errorType" data-testid="rsc-evidence-error-type">errorType: {{ probeEvidence.errorType }}</li>
           </ul>
         </div>
@@ -289,6 +292,8 @@
 // The probe evidence path is allowlist-normalized in the service layer, so row values or
 // field keys can never reach this template even from a malformed response.
 import { computed, reactive, ref, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
+import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../../services/integration/errorCodeLabels'
 import type { IntegrationScope, WorkbenchExternalSystem } from '../../services/integration/workbench'
 import {
   READ_SOURCE_KEY_ENCODINGS,
@@ -315,6 +320,8 @@ const props = defineProps<{
   systems: WorkbenchExternalSystem[]
 }>()
 
+const { locale } = useLocale()
+
 const draft = reactive(createReadSourceConfigDraft())
 const boundedSmoke = ref(false)
 const probeKey = ref('')
@@ -338,6 +345,16 @@ const evidenceContainers = computed(() => {
     return shape ? [{ alias, shape }] : []
   })
 })
+// IU-1: humanized probe evidence errorCode label (+ optional hint). The raw code stays visible in a
+// demoted/secondary spot (data-testid="rsc-evidence-error-code") for expert troubleshooting — only the
+// backend's free-text errorMessage (which does not exist on this evidence shape) would be unsafe to
+// render; the code itself is a registered, values-free vocabulary.
+const probeEvidenceErrorLabel = computed(() =>
+  integrationErrorCodeDisplayLabel(probeEvidence.value?.errorCode, locale.value),
+)
+const probeEvidenceErrorHint = computed(() =>
+  integrationErrorCodeHint(probeEvidence.value?.errorCode, locale.value),
+)
 const showKeyField = computed(() => draft.mode !== 'list_page')
 const keyFieldRequired = computed(() => draft.mode === 'single_record' || draft.mode === 'resolver_lookup')
 // The S2-b runtime requires inputs.key exactly when the config declares a keyField.

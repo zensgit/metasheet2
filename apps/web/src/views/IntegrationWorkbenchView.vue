@@ -1205,8 +1205,9 @@
           <div v-if="deadLetters.length === 0" class="integration-workbench__empty">暂无 open dead letters。</div>
           <ol v-else class="integration-workbench__record-list" data-testid="dead-letters">
             <li v-for="deadLetter in deadLetters" :key="deadLetter.id" :data-testid="`dead-letter-${deadLetter.id}`">
-              <strong>{{ deadLetter.errorCode }}</strong>
-              <span>{{ deadLetter.errorMessage }}</span>
+              <strong :data-testid="`dead-letter-label-${deadLetter.id}`">{{ deadLetterErrorLabel(deadLetter) }}</strong>
+              <span v-if="deadLetterErrorHint(deadLetter)">{{ deadLetterErrorHint(deadLetter) }}</span>
+              <small :data-testid="`dead-letter-code-${deadLetter.id}`">errorCode: {{ deadLetter.errorCode }}</small>
               <small>
                 {{ deadLetter.status }} · {{ deadLetter.createdAt || deadLetter.id }}<template v-if="deadLetter.retryCount"> · retries {{ deadLetter.retryCount }}</template><template v-if="deadLetter.idempotencyKey"> · key {{ deadLetter.idempotencyKey }}</template>
               </small>
@@ -1410,6 +1411,8 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
+import { useLocale } from '../composables/useLocale'
+import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../services/integration/errorCodeLabels'
 import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
 import { getDataSourceSchema, listDataSources } from '../data-sources/api'
 import type { DataSourceListItem, DataSourceTableInfo } from '../data-sources/types'
@@ -1598,6 +1601,7 @@ const flowSteps = [
   { title: '4. Dry-run / 推送', description: '预览 payload 后导出或 Save-only 写回' },
 ]
 const auth = useAuth()
+const { locale } = useLocale()
 
 const stagingDatasetCopy: Record<string, { area: string; name: string; description: string }> = {
   plm_raw_items: {
@@ -1719,6 +1723,18 @@ const stockPreparationOptionSyncResult = ref<IntegrationStockPreparationOptionSy
 const syncingStockPreparationOptions = ref(false)
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
+// IU-1 (RATIFIED addendum): the raw `errorMessage` free-text field must NEVER reach the DOM — it is
+// scrubbed for secret-shaped values only at dead-letter *write* time (see
+// plugins/plugin-integration-core/lib/dead-letter.cjs scrubSecretStringValue), so rendering it here would
+// be a leak-hole. The humanized label (generic-unknown fallback for unregistered codes) is the prominent
+// text; the raw `errorCode` (a registered, values-free vocabulary, safe to show) stays available in a
+// demoted/secondary spot for expert troubleshooting.
+function deadLetterErrorLabel(deadLetter: IntegrationDeadLetter): string {
+  return integrationErrorCodeDisplayLabel(deadLetter.errorCode, locale.value)
+}
+function deadLetterErrorHint(deadLetter: IntegrationDeadLetter): string | null {
+  return integrationErrorCodeHint(deadLetter.errorCode, locale.value)
+}
 const expandedRunIds = ref<Set<string>>(new Set())
 // DF-N2-3 (read-only): per-dead-letter cross-run provenance timeline, fetched lazily
 // on expand by the row's idempotency key (rowId). No write/replay affordance here.

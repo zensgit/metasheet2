@@ -178,6 +178,11 @@ describe('IntegrationReadSourceCompositionPanel', () => {
     expect(q(root, 'rscomp-evidence-error-code').textContent).toContain('READ_SOURCE_COMPOSITION_STEP_FAILED')
     expect(q(root, 'rscomp-step-1').textContent).toContain('READ_SOURCE_COMPOSITION_STEP_NOT_RUN')
     expect(root.querySelector('[data-testid="rscomp-output"]')).toBeNull()
+
+    // IU-1: the humanized label renders prominently (its own testid); the raw code is still present
+    // (demoted) for expert troubleshooting. Test environment defaults useLocale() to 'en'.
+    expect(q(root, 'rscomp-evidence-error-label').textContent).toContain('A step in the composition chain failed.')
+    expect(q(root, 'rscomp-evidence-error-code').textContent).toContain('READ_SOURCE_COMPOSITION_STEP_FAILED')
   })
 
   it('surfaces a 409 approved-only gate as a coarse error without echoing the key', async () => {
