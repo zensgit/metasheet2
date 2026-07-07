@@ -45,7 +45,7 @@
 
         <p v-if="errorMessage" class="login-error">{{ errorMessage }}</p>
 
-        <button class="login-submit" type="submit" :disabled="submitting">
+        <button class="login-submit" type="submit" :disabled="submitting || containerLoginInProgress">
           {{ submitting ? text.submitting : text.submit }}
         </button>
 
@@ -57,7 +57,7 @@
           v-if="dingtalkAvailable"
           class="login-dingtalk"
           type="button"
-          :disabled="dingtalkSubmitting"
+          :disabled="dingtalkSubmitting || containerLoginInProgress"
           @click="onLaunchDingTalk"
         >
           {{ dingtalkSubmitting ? text.dingtalkSubmitting : text.dingtalkSubmit }}
@@ -65,6 +65,7 @@
 
         <p v-if="dingtalkErrorMessage" class="login-error">{{ dingtalkErrorMessage }}</p>
         <p v-else-if="dingtalkStatusMessage" class="login-hint">{{ dingtalkStatusMessage }}</p>
+        <p v-if="containerLoginInProgress" class="login-hint" data-testid="dingtalk-container-login-progress">{{ text.dingtalkContainerLoggingIn }}</p>
       </form>
     </div>
   </section>
@@ -80,6 +81,7 @@ import { useFeatureFlags } from '../stores/featureFlags'
 import { normalizePostLoginRedirect } from '../utils/authRedirect'
 import { apiFetch, clearStoredAuthState } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
+import { ensureDingTalkJsApi, isDingTalkContainer, requestContainerAuthCode } from '../utils/dingtalkContainer'
 
 interface AuthUserPayload {
   role?: unknown
@@ -111,7 +113,7 @@ interface DingTalkRuntimeStatus {
 
 const router = useRouter()
 const route = useRoute()
-const { setToken, primeSession } = useAuth()
+const { getToken, setToken, primeSession } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 const { loadProductFeatures, resolveHomePath } = useFeatureFlags()
 
@@ -121,6 +123,7 @@ const submitting = ref(false)
 const errorMessage = ref('')
 const dingtalkAvailable = ref(false)
 const dingtalkSubmitting = ref(false)
+const containerLoginInProgress = ref(false)
 const dingtalkErrorMessage = ref('')
 const dingtalkStatusMessage = ref('')
 
@@ -139,6 +142,7 @@ const text = computed(() => {
       alternative: '或者',
       dingtalkSubmit: '使用钉钉登录',
       dingtalkSubmitting: '跳转到钉钉中...',
+      dingtalkContainerLoggingIn: '正在通过钉钉登录…',
       failed: '登录失败，请检查账号或密码。',
       networkError: '登录失败，请稍后再试。',
       dingtalkUnavailable: '钉钉登录暂不可用，请稍后重试。',
@@ -160,6 +164,7 @@ const text = computed(() => {
     alternative: 'or',
     dingtalkSubmit: 'Continue with DingTalk',
     dingtalkSubmitting: 'Redirecting to DingTalk...',
+    dingtalkContainerLoggingIn: 'Signing in with DingTalk…',
     failed: 'Sign-in failed. Check your account or password.',
     networkError: 'Sign-in failed. Please try again.',
     dingtalkUnavailable: 'DingTalk login is unavailable right now.',
@@ -298,7 +303,7 @@ async function onSubmit(): Promise<void> {
   }
 }
 
-async function probeDingTalkLogin(): Promise<void> {
+async function probeDingTalkLogin(): Promise<DingTalkRuntimeStatus | null> {
   dingtalkStatusMessage.value = ''
   try {
     const response = await apiFetch('/api/auth/dingtalk/launch?probe=1', {
@@ -309,9 +314,53 @@ async function probeDingTalkLogin(): Promise<void> {
     const status = (payload?.data ?? null) as DingTalkRuntimeStatus | null
     dingtalkAvailable.value = response.ok && payload?.success === true && status?.available === true
     dingtalkStatusMessage.value = dingtalkAvailable.value ? '' : readDingTalkStatusMessage(status)
+    return status
   } catch {
     dingtalkAvailable.value = false
     dingtalkStatusMessage.value = text.value.dingtalkUnavailable
+    return null
+  }
+}
+
+// E2b (e2-container-shell design-lock §2 E2b): auto 免登 inside a DingTalk
+// container. FAIL-SOFT — any failure leaves the normal login UI in place.
+async function attemptContainerLogin(corpId?: string): Promise<boolean> {
+  try {
+    await ensureDingTalkJsApi()
+    const authCode = await requestContainerAuthCode(corpId)
+    const response = await apiFetch('/api/auth/login/dingtalk/container', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ authCode }),
+      suppressUnauthorizedRedirect: true,
+    })
+    const payload = await response.json().catch(() => null)
+    if (!response.ok || !payload?.success) return false
+    const token = payload?.data?.token
+    if (typeof token !== 'string' || token.trim().length === 0) return false
+    const userPayload = (payload?.data?.user ?? null) as AuthUserPayload | null
+    const featurePayload = (payload?.data?.features ?? null) as AuthFeaturePayload | null
+    setToken(token)
+    primeSession({ success: true, data: { user: userPayload, features: featurePayload } })
+    persistAuthContext(userPayload, featurePayload)
+    await loadProductFeatures(true, { skipSessionProbe: true })
+    await router.replace(normalizePostLoginRedirect(route.query.redirect) || resolveHomePath())
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function bootstrapLogin(): Promise<void> {
+  const status = await probeDingTalkLogin()
+  if (!isDingTalkContainer()) return
+  const existing = getToken()
+  if (typeof existing === 'string' && existing.trim().length > 0) return
+  containerLoginInProgress.value = true
+  try {
+    await attemptContainerLogin(typeof status?.corpId === 'string' ? status.corpId : undefined)
+  } finally {
+    containerLoginInProgress.value = false
   }
 }
 
@@ -348,7 +397,7 @@ async function onLaunchDingTalk(): Promise<void> {
 }
 
 onMounted(() => {
-  void probeDingTalkLogin()
+  void bootstrapLogin()
 })
 </script>
 
