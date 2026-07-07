@@ -56,6 +56,15 @@ describe('writePersonalConfigMerged — additive personal writes', () => {
     expect(client.putPersonalViewConfig).toHaveBeenCalledWith('v1', { sortInfo: { fieldId: 'a', direction: 'asc' } })
   })
 
+  it('FAIL-CLOSED: a non-404 GET failure (500 / network) ⇒ REJECTS and does NOT PUT (never overwrites other facets)', async () => {
+    const client: PersonalConfigWriteClient = {
+      getPersonalViewConfig: vi.fn(async () => { throw Object.assign(new Error('server error'), { status: 500 }) }),
+      putPersonalViewConfig: vi.fn(async () => ({})),
+    }
+    await expect(writePersonalConfigMerged(client, 'v1', { sortInfo: { fieldId: 'a', direction: 'asc' } })).rejects.toThrow('server error')
+    expect(client.putPersonalViewConfig).not.toHaveBeenCalled()
+  })
+
   it('clearing a facet: patch {filterInfo: undefined} drops filter (JSON omits undefined) while others persist', async () => {
     const client = mockClient({ filterInfo: { conjunction: 'and', conditions: [] }, sortInfo: { fieldId: 'b', direction: 'asc' }, hiddenFieldIds: ['z'] })
     await writePersonalConfigMerged(client, 'v1', { filterInfo: undefined })

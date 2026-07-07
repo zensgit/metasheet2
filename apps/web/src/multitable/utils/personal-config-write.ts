@@ -26,10 +26,13 @@ export async function writePersonalConfigMerged(
 ): Promise<void> {
   let base: PersonalViewConfigOverlay = {}
   try {
-    // A view with no personal row yet returns { config: null } (row created lazily on first write); a genuine
-    // 404 (flag off / view gone) is caught → treat as empty and still write the patch.
+    // A view with no personal row yet returns { config: null } (row created lazily on first write).
     base = (await client.getPersonalViewConfig(viewId))?.config ?? {}
-  } catch {
+  } catch (err) {
+    // FAIL-CLOSED: only a 404 (no row / flag off / view gone) is a safe "start from empty". Any OTHER
+    // failure (500 / network / transient auth) must NOT proceed — writing { ...{}, ...patch } would REPLACE
+    // the row and wipe the actor's other personal facets (the very thing this helper exists to prevent).
+    if ((err as { status?: number } | null)?.status !== 404) throw err
     base = {}
   }
   await client.putPersonalViewConfig(viewId, { ...base, ...patch })

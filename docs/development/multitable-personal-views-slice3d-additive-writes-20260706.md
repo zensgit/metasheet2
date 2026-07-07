@@ -36,7 +36,10 @@ Goldens `apps/web/tests/multitable-grid-personal-additive-write.spec.ts` (7, all
   & sort preserved, hidden updated.
 - a `{sortInfo}` edit preserves an existing personal `fieldOrder` + filter (cross-facet durability).
 - no existing row (`config: null`) ⇒ writes just the patch (row created lazily).
-- GET 404 (flag flip / no row) ⇒ still writes, no throw.
+- GET **404** (flag flip / no row) ⇒ still writes, no throw.
+- **FAIL-CLOSED:** a non-404 GET failure (500 / network / transient auth) ⇒ re-throws and does NOT PUT — a blind
+  write on a failed read would REPLACE the row and wipe the actor's other facets (the exact thing this helper
+  prevents). Golden asserts reject + `putPersonalViewConfig` not called.
 - clearing: patch `{filterInfo: undefined}` drops filter on the wire while sort/hidden persist.
 - **grid wiring:** personal ON — `toggleFieldVisibility` merges over the existing personal config (sort
   preserved), `updateView` NOT called; personal OFF — uses the shared `updateView` path, no personal-config call.
