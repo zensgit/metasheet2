@@ -961,13 +961,13 @@ onMounted(() => {
 
 .approval-center__selection-count {
   margin-right: auto;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 13px;
 }
 
 .approval-center__batch-reject-summary {
   margin: 0 0 12px;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 14px;
 }
 
@@ -976,20 +976,20 @@ onMounted(() => {
   display: inline-block;
   margin-right: 8px;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 .approval-center__wait--warn {
-  color: #e6a23c;
+  color: var(--el-color-warning);
 }
 
 .approval-center__wait--urgent {
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 
 .approval-center__row-reject-summary {
   margin: 0 0 12px;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 14px;
 }
 
@@ -999,7 +999,7 @@ onMounted(() => {
 
 .approval-center__batch-result-summary {
   margin: 0 0 12px;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 14px;
 }
 
@@ -1013,7 +1013,7 @@ onMounted(() => {
 
 .approval-center__batch-result-item {
   padding: 8px 0;
-  border-bottom: 1px solid #ebeef5;
+  border-bottom: 1px solid var(--el-border-color-lighter);
 }
 
 .approval-center__batch-result-item:last-child {
@@ -1022,13 +1022,13 @@ onMounted(() => {
 
 .approval-center__batch-result-item-title {
   font-size: 14px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .approval-center__batch-result-item-message {
   margin-top: 2px;
   font-size: 13px;
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 
 .approval-center__attendance-entry {
@@ -1038,9 +1038,9 @@ onMounted(() => {
   gap: 16px;
   padding: 14px 16px;
   margin-bottom: 12px;
-  border: 1px solid #dbeafe;
+  border: 1px solid var(--el-color-primary-light-8);
   border-radius: 8px;
-  background: #eff6ff;
+  background: var(--el-color-primary-light-9);
 }
 
 .approval-center__attendance-entry-copy {
@@ -1049,13 +1049,13 @@ onMounted(() => {
 }
 
 .approval-center__attendance-entry-copy strong {
-  color: #1f2937;
+  color: var(--ms-text-1);
   font-size: 14px;
 }
 
 .approval-center__attendance-entry-copy p {
   margin: 0;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.5;
 }

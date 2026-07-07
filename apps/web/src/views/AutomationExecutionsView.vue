@@ -307,33 +307,33 @@ if (isAdmin) void loadData()
 <style scoped>
 .automation-runs { padding: 20px 24px; max-width: 1000px; margin: 0 auto; }
 .automation-runs__header { margin-bottom: 16px; }
-.automation-runs__title { margin: 0; font-size: 20px; font-weight: 700; color: #0f172a; }
-.automation-runs__subtitle { margin: 4px 0 0; font-size: 13px; color: #64748b; }
-.automation-runs__denied { padding: 14px 16px; border-radius: 10px; background: #fef2f2; color: #b91c1c; font-size: 14px; }
+.automation-runs__title { margin: 0; font-size: 20px; font-weight: 700; color: var(--ms-text-1); }
+.automation-runs__subtitle { margin: 4px 0 0; font-size: 13px; color: var(--ms-text-2); }
+.automation-runs__denied { padding: 14px 16px; border-radius: 10px; background: var(--el-color-danger-light-9); color: var(--el-color-danger-dark-2); font-size: 14px; }
 .automation-runs__toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
-.automation-runs__select, .automation-runs__input { border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 10px; font-size: 13px; background: #fff; }
-.automation-runs__btn { border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 14px; background: #fff; color: #0f172a; font-size: 13px; cursor: pointer; }
-.automation-runs__empty { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: #f8fafc; color: #64748b; }
-.automation-runs__error { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: #fef2f2; color: #b91c1c; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
-.automation-runs__item { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; cursor: pointer; margin-bottom: 8px; }
-.automation-runs__item:hover { background: #f8fafc; }
+.automation-runs__select, .automation-runs__input { border: 1px solid var(--ms-border); border-radius: 8px; padding: 6px 10px; font-size: 13px; background: var(--ms-bg-card); }
+.automation-runs__btn { border: 1px solid var(--ms-border); border-radius: 8px; padding: 6px 14px; background: var(--ms-bg-card); color: var(--ms-text-1); font-size: 13px; cursor: pointer; }
+.automation-runs__empty { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: var(--ms-bg-page); color: var(--ms-text-2); }
+.automation-runs__error { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: var(--el-color-danger-light-9); color: var(--el-color-danger-dark-2); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.automation-runs__item { border: 1px solid var(--ms-border-light); border-radius: 8px; padding: 10px 12px; cursor: pointer; margin-bottom: 8px; }
+.automation-runs__item:hover { background: var(--ms-bg-page); }
 .automation-runs__summary { display: flex; align-items: center; gap: 10px; font-size: 13px; flex-wrap: wrap; }
-.automation-runs__time { color: #64748b; min-width: 150px; }
-.automation-runs__rule { color: #334155; font-weight: 600; }
-.automation-runs__sheet { color: #475569; }
-.automation-runs__trigger { color: #475569; }
-.automation-runs__duration { margin-left: auto; color: #94a3b8; }
+.automation-runs__time { color: var(--ms-text-2); min-width: 150px; }
+.automation-runs__rule { color: var(--ms-text-2); font-weight: 600; }
+.automation-runs__sheet { color: var(--ms-text-2); }
+.automation-runs__trigger { color: var(--ms-text-2); }
+.automation-runs__duration { margin-left: auto; color: var(--ms-text-3); }
 /* UF-3: the run/step status badges are now <StatusTag domain="automationRun"> (utils/
    statusDomains.ts) — this file's own uppercase/hex badge palette (one of six independent
    status-color implementations the UI foundation design-lock audit found) is removed. */
-.automation-runs__detail { margin-top: 8px; padding-top: 8px; border-top: 1px solid #e2e8f0; display: flex; flex-direction: column; gap: 6px; }
-.automation-runs__detail-h { margin: 6px 0 2px; font-size: 12px; font-weight: 700; color: #475569; text-transform: uppercase; }
+.automation-runs__detail { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--ms-border-light); display: flex; flex-direction: column; gap: 6px; }
+.automation-runs__detail-h { margin: 6px 0 2px; font-size: 12px; font-weight: 700; color: var(--ms-text-2); text-transform: uppercase; }
 .automation-runs__step { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
-.automation-runs__step-key { font-weight: 700; color: #2563eb; }
-.automation-runs__step--branch-child { margin-left: 20px; border-left: 2px solid #e2e8f0; padding-left: 8px; }
-.automation-runs__branch-child { color: #64748b; font-size: 11px; }
-.automation-runs__branch-selection { width: 100%; padding: 4px 8px; background: #eff6ff; color: #1d4ed8; border-radius: 4px; font-size: 11px; font-weight: 600; }
-.automation-runs__step-error { width: 100%; padding: 4px 8px; background: #fef2f2; color: #dc2626; border-radius: 4px; font-size: 11px; }
-.automation-runs__step-output { width: 100%; padding: 4px 8px; background: #f8fafc; color: #475569; border-radius: 4px; font-size: 11px; word-break: break-all; }
-.automation-runs__json { width: 100%; margin: 0; padding: 8px; background: #f8fafc; color: #334155; border-radius: 6px; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; }
+.automation-runs__step-key { font-weight: 700; color: var(--ms-color-primary); }
+.automation-runs__step--branch-child { margin-left: 20px; border-left: 2px solid var(--ms-border-light); padding-left: 8px; }
+.automation-runs__branch-child { color: var(--ms-text-2); font-size: 11px; }
+.automation-runs__branch-selection { width: 100%; padding: 4px 8px; background: var(--el-color-primary-light-9); color: var(--el-color-primary-dark-2); border-radius: 4px; font-size: 11px; font-weight: 600; }
+.automation-runs__step-error { width: 100%; padding: 4px 8px; background: var(--el-color-danger-light-9); color: var(--ms-color-danger); border-radius: 4px; font-size: 11px; }
+.automation-runs__step-output { width: 100%; padding: 4px 8px; background: var(--ms-bg-page); color: var(--ms-text-2); border-radius: 4px; font-size: 11px; word-break: break-all; }
+.automation-runs__json { width: 100%; margin: 0; padding: 8px; background: var(--ms-bg-page); color: var(--ms-text-2); border-radius: 6px; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; }
 </style>

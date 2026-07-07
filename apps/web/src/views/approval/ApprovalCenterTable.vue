@@ -4,7 +4,7 @@
     v-loading="loading"
     :data="rows"
     size="default"
-    style="width: 100%"
+    class="ms-w-100pct"
     max-height="560"
     stripe
     highlight-current-row
@@ -165,7 +165,7 @@ defineExpose({
   white-space: nowrap;
   text-overflow: ellipsis;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 /* B1-03: 已等待 aging severity — normal inherits the surrounding text color; warn/urgent escalate. */
@@ -173,20 +173,20 @@ defineExpose({
   display: inline-block;
   margin-right: 8px;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 .approval-center__wait--warn {
-  color: #e6a23c;
+  color: var(--el-color-warning);
 }
 
 .approval-center__wait--urgent {
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 
 .approval-center__wait-progress {
   margin-top: 2px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 </style>

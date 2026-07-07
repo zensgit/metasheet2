@@ -128,7 +128,7 @@
               :disabled="isAutoSummedTotal(field.id)"
               :controls="!isAutoSummedTotal(field.id)"
               v-bind="numberFieldProps(field)"
-              style="width: 100%"
+              class="ms-w-100pct"
             />
 
             <!-- date -->
@@ -137,7 +137,7 @@
               v-model="formData[field.id]"
               type="date"
               :placeholder="field.placeholder || `请选择${field.label}`"
-              style="width: 100%"
+              class="ms-w-100pct"
             />
 
             <!-- datetime -->
@@ -146,7 +146,7 @@
               v-model="formData[field.id]"
               type="datetime"
               :placeholder="field.placeholder || `请选择${field.label}`"
-              style="width: 100%"
+              class="ms-w-100pct"
             />
 
             <!-- select -->
@@ -154,7 +154,7 @@
               v-else-if="field.type === 'select'"
               v-model="formData[field.id]"
               :placeholder="field.placeholder || `请选择${field.label}`"
-              style="width: 100%"
+              class="ms-w-100pct"
             >
               <el-option
                 v-for="opt in (field.options || [])"
@@ -170,7 +170,7 @@
               v-model="formData[field.id]"
               multiple
               :placeholder="field.placeholder || `请选择${field.label}`"
-              style="width: 100%"
+              class="ms-w-100pct"
             >
               <el-option
                 v-for="opt in (field.options || [])"
@@ -230,27 +230,27 @@
                       :controls="false"
                       :disabled="isDetailDerivedColumnReadOnly(field, column, row)"
                       v-bind="numberFieldProps(column)"
-                      style="width: 100%"
+                      class="ms-w-100pct"
                     />
                     <el-date-picker
                       v-else-if="column.type === 'date'"
                       v-model="row[column.id]"
                       type="date"
                       :placeholder="column.label"
-                      style="width: 100%"
+                      class="ms-w-100pct"
                     />
                     <el-date-picker
                       v-else-if="column.type === 'datetime'"
                       v-model="row[column.id]"
                       type="datetime"
                       :placeholder="column.label"
-                      style="width: 100%"
+                      class="ms-w-100pct"
                     />
                     <el-select
                       v-else-if="column.type === 'select'"
                       v-model="row[column.id]"
                       :placeholder="column.label"
-                      style="width: 100%"
+                      class="ms-w-100pct"
                     >
                       <el-option
                         v-for="opt in (column.options || [])"
@@ -264,7 +264,7 @@
                       v-model="row[column.id]"
                       multiple
                       :placeholder="column.label"
-                      style="width: 100%"
+                      class="ms-w-100pct"
                     >
                       <el-option
                         v-for="opt in (column.options || [])"
@@ -697,13 +697,13 @@ watch([visibleFieldIds, template], () => {
 }
 
 .approval-new__info-desc {
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular);
   margin: 0;
   font-size: 14px;
 }
 
 .approval-new__info-desc--empty {
-  color: var(--el-text-color-placeholder, #c0c4cc);
+  color: var(--el-text-color-placeholder);
   font-style: italic;
 }
 
@@ -731,29 +731,29 @@ watch([visibleFieldIds, template], () => {
   flex-direction: column;
   padding: 4px 10px;
   border-radius: 6px;
-  background: var(--el-fill-color-light, #f5f7fa);
-  color: var(--el-text-color-regular, #606266);
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-regular);
   font-size: 12px;
   line-height: 1.4;
 }
 
 .approval-new__flow-preview-chip--requester {
-  background: var(--el-color-primary-light-9, #ecf5ff);
-  color: var(--el-color-primary, #409eff);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
   font-weight: 500;
 }
 
 .approval-new__flow-preview-chip--conditional {
-  border: 1px dashed var(--el-color-warning, #e6a23c);
+  border: 1px dashed var(--el-color-warning);
 }
 
 .approval-new__flow-preview-chip-summary {
   font-size: 11px;
-  color: var(--el-text-color-placeholder, #909399);
+  color: var(--el-text-color-placeholder);
 }
 
 .approval-new__flow-preview-arrow {
-  color: var(--el-text-color-placeholder, #c0c4cc);
+  color: var(--el-text-color-placeholder);
   font-size: 12px;
 }
 
@@ -761,13 +761,13 @@ watch([visibleFieldIds, template], () => {
   display: block;
   font-size: 12px;
   font-weight: 400;
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
   margin-top: 2px;
 }
 
 .approval-new__form {
-  background: #fff;
-  border: 1px solid var(--el-border-color-lighter, #e4e7ed);
+  background: var(--ms-bg-card);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
   padding: 24px;
 }
@@ -776,10 +776,10 @@ watch([visibleFieldIds, template], () => {
   width: 100%;
   box-sizing: border-box;
   padding: 12px 16px;
-  border: 1px dashed var(--el-border-color, #dcdfe6);
+  border: 1px dashed var(--el-border-color);
   border-radius: 6px;
-  background: var(--el-fill-color-lighter, #f5f7fa);
-  color: var(--el-text-color-secondary, #909399);
+  background: var(--el-fill-color-lighter);
+  color: var(--el-text-color-secondary);
   font-size: 13px;
   line-height: 1.6;
 }
@@ -798,7 +798,7 @@ watch([visibleFieldIds, template], () => {
 }
 
 .approval-new__detail-required {
-  color: var(--el-color-danger, #f56c6c);
+  color: var(--el-color-danger);
   margin-left: 2px;
 }
 
@@ -812,6 +812,6 @@ watch([visibleFieldIds, template], () => {
 .approval-new__detail-hint,
 .approval-new__detail-empty {
   font-size: 12px;
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
 }
 </style>

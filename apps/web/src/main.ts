@@ -14,6 +14,10 @@ import './styles/tokens.css'
 // here once so multitable Calendar view, attendance personal calendar, and
 // holiday admin section all see the same `--calendar-source-accent` vars.
 import './styles/calendar-source-palette.css'
+// Shared form-layout utility classes (UF-6) — replaces the inline
+// `style="width: …"` / `style="margin-…"` attributes purged from the
+// approval/workflow surface set so the no-static-style= gate has a home.
+import './styles/form-layout-utilities.css'
 import App from './App.vue'
 import { useAuth } from './composables/useAuth'
 import { resolveAdminRouteRedirect } from './router/adminAccess'

@@ -8,7 +8,7 @@
             placeholder="全部分类"
             clearable
             data-testid="template-center-category-filter"
-            style="width: 160px; margin-right: 12px"
+            class="ms-w-160 ms-mr-12"
             @change="handleCategoryChange"
           >
             <el-option
@@ -22,7 +22,7 @@
             v-model="searchText"
             placeholder="搜索模板名称"
             clearable
-            style="width: 240px"
+            class="ms-w-240"
             @clear="handleSearch"
             @keyup.enter="handleSearch"
           >
@@ -33,7 +33,7 @@
           <el-button
             v-if="canManageTemplates"
             type="primary"
-            style="margin-left: 12px"
+            class="ms-ml-12"
             data-testid="template-center-new-button"
             @click="createTemplate"
           >
@@ -41,7 +41,7 @@
           </el-button>
           <el-button
             v-if="canManageTemplates"
-            style="margin-left: 8px"
+            class="ms-ml-8"
             data-testid="template-center-delegations-link"
             @click="$router.push('/approval-delegations')"
           >
@@ -95,7 +95,7 @@
     <el-table
       v-loading="store.loading"
       :data="store.templates"
-      style="width: 100%"
+      class="ms-w-100pct"
       max-height="560"
       stripe
       highlight-current-row
@@ -336,7 +336,7 @@ onMounted(() => {
 }
 
 .template-center__category-empty {
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 
@@ -349,7 +349,7 @@ onMounted(() => {
 }
 
 .template-center__recent-label {
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
   font-size: 13px;
 }
 

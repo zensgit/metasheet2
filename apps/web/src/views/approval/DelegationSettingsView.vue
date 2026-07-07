@@ -182,6 +182,6 @@ onMounted(load)
   display: block;
   margin-top: 2px;
   font-size: 12px;
-  color: var(--el-color-warning, #e6a23c);
+  color: var(--el-color-warning);
 }
 </style>

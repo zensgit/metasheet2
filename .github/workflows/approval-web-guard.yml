@@ -90,6 +90,20 @@ on:
       - 'apps/web/src/views/WorkflowHubView.vue'
       - 'apps/web/src/views/workflowHubLabels.ts'
       - 'apps/web/tests/workflowHubView.spec.ts'
+      # UF-6 (design-lock §6): style="..." purge + hardcoded-hex-in-<style> lint across the full
+      # UF surface set. Files below round out that set beyond what earlier UF slices already
+      # listed (ApprovalDetailView/ApprovalNewView/TemplateAuthoringView/ApprovalMetricsView/
+      # TemplateCenterView/TemplateDetailView/DelegationSettingsView/MyDelegationView/PageShell/
+      # PageHeader/ApprovalMobileList/ApprovalCenterView/ApprovalCenterTable/StatusTag/
+      # ApprovalInboxView above).
+      - 'apps/web/src/views/approval/ApprovalCardDecisionView.vue'
+      - 'apps/web/src/views/AutomationExecutionsView.vue'
+      - 'apps/web/src/views/WorkflowDesigner.vue'
+      - 'apps/web/src/multitable/components/MetaAutomationManager.vue'
+      - 'apps/web/src/multitable/components/MetaAutomationRuleEditor.vue'
+      - 'apps/web/src/styles/form-layout-utilities.css'
+      - 'apps/web/.eslintrc.cjs'
+      - 'apps/web/tests/ui-foundation-style-guard.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -167,6 +181,20 @@ on:
       - 'apps/web/src/views/WorkflowHubView.vue'
       - 'apps/web/src/views/workflowHubLabels.ts'
       - 'apps/web/tests/workflowHubView.spec.ts'
+      # UF-6 (design-lock §6): style="..." purge + hardcoded-hex-in-<style> lint across the full
+      # UF surface set. Files below round out that set beyond what earlier UF slices already
+      # listed (ApprovalDetailView/ApprovalNewView/TemplateAuthoringView/ApprovalMetricsView/
+      # TemplateCenterView/TemplateDetailView/DelegationSettingsView/MyDelegationView/PageShell/
+      # PageHeader/ApprovalMobileList/ApprovalCenterView/ApprovalCenterTable/StatusTag/
+      # ApprovalInboxView above).
+      - 'apps/web/src/views/approval/ApprovalCardDecisionView.vue'
+      - 'apps/web/src/views/AutomationExecutionsView.vue'
+      - 'apps/web/src/views/WorkflowDesigner.vue'
+      - 'apps/web/src/multitable/components/MetaAutomationManager.vue'
+      - 'apps/web/src/multitable/components/MetaAutomationRuleEditor.vue'
+      - 'apps/web/src/styles/form-layout-utilities.css'
+      - 'apps/web/.eslintrc.cjs'
+      - 'apps/web/tests/ui-foundation-style-guard.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -247,4 +275,11 @@ jobs:
         # locale → English everywhere, no mixed card), the chip/status/role/source enum labels
         # resolve through the key-table (not bare English enum values), the pager range label is
         # locale-aware, and a static tripwire against the original hardcoded-English literals.
-        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView --reporter=dot
+        # UF-6: style="..." purge + hardcoded-hex-in-<style> lint across the UF surface set
+        # (approval views + ApprovalInboxView/AutomationExecutionsView/WorkflowHubView/
+        # WorkflowDesigner + PageHeader/PageShell/StatusTag + MetaAutomationManager/
+        # MetaAutomationRuleEditor). ui-foundation-style-guard.spec.ts fs-reads all 21 target
+        # files and asserts zero static style= attributes and zero hex/rgb() literals inside
+        # <style> blocks (var() references + transparent/inherit/currentColor/none allowed);
+        # had no gate before this wiring.
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView ui-foundation-style-guard --reporter=dot

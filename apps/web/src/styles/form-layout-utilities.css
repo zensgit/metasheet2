@@ -1,0 +1,83 @@
+/**
+ * MetaSheet form-layout utility classes — UF-6.
+ *
+ * Per the UI foundation design-lock §6 (UF-6), inline `style="..."` attributes
+ * are banned in the approval/workflow-automation surface set (ESLint gate).
+ * The residual inline styles were almost all one-off widths/margins on form
+ * controls (el-select/el-input width, spacing between inline form fields).
+ * These utility classes replace them so the "no static style=" rule has
+ * somewhere to land, without inventing a general-purpose CSS framework —
+ * only the exact values that were actually in use across 3+ views are here.
+ *
+ * Values intentionally match the pre-existing pixel widths (visual
+ * byte-for-byte parity); this is a mechanical `style=` -> `class=` move, not
+ * a redesign.
+ */
+
+.ms-w-100pct {
+  width: 100%;
+}
+
+.ms-w-110 {
+  width: 110px;
+}
+
+.ms-w-120 {
+  width: 120px;
+}
+
+.ms-w-130 {
+  width: 130px;
+}
+
+.ms-w-140 {
+  width: 140px;
+}
+
+.ms-w-160 {
+  width: 160px;
+}
+
+.ms-w-200 {
+  width: 200px;
+}
+
+.ms-w-220 {
+  width: 220px;
+}
+
+.ms-w-240 {
+  width: 240px;
+}
+
+.ms-w-320 {
+  width: 320px;
+}
+
+.ms-w-360 {
+  width: 360px;
+}
+
+.ms-flex-1 {
+  flex: 1;
+}
+
+.ms-mr-4 {
+  margin-right: var(--ms-space-1);
+}
+
+.ms-mr-8 {
+  margin-right: var(--ms-space-2);
+}
+
+.ms-mr-12 {
+  margin-right: var(--ms-space-3);
+}
+
+.ms-ml-8 {
+  margin-left: var(--ms-space-2);
+}
+
+.ms-ml-12 {
+  margin-left: var(--ms-space-3);
+}
