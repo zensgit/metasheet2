@@ -210,13 +210,46 @@ describe('MtMenu / MtMenuItem', () => {
     ;(c.querySelector('.trigger-btn') as HTMLButtonElement).click()
     await nextTick()
 
-    const deleteItem = document.querySelectorAll('.mt-menu-item')[1] as HTMLElement
-    expect(deleteItem.classList.contains('is-disabled')).toBe(true)
+    const deleteItem = document.querySelectorAll('.mt-menu-item')[1] as HTMLButtonElement
+    // native `disabled` (not a css class) → removed from tab order + activation suppressed by the browser
+    expect(deleteItem.disabled).toBe(true)
     deleteItem.click()
     await nextTick()
 
     expect(disabledSelectCount).toBe(0)
     expect(document.querySelector('.mt-menu')).not.toBeNull()
+  })
+
+  it('renders each item as a native <button type="button" role="menuitem"> — honestly keyboard-operable', async () => {
+    // A11y contract: role="menuitem" on a bare, non-focusable <div> would be a lie (keyboard users
+    // can't reach or activate it). A native <button> gives focusability + Enter/Space→click activation
+    // + real `disabled` for free. jsdom does not synthesize the browser's native Enter/Space→click, so
+    // the robust, non-flaky assertion of keyboard-operability here is structural: it IS a native button.
+    const c = mountMenu(() => {}, () => {})
+    ;(c.querySelector('.trigger-btn') as HTMLButtonElement).click()
+    await nextTick()
+
+    const items = document.querySelectorAll('.mt-menu-item')
+    const enabled = items[0] as HTMLButtonElement
+    const disabled = items[1] as HTMLButtonElement
+    expect(enabled.tagName).toBe('BUTTON')
+    expect(enabled.getAttribute('type')).toBe('button')
+    expect(enabled.getAttribute('role')).toBe('menuitem')
+    expect(enabled.disabled).toBe(false) // enabled item is focusable + activatable
+    expect(disabled.disabled).toBe(true)  // disabled item is natively inert (tab-skipped, no activation)
+  })
+
+  it('activating an item (the click a browser fires for Enter/Space on a button) emits select once', async () => {
+    // Native <button> maps Enter/Space to a click event; asserting the click path proves the same code
+    // path keyboard activation drives (jsdom cannot emit the native keyboard→click itself).
+    let selectCount = 0
+    const c = mountMenu(() => { selectCount += 1 }, () => {})
+    ;(c.querySelector('.trigger-btn') as HTMLButtonElement).click()
+    await nextTick()
+    const enabled = document.querySelectorAll('.mt-menu-item')[0] as HTMLButtonElement
+    enabled.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await nextTick()
+    expect(selectCount).toBe(1)
   })
 })
 

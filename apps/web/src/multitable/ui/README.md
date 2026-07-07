@@ -189,6 +189,10 @@ and never closes the menu.
 `MtMenuItem` slots: default (label), `icon` (optional, leading).
 `MtMenuItem` emits: `select(evt: MouseEvent)`.
 
+**A11y:** `MtMenuItem` renders a native `<button type="button" role="menuitem">`, so it is genuinely
+keyboard-operable — focusable, activated by Enter/Space, and `disabled` uses the native attribute
+(tab-skipped, activation suppressed). Do not swap it for a `<div>` when migrating.
+
 ## MtPanel
 
 A small token-styled container card for grouping content — border/radius/background, optional
