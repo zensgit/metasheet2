@@ -2464,7 +2464,7 @@ describe('MetaAutomationManager', () => {
   })
 
   it('shows a successful automation test run status and refreshes stats', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { client, fetchFn } = mockClient([
       fakeRule({
         name: 'DingTalk group notify',
@@ -2503,7 +2503,7 @@ describe('MetaAutomationManager', () => {
 
   it('localizes zh-CN automation test run messages while preserving raw durations and backend errors', async () => {
     useLocale().setLocale('zh-CN')
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     let resolveExecution!: (value: Record<string, unknown>) => void
     const testExecution = new Promise<Record<string, unknown>>((resolve) => {
       resolveExecution = resolve
@@ -2534,7 +2534,10 @@ describe('MetaAutomationManager', () => {
     expect(container.textContent).toContain('可能向已配置的钉钉群或用户发送真实消息')
 
     testBtn.click()
-    await nextTick()
+    // UF-8: the test-run confirm is now async (ElMessageBox) — flush microtasks so the handler
+    // passes the resolved confirm and sets the running state; the execution promise itself is
+    // still pending, so the interim status stays assertable.
+    await flushPromises()
 
     expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
       .toContain('正在运行测试。钉钉动作可能发送真实消息。')
@@ -2556,7 +2559,7 @@ describe('MetaAutomationManager', () => {
 
   it('localizes zh-CN automation test run request failures with raw backend messages', async () => {
     useLocale().setLocale('zh-CN')
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { client } = mockClient([
       fakeRule({
         name: 'DingTalk person notify',
@@ -2615,7 +2618,7 @@ describe('MetaAutomationManager', () => {
   })
 
   it('shows failed automation test run step errors', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { client } = mockClient([
       fakeRule({
         name: 'DingTalk group notify',
@@ -2651,7 +2654,7 @@ describe('MetaAutomationManager', () => {
   })
 
   it('shows automation test run API errors instead of failing silently', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { client } = mockClient([
       fakeRule({
         name: 'DingTalk person notify',

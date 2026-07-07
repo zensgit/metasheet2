@@ -35,6 +35,7 @@ const TARGET_FILES = [
   'src/components/layout/PageHeader.vue',
   'src/components/layout/PageShell.vue',
   'src/components/status/StatusTag.vue',
+  'src/components/status/EmptyState.vue',
   'src/multitable/components/MetaAutomationManager.vue',
   'src/multitable/components/MetaAutomationRuleEditor.vue',
 ] as const
