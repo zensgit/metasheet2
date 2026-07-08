@@ -1,6 +1,7 @@
 # Multitable — 跨页 / 服务端分组数据模型 — DESIGN LOCK
 
 - **状态：PROPOSED — 待 owner ratify。** 本文件为纯文档；未经 ratify 不得开工任何运行时切片。
+- **✅ 已经独立对抗门禁（MERGE_CLEAN，2026-07-08）**——载重声明全部代码坐实（服务端发真计数/客户端 `MetaGridTable.vue:1213` 丢弃 `node.count`/两个「直接读」阻塞真实/小计值对骨架错/GW 台账矛盾只 surface 不改），权限引用真实、无 P1/P2。门禁 P3 + NIT 已并入：§3.0 分支优先级、count 消费者措辞收紧、§5.0 `[MUTEX:BE]`。报告 `/tmp/crosspage-grouping-lock-gate-20260708.md`。
 - **基线**：`origin/main` @ `c29b5e2c2`。以下每条"现状"断言均给出 file:line，均在该 commit 上复核过。
 - **本锁的位置**：`docs/development/multitable-grid-grouped-windowing-designlock-20260705.md` §6 / §8 把
   "server-side grouping / cross-page group coalescing（data-model slice, independent）"点名为一条**独立**的、
@@ -85,8 +86,8 @@ local rows"；`:2762` 明确"NO local fallback — keeps the 'filtered set, not 
   - `api/client.ts:889-897` — `interface ViewAggregateGroup { key; count: number; aggregates; children? }`
   - `MetaGridTable.vue:417-422` — `interface ServerAggregateGroup { key; count: number; aggregates; children? }`
 - **然后客户端把它丢掉了**：`MetaGridTable.vue:1207-1219` 的 `serverGroupAggByKey` 只做
-  `m.set(path, node.aggregates)`（`:1213`）——`node.count` **从未被读取**（全仓 grep：`ServerAggregateGroup` 仅出现在
-  `:417/:421/:483/:1209`，`count` 无任何消费点）。
+  `m.set(path, node.aggregates)`（`:1213`）——`node.count` **在任何产品/渲染路径中从未被读取**（全仓 grep：`ServerAggregateGroup` 仅出现在
+  `:417/:421/:483/:1209`，`count` 无产品/渲染消费点）。（精度校正，门禁 NIT：wire 上的 `count` **确有测试断言** `multitable-view-aggregate.test.ts:200/224/252`——即服务端真值已被契约测试锁住、只是产品端把它丢弃；这反而**加强**本锁：真值已在 wire 上、缺的只是消费。）
 
 矛盾的**可复现形式**：某分组在筛选集中有 200 行，页大小 50，用户对任一列配置聚合函数 `count`。
 
@@ -162,8 +163,14 @@ local rows"；`:2762` 明确"NO local fallback — keeps the 'filtered set, not 
 | `mode: "materialized"` | 存在 computed/link 条件或行级拒读，且筛选集 ≤ `MULTITABLE_AGGREGATE_MAX_ROWS` | 内存分桶（沿用 `groupRowsByFields`） | 组内 offset 退化游标（仍为不透明 token） |
 | `mode: "unavailable"` | 超上限 | 无（沿用 `413 AGGREGATE_TOO_LARGE` 语义） | 无；客户端回退到今天的经典翻页器 |
 
-分叉的具体实现选择**留给后端切片**（§5 B 号栏）在其 gate 内决定；本锁只锁定
-**游标必须可降级、且降级必须在 wire 上自陈**（`mode` 字段），而不是静默变形。
+**⚠ 分支优先级（门禁 P3，必须按此顺序判定——上表条件有重叠，误读会漏权限或自废阻塞）：**
+1. **污点即降级**：只要**行级拒读或字段掩码**在场，**永不** `indexed`——`indexed` 走 SQL `GROUP BY` 不携带否决过滤，会重新引入 INV-1 禁止的计数泄漏。有污点 → 至少 `materialized`（超上限则 `unavailable`）。
+2. **无污点且全 SQL 化 → `indexed` 优先，且不受 `MULTITABLE_AGGREGATE_MAX_ROWS` 约束**：SQL `GROUP BY` 本就能 scale 过该上限,该上限**只**绑 JS 分桶的 `materialized` 路径。若把 10k 上限套到 `indexed`,等于自废本锁头号阻塞。
+3. **`materialized`**：仅当**必须走 JS**（有 computed/link/污点无法 SQL 化）**且**筛选集 ≤ 上限。
+4. **`unavailable`**：仅当**必须走 JS 且超上限**。
+
+分叉的具体实现选择**留给后端切片**（§5 B 号栏）在其 gate 内决定；本锁只锁定上述**判定优先级** +
+**游标必须可降级、且降级必须在 wire 上自陈**（`mode` 字段），而不是静默变形。（B 号切片的 INV-1 双用户 + 行否决 mutation-red golden 兜底泄漏变体。）
 
 ### 3.1 新端点：`GET /api/multitable/sheets/:sheetId/view-groups`
 
@@ -285,6 +292,8 @@ local rows"；`:2762` 明确"NO local fallback — keeps the 'filtered set, not 
 
 → 下表中标注 **[MUTEX]** 的切片必须**串行独占**：开工前确认无其他在飞的网格 PR，落地后再放行下一个。
 → 切片 A（契约）与切片 E（画廊）不触碰这两个文件，可与非网格线并行。
+
+**⚠ 后端热文件纪律（门禁 NIT — 补 `[MUTEX:BE]`）**：切片 A（契约）/ B（后端）触及 `packages/core-backend/src/routes/univer-meta.ts`（仓内最热路由文件，也被 #3931 的后端切片、未来路由切片共享）。「切片 A 可与非网格线并行」**不等于**可与另一个在飞的 `univer-meta.ts` PR 并行——A/B 必须遵守 **baseline-first**：同一时刻该文件上不得有两个在飞 PR，后者 rebase 并**逐条重核 `:12xxx`/`:13xxx` 行号**（本锁行号即基于 `c29b5e2c2`，已知会随该文件流量漂移）。此为与 #3931 §5.0-C 一致的后端互斥类。
 
 ### §5.1 梯子
 
