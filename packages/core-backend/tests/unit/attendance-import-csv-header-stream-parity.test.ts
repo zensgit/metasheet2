@@ -27,6 +27,22 @@ const DINGTALK_STYLE_CSV = [
 // first non-empty row so upload validation keeps producing its existing 400.
 const HEADERLESS_CSV = ['随便一行,不是表头', 'a,b'].join('\n')
 
+// Same DingTalk title-row shape, but for the dingtalk_api_columns-style header
+// (workDate/userId — no name column at all). If header detection still requires a
+// literal name/姓名 cell, this title row is indistinguishable from "no header found
+// anywhere" and the fallback lands on the title row (index 0) instead of the real
+// header (index 1) — misaligning every column. The end-to-end
+// dingtalk_api_columns/manual_rows parity tests below do NOT catch this on their
+// own: those templates have their header at row 0 with nothing to skip, so a wrong
+// vocabulary + the tail fallback coincidentally still land on the right row. This
+// fixture is what actually exercises "skip the title row using the real
+// vocabulary", independent of the fallback.
+const DINGTALK_API_STYLE_CSV_WITH_TITLE = [
+  '某某集团有限公司考勤明细导出,,,,',
+  'workDate,userId,1_on_duty_user_check_time,1_off_duty_user_check_time,attend_result',
+  '2026-06-01,1001,2026-06-01T09:00:00+08:00,2026-06-01T18:00:00+08:00,Normal',
+].join('\n')
+
 async function collectInlineRows(csvText: string) {
   const rows: Array<{ workDate: string; fields: Record<string, string>; userId?: string }> = []
   const summary = await helpers.iterateImportRowsFromCsv({
@@ -270,6 +286,48 @@ describe('attendance CSV import — shipped template parity (DT-HARDEN-10 P1 fix
       expect(result).toEqual({ rowCount: 1, warnings: [] })
     })
   }
+
+  // Root-cause-1 discriminator: a name-less (workDate/userId) template header preceded
+  // by a DingTalk title row. Unlike the row-0-only cases above, a narrow "literal
+  // name/姓名 cell" vocabulary genuinely misdetects this one — the fallback cannot
+  // paper over it, because the fallback (first non-empty row) IS the wrong row here.
+  it('dingtalk_api_columns-style header behind a title row is still found at its real index, not row 0', async () => {
+    const csvPath = writeTmpCsv(DINGTALK_API_STYLE_CSV_WITH_TITLE)
+
+    expect(helpers.detectCsvHeaderIndex(DINGTALK_API_STYLE_CSV_WITH_TITLE, ',')).toBe(1)
+    await expect(helpers.readImportCsvHeaderFromFile(csvPath, ',')).resolves.toEqual([
+      'workDate',
+      'userId',
+      '1_on_duty_user_check_time',
+      '1_off_duty_user_check_time',
+      'attend_result',
+    ])
+
+    const rows: Array<{ workDate: string; fields: Record<string, string>; userId?: string }> = []
+    const summary = await helpers.iterateImportRowsFromCsvFileAsync({
+      csvPath,
+      csvOptions: {},
+      maxRows: 100,
+      onRow: (row: any) => {
+        rows.push(row)
+        return true
+      },
+    })
+    expect(summary).toEqual({ rowCount: 1, warnings: [], limitExceeded: false, maxRows: 100 })
+    expect(rows).toEqual([
+      {
+        workDate: '2026-06-01',
+        fields: {
+          workDate: '2026-06-01',
+          userId: '1001',
+          '1_on_duty_user_check_time': '2026-06-01T09:00:00+08:00',
+          '1_off_duty_user_check_time': '2026-06-01T18:00:00+08:00',
+          attend_result: 'Normal',
+        },
+        userId: '1001',
+      },
+    ])
+  })
 })
 
 describe('attendance CSV import header — normalization cases (DT-HARDEN-10)', () => {
