@@ -831,6 +831,87 @@ export function evaluateDirectoryAutoAdmissionEligibility(options: {
   }
 }
 
+/**
+ * DT-HARDEN-07 — which department is the requester's PRIMARY one.
+ *
+ * `directory_account_departments.is_primary` is what `ApprovalDirectoryOrg` anchors on:
+ * `direct_manager` and the whole `continuous_managers` chain start from the primary
+ * department. It was derived as `departmentIds[0]`, i.e. wherever DingTalk happened to
+ * put the department in `dept_id_list` (and, for a user first seen through another
+ * department's listing, wherever the merge happened to put it). A multi-department
+ * employee could therefore route approvals up the wrong management chain.
+ *
+ * DingTalk's `topapi/v2/user/get` has no unambiguous "main department" field. It returns
+ * `dept_order_list: [{dept_id, order}]`, whose `order` is the employee's sort position
+ * within each department — conventionally lowest for the primary department, but that is
+ * NOT contractually documented. Silently switching the signal would change live approval
+ * routing on an unverified assumption, so the order-based resolver ships DEFAULT-OFF
+ * behind `DIRECTORY_PRIMARY_DEPT_FROM_ORDER`. Roadmap §6.8 gates enabling it on
+ * confirming the field shape against a real tenant in staging.
+ *
+ * Either way the choice is now explicit, deterministic and testable rather than an
+ * accident of array order.
+ */
+export function isDirectoryPrimaryDepartmentFromOrderEnabled(): boolean {
+  return ['true', '1', 'yes'].includes(
+    String(process.env.DIRECTORY_PRIMARY_DEPT_FROM_ORDER ?? '').trim().toLowerCase(),
+  )
+}
+
+type DirectoryDepartmentOrderEntry = { departmentId: string; order: number }
+
+export function parseDirectoryDepartmentOrderList(raw: unknown): DirectoryDepartmentOrderEntry[] {
+  const source = asJsonRecord(raw)
+  if (!source) return []
+  const list = source.dept_order_list ?? source.deptOrderList
+  if (!Array.isArray(list)) return []
+
+  const entries: DirectoryDepartmentOrderEntry[] = []
+  for (const item of list) {
+    const record = asJsonRecord(item)
+    if (!record) continue
+    const departmentId = normalizeText(record.dept_id ?? record.deptId)
+    const order = Number(record.order)
+    if (!departmentId || !Number.isFinite(order)) continue
+    entries.push({ departmentId, order })
+  }
+  return entries
+}
+
+function asJsonRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+export function resolveDirectoryPrimaryDepartmentId(user: {
+  departmentIds: string[]
+  source?: unknown
+}): string | null {
+  const departmentIds = user.departmentIds.map((value) => normalizeText(value)).filter(Boolean)
+  if (departmentIds.length === 0) return null
+  if (departmentIds.length === 1) return departmentIds[0]
+
+  if (isDirectoryPrimaryDepartmentFromOrderEnabled()) {
+    const ranked = parseDirectoryDepartmentOrderList(user.source)
+      // Only departments the user actually belongs to; guards against stale entries.
+      .filter((entry) => departmentIds.includes(entry.departmentId))
+    if (ranked.length > 0) {
+      // Lowest order wins; ties break by the user's own dept_id_list position so the
+      // result is stable across syncs rather than dependent on payload iteration order.
+      const best = ranked.reduce((winner, candidate) => {
+        if (candidate.order !== winner.order) return candidate.order < winner.order ? candidate : winner
+        return departmentIds.indexOf(candidate.departmentId) < departmentIds.indexOf(winner.departmentId)
+          ? candidate
+          : winner
+      })
+      return best.departmentId
+    }
+  }
+
+  return departmentIds[0]
+}
+
 function normalizeDirectorySyncAuditUserId(adminUserId: string): string | null {
   const normalized = normalizeText(adminUserId)
   if (!normalized || normalized.startsWith('system:')) return null
@@ -2319,6 +2400,9 @@ export async function syncDirectoryIntegration(
       for (const user of users.values()) {
         const account = accountIdMap.get(user.userId)
         if (!account) continue
+        // DT-HARDEN-07: an explicit, deterministic primary department — approval manager
+        // routing anchors on is_primary, so this must not be an accident of array order.
+        const primaryDepartmentId = resolveDirectoryPrimaryDepartmentId(user)
         for (const departmentId of user.departmentIds) {
           const directoryDepartmentId = departmentIdMap.get(departmentId)
           if (!directoryDepartmentId) continue
@@ -2329,7 +2413,7 @@ export async function syncDirectoryIntegration(
              VALUES ($1, $2, $3, NOW())
              ON CONFLICT (directory_account_id, directory_department_id)
              DO UPDATE SET is_primary = EXCLUDED.is_primary`,
-            [account.id, directoryDepartmentId, departmentId === user.departmentIds[0]],
+            [account.id, directoryDepartmentId, departmentId === primaryDepartmentId],
           )
         }
       }
