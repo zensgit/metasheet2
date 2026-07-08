@@ -87,6 +87,11 @@ export default defineConfig({
       // DT-HARDEN-07 backfill idempotence + dry-run honesty: DATABASE_URL-gated. Same two-point
       // wiring — the script had zero coverage, which is how a non-idempotent backfill shipped.
       'tests/integration/directory-primary-department-backfill.db.test.ts',
+      // DT-OPS-01 deprovision selection: DATABASE_URL-gated (describeIfDatabase). These goldens
+      // exist *because* a fake client made the selection SQL untestable — running them without a
+      // DB would skip-green and restore exactly that hole. Excluded here, wired as a WHOLE FILE
+      // into the `Run approval real-DB integration` step in plugin-tests.yml.
+      'tests/integration/directory-deprovision-selection.db.test.ts',
       // T36-1: projection per-row participant read + the #3537 fence goldens (both were previously
       // wired into NO workflow — skip-green; now run in plugin-tests' approval real-DB step).
       'tests/integration/approval-projection-visibility.db.test.ts',

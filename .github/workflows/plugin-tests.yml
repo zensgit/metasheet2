@@ -354,7 +354,7 @@ jobs:
             tests/integration/multitable-tombstone-retention-realdb.test.ts \
             --reporter=dot
 
-      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets)
+      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens)
         # Lane A (directory endpoints) + Lane B (P1-C hidden field redaction) + Lane D (add_sign/reduce_sign). Wired as WHOLE FILE runs so the
         # gate is robust (a name filter that matches zero tests would exit green and hide
         # regressions). The file is describeIfDatabase-guarded + excluded from the no-DB
@@ -396,6 +396,7 @@ jobs:
             tests/integration/directory-primary-department-backfill.db.test.ts \
             tests/integration/directory-sync-preview-apply-parity.db.test.ts \
             tests/integration/directory-sync-alert-coverage.db.test.ts \
+            tests/integration/directory-deprovision-selection.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             --reporter=dot
 
