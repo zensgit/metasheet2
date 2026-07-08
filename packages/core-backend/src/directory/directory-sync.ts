@@ -871,11 +871,26 @@ export function parseDirectoryDepartmentOrderList(raw: unknown): DirectoryDepart
     const record = asJsonRecord(item)
     if (!record) continue
     const departmentId = normalizeText(record.dept_id ?? record.deptId)
-    const order = Number(record.order)
-    if (!departmentId || !Number.isFinite(order)) continue
+    const order = parseDepartmentOrderValue(record.order)
+    if (!departmentId || order === null) continue
     entries.push({ departmentId, order })
   }
   return entries
+}
+
+/**
+ * `Number()` folds null, '', [], and false to 0 — and 0 is the winning order. A missing or
+ * malformed `order` must drop the entry, never silently elect its department primary.
+ */
+function parseDepartmentOrderValue(raw: unknown): number | null {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+    if (!trimmed) return null
+    const parsed = Number(trimmed)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
 }
 
 function asJsonRecord(value: unknown): Record<string, unknown> | null {
@@ -910,6 +925,76 @@ export function resolveDirectoryPrimaryDepartmentId(user: {
   }
 
   return departmentIds[0]
+}
+
+export type DirectoryAccountDepartmentWriteSummary = {
+  membershipsWritten: number
+  /** Accounts that ended the write with exactly one department flagged primary. */
+  accountsWithPrimary: number
+  /** Accounts whose departments were all unknown to this integration — nothing written. */
+  accountsWithoutKnownDepartment: number
+}
+
+/**
+ * DT-HARDEN-07 — writes `directory_account_departments`, including the `is_primary` flag
+ * that `ApprovalDirectoryOrg` anchors approval routing on.
+ *
+ * This is a seam, not decoration. The flag used to be computed inline inside
+ * `syncDirectoryIntegration`, whose orchestration has no test (it needs a live DingTalk).
+ * The one line that decided a person's management chain was therefore unreachable from any
+ * test: reverting it left the whole suite green. Extracting the write lets a real-DB golden
+ * drive it directly — and any future rewrite of this body (a bulk `unnest` insert, say) has
+ * to keep that golden passing rather than silently reverting to `departmentIds[0]`.
+ */
+export async function upsertDirectoryAccountDepartments(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  input: {
+    users: Iterable<{ userId: string; departmentIds: string[]; source?: unknown }>
+    /** external_user_id → the account row (only `id` is read). */
+    accountIdMap: Map<string, { id: string }>
+    /** external_department_id → directory_departments.id */
+    departmentIdMap: Map<string, string>
+  },
+): Promise<DirectoryAccountDepartmentWriteSummary> {
+  const summary: DirectoryAccountDepartmentWriteSummary = {
+    membershipsWritten: 0,
+    accountsWithPrimary: 0,
+    accountsWithoutKnownDepartment: 0,
+  }
+
+  for (const user of input.users) {
+    const account = input.accountIdMap.get(user.userId)
+    if (!account) continue
+
+    // An explicit, deterministic primary department — approval manager routing anchors on
+    // is_primary, so this must not be an accident of array order.
+    const primaryDepartmentId = resolveDirectoryPrimaryDepartmentId(user)
+    let wrotePrimary = false
+    let wroteAny = false
+
+    for (const departmentId of user.departmentIds) {
+      const directoryDepartmentId = input.departmentIdMap.get(departmentId)
+      if (!directoryDepartmentId) continue
+      const isPrimary = departmentId === primaryDepartmentId
+      await client.query(
+        `INSERT INTO directory_account_departments (
+           directory_account_id, directory_department_id, is_primary, created_at
+         )
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (directory_account_id, directory_department_id)
+         DO UPDATE SET is_primary = EXCLUDED.is_primary`,
+        [account.id, directoryDepartmentId, isPrimary],
+      )
+      summary.membershipsWritten += 1
+      wroteAny = true
+      wrotePrimary = wrotePrimary || isPrimary
+    }
+
+    if (!wroteAny) summary.accountsWithoutKnownDepartment += 1
+    else if (wrotePrimary) summary.accountsWithPrimary += 1
+  }
+
+  return summary
 }
 
 function normalizeDirectorySyncAuditUserId(adminUserId: string): string | null {
@@ -2397,26 +2482,11 @@ export async function syncDirectoryIntegration(
         [integrationId],
       )
 
-      for (const user of users.values()) {
-        const account = accountIdMap.get(user.userId)
-        if (!account) continue
-        // DT-HARDEN-07: an explicit, deterministic primary department — approval manager
-        // routing anchors on is_primary, so this must not be an accident of array order.
-        const primaryDepartmentId = resolveDirectoryPrimaryDepartmentId(user)
-        for (const departmentId of user.departmentIds) {
-          const directoryDepartmentId = departmentIdMap.get(departmentId)
-          if (!directoryDepartmentId) continue
-          await client.query(
-            `INSERT INTO directory_account_departments (
-               directory_account_id, directory_department_id, is_primary, created_at
-             )
-             VALUES ($1, $2, $3, NOW())
-             ON CONFLICT (directory_account_id, directory_department_id)
-             DO UPDATE SET is_primary = EXCLUDED.is_primary`,
-            [account.id, directoryDepartmentId, departmentId === primaryDepartmentId],
-          )
-        }
-      }
+      await upsertDirectoryAccountDepartments(client, {
+        users: users.values(),
+        accountIdMap,
+        departmentIdMap,
+      })
 
       const {
         externalIdentityMap,
