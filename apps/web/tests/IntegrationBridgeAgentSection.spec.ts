@@ -437,4 +437,195 @@ describe('IntegrationBridgeAgentSection', () => {
       setLocale('en')
     }
   })
+
+  // --- BA-UI-2 (docs/development/bridge-agent-admin-page-design-lock-20260707.md §3 BA-UI-2):
+  // values-free one-click probe — health -> objects -> schema, sequential, early-stop on first
+  // failure. Evidence card renders ok/durationBucket/counts/humanized-code per step + overall
+  // PASS/FAIL, all through the three EXISTING generic endpoints (zero new routes).
+
+  it('probe: happy path runs health -> objects -> schema sequentially and renders PASS with three ok steps', async () => {
+    mockRoutes()
+    const system = bridgeSystem()
+    const root = mountSection([system])
+    await flushUi()
+
+    expect(root.querySelector(`[data-testid="bridge-agent-probe-evidence-${system.id}"]`)).toBeNull()
+    apiFetchMock.mockClear() // isolate the calls the probe itself issues from mount-time auto-load
+
+    q<HTMLButtonElement>(root, `bridge-agent-probe-${system.id}`).click()
+    await flushUi()
+
+    const overall = q(root, `bridge-agent-probe-overall-${system.id}`)
+    expect(overall.getAttribute('data-result')).toBe('pass')
+    expect(overall.textContent).toBe('PASS')
+
+    const healthStep = q(root, `bridge-agent-probe-step-health-${system.id}`)
+    const objectsStep = q(root, `bridge-agent-probe-step-objects-${system.id}`)
+    const schemaStep = q(root, `bridge-agent-probe-step-schema-${system.id}`)
+    expect(healthStep.getAttribute('data-ok')).toBe('true')
+    expect(objectsStep.getAttribute('data-ok')).toBe('true')
+    expect(schemaStep.getAttribute('data-ok')).toBe('true')
+    expect(objectsStep.textContent).toContain('objectCount: 2')
+    expect(schemaStep.textContent).toContain('fieldCount: 3')
+
+    // Sequential order through the three EXISTING generic endpoints only, nothing else.
+    const orderedUrls = apiFetchMock.mock.calls.map(([url]) => String(url))
+    const testIdx = orderedUrls.findIndex((u) => u.includes('/test'))
+    const objectsIdx = orderedUrls.findIndex((u) => u.includes('/objects'))
+    const schemaIdx = orderedUrls.findIndex((u) => u.includes('/schema'))
+    expect(testIdx).toBe(0)
+    expect(objectsIdx).toBeGreaterThan(testIdx)
+    expect(schemaIdx).toBeGreaterThan(objectsIdx)
+    expect(orderedUrls[schemaIdx]).toContain('object=material')
+  })
+
+  it('probe: a failure at the objects step early-stops before schema (schema never called) — FAIL badge + step guidance + humanized code', async () => {
+    mockRoutes({ objects: () => errorResponse(500, 'BRIDGE_AGENT_REQUEST_FAILED', SENTINEL.errorBody) })
+    const system = bridgeSystem()
+    const root = mountSection([system])
+    await flushUi()
+    apiFetchMock.mockClear()
+
+    q<HTMLButtonElement>(root, `bridge-agent-probe-${system.id}`).click()
+    await flushUi()
+
+    const overall = q(root, `bridge-agent-probe-overall-${system.id}`)
+    expect(overall.getAttribute('data-result')).toBe('fail')
+    expect(overall.textContent).toMatch(/FAIL: Objects/)
+
+    expect(q(root, `bridge-agent-probe-step-health-${system.id}`).getAttribute('data-ok')).toBe('true')
+    expect(q(root, `bridge-agent-probe-step-objects-${system.id}`).getAttribute('data-ok')).toBe('false')
+    // Early-stop: the schema step never even appears (it was never run), and its fetch never fired.
+    expect(root.querySelector(`[data-testid="bridge-agent-probe-step-schema-${system.id}"]`)).toBeNull()
+    expect(apiFetchMock.mock.calls.some(([url]) => typeof url === 'string' && url.includes('/schema'))).toBe(false)
+
+    // Humanized code: objects failures carry no code client-side, so this degrades to the generic
+    // IU-1 unknown-error label — never the raw backend code/message.
+    expect(q(root, `bridge-agent-probe-step-error-objects-${system.id}`).textContent).toContain('Unknown error')
+    expect(q(root, `bridge-agent-probe-step-guidance-objects-${system.id}`).textContent).toMatch(/retry the objects probe/i)
+    expect(root.innerHTML).not.toContain(SENTINEL.errorBody)
+    expect(root.innerHTML).not.toContain('BRIDGE_AGENT_REQUEST_FAILED')
+  })
+
+  it('probe: objects step returns zero objects -> schema step is SKIPPED (not a failure), overall still PASS', async () => {
+    mockRoutes({ objects: () => jsonResponse([]) })
+    const system = bridgeSystem()
+    const root = mountSection([system])
+    await flushUi()
+    apiFetchMock.mockClear()
+
+    q<HTMLButtonElement>(root, `bridge-agent-probe-${system.id}`).click()
+    await flushUi()
+
+    expect(q(root, `bridge-agent-probe-overall-${system.id}`).getAttribute('data-result')).toBe('pass')
+    expect(q(root, `bridge-agent-probe-step-schema-${system.id}`).getAttribute('data-ok')).toBe('true')
+    q(root, `bridge-agent-probe-step-skipped-${system.id}`)
+    // Nothing to sample -> schema is never fetched (distinct from the early-stop-on-failure path).
+    expect(apiFetchMock.mock.calls.some(([url]) => typeof url === 'string' && url.includes('/schema'))).toBe(false)
+  })
+
+  it('probe: per-step duration buckets classify short/medium/long elapsed time (<1s / 1-5s / >5s)', async () => {
+    mockRoutes()
+    const system = bridgeSystem()
+    const root = mountSection([system])
+    await flushUi()
+
+    // Fake timers so each mocked fetch resolves after a controlled, real elapsed delay — the
+    // component measures with plain `Date.now()`, and vitest's fake-timer install fakes that too, so
+    // advancing the clock produces real, deterministic bucket boundaries (no brittle call-count
+    // stubbing of Date.now, which can be thrown off by incidental calls elsewhere in the stack).
+    vi.useFakeTimers()
+    try {
+      apiFetchMock.mockImplementation((url: unknown) => {
+        const u = String(url)
+        if (u.includes('/test')) {
+          return new Promise<Response>((resolve) => {
+            setTimeout(() => resolve(jsonResponse({ ok: true, connected: true, authenticated: true })), 200)
+          })
+        }
+        if (u.includes('/objects')) {
+          return new Promise<Response>((resolve) => {
+            setTimeout(() => resolve(jsonResponse(OBJECTS_PAYLOAD)), 1500)
+          })
+        }
+        if (u.includes('/schema')) {
+          return new Promise<Response>((resolve) => {
+            setTimeout(() => resolve(jsonResponse(SCHEMA_PAYLOAD)), 6000)
+          })
+        }
+        return Promise.resolve(jsonResponse(null))
+      })
+
+      q<HTMLButtonElement>(root, `bridge-agent-probe-${system.id}`).click()
+      await vi.advanceTimersByTimeAsync(200) // health resolves: 200ms -> <1s
+      await vi.advanceTimersByTimeAsync(1500) // objects resolves: 1500ms later -> 1-5s
+      await vi.advanceTimersByTimeAsync(6000) // schema resolves: 6000ms later -> >5s
+      await nextTick()
+      await nextTick()
+
+      expect(q(root, `bridge-agent-probe-step-health-${system.id}`).textContent).toContain('durationBucket: <1s')
+      expect(q(root, `bridge-agent-probe-step-objects-${system.id}`).textContent).toContain('durationBucket: 1-5s')
+      expect(q(root, `bridge-agent-probe-step-schema-${system.id}`).textContent).toContain('durationBucket: >5s')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('SENTINEL via probe (lock §3 BA-UI-2): no secret-shaped string leaks through the probe evidence path, success or failure', async () => {
+    // Success path: the default fixtures already carry hostile extras (OBJECTS_PAYLOAD connectionString
+    // key, SCHEMA_PAYLOAD defaultValue/raw.leaked, the test response's SENTINEL-laden message).
+    mockRoutes()
+    const system = bridgeSystem()
+    const root = mountSection([system])
+    await flushUi()
+
+    q<HTMLButtonElement>(root, `bridge-agent-probe-${system.id}`).click()
+    await flushUi()
+
+    q(root, `bridge-agent-probe-evidence-${system.id}`)
+    for (const [key, sentinel] of Object.entries(SENTINEL)) {
+      expect(root.innerHTML.includes(sentinel), `probe (success) sentinel leak html: ${key}`).toBe(false)
+      expect((root.textContent || '').includes(sentinel), `probe (success) sentinel leak text: ${key}`).toBe(false)
+    }
+
+    // Failure path: hostile/non-closed-set code + secret-laden message on the health step.
+    apiFetchMock.mockReset()
+    mockRoutes({
+      test: () => jsonResponse({ ok: false, connected: false, code: SENTINEL.hostileCode, message: SENTINEL.testMessage }),
+    })
+    app!.unmount()
+    container!.remove()
+    const root2 = mountSection([bridgeSystem()])
+    await flushUi()
+    q<HTMLButtonElement>(root2, `bridge-agent-probe-${system.id}`).click()
+    await flushUi()
+
+    for (const [key, sentinel] of Object.entries(SENTINEL)) {
+      expect(root2.innerHTML.includes(sentinel), `probe (failure) sentinel leak html: ${key}`).toBe(false)
+      expect((root2.textContent || '').includes(sentinel), `probe (failure) sentinel leak text: ${key}`).toBe(false)
+    }
+    expect(q(root2, `bridge-agent-probe-step-error-health-${system.id}`).textContent).toContain('Unknown error')
+  })
+
+  it('zh copy: probe evidence renders bilingual overall/step labels + guidance under zh-CN', async () => {
+    const { setLocale } = useLocale()
+    setLocale('zh-CN')
+    try {
+      mockRoutes({ objects: () => errorResponse(500, 'BRIDGE_AGENT_REQUEST_FAILED', SENTINEL.errorBody) })
+      const system = bridgeSystem()
+      const root = mountSection([system])
+      await flushUi()
+
+      q<HTMLButtonElement>(root, `bridge-agent-probe-${system.id}`).click()
+      await flushUi()
+
+      expect(q(root, `bridge-agent-probe-overall-${system.id}`).textContent).toContain('对象列表')
+      expect(q(root, `bridge-agent-probe-step-health-${system.id}`).textContent).toContain('健康检查')
+      expect(q(root, `bridge-agent-probe-step-objects-${system.id}`).textContent).toContain('对象列表')
+      expect(q(root, `bridge-agent-probe-step-guidance-objects-${system.id}`).textContent).toContain('对象列表探测')
+      expect(root.querySelector(`[data-testid="bridge-agent-probe-step-schema-${system.id}"]`)).toBeNull()
+    } finally {
+      setLocale('en')
+    }
+  })
 })
