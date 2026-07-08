@@ -411,6 +411,18 @@ function testWriteDispatchGuard() {
     (error) => error instanceof WriteTargetDryRunError && error.code === 'WRITE_TARGET_DRY_RUN_WRITE_BLOCKED',
   )
   assert.equal(poisoned.writeAttempts, 1)
+
+  // Quality-gate pin (review): buildSuccessEvidence must FAITHFULLY carry the derived marker — passing
+  // true surfaces true, passing false surfaces false. This is the mutation-provable part of the
+  // "externalWriteAttempted DERIVED not hardcoded" lock (the call-site `guard.writeAttempts > 0` at the
+  // compose path is a provable-EQUIVALENT of `false` since >0 fails closed earlier, so it can't be killed;
+  // the killable guarantee is that the evidence builder never clamps/hardcodes the marker).
+  {
+    const evTrue = __internals.buildSuccessEvidence({ configId: 'c', configVersion: 1, counts: {}, capReached: false, externalWriteAttempted: true })
+    assert.equal(evTrue.externalWriteAttempted, true, 'evidence must surface a true write-attempted marker (never hardcoded false)')
+    const evFalse = __internals.buildSuccessEvidence({ configId: 'c', configVersion: 1, counts: {}, capReached: false, externalWriteAttempted: false })
+    assert.equal(evFalse.externalWriteAttempted, false)
+  }
   // Calling it again keeps tallying and keeps throwing — never a silent no-op after the first attempt.
   assert.throws(() => poisoned.blockDispatch(), WriteTargetDryRunError)
   assert.equal(poisoned.writeAttempts, 2)
