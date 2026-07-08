@@ -1,7 +1,7 @@
 # 多维表 — 手动排序基座 设计锁（DESIGN LOCK）
 
 状态：PROPOSED — 待 owner ratify
-类型：设计锁（docs-only，零 runtime）。**⚠ 本锁未经独立对抗门禁**——起草它的子代理死于每周限额（Jul 12 重置），门禁流水线暂停，故本锁由主循环 verify-first 写就。owner ratify 前请对其载重声明（§2 现状、§4 primitive 叉口）比对已门禁的 #3928/#3931/#3940 更严格审。
+类型：设计锁（docs-only，零 runtime）。**✅ 已经独立对抗门禁（MERGE_CLEAN，2026-07-08）**——四个载重声明（行序无基座 · 字段重排是整数-shift · 看板收窄 · 仪表盘排除）全部在代码里坐实，权限引用真实、每环 mutation 载重、seam 与 #3928/#3931 干净；报告 `/tmp/ordering-substrate-lock-gate-20260708.md`。门禁两个 P3 硬化已并入本文（§1.1 休眠 `row_order` 澄清、§4 primitive 类为约束锁死）。
 
 - **Baseline**: `origin/main` @ `7e7798a34`（引用行号会随 `[MUTEX:BE]` 流量漂移；实现前须按当时 HEAD 重核）。
 - **Provenance**: 目标池 B 簇「排序基座」。对标基线能力：用户可手动拖拽决定记录顺序。当前不存在。
@@ -12,7 +12,8 @@
 
 对标线要求「用户可手动排序」跨三个面。verify-first 发现三者**成熟度天差地别**，不可一锅端：
 
-1. **手动行序 = 完整缺口，零基座。** `meta_records` 的读取一律 `ORDER BY created_at ASC, id ASC`（`univer-meta.ts` 多处：`:4688`/`:5045`/`:5101`/`:5117`/`:5521`，及 `/view` 主读路径）。`meta_records` 上**没有** `order_index`/`position`/`row_order` 列（迁移目录无此列）。用户无法把某行拖到另一行前面并持久化。**这是本锁的核心。**
+1. **手动行序 = 完整缺口，零基座。** `meta_records` 的读取一律 `ORDER BY created_at ASC, id ASC`（`univer-meta.ts` 多处：`:4688`/`:5045`/`:5101`/`:5117`/`:5521`，及 `/view` 主读路径）。`meta_records` 上**没有** `order_index`/`position`/`row_order` 列（其列仅 `id/sheet_id/data/version/created_at/updated_at/created_by/modified_by/locked/locked_by/locked_at`）。用户无法把某行拖到另一行前面并持久化。**这是本锁的核心。**
+   - **⚠ 预防误解（门禁 P3-1）**：代码里确有一个 `row_order`，但它在**另一张表 `table_rows`**（遗留 `DefaultViewDataProvider` 路径，非多维表的 `meta_records`），且**无任何写者**——只有一处读（`default-view-data-provider.ts:80` `ORDER BY row_order`）、一处投影（`:261`）、一个类型（`db/types.ts:217`），没有任何 `INSERT`/`UPDATE` 写它，无迁移填充它。它是**休眠死码，不是可用基座**。本锁的 `meta_records.manual_order`（R1）与它无关，不复用、不迁移它。
 2. **看板卡片序 = 收窄。** 跨列拖拽**已工作**：`MetaKanbanView.vue` 有 `draggable="true"` / `onDragStart` / `onDrop`，而 `onDrop`（`:407-411`）= `emit('patch-cell', dragRecordId, groupField.value.id, targetValue, dragVersion)` —— 它改的是**分组字段的值**（把卡片移到另一列 = 改该行的字段值），已持久化。缺的**只是列内顺序**（同一列内的卡片仍按 `created_at` 显示）。这是**小 rider**，不是「看板无排序」。
 3. **仪表盘 widget 布局 = 基本已解决。** 面板已带整数 `order`：`MetaDashboardView.vue:746` `[...panels].sort((a,b)=>a.order-b.order)`，新面板追加于 `order: panels.length`（`:1014`/`:1071`）。线性重排基座**已存在**；只有 2D 自由布局（x/y/w/h）才是增量，且很可能超出对标范围。**本锁将仪表盘排除**（§6）。
 
@@ -39,7 +40,7 @@
 
 ## §4 载重叉口 — 整数-shift vs 分数/有理索引（不许糊弄）
 
-行是**协同编辑**对象且数量以千计。排序 primitive 有三条路，本锁**不预先裁定**，交由 R1 环后的 owner/实现裁断，但把权衡钉死：
+行是**协同编辑**对象且数量以千计。排序 primitive 有三条路，本锁把权衡钉死。**⚠ 诚实声明（门禁 P3-2）**：本锁的硬约束（O(1) 插入 + 协同安全）实际上**已把 primitive 类锁死为分数/有理索引**——整数-shift 被禁、id-array 被排除。因此 ratify 本锁 = **承诺有理索引键这一类**；真正留给 R1 的开放子设计是 **rebalance 策略 + 确定性键生成**（何时/如何重排、精度耗尽处理、是否需一次性全表迁移），**不是**「选哪类 primitive」。若 owner 希望 primitive 类本身保持开放，须在 §3 的 D 决定里追加「primitive 选型」一项并放宽 §4 硬约束。
 
 | 方案 | 插入成本 | 协同安全 | 代价 |
 |---|---|---|---|
@@ -96,6 +97,6 @@
 ## §9 本锁不主张什么（收束）
 
 - 不主张已获 ratify。
-- 不主张 §4 已裁定 primitive——只钉死约束（O(1) 插入 + 协同安全）与权衡，裁断留给 R1 后的 owner。
+- 不主张 primitive 的 rebalance/键生成子设计已定——那留给 R1。但**明确**：§4 的硬约束已把 primitive **类**约束为有理索引（见 §4 诚实声明），ratify 即承诺该类。
 - 不主张本锁经独立对抗验证（见页首告示）。
 - 不碰权限/中央授权（K3）。
