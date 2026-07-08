@@ -1394,7 +1394,16 @@ describe('Attendance admin regressions', () => {
     const requestType = container!.querySelector<HTMLSelectElement>('#attendance-approval-type')
     expect(name).toBeTruthy()
     expect(requestType).toBeTruthy()
-    expect(Array.from(requestType!.options).map(option => option.value)).toContain('shift_swap')
+    const typeValues = Array.from(requestType!.options).map(option => option.value)
+    expect(typeValues).toContain('shift_swap')
+    // A1 wire-level fix: the dropdown must now expose every backend REQUEST_TYPE,
+    // including the two that were missing (outdoor_punch / schedule_dispatch).
+    expect(typeValues).toContain('outdoor_punch')
+    expect(typeValues).toContain('schedule_dispatch')
+    // A1 structured editor + preview replace the raw JSON textarea.
+    expect(container!.querySelector('[data-testid="attendance-approval-steps-editor"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="attendance-approval-steps-preview"]')).toBeTruthy()
+    expect(container!.querySelector('#attendance-approval-steps')).toBeNull()
 
     name!.value = 'Shift swap approval'
     name!.dispatchEvent(new Event('input', { bubbles: true }))

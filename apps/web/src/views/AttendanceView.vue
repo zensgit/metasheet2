@@ -15362,12 +15362,11 @@ const overtimeRuleForm = reactive({
 const approvalFlowForm = reactive({
   name: '',
   requestType: 'leave',
-  steps: '',
   isActive: true,
 })
 // A1 structured step editor (approval-flow-editor design-lock): the working
-// step model behind the editor. approvalFlowForm.steps (JSON string) is retired
-// as an input surface but the persisted payload shape is unchanged.
+// step model behind the editor. The old approvalFlowForm.steps JSON string is
+// gone; the persisted payload shape is unchanged (built by toApprovalPayloadSteps).
 const approvalFlowSteps = ref<AttendanceApprovalStepModel[]>([])
 const approvalFlowStepsPreview = computed(() => stepsPreviewJson(approvalFlowSteps.value))
 const approvalFlowRequestTypeOptions = ATTENDANCE_APPROVAL_REQUEST_TYPES
@@ -16612,17 +16611,6 @@ function parseShiftSequenceInput(value: string): string[] {
   return parseAttendanceRotationSequenceInput(value)
 }
 
-function parseApprovalStepsInput(value: string): AttendanceApprovalStep[] | null {
-  if (!value.trim()) return []
-  try {
-    const parsed = JSON.parse(value)
-    if (!Array.isArray(parsed)) return null
-    return parsed.filter(item => item && typeof item === 'object') as AttendanceApprovalStep[]
-  } catch {
-    return null
-  }
-}
-
 function parseUserIdList(value: string): string[] {
   if (!value) return []
   return Array.from(new Set(
@@ -16649,10 +16637,6 @@ function comprehensiveHoursStatusClass(status: AttendanceComprehensiveHoursStatu
   if (status === 'violation') return 'attendance__status-chip--late_early'
   if (status === 'warning') return 'attendance__status-chip--late'
   return 'attendance__status-chip--normal'
-}
-
-function formatApprovalSteps(steps: AttendanceApprovalStep[]): string {
-  return JSON.stringify(steps ?? [], null, 2)
 }
 
 function formatMetaMinutes(meta: Record<string, any> | undefined, key: 'leave' | 'overtime'): string {
@@ -24428,7 +24412,6 @@ function resetApprovalFlowForm() {
   approvalFlowEditingId.value = null
   approvalFlowForm.name = ''
   approvalFlowForm.requestType = 'leave'
-  approvalFlowForm.steps = ''
   approvalFlowSteps.value = []
   approvalFlowForm.isActive = true
 }
@@ -24437,7 +24420,6 @@ function editApprovalFlow(flow: AttendanceApprovalFlow) {
   approvalFlowEditingId.value = flow.id
   approvalFlowForm.name = flow.name
   approvalFlowForm.requestType = flow.requestType
-  approvalFlowForm.steps = formatApprovalSteps(flow.steps)
   approvalFlowSteps.value = normalizeApprovalSteps(flow.steps)
   approvalFlowForm.isActive = flow.isActive
 }
