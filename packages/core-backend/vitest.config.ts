@@ -95,6 +95,12 @@ export default defineConfig({
       'tests/integration/approval-route-preview-substrate.db.test.ts',
       'tests/integration/approval-route-preview-api.db.test.ts',
       'tests/integration/approval-template-route-preview-api.db.test.ts',
+      // DT-OPS-03 P2-2: manager-binding coverage CTE + failure-streak ORDER BY are mock-only in
+      // every unit test (corrupting either leaves all 13 unit tests green). DATABASE_URL-gated
+      // (describeIfDatabase). Excluded from the no-DB default job so it doesn't skip-green, and
+      // wired as a WHOLE FILE into the `Run approval real-DB integration` step in
+      // plugin-tests.yml where it runs against real Postgres every PR.
+      'tests/integration/directory-sync-alert-coverage.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

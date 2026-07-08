@@ -392,6 +392,7 @@ jobs:
             tests/integration/directory-primary-department-write.db.test.ts \
             tests/integration/directory-primary-department-backfill.db.test.ts \
             tests/integration/directory-sync-preview-apply-parity.db.test.ts \
+            tests/integration/directory-sync-alert-coverage.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             --reporter=dot
 
