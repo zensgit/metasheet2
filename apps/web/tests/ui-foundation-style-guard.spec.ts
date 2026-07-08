@@ -71,6 +71,9 @@ const TARGET_FILES = [
   // Integration lane F (same design-lock §3 hard locks, UF-1 token-only): the K3 WISE setup
   // view's 107 hardcoded hex literals were mapped onto var(--ms-*)/--el-* tokens.
   'src/views/IntegrationK3WiseSetupView.vue',
+  // IU-4 (docs/development/integration-iu4-composition-wizard-design-lock-20260707.md, #3803):
+  // sibling wizard, same "clean from the start" rule.
+  'src/components/integration/IntegrationCompositionWizard.vue',
 ] as const
 
 // Per-file allowlist for counts that are legitimately un-clearable. Keep this EMPTY unless a

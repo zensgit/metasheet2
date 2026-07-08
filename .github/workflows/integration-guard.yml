@@ -33,6 +33,7 @@ on:
       - 'apps/web/src/services/integration/readSourceModePresets.ts'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
+      - 'apps/web/src/components/integration/IntegrationCompositionWizard.vue'
       - 'apps/web/src/components/integration/IntegrationWorkbenchRail.vue'
       - 'apps/web/src/components/integration/IntegrationMonitoringSection.vue'
       - 'apps/web/src/components/integration/IntegrationCleaningDatasetSection.vue'
@@ -61,6 +62,7 @@ on:
       - 'apps/web/tests/readSourceModePresets.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionPanel.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts'
+      - 'apps/web/tests/IntegrationCompositionWizard.spec.ts'
       - 'apps/web/tests/readSourceCompositions.service.spec.ts'
       - 'apps/web/tests/IntegrationWorkbenchView.spec.ts'
       - 'apps/web/tests/IntegrationWorkbenchRail.spec.ts'
@@ -94,6 +96,7 @@ on:
       - 'apps/web/src/services/integration/readSourceModePresets.ts'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
+      - 'apps/web/src/components/integration/IntegrationCompositionWizard.vue'
       - 'apps/web/src/components/integration/IntegrationWorkbenchRail.vue'
       - 'apps/web/src/components/integration/IntegrationMonitoringSection.vue'
       - 'apps/web/src/components/integration/IntegrationCleaningDatasetSection.vue'
@@ -122,6 +125,7 @@ on:
       - 'apps/web/tests/readSourceModePresets.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionPanel.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts'
+      - 'apps/web/tests/IntegrationCompositionWizard.spec.ts'
       - 'apps/web/tests/readSourceCompositions.service.spec.ts'
       - 'apps/web/tests/IntegrationWorkbenchView.spec.ts'
       - 'apps/web/tests/IntegrationWorkbenchRail.spec.ts'
@@ -185,5 +189,12 @@ jobs:
       - name: Run plugin-integration-core CJS test chain (hermetic, no DB)
         run: pnpm --filter plugin-integration-core test
 
+      # NOTE (IU-4, #3803): this step previously had THREE duplicate `run:` keys in a single step —
+      # invalid-but-tolerated YAML where every parser (this repo's included) silently keeps only the
+      # LAST one, so 6 already-listed specs (IntegrationBridgeAgentSection, IntegrationPipelineRunSection,
+      # IntegrationStockPrepPanel, IntegrationExternalWritePanel, IntegrationTableActionsPanel,
+      # IntegrationFieldOptionSyncPanel) were silently NOT running despite appearing in the file.
+      # Consolidated here into the SINGLE unioned list (verified green on both Node 20 and this repo's
+      # default Node before landing) — do not reintroduce a second `run:` key; add new specs to this one.
       - name: Run integration web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard --reporter=dot
