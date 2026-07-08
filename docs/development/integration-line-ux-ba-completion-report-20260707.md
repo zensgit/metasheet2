@@ -59,8 +59,11 @@ owner「完成这条开发线的所有开发」mandate(2026-07-07)达成:能力�
 ## 4. 收尾三核验(final main HEAD 7d9de81ad)
 
 ```text
-核验1 yml run 行 ⊇ 所有存在 integration spec —— PASS(31 spec pattern,JsonAssist 大小写不敏感
-       捞到 utils/jsonAssist.spec.ts,optionSetsStructured 在列)
+核验1 yml run 行 ⊇ 所有存在 integration spec —— PASS(33 spec pattern;JsonAssist 大小写不敏感
+       捞 utils/jsonAssist.spec.ts;审阅 P2 后补入 integrationWorkbench.spec.ts(511行service)与
+       MetaIntegrationFieldRuleAuthoring.spec.ts(212行,曾漏于 Integration* glob),现审计涵盖全
+       apps/web/tests 下 integration/bridge/readSource/jsonAssist/optionSets/fieldHint/errorCode/
+       MetaIntegration 前缀)
 核验2 逻辑文件(非仅 .vue)全在 main —— PASS(11 文件:6 service/util + 5 组件)
 核验3 完整 integration-guard 对 final main HEAD —— PASS(32 files / 415 tests,Node 20;Node 25 复证)
 ```
