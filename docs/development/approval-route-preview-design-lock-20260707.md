@@ -77,8 +77,8 @@
 - ✅ **RP-2** B3-05 端点 + ApprovalNewView 预览条 —— as-built：POST `/api/approvals/preview`（与 create 同门链 authenticate+rbacGuard approvals:write，body 仅进只读底座），服务端批量姓名充实（users/roles 单次只读查询，缺行诚实回退 id），发起页流程卡内「按当前表单预览路径」（compute-at-click；race-guard 抽为 `routePreviewController`——飞行中改表单/连点均按 generation 作废旧响应，陈旧路径永不回填；未解析节点渲染「（审批人待定）」）；路由级真库测试（401/403/400/404/200+零写入按模板 scope）+ FE 摘要矩阵 + controller race 单测；守卫突变验证 RED（门链 write→read、充实回退、preview 偷换 create）
   - **对账修正（gate ③ 语义诚实化）**：owner 硬门③的「白名单」在实现里位于 `pruneHiddenFormData` 之后，而后者已把 formData 收敛到「可见的模板声明字段」——故白名单是**冗余的纵深防御**而非唯一闸。安全性质（未声明/组织探测键不进走图）在 create+preview 两路都成立；证明用一个「条件节点按未声明字段 `route_secret` 分支」的判别式金测：任一层生效即 low 臂，**两层同时移除**才漂到 high 臂（已 mutation 验证 RED）。原「移除白名单即漂路由」的说法不成立，已在代码注释与测试注释更正。
   - **§3 输出契约对齐**：端点线响应严格等于 §3 的 `{ route, truncated }`——底座内部返回的 `totalSteps` 不上线（不转发），并有金测断言 `Object.keys(body)===['route','truncated']` 锁死防漂移。
-- ⬜ **RP-3** B3-06 端点 + authoring 试运行面板 —— RP-1 后，可与 RP-2 并行
-- 🔒 依赖提醒：RP-3 的条件人话展示消费 G-B2-19 `conditionSummary`（在飞）
+- 🟦 **RP-3 端点 as-built（本 PR，backend）**：POST `/api/approval-templates/:id/route-preview`，守卫 `approvalTemplateAdminGuard`（canManageTemplates）——**唯一接受 `sampleRequesterId` 的面**（owner 硬门③：组织探测面仅管理端点可达；B3-05 面永不接受 requester 覆盖）。复用 B3-05 同一只读走图+姓名充实（抽 `walkPreviewRoute` 私有helper，`previewApprovalRoute`/`previewTemplateRoute` 共享——无平行实现）。两处扩展只在 preview 侧生效、create/B3-05 字节不变：①`previewSource:'draft'` 用 publish 同一 `buildRuntimeGraph` 编译 LATEST/草稿版本（作者可试运行未发布编辑，跳过 409 published 门）；②`requesterOverride` 只从 sampleRequesterId 的 userId 现查 org 关系/目录角色（客户端不可喂 roles/dept）。入口 `actor` 仍负责模板可见性鉴权。真库测试 8/8（401/403非管理/400/404/草稿预览+样例发起人驱动路由A≠B/省略回退actor/§3+零写scope）；突变 RED（draft-compile 关→409；sampleRequester 断线→A/B 失效）；create 路径回归 14/14（requester role/dept/title/manager-chain/delegation）。
+- ⬜ **RP-3 FE 试运行面板** —— authoring 页消费上端点：样例发起人 picker（复用 directory/users）+ 样例表单 → 高亮命中路径 + 各节点解析人 + 条件人话（复用 G-B2-19 `conditionSummary`）。可交 Sonnet。
 
 ## 7. Out of scope
 
