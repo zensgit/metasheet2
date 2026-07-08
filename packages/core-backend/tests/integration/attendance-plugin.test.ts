@@ -6060,6 +6060,93 @@ attendanceIntegrationDescribe(
       // replay: re-approving is rejected and never adds extra lots.
       expect((await approve(bankId)).status).toBe(400)
       expect((await pool.query(`SELECT count(*)::int AS n FROM attendance_leave_balances WHERE source_id=$1 AND leave_type_code='comp_time'`, [bankId])).rows[0].n).toBe(2)
+
+      // (5) S1 加班银行·额度有效期裁决 (overtime-bank-validity design-lock):
+      // BEFORE S1 `overtimeBankPolicy.validityDays` was shipped in the admin UI but read by nothing —
+      // only compTimeFromOvertime.expiresInDays governed expiry. Now: bank-enabled + validityDays set →
+      // it governs BANKED (source-tagged) lots and overrides expiresInDays; unset → falls back; the
+      // DORMANT path always uses expiresInDays.
+      const expiryDaysOf = async (rid: string) => (await pool.query(
+        `SELECT overtime_source,
+                CASE WHEN expires_at IS NULL THEN NULL
+                     ELSE round(EXTRACT(EPOCH FROM (expires_at - now())) / 86400.0)::int END AS days
+           FROM attendance_leave_balances
+          WHERE org_id='default' AND source_id=$1 AND leave_type_code='comp_time'
+          ORDER BY overtime_source NULLS FIRST`,
+        [rid],
+      )).rows as { overtime_source: string | null; days: number | null }[]
+
+      const segmentRequest = async (rid: string) => {
+        await pool.query(
+          `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+          [rid, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-09-11', dayType: 'workday', segments: { workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: 60, compTimeGrantMinutes: 60 })],
+        )
+      }
+
+      // 5a — bank ON, validityDays=90, expiresInDays=null → banked lot expires in 90 days (was: never).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: 90 } })).status).toBe(200)
+      const vId = await createOvertime('2026-09-11', 60)
+      await segmentRequest(vId)
+      expect((await approve(vId)).status).toBe(200)
+      expect(await expiryDaysOf(vId)).toEqual([{ overtime_source: 'workday', days: 90 }])
+
+      // 5b — bank ON, validityDays=90, expiresInDays=30 → validityDays WINS (precedence proven).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 30 }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: 90 } })).status).toBe(200)
+      const vWinId = await createOvertime('2026-09-12', 60)
+      await pool.query(
+        `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+        [vWinId, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-09-12', dayType: 'workday', segments: { workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: 60, compTimeGrantMinutes: 60 })],
+      )
+      expect((await approve(vWinId)).status).toBe(200)
+      expect(await expiryDaysOf(vWinId)).toEqual([{ overtime_source: 'workday', days: 90 }])
+
+      // 5c — bank ON, validityDays unset, expiresInDays=30 → falls back (pre-S1 behaviour, unchanged).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 30 }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: null } })).status).toBe(200)
+      const vFallId = await createOvertime('2026-09-13', 60)
+      await pool.query(
+        `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+        [vFallId, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-09-13', dayType: 'workday', segments: { workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: 60, compTimeGrantMinutes: 60 })],
+      )
+      expect((await approve(vFallId)).status).toBe(200)
+      expect(await expiryDaysOf(vFallId)).toEqual([{ overtime_source: 'workday', days: 30 }])
+
+      // 5d — bank OFF + validityDays=90 + expiresInDays=30 → DORMANT single NULL-source lot keeps
+      // expiresInDays; the bank knob must NOT leak into the legacy path (byte-identical).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 30 }, overtimeBankPolicy: { enabled: false, pooledSources: [], validityDays: 90 } })).status).toBe(200)
+      const dormId = await createOvertime('2026-09-14', 60)
+      expect((await approve(dormId)).status).toBe(200)
+      expect(await expiryDaysOf(dormId)).toEqual([{ overtime_source: null, days: 30 }])
+
+      // 5e — P2-1: an over-large validityDays is rejected at settings-save (400), so it can never reach the
+      // banked INSERT and overflow the PG interval (was: 200 at PUT, then 500 on the next approval).
+      expect((await putSettings({ overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: 999999999 } })).status).toBe(400)
+      // the boundary value is accepted and governs.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: 36500 } })).status).toBe(200)
+      const capId = await createOvertime('2026-09-15', 60)
+      await pool.query(
+        `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+        [capId, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-09-15', dayType: 'workday', segments: { workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: 60, compTimeGrantMinutes: 60 })],
+      )
+      expect((await approve(capId)).status).toBe(200)
+      expect(await expiryDaysOf(capId)).toEqual([{ overtime_source: 'workday', days: 36500 }])
+
+      // 5f — P3-2: existing lots are never rewritten. Re-issuing the exact banked INSERT with a DIFFERENT
+      // validity leaves the already-granted lot's expires_at unchanged (INSERT … ON CONFLICT DO NOTHING,
+      // no UPDATE reaches comp_time).
+      const beforeExpiry = (await pool.query(
+        `SELECT expires_at FROM attendance_leave_balances WHERE org_id='default' AND source_id=$1 AND leave_type_code='comp_time'`, [capId],
+      )).rows[0].expires_at
+      await pool.query(
+        `INSERT INTO attendance_leave_balances
+           (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status, expires_at, overtime_source)
+         VALUES ('default', $1, 'comp_time', 60, 60, 'overtime_conversion', $2, $3, 'active', now() + (7 * interval '24 hours'), 'workday')
+         ON CONFLICT (org_id, source_key) DO NOTHING`,
+        [userId, capId, `overtime_conversion:${capId}:workday`],
+      )
+      const afterExpiry = (await pool.query(
+        `SELECT expires_at FROM attendance_leave_balances WHERE org_id='default' AND source_id=$1 AND leave_type_code='comp_time'`, [capId],
+      )).rows[0].expires_at
+      expect(new Date(afterExpiry).getTime()).toBe(new Date(beforeExpiry).getTime())
     } finally {
       if (token && Object.keys(originalSettings).length > 0) {
         await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
