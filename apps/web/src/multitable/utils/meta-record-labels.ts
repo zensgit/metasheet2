@@ -69,6 +69,7 @@ export type MetaRecordLabelKey =
   | 'record.configRestoreServerSummary' | 'record.configRestoreEntity' | 'record.configRestoreNote'
   | 'record.configRestoreIdCollision' | 'record.configRestoreIdCollisionBlocked' | 'record.configRestoreScope'
   | 'record.configRestoreDirection' | 'record.configRestoreBlocked'
+  | 'record.configRestoreBoolYes' | 'record.configRestoreBoolNo'
   // FE-owned static fallback strings (the `error?.message ?? l(...)`
   // pattern from T3A2). Backend error.message remains raw when present.
   | 'record.errorHistoryLoad' | 'record.errorWatchLoad' | 'record.errorWatchUpdate'
@@ -203,6 +204,8 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.configRestoreScope': { en: 'Scope', zh: '范围' },
   'record.configRestoreDirection': { en: 'Direction', zh: '方向' },
   'record.configRestoreBlocked': { en: 'This preview is not executable.', zh: '此预览不可执行。' },
+  'record.configRestoreBoolYes': { en: 'yes', zh: '是' },
+  'record.configRestoreBoolNo': { en: 'no', zh: '否' },
   'record.errorRestore': { en: 'Restore failed', zh: '恢复失败' },
   'record.errorHistoryLoad': { en: 'Failed to load history', zh: '加载历史失败' },
   'record.errorWatchLoad': { en: 'Failed to load watch status', zh: '加载关注状态失败' },
@@ -281,4 +284,13 @@ export function requiredField(fieldName: string, isZh: boolean): string {
 // (A4). Numbers are not translated; the surrounding copy is.
 export function formPageIndicator(current: number, total: number, isZh: boolean): string {
   return isZh ? `第 ${current} / ${total} 页` : `Page ${current} of ${total}`
+}
+
+// configRestoreTypedConfirm: the T9-W destructive-tier typed-confirm input prompt
+// (MetaConfigHistoryModal). `confirmToken` is one of the server-defined
+// ConfigRestoreExecuteConfirm literals ('uncreate' | 'undelete' | 'revert-permission')
+// — it is what the operator must literally type, so it is interpolated raw and
+// never translated; only the surrounding copy is.
+export function configRestoreTypedConfirm(confirmToken: string, isZh: boolean): string {
+  return isZh ? `输入 ${confirmToken} 以确认：` : `Type ${confirmToken} to confirm:`
 }

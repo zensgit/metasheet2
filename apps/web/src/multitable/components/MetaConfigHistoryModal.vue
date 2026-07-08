@@ -90,11 +90,11 @@
                   {{ blockedReason(revert.preview) }}
                 </p>
                 <label v-else class="cfg-restore-type" data-test="config-restore-type-label">
-                  {{ typedConfirmPrompt(requiredConfirm(revert.preview)) }}
+                  {{ configRestoreTypedConfirm(requiredConfirm(revert.preview) ?? '', isZh) }}
                   <input
                     v-model="revert.typedConfirm"
                     data-test="config-restore-type-input"
-                    :aria-label="typedConfirmPrompt(requiredConfirm(revert.preview))"
+                    :aria-label="configRestoreTypedConfirm(requiredConfirm(revert.preview) ?? '', isZh)"
                   />
                 </label>
               </template>
@@ -121,7 +121,7 @@ import { computed, ref } from 'vue'
 
 import type { MetaConfigRevision, ConfigRestoreExecuteConfirm, ConfigRestorePreview, ConfigRestoreUpdatePreview } from '../api/client'
 import { redactString } from '../utils/automation-log-redact'
-import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
+import { recordLabel, configRestoreTypedConfirm, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 
 const props = defineProps<{
   visible: boolean
@@ -385,7 +385,7 @@ function destructiveSummaryRows(preview: ConfigRestorePreview): Array<{ key: str
     return [
       { key: l('record.configRestoreEntity'), value: entitySummary(preview.undelete.entityType, preview.undelete.entityId, preview.undelete.entityName) },
       { key: l('record.configRestoreNote'), value: preview.undelete.note || l('record.configRestoreBlocked') },
-      { key: l('record.configRestoreIdCollision'), value: boolLabel(preview.undelete.idCollision === true) },
+      { key: l('record.configRestoreIdCollision'), value: l(preview.undelete.idCollision === true ? 'record.configRestoreBoolYes' : 'record.configRestoreBoolNo') },
     ]
   }
   if ('permissionRevert' in preview) {
@@ -400,15 +400,6 @@ function destructiveSummaryRows(preview: ConfigRestorePreview): Array<{ key: str
 
 function entitySummary(entityType: string, entityId: string, entityName?: string): string {
   return entityName ? `${entityLabel(entityType)} ${entityName} (${entityId})` : `${entityLabel(entityType)} ${entityId}`
-}
-
-function boolLabel(value: boolean): string {
-  return props.isZh ? (value ? '是' : '否') : (value ? 'yes' : 'no')
-}
-
-function typedConfirmPrompt(confirm: ConfigRestoreExecuteConfirm | undefined): string {
-  const token = confirm ?? ''
-  return props.isZh ? `输入 ${token} 以确认：` : `Type ${token} to confirm:`
 }
 </script>
 
