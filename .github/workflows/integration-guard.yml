@@ -53,6 +53,8 @@ on:
       - 'apps/web/src/utils/jsonAssist.ts'
       - 'apps/web/src/utils/optionSetsStructured.ts'
       - 'apps/web/src/components/integration/integrationWorkbenchSectionTypes.ts'
+      - 'apps/web/src/components/integration/MetaIntegrationFieldRuleAuthoring.vue'
+      - 'apps/web/src/services/integration/workbench.ts'
       - 'apps/web/src/components/integration/JsonAssist.vue'
       - 'apps/web/src/utils/jsonAssist.ts'
       - 'apps/web/src/views/IntegrationWorkbenchView.vue'
@@ -62,6 +64,8 @@ on:
       - 'apps/web/tests/multitable-resolver-vocab-mirror.spec.ts'
       - 'apps/web/tests/integrationErrorCodeLabels.spec.ts'
       - 'apps/web/tests/fieldHints.spec.ts'
+      - 'apps/web/tests/integrationWorkbench.spec.ts'
+      - 'apps/web/tests/MetaIntegrationFieldRuleAuthoring.spec.ts'
       - 'apps/web/tests/bridgeAgentConfigCheck.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceConfigPanel.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceWizard.spec.ts'
@@ -124,6 +128,8 @@ on:
       - 'apps/web/src/utils/jsonAssist.ts'
       - 'apps/web/src/utils/optionSetsStructured.ts'
       - 'apps/web/src/components/integration/integrationWorkbenchSectionTypes.ts'
+      - 'apps/web/src/components/integration/MetaIntegrationFieldRuleAuthoring.vue'
+      - 'apps/web/src/services/integration/workbench.ts'
       - 'apps/web/src/components/integration/JsonAssist.vue'
       - 'apps/web/src/utils/jsonAssist.ts'
       - 'apps/web/src/views/IntegrationWorkbenchView.vue'
@@ -133,6 +139,8 @@ on:
       - 'apps/web/tests/multitable-resolver-vocab-mirror.spec.ts'
       - 'apps/web/tests/integrationErrorCodeLabels.spec.ts'
       - 'apps/web/tests/fieldHints.spec.ts'
+      - 'apps/web/tests/integrationWorkbench.spec.ts'
+      - 'apps/web/tests/MetaIntegrationFieldRuleAuthoring.spec.ts'
       - 'apps/web/tests/bridgeAgentConfigCheck.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceConfigPanel.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceWizard.spec.ts'
@@ -213,4 +221,4 @@ jobs:
       # Consolidated here into the SINGLE unioned list (verified green on both Node 20 and this repo's
       # default Node before landing) — do not reintroduce a second `run:` key; add new specs to this one.
       - name: Run integration web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring --reporter=dot
