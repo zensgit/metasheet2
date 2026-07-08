@@ -74,7 +74,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -93,8 +93,20 @@ import {
   insertFieldValueTombstones,
   insertFieldLinkTombstones,
   readAutoNumberNextValue,
+  captureLossyRetypePreImageRows,
   TombstoneCaptureCapExceededError,
 } from '../multitable/tombstone-capture'
+import { resolveSheetRevertMaxRecords } from '../multitable/restore-caps'
+import {
+  type CellLossOutcome,
+  type LossSummary,
+  computeLossOutcomes,
+  isLossyPropertyRetypeRevertShape,
+  isLossyRetypeRevertEnabled,
+  isLossyRetypeSupportedFieldType,
+  summarizeLoss,
+  LOSSY_RETYPE_PREVIEW_NOTE,
+} from '../multitable/lossy-retype-oracle'
 import {
   type ConfigRevisionRow,
   classifyRevert,
@@ -6211,6 +6223,171 @@ async function computeUndeletePlan(query: TxnQuery, rev: ConfigRevisionRow): Pro
   return { idFree: !occupied, insertOrder, trailingShiftIds, targetConfigHash }
 }
 
+// ── 4c-1 lossy / value-transform retype revert helpers (design-lock 2026-07-07 #3812; ratified 2026-07-08) ─────
+
+interface LossyRetypeFieldRow { id: string; sheetId: string; type: string }
+
+/** The live field row the loss oracle reasons about. `FOR UPDATE` only inside the execute txn (caller decides). */
+async function loadLossyRetypeFieldRow(query: TxnQuery, fieldId: string, forUpdate: boolean): Promise<LossyRetypeFieldRow | null> {
+  const res = (await query(`SELECT id, sheet_id, type FROM meta_fields WHERE id = $1${forUpdate ? ' FOR UPDATE' : ''}`, [fieldId])) as any
+  const row = res.rows[0] as { id: unknown; sheet_id: unknown; type: unknown } | undefined
+  if (!row) return null
+  return { id: String(row.id), sheetId: String(row.sheet_id), type: String(row.type ?? '') }
+}
+
+/**
+ * The property the oracle coerces AGAINST: the revision's `before.property` — the config this revert restores.
+ * (`configUpdateDiff` records only the CHANGED keys, and `'property'` is in `changed_keys` by the envelope
+ * predicate, so `before.property` is always present; a `null` property normalizes to `undefined` for the codec,
+ * which is what `coerceBatch1Value`'s `property ?? {}` arms expect.)
+ */
+function lossyRetypeTargetProperty(rev: ConfigRevisionRow): Record<string, unknown> | undefined {
+  const raw = (rev.before ?? {}).property
+  return isPlainObject(raw) ? raw : undefined
+}
+
+/**
+ * 4c-1 U-L8 — the FULL-READ GATE (owner ratification 2026-07-08 §2, overriding the design-lock's alternative (ii)).
+ *
+ * An actor who cannot read EVERY record × field of this sheet is refused the whole surface (403 on preview AND
+ * execute); no scoped loss counts, no `undisclosedPresent` marker, hence NO oracle surface at all — C2 is satisfied
+ * by a gate rather than by a marker, which is the strongest available reading.
+ *
+ * CRITICAL: every input here is CONFIG-derived, never DATA-derived. `loadDeniedRecordIds` would have been the
+ * obvious row-axis primitive, but its rule-deny arm evaluates predicates against LIVE record data — so gating on
+ * "the denied set happens to be empty right now" would turn the 403/200 boundary into exactly the 1-bit data probe
+ * U-L8 forbids. We gate on the sheet's row-level-read SWITCH instead (`loadRowLevelReadDenyEnabled`, plus the same
+ * admin bypass every read surface applies): constant with respect to the data, conservative (a sheet with the switch
+ * on but zero effective denials is still refused), and impossible to use as a probe.
+ *
+ * Three axes, all of which must be clean — reusing the multitable-local permission primitives only (C7: the central
+ * rbac/auth is not touched):
+ *   1. ROW: the sheet's row-level read-deny switch is off for this actor (or the actor is an admin role).
+ *   2. FIELD: the actor's field_permissions scope masks nothing — the allowed set with the per-subject scope applied
+ *      equals the set with that axis lifted.
+ *   3. FORMULA TAINT: no allowed field is dropped by the §2a.3 stored-data taint mask.
+ */
+async function hasFullTableReadAccess(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+  access: { userId: string | null; isAdminRole: boolean },
+  capabilities: MultitableCapabilities,
+): Promise<boolean> {
+  if (!access.userId) return false // anonymous/unscoped → fail closed
+  if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, sheetId))) return false
+  const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
+  const scopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
+  const scoped = computeAllowedFieldIds(fields, capabilities, scopeMap)
+  const unscoped = computeAllowedFieldIds(fields, capabilities, new Map<string, FieldPermissionScope>())
+  if (scoped.size !== unscoped.size) return false
+  for (const id of unscoped) if (!scoped.has(id)) return false
+  const masked = await maskStoredRecordFieldIds(req, query, sheetId, undefined, scoped)
+  return masked.size === scoped.size
+}
+
+/**
+ * Live cells for one field: exactly the records whose `data` CARRIES the key (a missing key has nothing to lose).
+ * `FOR UPDATE` (execute only) locks the exact rows the oracle is about to judge, so the loss magnitude verified
+ * against the token cannot change between the re-computation and the rewrite (§2.3).
+ */
+async function loadLossyRetypeCells(query: TxnQuery, sheetId: string, fieldId: string, forUpdate: boolean): Promise<Array<{ recordId: string; value: unknown; data: Record<string, unknown> }>> {
+  const res = (await query(
+    `SELECT id, data FROM meta_records WHERE sheet_id = $1 AND data ? $2 ORDER BY id${forUpdate ? ' FOR UPDATE' : ''}`,
+    [sheetId, fieldId],
+  )) as any
+  return (res.rows as Array<{ id: unknown; data: unknown }>).map((r) => {
+    const data = normalizeJson(r.data)
+    return { recordId: String(r.id), value: data[fieldId], data }
+  })
+}
+
+/** C4 write-symmetric cap input: the rows the oracle must SCAN = the sheet's live records (not just cells present). */
+async function countLossyRetypeScanRows(query: TxnQuery, sheetId: string): Promise<number> {
+  const res = (await query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])) as any
+  return Number((res.rows[0] as { c?: number } | undefined)?.c ?? 0)
+}
+
+const lossyRetypeTooLargeMessage = (recordCount: number, cap: number): string =>
+  `This sheet has ${recordCount} records, above the ${cap}-record ceiling for a value-transforming field revert; a revert of this size is refused.`
+
+/**
+ * The lossy revert's WRITE half: capture the pre-image (4c-2 seam), then rewrite every coerced/dropped cell in ONE
+ * batched statement, then record ONE record revision per changed cell. Same txn as the `meta_fields` config revert.
+ */
+async function applyLossyRetypeCellRewrite(query: TxnQuery, opts: {
+  sheetId: string
+  fieldId: string
+  /** THIS revert's own config-revision id — the 4c-2 "回指触发行" anchor (§2 capture point 3 / 4c-1 §3). */
+  lossyRevisionId: string
+  changed: ReadonlyArray<CellLossOutcome>
+  cellByRecordId: ReadonlyMap<string, { data: Record<string, unknown> }>
+  actorId: string | null
+}): Promise<void> {
+  const { sheetId, fieldId, lossyRevisionId, changed, cellByRecordId, actorId } = opts
+  if (changed.length === 0) return
+
+  // 4c-2 pre-image capture (double-ratify linkage, design-lock §3 / C6). Same txn, BEFORE the overwrite, anchored to
+  // THIS revert's own config revision so a later revert-of-revert can recover the TRUE pre-coerce values rather than
+  // re-coercing. Gated by MULTITABLE_TOMBSTONE_CAPTURE_ENABLED; over its cap the capture THROWS and the whole revert
+  // rolls back (fail-closed: "capture on ⇒ every destruction is already captured" is never violated).
+  // `value jsonb NOT NULL` on meta_field_value_tombstones: a null pre-image is impossible here (coerce(null)===null
+  // ⇒ `unchanged` ⇒ never in `changed`), but filter defensively rather than trip a constraint at runtime.
+  if (isTombstoneCaptureEnabled()) {
+    const preImages = changed
+      .filter((c) => c.before !== null && c.before !== undefined)
+      .map((c) => ({ recordId: c.recordId, value: c.before }))
+    assertWithinCaptureCap(preImages.length)
+    await captureLossyRetypePreImageRows(query, preImages, { sheetId, fieldId, configRevisionId: lossyRevisionId })
+  }
+
+  // `COALESCE(item.value, 'null'::jsonb)` below is load-bearing: `jsonb_to_recordset` maps a JSON `null` to SQL NULL,
+  // and `jsonb_set(data, path, NULL)` returns NULL for the WHOLE `data` column — a dropped cell would wipe the record.
+  // A single batched statement (never a per-row round trip), matching the tombstone-capture module's discipline.
+  const payload = changed.map((c) => ({ record_id: c.recordId, value: c.after ?? null }))
+  // lock-exempt: 4c-1 lossy retype revert — schema op rewriting the reverted field's key sheet-wide under the
+  // config-restore canManageFields gate (mirrors the field-delete column strip / field-undelete rehydration);
+  const rewritten = (await query(
+    `UPDATE meta_records AS m
+     SET data = jsonb_set(m.data, ARRAY[$2::text], COALESCE(item.value, 'null'::jsonb), true),
+         version = m.version + 1,
+         updated_at = now()
+     FROM jsonb_to_recordset($3::jsonb) AS item(record_id text, value jsonb)
+     WHERE m.sheet_id = $1 AND m.id = item.record_id
+     RETURNING m.id, m.version`,
+    [sheetId, fieldId, JSON.stringify(payload)],
+  )) as any
+  const updatedRows = rewritten.rows as Array<{ id: unknown; version: unknown }>
+  // The cells were locked FOR UPDATE before the oracle ran, so a short write is a real invariant break, not a race.
+  if (updatedRows.length !== changed.length) {
+    throw new Error(`lossy retype revert rewrote ${updatedRows.length} of ${changed.length} cells; aborting`)
+  }
+
+  // C5 history completeness: ONE record revision per changed cell, sharing one batchId (LOCK-12 — one user action =
+  // one batch). This is what makes the lossy revert itself undoable through the ordinary record-version restore.
+  const outcomeByRecordId = new Map(changed.map((c) => [c.recordId, c]))
+  const recordBatchId = randomUUID()
+  for (const row of updatedRows) {
+    const recordId = String(row.id)
+    const outcome = outcomeByRecordId.get(recordId)
+    const previous = cellByRecordId.get(recordId)
+    if (!outcome || !previous) throw new Error(`lossy retype revert lost track of record ${recordId}; aborting`)
+    const nextValue = outcome.after ?? null
+    await recordRecordRevision(query, {
+      sheetId,
+      recordId,
+      version: Number(row.version) || 0,
+      action: 'update',
+      source: 'restore',
+      actorId,
+      changedFieldIds: [fieldId],
+      patch: { [fieldId]: nextValue },
+      snapshot: { ...previous.data, [fieldId]: nextValue },
+      batchId: recordBatchId,
+    })
+  }
+}
+
 /**
  * U4-L2/L3: recreate a deleted FIELD from its `before` at its original order (trailing shift +1).
  * 4c-2 R1: when the delete that produced `before` has a matching tombstone set (`opts.deleteRevisionId` —
@@ -8410,6 +8587,43 @@ export function univerMetaRouter(): Router {
       if (isFieldRetypeRevert(rev) && process.env.MULTITABLE_ENABLE_FIELD_RETYPE_REVERT !== 'true') {
         return res.status(403).json({ ok: false, error: { code: 'FIELD_RETYPE_REVERT_DISABLED', message: 'field type/property revert is disabled (MULTITABLE_ENABLE_FIELD_RETYPE_REVERT off).' } })
       }
+      // ── 4c-1 LOSSY / value-transform retype revert PREVIEW (design-lock #3812; owner-ratified 2026-07-08) ────
+      // Second flag, default off, AND requires the base Tier-2 flag (403'd immediately above ⇒ base off = 403 for
+      // the whole surface, the "双闸串联" of §2.1). Flag off ⇒ this branch is never entered ⇒ a property-only field
+      // revert keeps today's behavior byte-for-byte (gated preview here, 422 at execute). Envelope = property-only
+      // reverts on a Batch-1-typed field; see lossy-retype-oracle.ts for why the type-changing arm of §2.1 is read
+      // fail-closed. Preview is a PURE READ: it writes nothing and only re-plays the record-write codec.
+      if (isLossyPropertyRetypeRevertShape(rev) && isLossyRetypeRevertEnabled()) {
+        const fieldRow = await loadLossyRetypeFieldRow(pool.query.bind(pool), rev.entity_id, false)
+        if (!fieldRow) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot preview a revert.' } })
+        if (fieldRow.sheetId !== sheetId) return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'field revision entity does not belong to this sheet.' } })
+        // Outside the Batch-1 type envelope → fall through to the pre-existing gated preview (execute 422s it).
+        if (isLossyRetypeSupportedFieldType(fieldRow.type)) {
+          // U-L8 FULL-READ GATE (owner ruling): no full-table read ⇒ 403 for the whole surface. Runs BEFORE any
+          // counting, so no response on this path can ever carry a scoped count or an undisclosed marker.
+          if (!(await hasFullTableReadAccess(req, pool.query.bind(pool), sheetId, access, capabilities))) {
+            return res.status(403).json({ ok: false, error: { code: 'FULL_TABLE_READ_REQUIRED', message: 'A value-transforming field revert requires unrestricted read access to every record and field of this sheet.' } })
+          }
+          // C4 write-symmetric cap — the SAME ceiling the sheet-wide revert uses, checked on BOTH sides, fail-closed
+          // (never a silent truncation, never a partial transform).
+          const cap = resolveSheetRevertMaxRecords()
+          const scanRows = await countLossyRetypeScanRows(pool.query.bind(pool), sheetId)
+          if (scanRows > cap) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: lossyRetypeTooLargeMessage(scanRows, cap) } })
+          const snapshot = await loadEntityConfigSnapshot(pool.query.bind(pool), rev)
+          if (!snapshot) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot preview a revert.' } })
+          const cells = await loadLossyRetypeCells(pool.query.bind(pool), sheetId, rev.entity_id, false)
+          const lossSummary = summarizeLoss(computeLossOutcomes(cells, fieldRow.type, lossyRetypeTargetProperty(rev), rev.entity_id))
+          const preview = computeRevertPreview(rev, snapshot)
+          // classifyRevert stays PURE (it gates every field property revert); the flag opens exactly this subset.
+          preview.opKind = 'safe'
+          delete preview.gatedReason
+          const previewToken = mintConfigRestorePreviewIdentity({
+            sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+            baselineHash: preview.baselineHash, lossHash: hashLossSummary(rev.entity_id, lossSummary), actorId: access.userId,
+          })
+          return res.json({ ok: true, data: { preview, previewToken, lossSummary, lossNote: LOSSY_RETYPE_PREVIEW_NOTE, confirm: 'revert-retype-lossy' } })
+        }
+      }
       // T9-W Tier 1 (U-L1): sheet_config revert is behind a per-tier flag (default off) — refuse preview AND execute.
       if (rev.entity_type === 'sheet_config') {
         if (process.env.MULTITABLE_ENABLE_SHEET_CONFIG_REVERT !== 'true') {
@@ -8643,6 +8857,82 @@ export function univerMetaRouter(): Router {
         })
         if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
         return res.json({ ok: true, data: { permissionReverted: { scope: parsedPerm.scope, entityId: rev.entity_id } } })
+      }
+      // ── 4c-1 LOSSY / value-transform retype revert EXECUTE (design-lock #3812; owner-ratified 2026-07-08) ────
+      // ONE txn: lock the field + its cells (FOR UPDATE) → re-check the envelope, the U-L8 full-read gate and the
+      // write-symmetric cap → RE-COMPUTE the loss magnitude and verify the token's opaque lossHash (divergence ⇒ 409
+      // PLAN_DRIFT) → capture the 4c-2 pre-image → apply the config revert → rewrite the coerced/dropped cells →
+      // one record revision per changed cell → the source='restore' config revision (whose id anchors the pre-image).
+      // Any guard returns the failure object with ZERO writes; any throw rolls the whole thing back (C5/L7 atomicity).
+      if (isLossyPropertyRetypeRevertShape(rev) && isLossyRetypeRevertEnabled()) {
+        const liveField = await loadLossyRetypeFieldRow(pool.query.bind(pool), rev.entity_id, false)
+        if (!liveField) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' } })
+        if (liveField.sheetId !== sheetId) return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'field revision entity does not belong to this sheet.' } })
+        // Outside the Batch-1 type envelope → fall through to the generic gated 422 below (fail-closed, C1).
+        if (isLossyRetypeSupportedFieldType(liveField.type)) {
+          // Typed confirm — mirrors the uncreate / undelete / permission-revert destructive tiers on THIS route,
+          // which all answer a missing/incorrect confirm with 400 CONFIRM_REQUIRED (design-lock §2.4 "镜像
+          // uncreate/undelete 模式"). See the PR body: §4's L9 table shorthand says 422; the normative §2.4 mirror
+          // instruction and same-endpoint consistency win, and this is a one-line change if the owner rules otherwise.
+          const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
+          if (confirm.trim() !== 'revert-retype-lossy') {
+            return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "revert-retype-lossy" to confirm a value-transforming field revert (cells may be rewritten or emptied).' } })
+          }
+          const lossyRevisionId = randomUUID() // pre-generated: the 4c-2 pre-image anchors to THIS revert's revision
+          let lossyExecuteSummary: LossSummary = { unchanged: 0, coerced: 0, dropped: 0 }
+          const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+            const fieldRow = await loadLossyRetypeFieldRow(query, rev.entity_id, true)
+            if (!fieldRow) return { status: 409, code: 'ENTITY_GONE', message: 'The field no longer exists; cannot restore.' }
+            if (fieldRow.sheetId !== sheetId) return { status: 400, code: 'INVALID_REVISION', message: 'field revision entity does not belong to this sheet.' }
+            // Re-check inside the lock: the field could have been retyped out of the envelope since the preview.
+            if (!isLossyRetypeSupportedFieldType(fieldRow.type)) return { status: 422, code: 'RESTORE_NOT_SUPPORTED', message: 'This field revert is not a supported value-transforming revert.' }
+            if (!(await hasFullTableReadAccess(req, query as unknown as QueryFn, sheetId, access, capabilities))) {
+              return { status: 403, code: 'FULL_TABLE_READ_REQUIRED', message: 'A value-transforming field revert requires unrestricted read access to every record and field of this sheet.' }
+            }
+            const cap = resolveSheetRevertMaxRecords()
+            const scanRows = await countLossyRetypeScanRows(query, sheetId)
+            if (scanRows > cap) return { status: 413, code: 'SHEET_TOO_LARGE', message: lossyRetypeTooLargeMessage(scanRows, cap) }
+            const snapshot = await loadEntityConfigSnapshot(query, rev)
+            if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
+            const cells = await loadLossyRetypeCells(query, sheetId, rev.entity_id, true)
+            const outcomes = computeLossOutcomes(cells, fieldRow.type, lossyRetypeTargetProperty(rev), rev.entity_id)
+            const lossSummary = summarizeLoss(outcomes)
+            const preview = computeRevertPreview(rev, snapshot)
+            // §2.3: the token binds BOTH the config baseline AND the loss magnitude. The full-read gate makes the
+            // re-computation range identical to the preview's (the whole table), so this is a like-for-like compare.
+            const verdict = verifyConfigRestorePreviewIdentity(previewToken, {
+              sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+              baselineHash: preview.baselineHash, lossHash: hashLossSummary(rev.entity_id, lossSummary), actorId: access.userId,
+            })
+            if (!verdict.valid) {
+              if (verdict.reason === 'loss_drift') return { status: 409, code: 'PLAN_DRIFT', message: 'The values this revert would transform changed since preview; re-preview before reverting.' }
+              if (verdict.reason === 'mismatch_baselineHash') return { status: 409, code: 'PREVIEW_STALE', message: 'The config changed since preview; re-preview before restoring.' }
+              if (verdict.reason === 'expired') return { status: 410, code: 'PREVIEW_EXPIRED', message: 'The preview identity expired; re-preview.' }
+              return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before restoring.' }
+            }
+            if (preview.driftConflict) return { status: 409, code: 'CONFIG_DRIFT', message: 'The config was changed after this revision; cannot safely revert without re-previewing.' }
+            await applyConfigRevert(query, rev)
+            await applyLossyRetypeCellRewrite(query, {
+              sheetId,
+              fieldId: rev.entity_id,
+              lossyRevisionId,
+              changed: outcomes.filter((o) => o.bucket !== 'unchanged'),
+              cellByRecordId: new Map(cells.map((c) => [c.recordId, c])),
+              actorId: getRequestActorId(req),
+            })
+            await recordConfigRevision(query, {
+              sheetId, entityType: 'field', entityId: rev.entity_id, action: 'update',
+              before: preview.current, after: preview.target, changedKeys: rev.changed_keys,
+              batchId: randomUUID(), actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id,
+              id: lossyRevisionId,
+            })
+            lossyExecuteSummary = lossSummary
+            return null
+          })
+          if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+          invalidateFieldCache(sheetId)
+          return res.json({ ok: true, data: { restored: { revisionId, entityType: rev.entity_type, entityId: rev.entity_id, changedKeys: rev.changed_keys }, lossSummary: lossyExecuteSummary } })
+        }
       }
       const classify = classifyRevert(rev)
       // classifyRevert stays PURE; the route SUPPORTS only the flag-opened supported subsets — Tier-1 sheet_config
@@ -9530,8 +9820,9 @@ export function univerMetaRouter(): Router {
   type RevertSheetCaps = Awaited<ReturnType<typeof resolveSheetCapabilities>>
   // D3 / PIT-6 hard ceiling: a whole-sheet revert above this many records is REFUSED fail-closed (not processed
   // synchronously, never truncated). Async-above-threshold is a follow-up; v1 hard-refuses. Env-overridable.
-  const SHEET_REVERT_MAX_RECORDS = Number(process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS) > 0
-    ? Math.floor(Number(process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS)) : 5000
+  // Resolved ONCE here (router construction), exactly as the pre-extraction route-local const did; the shared
+  // resolver now also backs the 4c-1 lossy-retype write-symmetric cap (C4 — same ceiling, one definition).
+  const SHEET_REVERT_MAX_RECORDS = resolveSheetRevertMaxRecords()
   type SheetRevertTooLarge = { tooLarge: true; recordCount: number; scope: 'live_sheet' | 'effective_write_set' }
   const sheetRevertTooLargeMessage = (computed: SheetRevertTooLarge) => {
     if (computed.scope === 'effective_write_set') return `This revert would touch ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.`
