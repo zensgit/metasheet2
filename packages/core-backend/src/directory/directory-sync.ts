@@ -1,6 +1,5 @@
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
-import { auditLog } from '../audit/audit'
 import { buildOnboardingPacket } from '../auth/access-presets'
 import { recordInvite } from '../auth/invite-ledger'
 import { issueInviteToken } from '../auth/invite-tokens'
@@ -3103,24 +3102,41 @@ export async function syncDirectoryIntegration(
     // DT-OPS-01: audit offboarding AFTER the transaction commits (mirrors the invite
     // ledger below) and only for effects that actually happened. A revoked grant or a
     // deactivated user must leave a trail — this is the access-closure record.
-    if (deprovisionOutcome?.applied) {
+    if (deprovisionOutcome?.applied && deprovisionOutcome.affected.length > 0) {
+      // Imported lazily on purpose. The audit stack binds a repository to the shared pg
+      // pool when it loads, and directory-sync is imported by unit suites that mock
+      // `db/pg` down to { query, transaction } — an eager import made them fail at module
+      // load. That is a module-graph coupling, not a behavioural one, and the lazy form is
+      // also the honest one: the audit stack is only needed once an offboarding took effect.
+      const { auditLog } = await import('../audit/audit')
+
       for (const affected of deprovisionOutcome.affected) {
-        await auditLog({
-          actorId: triggeredBy,
-          actorType: triggeredBy.startsWith('system:') ? 'system' : 'user',
-          action: 'deprovision',
-          resourceType: 'directory-account-link',
-          resourceId: affected.directoryAccountId,
-          meta: {
-            integrationId,
-            directoryAccountId: affected.directoryAccountId,
-            localUserId: affected.localUserId,
-            policy: affected.policy,
-            grantDisabled: true,
-            userDeactivated: affected.policy === 'mark_inactive',
-            triggeredBy,
-          },
-        })
+        try {
+          await auditLog({
+            actorId: triggeredBy,
+            actorType: triggeredBy.startsWith('system:') ? 'system' : 'user',
+            action: 'deprovision',
+            resourceType: 'directory-account-link',
+            resourceId: affected.directoryAccountId,
+            meta: {
+              integrationId,
+              directoryAccountId: affected.directoryAccountId,
+              localUserId: affected.localUserId,
+              policy: affected.policy,
+              grantDisabled: true,
+              userDeactivated: affected.policy === 'mark_inactive',
+              triggeredBy,
+            },
+          })
+        } catch (error) {
+          // The transaction has already committed and the access WAS revoked. Throwing
+          // here would mark a successful sync as failed and fire a false failure alert;
+          // swallowing it silently would lose a compliance record. So: loud, and continue.
+          logger.error(
+            `Failed to audit directory deprovision of user ${affected.localUserId} (account ${affected.directoryAccountId}) — access was revoked but the audit record is missing`,
+            error instanceof Error ? error : new Error(readErrorMessage(error, 'unknown error')),
+          )
+        }
         // A deactivated or grant-revoked user must not keep cached permissions.
         invalidateUserPerms(affected.localUserId)
       }
