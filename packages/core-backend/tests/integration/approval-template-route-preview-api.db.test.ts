@@ -63,6 +63,7 @@ describeIfDatabase('RP-3 — POST /api/approval-templates/:id/route-preview (rea
   let adminTok = ''
   let draftTemplateId = ''
   let deptRoutingDraftId = ''
+  let titleRoutingDraftId = ''
 
   beforeAll(async () => {
     expect(await canListen()).toBe(true)
@@ -124,6 +125,33 @@ describeIfDatabase('RP-3 — POST /api/approval-templates/:id/route-preview (rea
     } as never, { userId: ADMIN, userName: ADMIN } as never)
     deptRoutingDraftId = (deptTemplate as { id: string }).id
 
+    // Sibling wedge: routes on requester.title. Same guard block as department — pinned separately
+    // because the sample-requester surface makes BOTH constantly reachable for admins testing users
+    // with incomplete directory data. (The role wedge fails closed only on a TRANSIENT read failure,
+    // never on genuine-empty, so it has no equivalent deterministic fixture.)
+    const titleTemplate = await approvals.createTemplate({
+      key: `rp3title-${TS}`,
+      name: 'RP3 Title-Routing Draft',
+      formSchema: { fields: [{ id: 'summary', type: 'text', label: 'Summary', required: true }] },
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: 'Start', config: {} },
+          { key: 'cond_1', type: 'condition', name: 'route', config: { branches: [{ edgeKey: 'senior', rules: [], formula: { expression: 'requester.title == "总监"' } }], defaultEdgeKey: 'other' } },
+          { key: 'approval_senior', type: 'approval', name: '总监审批', config: { mode: 'any', assigneeSources: [{ kind: 'requester' }] } },
+          { key: 'approval_other', type: 'approval', name: '其他审批', config: { mode: 'any', assigneeSources: [{ kind: 'requester' }] } },
+          { key: 'end', type: 'end', name: 'End', config: {} },
+        ],
+        edges: [
+          { key: 'e0', source: 'start', target: 'cond_1' },
+          { key: 'senior', source: 'cond_1', target: 'approval_senior' },
+          { key: 'other', source: 'cond_1', target: 'approval_other' },
+          { key: 'es', source: 'approval_senior', target: 'end' },
+          { key: 'eo', source: 'approval_other', target: 'end' },
+        ],
+      },
+    } as never, { userId: ADMIN, userName: ADMIN } as never)
+    titleRoutingDraftId = (titleTemplate as { id: string }).id
+
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
     base = `http://127.0.0.1:${server.getAddress()!.port}`
@@ -133,7 +161,7 @@ describeIfDatabase('RP-3 — POST /api/approval-templates/:id/route-preview (rea
   afterAll(async () => {
     try {
       const pool = poolManager.get()
-      for (const tid of [draftTemplateId, deptRoutingDraftId]) {
+      for (const tid of [draftTemplateId, deptRoutingDraftId, titleRoutingDraftId]) {
         if (!tid) continue
         const iids = (await pool.query(`SELECT id FROM approval_instances WHERE template_id = $1`, [tid])).rows.map((r) => r.id as string)
         if (iids.length > 0) {
@@ -211,6 +239,15 @@ describeIfDatabase('RP-3 — POST /api/approval-templates/:id/route-preview (rea
     })
     expect(res.status).toBe(422)
     expect(((await res.json()) as { error?: { code?: string } }).error?.code).toBe('APPROVAL_REQUESTER_DEPARTMENT_REQUIRED')
+  })
+
+  it('PINNED CONTRACT: the title wedge also fails closed (422) for a title-less sample requester', async () => {
+    const res = await post(base, `/api/approval-templates/${titleRoutingDraftId}/route-preview`, adminTok, {
+      sampleFormData: { summary: 'title route' },
+      sampleRequesterId: SAMPLE_A,
+    })
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error?: { code?: string } }).error?.code).toBe('APPROVAL_REQUESTER_TITLE_REQUIRED')
   })
 
   it('§3 output-contract conformance + ZERO writes (scoped to this template)', async () => {

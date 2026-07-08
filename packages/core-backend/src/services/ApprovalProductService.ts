@@ -3284,13 +3284,14 @@ export class ApprovalProductService {
       // RP-3 (B3-06): the admin caller may resolve the route AS a sample requester (owner order ③ —
       // sampleRequesterId only reachable on the canManageTemplates endpoint). The `actor` still
       // authorizes template access (visibility); only the requester SNAPSHOT is taken from here.
+      //
+      // IDENTITY ONLY, deliberately: every attribute routing actually consumes (directoryDepartment /
+      // directoryTitle / directoryRoles / manager chain) is re-resolved from the DB by this userId
+      // below. Widening this to accept department/roles/etc. would hand a caller an org-attribute
+      // injection channel — so the type structurally forbids it.
       requesterOverride?: {
         userId: string
         userName?: string
-        department?: string
-        departmentIds?: string[]
-        roles?: string[]
-        permissions?: string[]
       }
     } = {},
   ): Promise<{
@@ -3324,11 +3325,10 @@ export class ApprovalProductService {
     if (!previewFromDraft && (bundle.template.status !== 'published' || !bundle.publishedDefinition || !bundle.publishedDefinition.is_active)) {
       throw new ServiceError('Approval template is not published', 409, 'APPROVAL_TEMPLATE_NOT_PUBLISHED')
     }
-    // A draft version may have never been published (no runtime_graph row) — surface that as a clean
-    // 404-shaped error rather than letting the compile below dereference an empty authoring graph.
-    if (previewFromDraft && !bundle.version) {
-      throw new ServiceError('Approval template version not found', 404, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
-    }
+    // A never-published template has `publishedDefinition === null` — which the draft path
+    // deliberately tolerates (it compiles `bundle.version.approval_graph` below instead).
+    // `bundle.version` itself is always present: loadTemplateBundleWithClient returns null when it
+    // cannot resolve a version, and that already surfaced as the 404 above.
 
     const formSchema = asFormSchema(bundle.version.form_schema)
     // NOTE: pruneHiddenFormData already restricts formData to VISIBLE declared fields, so undeclared
@@ -3386,15 +3386,17 @@ export class ApprovalProductService {
     // The requester whose org attributes drive routing. Defaults to the actor (create + B3-05); the
     // B3-06 admin endpoint may override it with a sample requester (owner order ③). Template ACCESS
     // was already authorized against `actor` above — only routing identity changes here.
-    const effectiveRequester = options.requesterOverride
-      ? {
-          userId: options.requesterOverride.userId,
-          userName: options.requesterOverride.userName || options.requesterOverride.userId,
-          email: undefined as string | undefined,
-          department: options.requesterOverride.department,
-          roles: options.requesterOverride.roles,
-          permissions: options.requesterOverride.permissions,
-        }
+    const effectiveRequester: {
+      userId: string
+      userName?: string
+      email?: string
+      department?: string
+      roles?: string[]
+      permissions?: string[]
+    } = options.requesterOverride
+      // Identity only — the routing-authoritative attributes are re-resolved from the DB below, so
+      // the sample requester's org data can never be client-supplied (owner order ③).
+      ? { userId: options.requesterOverride.userId, userName: options.requesterOverride.userName || options.requesterOverride.userId }
       : { userId: actor.userId, userName: actor.userName, email: actor.email, department: actor.department, roles: actor.roles, permissions: actor.permissions }
     const needsManagerChain = runtimeGraphUsesManagerChain(runtimeGraph)
     let orgRelations: ApprovalRequesterOrgRelations = {}
@@ -3426,7 +3428,7 @@ export class ApprovalProductService {
       } catch (error) {
         roleReadFailed = true
         metricsLogger.warn(
-          `Failed to resolve requester roles for ${actor.userId}: ${
+          `Failed to resolve requester roles for ${effectiveRequester.userId}: ${
             error instanceof Error ? error.message : 'unknown error'
           }`,
         )
@@ -3575,14 +3577,9 @@ export class ApprovalProductService {
     request: { templateId: string; formData: Record<string, unknown> },
     actor: CreateApprovalActor,
     options: {
-      sampleRequester?: {
-        userId: string
-        userName?: string
-        department?: string
-        departmentIds?: string[]
-        roles?: string[]
-        permissions?: string[]
-      }
+      // Identity only — see assembleCreationContext.requesterOverride: the sample requester's org
+      // attributes are always re-resolved from the DB, never accepted from the caller.
+      sampleRequester?: { userId: string; userName?: string }
     } = {},
   ): Promise<ApprovalRoutePreviewResult> {
     const { runtimeGraph, executor } = await this.assembleCreationContext(request, actor, {
