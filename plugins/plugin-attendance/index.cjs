@@ -6927,18 +6927,55 @@ function normalizeCsvHeaderValue(value) {
   return text
 }
 
+// DT-HARDEN-10: the real header vocabulary — a work-date column and at least one
+// user/attendance context column — used by both header *detection* (which row is
+// the header) and upload *validation* (does the header carry enough columns to
+// import). Keeping a single pair of sets means the two checks cannot drift apart.
+const IMPORT_HEADER_DATE_KEYS = new Set(['日期', 'date', 'workdate'])
+const IMPORT_HEADER_CONTEXT_KEYS = new Set([
+  'userid',
+  '用户id',
+  'name',
+  '姓名',
+  '工号',
+  'empno',
+  'firstinat',
+  'lastoutat',
+  'status',
+  'attendancegroup',
+  'attendanceclass',
+  'shiftname',
+  '上班1打卡时间',
+  '下班1打卡时间',
+  '考勤结果',
+  '考勤组',
+  '班次',
+])
+
+// trim + lowercase + strip whitespace/underscore/hyphen so "Work Date", "work_date",
+// "姓 名" and "EMP_NO" all match the canonical keys above.
+function normalizeImportHeaderLookupKey(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '')
+}
+
 // DT-HARDEN-10: single source of truth for "does this row look like the import
-// header". A real header carries BOTH a name column and a date column. DingTalk
-// exports prepend a title row that has neither, so anything treating the first
-// non-empty row as the header mis-reads those files — the parser skips the title
-// row while upload validation and header diagnostics read it, which 400s the
-// upload before the parser is ever reached.
+// header". A real header carries BOTH a date column and a user/attendance context
+// column (see the key sets above — not just a literal "name"/"姓名" cell; DingTalk's
+// own API-columns and manual-rows templates use workDate/userId with no "name"
+// column at all). DingTalk exports also prepend a title row that has neither, so
+// anything treating the first non-empty row as the header mis-reads those files —
+// the parser skips the title row while upload validation and header diagnostics
+// read it, which 400s the upload before the parser is ever reached.
 function isLikelyImportHeaderRow(normalizedCells) {
-  const row = normalizedCells.filter(Boolean)
+  const row = Array.isArray(normalizedCells) ? normalizedCells.filter(Boolean) : []
   if (!row.length) return false
-  const hasName = row.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
-  const hasDate = row.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
-  return hasName && hasDate
+  const keys = row.map(normalizeImportHeaderLookupKey).filter(Boolean)
+  const hasDate = keys.some((key) => IMPORT_HEADER_DATE_KEYS.has(key))
+  const hasContext = keys.some((key) => IMPORT_HEADER_CONTEXT_KEYS.has(key))
+  return hasDate && hasContext
 }
 
 // Bound the header hunt so a headerless file cannot turn a cheap peek into a
@@ -7216,6 +7253,38 @@ async function iterateImportRowsFromCsvAsync({ csvText, csvOptions, maxRows, onR
   })
 }
 
+// DT-HARDEN-10: bounded peek to resolve which row is the header, without buffering
+// the file. The streaming parser below discards rows as it goes (it cannot rewind
+// once it decides row N is data), so it cannot reuse the old "trust row 0, or fall
+// back once nothing better turns up" single-pass trick the inline/text path used.
+// Instead this does a first bounded pass (capped at IMPORT_HEADER_SCAN_MAX_ROWS,
+// matching readImportCsvHeaderFromFile) to find the row index, then the caller
+// streams the real file a second time starting from a known header index — the
+// same seam an explicit `csvOptions.headerRowIndex` already used.
+async function detectCsvHeaderRowIndexFromFile(csvPath, delimiter) {
+  let detectedIndex = null
+  let firstNonEmptyIndex = null
+  let scanned = 0
+  const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
+  await iterateCsvRowsStreamAsync(csvStream, delimiter, (rawRow, rowIndex) => {
+    const normalized = rawRow.map(normalizeCsvHeaderValue)
+    if (!normalized.some((cell) => cell && String(cell).trim().length > 0)) return true
+    if (firstNonEmptyIndex === null) firstNonEmptyIndex = rowIndex
+    if (isLikelyImportHeaderRow(normalized)) {
+      detectedIndex = rowIndex
+      return false
+    }
+    scanned += 1
+    return scanned < IMPORT_HEADER_SCAN_MAX_ROWS
+  })
+  // Restore the tail fallback the inline path always had: a genuinely headerless
+  // file still resolves to a row (the first non-empty one) instead of yielding zero
+  // data rows forever, which used to 400 as "no non-empty data row" even though the
+  // file plainly had rows — it just had no row this function recognized as a header.
+  if (detectedIndex !== null) return detectedIndex
+  return firstNonEmptyIndex !== null ? firstNonEmptyIndex : 0
+}
+
 async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows, onRow }) {
   const delimiter = csvOptions?.delimiter || ','
   const resolvedMaxRowsRaw = Number(maxRows ?? ATTENDANCE_IMPORT_CSV_MAX_ROWS)
@@ -7226,32 +7295,18 @@ async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows,
     ? Math.max(0, Number(csvOptions.headerRowIndex))
     : null
 
+  const resolvedHeaderRowIndex = explicitHeaderRowIndex !== null
+    ? explicitHeaderRowIndex
+    : await detectCsvHeaderRowIndexFromFile(csvPath, delimiter)
+
   let seenRows = 0
   let header = []
   let rowCount = 0
   let limitExceeded = false
-  let resolvedHeaderRowIndex = explicitHeaderRowIndex
 
   const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
   await iterateCsvRowsStreamAsync(csvStream, delimiter, async (rawRow, rowIndex) => {
     seenRows += 1
-    if (resolvedHeaderRowIndex === null) {
-      const normalized = rawRow.map(normalizeCsvHeaderValue).filter(Boolean)
-      if (normalized.length > 0) {
-        const hasName = normalized.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
-        const hasDate = normalized.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
-        // Align with detectCsvHeaderIndex: only a row containing both a name column
-        // and a date column is treated as the header. Do not blindly trust row 0 —
-        // DingTalk exports often prepend a title row before the real header, and
-        // unconditionally taking row 0 misaligns every column for the whole file.
-        if (hasName && hasDate) {
-          resolvedHeaderRowIndex = rowIndex
-          header = rawRow.map(normalizeCsvHeaderValue)
-          return true
-        }
-      }
-      return true
-    }
     if (rowIndex < resolvedHeaderRowIndex) return true
     if (rowIndex === resolvedHeaderRowIndex) {
       if (!header.length) header = rawRow.map(normalizeCsvHeaderValue)
@@ -7277,34 +7332,6 @@ async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows,
     limitExceeded,
     maxRows: resolvedMaxRows,
   })
-}
-
-const IMPORT_HEADER_DATE_KEYS = new Set(['日期', 'date', 'workdate'])
-const IMPORT_HEADER_CONTEXT_KEYS = new Set([
-  'userid',
-  '用户id',
-  'name',
-  '姓名',
-  '工号',
-  'empno',
-  'firstinat',
-  'lastoutat',
-  'status',
-  'attendancegroup',
-  'attendanceclass',
-  'shiftname',
-  '上班1打卡时间',
-  '下班1打卡时间',
-  '考勤结果',
-  '考勤组',
-  '班次',
-])
-
-function normalizeImportHeaderLookupKey(value) {
-  return String(value ?? '')
-    .trim()
-    .toLowerCase()
-    .replace(/[\s_-]+/g, '')
 }
 
 // DT-HARDEN-10: prefer the detected header row (name+date) over the first
@@ -20511,11 +20538,17 @@ module.exports = {
   },
   __attendanceImportCsvHeaderForTests: {
     detectCsvHeaderIndex,
+    detectCsvHeaderRowIndexFromFile,
     isLikelyImportHeaderRow,
     iterateImportRowsFromCsv,
     iterateImportRowsFromCsvFileAsync,
     readImportCsvHeaderFromFile,
     readImportCsvHeaderFromText,
+    validateImportUploadCsvOrThrow,
+    IMPORT_MAPPING_PROFILES,
+    IMPORT_HEADER_DATE_KEYS,
+    IMPORT_HEADER_CONTEXT_KEYS,
+    normalizeImportHeaderLookupKey,
   },
   __attendanceAutoShiftForTests: {
     AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG,

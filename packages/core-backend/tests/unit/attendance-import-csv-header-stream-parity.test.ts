@@ -207,3 +207,141 @@ describe('attendance CSV import header readers — title-row aware (DT-HARDEN-10
     await expect(helpers.readImportCsvHeaderFromFile(csvPath, ',')).resolves.toEqual(REAL_HEADER)
   })
 })
+
+// P1 FOLLOW-UP: the fix above (skip a DingTalk title row) was necessary but not
+// sufficient. `isLikelyImportHeaderRow` still only recognized a literal 姓名/name
+// cell as "this is the header" — but two of the three *shipped* import templates
+// (dingtalk_api_columns, manual_rows) have no name column at all; they identify the
+// subject by workDate/userId. Because readImportCsvHeaderFromFile falls back to the
+// first non-empty row when nothing "looks like" a header, upload *validation* passed
+// by luck (the fallback happened to land on the real header) — but the *streaming
+// parser* (iterateImportRowsFromCsvFileAsync) had no such fallback, so it never
+// resolved a header at all and silently produced 0 data rows, 400ing with "CSV must
+// include at least 1 non-empty data row" for CSVs that plainly had a row.
+// This suite proves the fold onto the real vocabulary (IMPORT_HEADER_DATE_KEYS /
+// IMPORT_HEADER_CONTEXT_KEYS) + normalization, table-driven over the profiles the
+// product actually ships, and end-to-end through validateImportUploadCsvOrThrow —
+// the exact function the upload route calls before ever reaching the parser.
+describe('attendance CSV import — shipped template parity (DT-HARDEN-10 P1 fix)', () => {
+  const tmpDirs: string[] = []
+  afterEach(() => {
+    while (tmpDirs.length) {
+      const dir = tmpDirs.pop()
+      if (dir) rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  function writeTmpCsv(contents: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'dt-harden-10-template-'))
+    tmpDirs.push(dir)
+    const csvPath = join(dir, 'import.csv')
+    writeFileSync(csvPath, contents, 'utf8')
+    return csvPath
+  }
+
+  const profiles = helpers.IMPORT_MAPPING_PROFILES as Array<{
+    id: string
+    templateColumns: string[]
+    templateSampleRow: string[]
+  }>
+
+  it('covers exactly the three shipped profiles (fails loudly if one is added/renamed/removed)', () => {
+    expect(profiles.map((p) => p.id)).toEqual([
+      'dingtalk_csv_daily_summary',
+      'dingtalk_api_columns',
+      'manual_rows',
+    ])
+  })
+
+  for (const profile of profiles) {
+    it(`${profile.id}: template header is detected AND upload validates with rowCount > 0`, async () => {
+      const csvText = [profile.templateColumns.join(','), profile.templateSampleRow.join(',')].join('\n')
+      const csvPath = writeTmpCsv(csvText)
+
+      // (a) header detection: the inline detector and both readers must recognize
+      // row 0 as the header, not fall through to some other row.
+      expect(helpers.detectCsvHeaderIndex(csvText, ',')).toBe(0)
+      expect(helpers.readImportCsvHeaderFromText(csvText, ',')).toEqual(profile.templateColumns)
+      await expect(helpers.readImportCsvHeaderFromFile(csvPath, ',')).resolves.toEqual(profile.templateColumns)
+
+      // (b) upload/parse: the actual upload-validation entry point — this is what
+      // 400'd for dingtalk_api_columns and manual_rows before the fix.
+      const result = await helpers.validateImportUploadCsvOrThrow({ csvPath, csvOptions: {} })
+      expect(result).toEqual({ rowCount: 1, warnings: [] })
+    })
+  }
+})
+
+describe('attendance CSV import header — normalization cases (DT-HARDEN-10)', () => {
+  it('normalizes "Work Date" (space + mixed case) onto the workdate date key', () => {
+    expect(helpers.isLikelyImportHeaderRow(['userId', 'Work Date'])).toBe(true)
+  })
+
+  it('normalizes "姓 名" (internal space) onto the 姓名 context key', () => {
+    expect(helpers.isLikelyImportHeaderRow(['姓 名', 'date'])).toBe(true)
+  })
+
+  it('normalizes "EMP_NO" (underscore + upper case) onto the empno context key', () => {
+    expect(helpers.isLikelyImportHeaderRow(['EMP_NO', 'date'])).toBe(true)
+  })
+
+  it('a CSV whose header only uses these normalized variants is still detected as row 0', () => {
+    const csvText = ['EMP_NO,Work Date,姓 名', 'E001,2026-03-23,张三'].join('\n')
+    expect(helpers.detectCsvHeaderIndex(csvText, ',')).toBe(0)
+    expect(helpers.readImportCsvHeaderFromText(csvText, ',')).toEqual(['EMP_NO', 'Work Date', '姓 名'])
+  })
+})
+
+describe('attendance CSV import — headerless fallback, streaming path (DT-HARDEN-10)', () => {
+  const tmpDirs: string[] = []
+  afterEach(() => {
+    while (tmpDirs.length) {
+      const dir = tmpDirs.pop()
+      if (dir) rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  function writeTmpCsv(contents: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'dt-harden-10-headerless-stream-'))
+    tmpDirs.push(dir)
+    const csvPath = join(dir, 'import.csv')
+    writeFileSync(csvPath, contents, 'utf8')
+    return csvPath
+  }
+
+  // The streaming parser cannot replay rows it already discarded while still hunting
+  // for a header, so it cannot implement the fallback inline (a one-line
+  // `found ? idx : 0` the way the old sync detectCsvHeaderIndex could) — it needs a
+  // bounded peek pass first. This directly exercises that peek's own contract.
+  it('detectCsvHeaderRowIndexFromFile resolves to the first non-empty row when nothing looks like a header', async () => {
+    const csvPath = writeTmpCsv(HEADERLESS_CSV)
+    await expect(helpers.detectCsvHeaderRowIndexFromFile(csvPath, ',')).resolves.toBe(0)
+  })
+
+  it('iterateImportRowsFromCsvFileAsync falls back to the first non-empty row as header — not stuck at 0 rows forever', async () => {
+    const csvPath = writeTmpCsv(HEADERLESS_CSV)
+    const rows: Array<{ workDate: string; fields: Record<string, string>; userId?: string }> = []
+    const summary = await helpers.iterateImportRowsFromCsvFileAsync({
+      csvPath,
+      csvOptions: {},
+      maxRows: 100,
+      onRow: (row: any) => {
+        rows.push(row)
+        return true
+      },
+    })
+    expect(summary).toEqual({ rowCount: 1, warnings: [], limitExceeded: false, maxRows: 100 })
+    expect(rows).toEqual([
+      { workDate: '', fields: { '随便一行': 'a', '不是表头': 'b' }, userId: undefined },
+    ])
+  })
+
+  it('validateImportUploadCsvOrThrow still rejects a genuinely headerless CSV (no silent pass-through)', async () => {
+    const csvPath = writeTmpCsv(HEADERLESS_CSV)
+    await expect(helpers.validateImportUploadCsvOrThrow({ csvPath, csvOptions: {} })).rejects.toMatchObject({
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'CSV header must include a work date column and at least one user or attendance column',
+    })
+  })
+})
