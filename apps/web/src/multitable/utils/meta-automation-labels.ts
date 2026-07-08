@@ -180,6 +180,14 @@ export type AutomationLabelKey =
   | 'manager.quickLegacyForm'
   | 'manager.loading'
   | 'manager.empty'
+  | 'manager.recipeSectionTitle'
+  | 'manager.recipeOrBlank'
+  | 'recipe.createdNotifyTitle'
+  | 'recipe.createdNotifyDesc'
+  | 'recipe.updatedNotifyTitle'
+  | 'recipe.updatedNotifyDesc'
+  | 'recipe.fieldChangedUpdateTitle'
+  | 'recipe.fieldChangedUpdateDesc'
   | 'manager.enabled'
   | 'manager.disabled'
   | 'manager.allowedAudiencePrefix'
@@ -444,6 +452,14 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'manager.quickLegacyForm',
   'manager.loading',
   'manager.empty',
+  'manager.recipeSectionTitle',
+  'manager.recipeOrBlank',
+  'recipe.createdNotifyTitle',
+  'recipe.createdNotifyDesc',
+  'recipe.updatedNotifyTitle',
+  'recipe.updatedNotifyDesc',
+  'recipe.fieldChangedUpdateTitle',
+  'recipe.fieldChangedUpdateDesc',
   'manager.enabled',
   'manager.disabled',
   'manager.allowedAudiencePrefix',
@@ -757,6 +773,14 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.quickLegacyForm': { en: 'Quick legacy form', zh: '快速旧版表单' },
   'manager.loading': { en: 'Loading automations...', zh: '正在加载自动化...' },
   'manager.empty': { en: 'No automations yet. Create your first automation rule.', zh: '暂无自动化。创建第一条自动化规则。' },
+  'manager.recipeSectionTitle': { en: 'Start from a recipe', zh: '从配方开始' },
+  'manager.recipeOrBlank': { en: 'or start from blank', zh: '或从空白开始' },
+  'recipe.createdNotifyTitle': { en: 'Notify on new record', zh: '新记录时通知' },
+  'recipe.createdNotifyDesc': { en: 'When a record is created, send an in-app notification.', zh: '记录创建时，发送站内通知。' },
+  'recipe.updatedNotifyTitle': { en: 'Notify on record update', zh: '记录更新时通知' },
+  'recipe.updatedNotifyDesc': { en: 'When a record is updated, send an in-app notification.', zh: '记录更新时，发送站内通知。' },
+  'recipe.fieldChangedUpdateTitle': { en: 'Update a field on change', zh: '字段变更时回填' },
+  'recipe.fieldChangedUpdateDesc': { en: 'When a field changes, write a value into another field.', zh: '字段变更时，向另一字段写入值。' },
   'manager.enabled': { en: 'Enabled', zh: '已启用' },
   'manager.disabled': { en: 'Disabled', zh: '已停用' },
   'manager.allowedAudiencePrefix': { en: 'Allowed audience:', zh: '允许范围：' },
