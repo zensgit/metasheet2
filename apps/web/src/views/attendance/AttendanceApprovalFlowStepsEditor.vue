@@ -32,6 +32,7 @@
               :label="tr('Add approver (user)', '添加审批人（用户）')"
               :tr="tr"
               :input-id="`approval-step-user-${index}`"
+              endpoint="/api/attendance-admin/users/search"
               @update:model-value="(uid: string) => onAddUser(index, uid)"
             />
             <div class="approval-steps__chips" data-testid="attendance-approval-step-users">
@@ -110,9 +111,16 @@ function commit(next: AttendanceApprovalStep[]): void {
   emit('update:modelValue', next)
 }
 
+// roleDraft is keyed by step index; any structural change (move/remove) would
+// otherwise leave an un-entered draft attributed to a different step (review
+// P3). Clear pending drafts on structural edits so a later Enter can't add a
+// role to the wrong step.
+function clearRoleDrafts(): void {
+  for (const key of Object.keys(roleDraft)) delete roleDraft[Number(key)]
+}
 function onAdd(): void { commit(addStep(props.modelValue)) }
-function onRemove(index: number): void { commit(removeStep(props.modelValue, index)) }
-function onMove(index: number, delta: number): void { commit(moveStep(props.modelValue, index, delta)) }
+function onRemove(index: number): void { clearRoleDrafts(); commit(removeStep(props.modelValue, index)) }
+function onMove(index: number, delta: number): void { clearRoleDrafts(); commit(moveStep(props.modelValue, index, delta)) }
 function onName(index: number, value: string): void { commit(setStepField(props.modelValue, index, { name: value })) }
 function onAddUser(index: number, uid: string): void { if (uid) commit(addApproverUser(props.modelValue, index, uid)) }
 function onRemoveUser(index: number, uid: string): void { commit(removeApproverUser(props.modelValue, index, uid)) }

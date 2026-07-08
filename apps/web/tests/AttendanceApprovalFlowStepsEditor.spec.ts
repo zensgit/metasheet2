@@ -3,10 +3,12 @@ import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
 
 // Stub the user picker (its own composable hits the users API) — emit a chosen
 // user id on demand via a button so the editor's add-user path is exercised.
+const capturedPickerEndpoints: Array<string | undefined> = []
 const UserPickerStub = defineComponent({
-  props: { modelValue: { type: String, default: '' } },
+  props: { modelValue: { type: String, default: '' }, endpoint: { type: String, default: undefined } },
   emits: ['update:modelValue'],
-  setup(_props, { emit }) {
+  setup(props, { emit }) {
+    capturedPickerEndpoints.push(props.endpoint)
     return () => h('button', {
       class: 'user-picker-stub',
       onClick: () => emit('update:modelValue', 'u-picked'),
@@ -79,6 +81,41 @@ describe('AttendanceApprovalFlowStepsEditor', () => {
     await nextTick()
     expect(model.value).toHaveLength(1)
     expect(model.value[0].name).toBe('L2')
+  })
+
+  it('points the approver user picker at the attendance-scoped search (not platform /api/admin/users) — review P2', () => {
+    capturedPickerEndpoints.length = 0
+    mountEditor([{ name: 'L1', approverRoleIds: ['manager'] }])
+    // The delegated attendance admin can call /api/attendance-admin/users/search
+    // (rbacGuard attendance:admin), which /api/admin/users (ensurePlatformAdmin)
+    // would 403 for.
+    expect(capturedPickerEndpoints).toContain('/api/attendance-admin/users/search')
+    expect(capturedPickerEndpoints).not.toContain('/api/admin/users')
+  })
+
+  it('clears a pending role draft when a step is removed, so Enter cannot add it to the wrong step — review P3', async () => {
+    const { model, get } = mountEditor([
+      { name: 'L1', approverRoleIds: ['manager'] },
+      { name: 'L2', approverRoleIds: ['hr'] },
+    ])
+    // type a draft into step 2's role input without pressing Enter
+    const roleInputs = get().querySelectorAll('.approval-steps__col:last-child input')
+    const step2Input = roleInputs[1] as HTMLInputElement
+    step2Input.value = 'oops'
+    step2Input.dispatchEvent(new Event('input'))
+    await nextTick()
+    // remove step 1 → step 2 shifts to index 0; the draft must not survive to be
+    // committed against the shifted step
+    const removeButtons = get().querySelectorAll('.approval-steps__reorder .attendance__btn--danger')
+    ;(removeButtons[0] as HTMLButtonElement).click()
+    await nextTick()
+    expect(model.value).toHaveLength(1)
+    const remainingRoleInput = get().querySelector('.approval-steps__col:last-child input') as HTMLInputElement
+    expect(remainingRoleInput.value).toBe('')
+    remainingRoleInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    await nextTick()
+    // the surviving step keeps only its own role — no 'oops' leaked in
+    expect(model.value[0].approverRoleIds).toEqual(['hr'])
   })
 
   it('preserves unknown keys on an existing step through edits', async () => {

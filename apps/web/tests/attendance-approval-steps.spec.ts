@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { useAttendanceAdminUsers } from '../src/views/attendance/useAttendanceAdminUsers'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
@@ -129,5 +130,29 @@ describe('stepsPreviewJson', () => {
   it('renders the payload as pretty JSON', () => {
     const json = stepsPreviewJson([{ name: 'Manager', approverRoleIds: ['manager'] }])
     expect(JSON.parse(json)).toEqual([{ name: 'Manager', approverUserIds: [], approverRoleIds: ['manager'] }])
+  })
+})
+
+describe('useAttendanceAdminUsers endpoint (review P2)', () => {
+  it('defaults to the platform /api/admin/users route', async () => {
+    const calls: string[] = []
+    const apiFetch = async (path: string) => {
+      calls.push(path)
+      return { ok: true, status: 200, json: async () => ({ ok: true, data: { items: [] } }) } as unknown as Response
+    }
+    const { loadUsers } = useAttendanceAdminUsers({ apiFetch })
+    await loadUsers('alice')
+    expect(calls[0]).toBe('/api/admin/users?q=alice')
+  })
+  it('uses the attendance-scoped search when endpoint is provided', async () => {
+    const calls: string[] = []
+    const apiFetch = async (path: string) => {
+      calls.push(path)
+      return { ok: true, status: 200, json: async () => ({ ok: true, data: { items: [] } }) } as unknown as Response
+    }
+    const { loadUsers } = useAttendanceAdminUsers({ apiFetch, endpoint: '/api/attendance-admin/users/search' })
+    await loadUsers('bob')
+    expect(calls[0]).toBe('/api/attendance-admin/users/search?q=bob')
+    expect(calls.some(p => p.startsWith('/api/admin/users'))).toBe(false)
   })
 })
