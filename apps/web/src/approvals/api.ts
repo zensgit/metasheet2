@@ -928,6 +928,29 @@ export async function previewApprovalRoute(req: CreateApprovalRequest): Promise<
   return postApprovalJson('/api/approvals/preview', req)
 }
 
+/**
+ * RP-3 (route-preview lock, B3-06): the template AUTHOR's read-only dry-run of the LAST-SAVED
+ * draft version, optionally driven by a sample requester id (the only surface the design-lock
+ * allows an org-structure probe on — guarded server-side by `canManageTemplates`). Same output
+ * shape as `previewApprovalRoute` (shared substrate, no parallel impl).
+ *
+ * `templateRoutePreviewPath` is split out purely so the templateId URL-encoding is independently
+ * unit-testable: `USE_MOCK` is `import.meta.env.DEV || ...` and DEV is always `true` under this
+ * project's Vitest run (see `approvalApiErrorSurfacing.spec.ts`), so calling
+ * `previewTemplateRoute` itself in a test can only ever exercise the mock branch below.
+ */
+export function templateRoutePreviewPath(templateId: string): string {
+  return `/api/approval-templates/${encodeURIComponent(templateId)}/route-preview`
+}
+
+export async function previewTemplateRoute(
+  templateId: string,
+  body: { sampleFormData: Record<string, unknown>; sampleRequesterId?: string },
+): Promise<ApprovalRoutePreview> {
+  if (USE_MOCK) return { route: [], truncated: false }
+  return postApprovalJson(templateRoutePreviewPath(templateId), body)
+}
+
 export async function createApproval(req: CreateApprovalRequest): Promise<UnifiedApprovalDTO> {
   if (USE_MOCK) {
     return {

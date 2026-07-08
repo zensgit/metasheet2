@@ -17,17 +17,24 @@ export interface RoutePreviewState {
   error: string
 }
 
-export interface RoutePreviewController {
+export interface RoutePreviewController<Req = CreateApprovalRequest> {
   /** Fire a preview request; only its own (still-current) resolution may commit. */
-  run(req: CreateApprovalRequest): Promise<void>
+  run(req: Req): Promise<void>
   /** Invalidate any in-flight request and clear the rendered state (call on form edit). */
   invalidate(): void
 }
 
-export function createRoutePreviewController(
-  fetcher: (req: CreateApprovalRequest) => Promise<ApprovalRoutePreview>,
+/**
+ * RP-3 (B3-06 authoring 试运行面板) reuses this same race-guard for a DIFFERENT request shape
+ * (`{ sampleFormData, sampleRequesterId? }` against a template-scoped endpoint, vs RP-2's
+ * `{ templateId, formData }` against the requester-scoped one) — the generic `Req` parameter
+ * defaults to `CreateApprovalRequest` so RP-2's existing call sites (and this file's own tests)
+ * are unaffected; RP-3's caller supplies its own fetcher and Req is inferred from it.
+ */
+export function createRoutePreviewController<Req = CreateApprovalRequest>(
+  fetcher: (req: Req) => Promise<ApprovalRoutePreview>,
   onState: (patch: Partial<RoutePreviewState>) => void,
-): RoutePreviewController {
+): RoutePreviewController<Req> {
   let gen = 0
   return {
     invalidate() {

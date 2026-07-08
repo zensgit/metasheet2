@@ -1108,6 +1108,184 @@
           </el-collapse-item>
         </el-collapse>
       </el-card>
+
+      <!-- RP-3 (route-preview lock, B3-06) FE 试运行面板: read-only dry-run of the LAST-SAVED
+           draft graph — never writes an instance/assignment/notification. Compute-at-click via
+           the shared race-guard controller (RP-2's createRoutePreviewController, made generic). -->
+      <el-card
+        v-if="canManageTemplates"
+        class="template-authoring__panel"
+        shadow="never"
+        data-testid="approval-template-tryrun-panel"
+      >
+        <template #header>
+          <div class="template-authoring__panel-header">
+            <strong>试运行</strong>
+            <span class="template-authoring__hint">按样例表单值只读走一遍审批路径，不创建任何审批实例。</span>
+          </div>
+        </template>
+
+        <p class="template-authoring__hint" data-testid="approval-template-tryrun-draft-note">
+          试运行按最后保存的草稿图解析；未策展角色的路由以发布校验为准。
+        </p>
+
+        <el-form label-position="top" class="template-authoring__grid">
+          <el-form-item label="样例发起人（留空 = 以当前管理员身份预览）">
+            <ApprovalUserPicker
+              v-model="sampleRequesterId"
+              placeholder="搜索用户名 / 邮箱 / ID（可留空）"
+              data-testid="approval-template-tryrun-requester-picker"
+            />
+          </el-form-item>
+        </el-form>
+
+        <div v-if="templateFormFields.length === 0" class="template-authoring__hint">
+          请先在上方添加表单字段，再试运行。
+        </div>
+        <el-form v-else label-position="top" class="template-authoring__grid">
+          <template v-for="field in templateFormFields" :key="field.id">
+            <el-form-item
+              v-if="!sampleFieldUnsupportedReason(field)"
+              :label="field.label || field.id"
+              data-testid="approval-template-tryrun-field"
+            >
+              <!-- text -->
+              <el-input
+                v-if="field.type === 'text'"
+                v-model="sampleFormData[field.id]"
+                :placeholder="field.placeholder || `请输入${field.label}`"
+              />
+              <!-- textarea -->
+              <el-input
+                v-else-if="field.type === 'textarea'"
+                v-model="sampleFormData[field.id]"
+                type="textarea"
+                :rows="2"
+                :placeholder="field.placeholder || `请输入${field.label}`"
+              />
+              <!-- number -->
+              <el-input-number
+                v-else-if="field.type === 'number'"
+                v-model="sampleFormData[field.id]"
+                class="ms-w-100pct"
+              />
+              <!-- date -->
+              <el-date-picker
+                v-else-if="field.type === 'date'"
+                v-model="sampleFormData[field.id]"
+                type="date"
+                :placeholder="field.placeholder || `请选择${field.label}`"
+                class="ms-w-100pct"
+              />
+              <!-- datetime -->
+              <el-date-picker
+                v-else-if="field.type === 'datetime'"
+                v-model="sampleFormData[field.id]"
+                type="datetime"
+                :placeholder="field.placeholder || `请选择${field.label}`"
+                class="ms-w-100pct"
+              />
+              <!-- select -->
+              <el-select
+                v-else-if="field.type === 'select'"
+                v-model="sampleFormData[field.id]"
+                :placeholder="field.placeholder || `请选择${field.label}`"
+                class="ms-w-100pct"
+              >
+                <el-option
+                  v-for="opt in (field.options || [])"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-select>
+              <!-- multi-select -->
+              <el-select
+                v-else-if="field.type === 'multi-select'"
+                v-model="sampleFormData[field.id]"
+                multiple
+                :placeholder="field.placeholder || `请选择${field.label}`"
+                class="ms-w-100pct"
+              >
+                <el-option
+                  v-for="opt in (field.options || [])"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-select>
+              <!-- user -->
+              <ApprovalUserPicker
+                v-else-if="field.type === 'user'"
+                :model-value="(sampleFormData[field.id] as string | null | undefined) ?? null"
+                @update:model-value="sampleFormData[field.id] = $event"
+              />
+            </el-form-item>
+            <div
+              v-else
+              class="template-authoring__hint template-authoring__wide"
+              data-testid="approval-template-tryrun-field-unsupported"
+            >
+              {{ field.label || field.id }}：{{ sampleFieldUnsupportedReason(field) }}
+            </div>
+          </template>
+        </el-form>
+
+        <div class="template-authoring__tryrun-actions">
+          <el-tooltip v-if="tryRunDisabledReason" :content="tryRunDisabledReason" placement="top">
+            <span>
+              <el-button :loading="routePreviewLoading" disabled data-testid="approval-template-tryrun-button">
+                试运行
+              </el-button>
+            </span>
+          </el-tooltip>
+          <el-button
+            v-else
+            :loading="routePreviewLoading"
+            data-testid="approval-template-tryrun-button"
+            @click="runTemplateRoutePreview"
+          >
+            试运行
+          </el-button>
+        </div>
+
+        <div v-if="routePreviewError" class="template-authoring__tryrun-error" data-testid="approval-template-tryrun-error">
+          {{ routePreviewError }}
+        </div>
+        <div v-else-if="routePreview" class="template-authoring__tryrun-row" data-testid="approval-template-tryrun-result">
+          <span class="template-authoring__tryrun-chip template-authoring__tryrun-chip--requester">发起人</span>
+          <template v-for="node in routePreview.route" :key="node.nodeKey">
+            <span class="template-authoring__tryrun-arrow">→</span>
+            <span
+              class="template-authoring__tryrun-chip"
+              :class="{ 'template-authoring__tryrun-chip--unresolved': !!node.resolveError }"
+              data-testid="approval-template-tryrun-node"
+            >
+              {{ node.nodeLabel }}
+              <span class="template-authoring__tryrun-chip-summary">{{ routePreviewAssigneeSummary(node) }}</span>
+            </span>
+          </template>
+          <span
+            v-if="routePreview.truncated"
+            class="template-authoring__tryrun-truncated"
+            data-testid="approval-template-tryrun-truncated"
+          >
+            （路径未能完整解析，以实际流转为准）
+          </span>
+          <span v-else-if="routePreview.route.length === 0" class="template-authoring__tryrun-truncated">
+            （按当前样例将直接通过，无审批节点）
+          </span>
+        </div>
+
+        <div v-if="conditionNodeSummaries.length" class="template-authoring__tryrun-conditions" data-testid="approval-template-tryrun-conditions">
+          <strong>条件分支规则</strong>
+          <ul class="template-authoring__node-summary">
+            <li v-for="cond in conditionNodeSummaries" :key="cond.key">
+              {{ cond.label }}：{{ cond.lines.join('；') }}
+            </li>
+          </ul>
+        </div>
+      </el-card>
     </div>
 
     <!-- B2-03: publish pre-flight checklist — replaces the old "confirm first, validate after"
@@ -1162,9 +1340,15 @@ import {
   createTemplate,
   dryRunApprovalConditionFormula,
   getTemplate,
+  previewTemplateRoute,
   publishTemplate,
   updateTemplate,
+  type ApprovalRoutePreview,
 } from '../../approvals/api'
+import { createRoutePreviewController } from '../../approvals/routePreviewController'
+import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
+import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
+import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import {
   buildApprovalGraph,
   buildCreateTemplatePayload,
@@ -1222,6 +1406,7 @@ import type {
   ApprovalNode,
   CcNodeConfig,
   ConditionNodeConfig,
+  FormField,
   NodeFieldAccess,
   ParallelJoinMode,
   ParallelNodeConfig,
@@ -1980,6 +2165,95 @@ async function confirmPublish() {
   }
 }
 
+// RP-3 (route-preview lock, B3-06 FE 试运行面板) — template AUTHOR's read-only dry-run of the
+// LAST-SAVED draft (previewSource: 'draft' server-side — an editor with unsaved changes must save
+// first, enforced below via tryRunDisabledReason). Compute-at-click; any change to the sample
+// requester or sample form values invalidates the stale result — the SAME race-guard controller
+// RP-2's ApprovalNewView uses, now generic so this DIFFERENT request shape (`sampleFormData` +
+// optional `sampleRequesterId`, vs RP-2's `templateId` + `formData`) can reuse it verbatim instead
+// of a second hand-rolled loading/race implementation.
+const sampleRequesterId = ref<string | null>(null)
+const sampleFormData = ref<Record<string, unknown>>({})
+const routePreview = ref<ApprovalRoutePreview | null>(null)
+const routePreviewLoading = ref(false)
+const routePreviewError = ref('')
+
+// The template must exist server-side before it has an id to preview against.
+// `draft.value.templateId` is set by persistDraft() immediately on create/update (before the
+// router.replace even resolves), so it is the authoritative id source — not the route param,
+// which only updates once that navigation lands.
+const templateIdForPreview = computed(() => draft.value.templateId ?? '')
+
+const tryRunDisabledReason = computed<string>(() => {
+  if (!templateIdForPreview.value) return '请先保存草稿以获取模板 ID，才能试运行'
+  if (isDraftDirty.value) return '有未保存的更改，请先保存再试运行'
+  return ''
+})
+
+const routePreviewController = createRoutePreviewController(
+  async (req: { sampleFormData: Record<string, unknown>; sampleRequesterId?: string }) => {
+    try {
+      return await previewTemplateRoute(templateIdForPreview.value, req)
+    } catch (error) {
+      // Wedge-guard machine codes (422 *_REQUIRED / 503 *_UNRESOLVED) get an actionable Chinese
+      // message here instead of surfacing as a generic failure flash — the controller only ever
+      // reads `.message` off a caught error, so the code → message translation must happen
+      // before it does (describeRoutePreviewError is unit-tested independently).
+      throw new Error(describeRoutePreviewError(error))
+    }
+  },
+  (patch) => {
+    if ('preview' in patch) routePreview.value = patch.preview ?? null
+    if (patch.loading !== undefined) routePreviewLoading.value = patch.loading
+    if (patch.error !== undefined) routePreviewError.value = patch.error
+  },
+)
+
+async function runTemplateRoutePreview() {
+  if (tryRunDisabledReason.value) return
+  await routePreviewController.run({
+    sampleFormData: { ...sampleFormData.value },
+    ...(sampleRequesterId.value ? { sampleRequesterId: sampleRequesterId.value } : {}),
+  })
+}
+
+watch(sampleFormData, () => routePreviewController.invalidate(), { deep: true })
+watch(sampleRequesterId, () => routePreviewController.invalidate())
+// A draft-graph edit invalidates a prior result too — the ratified "stale path never misleads"
+// contract otherwise breaks the moment isDraftDirty flips true: the button greys out (see
+// tryRunDisabledReason), but the OLD chip row would keep rendering as if it still matched the
+// (now-unsaved) graph.
+watch(isDraftDirty, (dirty) => {
+  if (dirty) routePreviewController.invalidate()
+})
+
+// The sample form renders off the SAME formSchema the template actually routes on
+// (buildFormSchema(draft.value) — identical source as the "JSON 预览" card above), so an author
+// never types a sample value the template can't see. `detail` (repeating sub-form rows) and
+// `attachment` (no working upload pipeline yet — see ApprovalNewView's own honest stopgap) are
+// skipped with an inline note rather than faked; every other field type gets a plain input.
+const templateFormFields = computed<FormField[]>(() => buildFormSchema(draft.value).fields)
+
+function sampleFieldUnsupportedReason(field: FormField): string | null {
+  if (field.type === 'detail') return '试运行暂不支持明细子表单的样例值，已跳过（不影响其余字段的走图）'
+  if (field.type === 'attachment') return '试运行暂不支持附件类型的样例值，已跳过'
+  return null
+}
+
+// G-B2-19 condition summaries for the panel's static "条件分支规则" note — read straight off the
+// preserved graph (same source as the read-only structured node list above), NOT off the
+// route-preview response: the endpoint only ever returns `{ route, truncated }` (§3) — it does not
+// echo which branch a condition node took — so this can only show the RULE, never "which one fired".
+const conditionNodeSummaries = computed(() =>
+  graphPreviewNodes.value
+    .filter((node) => node.type === 'condition')
+    .map((node) => ({
+      key: node.key,
+      label: node.name || node.key,
+      lines: nodeConfigSummary(node),
+    })),
+)
+
 onMounted(() => {
   if (!canManageTemplates.value) return
   void directory.loadRoles()
@@ -2313,5 +2587,68 @@ pre {
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 4px;
+}
+
+/* RP-3 (route-preview lock, B3-06) 试运行面板 — chip styling mirrors ApprovalNewView's RP-2 live
+   route preview (same visual language for "resolved path", different scoped class prefix since
+   Vue's `<style scoped>` is per-SFC). */
+.template-authoring__tryrun-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.template-authoring__tryrun-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.template-authoring__tryrun-chip {
+  display: inline-flex;
+  flex-direction: column;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+}
+
+.template-authoring__tryrun-chip--requester {
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-weight: 500;
+}
+
+.template-authoring__tryrun-chip--unresolved {
+  border: 1px dashed var(--el-color-danger);
+}
+
+.template-authoring__tryrun-chip-summary {
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+}
+
+.template-authoring__tryrun-arrow {
+  color: var(--el-text-color-placeholder);
+  font-size: 12px;
+}
+
+.template-authoring__tryrun-error {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--el-color-danger);
+}
+
+.template-authoring__tryrun-truncated {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.template-authoring__tryrun-conditions {
+  margin-top: 12px;
+  font-size: 13px;
 }
 </style>
