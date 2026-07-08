@@ -82,4 +82,6 @@
 
 sheet 删除级联(`univer-meta.ts:11927`)、跨 base、任何 FE 面(独立 gated 项)、`meta_records_trash` 的 retention 接入、4d(不可能项,永不承诺)。
 
+**第二删除路径(impl 期审计 P3-1,显式出界):** plugin-SDK `records.ts` 的 `deleteRecord`(经 `plugin-scope.ts` 到达)硬删 `meta_links`+`meta_records`,**今天既无 trash/revision 也无 tombstone**,`MULTITABLE_TOMBSTONE_CAPTURE_ENABLED` 对其不生效。C2「flag on ⇒ 凡销毁必已捕获」的口径**仅覆盖** `record-service.deleteRecord` 与 `dropFieldCascade` 两条路由——该路由今日即不可恢复(非 4c-2 引入的回归)。给它 trash+capture 对等属**独立后续 rung**,非 4c-2。已在 `records.ts:556` 就地注释标注。
+
 **解锁词示例:「ratify 4c-2」(可附修改意见)。**

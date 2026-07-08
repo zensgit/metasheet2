@@ -6273,13 +6273,23 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
       [deleteRevisionId, sheetId, fieldId],
     )
     // Link edges: only between two records that are BOTH currently alive (design-lock §4 R1).
+    // Idempotence: meta_links has no unique on (field_id, record_id, foreign_record_id) (PK is the
+    // random `id` only), so a repeat rehydration would silently duplicate edges. Guard with NOT
+    // EXISTS, mirroring the value-side `NOT (m.data ? $3)` guard. Unreachable in current flows
+    // (rehydration runs only after the edges are gone) but load-bearing once 4c-3 replays inbound edges.
     await query(
       `INSERT INTO meta_links (field_id, record_id, foreign_record_id)
        SELECT t.field_id, t.record_id, t.foreign_record_id
        FROM meta_link_tombstones t
        JOIN meta_records r1 ON r1.id = t.record_id
        JOIN meta_records r2 ON r2.id = t.foreign_record_id
-       WHERE t.source_revision_id = $1 AND t.field_id = $2 AND t.reason = 'field_delete'`,
+       WHERE t.source_revision_id = $1 AND t.field_id = $2 AND t.reason = 'field_delete'
+         AND NOT EXISTS (
+           SELECT 1 FROM meta_links ml
+           WHERE ml.field_id = t.field_id
+             AND ml.record_id = t.record_id
+             AND ml.foreign_record_id = t.foreign_record_id
+         )`,
       [deleteRevisionId, fieldId],
     )
     // Auto-number sequence: only for an autoNumber field whose delete revision carried a captured lastValue.
