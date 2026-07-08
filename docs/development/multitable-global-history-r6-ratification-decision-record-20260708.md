@@ -25,9 +25,18 @@ owner 同时将会话模型切换至 Opus 4.8(Fable 5 不可用回退)。
 - golden 侧:锁文 L4 改为「无全表读权 → 403」形态;drift 重算(§2.3)因范围恒为全表可读,同尺比对无 undisclosed 边角(L5b 的 undisclosed 探针场景在 full-read gate 下不可达,保留为回归防护即可)。
 - C2 no-oracle 因此以「gate 而非 marker」满足——最强口径。
 
-## 3. O-1 PASSED 的 provenance(诚实记录)
+## 3. O-1 PASSED 的 provenance(正式 staging 验收已完成)
 
-owner 判定 O-1 通过,依据 = #3820 的**本地彩排**证据(6 run 全预期,三 flag 全开 **40 PASS / 0 FAIL / 0 SKIP**,harness 零缺陷)。**如实声明:这是本地 docker 彩排,不是 staging 正式验收跑**;owner 行使其闸门裁量权,判定本地证据已足以认定 O-1 通过。#3820 已把 staging 首跑摩擦(EDITOR_TOKEN 须真实 users 行、exit-2 无 summary 定位、8 条清单)预清——若将来 operator 仍要在真 staging 复跑,材料齐备,但非 O-1 pass 的前置。
+**O-1 已在真 staging 完成正式验收(2026-07-08),非仅本地彩排。** 证据链两段:
+
+1. **前置彩排(#3820)**:本地 docker 彩排,6 run 全预期,三 flag 全开 40/0/0,harness 零缺陷;并把 staging 首跑摩擦(EDITOR_TOKEN 须真实 users 行、exit-2 无 summary 定位、8 条清单)预清。
+2. **正式 staging O-1(2026-07-08,operator 执行)** — build `94ab9675ea77c7f141d4ef2998bb58bc7f166133`,staging health OK,**7 flags 全开**:
+   - **Reset harness**:10 passed / 0 failed / 1 skipped;DB 确认最新 `RESET-ACCEPT 1783496539745` = **live=2 / trash=3**。
+   - **Config-tier**:**40 passed / 0 failed / 0 skipped**。
+   - **PIT undelete**:**19 passed / 0 failed / 0 skipped**。
+   - **`MULTITABLE_META_REVISION_RETENTION_ENABLED` 未出现**(retention 关闭)——满足 PIT_RESET 的 STOP-SHIP 前置(retention 关或 trash 保留 ≥ 审批窗口),reset-undo 风险面在验收期正确保持关闭。
+
+O-1 因此以**正式 staging 证据**判定通过,#3820 本地彩排为其前置 rehearsal。
 
 ## 4. destructive-tier FE 闭合判定
 
