@@ -124,6 +124,30 @@
                 </li>
               </ul>
             </div>
+
+            <div
+              class="bridge-agent__task-status"
+              :data-testid="`bridge-agent-task-status-${system.id}`"
+            >
+              <h4>{{ bi('计划任务运行态提示', 'Scheduled task status (guidance)') }}</h4>
+              <p class="bridge-agent__task-note" :data-testid="`bridge-agent-task-managed-${system.id}`">
+                <el-icon><Clock /></el-icon>
+                <span>{{ bi(
+                  '按部署惯例：本 Agent 通常由本机 Windows 计划任务（Scheduled Task）常驻管理，而非本页直接控制。',
+                  'By deployment convention: this Agent is normally kept running by a local Windows Scheduled Task, not controlled from this page.',
+                ) }}</span>
+              </p>
+              <p
+                :data-testid="`bridge-agent-task-last-check-${system.id}`"
+                :data-result="taskLastCheckResult(system.id)"
+              >{{ bi('最近探测结果（非任务运行态）：', 'Last probe result (not task run-state): ') }}{{ taskLastCheckLabel(system.id) }}</p>
+              <p class="bridge-agent__task-guidance" :data-testid="`bridge-agent-task-guidance-${system.id}`">
+                {{ bi(
+                  '启动方式提示：安装/查看/启停计划任务由本机运维按 Bridge Agent 运维 runbook 操作；本页不提供启停或本机配置入口。',
+                  'Start/stop guidance: installing, checking, or starting/stopping the scheduled task is done by local operations per the Bridge Agent ops runbook; this page provides no start/stop or local-config entry point.',
+                ) }}
+              </p>
+            </div>
           </div>
         </div>
 
@@ -450,7 +474,7 @@
 //     (counted, never echoed) rather than rendered (lock §3: applied only by a controlled backend or
 //     ops script, never this page).
 import { computed, reactive, ref, watch } from 'vue'
-import { CircleCheck, CircleClose, Connection, DocumentCopy, List, Lock, Refresh, Warning } from '@element-plus/icons-vue'
+import { CircleCheck, CircleClose, Clock, Connection, DocumentCopy, List, Lock, Refresh, Warning } from '@element-plus/icons-vue'
 import { useLocale } from '../../composables/useLocale'
 import {
   bridgeAgentConfigCheckLabel,
@@ -851,6 +875,39 @@ async function runProbe(system: WorkbenchExternalSystem): Promise<void> {
   }
 }
 
+// --- BA-UI-4 (docs/development/bridge-agent-admin-page-design-lock-20260707.md §3 BA-UI-4): a
+// read-only "scheduled task status" guidance card. FIRST version, per lock: "只读显示，不
+// start/stop" — no control of any kind lives in this file for the scheduled task (no button, no
+// service call, no local-config write).
+//
+// Why this renders STATIC guidance rather than a live task-state field: the BA-UI-1 backend scout
+// established that none of the three generic routes this section consumes expose Windows Scheduled
+// Task state. `testConnection()`'s `/health`-derived `status`/`ok`/`connected` fields describe HTTP
+// reachability of the Agent process, not whether the OS scheduled task that launched it is
+// Running/Stopped/Ready — that distinction only exists on the host, surfaced by
+// `scripts/ops/bridge-agent-readonly-scheduled-task.ps1 -Action Status` (which itself deliberately
+// avoids calling `/health` — see the runbook). No new backend route is added to bridge that gap
+// (out of this slice's authorization; the lock's zero-new-route posture from BA-UI-1/2 continues
+// unchanged). So rather than inventing a "running/stopped" badge from data that was never asked for,
+// this card renders (a) a fixed, values-free statement of the deployment convention, (b) the
+// existing BA-UI-2 probe's last COARSE outcome relabeled as what it actually is (a reachability
+// probe result, not task run-state), and (c) a fixed pointer to the runbook process for anyone who
+// needs to actually install/inspect/start/stop the task.
+function taskLastCheckResult(systemId: string): 'pass' | 'fail' | 'unknown' {
+  const result = probeResultFor(systemId)
+  if (!result) return 'unknown'
+  return result.overallPass ? 'pass' : 'fail'
+}
+
+// Deliberately coarse (lock §3 BA-UI-4: "PASS/FAIL/未探测 coarse only") — unlike `overallLabel()`
+// above (which names the failed step for the probe-evidence panel), this card never names a step;
+// it only ever renders one of the three words below.
+function taskLastCheckLabel(systemId: string): string {
+  const result = taskLastCheckResult(systemId)
+  if (result === 'unknown') return bi('未探测', 'Not probed yet')
+  return result === 'pass' ? 'PASS' : 'FAIL'
+}
+
 watch(
   bridgeSystems,
   (list) => {
@@ -1184,6 +1241,43 @@ watch(suggestionDrafts, () => {
 
 .bridge-agent__probe-guidance {
   margin: 2px 0 0;
+  color: var(--ms-text-3);
+}
+
+/* BA-UI-4 own classes below — a neutral, non-badge-colored box (see the script-block comment above
+   for why: this is guidance/convention + a relabeled probe result, never a live "task running"
+   signal, so it deliberately does NOT borrow the online/offline badge coloring). */
+
+.bridge-agent__task-status {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px dashed var(--ms-border);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.bridge-agent__task-status h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--ms-text-1);
+}
+
+.bridge-agent__task-status p {
+  margin: 0 0 6px;
+}
+
+.bridge-agent__task-status p:last-child {
+  margin-bottom: 0;
+}
+
+.bridge-agent__task-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bridge-agent__task-guidance {
   color: var(--ms-text-3);
 }
 
