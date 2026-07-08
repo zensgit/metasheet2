@@ -50,6 +50,12 @@ import {
 } from './record-subscription-service'
 import { ensureRecordWriteAllowed, requiresOwnWriteRowPolicy, type AccessInfo, type SheetPermissionScope } from './sheet-capabilities'
 import { ensureRecordNotLocked } from './record-lock'
+import {
+  isTombstoneCaptureEnabled,
+  countInboundLinkCaptureRows,
+  assertWithinCaptureCap,
+  insertInboundLinkTombstones,
+} from './tombstone-capture'
 
 export type QueryFn = (
   sql: string,
@@ -803,6 +809,20 @@ export class RecordService {
       }
       const snapshot = normalizeJson(currentRow.data)
 
+      // 4c-2 forward tombstone-capture (design-lock 2026-07-07/#3809+#3830, ratified). INBOUND edges only
+      // (`foreign_record_id = $1`) — outbound edges are already covered by meta_records_trash (the
+      // trashed `data` snapshot still carries the link-field arrays and restoreRecord replays them; see
+      // tombstone-capture.ts doc-comment). MUST run before the DELETE below. The delete's own revision id
+      // is pre-generated so the tombstone rows' causal anchor (source_revision_id) matches the revision
+      // recordRecordRevision is about to write.
+      const captureEnabled = isTombstoneCaptureEnabled()
+      const recordDeleteRevisionId = randomUUID()
+      if (captureEnabled) {
+        const totalToCapture = await countInboundLinkCaptureRows(query, recordId)
+        assertWithinCaptureCap(totalToCapture) // fail-closed 422 (via caller's catch) — never a partial capture.
+        await insertInboundLinkTombstones(query, { sheetId, recordId, sourceRevisionId: recordDeleteRevisionId })
+      }
+
       try {
         await query(
           'DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1',
@@ -821,6 +841,7 @@ export class RecordService {
         actorId,
         changedFieldIds: [],
         patch: {},
+        id: recordDeleteRevisionId,
         snapshot,
       })
 
