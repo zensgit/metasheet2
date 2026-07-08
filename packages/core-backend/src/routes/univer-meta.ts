@@ -84,7 +84,17 @@ import {
   fieldCreateDiff,
   fieldUpdateDiff,
   fieldDeleteDiff,
+  fieldDeleteDiffWithSequence,
 } from '../multitable/config-revision-recorder'
+import {
+  isTombstoneCaptureEnabled,
+  countFieldDeleteCaptureRows,
+  assertWithinCaptureCap,
+  insertFieldValueTombstones,
+  insertFieldLinkTombstones,
+  readAutoNumberNextValue,
+  TombstoneCaptureCapExceededError,
+} from '../multitable/tombstone-capture'
 import {
   type ConfigRevisionRow,
   classifyRevert,
@@ -6069,13 +6079,34 @@ async function dropFieldCascade(query: TxnQuery, opts: {
   const { sheetId, fieldId, fieldRow, actorId } = opts
   const order = Number(fieldRow.order ?? 0)
   const configBatchId = randomUUID() // one batchId — the deleted field + the order-shift of later fields share it
+
+  // 4c-2 forward tombstone-capture (design-lock 2026-07-07/#3809+#3830, ratified). MUST run before the very
+  // first destructive statement below: `DELETE FROM meta_fields WHERE id = $1` cascade-deletes
+  // meta_links(field_id) and meta_field_auto_number_sequences(field_id) (both `ON DELETE CASCADE` to
+  // meta_fields) — so anything "captured before DELETE FROM meta_links/...sequences" textually below
+  // would already be too late. The field-delete revision's id is pre-generated so the tombstone rows'
+  // causal anchor (config_revision_id) matches the revision recordConfigRevision is about to write.
+  const captureEnabled = isTombstoneCaptureEnabled()
+  const fieldDeleteRevisionId = randomUUID()
+  let capturedLastValue: number | null = null
+  if (captureEnabled) {
+    const totalToCapture = await countFieldDeleteCaptureRows(query, sheetId, fieldId)
+    assertWithinCaptureCap(totalToCapture) // fail-closed 422 (via caller's catch) — never a partial capture.
+    await insertFieldValueTombstones(query, { sheetId, fieldId, configRevisionId: fieldDeleteRevisionId })
+    await insertFieldLinkTombstones(query, { sheetId, fieldId, configRevisionId: fieldDeleteRevisionId })
+    capturedLastValue = await readAutoNumberNextValue(query, fieldId)
+  }
+
   await query('DELETE FROM meta_fields WHERE id = $1', [fieldId])
   await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
   await recordConfigRevision(query, {
     sheetId, entityType: 'field', entityId: fieldId, action: 'delete',
-    ...fieldDeleteDiff({ name: String(fieldRow.name), type: String(fieldRow.type), property: fieldRow.property, order }),
+    ...(captureEnabled
+      ? fieldDeleteDiffWithSequence({ name: String(fieldRow.name), type: String(fieldRow.type), property: fieldRow.property, order }, capturedLastValue)
+      : fieldDeleteDiff({ name: String(fieldRow.name), type: String(fieldRow.type), property: fieldRow.property, order })),
     batchId: configBatchId, actorId,
     source: opts.source ?? 'mutation', restoredFromId: opts.restoredFromId ?? null,
+    id: fieldDeleteRevisionId,
   })
   try {
     await query('DELETE FROM meta_links WHERE field_id = $1', [fieldId])
@@ -6180,9 +6211,20 @@ async function computeUndeletePlan(query: TxnQuery, rev: ConfigRevisionRow): Pro
   return { idFree: !occupied, insertOrder, trailingShiftIds, targetConfigHash }
 }
 
-/** U4-L2/L3: recreate a deleted FIELD from its `before` (DEFINITION-ONLY) at its original order (trailing shift +1). */
+/**
+ * U4-L2/L3: recreate a deleted FIELD from its `before` at its original order (trailing shift +1).
+ * 4c-2 R1: when the delete that produced `before` has a matching tombstone set (`opts.deleteRevisionId` —
+ * the field-delete revision's own id), also rehydrate: column values (only into records that don't
+ * already have the key — never clobber a value written after this recreate), link edges (only between
+ * two currently-alive records), and the auto-number sequence's `next_value`. With NO tombstone (data
+ * destroyed before the capture flag was ever on, or `deleteRevisionId` unavailable) this stays exactly
+ * the pre-4c-2 DEFINITION-ONLY recreate — values/links/auto-number are NOT recovered (C1 forward-only).
+ */
 async function recreateFieldFromConfig(query: TxnQuery, opts: {
   sheetId: string; fieldId: string; before: Record<string, unknown>; actorId: string | null; source?: 'mutation' | 'restore'; restoredFromId?: string | null
+  /** The field-delete revision's own id (`rev.id` at the undelete-execute call site) — scopes which
+   * tombstone rows (if any) belong to THIS delete cycle, not a stray earlier/later capture for the same id. */
+  deleteRevisionId?: string | null
 }): Promise<void> {
   const { sheetId, fieldId, before, actorId } = opts
   const name = String(before.name ?? '')
@@ -6199,14 +6241,70 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
     if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Config entity id is occupied, cannot undelete: ${fieldId}`)
     throw e
   }
-  // DEFINITION-ONLY (U4-L3): column values / meta_links / auto-number are NOT recovered; the field is NOT re-added to
-  // any view config (lazy view re-integration). Record the recreate as a `create` revision (source='restore').
+  // DEFINITION-ONLY (U4-L3) baseline: column values / meta_links / auto-number are NOT recovered by
+  // default; the field is NOT re-added to any view config (lazy view re-integration, unaffected by 4c-2).
+  // Record the recreate as a `create` revision (source='restore').
   await recordConfigRevision(query, {
     sheetId, entityType: 'field', entityId: fieldId, action: 'create',
     ...fieldCreateDiff({ name, type, property, order }),
     batchId: configBatchId, actorId,
     source: opts.source ?? 'mutation', restoredFromId: opts.restoredFromId ?? null,
   })
+
+  // 4c-2 R1 rehydration (additive; presence-gated, NOT flag-gated — a tombstone captured while the flag was
+  // on stays restorable even if the flag is later turned off; conversely no tombstone → no rehydration
+  // regardless of the flag's current state). Scoped to deleteRevisionId so a same-id delete→undelete→delete
+  // →undelete cycle can never rehydrate from the WRONG cycle's captures.
+  const deleteRevisionId = opts.deleteRevisionId ?? null
+  if (deleteRevisionId) {
+    // Values: only into records that do NOT already carry this key (never overwrite a value written after
+    // this recreate — the recreate above just happened in THIS same transaction, so the only way a record
+    // could already have the key is a value legitimately written since — this WHERE clause is the guard).
+    // lock-exempt: field-undelete schema op — rehydrates the recreated field's key sheet-wide (mirror of
+    // the field-delete drop at ~6116); not a per-record user edit, and NOT(data?key) never clobbers.
+    await query(
+      `UPDATE meta_records m
+       SET data = data || jsonb_build_object($3::text, t.value)
+       FROM meta_field_value_tombstones t
+       WHERE m.id = t.record_id
+         AND m.sheet_id = $2
+         AND t.config_revision_id = $1
+         AND t.field_id = $3
+         AND t.reason = 'field_delete'
+         AND NOT (m.data ? $3)`,
+      [deleteRevisionId, sheetId, fieldId],
+    )
+    // Link edges: only between two records that are BOTH currently alive (design-lock §4 R1).
+    // Idempotence: meta_links has no unique on (field_id, record_id, foreign_record_id) (PK is the
+    // random `id` only), so a repeat rehydration would silently duplicate edges. Guard with NOT
+    // EXISTS, mirroring the value-side `NOT (m.data ? $3)` guard. Unreachable in current flows
+    // (rehydration runs only after the edges are gone) but load-bearing once 4c-3 replays inbound edges.
+    await query(
+      `INSERT INTO meta_links (field_id, record_id, foreign_record_id)
+       SELECT t.field_id, t.record_id, t.foreign_record_id
+       FROM meta_link_tombstones t
+       JOIN meta_records r1 ON r1.id = t.record_id
+       JOIN meta_records r2 ON r2.id = t.foreign_record_id
+       WHERE t.source_revision_id = $1 AND t.field_id = $2 AND t.reason = 'field_delete'
+         AND NOT EXISTS (
+           SELECT 1 FROM meta_links ml
+           WHERE ml.field_id = t.field_id
+             AND ml.record_id = t.record_id
+             AND ml.foreign_record_id = t.foreign_record_id
+         )`,
+      [deleteRevisionId, fieldId],
+    )
+    // Auto-number sequence: only for an autoNumber field whose delete revision carried a captured lastValue.
+    const lastValue = (before as { lastValue?: unknown }).lastValue
+    if (type === 'autoNumber' && typeof lastValue === 'number' && Number.isFinite(lastValue)) {
+      await query(
+        `INSERT INTO meta_field_auto_number_sequences (field_id, sheet_id, next_value)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (field_id) DO UPDATE SET next_value = EXCLUDED.next_value, updated_at = now()`,
+        [fieldId, sheetId, lastValue],
+      )
+    }
+  }
 }
 
 /** U4-L2: recreate a deleted VIEW from its `before` (clean, non-lossy). */
@@ -8264,11 +8362,33 @@ export function univerMetaRouter(): Router {
           undeleteHash: hashUndeletePlan(plan), actorId: access.userId,
         })
         const entityName = typeof (rev.before as { name?: unknown })?.name === 'string' ? ((rev.before as { name?: string }).name as string) : undefined
+        // 4c-2: the pre-4c-2 note ("gone and are NOT restored") is a LIE once a tombstone exists for this
+        // exact delete revision — R1 rehydration WILL restore values/links/sequence at execute time. Check
+        // presence (boolean only — no counts, still U4-L5 no-oracle) so the preview stays honest either way.
+        let tombstoneAvailable = false
+        if (rev.entity_type === 'field') {
+          try {
+            const [valueRes, linkRes] = await Promise.all([
+              pool.query('SELECT 1 FROM meta_field_value_tombstones WHERE config_revision_id = $1 LIMIT 1', [rev.id]),
+              pool.query('SELECT 1 FROM meta_link_tombstones WHERE source_revision_id = $1 AND reason = $2 LIMIT 1', [rev.id, 'field_delete']),
+            ])
+            const hasLastValue = typeof (rev.before as { lastValue?: unknown } | null)?.lastValue === 'number'
+            tombstoneAvailable = valueRes.rows.length > 0 || linkRes.rows.length > 0 || hasLastValue
+          } catch (err) {
+            if (!isUndefinedTableError(err, 'meta_field_value_tombstones') && !isUndefinedTableError(err, 'meta_link_tombstones')) throw err
+          }
+        }
         const note = rev.entity_type === 'field'
-          ? 'Undeleting recreates this field definition (name/type/config) at its original position. Its previous cell values, link references, and auto-number counter are gone and are NOT restored.'
+          ? (tombstoneAvailable
+            ? 'Undeleting recreates this field definition (name/type/config) at its original position. A captured tombstone exists for this deletion: previous cell values, link references (to still-alive records), and the auto-number counter will be restored where still applicable.'
+            : 'Undeleting recreates this field definition (name/type/config) at its original position. Its previous cell values, link references, and auto-number counter are gone and are NOT restored.')
           : 'Undeleting recreates this view with its saved configuration.'
-        // U4-L5 no-oracle: name + losses note + an id-collision flag; NO counts, NO raw plan fields.
-        return res.json({ ok: true, data: { undelete: { entityType: rev.entity_type, entityId: rev.entity_id, entityName, note, idCollision: !plan.idFree }, previewToken } })
+        // U4-L5 no-oracle: name + losses note + an id-collision flag + (only when true) a tombstone-availability
+        // flag; NO counts, NO raw plan fields. Omitted-when-false (rather than always present) keeps the
+        // response shape IDENTICAL to pre-4c-2 for every revision with no tombstone — including every revision
+        // from before the capture flag ever existed — so no pre-existing consumer's exact-key-set expectation
+        // (e.g. the undelete opacity golden) can be perturbed by a feature that, for that revision, did nothing.
+        return res.json({ ok: true, data: { undelete: { entityType: rev.entity_type, entityId: rev.entity_id, entityName, note, idCollision: !plan.idFree, ...(tombstoneAvailable ? { tombstoneAvailable: true } : {}) }, previewToken } })
       }
       // T9-W permission-revert (de-escalation-only). The cap block above already requires canManageSheetAccess for
       // permission. Open ONLY when restoring `before` reduces access vs the LIVE grant; escalation/noop is surfaced
@@ -8466,7 +8586,7 @@ export function univerMetaRouter(): Router {
               return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before undeleting.' }
             }
             if (rev.entity_type === 'field') {
-              await recreateFieldFromConfig(query, { sheetId: undeleteSheetId, fieldId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
+              await recreateFieldFromConfig(query, { sheetId: undeleteSheetId, fieldId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id, deleteRevisionId: rev.id })
             } else {
               await recreateViewFromConfig(query, { sheetId: undeleteSheetId, viewId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
             }
@@ -8560,6 +8680,9 @@ export function univerMetaRouter(): Router {
       if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
       return res.json({ ok: true, data: { restored: { revisionId, entityType: rev.entity_type, entityId: rev.entity_id, changedKeys: rev.changed_keys } } })
     } catch (err: unknown) {
+      if (err instanceof TombstoneCaptureCapExceededError) {
+        return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] config-restore execute failed:', err)
@@ -10987,6 +11110,9 @@ export function univerMetaRouter(): Router {
     } catch (err: any) {
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      if (err instanceof TombstoneCaptureCapExceededError) {
+        return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -15411,6 +15537,9 @@ export function univerMetaRouter(): Router {
             serverVersion: err.serverVersion,
           },
         })
+      }
+      if (err instanceof TombstoneCaptureCapExceededError) {
+        return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
