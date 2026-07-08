@@ -6236,11 +6236,67 @@ async function loadLossyRetypeFieldRow(query: TxnQuery, fieldId: string, forUpda
 }
 
 /**
- * The property the oracle coerces AGAINST: the revision's `before.property` — the config this revert restores.
- * (`configUpdateDiff` records only the CHANGED keys, and `'property'` is in `changed_keys` by the envelope
- * predicate, so `before.property` is always present; a `null` property normalizes to `undefined` for the codec,
- * which is what `coerceBatch1Value`'s `property ?? {}` arms expect.)
+ * 4c-1 P1-1 — TYPE-ERA GUARD. `changed_keys` for a property-only revert is `['property']`, and BOTH drift controls
+ * key off `changed_keys` alone (`computeRevertPreview`'s `driftConflict` and `configBaselineHash`), so a `type`
+ * change landing BETWEEN the reverted revision and now is invisible to them. That matters because
+ * `sanitizeFieldProperty` is the IDENTITY for url/email/phone/barcode/qrcode/location, so a `string → url`
+ * type-only PATCH preserves `property` byte-for-byte and a stale `string`-era property revert does NOT drift.
+ * Reverting it would then coerce every cell under the NEW type — a forward `text → url` value migration smuggled
+ * in through the revert door, which lock §7 puts explicitly OUT OF BOUNDS.
+ *
+ * Lock §2.1 says "同 type 的 property 变换" — SAME type. This enforces it: if the field's `type` changed at any
+ * point strictly AFTER the revision being reverted, the revision belongs to a different type era and the revert is
+ * refused (422). Ordering uses this table's EXISTING deterministic order — `(created_at, id)`, the ascending twin
+ * of the `ORDER BY created_at DESC, id DESC` the config-history read surface uses — not a home-grown one.
+ *
+ * Also catches a delete→undelete cycle that recreated the field at a different type: `fieldDeleteDiff` /
+ * `fieldCreateDiff` both put `type` in `changed_keys`. A type change that was later changed BACK still trips this
+ * (the era is "unbroken", not "endpoint-equal") — deliberately fail-closed, and it only ever refuses.
  */
+async function hasFieldTypeChangeSince(query: TxnQuery, sheetId: string, fieldId: string, revisionId: string): Promise<boolean> {
+  const res = (await query(
+    `SELECT 1 FROM meta_config_revisions r
+     WHERE r.sheet_id = $1 AND r.entity_type = 'field' AND r.entity_id = $2
+       AND 'type' = ANY(r.changed_keys)
+       AND (r.created_at, r.id) > (SELECT a.created_at, a.id FROM meta_config_revisions a WHERE a.id = $3)
+     LIMIT 1`,
+    [sheetId, fieldId, revisionId],
+  )) as any
+  return res.rows.length > 0
+}
+
+const FIELD_TYPE_ERA_MISMATCH = {
+  code: 'FIELD_TYPE_ERA_MISMATCH',
+  // No counts, no bucket names, no record/value information — the same no-oracle discipline as every other
+  // refusal on this surface (and it is reached only AFTER the full-read gate has already passed).
+  message: "This field's type changed after the revision being reverted, so restoring its old configuration would re-interpret every cell under a different type. Refused.",
+} as const
+
+/**
+ * 4c-1 defense-in-depth: normalize the `before.property` this revert is about to write THROUGH the live type's
+ * sanitizer, and use that same normalized value for the oracle, the preview's `target`, and the write. Reasons:
+ *   • `applyConfigRevert` writes `before[k]` RAW. It is shared with Tier-1/Tier-2, so it is NOT changed here — we
+ *     hand the lossy branch (and only the lossy branch) a derived revision instead. Other tiers are untouched.
+ *   • On real data this is a NO-OP: every stored property was written through `normalizeFieldWriteInput`, so a
+ *     recorded `before.property` is already sanitizer-shaped, and `sanitizeFieldProperty` is idempotent. It only
+ *     bites on a hand-crafted / legacy / plugin-written property, where writing it raw would leave the field
+ *     holding a malformed property for its type.
+ *   • Because `preview.target` is derived from the SAME value, whatever normalization happens is DISCLOSED to the
+ *     actor in the preview rather than applied silently.
+ * Safe by construction: `driftConflict` compares `current` against `after` (untouched) and `baselineHash` hashes
+ * the CURRENT snapshot (untouched), so neither drift control is perturbed.
+ *
+ * Uses the ROUTE-LOCAL `sanitizeFieldProperty` (with the same `as UniverMetaField['type']` cast the forward
+ * `normalizeFieldWriteInput` uses) rather than field-codecs' — write-path parity: it is the route-local one that
+ * shapes every property the forward PATCH stores, and it additionally applies `applyFieldValidationNormalisation`.
+ * The cast is sound: the caller has already proven `liveType ∈ BATCH1_FIELD_TYPES ⊂ UniverMetaField['type']`.
+ */
+function lossyRetypeDerivedRevision(rev: ConfigRevisionRow, liveType: string): ConfigRevisionRow {
+  const before = rev.before ?? {}
+  return { ...rev, before: { ...before, property: sanitizeFieldProperty(liveType as UniverMetaField['type'], before.property) } }
+}
+
+/** The property the oracle coerces AGAINST: the (normalized) `before.property` this revert restores. */
 function lossyRetypeTargetProperty(rev: ConfigRevisionRow): Record<string, unknown> | undefined {
   const raw = (rev.before ?? {}).property
   return isPlainObject(raw) ? raw : undefined
@@ -8604,6 +8660,11 @@ export function univerMetaRouter(): Router {
           if (!(await hasFullTableReadAccess(req, pool.query.bind(pool), sheetId, access, capabilities))) {
             return res.status(403).json({ ok: false, error: { code: 'FULL_TABLE_READ_REQUIRED', message: 'A value-transforming field revert requires unrestricted read access to every record and field of this sheet.' } })
           }
+          // P1-1 TYPE-ERA GUARD (§2.1 "同 type"): a `type` change after this revision puts it in a different era,
+          // and neither driftConflict nor baselineHash can see it (both key off `changed_keys` = ['property']).
+          if (await hasFieldTypeChangeSince(pool.query.bind(pool), sheetId, rev.entity_id, rev.id)) {
+            return res.status(422).json({ ok: false, error: { ...FIELD_TYPE_ERA_MISMATCH } })
+          }
           // C4 write-symmetric cap — the SAME ceiling the sheet-wide revert uses, checked on BOTH sides, fail-closed
           // (never a silent truncation, never a partial transform).
           const cap = resolveSheetRevertMaxRecords()
@@ -8612,8 +8673,9 @@ export function univerMetaRouter(): Router {
           const snapshot = await loadEntityConfigSnapshot(pool.query.bind(pool), rev)
           if (!snapshot) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot preview a revert.' } })
           const cells = await loadLossyRetypeCells(pool.query.bind(pool), sheetId, rev.entity_id, false)
-          const lossSummary = summarizeLoss(computeLossOutcomes(cells, fieldRow.type, lossyRetypeTargetProperty(rev), rev.entity_id))
-          const preview = computeRevertPreview(rev, snapshot)
+          const derived = lossyRetypeDerivedRevision(rev, fieldRow.type)
+          const lossSummary = summarizeLoss(computeLossOutcomes(cells, fieldRow.type, lossyRetypeTargetProperty(derived), rev.entity_id))
+          const preview = computeRevertPreview(derived, snapshot)
           // classifyRevert stays PURE (it gates every field property revert); the flag opens exactly this subset.
           preview.opKind = 'safe'
           delete preview.gatedReason
@@ -8889,15 +8951,21 @@ export function univerMetaRouter(): Router {
             if (!(await hasFullTableReadAccess(req, query as unknown as QueryFn, sheetId, access, capabilities))) {
               return { status: 403, code: 'FULL_TABLE_READ_REQUIRED', message: 'A value-transforming field revert requires unrestricted read access to every record and field of this sheet.' }
             }
+            // P1-1 TYPE-ERA GUARD, re-checked INSIDE the lock alongside the lossSummary recompute: a `type` change
+            // could have landed between preview and execute, and no other control on this path can see it.
+            if (await hasFieldTypeChangeSince(query, sheetId, rev.entity_id, rev.id)) {
+              return { status: 422, ...FIELD_TYPE_ERA_MISMATCH }
+            }
             const cap = resolveSheetRevertMaxRecords()
             const scanRows = await countLossyRetypeScanRows(query, sheetId)
             if (scanRows > cap) return { status: 413, code: 'SHEET_TOO_LARGE', message: lossyRetypeTooLargeMessage(scanRows, cap) }
             const snapshot = await loadEntityConfigSnapshot(query, rev)
             if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
             const cells = await loadLossyRetypeCells(query, sheetId, rev.entity_id, true)
-            const outcomes = computeLossOutcomes(cells, fieldRow.type, lossyRetypeTargetProperty(rev), rev.entity_id)
+            const derived = lossyRetypeDerivedRevision(rev, fieldRow.type)
+            const outcomes = computeLossOutcomes(cells, fieldRow.type, lossyRetypeTargetProperty(derived), rev.entity_id)
             const lossSummary = summarizeLoss(outcomes)
-            const preview = computeRevertPreview(rev, snapshot)
+            const preview = computeRevertPreview(derived, snapshot)
             // §2.3: the token binds BOTH the config baseline AND the loss magnitude. The full-read gate makes the
             // re-computation range identical to the preview's (the whole table), so this is a like-for-like compare.
             const verdict = verifyConfigRestorePreviewIdentity(previewToken, {
@@ -8911,7 +8979,9 @@ export function univerMetaRouter(): Router {
               return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before restoring.' }
             }
             if (preview.driftConflict) return { status: 409, code: 'CONFIG_DRIFT', message: 'The config was changed after this revision; cannot safely revert without re-previewing.' }
-            await applyConfigRevert(query, rev)
+            // `derived` (not `rev`): the property written is the sanitizer-normalized one the preview disclosed.
+            // `applyConfigRevert` itself is UNCHANGED — Tier-1/Tier-2 keep passing their raw revision.
+            await applyConfigRevert(query, derived)
             await applyLossyRetypeCellRewrite(query, {
               sheetId,
               fieldId: rev.entity_id,

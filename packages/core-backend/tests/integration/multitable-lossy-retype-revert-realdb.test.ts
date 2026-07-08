@@ -40,6 +40,7 @@ const BASE = `base_lrr_${TS}`
 const SHEET = `sheet_lrr_${TS}`
 const FIELD = `fld_lrr_${TS}`
 const OTHER_FIELD = `fld_lrr_other_${TS}`
+const ERA_FIELD = `fld_lrr_era_${TS}`
 const U_FULL = `u_lrr_full_${TS}` // multitable:write -> canManageFields
 const BASE_FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT'
 const LOSSY_FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY'
@@ -432,6 +433,118 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     expect(restores).toHaveLength(1)
     expect(new Set(rows.map((r) => r.config_revision_id))).toEqual(new Set([restores[0].id]))
     expect(rows.every((r) => r.config_revision_id !== rev)).toBe(true)
+  })
+
+  // ── P1-1 TYPE-ERA GUARD (adversarial-review finding: a real, end-to-end data-destruction path) ─────────────
+  // Built ENTIRELY through the normal forward pipeline (POST /fields, PATCH /fields) — no hand-crafted revision.
+  // The exploit: `changed_keys` for a property-only revert is ['property'], and BOTH drift controls key off
+  // `changed_keys` (driftConflict compares current vs `after`; baselineHash hashes only those keys). A `type`
+  // change in between is therefore invisible to them. It is REACHABLE because sanitizeFieldProperty is the
+  // identity for url/email/phone/barcode/qrcode/location, so a `string -> url` type-only PATCH preserves
+  // `property` byte-for-byte and the stale `string`-era property revision does not drift. Reverting it would
+  // coerce every cell under the NEW type = a forward `text -> url` value migration smuggled in through the
+  // revert door, which lock §7 puts explicitly out of bounds.
+  const eraQ = {
+    type: async (): Promise<string> => ((await q('SELECT type FROM meta_fields WHERE id=$1', [ERA_FIELD])).rows[0] as { type: string }).type,
+    property: async (): Promise<unknown> => ((await q('SELECT property FROM meta_fields WHERE id=$1', [ERA_FIELD])).rows[0] as { property: unknown }).property,
+    cells: async (): Promise<Record<string, unknown>> => Object.fromEntries(((await q('SELECT id, data->$2 AS v FROM meta_records WHERE sheet_id=$1 ORDER BY id', [SHEET, ERA_FIELD])).rows as Array<{ id: string; v: unknown }>).map((r) => [r.id, r.v])),
+  }
+  /** Drives the REAL forward routes so the revision chain is exactly what production would record. */
+  const seedTypeEraExploit = async (): Promise<{ propertyRevisionId: string; typeRevisionKeys: string[] }> => {
+    actor = FULL
+    await request(app).post('/api/multitable/fields').send({ id: ERA_FIELD, sheetId: SHEET, name: 'EraF', type: 'string', property: {} }).expect(201)
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [rid(11), SHEET, JSON.stringify({ [ERA_FIELD]: 'hello world' })])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [rid(12), SHEET, JSON.stringify({ [ERA_FIELD]: 'https://ok.example' })])
+    // (1) a plain property edit while the field is still `string` -> revision with changed_keys = ['property']
+    await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ property: { note: 'a' } }).expect(200)
+    // (2) a type-only PATCH -> `url`. The url sanitizer is the identity, so `property` survives byte-for-byte
+    //     and this revision's changed_keys is ['type'] ALONE.
+    await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ type: 'url' }).expect(200)
+    const revs = (await q(`SELECT id, changed_keys FROM meta_config_revisions WHERE sheet_id=$1 AND entity_id=$2 AND action='update' ORDER BY created_at ASC, id ASC`, [SHEET, ERA_FIELD])).rows as Array<{ id: string; changed_keys: string[] }>
+    const propertyRev = revs.find((r) => r.changed_keys.length === 1 && r.changed_keys[0] === 'property')
+    const typeRev = revs.find((r) => r.changed_keys.includes('type'))
+    if (!propertyRev || !typeRev) throw new Error(`fixture did not produce the expected revisions: ${JSON.stringify(revs)}`)
+    return { propertyRevisionId: propertyRev.id, typeRevisionKeys: typeRev.changed_keys }
+  }
+
+  test('P1-1 a property revert from an EARLIER type era -> 422 on preview AND execute, DB untouched', async () => {
+    bothFlagsOn()
+    process.env[CAPTURE_FLAG] = 'true'
+    const { propertyRevisionId, typeRevisionKeys } = await seedTypeEraExploit()
+
+    // the exploit's premise, asserted: the type change is invisible to `changed_keys`-based drift control
+    expect(typeRevisionKeys).toEqual(['type'])
+    expect(await eraQ.type()).toBe('url')
+    expect(await eraQ.property()).toEqual({ note: 'a' }) // preserved byte-for-byte across the type PATCH
+
+    const beforeCells = await eraQ.cells()
+    expect(beforeCells).toEqual({ [rid(11)]: 'hello world', [rid(12)]: 'https://ok.example' })
+
+    const p = await preview(propertyRevisionId)
+    expect(p.status).toBe(422)
+    expect(p.body?.error?.code).toBe('FIELD_TYPE_ERA_MISMATCH')
+    expectNoLeak(p.body)
+    const x = await execute(propertyRevisionId, 'tok')
+    expect(x.status).toBe(422)
+    expect(x.body?.error?.code).toBe('FIELD_TYPE_ERA_MISMATCH')
+    expectNoLeak(x.body)
+
+    // zero destruction: 'hello world' (an invalid url) is NOT dropped, and nothing else moved
+    expect(await eraQ.cells()).toEqual(beforeCells)
+    expect(await eraQ.type()).toBe('url')
+    expect(await eraQ.property()).toEqual({ note: 'a' })
+    expect(await restoreConfigRevisions()).toEqual([])
+    expect(await recordRevisions()).toEqual([])
+    expect(await tombstones()).toEqual([])
+  })
+
+  test('P1-1b a SAME-era property revert is unaffected by the guard (the guard refuses eras, not property reverts)', async () => {
+    bothFlagsOn()
+    actor = FULL
+    await request(app).post('/api/multitable/fields').send({ id: ERA_FIELD, sheetId: SHEET, name: 'EraF', type: 'url', property: {} }).expect(201)
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [rid(11), SHEET, JSON.stringify({ [ERA_FIELD]: 'https://ok.example' })])
+    await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ property: { note: 'a' } }).expect(200)
+    const propertyRev = ((await q(`SELECT id FROM meta_config_revisions WHERE sheet_id=$1 AND entity_id=$2 AND changed_keys = ARRAY['property']::text[] LIMIT 1`, [SHEET, ERA_FIELD])).rows[0] as { id: string }).id
+    const p = await preview(propertyRev)
+    expect(p.status).toBe(200)
+    expect(p.body?.data?.lossSummary).toEqual({ unchanged: 1, coerced: 0, dropped: 0 })
+  })
+
+  test('P1-1c the property written is the sanitizer-normalized one the preview DISCLOSED (no silent downgrade)', async () => {
+    bothFlagsOn()
+    // A hand-crafted revision whose `before.property` carries a MALFORMED cross-cutting rule. `applyConfigRevert`
+    // writes `before[k]` raw, so without the derived-revision normalization the field would end up holding it.
+    await seedField('url', { note: 'a' }, [[1, 'https://ok.example']])
+    const rev = await craftPropertyRev({ visibilityRule: { bogus: 1 } }, { note: 'a' })
+    const p = await preview(rev)
+    expect(p.status).toBe(200)
+    const disclosedTarget = p.body?.data?.preview?.target?.property
+    expect(disclosedTarget).toEqual({}) // the malformed rule is stripped, and the actor SEES the stripped target
+    const x = await execute(rev, p.body.data.previewToken)
+    expect(x.status).toBe(200)
+    expect(await fieldProperty()).toEqual(disclosedTarget) // written === disclosed
+  })
+
+  // ── P2-1 route-level Batch-1 type gate (was behaviourally correct but had ZERO wire coverage) ──────────────
+  test('P2-1 a property revert on a NON-Batch-1 field (select) stays gated: no lossSummary + execute 422', async () => {
+    bothFlagsOn()
+    // `select`'s lossiness (an option removal) is invisible to coerceBatch1Value, which is the identity for it —
+    // admitting it would preview "zero loss" and then leave orphaned values. Fail-closed: it must stay 422.
+    await seedField('select', { options: [{ value: 'a' }, { value: 'b' }] }, [[1, 'b']])
+    const rev = await craftPropertyRev({ options: [{ value: 'a' }] }, { options: [{ value: 'a' }, { value: 'b' }] })
+    const before = await cellValues()
+    const p = await preview(rev)
+    expect(p.status).toBe(200)
+    expect(p.body?.data?.preview?.opKind).toBe('gated')
+    expect(p.body?.data).not.toHaveProperty('lossSummary')
+    expect(p.body?.data).not.toHaveProperty('lossNote')
+    const x = await execute(rev, p.body.data.previewToken)
+    expect(x.status).toBe(422)
+    expect(x.body?.error?.code).toBe('RESTORE_NOT_SUPPORTED')
+    expect(await cellValues()).toEqual(before)
+    expect(await fieldProperty()).toEqual({ options: [{ value: 'a' }, { value: 'b' }] })
+    expect(await restoreConfigRevisions()).toEqual([])
+    expect(await recordRevisions()).toEqual([])
   })
 
   test('L11b capture flag OFF -> zero tombstones captured, and the revert still succeeds', async () => {
