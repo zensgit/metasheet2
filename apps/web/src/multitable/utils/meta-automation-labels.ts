@@ -97,6 +97,7 @@ export type AutomationLabelKey =
   | 'editor.executionModeLabel'
   | 'editor.executionModeHint'
   | 'editor.executionModeRequiredHint'
+  | 'editor.advancedSection'
   | 'editor.saveBlockedTitle'
   | 'trigger.title'
   | 'trigger.watchField'
@@ -361,6 +362,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'editor.executionModeLabel',
   'editor.executionModeHint',
   'editor.executionModeRequiredHint',
+  'editor.advancedSection',
   'editor.saveBlockedTitle',
   'trigger.title',
   'trigger.watchField',
@@ -622,6 +624,10 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'editor.moveUpTitle': { en: 'Move up', zh: '上移' },
   'editor.moveDownTitle': { en: 'Move down', zh: '下移' },
   'editor.removeActionTitle': { en: 'Remove action', zh: '移除动作' },
+  'editor.advancedSection': {
+    en: 'Advanced',
+    zh: '高级设置',
+  },
   'editor.executionModeLabel': {
     en: 'Persist a per-action run record (advanced)',
     zh: '持久化每步运行记录（高级）',
