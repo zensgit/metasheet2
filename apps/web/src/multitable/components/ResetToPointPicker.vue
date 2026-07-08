@@ -32,15 +32,14 @@
             </option>
           </select>
         </label>
-        <button
-          type="button"
+        <MtButton
           class="reset-picker__refresh"
           data-test="reset-picker-history-refresh"
           :disabled="historyLoading || !canLoadHistory"
           @click="loadHistoryBatches"
         >
           Refresh
-        </button>
+        </MtButton>
       </div>
       <p v-if="historyLoading" class="reset-picker__hint" data-test="reset-picker-history-loading">Loading history points...</p>
       <p v-else-if="historyError" class="reset-picker__hint reset-picker__hint--warn" data-test="reset-picker-history-error">{{ historyError }}</p>
@@ -89,6 +88,7 @@
 import { computed, ref, watch } from 'vue'
 
 import ResetConfirmDialog from './ResetConfirmDialog.vue'
+import { MtButton } from '../ui'
 import type { ResetPreview, ResetResult } from '../api/client'
 import type { HistoryBatchSummary } from '../types'
 
@@ -216,8 +216,9 @@ const boundExecute = (a: string, identity: string): Promise<ResetResult> => prop
 .reset-picker__label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #912018; }
 .reset-picker__input { padding: 6px 8px; border: 1px solid #d0d5dd; border-radius: 6px; max-width: 240px; }
 .reset-picker__select { min-width: min(520px, 100%); max-width: min(640px, 100%); }
-.reset-picker__refresh { padding: 6px 10px; border: 1px solid #d0d5dd; border-radius: 6px; background: #fff; color: #912018; cursor: pointer; }
-.reset-picker__refresh:disabled { cursor: default; opacity: 0.6; }
+/* .reset-picker__refresh: the Refresh control is now <MtButton> (ghost, token-styled); its bespoke
+   hardcoded-hex CSS was removed to avoid double-styling the MtButton root. Class + data-test kept for
+   selector stability. */
 .reset-picker__manual { color: #912018; font-size: 12px; }
 .reset-picker__manual > summary { cursor: pointer; }
 .reset-picker__manual .reset-picker__label { margin-top: 6px; }
