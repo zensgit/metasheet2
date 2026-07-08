@@ -9,6 +9,11 @@ owner「完成这条开发线的所有开发」mandate(2026-07-07)达成:能力�
 
 ## 1. 交付账(全 MERGED)
 
+> **PR 计数口径(对外引用请保留此拆法)**:本轮共 **17 个 PR** = **16 个功能 PR**(UX 阶梯 11:
+> IU-1/2a/2b/2c/2d/3/4/5a/5b/6/F + Bridge-Agent 5:BA-UI-0/1/2/3/4)+ **1 个收尾报告 PR**(#3868,
+> 即本文)。**不是 17 个功能 PR。**
+
+
 ### UX 阶梯(design-lock `integration-ux-workbench-redesign-design-lock-20260706.md`,RATIFIED)
 
 | 片 | 内容 | PR |
