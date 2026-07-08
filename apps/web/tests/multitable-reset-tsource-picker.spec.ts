@@ -78,6 +78,43 @@ describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
     expect(q('[data-test="reset-entry"]')).toBeFalsy()
   })
 
+  it('(d1) P3-2 history load ERROR: listHistoryEvents rejects → error hint shown, manual fallback still mounts a dialog', async () => {
+    const listHistoryEvents = vi.fn(async () => { throw new Error('history service unavailable') })
+    mount({ listHistoryEvents }); await nextTick()
+    await waitUntil(() => !!q('[data-test="reset-picker-history-error"]'))
+    expect(q('[data-test="reset-picker-history-error"]')?.textContent).toBe('history service unavailable')
+    expect(q('[data-test="reset-picker-history-loading"]')).toBeFalsy()
+    expect(q('[data-test="reset-picker-history-empty"]')).toBeFalsy()
+    expect(q('[data-test="reset-picker-history-unavailable"]')).toBeFalsy()
+    // the manual/Advanced fallback isn't disabled by a history-load failure — it must still be able to
+    // source a T and mount the dialog (the whole point of keeping it as a fallback).
+    setInput('[data-test="reset-picker-input"]', '2020-01-16T12:00'); await flush()
+    expect(q('[data-test="reset-picker-target"]')).toBeTruthy()
+    await waitUntil(() => !!q('[data-test="reset-entry"]'))
+  })
+
+  it('(d2) P3-2 history EMPTY: canLoadHistory true + zero batches → empty hint (not the error or unavailable hint)', async () => {
+    const listHistoryEvents = vi.fn(async () => ({ batches: [], total: 0, nextCursor: null, searchTruncated: false }))
+    mount({ listHistoryEvents }); await nextTick()
+    await waitUntil(() => !!q('[data-test="reset-picker-history-empty"]'))
+    expect(q('[data-test="reset-picker-history-empty"]')?.textContent).toBe('No recent history batches found.')
+    expect(q('[data-test="reset-picker-history-error"]')).toBeFalsy()
+    expect(q('[data-test="reset-picker-history-unavailable"]')).toBeFalsy()
+    expect((q('[data-test="reset-picker-history-select"]') as HTMLSelectElement).options.length).toBe(1) // only the placeholder option
+  })
+
+  it('(d3) P3-2 history UNAVAILABLE: no usable baseId → unavailable hint (history-load never even attempted)', async () => {
+    const listHistoryEvents = vi.fn(async () => ({ batches: [], total: 0, nextCursor: null, searchTruncated: false }))
+    mount({ baseId: '', listHistoryEvents }); await nextTick(); await flush()
+    expect(q('[data-test="reset-picker-history-unavailable"]')?.textContent).toBe('History points unavailable.')
+    expect(q('[data-test="reset-picker-history-error"]')).toBeFalsy()
+    expect(q('[data-test="reset-picker-history-empty"]')).toBeFalsy()
+    expect(listHistoryEvents).not.toHaveBeenCalled() // canLoadHistory is false — no doomed fetch attempt
+    // the select + manual fallback are still present (fail-closed on THIS source only, not the whole picker)
+    expect(q('[data-test="reset-picker-history-select"]')).toBeTruthy()
+    expect(q('[data-test="reset-picker-input"]')).toBeTruthy()
+  })
+
   it('(e) valid history batch T → shows local target + mounts the ResetConfirmDialog entry', async () => {
     mount(); await nextTick()
     await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 3)
