@@ -7497,12 +7497,7 @@
                 <label class="attendance__field" for="attendance-approval-type">
                   <span>{{ tr('Request type', '申请类型') }}</span>
                   <select id="attendance-approval-type" name="approvalType" v-model="approvalFlowForm.requestType">
-                    <option value="missed_check_in">{{ tr('Missed check-in', '漏打上班卡') }}</option>
-                    <option value="missed_check_out">{{ tr('Missed check-out', '漏打下班卡') }}</option>
-                    <option value="time_correction">{{ tr('Time correction', '时间更正') }}</option>
-                    <option value="leave">{{ tr('Leave', '请假') }}</option>
-                    <option value="overtime">{{ tr('Overtime', '加班') }}</option>
-                    <option value="shift_swap">{{ tr('Shift swap', '换班') }}</option>
+                    <option v-for="type in approvalFlowRequestTypeOptions" :key="type" :value="type">{{ formatRequestType(type) }}</option>
                   </select>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-approval-active">
@@ -7514,16 +7509,18 @@
                     type="checkbox"
                   />
                 </label>
-                <label class="attendance__field attendance__field--full" for="attendance-approval-steps">
-                  <span>{{ tr('Steps (JSON)', '步骤（JSON）') }}</span>
-                  <textarea
-                    id="attendance-approval-steps"
-                    name="approvalSteps"
-                    v-model="approvalFlowForm.steps"
-                    rows="3"
-                    placeholder='[{"name":"Manager","approverRoleIds":["manager"]}]'
-                  />
-                </label>
+                <div class="attendance__field attendance__field--full">
+                  <span>{{ tr('Approval steps', '审批步骤') }}</span>
+                  <AttendanceApprovalFlowStepsEditor v-model="approvalFlowSteps" :tr="tr" />
+                  <p v-for="(warn, i) in approvalFlowStepWarnings" :key="i" class="attendance__hint attendance__hint--warning" data-testid="attendance-approval-flow-warning">
+                    <template v-if="warn.code === 'no_steps'">{{ tr('No steps configured — requests of this type may auto-pass.', '未配置任何步骤——该类型申请可能自动通过。') }}</template>
+                    <template v-else>{{ tr(`Step ${(warn.stepIndex ?? 0) + 1} has no approver.`, `第 ${(warn.stepIndex ?? 0) + 1} 级未配置审批人。`) }}</template>
+                  </p>
+                  <details class="attendance__approval-preview" data-testid="attendance-approval-steps-preview">
+                    <summary>{{ tr('Preview steps JSON (what will be saved)', '预览步骤 JSON（即将保存的内容）') }}</summary>
+                    <pre><code>{{ approvalFlowStepsPreview }}</code></pre>
+                  </details>
+                </div>
               </div>
               <div class="attendance__admin-actions">
                 <button
@@ -9766,6 +9763,15 @@ import AttendanceImportBatchesSection from './attendance/AttendanceImportBatches
 import AttendanceTeamAvailabilitySection from './attendance/AttendanceTeamAvailabilitySection.vue'
 import AttendanceHolidayDataSection from './attendance/AttendanceHolidayDataSection.vue'
 import AttendanceUserPickerField from './attendance/AttendanceUserPickerField.vue'
+import AttendanceApprovalFlowStepsEditor from './attendance/AttendanceApprovalFlowStepsEditor.vue'
+import {
+  ATTENDANCE_APPROVAL_REQUEST_TYPES,
+  collectAuthoringWarnings,
+  normalizeSteps as normalizeApprovalSteps,
+  stepsPreviewJson,
+  toPayloadSteps as toApprovalPayloadSteps,
+  type AttendanceApprovalStep as AttendanceApprovalStepModel,
+} from './attendance/attendanceApprovalSteps'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import {
   buildCalendarPolicyOverrideDiagnostics,
@@ -15359,6 +15365,13 @@ const approvalFlowForm = reactive({
   steps: '',
   isActive: true,
 })
+// A1 structured step editor (approval-flow-editor design-lock): the working
+// step model behind the editor. approvalFlowForm.steps (JSON string) is retired
+// as an input surface but the persisted payload shape is unchanged.
+const approvalFlowSteps = ref<AttendanceApprovalStepModel[]>([])
+const approvalFlowStepsPreview = computed(() => stepsPreviewJson(approvalFlowSteps.value))
+const approvalFlowRequestTypeOptions = ATTENDANCE_APPROVAL_REQUEST_TYPES
+const approvalFlowStepWarnings = computed(() => collectAuthoringWarnings(approvalFlowSteps.value))
 
 const rotationRuleForm = reactive({
   name: '',
@@ -15836,7 +15849,9 @@ function formatRequestType(value: string): string {
         time_correction: '时间更正',
         leave: '请假申请',
         overtime: '加班申请',
+        outdoor_punch: '外勤打卡',
         shift_swap: '换班申请',
+        schedule_dispatch: '调度申请',
       }
     : {
         missed_check_in: 'Missed check-in',
@@ -15844,7 +15859,9 @@ function formatRequestType(value: string): string {
         time_correction: 'Time correction',
         leave: 'Leave request',
         overtime: 'Overtime request',
+        outdoor_punch: 'Outdoor punch',
         shift_swap: 'Shift-swap request',
+        schedule_dispatch: 'Schedule dispatch',
       }
   return map[value] ?? value
 }
@@ -24412,6 +24429,7 @@ function resetApprovalFlowForm() {
   approvalFlowForm.name = ''
   approvalFlowForm.requestType = 'leave'
   approvalFlowForm.steps = ''
+  approvalFlowSteps.value = []
   approvalFlowForm.isActive = true
 }
 
@@ -24420,6 +24438,7 @@ function editApprovalFlow(flow: AttendanceApprovalFlow) {
   approvalFlowForm.name = flow.name
   approvalFlowForm.requestType = flow.requestType
   approvalFlowForm.steps = formatApprovalSteps(flow.steps)
+  approvalFlowSteps.value = normalizeApprovalSteps(flow.steps)
   approvalFlowForm.isActive = flow.isActive
 }
 
@@ -24452,10 +24471,10 @@ async function saveApprovalFlow() {
     if (!approvalFlowForm.name.trim()) {
       throw new Error(tr('Name is required', '名称为必填项'))
     }
-    const steps = parseApprovalStepsInput(approvalFlowForm.steps)
-    if (steps === null) {
-      throw new Error(tr('Invalid steps JSON', '步骤 JSON 格式无效'))
-    }
+    // A1: steps now come from the structured editor's working model (payload
+    // shape unchanged — same {name,approverUserIds,approverRoleIds}, unknown
+    // keys on existing flows preserved via toApprovalPayloadSteps).
+    const steps = toApprovalPayloadSteps(approvalFlowSteps.value)
     const payload = {
       name: approvalFlowForm.name.trim(),
       requestType: approvalFlowForm.requestType,
