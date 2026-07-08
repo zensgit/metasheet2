@@ -90,6 +90,13 @@ export type MetaRecordLabelKey =
   | 'notification.eventNotificationSent'
   // --- MetaFormView multi-page nav chrome (A4) ---
   | 'form.previousPage' | 'form.nextPage'
+  // --- T8-2 Reset UI T-source picker (R5b strict-zero closeout) ---
+  | 'record.resetPickerHeading' | 'record.resetPickerHistoryLabel' | 'record.resetPickerHistoryPlaceholder'
+  | 'record.resetPickerRefresh' | 'record.resetPickerHistoryLoading'
+  | 'record.resetPickerHistoryEmpty' | 'record.resetPickerHistoryUnavailable'
+  | 'record.resetPickerManualSummary' | 'record.resetPickerManualLabel' | 'record.resetPickerFutureWarn'
+  | 'record.resetPickerTargetPrefix' | 'record.resetPickerTargetSuffix' | 'record.resetPickerFromBatch'
+  | 'record.resetPickerErrorLoad' | 'record.resetPickerSystemActor' | 'record.resetPickerDefaultAction'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -229,6 +236,26 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'form.reset': { en: 'Reset', zh: '重置' },
   'form.previousPage': { en: 'Previous', zh: '上一页' },
   'form.nextPage': { en: 'Next', zh: '下一页' },
+
+  // T8-2 Reset UI T-source picker (ResetToPointPicker.vue, R5b strict-zero closeout — the component was born
+  // after the i18n line closed and shipped all-English; flag (pitResetEnabled) is dormant by default so this
+  // is a shape-only migration, no behavior change).
+  'record.resetPickerHeading': { en: 'Reset this sheet to a Global History point', zh: '将此表重置到某个全局历史点' },
+  'record.resetPickerHistoryLabel': { en: 'History point', zh: '历史点' },
+  'record.resetPickerHistoryPlaceholder': { en: 'Select a recent history batch', zh: '选择一个最近的历史批次' },
+  'record.resetPickerRefresh': { en: 'Refresh', zh: '刷新' },
+  'record.resetPickerHistoryLoading': { en: 'Loading history points...', zh: '正在加载历史点...' },
+  'record.resetPickerHistoryEmpty': { en: 'No recent history batches found.', zh: '未找到最近的历史批次。' },
+  'record.resetPickerHistoryUnavailable': { en: 'History points unavailable.', zh: '历史点不可用。' },
+  'record.resetPickerManualSummary': { en: 'Advanced manual time', zh: '高级：手动指定时间' },
+  'record.resetPickerManualLabel': { en: 'Manual point in time', zh: '手动指定时间点' },
+  'record.resetPickerFutureWarn': { en: 'Pick a time in the past — you can only reset to an earlier state.', zh: '请选择过去的时间——只能重置到更早的状态。' },
+  'record.resetPickerTargetPrefix': { en: 'Target:', zh: '目标：' },
+  'record.resetPickerTargetSuffix': { en: '(your local time)', zh: '（你的本地时间）' },
+  'record.resetPickerFromBatch': { en: 'from history batch', zh: '来自历史批次' },
+  'record.resetPickerErrorLoad': { en: 'Failed to load history points', zh: '加载历史点失败' },
+  'record.resetPickerSystemActor': { en: 'System', zh: '系统' },
+  'record.resetPickerDefaultAction': { en: 'update', zh: '更新' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -293,4 +320,12 @@ export function formPageIndicator(current: number, total: number, isZh: boolean)
 // never translated; only the surrounding copy is.
 export function configRestoreTypedConfirm(confirmToken: string, isZh: boolean): string {
   return isZh ? `输入 ${confirmToken} 以确认：` : `Type ${confirmToken} to confirm:`
+}
+
+// resetPickerRecordCount: the affected-record count fragment of a Global History batch label
+// (ResetToPointPicker's historyBatchLabel, R5b). EN keeps the original singular/plural literal
+// ('1 record' / 'N records'); zh uses the measure-word form. The number itself is never translated.
+export function resetPickerRecordCount(count: number, isZh: boolean): string {
+  if (isZh) return `${count} 条记录`
+  return count === 1 ? '1 record' : `${count} records`
 }
