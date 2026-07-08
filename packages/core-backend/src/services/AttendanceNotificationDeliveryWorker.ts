@@ -6,7 +6,9 @@ import {
   DingTalkRequestError,
   fetchDingTalkAppAccessToken,
   sendDingTalkWorkNotification,
+  sendDingTalkWorkNotificationActionCard,
   type DingTalkMessageConfig,
+  type DingTalkWorkNotificationActionCardInput,
   type DingTalkWorkNotificationResult,
 } from '../integrations/dingtalk/client'
 import {
@@ -74,6 +76,34 @@ export interface DingTalkAttendanceDeliveryChannelOptions {
     input: { userIds: string[]; title: string; content: string },
     config: DingTalkMessageConfig,
   ) => Promise<DingTalkWorkNotificationResult>
+  sendWorkNotificationActionCard?: (
+    accessToken: string,
+    input: DingTalkWorkNotificationActionCardInput,
+    config: DingTalkMessageConfig,
+  ) => Promise<DingTalkWorkNotificationResult>
+}
+
+/**
+ * E3 notification deep link (e3-notification-deeplink design-lock): the URL a
+ * DingTalk actionCard button opens — the E2 container landing (/attendance,
+ * overview) with the notification source as an inert query marker. Returns
+ * null when no base URL is configured (callers fall back to the text path).
+ */
+export function buildAttendanceNotificationDeepLink(sourceType: string, baseUrl: string | null | undefined): string | null {
+  const base = String(baseUrl ?? '').trim().replace(/\/+$/, '')
+  if (!base) return null
+  return `${base}/attendance?noticeSource=${encodeURIComponent(String(sourceType ?? '').trim())}`
+}
+
+function resolveAttendanceDeepLinkBaseUrl(): string | null {
+  return process.env.PUBLIC_APP_URL?.trim() || process.env.APP_BASE_URL?.trim() || null
+}
+
+// Both the flag AND a base URL must be present: PUBLIC_APP_URL is already set
+// in production for the approval cards, so its presence alone must not flip
+// this channel's msgtype (env-gate side-effect channel discipline).
+function attendanceDeepLinkEnabled(): boolean {
+  return String(process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED ?? '').trim() === 'true'
 }
 
 export interface AttendanceNotificationDeliveryResult {
@@ -208,11 +238,18 @@ export class DingTalkAttendanceDeliveryChannel implements AttendanceDeliveryChan
     config: DingTalkMessageConfig,
   ) => Promise<DingTalkWorkNotificationResult>
 
+  private readonly sendWorkNotificationActionCard: (
+    accessToken: string,
+    input: DingTalkWorkNotificationActionCardInput,
+    config: DingTalkMessageConfig,
+  ) => Promise<DingTalkWorkNotificationResult>
+
   constructor(options: DingTalkAttendanceDeliveryChannelOptions = {}) {
     this.query = options.query ?? (defaultQuery as AttendanceNotificationDeliveryQuery)
     this.readConfig = options.readConfig ?? readDingTalkMessageConfigFromRuntime
     this.fetchAccessToken = options.fetchAccessToken ?? fetchDingTalkAppAccessToken
     this.sendWorkNotification = options.sendWorkNotification ?? sendDingTalkWorkNotification
+    this.sendWorkNotificationActionCard = options.sendWorkNotificationActionCard ?? sendDingTalkWorkNotificationActionCard
   }
 
   async send(message: AttendanceDeliveryMessage): Promise<AttendanceDeliveryChannelResult> {
@@ -228,15 +265,34 @@ export class DingTalkAttendanceDeliveryChannel implements AttendanceDeliveryChan
 
     try {
       const accessToken = await this.fetchAccessToken(config)
-      await this.sendWorkNotification(
-        accessToken,
-        {
-          userIds: [recipient.dingTalkUserId],
-          title: buildDeliveryTitle(message),
-          content: buildDeliveryContent(message),
-        },
-        config,
-      )
+      const deepLink = attendanceDeepLinkEnabled()
+        ? buildAttendanceNotificationDeepLink(message.sourceType, resolveAttendanceDeepLinkBaseUrl())
+        : null
+      if (deepLink) {
+        // E3: actionCard whose button deep-links into the E2 container landing.
+        // Same title/content source as the text path — no per-msgtype drift.
+        await this.sendWorkNotificationActionCard(
+          accessToken,
+          {
+            userIds: [recipient.dingTalkUserId],
+            title: buildDeliveryTitle(message),
+            markdown: buildDeliveryContent(message),
+            singleTitle: '打开考勤',
+            singleUrl: deepLink,
+          },
+          config,
+        )
+      } else {
+        await this.sendWorkNotification(
+          accessToken,
+          {
+            userIds: [recipient.dingTalkUserId],
+            title: buildDeliveryTitle(message),
+            content: buildDeliveryContent(message),
+          },
+          config,
+        )
+      }
       return { ok: true }
     } catch (error) {
       return classifyDingTalkSendError(error)

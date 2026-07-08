@@ -5,6 +5,7 @@ import { Pool } from 'pg'
 import { up as createAttendanceNotificationDeliveries } from '../../src/db/migrations/zzzz20260611120000_create_attendance_notification_deliveries'
 import {
   AttendanceNotificationDeliveryWorker,
+  buildAttendanceNotificationDeepLink,
   DeterministicFakeAttendanceDeliveryChannel,
   DingTalkAttendanceDeliveryChannel,
   EmailAttendanceDeliveryChannel,
@@ -543,6 +544,191 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
     } finally {
       if (deliveryId) {
         await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [deliveryId]).catch(() => undefined)
+      }
+      await publicPool.query('DELETE FROM directory_account_links WHERE directory_account_id = $1', [directoryAccountId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_accounts WHERE id = $1', [directoryAccountId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_integrations WHERE id = $1', [integrationId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM users WHERE id = $1', [localUserId]).catch(() => undefined)
+      await publicPool.end().catch(() => undefined)
+    }
+  })
+
+  it('E3 deep-link: flag+base-URL send an actionCard whose button opens the container landing; missing URL falls back to text', async () => {
+    if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
+    const publicPool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = `e3-deeplink-${runSuffix}`
+    const localUserId = `u-e3-deeplink-${runSuffix}`
+    const integrationId = randomUUID()
+    const directoryAccountId = randomUUID()
+    const sourceId = randomUUID()
+    const deliveryIds: string[] = []
+    const envSnapshot = {
+      flag: process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED,
+      publicUrl: process.env.PUBLIC_APP_URL,
+      baseUrl: process.env.APP_BASE_URL,
+    }
+    const config: DingTalkMessageConfig = {
+      appKey: 'dt-app-key',
+      appSecret: 'dt-app-secret',
+      agentId: '123456789',
+      baseUrl: 'https://oapi.dingtalk.com',
+    }
+    const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
+      const r = await publicPool.query(sqlText, params as unknown[])
+      return { rows: r.rows, rowCount: r.rowCount }
+    }
+
+    const insertDelivery = async (): Promise<string> => {
+      const row = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','dingtalk_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          sourceId,
+          `e3-deeplink:${sourceId}:recipient:${localUserId}:n:${deliveryIds.length}:${runSuffix}`,
+          localUserId,
+          JSON.stringify({ title: 'E3 deep-link smoke', body: 'Tap to open attendance.' }),
+        ],
+      )
+      deliveryIds.push(row.rows[0].id)
+      return row.rows[0].id
+    }
+
+    const buildChannel = (sink: { text: unknown[]; card: unknown[] }) => new DingTalkAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => 'access-token',
+      sendWorkNotification: async (_accessToken, input) => {
+        sink.text.push(input)
+        return { taskId: 'task-e3-text', requestId: 'req-e3-text', raw: {} }
+      },
+      sendWorkNotificationActionCard: async (_accessToken, input) => {
+        sink.card.push(input)
+        return { taskId: 'task-e3-card', requestId: 'req-e3-card', raw: {} }
+      },
+    })
+
+    try {
+      await requireTable(publicPool, 'attendance_notification_deliveries')
+      await publicPool.query(
+        `INSERT INTO users (id, email, password_hash, name, role, is_active)
+         VALUES ($1,$2,'hash',$3,'user',true)
+         ON CONFLICT (id) DO UPDATE SET is_active = EXCLUDED.is_active`,
+        [localUserId, `${localUserId}@example.test`, localUserId],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_integrations (id, org_id, provider, name, status, corp_id, config)
+         VALUES ($1,$2,'dingtalk',$3,'active','corp-e3',$4::jsonb)`,
+        [integrationId, orgId, `E3 DingTalk ${runSuffix}`, JSON.stringify({})],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_accounts
+           (id, integration_id, provider, corp_id, external_user_id, external_key, name, is_active)
+         VALUES ($1,$2,'dingtalk','corp-e3','dt-user-e3','dt-key-e3',$3,true)`,
+        [directoryAccountId, integrationId, localUserId],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy)
+         VALUES ($1,$2,'linked','manual')`,
+        [directoryAccountId, localUserId],
+      )
+
+      // Case 1: flag + base URL (with a trailing slash to prove normalization) -> actionCard.
+      process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = 'true'
+      process.env.PUBLIC_APP_URL = 'https://app.example.test/'
+      delete process.env.APP_BASE_URL
+      await insertDelivery()
+      const cardSink = { text: [] as unknown[], card: [] as unknown[] }
+      const cardWorker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [buildChannel(cardSink)],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-e3-card',
+      })
+      await expect(cardWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      expect(cardSink.text).toHaveLength(0)
+      expect(cardSink.card).toEqual([{
+        userIds: ['dt-user-e3'],
+        title: 'E3 deep-link smoke',
+        markdown: 'Tap to open attendance.',
+        singleTitle: '打开考勤',
+        singleUrl: 'https://app.example.test/attendance?noticeSource=unscheduled_reminder',
+      }])
+
+      // Case 2: flag on but NO base URL -> text path, byte-identical fallback.
+      process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = 'true'
+      delete process.env.PUBLIC_APP_URL
+      delete process.env.APP_BASE_URL
+      await insertDelivery()
+      const textSink = { text: [] as unknown[], card: [] as unknown[] }
+      const textWorker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [buildChannel(textSink)],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-e3-text',
+      })
+      await expect(textWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      expect(textSink.card).toHaveLength(0)
+      expect(textSink.text).toEqual([{
+        userIds: ['dt-user-e3'],
+        title: 'E3 deep-link smoke',
+        content: 'Tap to open attendance.',
+      }])
+
+      // Case 2b (review P3): APP_BASE_URL alone (no PUBLIC_APP_URL) also powers
+      // the deep link — the fallback branch of the base-URL resolver.
+      process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = 'true'
+      delete process.env.PUBLIC_APP_URL
+      process.env.APP_BASE_URL = 'https://fallback.example.test'
+      await insertDelivery()
+      const fallbackSink = { text: [] as unknown[], card: [] as unknown[] }
+      const fallbackWorker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [buildChannel(fallbackSink)],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-e3-appbase',
+      })
+      await expect(fallbackWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      expect(fallbackSink.text).toHaveLength(0)
+      expect(fallbackSink.card).toHaveLength(1)
+      expect((fallbackSink.card[0] as { singleUrl: string }).singleUrl)
+        .toBe('https://fallback.example.test/attendance?noticeSource=unscheduled_reminder')
+
+      // Case 3: base URL present but flag OFF -> text path (the flag is load-bearing:
+      // PUBLIC_APP_URL is already set in production for approval cards).
+      delete process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED
+      process.env.PUBLIC_APP_URL = 'https://app.example.test'
+      await insertDelivery()
+      const flagOffSink = { text: [] as unknown[], card: [] as unknown[] }
+      const flagOffWorker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [buildChannel(flagOffSink)],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-e3-flagoff',
+      })
+      await expect(flagOffWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      expect(flagOffSink.card).toHaveLength(0)
+      expect(flagOffSink.text).toHaveLength(1)
+
+      // Builder contract: trailing slashes normalized, source encoded, empty base -> null.
+      expect(buildAttendanceNotificationDeepLink('manual_missed_punch_reminder', 'https://a.example//'))
+        .toBe('https://a.example/attendance?noticeSource=manual_missed_punch_reminder')
+      expect(buildAttendanceNotificationDeepLink('week end/review', 'https://a.example'))
+        .toBe('https://a.example/attendance?noticeSource=week%20end%2Freview')
+      expect(buildAttendanceNotificationDeepLink('unscheduled_reminder', '')).toBeNull()
+      expect(buildAttendanceNotificationDeepLink('unscheduled_reminder', undefined)).toBeNull()
+    } finally {
+      if (envSnapshot.flag === undefined) delete process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED
+      else process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = envSnapshot.flag
+      if (envSnapshot.publicUrl === undefined) delete process.env.PUBLIC_APP_URL
+      else process.env.PUBLIC_APP_URL = envSnapshot.publicUrl
+      if (envSnapshot.baseUrl === undefined) delete process.env.APP_BASE_URL
+      else process.env.APP_BASE_URL = envSnapshot.baseUrl
+      for (const id of deliveryIds) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [id]).catch(() => undefined)
       }
       await publicPool.query('DELETE FROM directory_account_links WHERE directory_account_id = $1', [directoryAccountId]).catch(() => undefined)
       await publicPool.query('DELETE FROM directory_accounts WHERE id = $1', [directoryAccountId]).catch(() => undefined)
