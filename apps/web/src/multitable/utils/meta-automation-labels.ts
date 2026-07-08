@@ -121,6 +121,8 @@ export type AutomationLabelKey =
   | 'condition.removeConditionTitle'
   | 'actionConfig.targetSheetId'
   | 'actionConfig.sheetIdPlaceholder'
+  | 'actionConfig.targetSheetManualToggle'
+  | 'actionConfig.targetSheetUseListToggle'
   | 'actionConfig.fieldIdPlaceholder'
   | 'actionConfig.url'
   | 'actionConfig.method'
@@ -386,6 +388,8 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'condition.removeConditionTitle',
   'actionConfig.targetSheetId',
   'actionConfig.sheetIdPlaceholder',
+  'actionConfig.targetSheetManualToggle',
+  'actionConfig.targetSheetUseListToggle',
   'actionConfig.fieldIdPlaceholder',
   'actionConfig.url',
   'actionConfig.method',
@@ -668,6 +672,10 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'condition.removeConditionTitle': { en: 'Remove condition', zh: '移除条件' },
   'actionConfig.targetSheetId': { en: 'Target sheet ID', zh: '目标工作表 ID' },
   'actionConfig.sheetIdPlaceholder': { en: 'Sheet ID', zh: '工作表 ID' },
+  // G-B2-27: escape hatch next to the target-sheet dropdown — listSheets() may omit
+  // cross-base/future sheets, so typing the ID directly stays available on demand.
+  'actionConfig.targetSheetManualToggle': { en: 'Enter ID manually', zh: '手动输入 ID' },
+  'actionConfig.targetSheetUseListToggle': { en: 'Choose from list', zh: '从列表选择' },
   'actionConfig.fieldIdPlaceholder': { en: 'Field ID', zh: '字段 ID' },
   'actionConfig.url': { en: 'URL', zh: 'URL' },
   'actionConfig.method': { en: 'Method', zh: '方法' },
