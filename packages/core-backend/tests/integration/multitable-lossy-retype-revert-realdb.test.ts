@@ -525,6 +525,51 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     expect(await fieldProperty()).toEqual(disclosedTarget) // written === disclosed
   })
 
+  test('P1-1d TOCTOU: a type change AFTER a passing preview is caught by the EXECUTE-side guard, with a REAL token', async () => {
+    // Fixing the review's NIT-1 (P1-1 used a fake 'tok' so it only exercised the preview guard) and P3-B (the
+    // execute guard's IN-LOCK position was untested). Here the preview passes and mints a genuine token BEFORE
+    // any type change exists; the type-only PATCH lands in the window between preview and execute. Only the
+    // execute-side re-check (inside the FOR UPDATE txn) can catch this — the preview guard already passed, and it
+    // surfaces as FIELD_TYPE_ERA_MISMATCH rather than PLAN_DRIFT precisely because the era guard runs BEFORE the
+    // lossSummary recompute, i.e. it is the first line of defence for this whole class, not a drift side-effect.
+    // (Mutation-confirmed: neuter the execute-side guard and this returns 409 PLAN_DRIFT here — the lossHash
+    // recompute is a genuine second line for the *drifting* case. The reviewer separately proved the era guard is
+    // the SOLE defence for the count-conserving email<->url case, where lossHash is blind — see
+    // /tmp/pr3922-4c1-fix-review-claude-20260708.md MB. This golden pins the guard's existence + ordering.)
+    bothFlagsOn()
+    process.env[CAPTURE_FLAG] = 'true'
+    actor = FULL
+    await request(app).post('/api/multitable/fields').send({ id: ERA_FIELD, sheetId: SHEET, name: 'EraF', type: 'string', property: {} }).expect(201)
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [rid(11), SHEET, JSON.stringify({ [ERA_FIELD]: 'hello world' })])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [rid(12), SHEET, JSON.stringify({ [ERA_FIELD]: 'https://ok.example' })])
+    // A plain property edit while the field is still `string` -> the revision we will try to revert.
+    await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ property: { note: 'a' } }).expect(200)
+    const propertyRev = ((await q(`SELECT id FROM meta_config_revisions WHERE sheet_id=$1 AND entity_id=$2 AND changed_keys = ARRAY['property']::text[] ORDER BY created_at DESC, id DESC LIMIT 1`, [SHEET, ERA_FIELD])).rows[0] as { id: string }).id
+
+    // (1) preview passes NOW (field is still `string`, no later type change) and mints a genuine token.
+    const p = await preview(propertyRev)
+    expect(p.status).toBe(200)
+    const realToken = p.body?.data?.previewToken as string
+    expect(typeof realToken).toBe('string')
+    const beforeCells = await eraQ.cells()
+
+    // (2) TOCTOU: a type-only PATCH -> `url` lands in the window. The url sanitizer is the identity, so `property`
+    //     survives byte-for-byte and this type revision is invisible to the changed_keys-based drift controls.
+    await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ type: 'url' }).expect(200)
+
+    // (3) execute with the REAL token -> the execute-side era guard refuses, and nothing is coerced under `url`.
+    const x = await execute(propertyRev, realToken)
+    expect(x.status).toBe(422)
+    expect(x.body?.error?.code).toBe('FIELD_TYPE_ERA_MISMATCH')
+    expectNoLeak(x.body)
+    expect(await eraQ.cells()).toEqual(beforeCells) // 'hello world' NOT dropped
+    expect(await eraQ.type()).toBe('url')
+    expect(await eraQ.property()).toEqual({ note: 'a' })
+    expect(await restoreConfigRevisions()).toEqual([])
+    expect(await recordRevisions()).toEqual([])
+    expect(await tombstones()).toEqual([])
+  })
+
   // ── P2-1 route-level Batch-1 type gate (was behaviourally correct but had ZERO wire coverage) ──────────────
   test('P2-1 a property revert on a NON-Batch-1 field (select) stays gated: no lossSummary + execute 422', async () => {
     bothFlagsOn()
