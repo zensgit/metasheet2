@@ -5,7 +5,7 @@
 owner「完成这条开发线的所有开发」mandate(2026-07-07)达成:能力面早已收官
 (见 `integration-line-final-closure-report-20260706.md`,BL0→BL4 全 PASS),本轮完成**体验面
 (UX 阶梯 IU-1..IU-6 + F)与 Bridge-Agent 可视化线(BA-UI-0..4)全部实现**。终态经三项收尾核验
-(§4),对 final main HEAD 完整 integration-guard **32 files / 415 tests 全绿**(Node 20 + 25 双证)。
+(§4),对 final main HEAD 完整 integration-guard **34 files / 465 tests 全绿**(Node 20 + 25 双证)。
 
 ## 1. 交付账(全 MERGED)
 
@@ -65,7 +65,7 @@ owner「完成这条开发线的所有开发」mandate(2026-07-07)达成:能力�
        apps/web/tests 下 integration/bridge/readSource/jsonAssist/optionSets/fieldHint/errorCode/
        MetaIntegration 前缀)
 核验2 逻辑文件(非仅 .vue)全在 main —— PASS(11 文件:6 service/util + 5 组件)
-核验3 完整 integration-guard 对 final main HEAD —— PASS(32 files / 415 tests,Node 20;Node 25 复证)
+核验3 完整 integration-guard 对 final main HEAD —— PASS(34 files / 465 tests,Node 20;Node 25 复证)
 ```
 
 ## 5. 后续(各自独立轨,非本线)
