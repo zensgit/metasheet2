@@ -49,7 +49,6 @@ async function post(base: string, path: string, token: string | null, body?: unk
 
 interface PreviewBody {
   route: Array<{ nodeKey: string; nodeLabel: string; assignees: Array<{ id: string; name: string; assignmentType: string }>; resolveError?: string }>
-  totalSteps: number
   truncated: boolean
 }
 
@@ -221,6 +220,10 @@ describeIfDatabase('RP-2 — POST /api/approvals/preview (real-DB HTTP)', () => 
     expect(res.status, await res.clone().text()).toBe(200)
     const body = (await res.json()) as PreviewBody
 
+    // §3 output-contract conformance: the wire body is exactly { route, truncated } — the
+    // substrate's internal `totalSteps` is not forwarded (locked against contract drift).
+    expect(Object.keys(body).sort()).toEqual(['route', 'truncated'])
+    expect((body as Record<string, unknown>).totalSteps).toBeUndefined()
     expect(body.truncated).toBe(false)
     expect(body.route.map((n) => n.nodeKey)).toEqual(['approval_1', 'approval_2'])
     expect(body.route[0]!.nodeLabel).toBe('一级审批')

@@ -817,7 +817,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         },
       )
 
-      res.json(preview)
+      // Conform to the ratified §3 B3-05 output contract exactly ({ route, truncated? }). The
+      // substrate returns totalSteps for its own internal use, but it is not part of the endpoint
+      // contract, so it is not forwarded on the wire.
+      res.json({ route: preview.route, truncated: preview.truncated })
     } catch (error) {
       handleApprovalsError(
         res,

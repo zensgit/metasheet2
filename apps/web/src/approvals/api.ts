@@ -920,12 +920,11 @@ export interface ApprovalRoutePreviewNode {
 
 export interface ApprovalRoutePreview {
   route: ApprovalRoutePreviewNode[]
-  totalSteps: number
   truncated: boolean
 }
 
 export async function previewApprovalRoute(req: CreateApprovalRequest): Promise<ApprovalRoutePreview> {
-  if (USE_MOCK) return { route: [], totalSteps: 0, truncated: false }
+  if (USE_MOCK) return { route: [], truncated: false }
   return postApprovalJson('/api/approvals/preview', req)
 }
 

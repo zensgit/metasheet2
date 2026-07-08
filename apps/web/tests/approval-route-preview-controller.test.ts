@@ -17,7 +17,7 @@ function deferred<T>() {
 }
 
 function route(nodeKey: string): ApprovalRoutePreview {
-  return { route: [{ nodeKey, nodeLabel: nodeKey, assignees: [] }], totalSteps: 1, truncated: false }
+  return { route: [{ nodeKey, nodeLabel: nodeKey, assignees: [] }], truncated: false }
 }
 
 function collector() {
