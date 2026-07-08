@@ -51,6 +51,22 @@ on:
       - 'apps/web/tests/multitable-restore-preview-dialog.spec.ts'
       - 'apps/web/tests/multitable-reset-tsource-picker.spec.ts'
       - 'apps/web/src/multitable/components/ResetToPointPicker.vue'
+      # R5c CI-residual fix: ResetConfirmDialog (destructive-reset gating: typed 'reset' + deleted-count ack
+      # before confirm enables) and its dedicated spec were already in the `vitest run` filter below but had
+      # NO path trigger — a PR touching only ResetConfirmDialog.vue ran no web-guard at all. Same gap found on
+      # sibling restore/revert specs: multitable-config-history-modal.spec.ts (MetaConfigHistoryModal.vue's own
+      # spec — the .vue source was covered but not this spec), multitable-restore-batch-dialog.spec.ts + the two
+      # narrowly-scoped utils it locks (buildBatchExpectedVersions preview-time-version safety,
+      # resolveSelectionLabels), and multitable-config-revert-refresh.spec.ts (T9-W-3 post-revert
+      # meta-then-grid reload contract).
+      - 'apps/web/src/multitable/components/ResetConfirmDialog.vue'
+      - 'apps/web/tests/multitable-reset-confirm-dialog.spec.ts'
+      - 'apps/web/tests/multitable-config-history-modal.spec.ts'
+      - 'apps/web/tests/multitable-restore-batch-dialog.spec.ts'
+      - 'apps/web/src/multitable/utils/batch-restore-expected-versions.ts'
+      - 'apps/web/src/multitable/utils/batch-restore-labels.ts'
+      - 'apps/web/src/multitable/views/config-revert-refresh.ts'
+      - 'apps/web/tests/multitable-config-revert-refresh.spec.ts'
       - 'apps/web/tests/multitable-sheet-cursor-state.spec.ts'
       - 'apps/web/src/multitable/components/MetaRecordPermissionManager.vue'
       - 'apps/web/src/multitable/components/MetaSheetPermissionManager.vue'
@@ -121,6 +137,22 @@ on:
       - 'apps/web/tests/multitable-restore-preview-dialog.spec.ts'
       - 'apps/web/tests/multitable-reset-tsource-picker.spec.ts'
       - 'apps/web/src/multitable/components/ResetToPointPicker.vue'
+      # R5c CI-residual fix: ResetConfirmDialog (destructive-reset gating: typed 'reset' + deleted-count ack
+      # before confirm enables) and its dedicated spec were already in the `vitest run` filter below but had
+      # NO path trigger — a PR touching only ResetConfirmDialog.vue ran no web-guard at all. Same gap found on
+      # sibling restore/revert specs: multitable-config-history-modal.spec.ts (MetaConfigHistoryModal.vue's own
+      # spec — the .vue source was covered but not this spec), multitable-restore-batch-dialog.spec.ts + the two
+      # narrowly-scoped utils it locks (buildBatchExpectedVersions preview-time-version safety,
+      # resolveSelectionLabels), and multitable-config-revert-refresh.spec.ts (T9-W-3 post-revert
+      # meta-then-grid reload contract).
+      - 'apps/web/src/multitable/components/ResetConfirmDialog.vue'
+      - 'apps/web/tests/multitable-reset-confirm-dialog.spec.ts'
+      - 'apps/web/tests/multitable-config-history-modal.spec.ts'
+      - 'apps/web/tests/multitable-restore-batch-dialog.spec.ts'
+      - 'apps/web/src/multitable/utils/batch-restore-expected-versions.ts'
+      - 'apps/web/src/multitable/utils/batch-restore-labels.ts'
+      - 'apps/web/src/multitable/views/config-revert-refresh.ts'
+      - 'apps/web/tests/multitable-config-revert-refresh.spec.ts'
       - 'apps/web/tests/multitable-sheet-cursor-state.spec.ts'
       - 'apps/web/src/multitable/components/MetaRecordPermissionManager.vue'
       - 'apps/web/src/multitable/components/MetaSheetPermissionManager.vue'
