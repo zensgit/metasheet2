@@ -997,6 +997,22 @@ export async function upsertDirectoryAccountDepartments(
   return summary
 }
 
+/**
+ * DT-HARDEN-02: whether an auto-admitted account can be granted DingTalk login.
+ * A grant needs a stable identity key: corp-scoped accounts key on corpId+openId,
+ * so a corp account WITHOUT an openId cannot be granted (directory 通讯录's
+ * user/get does not return openId — it only appears after a real DingTalk OAuth
+ * bind); non-corp accounts key on unionId and are grantable. Mirrors
+ * `assertDirectoryAccountCanEnableDingTalkGrant` exactly so auto-admission never
+ * requests a grant the assertion would reject (which previously threw AFTER the
+ * users row was inserted, leaving a committed orphan).
+ */
+export function resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(
+  account: { corp_id: string | null; open_id: string | null },
+): boolean {
+  return !normalizeText(account.corp_id) || Boolean(normalizeText(account.open_id))
+}
+
 function normalizeDirectorySyncAuditUserId(adminUserId: string): string | null {
   const normalized = normalizeText(adminUserId)
   if (!normalized || normalized.startsWith('system:')) return null
@@ -2516,6 +2532,7 @@ export async function syncDirectoryIntegration(
       let autoAdmissionCandidateCount = 0
       let autoAdmittedCount = 0
       let autoAdmittedNoEmailCount = 0
+      let autoAdmittedWithoutGrantCount = 0
       let autoAdmissionSkippedMissingEmailCount = 0
       let autoAdmissionExcludedCount = 0
       let autoAdmissionFailedCount = 0
@@ -2583,6 +2600,15 @@ export async function syncDirectoryIntegration(
                   const cleanMobile = sanitizeDirectoryAdmissionMobile(account.mobile)
                   const generatedPassword = generateDirectoryAdmissionTemporaryPassword()
                   const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
+                  // DT-HARDEN-02: mirror assertDirectoryAccountCanEnableDingTalkGrant's
+                  // condition instead of hardcoding grant=true. A corp-scoped account
+                  // (corp_id set) without an openId cannot use DingTalk login and would
+                  // make the downstream bind throw — previously that threw AFTER the
+                  // users row was inserted (swallowed catch → committed orphan). Now such
+                  // an account is admitted with the grant OFF (directory binding still
+                  // happens), and the assertion is enforced before INSERT (see
+                  // createDirectoryAdmittedUserInTransaction) so no orphan can be created.
+                  const canGrantDingTalkLogin = resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(account)
                   const created = await createDirectoryAdmittedUserInTransaction(client, {
                     account: {
                       id: account.id,
@@ -2604,7 +2630,7 @@ export async function syncDirectoryIntegration(
                     mobile: cleanMobile,
                     passwordHash,
                     mustChangePassword: true,
-                    enableDingTalkGrant: true,
+                    enableDingTalkGrant: canGrantDingTalkLogin,
                   })
                   let inviteToken: string | null = null
                   if (cleanEmail) {
@@ -2645,6 +2671,7 @@ export async function syncDirectoryIntegration(
                   linkStatus = 'linked'
                   matchStrategy = 'auto_admit'
                   autoAdmittedCount += 1
+                  if (!canGrantDingTalkLogin) autoAdmittedWithoutGrantCount += 1
                   if (cleanEmail) emailMap.set(cleanEmail.toLowerCase(), created.userId)
                   if (cleanMobile) mobileMap.set(cleanMobile, created.userId)
                   if (cleanEmail) ambiguousEmailKeys.delete(cleanEmail.toLowerCase())
@@ -2729,6 +2756,7 @@ export async function syncDirectoryIntegration(
         autoAdmissionCandidateCount,
         autoAdmittedCount,
         autoAdmittedNoEmailCount,
+        autoAdmittedWithoutGrantCount,
         autoAdmissionSkippedMissingEmailCount,
         autoAdmissionExcludedCount,
         autoAdmissionFailedCount,
@@ -3434,6 +3462,12 @@ async function createDirectoryAdmittedUserInTransaction(
   },
 ): Promise<{ userId: string }> {
   const userId = crypto.randomUUID()
+  // DT-HARDEN-02: assert grant feasibility BEFORE inserting the users row. If a
+  // corp-scoped account lacks an openId and grant is requested, the downstream
+  // bind would throw — historically that happened after INSERT, and the caller's
+  // swallowing catch left a committed orphan user. Failing here guarantees the
+  // users row and its bind are all-or-nothing for every caller of this function.
+  assertDirectoryAccountCanEnableDingTalkGrant(options.account, options.enableDingTalkGrant)
   if (options.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(options.email)) {
     throw new Error('Invalid email format')
   }
@@ -3504,6 +3538,18 @@ async function createDirectoryAdmittedUserInTransaction(
   })
 
   return { userId }
+}
+
+/**
+ * DT-HARDEN-02: internals exposed only so the orphan-prevention invariant can be
+ * asserted directly — "a grant that cannot be honored must throw BEFORE the users
+ * row is inserted". The invariant is not observable through the exported surface
+ * (the manual-admission path asserts earlier; the sync path now computes the grant
+ * from openId presence), so without this seam a regression at the call site would
+ * pass every test.
+ */
+export const __directorySyncInternalsForTests = {
+  createDirectoryAdmittedUserInTransaction,
 }
 
 async function applyDirectoryProjectedMemberGroupGovernanceInTransaction(
