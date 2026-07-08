@@ -3,9 +3,11 @@ import {
   BRIDGE_AGENT_CONFIG_CHECK_LABELS,
   bridgeAgentConfigCheckLabel,
   buildBridgeAgentChangeSuggestion,
+  buildImplementationChecklist,
   computeBridgeAgentConfigCheck,
   type BridgeAgentConfigCheckItem,
   type BridgeAgentConfigCheckLabelKey,
+  type BridgeAgentSuggestionObjectDraft,
 } from '../src/services/integration/bridgeAgentConfigCheck'
 
 // BA-UI-3 (docs/development/bridge-agent-admin-page-design-lock-20260707.md §3 BA-UI-3): pure-util
@@ -311,5 +313,121 @@ describe('buildBridgeAgentChangeSuggestion', () => {
     expect(() => buildBridgeAgentChangeSuggestion(drafts, 'en')).not.toThrow()
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect(() => buildBridgeAgentChangeSuggestion('not-an-array' as any, 'en')).not.toThrow()
+  })
+})
+
+// BA-APPLY-1 (docs/development/bridge-agent-controlled-apply-design-lock-20260708.md §2 形态 A): the
+// change-suggestion drafts above rendered as a fixed-schema, machine-readable checklist instead of
+// prose. This is form A's entire scope — an EXPORT/render only, zero platform write, zero Agent write.
+// ALLOWED_OPS is hardcoded HERE (not imported from source) so that a source mutation adding a third —
+// or a write/delete/make-writable-shaped — operation literal is caught by these tests even though the
+// mutated code still "type-checks" against its own (mutated) union.
+describe('buildImplementationChecklist (BA-APPLY-1)', () => {
+  const ALLOWED_OPS = ['add_readonly_object', 'add_readonly_field']
+
+  function allOpsAreAllowlisted(checklist: { operations: { op: string }[] }): boolean {
+    return checklist.operations.every((operation) => ALLOWED_OPS.includes(operation.op))
+  }
+
+  it('serializes to exactly { schemaVersion, operations } — no counts, no targetLabel/system-name, no free text', () => {
+    const result = buildImplementationChecklist([{ objectName: 'material_extra', fieldKeys: ['field_a'] }])
+    expect(Object.keys(result.checklist).sort()).toEqual(['operations', 'schemaVersion'])
+    expect(result.checklist.schemaVersion).toBe(1)
+    expect(JSON.parse(JSON.stringify(result.checklist))).toEqual({
+      schemaVersion: 1,
+      operations: [{ op: 'add_readonly_field', objectName: 'material_extra', fieldKeys: ['field_a'] }],
+    })
+  })
+
+  it('empty/no-valid-draft input yields an empty operations array, never throwing', () => {
+    expect(buildImplementationChecklist([]).checklist).toEqual({ schemaVersion: 1, operations: [] })
+    expect(buildImplementationChecklist([{ objectName: '   ', fieldKeys: [] }]).checklist.operations).toEqual([])
+  })
+
+  // --- op-derivation branches (the literal that a mutant flipping the derived op would break) -----
+  it('object-only draft (zero valid field keys) yields exactly op=add_readonly_object', () => {
+    const result = buildImplementationChecklist([{ objectName: 'material_extra', fieldKeys: [] }])
+    expect(result.checklist.operations).toEqual([
+      { op: 'add_readonly_object', objectName: 'material_extra', fieldKeys: [] },
+    ])
+  })
+
+  it('draft with >=1 valid field key yields exactly op=add_readonly_field, carrying every valid key', () => {
+    const result = buildImplementationChecklist([{ objectName: 'bom_child', fieldKeys: ['child_qty', 'child_uom'] }])
+    expect(result.checklist.operations).toEqual([
+      { op: 'add_readonly_field', objectName: 'bom_child', fieldKeys: ['child_qty', 'child_uom'] },
+    ])
+  })
+
+  it('one operation per row (never per field key) — multiple rows preserve order', () => {
+    const result = buildImplementationChecklist([
+      { objectName: 'material_extra', fieldKeys: [] },
+      { objectName: 'bom_child', fieldKeys: ['child_qty'] },
+    ])
+    expect(result.checklist.operations).toEqual([
+      { op: 'add_readonly_object', objectName: 'material_extra', fieldKeys: [] },
+      { op: 'add_readonly_field', objectName: 'bom_child', fieldKeys: ['child_qty'] },
+    ])
+  })
+
+  // --- exact-registered enum lock ------------------------------------------------------------------
+  it('every produced op is in the hardcoded ALLOWED_OPS allowlist (mutation gate: a 3rd/write-shaped op fails this)', () => {
+    const result = buildImplementationChecklist([
+      { objectName: 'material_extra', fieldKeys: [] },
+      { objectName: 'bom_child', fieldKeys: ['child_qty'] },
+    ])
+    expect(result.checklist.operations.length).toBeGreaterThan(0)
+    expect(allOpsAreAllowlisted(result.checklist)).toBe(true)
+  })
+
+  it('a draft with an injected op-like field cannot smuggle a write/delete-shaped op — output op is always derived', () => {
+    const hostileDraft = { objectName: 'material_extra', fieldKeys: [], op: 'delete_object' } as unknown as BridgeAgentSuggestionObjectDraft
+    const result = buildImplementationChecklist([hostileDraft])
+    expect(result.checklist.operations).toEqual([
+      { op: 'add_readonly_object', objectName: 'material_extra', fieldKeys: [] },
+    ])
+    expect(allOpsAreAllowlisted(result.checklist)).toBe(true)
+  })
+
+  // --- SAFE_IDENTIFIER gate reuse (independent of buildBridgeAgentChangeSuggestion) ------------------
+  it('reuses the safe-identifier gate independently: invalid object/field names are dropped, only counted', () => {
+    const result = buildImplementationChecklist([
+      { objectName: `password=${SENTINEL_SECRET}`, fieldKeys: [] },
+      { objectName: 'material_extra', fieldKeys: ['field_a', `token=${SENTINEL_SECRET}`] },
+    ])
+    expect(result.invalidObjectCount).toBe(1)
+    expect(result.invalidFieldKeyCount).toBe(1)
+    expect(result.checklist.operations).toEqual([
+      { op: 'add_readonly_field', objectName: 'material_extra', fieldKeys: ['field_a'] },
+    ])
+  })
+
+  // --- SENTINEL: full serialized artifact scan ------------------------------------------------------
+  it('SENTINEL: a secret/host/connection-string planted in a draft name never appears anywhere in the serialized checklist', () => {
+    const result = buildImplementationChecklist([
+      { objectName: SENTINEL_CONNECTION_STRING, fieldKeys: [] },
+      { objectName: SENTINEL_HOST_URL, fieldKeys: [SENTINEL_SECRET] },
+      { objectName: 'material_extra', fieldKeys: ['field_a', SENTINEL_SECRET, SENTINEL_HOST_URL] },
+    ])
+    const serialized = JSON.stringify(result.checklist)
+    expect(serialized).not.toContain(SENTINEL_SECRET)
+    expect(serialized).not.toContain('SENTINEL-PW')
+    expect(serialized).not.toContain('10.0.0.9')
+    expect(serialized).not.toContain(SENTINEL_CONNECTION_STRING)
+    // the two hostile rows (bad object name / bad field keys) are dropped entirely; the one surviving
+    // row is exactly the sanitized entry — no partial/mangled leakage.
+    expect(result.checklist.operations).toEqual([
+      { op: 'add_readonly_field', objectName: 'material_extra', fieldKeys: ['field_a'] },
+    ])
+    expect(result.invalidObjectCount).toBe(2)
+    expect(result.invalidFieldKeyCount).toBe(2)
+  })
+
+  it('never throws on malformed drafts (non-array fieldKeys, non-string names, non-array input)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const drafts = [{ objectName: 123 as any, fieldKeys: 'not-an-array' as any }, null as any, undefined as any]
+    expect(() => buildImplementationChecklist(drafts)).not.toThrow()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(() => buildImplementationChecklist('not-an-array' as any)).not.toThrow()
   })
 })

@@ -1,10 +1,13 @@
 // Bridge Agent config validation + change-suggestion checklist (BA-UI-3, design-lock
-// docs/development/bridge-agent-admin-page-design-lock-20260707.md §3 BA-UI-3). Predecessors: BA-UI-1
-// (#3824, observability) + BA-UI-2 (#3840, values-free probe). This slice is READ-ONLY + SUGGESTIONS
-// ONLY — no controlled apply, no backend write (lock §3: "由受控后端或运维脚本应用" — the controlled
-// backend or an ops script applies any change, never this page).
+// docs/development/bridge-agent-admin-page-design-lock-20260707.md §3 BA-UI-3) + BA-APPLY-1's
+// machine-readable implementation-checklist export (design-lock
+// docs/development/bridge-agent-controlled-apply-design-lock-20260708.md §2 形态 A). Predecessors:
+// BA-UI-1 (#3824, observability) + BA-UI-2 (#3840, values-free probe). This slice is READ-ONLY +
+// SUGGESTIONS/EXPORT ONLY — no controlled apply, no backend write, no Agent write (lock §3 / BA-APPLY
+// lock §1-§2: "由受控后端或运维脚本应用" — the controlled backend or an ops script applies any change,
+// never this page).
 //
-// Pure, framework-free module: no Vue import, no DOM, no `fetch`/apiFetch. Two independent surfaces:
+// Pure, framework-free module: no Vue import, no DOM, no `fetch`/apiFetch. Three independent surfaces:
 //
 //   1. computeBridgeAgentConfigCheck(input) — a fixed 6-item values-free checklist over a bridge-agent
 //      system's PUBLIC config (the same `system.config` shape BA-UI-1 already receives on the wire —
@@ -26,6 +29,13 @@
 //      shapes a secret, connection string, or host would carry) is dropped and only COUNTED, never
 //      echoed, so a stray secret-shaped string pasted into a name field can never ride along into the
 //      generated text.
+//
+//   3. buildImplementationChecklist(drafts) — BA-APPLY-1: the SAME safe-identifier gate (shared helper
+//      `filterSafeSuggestionDrafts`, used by both #2 and #3) applied to the same OPERATOR-SPECIFIED
+//      drafts, rendered as a fixed-schema, machine-readable object (`{ schemaVersion, operations }`)
+//      instead of prose — object names, field-key names, and a closed operation enum only, never a
+//      value/host/credential/free-form string. This is an EXPORT/render only: apply is a later,
+//      unopened rung (BA-APPLY-2+).
 
 import type { AppLocale } from '../../composables/useLocale'
 
@@ -322,20 +332,17 @@ export interface BridgeAgentChangeSuggestionResult {
   text: string
 }
 
-/**
- * Builds a values-free "变更建议 / 实施清单" from OPERATOR-SPECIFIED new object/field-key names (never
- * values). Every name is validated against `SAFE_IDENTIFIER_PATTERN`; anything that fails is dropped
- * from the rendered text and only counted (`invalidObjectCount` / `invalidFieldKeyCount`), so a
- * secret/host/connection-string-shaped string pasted into a name field can never appear in `text`.
- * `targetLabel` (optional) is a plain system NAME for a documentation header line — the same trust
- * boundary BA-UI-1 already extends to `system.name` elsewhere in this section (never a config value).
- */
-export function buildBridgeAgentChangeSuggestion(
-  drafts: BridgeAgentSuggestionObjectDraft[],
-  locale: AppLocale,
-  targetLabel?: string | null,
-): BridgeAgentChangeSuggestionResult {
-  const isZh = locale === 'zh-CN'
+interface FilteredSuggestionDrafts {
+  entries: BridgeAgentSuggestionEntryResult[]
+  invalidObjectCount: number
+  invalidFieldKeyCount: number
+}
+
+// Single shared gate: BOTH `buildBridgeAgentChangeSuggestion` (below) and `buildImplementationChecklist`
+// (BA-APPLY-1, further below) filter OPERATOR-SPECIFIED drafts through this one function, so there is
+// exactly one place that decides which object/field-key names are safe to echo anywhere. Anything not
+// identifier-shaped is dropped and only counted — never returned in `entries`.
+function filterSafeSuggestionDrafts(drafts: BridgeAgentSuggestionObjectDraft[]): FilteredSuggestionDrafts {
   const safeDrafts = Array.isArray(drafts) ? drafts : []
 
   let invalidObjectCount = 0
@@ -359,6 +366,25 @@ export function buildBridgeAgentChangeSuggestion(
     }
     entries.push({ objectName: rawObjectName, fieldKeys })
   }
+
+  return { entries, invalidObjectCount, invalidFieldKeyCount }
+}
+
+/**
+ * Builds a values-free "变更建议 / 实施清单" from OPERATOR-SPECIFIED new object/field-key names (never
+ * values). Every name is validated against `SAFE_IDENTIFIER_PATTERN`; anything that fails is dropped
+ * from the rendered text and only counted (`invalidObjectCount` / `invalidFieldKeyCount`), so a
+ * secret/host/connection-string-shaped string pasted into a name field can never appear in `text`.
+ * `targetLabel` (optional) is a plain system NAME for a documentation header line — the same trust
+ * boundary BA-UI-1 already extends to `system.name` elsewhere in this section (never a config value).
+ */
+export function buildBridgeAgentChangeSuggestion(
+  drafts: BridgeAgentSuggestionObjectDraft[],
+  locale: AppLocale,
+  targetLabel?: string | null,
+): BridgeAgentChangeSuggestionResult {
+  const isZh = locale === 'zh-CN'
+  const { entries, invalidObjectCount, invalidFieldKeyCount } = filterSafeSuggestionDrafts(drafts)
 
   const lines: string[] = []
   lines.push(isZh
@@ -393,4 +419,73 @@ export function buildBridgeAgentChangeSuggestion(
   }
 
   return { entries, invalidObjectCount, invalidFieldKeyCount, text: lines.join('\n') }
+}
+
+// #### 3. Implementation-checklist builder (BA-APPLY-1) #############################################
+//
+// docs/development/bridge-agent-controlled-apply-design-lock-20260708.md §2 形态 A ("运维脚本
+// handoff, 风险最低, 建议 v1"): BA-UI-3's change suggestion above is prose for a human to read; this
+// builder renders the SAME already-identifier-gated drafts as a machine-readable, values-free
+// "implementation checklist" — a fixed-schema object whose ONLY content is object names, field-key
+// names, and a closed operation enum. It is an EXPORT/render only: nothing in this module (or its
+// caller) writes local config, calls a backend endpoint, or touches the Agent — apply is a LATER,
+// unopened rung (BA-APPLY-2+), done by a human handing this checklist to the controlled backend or the
+// existing scripts/ops/bridge-agent-readonly.ps1 script.
+
+// Exact-registered, closed operation enum (design-lock §4 hard lock — "只读不变式": the checklist can
+// only ever describe EXPANDING readonly exposure, never a write/delete/make-writable operation). Adding
+// a third literal to this union — or any write/delete/make-writable-shaped op — is NOT authorized by
+// this slice; it would require its own owner-ratified design-lock rung.
+export type BridgeAgentChecklistOperationKind = 'add_readonly_object' | 'add_readonly_field'
+
+export interface BridgeAgentChecklistOperation {
+  op: BridgeAgentChecklistOperationKind
+  objectName: string
+  fieldKeys: string[]
+}
+
+// The serialized/exported artifact shape — copy/download output is exactly this object (no counts, no
+// targetLabel/system name, no free-form text): `{ schemaVersion, operations }`.
+export interface BridgeAgentImplementationChecklist {
+  schemaVersion: 1
+  operations: BridgeAgentChecklistOperation[]
+}
+
+export interface BridgeAgentImplementationChecklistResult {
+  checklist: BridgeAgentImplementationChecklist
+  invalidObjectCount: number
+  invalidFieldKeyCount: number
+}
+
+const CHECKLIST_SCHEMA_VERSION = 1 as const
+
+/**
+ * Builds a machine-readable, values-free implementation checklist from OPERATOR-SPECIFIED new
+ * object/field-key names (never values) — form A of the BA-APPLY line. Independently re-applies
+ * `filterSafeSuggestionDrafts` (the same gate `buildBridgeAgentChangeSuggestion` uses): this function
+ * does not trust its caller to have already filtered `drafts`, so a non-conforming name is dropped and
+ * only counted, never emitted into `checklist.operations`.
+ *
+ * One operation per valid draft row (never per field key) — `op` is DERIVED, never read off caller
+ * input (there is no `op` field on `BridgeAgentSuggestionObjectDraft`), so a caller can never smuggle a
+ * write/delete/make-writable op string through: a row with zero valid field keys yields
+ * `add_readonly_object`; a row with >=1 valid field keys yields `add_readonly_field` (its `fieldKeys`
+ * carries every valid key from that row).
+ */
+export function buildImplementationChecklist(
+  drafts: BridgeAgentSuggestionObjectDraft[],
+): BridgeAgentImplementationChecklistResult {
+  const { entries, invalidObjectCount, invalidFieldKeyCount } = filterSafeSuggestionDrafts(drafts)
+
+  const operations: BridgeAgentChecklistOperation[] = entries.map((entry) => ({
+    op: entry.fieldKeys.length > 0 ? 'add_readonly_field' : 'add_readonly_object',
+    objectName: entry.objectName,
+    fieldKeys: entry.fieldKeys,
+  }))
+
+  return {
+    checklist: { schemaVersion: CHECKLIST_SCHEMA_VERSION, operations },
+    invalidObjectCount,
+    invalidFieldKeyCount,
+  }
 }
