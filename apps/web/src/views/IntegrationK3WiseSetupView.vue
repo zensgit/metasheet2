@@ -82,7 +82,11 @@
               <span>{{ system.name }}</span>
               <small>{{ system.kind }} · {{ system.status }}</small>
               <small v-if="system.lastTestedAt">Last test: {{ formatTimestamp(system.lastTestedAt) }}</small>
-              <small v-if="system.lastError" class="k3-setup__saved-error">{{ system.lastError }}</small>
+              <small
+                v-if="system.lastError"
+                class="k3-setup__saved-error"
+                :data-testid="`k3-saved-system-error-${system.id}`"
+              >{{ savedSystemErrorDisplay(system) }}</small>
             </button>
           </div>
         </div>
@@ -373,7 +377,11 @@
                 </div>
                 <small>{{ formatRunMetrics(run) }}</small>
                 <small>{{ formatTimestamp(run.startedAt || run.createdAt || '') }}</small>
-                <small v-if="run.errorSummary" class="k3-setup__saved-error">{{ run.errorSummary }}</small>
+                <small
+                  v-if="run.errorSummary"
+                  class="k3-setup__saved-error"
+                  :data-testid="`k3-run-error-${run.id}`"
+                >{{ runErrorDisplay(run) }}</small>
               </div>
             </template>
           </div>
@@ -926,7 +934,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
-import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../services/integration/errorCodeLabels'
+import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint, integrationErrorCodeLabel } from '../services/integration/errorCodeLabels'
 import {
   K3_WISE_SQLSERVER_KIND,
   K3_WISE_WEBAPI_KIND,
@@ -1026,6 +1034,78 @@ function deadLetterErrorLabel(deadLetter: IntegrationDeadLetter): string {
 }
 function deadLetterErrorHint(deadLetter: IntegrationDeadLetter): string | null {
   return integrationErrorCodeHint(deadLetter.errorCode, locale.value)
+}
+
+// Lane F (design-lock §3 values-free 展示纪律, ratified P2: "raw errorMessage 一律不渲染(任何层,
+// 含折叠),只允许映射为安全原因/固定文案"): `run.errorSummary`, `system.lastError` and thrown API
+// `Error.message` (the server envelope's `error.message` passes straight through
+// parseIntegrationResponse) are backend FREE TEXT and must never be interpolated into the DOM.
+// Display is limited to (a) the humanized label of an exactly-registered errorCode
+// (integrationErrorCodeLabels closed vocabulary), or (b) the FIXED values-free copy below.
+// Raw strings stay in component state for programmatic use (regex safe-reason tests, logs).
+const RUN_FAILURE_FALLBACK_COPY = {
+  zh: '运行失败，详情见服务端日志/诊断。',
+  en: 'Run failed — see server logs/diagnostics for details.',
+} as const
+
+const CONNECTION_FAILURE_FALLBACK_COPY = {
+  zh: '上次连接测试失败，详情见服务端日志与排障 JSON。',
+  en: 'Last connection test failed — see server logs and the diagnostics JSON.',
+} as const
+
+// Same safe-reason pattern test as summarizeConnectionTestResult: raw text is only pattern-TESTED
+// to pick a fixed copy; it is never embedded in the returned string.
+const SQLSERVER_EXECUTOR_MISSING_RE = /SQLSERVER_EXECUTOR_MISSING|queryExecutor|executor|执行器|注入/i
+const SQLSERVER_EXECUTOR_MISSING_COPY =
+  'SQLSERVER_EXECUTOR_MISSING：当前部署未注入 SQL 执行器，SQL 只读通道暂不能作为数据源。'
+
+function runErrorDisplay(run: IntegrationPipelineRun): string {
+  // "Paired errorCode if one exists on the run object": the wire type carries no errorCode field
+  // today, but tolerate one on the run row or inside details — only EXACT registered codes get a
+  // label (unregistered/absent → fixed values-free fallback, never the raw code or summary).
+  const candidate = (run as { errorCode?: unknown }).errorCode ?? run.details?.errorCode
+  const code = typeof candidate === 'string' ? candidate : null
+  if (code && integrationErrorCodeLabel(code, locale.value)) {
+    return integrationErrorCodeDisplayLabel(code, locale.value)
+  }
+  return locale.value === 'zh-CN' ? RUN_FAILURE_FALLBACK_COPY.zh : RUN_FAILURE_FALLBACK_COPY.en
+}
+
+function connectionFailureFallbackCopy(): string {
+  return locale.value === 'zh-CN' ? CONNECTION_FAILURE_FALLBACK_COPY.zh : CONNECTION_FAILURE_FALLBACK_COPY.en
+}
+
+function savedSystemErrorDisplay(system: IntegrationExternalSystem): string {
+  if (system.lastError && SQLSERVER_EXECUTOR_MISSING_RE.test(system.lastError)) {
+    return SQLSERVER_EXECUTOR_MISSING_COPY
+  }
+  return connectionFailureFallbackCopy()
+}
+
+// Deep display-time scrub for the collapsed "expert" JSON panels: the JSON structure (codes,
+// status flags, diagnostics keys) is preserved per the design-lock's 专家能力不降级 hard lock, but
+// values of error-free-text keys are replaced with a fixed placeholder so no raw backend message
+// reaches the DOM — including collapsed <details>. State keeps the raw envelope untouched.
+const RAW_ERROR_TEXT_KEYS = new Set(['message', 'errorMessage', 'lastError', 'errorSummary'])
+const REDACTED_ERROR_TEXT_PLACEHOLDER = '[已按 values-free 纪律隐藏；原文见服务端日志]'
+
+function sanitizeErrorTextForDisplay(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => sanitizeErrorTextForDisplay(item))
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, entry]) => {
+        if (RAW_ERROR_TEXT_KEYS.has(key) && typeof entry === 'string' && entry.trim().length > 0) {
+          return [key, REDACTED_ERROR_TEXT_PLACEHOLDER]
+        }
+        return [key, sanitizeErrorTextForDisplay(entry)]
+      }),
+    )
+  }
+  return value
+}
+
+function stringifyForDisplay(value: unknown): string {
+  return JSON.stringify(sanitizeErrorTextForDisplay(value), null, 2)
 }
 const stagingDescriptors = ref<IntegrationStagingDescriptor[]>([])
 const templatePreviewTarget = ref<K3WisePipelineTarget>('material')
@@ -1152,10 +1232,12 @@ const webApiConnectionStatus = computed(() => {
         message: `已连接 K3 WISE WebAPI；最近测试 ${formatTimestamp(webApiLastTest.value.lastTestedAt)}。`,
       }
     }
+    // Values-free display (design-lock §3 P2): the stored lastError free text never renders —
+    // only the fixed fallback copy (raw detail stays in server logs / the scrubbed JSON panel).
     return {
       status: 'failed',
       label: 'failed',
-      message: `上次连接测试失败：${webApiLastTest.value.lastError || 'K3 WISE WebAPI returned an unsuccessful test result'}`,
+      message: connectionFailureFallbackCopy(),
     }
   }
   const system = selectedWebApiSystem.value
@@ -1163,7 +1245,7 @@ const webApiConnectionStatus = computed(() => {
     return {
       status: 'failed',
       label: 'failed',
-      message: `上次连接测试失败：${system.lastError}`,
+      message: connectionFailureFallbackCopy(),
     }
   }
   if (system?.lastTestedAt) {
@@ -1296,8 +1378,10 @@ async function copyGateDraft(): Promise<void> {
   try {
     await navigator.clipboard.writeText(gateDraftText.value)
     setStatus('GATE JSON 已复制', 'success')
-  } catch (error) {
-    setStatus(formatError(error), 'error')
+  } catch {
+    // Browser clipboard errors are client-generated, but the same fixed-copy invariant keeps
+    // "Error.message never reaches the DOM" absolute across the whole view.
+    setStatus('复制失败，请手动选择文本复制。', 'error')
   }
 }
 
@@ -1305,8 +1389,8 @@ async function copyGateCommand(label: string, command: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(command)
     setStatus(`${label} 命令已复制`, 'success')
-  } catch (error) {
-    setStatus(formatError(error), 'error')
+  } catch {
+    setStatus('复制失败，请手动选择文本复制。', 'error')
   }
 }
 
@@ -1340,6 +1424,9 @@ function importGateJson(): void {
     )
   } catch (error) {
     gateImportWarnings.value = []
+    // Audited (lane F): applyK3WiseGateJsonToForm is fully CLIENT-side and throws only our own
+    // fixed validation copy ('GATE JSON must be valid JSON' etc.) about the user's own paste —
+    // no backend text can flow through here, so surfacing the message is values-free and useful.
     setStatus(formatError(error), 'error')
   }
 }
@@ -1402,10 +1489,12 @@ function summarizeConnectionTestResult(result: Record<string, unknown>, label: s
   const testedSystem = getTestResultSystem(result)
   const lastError = typeof testedSystem?.lastError === 'string' ? testedSystem.lastError : ''
   if (ok) return `${label} 测试通过。原始响应已收起，可展开排障 JSON。`
-  const errorText = message || lastError || code || 'unknown error'
-  const concise = /SQLSERVER_EXECUTOR_MISSING|queryExecutor|executor|执行器|注入/i.test(errorText)
-    ? 'SQLSERVER_EXECUTOR_MISSING：当前部署未注入 SQL 执行器，SQL 只读通道暂不能作为数据源。'
-    : `${label} 测试失败：${errorText}`
+  // Values-free display (design-lock §3 P2): raw backend text is only pattern-TESTED here to pick
+  // a fixed safe-reason copy — it is never embedded in the returned string.
+  const errorText = message || lastError || code || ''
+  const concise = SQLSERVER_EXECUTOR_MISSING_RE.test(errorText)
+    ? SQLSERVER_EXECUTOR_MISSING_COPY
+    : `${label} 测试失败：服务端错误详情已按 values-free 纪律收起，见服务端日志。`
   return `${concise} 原始响应已收起，可展开排障 JSON。`
 }
 
@@ -1421,8 +1510,10 @@ async function loadSystems(silent = false): Promise<void> {
     if (!form.webApiSystemId && webApi[0]) loadSystemIntoForm(webApi[0])
     if (!form.sqlSystemId && sql[0]) loadSystemIntoForm(sql[0])
     if (!silent) setStatus('K3 WISE 配置已刷新', 'success')
-  } catch (error) {
-    if (!silent) setStatus(formatError(error), 'error')
+  } catch {
+    // Lane F values-free discipline: thrown Error.message carries the server envelope's free
+    // text (parseIntegrationResponse) — fixed copy only, never formatError(...) into the DOM.
+    if (!silent) setStatus('加载 K3 WISE 配置失败，详情见服务端日志。', 'error')
   } finally {
     loading.value = false
   }
@@ -1454,8 +1545,8 @@ async function saveConfiguration(): Promise<void> {
     }
     await loadSystems(true)
     setStatus('K3 WISE 预设配置已保存', 'success')
-  } catch (error) {
-    setStatus(formatError(error), 'error')
+  } catch {
+    setStatus('保存 K3 WISE 预设配置失败，详情见服务端日志。', 'error')
   } finally {
     saving.value = false
   }
@@ -1468,7 +1559,7 @@ async function testWebApi(): Promise<void> {
   testResultSummary.value = ''
   try {
     const result = await testIntegrationSystem(form.webApiSystemId, buildConnectionTestPayload())
-    testResult.value = JSON.stringify(result, null, 2)
+    testResult.value = stringifyForDisplay(result)
     testResultSummary.value = summarizeConnectionTestResult(result, 'WebAPI')
     const testedSystem = getTestResultSystem(result)
     if (testedSystem) upsertLocalWebApiSystem(testedSystem)
@@ -1484,14 +1575,15 @@ async function testWebApi(): Promise<void> {
     void loadSystems(true)
     setStatus(result.ok === true ? 'WebAPI 连接测试完成' : 'WebAPI 连接测试失败', result.ok === true ? 'success' : 'error')
   } catch (error) {
-    testResultSummary.value = `WebAPI 测试失败：${formatError(error)}`
+    testResultSummary.value = 'WebAPI 测试失败：网络或服务端异常，详情见服务端日志。'
     webApiLastTest.value = {
       systemId: form.webApiSystemId,
       ok: false,
       lastTestedAt: new Date().toISOString(),
+      // State keeps the raw text (never rendered — display goes through the fixed-copy layer).
       lastError: formatError(error),
     }
-    setStatus(formatError(error), 'error')
+    setStatus('WebAPI 连接测试失败，详情见服务端日志。', 'error')
   } finally {
     testingWebApi.value = false
   }
@@ -1504,13 +1596,13 @@ async function testSqlServer(): Promise<void> {
   testResultSummary.value = ''
   try {
     const result = await testIntegrationSystem(form.sqlSystemId, buildConnectionTestPayload())
-    testResult.value = JSON.stringify(result, null, 2)
+    testResult.value = stringifyForDisplay(result)
     testResultSummary.value = summarizeConnectionTestResult(result, 'SQL Server')
     await loadSystems(true)
     setStatus('SQL Server 通道测试完成', 'success')
-  } catch (error) {
-    testResultSummary.value = `SQL Server 测试失败：${formatError(error)}`
-    setStatus(formatError(error), 'error')
+  } catch {
+    testResultSummary.value = 'SQL Server 测试失败：网络或服务端异常，详情见服务端日志。'
+    setStatus('SQL Server 通道测试失败，详情见服务端日志。', 'error')
   } finally {
     testingSql.value = false
   }
@@ -1521,8 +1613,8 @@ async function loadStagingDescriptors(silent = false): Promise<void> {
   try {
     stagingDescriptors.value = await listIntegrationStagingDescriptors()
     if (!silent) setStatus('Staging 契约已刷新', 'success')
-  } catch (error) {
-    if (!silent) setStatus(formatError(error), 'error')
+  } catch {
+    if (!silent) setStatus('刷新 Staging 契约失败，详情见服务端日志。', 'error')
   } finally {
     loadingStagingDescriptors.value = false
   }
@@ -1541,11 +1633,11 @@ async function installStagingTables(): Promise<void> {
     const result = await installIntegrationStaging(buildK3WiseStagingInstallPayload(form))
     if (result.projectId) form.projectId = result.projectId
     stagingInstallResult.value = result
-    stagingResult.value = JSON.stringify(result, null, 2)
+    stagingResult.value = stringifyForDisplay(result)
     await loadStagingDescriptors(true)
     setStatus('Staging 多维表已安装或确认存在', result.warnings.length > 0 ? 'info' : 'success')
-  } catch (error) {
-    setStatus(formatError(error), 'error')
+  } catch {
+    setStatus('安装 Staging 多维表失败，详情见服务端日志。', 'error')
   } finally {
     installingStaging.value = false
   }
@@ -1572,8 +1664,8 @@ async function createPipelineTemplates(): Promise<void> {
       bom: { id: bom.id, name: bom.name, status: bom.status },
     }, null, 2)
     setStatus('PLM → K3 清洗 Pipeline 已创建为 draft', 'success')
-  } catch (error) {
-    setStatus(formatError(error), 'error')
+  } catch {
+    setStatus('创建清洗 Pipeline 失败，详情见服务端日志。', 'error')
   } finally {
     creatingPipelines.value = false
   }
@@ -1606,8 +1698,8 @@ async function refreshPipelineObservation(target: K3WisePipelineTarget, silent =
     if (!silent) {
       setStatus(`${target === 'material' ? '物料' : 'BOM'} Pipeline 运行状态已刷新`, 'success')
     }
-  } catch (error) {
-    if (!silent) setStatus(formatError(error), 'error')
+  } catch {
+    if (!silent) setStatus('刷新 Pipeline 运行状态失败，详情见服务端日志。', 'error')
   } finally {
     observingPipeline.value = ''
   }
@@ -1628,16 +1720,16 @@ async function executePipeline(target: K3WisePipelineTarget, dryRun: boolean): P
   try {
     const pipelineId = getK3WisePipelineId(form, target)
     const result = await runIntegrationPipeline(pipelineId, buildK3WisePipelineRunPayload(form, target), dryRun)
-    pipelineRunResult.value = JSON.stringify({
+    pipelineRunResult.value = stringifyForDisplay({
       target,
       dryRun,
       pipelineId,
       result,
-    }, null, 2)
+    })
     await refreshPipelineObservation(target, true)
     setStatus(`${target === 'material' ? '物料' : 'BOM'} Pipeline ${dryRun ? 'dry-run' : 'run'} 已提交`, 'success')
-  } catch (error) {
-    setStatus(formatError(error), 'error')
+  } catch {
+    setStatus('提交 Pipeline 运行失败，详情见服务端日志。', 'error')
   } finally {
     runningPipeline.value = ''
   }
@@ -1656,8 +1748,8 @@ onMounted(() => {
   gap: 16px;
   min-height: 100%;
   padding: 24px;
-  background: #f6f8fb;
-  color: #172033;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-1);
 }
 
 .k3-setup__header {
@@ -1666,12 +1758,12 @@ onMounted(() => {
   gap: 20px;
   align-items: flex-start;
   padding-bottom: 16px;
-  border-bottom: 1px solid #d9e1ec;
+  border-bottom: 1px solid var(--ms-border-light);
 }
 
 .k3-setup__eyebrow {
   margin: 0 0 4px;
-  color: #64748b;
+  color: var(--ms-text-2);
   font-size: 12px;
   text-transform: uppercase;
 }
@@ -1680,12 +1772,12 @@ onMounted(() => {
   margin: 0;
   font-size: 28px;
   line-height: 1.2;
-  color: #111827;
+  color: var(--ms-text-1);
 }
 
 .k3-setup__lead {
   margin: 8px 0 0;
-  color: #526072;
+  color: var(--ms-text-2);
 }
 
 .k3-setup__header-actions {
@@ -1704,9 +1796,9 @@ onMounted(() => {
 .k3-setup__journey-step {
   min-width: 0;
   padding: 12px;
-  border: 1px solid #d9e1ec;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #fff;
+  background: var(--ms-bg-card);
 }
 
 .k3-setup__journey-step strong,
@@ -1716,13 +1808,13 @@ onMounted(() => {
 }
 
 .k3-setup__journey-step strong {
-  color: #111827;
+  color: var(--ms-text-1);
   font-size: 14px;
 }
 
 .k3-setup__journey-step span {
   margin-top: 4px;
-  color: #64748b;
+  color: var(--ms-text-2);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -1744,17 +1836,17 @@ onMounted(() => {
 .k3-setup__panel,
 .k3-setup__section {
   padding: 16px;
-  border: 1px solid #d9e1ec;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #fff;
+  background: var(--ms-bg-card);
 }
 
 .k3-setup__section--primary {
-  border-color: #99f6e4;
+  border-color: var(--el-color-primary-light-7);
 }
 
 .k3-setup__details[open] {
-  border-color: #cbd5e1;
+  border-color: var(--ms-border);
 }
 
 .k3-setup__collapsible-panel {
@@ -1781,7 +1873,7 @@ onMounted(() => {
 
 .k3-setup__collapsible-panel[open] .k3-setup__panel-summary {
   margin: 0 -16px 14px;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--ms-border-light);
 }
 
 .k3-setup__section-summary {
@@ -1791,7 +1883,7 @@ onMounted(() => {
 .k3-setup__details[open] .k3-setup__section-summary {
   margin-bottom: 14px;
   padding-bottom: 12px;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--ms-border-light);
 }
 
 .k3-setup__panel-summary::-webkit-details-marker,
@@ -1809,8 +1901,8 @@ onMounted(() => {
   width: 22px;
   height: 22px;
   border-radius: 999px;
-  background: #e2e8f0;
-  color: #334155;
+  background: var(--el-fill-color-dark);
+  color: var(--ms-text-2);
   font-weight: 700;
 }
 
@@ -1821,14 +1913,14 @@ onMounted(() => {
 
 .k3-setup__panel-summary span,
 .k3-setup__section-summary span {
-  color: #111827;
+  color: var(--ms-text-1);
   font-size: 16px;
   font-weight: 700;
 }
 
 .k3-setup__panel-summary small,
 .k3-setup__section-summary small {
-  color: #64748b;
+  color: var(--ms-text-2);
   font-size: 12px;
 }
 
@@ -1850,12 +1942,12 @@ onMounted(() => {
   margin: 0;
   font-size: 16px;
   line-height: 1.3;
-  color: #111827;
+  color: var(--ms-text-1);
 }
 
 .k3-setup__panel-head span,
 .k3-setup__section-head span {
-  color: #64748b;
+  color: var(--ms-text-2);
   font-size: 12px;
 }
 
@@ -1881,14 +1973,14 @@ onMounted(() => {
 .k3-setup__field span,
 .k3-setup__check span,
 .k3-setup__switch span {
-  color: #334155;
+  color: var(--ms-text-2);
   font-size: 13px;
   font-weight: 600;
 }
 
 .k3-setup__field small,
 .k3-setup__field-note {
-  color: #64748b;
+  color: var(--ms-text-2);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -1903,7 +1995,7 @@ onMounted(() => {
 
 .k3-setup__hint {
   margin: 6px 0 0;
-  color: #9a3412;
+  color: var(--el-color-warning-dark-2);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -1913,11 +2005,11 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  border: 1px solid #facc15;
+  border: 1px solid var(--el-color-warning-light-3);
   border-radius: 6px;
   padding: 10px;
-  background: #fefce8;
-  color: #744600;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
 }
 
 .k3-setup__hint--strong span {
@@ -1926,7 +2018,7 @@ onMounted(() => {
 }
 
 .k3-setup__hint-warning {
-  color: #92400e;
+  color: var(--el-color-warning-dark-2);
 }
 
 .k3-setup__field input,
@@ -1934,17 +2026,17 @@ onMounted(() => {
 .k3-setup__field textarea {
   width: 100%;
   min-width: 0;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--ms-border);
   border-radius: 6px;
   padding: 9px 10px;
-  background: #fff;
-  color: #111827;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   font: inherit;
 }
 
 .k3-setup__field input[readonly] {
-  background: #f8fafc;
-  color: #64748b;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .k3-setup__field textarea {
@@ -1970,20 +2062,20 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--ms-border);
   border-radius: 6px;
   padding: 9px 12px;
-  background: #fff;
-  color: #172033;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   font: inherit;
   cursor: pointer;
   text-decoration: none;
 }
 
 .k3-setup__btn--primary {
-  border-color: #0f766e;
-  background: #0f766e;
-  color: #fff;
+  border-color: var(--ms-color-primary);
+  background: var(--ms-color-primary);
+  color: var(--ms-bg-card);
 }
 
 .k3-setup__btn--full {
@@ -2004,21 +2096,21 @@ onMounted(() => {
 .k3-setup__status {
   margin: 0;
   padding: 10px 12px;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--ms-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--ms-bg-card);
 }
 
 .k3-setup__status[data-kind="success"] {
-  border-color: #99f6e4;
-  background: #f0fdfa;
-  color: #115e59;
+  border-color: var(--el-color-success-light-7);
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .k3-setup__status[data-kind="error"] {
-  border-color: #fecaca;
-  background: #fff1f2;
-  color: #9f1239;
+  border-color: var(--el-color-danger-light-7);
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger-dark-2);
 }
 
 .k3-setup__saved-list {
@@ -2032,21 +2124,21 @@ onMounted(() => {
   flex-direction: column;
   gap: 4px;
   width: 100%;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--ms-border-light);
   border-radius: 6px;
   padding: 10px;
-  background: #f8fafc;
-  color: #172033;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-1);
   text-align: left;
   cursor: pointer;
 }
 
 .k3-setup__saved small {
-  color: #64748b;
+  color: var(--ms-text-2);
 }
 
 .k3-setup__saved-error {
-  color: #9f1239;
+  color: var(--el-color-danger-dark-2);
   overflow-wrap: anywhere;
 }
 
@@ -2055,21 +2147,21 @@ onMounted(() => {
   flex-direction: column;
   gap: 6px;
   min-width: 0;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--ms-border-light);
   border-radius: 6px;
   padding: 10px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .k3-setup__connection-state small {
-  color: #64748b;
+  color: var(--ms-text-2);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .k3-setup__empty {
-  color: #64748b;
+  color: var(--ms-text-2);
 }
 
 .k3-setup__records {
@@ -2100,23 +2192,23 @@ onMounted(() => {
 }
 
 .k3-setup__command-head strong {
-  color: #334155;
+  color: var(--ms-text-2);
   font-size: 12px;
 }
 
 .k3-setup__command-copy {
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--ms-border);
   border-radius: 6px;
   padding: 3px 8px;
-  background: #fff;
-  color: #334155;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-2);
   font-size: 12px;
   cursor: pointer;
 }
 
 .k3-setup__command-copy:hover {
-  border-color: #94a3b8;
-  background: #f8fafc;
+  border-color: var(--ms-color-primary);
+  background: var(--ms-bg-page);
 }
 
 .k3-setup__commands code {
@@ -2124,8 +2216,8 @@ onMounted(() => {
   overflow-wrap: anywhere;
   border-radius: 6px;
   padding: 8px;
-  background: #f1f5f9;
-  color: #172033;
+  background: var(--el-fill-color-light);
+  color: var(--ms-text-1);
   font-size: 12px;
 }
 
@@ -2160,14 +2252,14 @@ onMounted(() => {
   flex-direction: column;
   gap: 6px;
   min-width: 0;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--ms-border-light);
   border-radius: 6px;
   padding: 10px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .k3-setup__gate-item small {
-  color: #64748b;
+  color: var(--ms-text-2);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -2178,10 +2270,10 @@ onMounted(() => {
   flex-direction: column;
   gap: 4px;
   min-width: 0;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--ms-border-light);
   border-radius: 6px;
   padding: 10px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .k3-setup__descriptor strong,
@@ -2190,7 +2282,7 @@ onMounted(() => {
 }
 
 .k3-setup__descriptor small {
-  color: #64748b;
+  color: var(--ms-text-2);
   font-size: 12px;
 }
 
@@ -2207,10 +2299,10 @@ onMounted(() => {
   gap: 10px;
   align-items: center;
   min-width: 0;
-  border: 1px solid #ccfbf1;
+  border: 1px solid var(--el-color-primary-light-8);
   border-radius: 6px;
   padding: 10px;
-  background: #f0fdfa;
+  background: var(--el-color-primary-light-9);
 }
 
 .k3-setup__open-target div {
@@ -2226,12 +2318,12 @@ onMounted(() => {
 }
 
 .k3-setup__open-target strong {
-  color: #115e59;
+  color: var(--el-color-primary-dark-2);
   font-size: 13px;
 }
 
 .k3-setup__open-target small {
-  color: #475569;
+  color: var(--ms-text-2);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -2245,13 +2337,13 @@ onMounted(() => {
 }
 
 .k3-setup__record-head span {
-  color: #334155;
+  color: var(--ms-text-2);
   font-size: 13px;
   font-weight: 700;
 }
 
 .k3-setup__record-head small {
-  color: #64748b;
+  color: var(--ms-text-2);
 }
 
 .k3-setup__record {
@@ -2259,47 +2351,47 @@ onMounted(() => {
   flex-direction: column;
   gap: 4px;
   min-width: 0;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--ms-border-light);
   border-radius: 6px;
   padding: 10px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .k3-setup__record strong {
   overflow-wrap: anywhere;
-  color: #172033;
+  color: var(--ms-text-1);
   font-size: 13px;
 }
 
 .k3-setup__record small {
   overflow-wrap: anywhere;
-  color: #64748b;
+  color: var(--ms-text-2);
 }
 
 .k3-setup__badge {
   border-radius: 999px;
   padding: 2px 8px;
-  background: #e2e8f0;
-  color: #334155;
+  background: var(--el-fill-color-dark);
+  color: var(--ms-text-2);
   font-size: 12px;
   white-space: nowrap;
 }
 
 .k3-setup__badge[data-status="succeeded"],
 .k3-setup__badge[data-status="replayed"] {
-  background: #ccfbf1;
-  color: #115e59;
+  background: var(--el-color-success-light-8);
+  color: var(--el-color-success-dark-2);
 }
 
 .k3-setup__badge[data-status="partial"],
 .k3-setup__badge[data-status="open"] {
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--el-color-warning-light-8);
+  color: var(--el-color-warning-dark-2);
 }
 
 .k3-setup__badge[data-status="failed"] {
-  background: #ffe4e6;
-  color: #9f1239;
+  background: var(--el-color-danger-light-8);
+  color: var(--el-color-danger-dark-2);
 }
 
 .k3-setup__test-result {
@@ -2308,8 +2400,8 @@ onMounted(() => {
   margin: 12px 0 0;
   padding: 10px;
   border-radius: 6px;
-  background: #0f172a;
-  color: #e2e8f0;
+  background: var(--ms-text-1);
+  color: var(--el-color-primary-light-9);
   font-size: 12px;
 }
 
@@ -2321,16 +2413,16 @@ onMounted(() => {
 }
 
 .k3-setup__test-summary {
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--ms-border-light);
   border-radius: 6px;
   padding: 8px;
-  background: #f8fafc;
-  color: #334155;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
   overflow-wrap: anywhere;
 }
 
 .k3-setup__diagnostics summary {
-  color: #475569;
+  color: var(--ms-text-2);
   cursor: pointer;
 }
 
@@ -2345,14 +2437,14 @@ onMounted(() => {
   flex-direction: column;
   gap: 10px;
   min-width: 0;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
   padding: 12px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .k3-setup__template-card small {
-  color: #64748b;
+  color: var(--ms-text-2);
   overflow-wrap: anywhere;
 }
 
@@ -2365,7 +2457,7 @@ onMounted(() => {
 
 .k3-setup__mapping-table th,
 .k3-setup__mapping-table td {
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--ms-border-light);
   padding: 7px 6px;
   text-align: left;
   vertical-align: top;
@@ -2373,7 +2465,7 @@ onMounted(() => {
 }
 
 .k3-setup__mapping-table th {
-  color: #475569;
+  color: var(--ms-text-2);
   font-weight: 700;
 }
 
@@ -2382,12 +2474,12 @@ onMounted(() => {
   justify-content: space-between;
   gap: 12px;
   margin-top: 14px;
-  color: #334155;
+  color: var(--ms-text-2);
   font-size: 13px;
 }
 
 .k3-setup__preview-head span {
-  color: #64748b;
+  color: var(--ms-text-2);
 }
 
 .k3-setup__json-preview {
@@ -2396,20 +2488,20 @@ onMounted(() => {
   margin: 8px 0 0;
   padding: 10px;
   border-radius: 6px;
-  background: #0f172a;
-  color: #e2e8f0;
+  background: var(--ms-text-1);
+  color: var(--el-color-primary-light-9);
   font-size: 12px;
 }
 
 .k3-setup__section--issues {
-  border-color: #fed7aa;
-  background: #fff7ed;
+  border-color: var(--el-color-warning-light-7);
+  background: var(--el-color-warning-light-9);
 }
 
 .k3-setup__issues {
   margin: 0;
   padding-left: 18px;
-  color: #9a3412;
+  color: var(--el-color-warning-dark-2);
 }
 
 .k3-setup__issues--compact {
