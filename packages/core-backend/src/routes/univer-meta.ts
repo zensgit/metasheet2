@@ -9038,6 +9038,17 @@ export function univerMetaRouter(): Router {
         return null
       })
       if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+      // D-6: this Tier-1 (sheet_config)/Tier-2 (field name/order/type/property) revert path applies a real
+      // meta_fields UPDATE on success but — unlike the uncreate (:8832) / undelete (:8878) / 4c-1 lossy-retype
+      // (:9003) branches above — never invalidated metaFieldCache. loadSheetFields (:4183) is the ONLY loader
+      // backed by that cache (loadFieldsForSheet, used by RecordService/form-submit for actual write-side
+      // coercion, always queries fresh — unaffected), but loadSheetFields itself feeds GET /view's field list,
+      // the create/duplicate echo mask, and recalcNewRecordFormulas' record-creation formula recompute. A
+      // successful field type/property revert would leave the process serving the PRE-revert field definition
+      // to all of those until the cache happened to be invalidated for an unrelated reason. Same shape as the
+      // sibling branches: only on a real field change, only after the write commits (never on preview/failure/
+      // gated-422 paths above).
+      if (rev.entity_type === 'field') invalidateFieldCache(sheetId)
       return res.json({ ok: true, data: { restored: { revisionId, entityType: rev.entity_type, entityId: rev.entity_id, changedKeys: rev.changed_keys } } })
     } catch (err: unknown) {
       if (err instanceof TombstoneCaptureCapExceededError) {
