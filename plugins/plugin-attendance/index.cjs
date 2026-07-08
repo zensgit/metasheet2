@@ -7224,7 +7224,11 @@ async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows,
       if (normalized.length > 0) {
         const hasName = normalized.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
         const hasDate = normalized.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
-        if (rowIndex === 0 || (hasName && hasDate)) {
+        // Align with detectCsvHeaderIndex: only a row containing both a name column
+        // and a date column is treated as the header. Do not blindly trust row 0 —
+        // DingTalk exports often prepend a title row before the real header, and
+        // unconditionally taking row 0 misaligns every column for the whole file.
+        if (hasName && hasDate) {
           resolvedHeaderRowIndex = rowIndex
           header = rawRow.map(normalizeCsvHeaderValue)
           return true
@@ -20472,6 +20476,11 @@ module.exports = {
     buildUnresolvedRowUserWarning,
     collectRowUserIdentityValues,
     resolveRowUserId,
+  },
+  __attendanceImportCsvHeaderForTests: {
+    detectCsvHeaderIndex,
+    iterateImportRowsFromCsv,
+    iterateImportRowsFromCsvFileAsync,
   },
   __attendanceAutoShiftForTests: {
     AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG,
