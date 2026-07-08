@@ -3289,6 +3289,11 @@ export class ApprovalProductService {
     }
 
     const formSchema = asFormSchema(bundle.version.form_schema)
+    // NOTE: pruneHiddenFormData already restricts formData to VISIBLE declared fields, so undeclared
+    // keys are dropped here on BOTH the create and preview paths. The whitelist below is therefore
+    // REDUNDANT defense-in-depth for the owner's gate ③, not the sole enforcer — see the
+    // route-preview-api "HARD GATE ③" golden, which stays green if either layer holds and only
+    // flips if BOTH are removed.
     const normalizedFormData = pruneHiddenFormData(formSchema, request.formData)
     // RP-1 hard gate (owner order, ratified lock): on the PREVIEW path formData is interpreted
     // STRICTLY per the template field whitelist — unknown keys are dropped BEFORE validation,
@@ -3494,7 +3499,7 @@ export class ApprovalProductService {
     route: Array<{
       nodeKey: string
       nodeLabel: string
-      assignees: Array<{ id: string; assignmentType: 'user' | 'role' }>
+      assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
       resolveError?: string
     }>
     totalSteps: number
@@ -3511,7 +3516,7 @@ export class ApprovalProductService {
     const route: Array<{
       nodeKey: string
       nodeLabel: string
-      assignees: Array<{ id: string; assignmentType: 'user' | 'role' }>
+      assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
       resolveError?: string
     }> = []
     let truncated = false
@@ -3540,7 +3545,7 @@ export class ApprovalProductService {
         route.push({
           nodeKey,
           nodeLabel: nodeLabel(nodeKey),
-          assignees: assignments.map((entry) => ({ id: entry.assigneeId, assignmentType: entry.assignmentType })),
+          assignees: assignments.map((entry) => ({ id: entry.assigneeId, name: entry.assigneeId, assignmentType: entry.assignmentType })),
           ...(assignments.length === 0 ? { resolveError: 'EMPTY_ASSIGNEES' } : {}),
         })
       }
@@ -3562,6 +3567,28 @@ export class ApprovalProductService {
     if (resolution.status !== 'approved' && !truncated && resolution.currentNodeKey) {
       // Ran out of the step budget while still pending — cycle-shaped graph; honest flag.
       truncated = true
+    }
+    // RP-2: display-name enrichment — one batched READ-ONLY lookup per type; a missing row keeps
+    // the honest id fallback (never blank, never a second query fan-out).
+    const userIds = [...new Set(route.flatMap((n) => n.assignees.filter((a) => a.assignmentType === 'user').map((a) => a.id)))]
+    const roleIds = [...new Set(route.flatMap((n) => n.assignees.filter((a) => a.assignmentType === 'role').map((a) => a.id)))]
+    const nameOf = new Map<string, string>()
+    if (userIds.length > 0) {
+      const users = await pool!.query('SELECT id, name FROM users WHERE id = ANY($1::text[])', [userIds])
+      for (const row of users.rows as Array<{ id: string; name: string | null }>) {
+        if (row.name && row.name.trim()) nameOf.set(`user:${row.id}`, row.name)
+      }
+    }
+    if (roleIds.length > 0) {
+      const roles = await pool!.query('SELECT id, name FROM roles WHERE id = ANY($1::text[])', [roleIds]).catch(() => ({ rows: [] as unknown[] }))
+      for (const row of roles.rows as Array<{ id: string; name: string | null }>) {
+        if (row.name && row.name.trim()) nameOf.set(`role:${row.id}`, row.name)
+      }
+    }
+    for (const node of route) {
+      for (const assignee of node.assignees) {
+        assignee.name = nameOf.get(`${assignee.assignmentType}:${assignee.id}`) ?? assignee.id
+      }
     }
     return { route, totalSteps: executor.totalSteps, truncated }
   }

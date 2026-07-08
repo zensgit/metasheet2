@@ -905,6 +905,29 @@ async function postApprovalJson<T>(path: string, payload: unknown): Promise<T> {
   return response.json()
 }
 
+/**
+ * RP-2 (route-preview lock, B3-05): read-only live route preview for the requester's CURRENT
+ * form values — the backend walks the real create pipeline (same validation/branch resolution/
+ * delegation substitution) without writing anything. Assignee `name` is display-enriched
+ * server-side with an honest id fallback.
+ */
+export interface ApprovalRoutePreviewNode {
+  nodeKey: string
+  nodeLabel: string
+  assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
+  resolveError?: string
+}
+
+export interface ApprovalRoutePreview {
+  route: ApprovalRoutePreviewNode[]
+  truncated: boolean
+}
+
+export async function previewApprovalRoute(req: CreateApprovalRequest): Promise<ApprovalRoutePreview> {
+  if (USE_MOCK) return { route: [], truncated: false }
+  return postApprovalJson('/api/approvals/preview', req)
+}
+
 export async function createApproval(req: CreateApprovalRequest): Promise<UnifiedApprovalDTO> {
   if (USE_MOCK) {
     return {

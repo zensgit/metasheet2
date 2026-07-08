@@ -94,6 +94,49 @@
               </span>
             </template>
           </div>
+
+          <!-- RP-2 (B3-05): live route preview — resolves the ACTUAL path for the values typed so
+               far by walking the real create pipeline server-side (read-only). Compute-at-click,
+               and any later form edit clears the result so a stale path never misleads. -->
+          <div class="approval-new__route-preview" data-testid="approval-route-preview">
+            <el-button
+              size="small"
+              :loading="routePreviewLoading"
+              data-testid="approval-route-preview-btn"
+              @click="loadRoutePreview"
+            >
+              按当前表单预览路径
+            </el-button>
+            <div v-if="routePreviewError" class="approval-new__route-preview-error" data-testid="approval-route-preview-error">
+              {{ routePreviewError }}
+            </div>
+            <div v-else-if="routePreview" class="approval-new__flow-preview-row" data-testid="approval-route-preview-row">
+              <span class="approval-new__flow-preview-chip approval-new__flow-preview-chip--requester">
+                发起人
+              </span>
+              <template v-for="node in routePreview.route" :key="node.nodeKey">
+                <span class="approval-new__flow-preview-arrow">→</span>
+                <span
+                  class="approval-new__flow-preview-chip"
+                  :class="{ 'approval-new__flow-preview-chip--unresolved': !!node.resolveError }"
+                  data-testid="approval-route-preview-node"
+                >
+                  {{ node.nodeLabel }}
+                  <span class="approval-new__flow-preview-chip-summary">{{ routePreviewAssigneeSummary(node) }}</span>
+                </span>
+              </template>
+              <span
+                v-if="routePreview.truncated"
+                class="approval-new__route-preview-truncated"
+                data-testid="approval-route-preview-truncated"
+              >
+                （路径未能完整解析，以实际流转为准）
+              </span>
+              <span v-else-if="routePreview.route.length === 0" class="approval-new__route-preview-truncated">
+                （按当前表单将直接通过，无审批节点）
+              </span>
+            </div>
+          </div>
         </el-card>
 
         <el-divider content-position="left">填写表单</el-divider>
@@ -414,6 +457,9 @@ import {
   validateDetailRows,
 } from '../../approvals/detailField'
 import { summarizeApprovalFlow, type ApprovalFlowStep } from '../../approvals/graphSummary'
+import { previewApprovalRoute, type ApprovalRoutePreview } from '../../approvals/api'
+import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
+import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { getApproval } from '../../approvals/api'
 import { prefillFromSnapshot } from '../../approvals/prefillFromSnapshot'
 
@@ -497,6 +543,26 @@ const flowPreviewSteps = computed<ApprovalFlowStep[]>(() => {
   if (!graph) return []
   return summarizeApprovalFlow(graph, template.value?.formSchema ?? null)
 })
+
+// RP-2 (B3-05): live route preview state. Compute-at-click; any form edit invalidates the resolved
+// path (stale resolution must never keep rendering as if it matched the current values). The
+// generation race-guard lives in createRoutePreviewController so it is unit-testable.
+const routePreview = ref<ApprovalRoutePreview | null>(null)
+const routePreviewLoading = ref(false)
+const routePreviewError = ref('')
+
+const routePreviewController = createRoutePreviewController(previewApprovalRoute, (patch) => {
+  if ('preview' in patch) routePreview.value = patch.preview ?? null
+  if (patch.loading !== undefined) routePreviewLoading.value = patch.loading
+  if (patch.error !== undefined) routePreviewError.value = patch.error
+})
+
+async function loadRoutePreview() {
+  if (!template.value) return
+  await routePreviewController.run({ templateId: template.value.id, formData: { ...formData } })
+}
+
+watch(formData, () => routePreviewController.invalidate(), { deep: true })
 
 // Detail-row auto-sum (design-lock #3189, Gate B): when the template declares amountConsistencyCheck the
 // total field is derived from the detail rows (read-only) — auto-fill (UX) + backend total-check
@@ -849,6 +915,31 @@ watch([visibleFieldIds, template], () => {
 .approval-new__flow-preview-arrow {
   color: var(--el-text-color-placeholder);
   font-size: 12px;
+}
+
+.approval-new__route-preview {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+
+.approval-new__route-preview .approval-new__flow-preview-row {
+  margin-top: 8px;
+}
+
+.approval-new__flow-preview-chip--unresolved {
+  border: 1px dashed var(--el-color-danger);
+}
+
+.approval-new__route-preview-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--el-color-danger);
+}
+
+.approval-new__route-preview-truncated {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 .approval-new__field-hint {

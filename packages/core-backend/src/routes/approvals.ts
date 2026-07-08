@@ -773,6 +773,64 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // RP-2 (route-preview lock, RATIFIED; B3-05): read-only route preview — the SAME guard chain
+  // and actor assembly as POST /api/approvals (below), but the body reaches ONLY
+  // previewApprovalRoute (zero-write substrate, formData whitelisted to the template's fields —
+  // the owner hard gate lives in the service). The session actor IS the requester: no requester
+  // override is accepted on this surface (org-structure probing stays impossible; the admin
+  // sample-requester variant is the separate RP-3 endpoint behind canManageTemplates).
+  r.post('/api/approvals/preview', authenticate, rbacGuard('approvals', 'write'), async (req: Request, res: Response) => {
+    try {
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const templateId = typeof req.body?.templateId === 'string' ? req.body.templateId.trim() : ''
+      const formData =
+        req.body?.formData && typeof req.body.formData === 'object' && !Array.isArray(req.body.formData)
+          ? req.body.formData as Record<string, unknown>
+          : null
+
+      if (!templateId || !formData) {
+        return res.status(400).json({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'templateId and formData are required',
+          },
+        })
+      }
+
+      const preview = await productService.previewApprovalRoute(
+        { templateId, formData },
+        {
+          userId,
+          userName: resolveApprovalActorName(req, userId),
+          email: typeof req.user?.email === 'string' ? req.user.email : undefined,
+          tenantId: resolveApprovalTenantId(req),
+          department: typeof req.user?.department === 'string' ? req.user.department : undefined,
+          departmentIds: resolveApprovalActorDepartmentIds(req),
+          roles: resolveApprovalActorRoles(req),
+          permissions: resolveApprovalActorPermissions(req),
+        },
+      )
+
+      // Conform to the ratified §3 B3-05 output contract exactly ({ route, truncated? }). The
+      // substrate returns totalSteps for its own internal use, but it is not part of the endpoint
+      // contract, so it is not forwarded on the wire.
+      res.json({ route: preview.route, truncated: preview.truncated })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_PREVIEW_FAILED',
+        'Failed to preview the approval route',
+      )
+    }
+  })
+
   r.post('/api/approvals', authenticate, rbacGuard('approvals', 'write'), async (req: Request, res: Response) => {
     try {
       const userId = resolveApprovalActorId(req)
