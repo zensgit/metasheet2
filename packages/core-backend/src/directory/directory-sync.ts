@@ -946,6 +946,64 @@ export type DirectoryAccountDepartmentWriteSummary = {
  * drive it directly — and any future rewrite of this body (a bulk `unnest` insert, say) has
  * to keep that golden passing rather than silently reverting to `departmentIds[0]`.
  */
+/**
+ * DT-PERF-01 — flatten (employee × department) membership into three parallel arrays for a
+ * single `unnest` upsert. Exported because the per-row loop it replaced was the sync's largest
+ * source of round trips, and its semantics — which pair exists, which one is primary, how a
+ * repeated pair collapses — must be pinned by tests rather than re-derived by a reader.
+ *
+ * `isPrimary` comes from `resolveDirectoryPrimaryDepartmentId`, NOT from `departmentIds[0]`.
+ * Reintroducing the array index here would silently revert DT-HARDEN-07's approval-routing fix,
+ * which is why the real-DB golden drives the writer rather than this builder.
+ */
+export function buildDirectoryAccountDepartmentRows(
+  users: Iterable<{ userId: string; departmentIds: string[]; source?: unknown }>,
+  accountIdByExternalUserId: Map<string, { id: string }>,
+  departmentIdByExternalDepartmentId: Map<string, string>,
+): { accountIds: string[]; departmentIds: string[]; isPrimary: boolean[]; summary: DirectoryAccountDepartmentWriteSummary } {
+  const accountIds: string[] = []
+  const departmentIds: string[] = []
+  const isPrimary: boolean[] = []
+  const seen = new Set<string>()
+  const summary: DirectoryAccountDepartmentWriteSummary = {
+    membershipsWritten: 0,
+    accountsWithPrimary: 0,
+    accountsWithoutKnownDepartment: 0,
+  }
+
+  for (const user of users) {
+    const account = accountIdByExternalUserId.get(user.userId)
+    if (!account) continue
+
+    // An explicit, deterministic primary department — approval manager routing anchors on
+    // is_primary, so this must not be an accident of array order.
+    const primaryDepartmentId = resolveDirectoryPrimaryDepartmentId(user)
+    let wrotePrimary = false
+    let wroteAny = false
+
+    for (const departmentId of user.departmentIds) {
+      const directoryDepartmentId = departmentIdByExternalDepartmentId.get(departmentId)
+      if (!directoryDepartmentId) continue
+      const pairKey = `${account.id}:${directoryDepartmentId}`
+      if (seen.has(pairKey)) continue
+      seen.add(pairKey)
+
+      const primary = departmentId === primaryDepartmentId
+      accountIds.push(account.id)
+      departmentIds.push(directoryDepartmentId)
+      isPrimary.push(primary)
+      summary.membershipsWritten += 1
+      wroteAny = true
+      wrotePrimary = wrotePrimary || primary
+    }
+
+    if (!wroteAny) summary.accountsWithoutKnownDepartment += 1
+    else if (wrotePrimary) summary.accountsWithPrimary += 1
+  }
+
+  return { accountIds, departmentIds, isPrimary, summary }
+}
+
 export async function upsertDirectoryAccountDepartments(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
   input: {
@@ -956,45 +1014,27 @@ export async function upsertDirectoryAccountDepartments(
     departmentIdMap: Map<string, string>
   },
 ): Promise<DirectoryAccountDepartmentWriteSummary> {
-  const summary: DirectoryAccountDepartmentWriteSummary = {
-    membershipsWritten: 0,
-    accountsWithPrimary: 0,
-    accountsWithoutKnownDepartment: 0,
+  const rows = buildDirectoryAccountDepartmentRows(input.users, input.accountIdMap, input.departmentIdMap)
+
+  // DT-PERF-01: this is the highest-cardinality write in the sync — one row per
+  // (employee × department), so a 2,000-employee tenant issued thousands of single-row round
+  // trips inside the apply transaction, holding its locks open for the whole walk. One `unnest`
+  // statement writes them all with identical semantics.
+  if (rows.accountIds.length > 0) {
+    await client.query(
+      `INSERT INTO directory_account_departments (
+         directory_account_id, directory_department_id, is_primary, created_at
+       )
+       SELECT account_id, department_id, is_primary, NOW()
+         FROM unnest($1::uuid[], $2::uuid[], $3::boolean[])
+           AS t(account_id, department_id, is_primary)
+       ON CONFLICT (directory_account_id, directory_department_id)
+       DO UPDATE SET is_primary = EXCLUDED.is_primary`,
+      [rows.accountIds, rows.departmentIds, rows.isPrimary],
+    )
   }
 
-  for (const user of input.users) {
-    const account = input.accountIdMap.get(user.userId)
-    if (!account) continue
-
-    // An explicit, deterministic primary department — approval manager routing anchors on
-    // is_primary, so this must not be an accident of array order.
-    const primaryDepartmentId = resolveDirectoryPrimaryDepartmentId(user)
-    let wrotePrimary = false
-    let wroteAny = false
-
-    for (const departmentId of user.departmentIds) {
-      const directoryDepartmentId = input.departmentIdMap.get(departmentId)
-      if (!directoryDepartmentId) continue
-      const isPrimary = departmentId === primaryDepartmentId
-      await client.query(
-        `INSERT INTO directory_account_departments (
-           directory_account_id, directory_department_id, is_primary, created_at
-         )
-         VALUES ($1, $2, $3, NOW())
-         ON CONFLICT (directory_account_id, directory_department_id)
-         DO UPDATE SET is_primary = EXCLUDED.is_primary`,
-        [account.id, directoryDepartmentId, isPrimary],
-      )
-      summary.membershipsWritten += 1
-      wroteAny = true
-      wrotePrimary = wrotePrimary || isPrimary
-    }
-
-    if (!wroteAny) summary.accountsWithoutKnownDepartment += 1
-    else if (wrotePrimary) summary.accountsWithPrimary += 1
-  }
-
-  return summary
+  return rows.summary
 }
 
 function normalizeDirectorySyncAuditUserId(adminUserId: string): string | null {
