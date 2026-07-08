@@ -3462,11 +3462,14 @@ async function createDirectoryAdmittedUserInTransaction(
   },
 ): Promise<{ userId: string }> {
   const userId = crypto.randomUUID()
-  // DT-HARDEN-02: assert grant feasibility BEFORE inserting the users row. If a
-  // corp-scoped account lacks an openId and grant is requested, the downstream
-  // bind would throw — historically that happened after INSERT, and the caller's
-  // swallowing catch left a committed orphan user. Failing here guarantees the
-  // users row and its bind are all-or-nothing for every caller of this function.
+  // DT-HARDEN-02: assert grant feasibility BEFORE inserting the users row — the cheapest
+  // and most common orphan cause (grant requested for an account that cannot hold one).
+  // But this alone is not sufficient: applyDirectoryAccountBindInTransaction (called AFTER
+  // the INSERT below) still throws when the account has no openId/unionId at all — even with
+  // grant disabled — or when its identity is already bound to another local user. Those
+  // throws, swallowed by the sync loop's catch, historically committed an orphan. The
+  // SAVEPOINT around INSERT+bind (below) makes the whole admission all-or-nothing: a bind
+  // that throws for ANY reason rolls the users row back, so the loop's swallow is safe.
   assertDirectoryAccountCanEnableDingTalkGrant(options.account, options.enableDingTalkGrant)
   if (options.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(options.email)) {
     throw new Error('Invalid email format')
@@ -3518,24 +3521,38 @@ async function createDirectoryAdmittedUserInTransaction(
     }
   }
 
-  await client.query(
-    `INSERT INTO users (id, email, username, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
-     VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean, 'user', $8::jsonb, TRUE, FALSE, NOW(), NOW())`,
-    [userId, options.email, options.username, options.name, options.mobile, options.passwordHash, options.mustChangePassword, JSON.stringify([])],
-  )
+  // DT-HARDEN-02: INSERT + bind are one all-or-nothing unit. A bind throw after the INSERT
+  // (missing openId/unionId, or an identity already bound to another local user) would
+  // otherwise leave a committed orphan once the sync loop swallows the error — the exact
+  // hazard this ticket exists to close, and the one the pre-INSERT assert above does not cover.
+  await client.query('SAVEPOINT directory_admit_user')
+  try {
+    await client.query(
+      `INSERT INTO users (id, email, username, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
+       VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean, 'user', $8::jsonb, TRUE, FALSE, NOW(), NOW())`,
+      [userId, options.email, options.username, options.name, options.mobile, options.passwordHash, options.mustChangePassword, JSON.stringify([])],
+    )
 
-  await applyDirectoryAccountBindInTransaction(client, {
-    normalizedAccountId: options.account.id,
-    normalizedAdminUserId: options.adminUserId,
-    enableDingTalkGrant: options.enableDingTalkGrant,
-    account: options.account,
-    localUser: {
-      id: userId,
-      email: options.email,
-      username: options.username,
-      name: options.name,
-    },
-  })
+    await applyDirectoryAccountBindInTransaction(client, {
+      normalizedAccountId: options.account.id,
+      normalizedAdminUserId: options.adminUserId,
+      enableDingTalkGrant: options.enableDingTalkGrant,
+      account: options.account,
+      localUser: {
+        id: userId,
+        email: options.email,
+        username: options.username,
+        name: options.name,
+      },
+    })
+  } catch (error) {
+    // Undo the users INSERT (and recover the transaction if the throw came from a failed
+    // statement), then release, so the outer sync transaction stays usable for the next account.
+    await client.query('ROLLBACK TO SAVEPOINT directory_admit_user')
+    await client.query('RELEASE SAVEPOINT directory_admit_user')
+    throw error
+  }
+  await client.query('RELEASE SAVEPOINT directory_admit_user')
 
   return { userId }
 }

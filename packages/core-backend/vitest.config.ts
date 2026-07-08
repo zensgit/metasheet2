@@ -27,6 +27,10 @@ export default defineConfig({
       'tests/integration/approval-direct-manager.api.test.ts',
       'tests/integration/approval-postgate-acceptance.api.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
+      // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
+      // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
+      // cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
+      'tests/integration/directory-sync-admission-orphan-guard.db.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',
