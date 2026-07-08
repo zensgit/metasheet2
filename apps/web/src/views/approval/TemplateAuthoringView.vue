@@ -835,7 +835,7 @@
                   :disabled="readOnly"
                   class="ms-w-240"
                   data-testid="approval-node-source-kind"
-                  @update:model-value="(kind: ApprovalAssigneeSourceKind) => setApprovalSourceKind(node.key, kind)"
+                  @update:model-value="(kind: ApprovalAssigneeSourceKind) => { setApprovalSourceKind(node.key, kind); syncApprovalNodeOptions(node.key) }"
                 >
                   <el-option
                     v-for="opt in APPROVAL_NODE_SOURCE_KINDS"
@@ -845,24 +845,65 @@
                   />
                 </el-select>
               </el-form-item>
-              <el-form-item
-                v-if="approvalSourceKind(node.key) === 'static_user' || approvalSourceKind(node.key) === 'static_role'"
-                :label="approvalSourceKind(node.key) === 'static_user' ? '用户 ID' : '角色 ID'"
-              >
-                <el-select
-                  :model-value="approvalSourceIds(node.key)"
-                  multiple
-                  filterable
-                  allow-create
-                  default-first-option
-                  size="small"
-                  :disabled="readOnly"
-                  class="ms-w-360"
-                  placeholder="输入 ID 后回车"
-                  data-testid="approval-node-source-ids"
-                  @update:model-value="(ids: string[]) => setApprovalSourceIds(node.key, ids)"
-                />
-              </el-form-item>
+              <!-- G-B2-18: same directory typeahead as the linear-step picker (line ~973) — the
+                   composable is shared (one users/roles fetch backs both surfaces), only the
+                   template wiring is duplicated per editor. The manual-ID input stays as the
+                   advanced fallback (directory search doesn't guarantee full id coverage). -->
+              <template v-if="approvalSourceKind(node.key) === 'static_user' || approvalSourceKind(node.key) === 'static_role'">
+                <el-form-item v-if="approvalSourceKind(node.key) === 'static_user'" label="选择用户">
+                  <el-select
+                    :model-value="approvalSourceIds(node.key)"
+                    multiple
+                    filterable
+                    remote
+                    :remote-method="onUserSearch"
+                    :loading="directory.usersLoading.value"
+                    size="small"
+                    :disabled="readOnly"
+                    class="ms-w-360"
+                    placeholder="搜索用户名 / 邮箱 / ID"
+                    data-testid="approval-node-source-user-picker"
+                    @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, ids)"
+                    @visible-change="(visible: boolean) => visible && onUserSearch('')"
+                  >
+                    <el-option
+                      v-for="user in directory.users.value"
+                      :key="user.id"
+                      :label="directory.formatUserLabel(user)"
+                      :value="user.id"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item v-else label="选择角色">
+                  <el-select
+                    :model-value="approvalSourceIds(node.key)"
+                    multiple
+                    filterable
+                    size="small"
+                    :disabled="readOnly"
+                    class="ms-w-360"
+                    placeholder="选择角色"
+                    data-testid="approval-node-source-role-picker"
+                    @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, ids)"
+                  >
+                    <el-option
+                      v-for="role in directory.roles.value"
+                      :key="role.id"
+                      :label="directory.formatRoleLabel(role)"
+                      :value="role.id"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="手动输入 ID（高级）">
+                  <el-input
+                    :model-value="approvalSourceIdsText(node.key)"
+                    :disabled="readOnly"
+                    placeholder="逗号或换行分隔"
+                    data-testid="approval-node-source-ids-text"
+                    @update:model-value="(text: string) => setApprovalSourceIdsText(node.key, text)"
+                  />
+                </el-form-item>
+              </template>
               <el-form-item
                 v-else-if="approvalSourceKind(node.key) === 'form_field_user'"
                 label="表单用户字段 ID"
@@ -1914,6 +1955,26 @@ function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
   if (kind === 'static_user') setApprovalNodeSource(nodeKey, { kind, userIds: ids })
   else if (kind === 'static_role') setApprovalNodeSource(nodeKey, { kind, roleIds: ids })
 }
+// G-B2-18 manual-ID advanced fallback for the complex-node picker. Unlike the linear step (whose
+// idsText is a real persisted draft field — the SOLE carrier, only parsed into ids at save time),
+// the node model carries just the ids array (no raw-text sibling): a naive `ids.join(', ')` getter
+// re-derived on every keystroke fights the controlled <el-input> — it resets the DOM to the
+// re-derived text on next tick whenever that differs from what was just typed, so a trailing
+// separator is silently swallowed and a second id can never be typed. This transient per-node text
+// buffer is the raw carrier instead (never part of node.config / the saved graph): read back
+// verbatim once the author has touched the field, falling back to the derived join before that
+// (hydrate / a node nobody has edited yet).
+function approvalSourceIdsText(nodeKey: string): string {
+  const v = approvalSourceIds(nodeKey).join(', ')
+  console.log('DEBUG approvalSourceIdsText call ->', JSON.stringify(v), 'ids=', JSON.stringify(approvalSourceIds(nodeKey)))
+  return v
+}
+function setApprovalSourceIdsText(nodeKey: string, text: string): void {
+  setApprovalSourceIds(nodeKey, parseIdsText(text))
+}
+function setApprovalSourceIdsFromPicker(nodeKey: string, ids: string[]): void {
+  setApprovalSourceIds(nodeKey, ids)
+}
 function approvalSourceFieldId(nodeKey: string): string {
   const source = approvalNodeFirstSource(nodeKey)
   return source?.kind === 'form_field_user' ? source.fieldId : ''
@@ -1969,10 +2030,16 @@ function setStepIds(step: ApprovalStepDraft, ids: string[]): void {
 
 async function onUserSearch(query: string): Promise<void> {
   await directory.searchUsers(query)
-  // Keep already-selected ids visible as chips even if the new search page omits them.
+  // Keep already-selected ids visible as chips even if the new search page omits them —
+  // across BOTH pickers that share this one composable instance (linear steps + G-B2-18
+  // complex-graph nodes).
   for (const step of draft.value.steps) {
     if (step.sourceKind !== 'static_user') continue
     for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
+  }
+  for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) {
+    if (approvalSourceKind(nodeKey) !== 'static_user') continue
+    for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
   }
 }
 
@@ -1988,6 +2055,24 @@ function syncStepOptions(step: ApprovalStepDraft): void {
 
 function syncAllStepOptions(): void {
   for (const step of draft.value.steps) syncStepOptions(step)
+}
+
+// G-B2-18: same hydrate-time visibility sync as syncStepOptions, applied to the complex-graph
+// approval-node assignee sources (approvalNodeEdits is keyed by nodeKey, one entry per editable
+// approval node — see approvalNodeEditFor). Also re-seeds (or clears) the manual-ID text buffer
+// so a source-KIND switch never leaves the OTHER kind's stale typed text showing — the buffer is
+// keyed only by nodeKey, not by (nodeKey, kind), so it must be reset whenever kind changes.
+function syncApprovalNodeOptions(nodeKey: string): void {
+  const kind = approvalSourceKind(nodeKey)
+  if (kind === 'static_user') {
+    for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
+  } else if (kind === 'static_role') {
+    for (const id of approvalSourceIds(nodeKey)) directory.ensureRoleOptionVisible(id)
+  }
+}
+
+function syncAllApprovalNodeOptions(): void {
+  for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) syncApprovalNodeOptions(nodeKey)
 }
 
 function clearErrors() {
@@ -2094,6 +2179,7 @@ async function loadTemplateForEdit() {
     graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
     syncAllStepOptions()
+    syncAllApprovalNodeOptions()
     snapshotDraft()
   } catch (error: any) {
     loadError.value = error?.message ?? '加载审批模板失败'
@@ -2148,6 +2234,7 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
     syncAllStepOptions()
+    syncAllApprovalNodeOptions()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     ElMessage.success('模板草稿已创建')
