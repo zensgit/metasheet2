@@ -3249,7 +3249,25 @@ export class ApprovalProductService {
     )
   }
 
-  async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {
+  /**
+   * RP-1 (route-preview lock, RATIFIED — RP-0): the SINGLE assembly shared by createApproval and
+   * the read-only route preview. Everything from template-bundle load through executor
+   * construction lives here so preview can NEVER drift from create (the same normalization,
+   * wedge guards, org/role/delegation snapshot freezing and resolver wiring — one source).
+   * Persistence never happens here; the caller decides whether to write (create) or walk (preview).
+   */
+  private async assembleCreationContext(
+    request: { templateId: string; formData: Record<string, unknown> },
+    actor: CreateApprovalActor,
+    options: { whitelistFormDataToSchema?: boolean } = {},
+  ): Promise<{
+    bundle: NonNullable<Awaited<ReturnType<ApprovalProductService['loadTemplateBundle']>>>
+    formSchema: FormSchema
+    normalizedFormData: Record<string, unknown>
+    runtimeGraph: RuntimeGraph
+    requesterSnapshot: ApprovalRequesterSnapshot
+    executor: ApprovalGraphExecutor
+  }> {
     if (!pool) throw new Error('Database not available')
 
     const bundle = await this.loadTemplateBundle(request.templateId, undefined, 'active', {
@@ -3272,6 +3290,16 @@ export class ApprovalProductService {
 
     const formSchema = asFormSchema(bundle.version.form_schema)
     const normalizedFormData = pruneHiddenFormData(formSchema, request.formData)
+    // RP-1 hard gate (owner order, ratified lock): on the PREVIEW path formData is interpreted
+    // STRICTLY per the template field whitelist — unknown keys are dropped BEFORE validation,
+    // amount-check and graph evaluation, so a request body can never smuggle org-probing
+    // parameters through the read-only walk. The CREATE path never sets this flag (byte-identical).
+    if (options.whitelistFormDataToSchema) {
+      const allowedFieldIds = new Set((formSchema.fields ?? []).map((field) => field.id))
+      for (const key of Object.keys(normalizedFormData)) {
+        if (!allowedFieldIds.has(key)) delete normalizedFormData[key]
+      }
+    }
     const validationErrors = validateApprovalFormData(formSchema, normalizedFormData)
     if (validationErrors.length > 0) {
       throw new ServiceError(
@@ -3446,6 +3474,103 @@ export class ApprovalProductService {
         roles: requesterSnapshot.directoryRoles ?? [],
       },
     })
+    return { bundle, formSchema, normalizedFormData, runtimeGraph, requesterSnapshot, executor }
+  }
+
+  /**
+   * RP-1 (route-preview lock §3/§4, RATIFIED): read-only first-pass route walk over the SAME
+   * assembly createApproval uses. ZERO-WRITE BY CONSTRUCTION — this method touches no client,
+   * no INSERT, no epoch mint, no notification; it only iterates the pure executor. Per-node
+   * fault tolerance: a node whose assignment resolution yields nothing carries an
+   * `EMPTY_ASSIGNEES` marker instead of failing the call; a walk that cannot advance (or would
+   * exceed the node count) truncates honestly. Endpoints/UI arrive in RP-2/RP-3 — the B3-05
+   * consumer passes the SESSION actor as requester (never a caller-supplied one); the B3-06
+   * admin variant threads its sampleRequester through the same method under its own guard.
+   */
+  async previewApprovalRoute(
+    request: { templateId: string; formData: Record<string, unknown> },
+    actor: CreateApprovalActor,
+  ): Promise<{
+    route: Array<{
+      nodeKey: string
+      nodeLabel: string
+      assignees: Array<{ id: string; assignmentType: 'user' | 'role' }>
+      resolveError?: string
+    }>
+    totalSteps: number
+    truncated: boolean
+  }> {
+    const { runtimeGraph, executor } = await this.assembleCreationContext(request, actor, {
+      whitelistFormDataToSchema: true,
+    })
+
+    const nodeLabel = (key: string): string => {
+      const node = runtimeGraph.nodes.find((entry) => entry.key === key)
+      return (node?.name && String(node.name).trim()) || key
+    }
+    const route: Array<{
+      nodeKey: string
+      nodeLabel: string
+      assignees: Array<{ id: string; assignmentType: 'user' | 'role' }>
+      resolveError?: string
+    }> = []
+    let truncated = false
+    const visited = new Set<string>()
+    let resolution: ApprovalGraphResolution
+    try {
+      resolution = executor.resolveInitialState()
+    } catch {
+      // Per-node fault tolerance floor: a template whose FIRST resolution throws (e.g.
+      // emptyAssigneePolicy 'error' with a runtime-empty node) previews as an honest empty
+      // truncated route — the create path keeps its own throw semantics untouched.
+      return { route: [], totalSteps: executor.totalSteps, truncated: true }
+    }
+    // Bounded by node count: a healthy DAG first-pass can never revisit a node; anything else
+    // (cycle, resolver loop) stops the walk with an honest truncation flag instead of spinning.
+    const maxSteps = runtimeGraph.nodes.length + 1
+    for (let step = 0; step < maxSteps; step += 1) {
+      if (resolution.status === 'approved' || !resolution.currentNodeKey) break
+      const frontier = resolution.currentNodeKeys && resolution.currentNodeKeys.length > 0
+        ? resolution.currentNodeKeys
+        : [resolution.currentNodeKey]
+      for (const nodeKey of frontier) {
+        if (visited.has(nodeKey)) continue
+        visited.add(nodeKey)
+        const assignments = resolution.assignments.filter((entry) => entry.nodeKey === nodeKey)
+        route.push({
+          nodeKey,
+          nodeLabel: nodeLabel(nodeKey),
+          assignees: assignments.map((entry) => ({ id: entry.assigneeId, assignmentType: entry.assignmentType })),
+          ...(assignments.length === 0 ? { resolveError: 'EMPTY_ASSIGNEES' } : {}),
+        })
+      }
+      // Parallel frontier: advancing a multi-branch region node-by-node through
+      // resolveAfterApprove mirrors the runtime, but the preview only promises the FIRST-PASS
+      // node set — advance from the primary cursor; if the executor cannot advance, truncate.
+      try {
+        const next = executor.resolveAfterApprove(resolution.currentNodeKey)
+        if (next.currentNodeKey && visited.has(next.currentNodeKey) && next.status !== 'approved') {
+          truncated = true
+          break
+        }
+        resolution = next
+      } catch {
+        truncated = true
+        break
+      }
+    }
+    if (resolution.status !== 'approved' && !truncated && resolution.currentNodeKey) {
+      // Ran out of the step budget while still pending — cycle-shaped graph; honest flag.
+      truncated = true
+    }
+    return { route, totalSteps: executor.totalSteps, truncated }
+  }
+
+  async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {
+    if (!pool) throw new Error('Database not available')
+    // RP-1: prefix extracted verbatim into assembleCreationContext (shared with previewApprovalRoute).
+    const { bundle, normalizedFormData, runtimeGraph, requesterSnapshot, executor } =
+      await this.assembleCreationContext(request, actor)
     const instanceId = crypto.randomUUID()
     const initialResolution = executor.resolveInitialState()
     const initial = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)

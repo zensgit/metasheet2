@@ -1,6 +1,8 @@
-# 审批路由预览（B3-05 审批人解析预览 + B3-06 模板整流程试运行）· DESIGN-LOCK（PROPOSED）— 2026-07-07
+# 审批路由预览（B3-05 审批人解析预览 + B3-06 模板整流程试运行）· DESIGN-LOCK（RATIFIED）— 2026-07-07
 
-> **状态：PROPOSED，待 owner ratify。** 未 ratify 前不实现（staged-opt-in）。
+> **状态：RATIFIED（owner 2026-07-07，RP-0 通过）。** owner 执行口令：RP-1 只做底座+只读走图+
+> 一致性金测（不碰 UI 面）；RP-2/RP-3 分 PR、均依赖 RP-1；实现硬门=B3-05 formData 只按模板字段
+> 白名单解释、sampleRequesterId 只出现在 B3-06 管理端点。
 > 出处：benchmark §7.4 将本两项定位为「服务 fusion、优先级高于纯打磨」的 batch-3 对
 > （approval-automation-operation-ux-benchmark-20260704.md:108-109,132）；两项共享一个只读底座、
 > **分开 opt-in**。
@@ -70,8 +72,8 @@
 
 ## 6. 切片阶梯（ratify 后各自独立 opt-in）
 
-- ⬜ **RP-0** 本锁 ratify
-- ⬜ **RP-1** 共享底座抽取（快照装配共享化 + 只读走图函数 + 一致性金测）——后端，强模型
+- ✅ **RP-0** ratify（owner 2026-07-07）
+- ✅ **RP-1** 共享底座抽取——本 PR：assembleCreationContext（create 前缀原文抽取，preview 永不漂移）+ previewApprovalRoute 只读走图（逐节点容错/诚实截断）+ formData 白名单硬门（仅 preview 路径）+ 真库金测 6/6（preview===create/零写 RED-before/委托一致/容错/白名单）
 - ⬜ **RP-2** B3-05 端点 + ApprovalNewView 预览条 —— RP-1 后
 - ⬜ **RP-3** B3-06 端点 + authoring 试运行面板 —— RP-1 后，可与 RP-2 并行
 - 🔒 依赖提醒：RP-3 的条件人话展示消费 G-B2-19 `conditionSummary`（在飞）

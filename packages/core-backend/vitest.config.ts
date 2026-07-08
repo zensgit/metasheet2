@@ -75,6 +75,8 @@ export default defineConfig({
       // wired into NO workflow — skip-green; now run in plugin-tests' approval real-DB step).
       'tests/integration/approval-projection-visibility.db.test.ts',
       'tests/integration/approval-projection-participant-read.db.test.ts',
+      // RP-1: route-preview shared substrate goldens (preview===create, zero-write, whitelist gate).
+      'tests/integration/approval-route-preview-substrate.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
