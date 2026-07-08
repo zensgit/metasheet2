@@ -133,7 +133,7 @@
                     maxlength="9"
                   />
                 </div>
-                <button type="button" class="scf-dlg__btn scf-dlg__btn--ghost" @click="rule.hasMid = false">{{ ml('formatting.scaleDropMidStop') }}</button>
+                <MtButton class="scf-dlg__btn scf-dlg__btn--ghost" @click="rule.hasMid = false">{{ ml('formatting.scaleDropMidStop') }}</MtButton>
               </div>
               <div class="scf-dlg__rule-row">
                 <span class="scf-dlg__label">{{ ml('formatting.scaleStopMax') }}</span>
@@ -159,7 +159,7 @@
                 </div>
               </div>
               <div v-if="!rule.hasMid" class="scf-dlg__rule-row">
-                <button type="button" class="scf-dlg__btn scf-dlg__btn--ghost" @click="rule.hasMid = true">{{ ml('formatting.scaleAddMidStop') }}</button>
+                <MtButton class="scf-dlg__btn scf-dlg__btn--ghost" @click="rule.hasMid = true">{{ ml('formatting.scaleAddMidStop') }}</MtButton>
               </div>
               <div class="scf-dlg__rule-row">
                 <span class="scf-dlg__label">{{ ml('formatting.scalePreview') }}</span>
@@ -247,22 +247,22 @@
             <p v-else-if="rule.rangeMode === 'auto'" class="scf-dlg__hint">{{ ml('formatting.scaleAutoRangeHint') }}</p>
 
             <div class="scf-dlg__rule-row scf-dlg__rule-row--actions">
-              <button type="button" class="scf-dlg__btn scf-dlg__btn--danger" @click="removeRule(index)">{{ ml('action.remove') }}</button>
+              <MtButton variant="danger" class="scf-dlg__btn scf-dlg__btn--danger" @click="removeRule(index)">{{ ml('action.remove') }}</MtButton>
             </div>
           </div>
         </div>
-        <button
-          type="button"
+        <MtButton
+          variant="primary"
           class="scf-dlg__btn scf-dlg__btn--primary"
           :disabled="!canAddRule"
           @click="addRule"
-        >{{ ml('formatting.scaleAddRule') }}</button>
+        >{{ ml('formatting.scaleAddRule') }}</MtButton>
         <p v-if="!numericFields.length" class="scf-dlg__hint">{{ ml('formatting.scaleNoFieldsHint') }}</p>
         <p v-else-if="!availableFields.length" class="scf-dlg__hint">{{ ml('formatting.scaleAllFieldsUsedHint') }}</p>
       </div>
       <div class="scf-dlg__footer">
-        <button type="button" class="scf-dlg__btn" @click="close">{{ ml('action.cancel') }}</button>
-        <button type="button" class="scf-dlg__btn scf-dlg__btn--primary" :disabled="!dirty || hasInvalidRule" @click="save">{{ ml('formatting.saveRules') }}</button>
+        <MtButton class="scf-dlg__btn" @click="close">{{ ml('action.cancel') }}</MtButton>
+        <MtButton variant="primary" class="scf-dlg__btn scf-dlg__btn--primary" :disabled="!dirty || hasInvalidRule" @click="save">{{ ml('formatting.saveRules') }}</MtButton>
       </div>
     </div>
   </div>
@@ -282,6 +282,7 @@ import { CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT } from '../types'
 import { HEX_COLOR_RE, extractScaleRulesFromConfig, lerpHexColor } from '../utils/conditional-formatting'
 import { SCALE_ICON_GLYPHS, type ScaleIconGlyph } from '../utils/scale-icons'
 import { formattingPickColor, managerLabel } from '../utils/meta-manager-labels'
+import { MtButton } from '../ui'
 
 const props = defineProps<{
   visible: boolean
@@ -573,13 +574,10 @@ function save() {
 .scf-dlg__icon-glyph { font-size: 16px; font-weight: 700; }
 .scf-dlg__error { font-size: 12px; color: #b91c1c; margin: 0; }
 .scf-dlg__hint { font-size: 12px; color: #888; margin: 0; }
-.scf-dlg__btn { padding: 5px 12px; border: 1px solid #d0d5dc; border-radius: 4px; background: #fff; cursor: pointer; font-size: 12px; color: #333; }
-.scf-dlg__btn:hover:not(:disabled) { background: #f3f4f6; }
-.scf-dlg__btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.scf-dlg__btn--primary { background: #2563eb; border-color: #2563eb; color: #fff; }
-.scf-dlg__btn--primary:hover:not(:disabled) { background: #1d4ed8; }
-.scf-dlg__btn--danger { color: #b91c1c; border-color: #fecaca; }
-.scf-dlg__btn--danger:hover:not(:disabled) { background: #fef2f2; }
-.scf-dlg__btn--ghost { border-color: transparent; }
+/* .scf-dlg__btn / --primary / --danger / --ghost: all six action controls (per-rule drop/add-mid-stop,
+   remove, addRule, footer cancel/save) are now <MtButton> (token-styled, variant primary/danger/ghost).
+   The bespoke hardcoded-hex button CSS was removed to avoid double-styling the MtButton root; classes kept
+   for selector stability. --primary was #2563eb == --ms-color-primary (exact match). Mirrors the
+   ConditionalFormattingDialog shared-class migration. */
 .scf-dlg__footer { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid #eee; }
 </style>
