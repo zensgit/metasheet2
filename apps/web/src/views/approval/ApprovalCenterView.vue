@@ -254,12 +254,13 @@
               v-if="row.status === 'pending'"
               type="primary"
               link
-              :loading="remindingId === row.id"
-              :disabled="remindingId !== null"
+              :loading="urgeState(row.id).loading"
+              :disabled="urgeState(row.id).disabled"
+              :title="urgeState(row.id).title"
               :data-testid="`approval-urge-${row.id}`"
               @click.stop="handleUrge(row)"
             >
-              催办
+              {{ urgeState(row.id).label }}
             </el-button>
           </template>
         </ApprovalCenterTable>
@@ -458,6 +459,7 @@ import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { dispatchAction, getPendingCount, markAllApprovalsRead, remindApproval } from '../../approvals/api'
+import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
@@ -532,7 +534,16 @@ const batchRunning = ref(false)
 const batchAction = ref<'approve' | 'reject' | null>(null)
 const batchRejectDialogVisible = ref(false)
 const batchRejectComment = ref('')
-const remindingId = ref<string | null>(null)
+// G-B2-12: 催办 is gated PER ROW (a nudge on one request must not freeze every other row's button).
+// `remindingIds` = this row's own request is in flight; `remindedIds` = session memory of rows
+// already nudged. Both are reactive Sets; see urgeButtonState for the precedence + why the memory
+// is deliberately not persisted.
+const remindingIds = ref<Set<string>>(new Set())
+const remindedIds = ref<Set<string>>(new Set())
+
+function urgeState(rowId: string) {
+  return urgeButtonState(rowId, remindingIds.value, remindedIds.value)
+}
 
 // B1-03: 已等待 aging severity class — the 我发起的 tab's inline hint next to 催办 (same
 // warn/urgent palette as ApprovalCenterTable's own internal 已等待 column, kept separate since
@@ -687,8 +698,10 @@ async function handleBatchReject(): Promise<void> {
 
 // ── B1-03 (part 1): inline approve/reject hot path on the pending list ─────
 // `inlineApprovingId` gates every row's approve button (not just the clicked row) while a
-// request is in flight — mirrors the existing `remindingId`-gates-every-催办-button convention
-// below, so a slow request can't be raced by mashing a different row.
+// request is in flight, so a slow request can't be raced by mashing a different row. This global
+// gate is deliberate HERE and NOT shared with 催办 (G-B2-12): approve/reject MUTATES an approval,
+// so racing two rows is a correctness hazard, whereas 催办 is a server-rate-limited nudge and is
+// gated per row.
 const inlineApprovingId = ref<string | null>(null)
 
 async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
@@ -748,13 +761,18 @@ async function submitRowReject(): Promise<void> {
 }
 
 async function handleUrge(row: UnifiedApprovalDTO): Promise<void> {
-  if (remindingId.value) return
-  remindingId.value = row.id
+  // Only this row's own state gates it — other rows may be nudged concurrently.
+  if (remindingIds.value.has(row.id) || remindedIds.value.has(row.id)) return
+  remindingIds.value.add(row.id)
   try {
     const result = await remindApproval(row.id)
     if (result.ok) {
+      remindedIds.value.add(row.id)
       ElMessage.success('已发送催办提醒')
     } else if (result.status === 429) {
+      // 429 means the server's hourly window already holds a nudge for this instance+user, so the
+      // row genuinely IS 已催办 — recording it stops the user re-clicking into the same rejection.
+      remindedIds.value.add(row.id)
       const retry = result.error.retryAfterSeconds
       ElMessage.warning(retry ? `催办过于频繁，请 ${Math.ceil(retry / 60)} 分钟后再试` : '催办过于频繁，请稍后再试')
     } else {
@@ -763,7 +781,7 @@ async function handleUrge(row: UnifiedApprovalDTO): Promise<void> {
   } catch {
     ElMessage.error('催办失败，请重试')
   } finally {
-    remindingId.value = null
+    remindingIds.value.delete(row.id)
   }
 }
 
