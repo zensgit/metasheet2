@@ -3,7 +3,7 @@
 - Date: 2026-07-08
 - Scope: implementation of `docs/development/dingtalk-sync-integrated-roadmap-20260708.md` (Rev 3.2, merged as #3873)
 - Baseline: `origin/main` at the time each branch was cut (main moved continuously; each PR states its own base)
-- Status: **Phase 1 complete (11/11 tickets). Phase 2 in progress.** Phase 3 (`DT-STRAT-*`) is design-gated and deliberately not implemented — see roadmap §11.
+- Status: **Phase 1 complete (11/11). Phase 2 complete (6/6), two tickets partial by design.** Phase 3 (`DT-STRAT-*`) is design-gated and deliberately not implemented — see roadmap §11.
 
 ---
 
@@ -117,12 +117,16 @@ Three defects, one theme: the system lied about what happened.
 
 ---
 
-## 4. Phase 2 — shipped so far
+## 4. Phase 2 — shipped
 
 | Ticket | PR | Notes |
 |---|---|---|
 | DT-OPS-01 | #3905 | Offboarding policy executor — **default-off with a preview** |
+| DT-OPS-02 | #3915 | Read-only sync preview; async sync **opt-in, not default** |
+| DT-OPS-03 | #3914 | Sync-failure alerts actually delivered; manager-binding coverage metric (backend) |
+| DT-OPS-04 | #3910 | Work-notification credentials resolve from the recipient's own integration |
 | DT-OPS-05 | #3907 | OAuth state store may fail closed — **default-off** |
+| DT-PERF-01 | #3911 | Account-department upsert batched into one statement (partial, by design) |
 
 ### 4.1 DT-OPS-01 — offboarding policy executor
 
@@ -139,6 +143,32 @@ Policies: `manual_review` (review-only, as today) / `disable_grant_only` (revoke
 The in-process `Map` fallback is fine for one replica and quietly wrong for more: the callback can land on a different instance than the launch (a valid state is rejected and a legitimate login fails), one-time-use is only guaranteed per process, and a transient Redis outage degrades to the same place — the one case where the degradation also breaks the login it was meant to rescue.
 
 `DINGTALK_OAUTH_REQUIRE_SHARED_STATE_STORE` (default off) makes multi-replica deployments fail closed: `generateState` throws 503 rather than writing a state the other replicas cannot see, and `validateState` never consults the per-process Map.
+
+### 4.3 DT-OPS-02 — preview before apply; async by request only
+
+Applying a sync is not reversible: `auto_for_scoped_departments` creates local users on the spot and the `last_seen_at` sweep deactivates accounts.
+
+`POST /integrations/:id/sync/preview` pulls the DingTalk directory *exactly as a sync does* — so its numbers are the real ones — and compares against the database **writing nothing at all**: no run row, no lease, no upsert, no user. It reuses the same pure eligibility predicate the apply path uses, so preview and apply cannot drift on the question that matters: *who gets an account created for them*.
+
+Async is **opt-in**, and this is the interesting constraint: the synchronous response carries the auto-admission onboarding packets — one-time temporary passwords that are **never persisted**. A default `202` would silently throw them away. So `{"async": true}` returns `202 + runId`, and the default path is untouched. Mutation-proven: making async the default turns the existing packet-carrying test red.
+
+### 4.4 DT-OPS-03 — alerts that leave the database; approval-routing health
+
+`directory_sync_alerts.sent_to_webhook` had existed since the table was created and nothing ever sent anything: a nightly sync failing on a rotated app secret just accumulated rows nobody read. The product already owns the channel, so *"the DingTalk sync broke"* is now announced over DingTalk — env-gated (no channel, no noise), SSRF-pinned and HMAC-signed by the same `robot.ts` primitives, masked in every log, and **best-effort by construction: a sync that already failed must never be made worse because a webhook was down**. The subject escalates once failures repeat.
+
+`getDirectoryManagerBindingCoverage()` exposes approval-routing health. `ApprovalDirectoryOrg` can only resolve a manager that is *linked* to a local user, so the bound share of managers is a direct upper bound on approval-routing success — invisible until now. Verified against real Postgres: a department head and a `leader_in_dept` account count; a `leader:false` account does not; a department with no managers does not divide by zero.
+
+### 4.5 DT-OPS-04 — credentials follow the recipient, not "latest active"
+
+A DingTalk userid only means anything inside its own corp, but the person-notification path resolved credentials with no integration, so the stored-config resolver fell back to *whichever integration sorts first as latest active*. Under two integrations, a user bound to corp A could be notified with corp B's credentials. The recipient query now carries the binding's integration and scopes the lookup; recipients spanning more than one integration are refused outright rather than silently mis-notified — the send never reaches the DingTalk API. Env-first resolution is untouched, so env-configured and single-integration deployments are unaffected.
+
+### 4.6 DT-PERF-01 — batched membership upsert (and what was *not* done)
+
+`(employee × department)` is the highest-cardinality write in the sync: thousands of single-row round trips inside the apply transaction, holding its locks for the whole walk. One `unnest` statement replaces them with identical semantics, proved on real Postgres (batch insert, `ON CONFLICT DO UPDATE`, empty arrays as a no-op).
+
+Two parts were deliberately **not** done, with reasons rather than silence:
+- **the per-user `user/get` N+1** cannot be removed blind. `ApprovalDirectoryOrg` reads `leader_in_dept` out of `directory_accounts.raw`, which *is* the user-detail payload. Whether `user/list` carries that field is precisely the staging check roadmap §7.7 asks for; dropping the detail call without it would silently destroy manager routing.
+- **hoisting bcrypt out of the transaction** would require pre-hashing every in-scope candidate before knowing which actually need admission — more cost than it saves.
 
 ---
 
@@ -162,21 +192,24 @@ Honesty about the boundary of the evidence is part of the deliverable.
 
 ## 6. Remaining work
 
-| Ticket | Status |
-|---|---|
-| DT-OPS-02 (async sync + dry-run preview) | Not started. Backend (202+runId, preview counts) is tractable; the polling UI is the larger half. |
-| DT-OPS-03 (run diff, alert delivery, manager-binding coverage) | Not started. Substantial UI work in a 5,735-line SFC. |
-| DT-OPS-04 (explicit `integration_id` binding) | Not started. Needs an additive migration on the card-delivery ledger. |
-| DT-PERF-01 (`user/list` primary source, batch upsert, bcrypt outside txn) | Not started. Touches the sync hot path; wants the orchestration harness from §5.2 first. |
-| DT-STRAT-01/02 | **Design-gated by the roadmap (§11). Deliberately not implemented.** |
+Every roadmap ticket has shipped. What is left is the work each ticket **explicitly scoped out**, recorded here rather than quietly dropped:
 
-The retention sweep from DT-HARDEN-08 was explicitly scoped out of that slice (it needs scheduler wiring) and remains open.
+| Open item | From | Why it was left |
+|---|---|---|
+| Admin-UI polling for async sync; run-diff and alert-`details` panels | DT-OPS-02 / DT-OPS-03 | Substantial work in a 5,735-line SFC that cannot be visually verified from here. The APIs they need now exist. |
+| `integration_id` on approval-card delivery rows | DT-OPS-04 | Needs an additive migration on the card ledger; the person-notification hazard (the actual cross-corp risk) is closed. |
+| Remove the `user/get` N+1; hoist bcrypt out of the transaction | DT-PERF-01 | The first is staging-gated (`leader_in_dept` lives in the detail payload); the second costs more than it saves. |
+| Delivery-telemetry retention sweep | DT-HARDEN-08 | Needs scheduler wiring; the indexes and validation shipped. |
+| Refuse a sync preview while a run holds the lease | DT-OPS-02 | Depends on DT-HARDEN-05 landing first. |
+| `DT-STRAT-01/02` | Roadmap §11 | **Design-gated. Deliberately not implemented.** |
 
 ---
 
 ## 7. Operational notes for the owner
 
-- **Nothing in these PRs changes production behavior on deploy.** Every new behavior is behind a flag that defaults to today's semantics, except three strict tightenings: `#3883` refuses auto-provision when the corp allowlist is empty (its PR body documents the migration path); `#3897` stops recording malformed 200 responses as successful sends; `#3900` stops recording a recipient as both sent and failed.
+- **Nothing in these PRs changes production behavior on deploy.** Every new behavior is behind a flag that defaults to today's semantics, except four strict tightenings: `#3883` refuses auto-provision when the corp allowlist is empty (its PR body documents the migration path); `#3897` stops recording malformed 200 responses as successful sends; `#3900` stops recording a recipient as both sent and failed; `#3910` refuses to notify recipients spanning two DingTalk integrations rather than using one corp's credentials on the other's users.
+- **Run a preview before the first sync after these land** (`POST /integrations/:id/sync/preview`, DT-OPS-02). It writes nothing and tells you exactly how many accounts a sync would create, deactivate, and deactivate-while-still-linked.
+- **`DIRECTORY_SYNC_ALERT_WEBHOOK`** is worth setting immediately: until it is, a failing nightly sync still only writes a row nobody reads.
 - **Before enabling `DIRECTORY_DEPROVISION_ENABLED`**: run a sync with it off and read `deprovisionCandidateCount` / `deprovisionUsersDeactivatedCount` from the run stats. That is the blast radius, exactly.
 - **Before enabling `DIRECTORY_PRIMARY_DEPT_FROM_ORDER`**: confirm `dept_order_list` against a real tenant, then run `backfill-directory-primary-department.ts --dry-run` to see which employees' approval routing would move.
 - **Run the orphan inventory** (`scripts/ops/dingtalk-directory-orphan-inventory.mjs`) once: DT-HARDEN-02 prevents new orphans but does not clean up the ones already committed.
