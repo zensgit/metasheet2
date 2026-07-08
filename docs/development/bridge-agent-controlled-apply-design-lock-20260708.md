@@ -46,8 +46,8 @@ BA-UI-4 任务提示)。BA-UI-3 已能产出"新增只读对象/字段映射"的
 ```text
 BA-APPLY-0 ✅ 本 design-lock(采纳 BA-UI-0 §2.1 安全边界为硬锁)
 BA-APPLY-1 🔒 形态 A:变更建议 → 机读实施清单导出(values-free);运维受控应用。门:owner opt-in
-BA-APPLY-2 🔒 形态 B:后端受控 config-apply 端点(只读 allowlist 白名单 + 审批 + 审计)。
-              门:BA-APPLY-1 落地 + owner 单独 opt-in + 后端受控写轨评估
+BA-APPLY-2a ⬜ 后端审批门 + 审计 + values-free 清单暂存(零 Agent 改动;in-lock,已开发)
+BA-APPLY-2b ⛔ 后端写 Agent config 端点 —— WONTFIX by design(见 §7;需 owner ratify 扩安全模型才复活)
 BA-APPLY-3 🔒 apply 后自动复探测确认(复用 BA-UI-2 probe 证明生效)。门:BA-APPLY-1/2
 ```
 
@@ -69,6 +69,32 @@ BA-APPLY-3 🔒 apply 后自动复探测确认(复用 BA-UI-2 probe 证明生效
         审计 values-free;凭据零前端;fail-closed on 非白名单操作。
 每 slice:主循环质量闸 + mutation 逐守卫 + 双 Node + values-free sentinel 纯层+DOM。
 ```
+
+## 7. Disposition — 形态 B (2b) = WONTFIX by design(owner 定 2026-07-08)
+
+**本线终态锁定,形态 B「后端写 Agent 只读 config」不实现(WONTFIX by design,非缺功能)。**
+
+**理由(安全模型层面,非实现成本)**:
+- Bridge Agent 的核心安全价值就是 **never writes**。它贴近客户现场环境与生产库;给它加 config-write
+  端点,本质是在客户机器上新增**高爆炸半径入口**——该端点一旦有 auth 绕过/路径穿越/allowlist 注入,
+  爆炸半径是客户的生产数据库。
+- `add_readonly_object` 名字是 readonly,实际效果是**扩大数据暴露面**;allowlist/config 是安全边界,
+  **不适合自动 API 化**。
+- 加只读对象是**低频高后果**操作;保留运维手工执行那一步,正是**人类在这个控制点的把关**——刻意保留,
+  不是缺失。
+
+**本线终态形态(全程 Agent 恒 readonly:true)**:
+```text
+看得见   BA-UI-1/2   只读观测 + values-free 探测
+查得清   BA-UI-3     配置校验 + 变更建议
+可导出   BA-APPLY-1  变更建议 → 机读实施清单(#3894)
+审批暂存 BA-APPLY-2a 后端审批门 + 审计 + values-free 清单暂存(零 Agent 改动)
+运维落地 handoff     人工按 runbook 执行只读 allowlist/config 变更 ← 人类把关点(刻意保留)
+自动确认 BA-APPLY-3  系统自动复探测确认生效(只读,不写配置/不 start-stop/不碰凭据/不改 raw config)
+```
+
+**2b 撤除**:BA-APPLY-2b(给 .ps1 加 config-apply 端点)从阶梯移除,标 WONTFIX-by-design。若未来现场
+强需求全自动,须 owner **显式 ratify 扩 Agent 安全模型 + 本锁修订**,不在本线范围。
 
 ## 6. 边界(本锁零开门)
 
