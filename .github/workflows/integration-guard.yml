@@ -26,6 +26,8 @@ on:
       - 'apps/web/src/services/integration/errorCodeLabels.ts'
       - 'apps/web/src/services/integration/fieldHints.ts'
       - 'apps/web/src/components/integration/IntegrationReadSourceConfigPanel.vue'
+      - 'apps/web/src/components/integration/IntegrationReadSourceWizard.vue'
+      - 'apps/web/src/services/integration/readSourceModePresets.ts'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
       - 'apps/web/src/components/integration/IntegrationWorkbenchRail.vue'
@@ -50,6 +52,8 @@ on:
       - 'apps/web/tests/integrationErrorCodeLabels.spec.ts'
       - 'apps/web/tests/fieldHints.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceConfigPanel.spec.ts'
+      - 'apps/web/tests/IntegrationReadSourceWizard.spec.ts'
+      - 'apps/web/tests/readSourceModePresets.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionPanel.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts'
       - 'apps/web/tests/readSourceCompositions.service.spec.ts'
@@ -79,6 +83,8 @@ on:
       - 'apps/web/src/services/integration/errorCodeLabels.ts'
       - 'apps/web/src/services/integration/fieldHints.ts'
       - 'apps/web/src/components/integration/IntegrationReadSourceConfigPanel.vue'
+      - 'apps/web/src/components/integration/IntegrationReadSourceWizard.vue'
+      - 'apps/web/src/services/integration/readSourceModePresets.ts'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
       - 'apps/web/src/components/integration/IntegrationWorkbenchRail.vue'
@@ -103,6 +109,8 @@ on:
       - 'apps/web/tests/integrationErrorCodeLabels.spec.ts'
       - 'apps/web/tests/fieldHints.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceConfigPanel.spec.ts'
+      - 'apps/web/tests/IntegrationReadSourceWizard.spec.ts'
+      - 'apps/web/tests/readSourceModePresets.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionPanel.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts'
       - 'apps/web/tests/readSourceCompositions.service.spec.ts'
@@ -169,3 +177,4 @@ jobs:
       - name: Run integration web guard specs (targeted)
         run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView --reporter=dot
         run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel IntegrationK3WiseSetupView IntegrationHelpView --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints readSourceModePresets IntegrationReadSourceConfigPanel IntegrationReadSourceWizard IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationK3WiseSetupView IntegrationHelpView --reporter=dot
