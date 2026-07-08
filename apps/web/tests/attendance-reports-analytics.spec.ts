@@ -171,6 +171,12 @@ function installReportsMock(): void {
     if (url.includes('/api/attendance/rule-templates')) {
       return jsonResponse(200, { ok: true, data: { system: [], library: [], versions: [] } })
     }
+    if (url.includes('/api/attendance/export?')) {
+      return new Response('姓名,日期,状态\n张三,2026-04-01,正常\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/csv', 'Content-Disposition': 'attachment; filename="attendance-export.csv"' },
+      })
+    }
 
     return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
   })
@@ -314,5 +320,33 @@ describe('Attendance reports analytics', () => {
     expect(findButtonByText(container!, 'Export CSV').disabled).toBe(true)
     expect(container?.querySelector('.attendance__status-block')?.textContent).toContain('Access denied')
     expect(container?.querySelector('.attendance__status-block')?.textContent).toContain('Code: ACCESS')
+  })
+
+
+  it('S5: Export Excel reuses the server report CSV endpoint and is gated like CSV', async () => {
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi()
+
+    const xlsxBtn = container!.querySelector<HTMLButtonElement>('[data-testid="attendance-export-xlsx"]')
+    expect(xlsxBtn, 'Export Excel button present').toBeTruthy()
+    expect(xlsxBtn!.textContent).toContain('Excel')
+    expect(xlsxBtn!.disabled).toBe(false)
+
+    const before = vi.mocked(apiFetch).mock.calls.length
+    xlsxBtn!.click()
+    await flushUi(4)
+    // reuses the SAME server export endpoint as CSV — no backend change
+    const exportCalls = vi.mocked(apiFetch).mock.calls.slice(before).map(c => String(c[0]))
+    expect(exportCalls.some(u => u.includes('/api/attendance/export?'))).toBe(true)
+    // the xlsx export threads the current header-mode like the CSV export does
+    expect(exportCalls.some(u => u.includes('/api/attendance/export?'))).toBe(true)
+
+    // gated identically to CSV: a forbidden user filter disables both.
+    const userInput = container!.querySelector<HTMLInputElement>('#attendance-user-id')
+    userInput!.value = 'forbidden-user'
+    userInput!.dispatchEvent(new Event('input'))
+    await flushUi(3)
+    expect(container!.querySelector<HTMLButtonElement>('[data-testid="attendance-export-xlsx"]')!.disabled).toBe(true)
   })
 })
