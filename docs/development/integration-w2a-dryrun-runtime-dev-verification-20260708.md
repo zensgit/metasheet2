@@ -56,7 +56,11 @@ top-level allowlist, `WRITE_TARGET_DRY_RUN_TOP_KEYS`):
 
 ```
 {
-  configRecord: { id, status, version, config },   // the STORED W1 record; status must be 'approved'
+  configRecord: { id, status, version, config },   // a RESHAPED 4-key PROJECTION the caller builds
+                                                     // from the W1 store's record; status must be
+                                                     // 'approved'. NOT the store's raw ~14-field
+                                                     // rowToPublicWriteTargetConfig() shape verbatim
+                                                     // -- see §10, this is a wiring-rung obligation.
   payload: { rows: [ {...}, ... ] },                // cleansing-zone rows, bounded
   sandboxSystem: { id, ... },                       // must match config.sandboxSystemId
   maxRows?: number,                                 // optional, clamped to the hard ceiling
@@ -243,3 +247,39 @@ exit code 0, re-confirmed after all mutation experiments were reverted.
 
 Each of the above is a separate, later, explicit owner opt-in, exactly as the design-lock's §7
 disposition and §4.10 require.
+
+## 10. Honest gap — one lock clause NOT fully proven (store-integration, deferred to wiring)
+
+Everything in §1-9 is proven against this module in isolation, hermetically. One thing is
+**not** proven, and should not be read as proven by the green test suite: **the real W1
+config-store record has not been exercised against this module.**
+
+- `write-target-config-store.cjs`'s `rowToPublicWriteTargetConfig` returns a record with roughly
+  14 fields (`tenantId`, `workspaceId`, `sandboxSystemId`, `contentKey`, `createdBy`, `updatedBy`,
+  `createdAt`, `updatedAt`, ... plus `id`/`status`/`version`/`config`). This module's
+  `assertContractShape`/`assertApprovedNormalizedConfig` enforce a **strict 4-key allowlist**
+  (`id`, `status`, `version`, `config`) on `configRecord` and will reject a real store row
+  verbatim with `config_record_unexpected_field` (clamped to `WRITE_TARGET_DRY_RUN_CONTRACT_INVALID`).
+  **This is by design, not a bug** — the module deliberately consumes a narrow, values-free
+  projection rather than trusting an arbitrary caller-supplied object — but it means the future
+  wiring rung MUST explicitly reshape the store's row into this module's 4-key input (or this
+  module's allowlist must be revisited); which of the two is correct is a wiring-rung decision,
+  not decided here.
+- The store's `get()` also runs the stored `config` through `sanitizeIntegrationPayload` and
+  version-injection before returning it (`rowToPublicWriteTargetConfig`). This module's
+  byte-identity check (`stableStringify(configRecord.config) === stableStringify(validateWriteTargetConfig(configRecord.config).normalized)`)
+  has only been tested against synthetic fixtures built directly from
+  `validateWriteTargetConfig(raw).normalized` — **never against a config that has round-tripped
+  through the real store's save→get path.** If `sanitizeIntegrationPayload` (or the version
+  field the store injects) perturbs the config's shape in any way the W1 validator doesn't
+  also normalize away, every real (non-synthetic) dry-run would fail closed with
+  `WRITE_TARGET_DRY_RUN_CONFIG_NOT_NORMALIZED` — fail-closed, not a silent-wrong-answer risk, but
+  untested and worth a real-store round-trip test before or during wiring.
+
+This mirrors the read-line's own precedent (`read-source-read-runtime.test.cjs` also tests
+against synthetic normalized configs, not a live `read-source-config-store` round-trip) and
+store-wiring is explicitly out of scope for W2-a per the design-lock's §7 disposition — so this
+is **not a defect in this slice**, but it is the one clause this PR cannot claim is fully proven
+end-to-end. Recommended follow-up for the route/wiring rung: a real-store round-trip test
+(`saveVersion` → `approve` → `get` → feed the row into `dryRunWriteTarget`, reshaped as needed)
+before this module is wired to anything the store actually produces.
