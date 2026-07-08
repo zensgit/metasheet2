@@ -21,6 +21,8 @@
 
 ### 2.1 范围信封(fail-closed)
 - v1 仅覆盖:**scalar↔scalar 之外的 type revert 中,目标(before)type 仍为 plain scalar 的情形**,以及**同 type 的 property 变换会改变值解释的情形**(currency/percent/duration/dateTime 等 Batch-1 类型的 property revert)。
+- **impl 期澄清(2026-07-08,收窄非扩张;由 #3922 对抗审阅 P1-1 触发)**:「**同 type**」意为 **field 的 type 自该 revision 以来未曾变更**(type-era 一致),由 preview 与 execute **双侧 era guard** 强制;任何 type 时代不一致的 property revert 一律 **422**。
+  必要性:property-only revert 的 `changed_keys` 恒为 `['property']`,而 `driftConflict`(`config-restore.ts` `computeRevertPreview`)与 `baselineHash`(`configBaselineHash`)**都只比对 `changed_keys`** ⇒ 中途发生的 `type` 变更对两者**完全不可见**;又因 `sanitizeFieldProperty` 对 `url/email/phone/barcode/qrcode/location` 是**恒等函数**,一次 type-only PATCH 会把 `property` 逐字节保留,老 revision 因此不 drift。若不加此 guard,revert 会按**新 type** 重解释全部 cell —— 等于从 revert 侧偷渡一次 §7 明令出界的「前向 lossy retype」。
 - 仍然排除(维持 422):目标 type ∈ `FIELD_RETYPE_EXCLUDED_TYPES`(formula/lookup/rollup/link/attachment/button/autoNumber/created*/modified*)——这些是派生/物化语义,revert 值变换无意义且有独立副作用面(`univer-meta.ts:10670-10684`)。
 - flag:新增 `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY`,默认 **off**;**且要求基础 flag `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT` 同时 on**(基础 flag 关则本面整体 403,双闸串联)。off 时一切现状逐字节不变。
 
@@ -37,7 +39,7 @@
 ### 2.4 写对称 cap 与执行语义
 - cap:复用 `SHEET_REVERT_MAX_RECORDS`(默认 5000;**impl 注**:该常量目前是 reset handler 内的 route-local const(约 `:9410`),复用前须先提为共享读取)——待扫描/变换行数超限 → 413 fail-closed(preview 与 execute 双侧),不静默截断、不 partial。
 - execute 单事务:`UPDATE meta_fields` 套回 before 定义 + 按 oracle 结果批量改写 cell 值;每条被 coerce/drop 的 cell **记 record revision**(现有 recorder,`record-history-service.ts:45-78`)——Global History 完整,且 lossy revert 自身可经**记录版本回退(restore-to-prior-version)撤销**(coerce/drop 是 UPDATE revision,非 trash undelete)。
-- typed confirm:execute 须 `confirm: 'revert-retype-lossy'`(镜像 uncreate/undelete 模式,`univer-meta.ts:8259/:8313`)。
+- typed confirm:execute 须 `confirm: 'revert-retype-lossy'`(镜像 uncreate/undelete 模式,`univer-meta.ts:8259/:8313`)。**失败码 = 400 `CONFIRM_REQUIRED`**(与被镜像的三个破坏性 tier 实测一致;§4 表格原写「422」系笔误,已订正 —— 本路由的 422 已被 `RESTORE_NOT_SUPPORTED`「良构但形态出界」占据,混用会把两类正交失败塞进同一个码)。
 - gate:沿用 config-restore 面的既有 capability 门,**不触碰中央 rbac/auth**。
 
 ## 3. 与 4c-2 的关系(pre-image preference)
@@ -59,7 +61,7 @@
 | L6 | cap | 超 `SHEET_REVERT_MAX_RECORDS` → 413,preview/execute 双侧,库零变化 |
 | L7 | 原子性 | execute 中途注入失败 → 定义与值全部回滚 |
 | L8 | revision 完整性 | 每个被 coerce/drop 的 cell 有 record revision;changedFieldIds 正确;masking parity 与 history 读面一致 |
-| L9 | typed confirm | 缺失/错误 confirm → 422,库零变化 |
+| L9 | typed confirm | 缺失/错误 confirm → **400 `CONFIRM_REQUIRED`**,库零变化 |
 | L10 | mutation | neuter oracle 重算(2.3)→ L5 必红;neuter cap → L6 必红;neuter 桶判定 → L3 必红 |
 | L11 | (双 ratify 后)pre-image preference | 有锚走真值 `restored`;无锚走 coerce 且文案区分 |
 
