@@ -157,11 +157,25 @@ export function bridgeAgentConfigCheckLabel(labelKey: BridgeAgentConfigCheckLabe
   return locale === 'zh-CN' ? entry.zh : entry.en
 }
 
+// The adapter kind this whole module is scoped to (mirrors
+// plugins/plugin-integration-core/index.cjs's `.registerAdapter('bridge:legacy-sql-readonly', ...)`).
+// Exported so a consumer needing to reference this kind (e.g. the connector/experience template
+// catalog, TC-1) reads it from here rather than hand-typing the literal a second time.
+export const BRIDGE_AGENT_KIND = 'bridge:legacy-sql-readonly'
+
+// The connection-field precedence `firstBaseUrlLike` checks, in order — mirrors
+// bridge-agent-readonly-adapter.cjs's normalizeBaseUrl() input precedence. Exported as the single
+// source of truth for "which config keys satisfy the requiredFields check" so a consumer (e.g. the
+// template catalog's requiredFieldKeys for a bridge template) reads the real list instead of a
+// hand-copied one.
+export const BRIDGE_AGENT_REQUIRED_CONFIG_FIELDS: string[] = ['baseUrl', 'bridgeUrl', 'url']
+
 // Mirrors bridge-agent-readonly-adapter.cjs's normalizeBaseUrl() input precedence.
 function firstBaseUrlLike(config: Record<string, unknown>): string | null {
-  if (isNonEmptyString(config.baseUrl)) return config.baseUrl
-  if (isNonEmptyString(config.bridgeUrl)) return config.bridgeUrl
-  if (isNonEmptyString(config.url)) return config.url
+  for (const key of BRIDGE_AGENT_REQUIRED_CONFIG_FIELDS) {
+    const value = config[key]
+    if (isNonEmptyString(value)) return value
+  }
   return null
 }
 

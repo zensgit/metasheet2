@@ -35,6 +35,8 @@ on:
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
       - 'apps/web/src/components/integration/IntegrationCompositionWizard.vue'
+      - 'apps/web/src/services/integration/readSourceTemplateCatalog.ts'
+      - 'apps/web/src/components/integration/IntegrationTemplateCatalogPicker.vue'
       - 'apps/web/src/components/integration/IntegrationWorkbenchRail.vue'
       - 'apps/web/src/components/integration/IntegrationMonitoringSection.vue'
       - 'apps/web/src/components/integration/IntegrationCleaningDatasetSection.vue'
@@ -73,6 +75,8 @@ on:
       - 'apps/web/tests/IntegrationReadSourceCompositionPanel.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts'
       - 'apps/web/tests/IntegrationCompositionWizard.spec.ts'
+      - 'apps/web/tests/readSourceTemplateCatalog.spec.ts'
+      - 'apps/web/tests/IntegrationTemplateCatalogPicker.spec.ts'
       - 'apps/web/tests/readSourceCompositions.service.spec.ts'
       - 'apps/web/tests/IntegrationWorkbenchView.spec.ts'
       - 'apps/web/tests/IntegrationWorkbenchRail.spec.ts'
@@ -110,6 +114,8 @@ on:
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionPanel.vue'
       - 'apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
       - 'apps/web/src/components/integration/IntegrationCompositionWizard.vue'
+      - 'apps/web/src/services/integration/readSourceTemplateCatalog.ts'
+      - 'apps/web/src/components/integration/IntegrationTemplateCatalogPicker.vue'
       - 'apps/web/src/components/integration/IntegrationWorkbenchRail.vue'
       - 'apps/web/src/components/integration/IntegrationMonitoringSection.vue'
       - 'apps/web/src/components/integration/IntegrationCleaningDatasetSection.vue'
@@ -148,6 +154,8 @@ on:
       - 'apps/web/tests/IntegrationReadSourceCompositionPanel.spec.ts'
       - 'apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts'
       - 'apps/web/tests/IntegrationCompositionWizard.spec.ts'
+      - 'apps/web/tests/readSourceTemplateCatalog.spec.ts'
+      - 'apps/web/tests/IntegrationTemplateCatalogPicker.spec.ts'
       - 'apps/web/tests/readSourceCompositions.service.spec.ts'
       - 'apps/web/tests/IntegrationWorkbenchView.spec.ts'
       - 'apps/web/tests/IntegrationWorkbenchRail.spec.ts'
@@ -221,4 +229,4 @@ jobs:
       # Consolidated here into the SINGLE unioned list (verified green on both Node 20 and this repo's
       # default Node before landing) — do not reintroduce a second `run:` key; add new specs to this one.
       - name: Run integration web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring readSourceTemplateCatalog IntegrationTemplateCatalogPicker --reporter=dot
