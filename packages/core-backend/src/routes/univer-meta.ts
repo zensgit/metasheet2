@@ -6260,6 +6260,8 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
     // Values: only into records that do NOT already carry this key (never overwrite a value written after
     // this recreate — the recreate above just happened in THIS same transaction, so the only way a record
     // could already have the key is a value legitimately written since — this WHERE clause is the guard).
+    // lock-exempt: field-undelete schema op — rehydrates the recreated field's key sheet-wide (mirror of
+    // the field-delete drop at ~6116); not a per-record user edit, and NOT(data?key) never clobbers.
     await query(
       `UPDATE meta_records m
        SET data = data || jsonb_build_object($3::text, t.value)
