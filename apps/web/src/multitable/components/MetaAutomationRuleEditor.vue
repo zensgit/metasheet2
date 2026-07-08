@@ -397,7 +397,44 @@
             <!-- create_record config -->
             <div v-if="action.type === 'create_record'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.targetSheetId', isZh) }}</label>
-              <el-input v-model="action.config.targetSheetId" type="text" :placeholder="automationLabel('actionConfig.sheetIdPlaceholder', isZh)" />
+              <!-- G-B2-27: dropdown sourced from listSheets() so non-developers don't have to paste
+                   a raw sheet ID. The manual-entry toggle covers what the dropdown can't: listSheets
+                   may omit cross-base/future sheets (isManualTargetSheetEntry defaults to manual when
+                   the currently-configured id isn't in the fetched list, so a stale/foreign value is
+                   never silently hidden). A missing/failed/empty listSheets() falls all the way back
+                   to the plain text input in the v-else branch below. -->
+              <template v-if="targetSheetOptions.length > 0">
+                <el-select
+                  v-if="!isManualTargetSheetEntry(action)"
+                  v-model="(action.config.targetSheetId as string)"
+                  filterable
+                  class="meta-rule-editor__select"
+                  :placeholder="automationLabel('actionConfig.sheetIdPlaceholder', isZh)"
+                  data-field="createRecordTargetSheetId"
+                >
+                  <el-option value="" data-value="" :label="automationLabel('actionConfig.sheetIdPlaceholder', isZh)" />
+                  <el-option v-for="opt in targetSheetOptions" :key="opt.value" :value="opt.value" :data-value="opt.value" :label="opt.label" />
+                </el-select>
+                <el-input
+                  v-else
+                  v-model="action.config.targetSheetId"
+                  type="text"
+                  :placeholder="automationLabel('actionConfig.sheetIdPlaceholder', isZh)"
+                  data-field="createRecordTargetSheetId"
+                />
+                <el-button
+                  size="small"
+                  class="meta-rule-editor__btn"
+                  data-field="createRecordTargetSheetToggle"
+                  @click="toggleManualTargetSheetEntry(action)"
+                >{{ isManualTargetSheetEntry(action) ? automationLabel('actionConfig.targetSheetUseListToggle', isZh) : automationLabel('actionConfig.targetSheetManualToggle', isZh) }}</el-button>
+              </template>
+              <!-- Load-bearing fallback, not just cosmetic degradation: this is a plain el-input so
+                   `.meta-rule-editor__action-config .el-input__inner` still resolves to it when no
+                   sheets are loaded (no client / listSheets() failed or empty) — an existing
+                   multitable-automation-rule-editor.spec.ts case types into exactly that selector.
+                   Collapsing this to an always-on el-select would silently break that test. -->
+              <el-input v-else v-model="action.config.targetSheetId" type="text" :placeholder="automationLabel('actionConfig.sheetIdPlaceholder', isZh)" data-field="createRecordTargetSheetId" />
               <div v-for="(pair, pidx) in (action.config.fieldValues as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
                 <el-input v-model="pair.fieldId" class="meta-rule-editor__input--sm" type="text" :placeholder="automationLabel('actionConfig.fieldIdPlaceholder', isZh)" />
                 <el-input v-model="pair.value" class="meta-rule-editor__input--sm" type="text" :placeholder="automationLabel('editor.value', isZh)" />
@@ -1334,6 +1371,7 @@ import type {
   ConditionGroup,
   DingTalkGroupDestination,
   MetaSheetPermissionCandidate,
+  MetaSheet,
   MetaView,
 } from '../types'
 import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
@@ -1403,6 +1441,7 @@ import {
   summarizeAutomationAction,
   type ActionSummarySnapshot,
 } from '../automationActionSummary'
+import { automationTargetSheetOptions } from '../utils/automation-target-sheet-options'
 
 interface FieldPair {
   fieldId: string
@@ -1504,6 +1543,29 @@ const dingTalkDestinationsError = ref('')
 // start_approval template picker. Empty (incl. on a 401/403 for an author lacking `approvals:read`) →
 // the config block degrades to a free-text template-id input; the select is never a hard dependency.
 const approvalTemplates = ref<Array<{ id: string; name?: string }>>([])
+// G-B2-27: create_record's target-sheet picker. Empty (no client, listSheets() unavailable/failed,
+// or the base simply has no other sheets yet) → the config block degrades to the original free-text
+// sheet-ID input further below — never a hard dependency, same shape as approvalTemplates above.
+const availableSheets = ref<MetaSheet[]>([])
+const targetSheetOptions = computed(() => automationTargetSheetOptions(availableSheets.value))
+// Per-action manual-vs-dropdown override for the target-sheet field, keyed by the action's stable
+// draftId (survives reordering, unlike an array index). Undefined means "no explicit choice yet" —
+// isManualTargetSheetEntry then defaults to manual whenever the currently-configured sheet id isn't
+// among targetSheetOptions, so an off-list value (cross-base sheet, or set before listSheets loaded)
+// is always visible/editable rather than silently swallowed by a dropdown that can't represent it.
+const manualTargetSheetOverride = ref<Record<string, boolean>>({})
+
+function isManualTargetSheetEntry(action: DraftAction): boolean {
+  const override = manualTargetSheetOverride.value[action.draftId]
+  if (override !== undefined) return override
+  const current = typeof action.config.targetSheetId === 'string' ? action.config.targetSheetId.trim() : ''
+  if (!current) return false
+  return !targetSheetOptions.value.some((opt) => opt.value === current)
+}
+
+function toggleManualTargetSheetEntry(action: DraftAction) {
+  manualTargetSheetOverride.value[action.draftId] = !isManualTargetSheetEntry(action)
+}
 const personRecipientSuggestions = ref<Record<number, MetaSheetPermissionCandidate[]>>({})
 const personRecipientLoading = ref<Record<number, boolean>>({})
 const personRecipientErrors = ref<Record<number, string>>({})
@@ -2467,9 +2529,18 @@ watch(
         } catch {
           approvalTemplates.value = []
         }
+        try {
+          // Best-effort: any error (network, older host without the endpoint, etc.) → empty →
+          // the create_record target-sheet field falls back to its original free-text input.
+          const res = await props.client.listSheets()
+          availableSheets.value = Array.isArray(res?.sheets) ? res.sheets : []
+        } catch {
+          availableSheets.value = []
+        }
       } else {
         dingTalkDestinations.value = []
         approvalTemplates.value = []
+        availableSheets.value = []
       }
     }
   },
