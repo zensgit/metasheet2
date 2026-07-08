@@ -9,6 +9,10 @@ const helpers = attendancePlugin.__attendanceOvertimeBankForTests as {
     maxMinutesPerPeriod: number
     validityDays: number | null
   }
+  resolveBankedLotExpiresInDays: (
+    policy: { enabled?: boolean; validityDays?: number | null } | null | undefined,
+    fallbackExpiresInDays: number | null,
+  ) => number | null
 }
 
 describe('#8/加班银行 v1-1a — OvertimeBankPolicy normalizer (LATENT, compliance-floor)', () => {
@@ -54,5 +58,34 @@ describe('#8/加班银行 v1-1a — OvertimeBankPolicy normalizer (LATENT, compl
     expect(norm({ validityDays: 90 }).validityDays).toBe(90)
     expect(norm({ validityDays: 0 }).validityDays).toBeNull()
     expect(norm({ validityDays: -3 }).validityDays).toBeNull()
+  })
+})
+
+describe('S1 — resolveBankedLotExpiresInDays (banked-lot validity precedence)', () => {
+  const resolve = helpers.resolveBankedLotExpiresInDays
+
+  it('bank enabled + validityDays set → validityDays governs (overrides expiresInDays)', () => {
+    expect(resolve({ enabled: true, validityDays: 90 }, 30)).toBe(90)
+    expect(resolve({ enabled: true, validityDays: 90 }, null)).toBe(90)
+  })
+
+  it('bank enabled + validityDays unset/invalid → falls back to expiresInDays (pre-S1 behaviour)', () => {
+    expect(resolve({ enabled: true, validityDays: null }, 30)).toBe(30)
+    expect(resolve({ enabled: true, validityDays: 0 }, 30)).toBe(30)
+    expect(resolve({ enabled: true, validityDays: -5 }, 30)).toBe(30)
+    expect(resolve({ enabled: true, validityDays: null }, null)).toBeNull()
+  })
+
+  it('bank disabled → never governs, always the fallback (dormant path untouched)', () => {
+    expect(resolve({ enabled: false, validityDays: 90 }, 30)).toBe(30)
+    expect(resolve({ enabled: false, validityDays: 90 }, null)).toBeNull()
+    expect(resolve(null, 30)).toBe(30)
+    expect(resolve(undefined, null)).toBeNull()
+  })
+
+  it('coerces a fractional validity down to whole days and rejects a non-positive fallback', () => {
+    expect(resolve({ enabled: true, validityDays: 90.9 }, null)).toBe(90)
+    expect(resolve({ enabled: false, validityDays: null }, 0)).toBeNull()
+    expect(resolve({ enabled: false, validityDays: null }, -1)).toBeNull()
   })
 })

@@ -10559,6 +10559,18 @@ function partitionOvertimeBankGrantLots({ requestId, totalMinutes, segments, ove
   return { lots, perSource }
 }
 
+// 加班银行 S1 (overtime-bank-validity design-lock §2): which validity governs a BANKED (source-tagged) lot.
+// The bank card's `validityDays` wins when the bank is ENABLED and the value is a positive integer; otherwise
+// we fall back to compTimeFromOvertime.expiresInDays — the pre-S1 behaviour, byte-identical. The dormant path
+// (bank disabled → single NULL-source lot) never calls this. Returns days (positive int) or null (no expiry).
+function resolveBankedLotExpiresInDays(overtimeBankPolicy, fallbackExpiresInDays) {
+  const fallback = Number.isInteger(fallbackExpiresInDays) && fallbackExpiresInDays > 0 ? fallbackExpiresInDays : null
+  if (!overtimeBankPolicy || overtimeBankPolicy.enabled !== true) return fallback
+  const raw = Number(overtimeBankPolicy.validityDays)
+  if (!Number.isFinite(raw) || raw <= 0) return fallback
+  return Math.floor(raw)
+}
+
 function applyOvertimeSegmentationSnapshotToApprovedEntry(entry, snapshot) {
   if (!entry || !snapshot) return
   entry.workdayOvertimeMinutes += snapshot.workdayOvertimeMinutes
@@ -20477,6 +20489,7 @@ module.exports = {
     normalizeOvertimeBankPolicySetting,
     resolveOvertimeBankSourceMinutes,
     partitionOvertimeBankGrantLots,
+    resolveBankedLotExpiresInDays,
     buildCycleSettlementRows,
   },
   __attendanceLeaveOffsetForTests: {
@@ -28694,6 +28707,13 @@ module.exports = {
                       ? { workdayMinutes: snap.workdayOvertimeMinutes, restdayMinutes: snap.restdayOvertimeMinutes, holidayMinutes: snap.holidayOvertimeMinutes }
                       : null
                     const { lots } = partitionOvertimeBankGrantLots({ requestId, totalMinutes: amountMinutes, segments, overtimeBankPolicy: bankPolicy })
+                    // 加班银行 S1 (overtime-bank-validity design-lock): the bank card owns the BANKED (source-
+                    // tagged) lots' validity. `overtimeBankPolicy.validityDays`, when set, governs their
+                    // expires_at and overrides compTimeFromOvertime.expiresInDays for THESE lots only; unset
+                    // falls back to expiresInDays (byte-identical to pre-S1). The dormant branch above is
+                    // untouched. Before S1 this knob was shipped in the admin UI but read by nothing, while
+                    // expiresInDays silently governed expiry — two conflicting switches.
+                    const bankedExpiresInDays = resolveBankedLotExpiresInDays(bankPolicy, expiresInDays)
                     for (const lot of lots) {
                       const lotRows = await trx.query(
                         `INSERT INTO attendance_leave_balances
@@ -28702,7 +28722,7 @@ module.exports = {
                                  CASE WHEN $6::int IS NULL THEN NULL ELSE now() + ($6::int * interval '24 hours') END, $7)
                          ON CONFLICT (org_id, source_key) DO NOTHING
                          RETURNING id`,
-                        [orgId, requestRow.user_id, lot.minutes, requestId, lot.sourceKey, expiresInDays, lot.source]
+                        [orgId, requestRow.user_id, lot.minutes, requestId, lot.sourceKey, bankedExpiresInDays, lot.source]
                       )
                       const newLotId = lotRows[0]?.id
                       if (newLotId) {

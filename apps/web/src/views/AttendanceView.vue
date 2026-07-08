@@ -3022,6 +3022,9 @@
                     data-overtime-bank="cap"
                     :placeholder="tr('0 = no cap', '0＝不限')"
                   />
+                  <small class="attendance__field-hint" data-overtime-bank-hint="cap">
+                    {{ tr('Not enforced yet — the runtime does not read this value.', '尚未强制——运行时暂不读取该值。') }}
+                  </small>
                 </label>
                 <label class="attendance__field" for="attendance-overtime-bank-validity">
                   <span>{{ tr('Lot validity (days, empty = no expiry)', '额度有效期（天，留空＝不过期）') }}</span>
@@ -3034,6 +3037,9 @@
                     data-overtime-bank="validity"
                     :placeholder="tr('Empty = no expiry', '留空＝不过期')"
                   />
+                  <small class="attendance__field-hint" data-overtime-bank-hint="validity">
+                    {{ tr('Applies to banked (source-tagged) lots; overrides the comp-time conversion validity. Empty = fall back to it.', '作用于加班银行的分源额度，覆盖调休转换的有效期；留空则回落到该有效期。') }}
+                  </small>
                 </label>
                 <button
                   class="attendance__btn attendance__btn--primary"
