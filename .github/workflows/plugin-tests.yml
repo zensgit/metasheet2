@@ -384,6 +384,8 @@ jobs:
             tests/integration/approval-node-signature-policy.api.test.ts \
             tests/integration/dingtalk-approval-card-deliveries.db.test.ts \
             tests/integration/dingtalk-container-login.db.test.ts \
+            tests/integration/directory-primary-department-write.db.test.ts \
+            tests/integration/directory-primary-department-backfill.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             --reporter=dot
 
