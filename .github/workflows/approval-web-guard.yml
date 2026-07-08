@@ -29,8 +29,24 @@ on:
       - 'apps/web/src/approvals/amountAutoSum.ts'
       - 'apps/web/src/approvals/useAutoSumTotal.ts'
       - 'apps/web/src/approvals/lineDerivation.ts'
+      # G-B2-11 / G-B2-12: the 待办 list's pill re-baseline choke point + per-row 催办 state.
+      - 'apps/web/src/approvals/newTodoPill.ts'
+      - 'apps/web/src/approvals/urgeButtonState.ts'
+      - 'apps/web/src/views/approval/ApprovalCenterView.vue'
+      # Previously UNGATED approval specs (verified green before wiring): route-preview FE,
+      # wave-A helpers, template center, and the approval-center list surfaces. NOTE: the guard is
+      # NOT a required check — see the PR body. approvalStaticPicker is deliberately excluded: it
+      # carries two failures already on main and would red the guard for everyone.
+      - 'apps/web/src/approvals/routePreviewController.ts'
+      - 'apps/web/src/approvals/routePreviewSummary.ts'
+      - 'apps/web/src/approvals/formDraft.ts'
+      - 'apps/web/src/approvals/amountInWords.ts'
+      - 'apps/web/src/approvals/conditionSummary.ts'
+      - 'apps/web/src/approvals/templateGalleryFilter.ts'
+      - 'apps/web/src/views/approval/TemplateCenterView.vue'
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
       - 'apps/web/src/views/approval/ApprovalNewView.vue'
+      - 'apps/web/src/approvals/requesterPreviewFields.ts'
       - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
       - 'apps/web/src/views/approval/ApprovalMetricsView.vue'
       - 'apps/web/src/views/approval/TemplateCenterView.vue'
@@ -350,4 +366,4 @@ jobs:
         # files and asserts zero static style= attributes and zero hex/rgb() literals inside
         # <style> blocks (var() references + transparent/inherit/currentColor/none allowed);
         # had no gate before this wiring.
-        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView ui-foundation-style-guard uiFoundationTexture --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields ui-foundation-style-guard uiFoundationTexture --reporter=dot

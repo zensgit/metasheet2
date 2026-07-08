@@ -181,6 +181,67 @@ export async function sweepConfigRevisionRetention(
   return result.rowCount ?? 0
 }
 
+export const META_FIELD_VALUE_TOMBSTONE_RETENTION_TABLE = 'meta_field_value_tombstones'
+export const META_LINK_TOMBSTONE_RETENTION_TABLE = 'meta_link_tombstones'
+
+function isUndefinedTableError(err: unknown, tableName: string): boolean {
+  const code = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : null
+  const message = typeof (err as { message?: unknown })?.message === 'string' ? (err as { message: string }).message : ''
+  if (code === '42P01') return message.includes(tableName)
+  return message.includes(`relation "${tableName}" does not exist`)
+}
+
+/**
+ * 4c-2 C6 — prune old tombstone rows (`meta_field_value_tombstones` / `meta_link_tombstones`) under the
+ * SAME knob/schedule as the record/config revision sweeps above (one enable flag, one batch size, one
+ * interval; disabled by default). UNLIKE those two sweeps, this ALWAYS uses keep-days age-based pruning
+ * regardless of `config.policy` — "keep-last-n" has no meaning for a tombstone (there is no per-entity
+ * "latest row that must survive" invariant: a tombstone is an independent historical capture, not a
+ * superseded-by-newer-version log). There is deliberately no "never delete the latest" floor either — once
+ * a tombstone ages out, R1 rehydration for that specific delete cycle correctly degrades to the honest
+ * no-tombstone / definition-only path (C1 forward-only), which is the INTENDED behavior of retention, not
+ * a bug. Guarded for a pre-migration DB missing the table (degrades to 0 — this is a background janitor,
+ * not the fail-closed capture path, so it must never crash the scheduler over a deploy-ordering race).
+ */
+async function sweepTombstoneTableRetention(
+  query: RetentionQueryFn,
+  config: MetaRevisionRetentionConfig,
+  table: string,
+): Promise<number> {
+  if (!config.enabled) return 0
+  const batchSize = Math.max(1, Math.floor(config.batchSize))
+  const days = Math.max(META_REVISION_RETENTION_MIN_DAYS, Math.floor(config.retentionDays))
+  try {
+    const result = await query(
+      `DELETE FROM ${table}
+        WHERE id IN (
+          SELECT id FROM ${table}
+          WHERE created_at < now() - ($1::int * interval '1 day')
+          LIMIT $2
+        )`,
+      [days, batchSize],
+    )
+    return result.rowCount ?? 0
+  } catch (err) {
+    if (isUndefinedTableError(err, table)) return 0
+    throw err
+  }
+}
+
+export async function sweepFieldValueTombstoneRetention(
+  query: RetentionQueryFn,
+  config: MetaRevisionRetentionConfig,
+): Promise<number> {
+  return sweepTombstoneTableRetention(query, config, META_FIELD_VALUE_TOMBSTONE_RETENTION_TABLE)
+}
+
+export async function sweepLinkTombstoneRetention(
+  query: RetentionQueryFn,
+  config: MetaRevisionRetentionConfig,
+): Promise<number> {
+  return sweepTombstoneTableRetention(query, config, META_LINK_TOMBSTONE_RETENTION_TABLE)
+}
+
 /** Default sweep cadence (24h), env-overridable, clamped to [1m, 24h]. */
 export const META_REVISION_RETENTION_DEFAULT_INTERVAL_MS = 24 * 60 * 60 * 1000
 
@@ -227,6 +288,16 @@ export function startMetaRevisionRetention(options: MetaRevisionRetentionSchedul
       .then(() => sweepConfigRevisionRetention(queryFn, config))
       .then((deleted) => { if (deleted > 0) logger.info(`Meta-revision retention pruned ${deleted} config revision(s)`) })
       .catch((error) => logger.warn('Config-revision retention sweep failed', error as Error))
+    // 4c-2 C6: the two tombstone tables age under the SAME knob (always keep-days — see sweepTombstoneTableRetention
+    // doc-comment), isolated from the two sweeps above and from each other.
+    void Promise.resolve()
+      .then(() => sweepFieldValueTombstoneRetention(queryFn, config))
+      .then((deleted) => { if (deleted > 0) logger.info(`Meta-revision retention pruned ${deleted} field-value tombstone(s)`) })
+      .catch((error) => logger.warn('Field-value tombstone retention sweep failed', error as Error))
+    void Promise.resolve()
+      .then(() => sweepLinkTombstoneRetention(queryFn, config))
+      .then((deleted) => { if (deleted > 0) logger.info(`Meta-revision retention pruned ${deleted} link tombstone(s)`) })
+      .catch((error) => logger.warn('Link tombstone retention sweep failed', error as Error))
   }
   const timer = setInterval(runSweep, intervalMs)
   if (typeof timer === 'object' && 'unref' in timer) (timer as { unref: () => void }).unref()

@@ -553,6 +553,11 @@ export async function deleteRecord(
   // be deleted via the SDK (it must be unlocked first through the explicit unlock action).
   await guardRecordNotLockedForPlugin(query, input.sheetId, input.recordId)
 
+  // 4c-2 scope boundary (design-lock §8, out-of-scope): this plugin-SDK delete path is intentionally
+  // NOT wired to tombstone-capture (nor to meta_records_trash / meta_record_revisions). It already
+  // destroys the row irrecoverably today, independent of MULTITABLE_TOMBSTONE_CAPTURE_ENABLED — the
+  // flag's "every destruction is captured" guarantee covers only record-service.deleteRecord and
+  // dropFieldCascade. Giving this path trash+capture parity is a separate follow-up rung, not 4c-2.
   await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [input.recordId])
 
   // lock-guarded: plugin-SDK deleteRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.

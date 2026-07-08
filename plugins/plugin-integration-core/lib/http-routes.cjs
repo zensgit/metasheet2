@@ -32,6 +32,14 @@ const ROUTES = [
   ['POST', '/api/integration/read-source-compositions/:id/approve', 'readSourceCompositionsApprove'],
   ['POST', '/api/integration/read-source-compositions/:id/retire', 'readSourceCompositionsRetire'],
   ['POST', '/api/integration/read-source-compositions/:id/run', 'readSourceCompositionsRun'],
+  // BA-APPLY-2a (design-lock docs/development/bridge-agent-controlled-apply-design-lock-20260708.md
+  // §2 形态 B backend channel): approval gate + values-free checklist staging ONLY. NO route here
+  // ever writes to the Bridge Agent or applies anything — GET :id is the approval gate itself
+  // (approved-only, fail-closed on draft/retired).
+  ['POST', '/api/integration/bridge-agent-checklists', 'bridgeAgentChecklistsSave'],
+  ['GET', '/api/integration/bridge-agent-checklists/:id', 'bridgeAgentChecklistsGet'],
+  ['POST', '/api/integration/bridge-agent-checklists/:id/approve', 'bridgeAgentChecklistsApprove'],
+  ['POST', '/api/integration/bridge-agent-checklists/:id/retire', 'bridgeAgentChecklistsRetire'],
   ['GET', '/api/integration/external-systems/:id/objects', 'externalSystemObjects'],
   ['GET', '/api/integration/external-systems/:id/schema', 'externalSystemSchema'],
   ['GET', '/api/integration/pipelines', 'pipelinesList'],
@@ -124,6 +132,15 @@ const {
   ReadSourceCompositionConfigConflictError,
   ReadSourceCompositionConfigNotApprovedError,
 } = require('./read-source-composition-config-store.cjs')
+// BA-APPLY-2a: the bridge-agent change-checklist store error surface (mirrors the read-source-config
+// store) — for the save/approve/retire routes + the approved-only GET route error mapping. NOTHING
+// downstream of these errors ever contacts the Bridge Agent (design-lock hard lock).
+const {
+  BridgeAgentChecklistValidationError,
+  BridgeAgentChecklistNotFoundError,
+  BridgeAgentChecklistConflictError,
+  BridgeAgentChecklistNotApprovedError,
+} = require('./bridge-agent-change-checklist-store.cjs')
 // S3-2 (#1709 self-service): runtime-tier configured read — consumes an APPROVED stored config version;
 // data plane (mapped values) flows to the authorized caller, evidence stays values-free.
 const {
@@ -1535,6 +1552,26 @@ function mapReadSourceCompositionConfigError(error) {
   return error
 }
 
+// BA-APPLY-2a: map bridge-agent checklist store errors to HTTP, values-free — the contract
+// validator's { code, field, reason } tuples ride through untouched (field is always a structural
+// path, never a submitted object/field-key value). Mirrors mapReadSourceConfigError.
+function mapBridgeAgentChecklistError(error) {
+  if (error instanceof BridgeAgentChecklistValidationError) {
+    return new HttpRouteError(400, 'BRIDGE_AGENT_CHECKLIST_INVALID', 'bridge-agent checklist is invalid', error.details)
+  }
+  if (error instanceof BridgeAgentChecklistNotFoundError) {
+    return new HttpRouteError(404, 'BRIDGE_AGENT_CHECKLIST_NOT_FOUND', 'bridge-agent checklist not found')
+  }
+  if (error instanceof BridgeAgentChecklistNotApprovedError) {
+    // Fail-closed approval gate: a draft/retired checklist is not fetchable by the apply consumer.
+    return new HttpRouteError(409, 'BRIDGE_AGENT_CHECKLIST_NOT_APPROVED', 'bridge-agent checklist is not approved', { status: error.details && error.details.status })
+  }
+  if (error instanceof BridgeAgentChecklistConflictError) {
+    return new HttpRouteError(409, 'BRIDGE_AGENT_CHECKLIST_STATUS_CONFLICT', 'bridge-agent checklist status transition is not allowed', error.details)
+  }
+  return error
+}
+
 function createHandlers(services, options = {}) {
   function requireService(name, methods) {
     const service = services[name]
@@ -1556,6 +1593,9 @@ function createHandlers(services, options = {}) {
   const templateRegistry = requireService('templateRegistry', ['upsertTemplate', 'getTemplate', 'listTemplates', 'deleteTemplate', 'instantiateTemplate'])
   const readSourceConfigs = requireService('readSourceConfigStore', ['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime'])
   const readSourceCompositions = requireService('readSourceCompositionConfigStore', ['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime'])
+  // BA-APPLY-2a: only the methods the 4 routes below actually call are required — save/approve/retire
+  // (write-tier) + getForApply (the fail-closed approval gate for the GET route).
+  const bridgeAgentChecklists = requireService('bridgeAgentChecklistStore', ['saveVersion', 'approve', 'retire', 'getForApply'])
   const context = options.context || {}
   const configuredTableActions = context && context.config
     ? (context.config.stockPreparationTableActions || context.config.tableActions)
@@ -2081,6 +2121,68 @@ function createHandlers(services, options = {}) {
           throw new HttpRouteError(400, 'READ_SOURCE_COMPOSITION_RUN_CONTRACT_INVALID', 'composition run request is invalid', { reason: error && typeof error.reason === 'string' ? error.reason : 'invalid' })
         }
         throw error
+      }
+    },
+
+    // BA-APPLY-2a (design-lock docs/development/bridge-agent-controlled-apply-design-lock-20260708.md
+    // §2 形态 B): consultant/operator-tier persistence for a submitted, values-free implementation
+    // checklist (BA-APPLY-1's `{ schemaVersion, operations }` artifact). Save is content-keyed
+    // idempotent (identical checklist -> the existing version, 200; new content -> next version,
+    // 201). Status lifecycle draft -> approved -> retired is fail-closed. Errors are values-free: the
+    // contract validator's { code, field, reason } tuples (field is always a structural path) or a
+    // coarse status conflict — NEVER the submitted checklist content. This route (and every route
+    // below) never contacts the Bridge Agent — there is no apply here.
+    async bridgeAgentChecklistsSave(req, res) {
+      // Config-time trust (mirrors read-source-config save, lock 10): integration write only, never
+      // end-user reachable.
+      requireAccess(req, 'write')
+      const body = requestBody(req)
+      try {
+        const saved = await bridgeAgentChecklists.saveVersion(scopedInput(req, {
+          checklist: body.checklist,
+          actor: requestPrincipal(req),
+        }))
+        return sendOk(res, saved, saved.reused ? 200 : 201)
+      } catch (error) {
+        throw mapBridgeAgentChecklistError(error)
+      }
+    },
+
+    // Approval gate (design-lock "审批门", hard lock): only an APPROVED checklist is fetchable here —
+    // this IS the apply-consumer surface (a human/ops-script fetches the approved, values-free
+    // checklist and applies it locally per the existing runbook; NOTHING here calls the Agent, writes
+    // a local config file, or invokes scripts/ops/bridge-agent-readonly.ps1). Draft/retired fail
+    // closed with a coarse status-only 409 — never the checklist content.
+    async bridgeAgentChecklistsGet(req, res) {
+      requireAccess(req, 'read')
+      try {
+        return sendOk(res, await bridgeAgentChecklists.getForApply(scopedInput(req, { id: requestParams(req).id })))
+      } catch (error) {
+        throw mapBridgeAgentChecklistError(error)
+      }
+    },
+
+    async bridgeAgentChecklistsApprove(req, res) {
+      requireAccess(req, 'write')
+      try {
+        return sendOk(res, await bridgeAgentChecklists.approve(scopedInput(req, {
+          id: requestParams(req).id,
+          actor: requestPrincipal(req),
+        })))
+      } catch (error) {
+        throw mapBridgeAgentChecklistError(error)
+      }
+    },
+
+    async bridgeAgentChecklistsRetire(req, res) {
+      requireAccess(req, 'write')
+      try {
+        return sendOk(res, await bridgeAgentChecklists.retire(scopedInput(req, {
+          id: requestParams(req).id,
+          actor: requestPrincipal(req),
+        })))
+      } catch (error) {
+        throw mapBridgeAgentChecklistError(error)
       }
     },
 

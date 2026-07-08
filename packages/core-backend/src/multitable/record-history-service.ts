@@ -25,6 +25,13 @@ export interface RecordRevisionInput {
    * one shared id across all its rows so they group as one batch. NOT a parallel write store (LOCK-1).
    */
   batchId?: string | null
+  /**
+   * 4c-2: pre-generate the row's own id when a caller needs to know it BEFORE this INSERT runs — e.g.
+   * `deleteRecord` anchors an inbound-link tombstone's `source_revision_id` to this delete's OWN revision
+   * id, captured earlier in the same transaction than this call. Omitted → random uuid (identical to
+   * every pre-existing call site's behavior).
+   */
+  id?: string
 }
 
 export interface RecordRevisionEntry {
@@ -43,7 +50,7 @@ export interface RecordRevisionEntry {
 }
 
 export async function recordRecordRevision(query: QueryFn, input: RecordRevisionInput): Promise<string> {
-  const id = randomUUID()
+  const id = input.id ?? randomUUID()
   const changedFieldIds = Array.from(new Set((input.changedFieldIds ?? []).filter(Boolean)))
   await query(
     `INSERT INTO meta_record_revisions (

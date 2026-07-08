@@ -89,6 +89,22 @@
             </el-tooltip>
           </span>
         </template>
+        <!-- G-B2-11 (新待办到达刷新 pill): the badge above can go stale relative to the list below
+             it (badge 5 / list 3) once new pending items land server-side after the list was last
+             loaded. We deliberately do NOT auto-refresh the list when that happens — a silent
+             reload would clear the operator's in-progress 批量通过/批量驳回 selection with no
+             warning. Instead this pill only appears here (待我处理 only) once `newTodoPill.visible`
+             flips true, and reloads solely on the operator's own click. See
+             src/approvals/newTodoPill.ts for the count-vs-loaded-rows pitfall this avoids. -->
+        <button
+          v-if="newTodoPill.visible"
+          type="button"
+          class="approval-center__new-todo-pill"
+          data-testid="approval-new-todo-pill"
+          @click="handleNewTodoPillClick"
+        >
+          {{ newTodoPill.delta }} 条新待办 · 点击刷新
+        </button>
         <!-- Wave 2 WP3 slice 2 — bulk 全部标记已读. Disabled until the server
              reports at least one unread row for the current filter so clicking
              never issues a no-op round-trip.
@@ -254,12 +270,13 @@
               v-if="row.status === 'pending'"
               type="primary"
               link
-              :loading="remindingId === row.id"
-              :disabled="remindingId !== null"
+              :loading="urgeState(row.id).loading"
+              :disabled="urgeState(row.id).disabled"
+              :title="urgeState(row.id).title"
               :data-testid="`approval-urge-${row.id}`"
               @click.stop="handleUrge(row)"
             >
-              催办
+              {{ urgeState(row.id).label }}
             </el-button>
           </template>
         </ApprovalCenterTable>
@@ -458,9 +475,11 @@ import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { dispatchAction, getPendingCount, markAllApprovalsRead, remindApproval } from '../../approvals/api'
+import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
+import { newTodoPillState } from '../../approvals/newTodoPill'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
 import { useLocale } from '../../composables/useLocale'
@@ -532,7 +551,16 @@ const batchRunning = ref(false)
 const batchAction = ref<'approve' | 'reject' | null>(null)
 const batchRejectDialogVisible = ref(false)
 const batchRejectComment = ref('')
-const remindingId = ref<string | null>(null)
+// G-B2-12: 催办 is gated PER ROW (a nudge on one request must not freeze every other row's button).
+// `remindingIds` = this row's own request is in flight; `remindedIds` = session memory of rows
+// already nudged. Both are reactive Sets; see urgeButtonState for the precedence + why the memory
+// is deliberately not persisted.
+const remindingIds = ref<Set<string>>(new Set())
+const remindedIds = ref<Set<string>>(new Set())
+
+function urgeState(rowId: string) {
+  return urgeButtonState(rowId, remindingIds.value, remindedIds.value)
+}
 
 // B1-03: 已等待 aging severity class — the 我发起的 tab's inline hint next to 催办 (same
 // warn/urgent palette as ApprovalCenterTable's own internal 已等待 column, kept separate since
@@ -624,7 +652,6 @@ async function dispatchBatchAndHandleResult(
   }
   clearPendingSelection()
   loadCurrentTab()
-  void refreshPendingBadgeCount()
 }
 
 async function runBatch(action: 'approve' | 'reject', comment: string): Promise<void> {
@@ -687,8 +714,10 @@ async function handleBatchReject(): Promise<void> {
 
 // ── B1-03 (part 1): inline approve/reject hot path on the pending list ─────
 // `inlineApprovingId` gates every row's approve button (not just the clicked row) while a
-// request is in flight — mirrors the existing `remindingId`-gates-every-催办-button convention
-// below, so a slow request can't be raced by mashing a different row.
+// request is in flight, so a slow request can't be raced by mashing a different row. This global
+// gate is deliberate HERE and NOT shared with 催办 (G-B2-12): approve/reject MUTATES an approval,
+// so racing two rows is a correctness hazard, whereas 催办 is a server-rate-limited nudge and is
+// gated per row.
 const inlineApprovingId = ref<string | null>(null)
 
 async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
@@ -698,7 +727,6 @@ async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
     await dispatchAction(row.id, { action: 'approve' })
     ElMessage.success('审批已通过')
     loadCurrentTab()
-    void refreshPendingBadgeCount()
   } catch (error) {
     ElMessage.error(error instanceof Error && error.message ? error.message : '操作失败，请重试')
   } finally {
@@ -737,7 +765,6 @@ async function submitRowReject(): Promise<void> {
     ElMessage.success('审批已驳回')
     rowRejectDialogVisible.value = false
     loadCurrentTab()
-    void refreshPendingBadgeCount()
   } catch (error) {
     // Mirrors B1-04's dialog-scoped inline error: keep the dialog open with the server's own
     // reason instead of a toast, so the typed comment is never lost on a retry-in-place.
@@ -748,13 +775,18 @@ async function submitRowReject(): Promise<void> {
 }
 
 async function handleUrge(row: UnifiedApprovalDTO): Promise<void> {
-  if (remindingId.value) return
-  remindingId.value = row.id
+  // Only this row's own state gates it — other rows may be nudged concurrently.
+  if (remindingIds.value.has(row.id) || remindedIds.value.has(row.id)) return
+  remindingIds.value.add(row.id)
   try {
     const result = await remindApproval(row.id)
     if (result.ok) {
+      remindedIds.value.add(row.id)
       ElMessage.success('已发送催办提醒')
     } else if (result.status === 429) {
+      // 429 means the server's hourly window already holds a nudge for this instance+user, so the
+      // row genuinely IS 已催办 — recording it stops the user re-clicking into the same rejection.
+      remindedIds.value.add(row.id)
       const retry = result.error.retryAfterSeconds
       ElMessage.warning(retry ? `催办过于频繁，请 ${Math.ceil(retry / 60)} 分钟后再试` : '催办过于频繁，请稍后再试')
     } else {
@@ -763,7 +795,7 @@ async function handleUrge(row: UnifiedApprovalDTO): Promise<void> {
   } catch {
     ElMessage.error('催办失败，请重试')
   } finally {
-    remindingId.value = null
+    remindingIds.value.delete(row.id)
   }
 }
 
@@ -778,10 +810,16 @@ function applyPendingBadgeCount(count: number, unreadCount: number): void {
   pendingTotalCount.value = Number.isFinite(count) ? count : 0
 }
 
-async function refreshPendingBadgeCount(): Promise<void> {
+// G-B2-11: `resnapshot` ties a fresh server count to "the list was just (re)loaded" — see
+// `pendingCountAtLoad` below. Only call sites that ALSO reload the pending list (or are the very
+// first load) pass this; a bare badge poll must never move the baseline the pill compares against.
+async function refreshPendingBadgeCount(options?: { resnapshot?: boolean }): Promise<void> {
   try {
     const result = await getPendingCount(sourceSystemFilter.value)
     applyPendingBadgeCount(result.count, result.unreadCount)
+    if (options?.resnapshot) {
+      pendingCountAtLoad.value = result.count
+    }
   } catch {
     // Badge is decorative — do not surface errors here; the tab itself
     // surfaces list-load failures via `store.error`.
@@ -792,12 +830,40 @@ async function refreshPendingBadgeCount(): Promise<void> {
 
 function handleRealtimeCountsUpdated(payload: ApprovalCountsUpdatedPayload): void {
   const scopedCounts = payload.countsBySourceSystem?.[sourceSystemFilter.value] ?? payload
+  // Deliberately NOT resnapshotted: a realtime push updates the live count (and can therefore
+  // surface the G-B2-11 pill below) without ever moving `pendingCountAtLoad` — the whole point of
+  // the pill is to notice this push happened while the list itself sat unrefreshed.
   applyPendingBadgeCount(scopedCounts.count, scopedCounts.unreadCount)
 }
 
 useApprovalCountsRealtime({
   onCountsUpdated: handleRealtimeCountsUpdated,
 })
+
+// G-B2-11 (新待办到达刷新 pill) — see src/approvals/newTodoPill.ts for the full design rationale.
+// `pendingCountAtLoad` is a snapshot of the server's pending `count`, taken at the moment the
+// pending list was last explicitly (re)loaded (mount / tab switch / source-system change / batch
+// action reload / the pill's own click). `null` until the very first load completes, so the pill
+// can never render before there is a baseline to compare against.
+//
+// This is intentionally compared against `pendingTotalCount` (the server's authoritative total),
+// NEVER against `store.pendingApprovals.length` (rows loaded on the current page) — the list is
+// paged, so "server total > rows on this page" would be true forever and misreport ordinary paging
+// as new arrivals.
+const pendingCountAtLoad = ref<number | null>(null)
+const newTodoPill = computed(() => newTodoPillState({
+  activeTab: activeTab.value,
+  pendingCountAtLoad: pendingCountAtLoad.value,
+  currentPendingCount: pendingTotalCount.value,
+}))
+
+// Deliberately NOT an automatic refresh: silently reloading the list out from under the operator
+// would clear whatever rows they currently have checked in the 批量通过/批量驳回 multi-select
+// (`selectedPending`) with no explanation. The pill only reloads when the operator clicks it.
+function handleNewTodoPillClick(): void {
+  clearPendingSelection()
+  loadCurrentTab()
+}
 
 // Wave 2 WP3 slice 2 — bulk 全部标记已读. Honours the current sourceSystem tab
 // so the button's effect matches the tooltip the user is looking at.
@@ -855,15 +921,18 @@ function loadCurrentTab() {
     case 'cc': store.loadCc(query); break
     case 'completed': store.loadCompleted(query); break
   }
+  // G-B2-11: EVERY list reload re-baselines the pill, from the ONE place every reload passes
+  // through. Hanging this off individual call sites is precisely what let handleSearch() and
+  // handlePageChange() skip it — leaving a pill still urging "N 条新待办 · 点击刷新" for todos the
+  // reload had already fetched. A choke point cannot be forgotten by the next call site.
+  void refreshPendingBadgeCount({ resnapshot: true })
 }
 
 function handleTabChange() {
   currentPage.value = 1
   clearPendingSelection()
+  // loadCurrentTab() refreshes the badge and re-baselines the G-B2-11 pill (see its choke point).
   loadCurrentTab()
-  // Refresh badge whenever the user re-enters the 待办 tab so recent actions
-  // reflect immediately.
-  void refreshPendingBadgeCount()
 }
 
 function handleSearch() {
@@ -875,8 +944,9 @@ function handleSearch() {
 function handleSourceSystemChange() {
   currentPage.value = 1
   clearPendingSelection()
+  // The source-system switch changes what `count` even means (a different scope); the reload's
+  // own re-baseline inside loadCurrentTab() handles it.
   loadCurrentTab()
-  void refreshPendingBadgeCount()
 }
 
 function handlePageChange(page: number) {
@@ -927,8 +997,8 @@ function openAttendanceApprovalQueue() {
 }
 
 onMounted(() => {
+  // The first load establishes the pill's initial baseline (no delta possible against itself).
   loadCurrentTab()
-  void refreshPendingBadgeCount()
 })
 </script>
 
@@ -977,6 +1047,26 @@ onMounted(() => {
 
 .approval-center__tab-badge {
   margin-left: 4px;
+}
+
+/* G-B2-11: 新待办到达刷新 pill — a deliberately clickable, un-missable affordance (not a passive
+   badge) since it is the ONLY way this new count ever reaches the list; there is no auto-refresh. */
+.approval-center__new-todo-pill {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 4px 12px;
+  border: 1px solid var(--el-color-primary-light-5);
+  border-radius: 999px;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-size: 13px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.approval-center__new-todo-pill:hover {
+  border-color: var(--el-color-primary);
 }
 
 .approval-center__tab-toolbar {

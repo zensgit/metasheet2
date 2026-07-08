@@ -491,6 +491,65 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // RP-3 (B3-06 authoring 试运行): template author's read-only dry-run of the LATEST/draft version.
+  // Guarded by approvalTemplateAdminGuard (canManageTemplates) — this is the ONLY surface that
+  // accepts sampleRequesterId, the org-structure probe vector owner order ③ isolates here (the
+  // B3-05 requester surface never accepts a requester override). Zero writes (RP-1 substrate).
+  r.post('/api/approval-templates/:id/route-preview', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const actorId = resolveApprovalActorId(req)
+      if (!actorId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const templateId = typeof req.params.id === 'string' ? req.params.id.trim() : ''
+      const sampleFormData =
+        req.body?.sampleFormData && typeof req.body.sampleFormData === 'object' && !Array.isArray(req.body.sampleFormData)
+          ? req.body.sampleFormData as Record<string, unknown>
+          : null
+      const sampleRequesterId = typeof req.body?.sampleRequesterId === 'string' ? req.body.sampleRequesterId.trim() : ''
+
+      if (!templateId || !sampleFormData) {
+        return res.status(400).json({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'templateId (path) and sampleFormData are required',
+          },
+        })
+      }
+
+      const preview = await productService.previewTemplateRoute(
+        { templateId, formData: sampleFormData },
+        {
+          userId: actorId,
+          userName: resolveApprovalActorName(req, actorId),
+          email: typeof req.user?.email === 'string' ? req.user.email : undefined,
+          tenantId: resolveApprovalTenantId(req),
+          department: typeof req.user?.department === 'string' ? req.user.department : undefined,
+          departmentIds: resolveApprovalActorDepartmentIds(req),
+          roles: resolveApprovalActorRoles(req),
+          permissions: resolveApprovalActorPermissions(req),
+        },
+        // The sample requester is identified by id only; org relations / directory roles / dept /
+        // title are resolved fresh from the DB by that id inside the substrate (never client-supplied).
+        sampleRequesterId ? { sampleRequester: { userId: sampleRequesterId } } : {},
+      )
+
+      // Conform to the ratified §3 output contract ({ route, truncated? }); the substrate's
+      // internal totalSteps is not part of the endpoint contract.
+      res.json({ route: preview.route, truncated: preview.truncated })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_PREVIEW_FAILED',
+        'Failed to preview the approval template route',
+      )
+    }
+  })
+
   r.post('/api/approval-templates', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const template = await productService.createTemplate({

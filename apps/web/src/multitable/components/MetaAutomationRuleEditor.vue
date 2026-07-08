@@ -11,24 +11,38 @@
       <h4 class="meta-rule-editor__title">{{ rule ? automationLabel('editor.titleEdit', isZh) : automationLabel('editor.titleNew', isZh) }}</h4>
     </template>
 
-    <div class="meta-rule-editor__body">
+    <div class="meta-rule-editor__body" ref="editorBodyRef">
         <div v-if="error" class="meta-rule-editor__error" role="alert">{{ error }}</div>
 
         <!-- Name -->
         <label class="meta-rule-editor__label">{{ automationLabel('editor.name', isZh) }}</label>
         <el-input v-model="draft.name" type="text" :placeholder="automationLabel('editor.namePlaceholder', isZh)" data-field="name" />
 
-        <!-- Execution mode (A6-1 opt-in): persist a per-action WorkflowJob plane -->
-        <el-checkbox
-          class="meta-rule-editor__label"
-          data-field="executionModeToggle"
-          :model-value="draft.executionMode === 'workflow_job_v1' || requiresJobMode"
-          :disabled="requiresJobMode"
-          @change="setExecutionMode($event === true)"
-        >
-          {{ automationLabel('editor.executionModeLabel', isZh) }}
-        </el-checkbox>
-        <div class="meta-rule-editor__hint" data-field="executionModeHint">{{ requiresJobMode ? automationLabel('editor.executionModeRequiredHint', isZh) : automationLabel('editor.executionModeHint', isZh) }}</div>
+        <!-- G-B2-24: the execution-mode toggle is an ENGINE-TERM concern (persist per-action
+             WorkflowJob records) that used to sit second on the form, dominating the first screen.
+             Collapsed into an "Advanced" section so the first screen reads trigger → condition →
+             action. It auto-expands when the rule REQUIRES job mode (e.g. start_approval) so the
+             forced-on state is never hidden. The toggle keeps its data-field/behavior unchanged. -->
+        <el-collapse v-model="advancedSectionOpen" class="meta-rule-editor__advanced">
+          <el-collapse-item name="advanced" data-field="advancedSection">
+            <!-- Header via slot (not the `title` prop) so no HTML title attribute is added — the
+                 a11y guard asserts the authored surface introduces no [title] noise. -->
+            <template #title>
+              <span class="meta-rule-editor__advanced-title">{{ automationLabel('editor.advancedSection', isZh) }}</span>
+            </template>
+            <!-- Execution mode (A6-1 opt-in): persist a per-action WorkflowJob plane -->
+            <el-checkbox
+              class="meta-rule-editor__label"
+              data-field="executionModeToggle"
+              :model-value="draft.executionMode === 'workflow_job_v1' || requiresJobMode"
+              :disabled="requiresJobMode"
+              @change="setExecutionMode($event === true)"
+            >
+              {{ automationLabel('editor.executionModeLabel', isZh) }}
+            </el-checkbox>
+            <div class="meta-rule-editor__hint" data-field="executionModeHint">{{ requiresJobMode ? automationLabel('editor.executionModeRequiredHint', isZh) : automationLabel('editor.executionModeHint', isZh) }}</div>
+          </el-collapse-item>
+        </el-collapse>
 
         <!-- 1. Trigger selector -->
         <section class="meta-rule-editor__section">
@@ -1223,6 +1237,25 @@
             @click="addAction"
           >{{ automationLabel('editor.addAction', isZh) }}</el-button>
         </section>
+
+        <!-- G-B2-22: why Save is disabled, in place of a silent grey button. Each reason is its
+             own clickable line — clicking scrolls the editor to the control it's about. A reason
+             with no anchor (honestly) does nothing on click instead of pointing somewhere wrong. -->
+        <div v-if="saveBlockReasons.length > 0" class="meta-rule-editor__save-block-alert" data-field="saveBlockReasons">
+          <div class="meta-rule-editor__save-block-title">{{ automationLabel('editor.saveBlockedTitle', isZh) }}</div>
+          <ul class="meta-rule-editor__save-block-list">
+            <li v-for="reason in saveBlockReasons" :key="reason.key">
+              <button
+                type="button"
+                class="meta-rule-editor__save-block-reason"
+                :disabled="!reason.anchor"
+                data-action="save-block-reason"
+                :data-reason-key="reason.key"
+                @click="scrollToSaveBlockAnchor(reason.anchor)"
+              >{{ reason.message }}</button>
+            </li>
+          </ul>
+        </div>
     </div>
 
     <!-- Footer -->
@@ -1267,7 +1300,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
-import { ElButton, ElCheckbox, ElCheckboxGroup, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
+import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { useLocale } from '../../composables/useLocale'
 import type { MultitableApiClient } from '../api/client'
 import type {
@@ -1340,6 +1373,11 @@ import {
   validateParallelBranchActions,
   validateParallelBranchKeys,
 } from '../utils/parallelBranchAuthoring'
+import {
+  computeSaveBlockReasons,
+  type SaveBlockActionSnapshot,
+  type SaveBlockReason,
+} from '../automationSaveBlockReasons'
 
 interface FieldPair {
   fieldId: string
@@ -1432,6 +1470,9 @@ const emit = defineEmits<{
 
 const error = ref('')
 const saving = ref(false)
+// G-B2-22: root of the drawer's scrollable body, scoped so scroll-to-reason navigation never
+// reaches outside this editor instance.
+const editorBodyRef = ref<HTMLElement | null>(null)
 const cronPreset = ref('0 * * * *')
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingTalkDestinationsError = ref('')
@@ -2159,6 +2200,16 @@ const JOB_MODE_REQUIRING_ACTION_TYPES: AutomationActionType[] = ['wait_for_callb
 const requiresJobMode = computed(() =>
   draft.value.actions.some((a) => JOB_MODE_REQUIRING_ACTION_TYPES.includes(a.type)),
 )
+// G-B2-24: the Advanced section is collapsed by default (keeps the engine-term execution-mode
+// toggle off the first screen) but force-opens when job mode is REQUIRED, so a forced-on toggle is
+// never hidden behind a collapsed panel. Modeled as a writable computed rather than a watched ref
+// so expansion is a pure reactive dependency of requiresJobMode (no load-order/tick races): until
+// the user manually toggles it, "open" == requiresJobMode; a manual toggle then takes over.
+const advancedManualOpen = ref<string[] | null>(null)
+const advancedSectionOpen = computed<string[]>({
+  get: () => advancedManualOpen.value ?? (requiresJobMode.value ? ['advanced'] : []),
+  set: (value) => { advancedManualOpen.value = value },
+})
 const hasDeleteRecordAction = computed(() => draft.value.actions.some((a) => a.type === 'delete_record'))
 
 // A6-3-2a: empty drafts for a fresh condition_branch action.
@@ -2443,55 +2494,112 @@ function setDeleteRecordAcknowledged(action: DraftAction, checked: boolean): voi
   }
 }
 
-const canSave = computed(() => {
-  if (!draft.value.name.trim()) return false
-  if (draft.value.actions.length < 1) return false
-  // T1-3: mirror the backend save gate (templateId / no-conditions / notification-only actions).
-  if (draft.value.triggerType === 'approval.completed' && approvalCompletedBlockReason.value) return false
-  if (draft.value.triggerType === 'approval.task_created' && approvalTaskCreatedBlockReason.value) return false
-  // T1-2: a signing secret is required; an existing rule with a stored (redacted-on-read) secret may
-  // leave the field blank to keep it.
-  if (draft.value.triggerType === 'webhook.received') {
-    const secret = typeof draft.value.triggerConfig.secret === 'string' ? draft.value.triggerConfig.secret.trim() : ''
-    if (!secret && !(props.rule?.id && savedWebhookSecretConfigured.value)) return false
-  }
-  if (conditionBranchReadOnlyReason.value) return false // A6-3-2a point #3: never save a non-round-trippable loaded branch
-  if (conditionBranchKeyError.value) return false // A6-3-2a point #1: branch key safe/unique mirror
-  if (parallelBranchReadOnlyReason.value) return false // A6-3-4/W3-2a: never save a non-round-trippable loaded join
-  if (parallelBranchKeyError.value) return false // W3-2a: frontend mirror of backend branch bounds/keys
-  if (parallelBranchActionError.value) return false // W3-2a: nested branch actions must be executable, not executor-failing shells
-  if (!draft.value.conditions.conditions.every(areConditionsComplete)) return false
-  for (const action of draft.value.actions) {
+// G-B2-22: per-action data needed by saveBlockReasons, captured as plain snapshots (counts + raw
+// template strings, not pre-combined booleans) so the AND/OR/negation for "is this action
+// configured" lives in computeSaveBlockReasons (automationSaveBlockReasons.ts) — the one place
+// that can be unit-tested without this 3000+ line component. The parsing calls themselves
+// (parseGroupDestinationIds etc.) stay here unchanged: this is exactly what canSave read before,
+// just captured instead of immediately branching on it.
+const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
+  return draft.value.actions.map((action, index) => {
+    const snapshot: SaveBlockActionSnapshot = { index, type: action.type }
     if (action.type === 'send_dingtalk_group_message') {
       const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
       const destinationFieldPaths = parseRecipientFieldPathsText(action.config.destinationFieldPath)
-      const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
-      const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if ((!destinationIds.length && !destinationFieldPaths.length) || !titleTemplate || !bodyTemplate) return false
-      if (publicFormLinkBlockingErrors(action.config.publicFormViewId).length) return false
-      if (internalViewLinkBlockingErrors(action.config.internalViewId).length) return false
+      snapshot.groupMessage = {
+        destinationIdCount: destinationIds.length,
+        destinationFieldPathCount: destinationFieldPaths.length,
+        titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate : '',
+        bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate : '',
+        publicFormBlockingErrorCount: publicFormLinkBlockingErrors(action.config.publicFormViewId).length,
+        internalViewBlockingErrorCount: internalViewLinkBlockingErrors(action.config.internalViewId).length,
+      }
     }
     if (action.type === 'send_dingtalk_person_message') {
       const userIds = parseUserIdsText(action.config.userIdsText)
       const memberGroupIds = parseMemberGroupIdsText(action.config.memberGroupIdsText)
       const recipientFieldPaths = parseRecipientFieldPathsText(action.config.recipientFieldPath)
       const memberGroupRecipientFieldPaths = parseRecipientFieldPathsText(action.config.memberGroupRecipientFieldPath)
-      const titleTemplate = typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate.trim() : ''
-      const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if ((!userIds.length && !memberGroupIds.length && !recipientFieldPaths.length && !memberGroupRecipientFieldPaths.length) || !titleTemplate || !bodyTemplate) return false
-      if (publicFormLinkBlockingErrors(action.config.publicFormViewId).length) return false
-      if (internalViewLinkBlockingErrors(action.config.internalViewId).length) return false
+      snapshot.personMessage = {
+        userIdCount: userIds.length,
+        memberGroupIdCount: memberGroupIds.length,
+        recipientFieldPathCount: recipientFieldPaths.length,
+        memberGroupRecipientFieldPathCount: memberGroupRecipientFieldPaths.length,
+        titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate : '',
+        bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate : '',
+        publicFormBlockingErrorCount: publicFormLinkBlockingErrors(action.config.publicFormViewId).length,
+        internalViewBlockingErrorCount: internalViewLinkBlockingErrors(action.config.internalViewId).length,
+      }
     }
     if (action.type === 'send_email') {
       const recipients = parseEmailRecipientsText(action.config.recipientsText)
-      const subjectTemplate = typeof action.config.subjectTemplate === 'string' ? action.config.subjectTemplate.trim() : ''
-      const bodyTemplate = typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate.trim() : ''
-      if (!recipients.length || !subjectTemplate || !bodyTemplate) return false
+      snapshot.email = {
+        recipientCount: recipients.length,
+        subjectTemplate: typeof action.config.subjectTemplate === 'string' ? action.config.subjectTemplate : '',
+        bodyTemplate: typeof action.config.bodyTemplate === 'string' ? action.config.bodyTemplate : '',
+      }
     }
-    if (action.type === 'delete_record' && !isDeleteRecordAcknowledged(action)) return false
-  }
-  return true
+    if (action.type === 'delete_record') {
+      snapshot.deleteRecord = { acknowledged: isDeleteRecordAcknowledged(action) }
+    }
+    return snapshot
+  })
 })
+
+// G-B2-22: locates the first entry collectConditionEditorEntries would flag as incomplete, in the
+// same depth-first order areConditionsComplete's recursive `.every()` short-circuits on — so this
+// always names the same condition/group the boolean check would have failed on first.
+const firstIncompleteConditionAnchor = computed<string | undefined>(() => {
+  for (const entry of conditionEditorEntries.value) {
+    if (entry.kind === 'group') {
+      if (entry.group.conditions.length === 0) return `[data-condition-group-path="${entry.pathKey}"]`
+      continue
+    }
+    if (!isConditionLeafComplete(entry.condition)) return `[data-condition-path="${entry.pathKey}"]`
+  }
+  return undefined
+})
+
+// G-B2-22: saveBlockReasons is the single source of truth for "why can't I save" — canSave is
+// derived from it below so the button's disabled state and the reasons shown to the author can
+// never disagree. See automationSaveBlockReasons.ts for the aggregation itself; every condition
+// here is the exact condition the old canSave silently checked (kept in the same order).
+const saveBlockReasons = computed<SaveBlockReason[]>(() => {
+  const secret = typeof draft.value.triggerConfig.secret === 'string' ? draft.value.triggerConfig.secret.trim() : ''
+  return computeSaveBlockReasons({
+    isZh: isZh.value,
+    name: draft.value.name,
+    actionsCount: draft.value.actions.length,
+    triggerType: draft.value.triggerType,
+    // T1-3: mirror the backend save gate (templateId / no-conditions / notification-only actions).
+    approvalCompletedBlockReason: approvalCompletedBlockReason.value,
+    approvalTaskCreatedBlockReason: approvalTaskCreatedBlockReason.value,
+    // T1-2: a signing secret is required; an existing rule with a stored (redacted-on-read) secret
+    // may leave the field blank to keep it.
+    webhookSecretPresent: !!secret,
+    ruleHasId: !!props.rule?.id,
+    savedWebhookSecretConfigured: savedWebhookSecretConfigured.value,
+    conditionBranchReadOnlyReason: conditionBranchReadOnlyReason.value, // A6-3-2a #3: never save a non-round-trippable loaded branch
+    conditionBranchKeyError: conditionBranchKeyError.value, // A6-3-2a #1: branch key safe/unique mirror
+    parallelBranchReadOnlyReason: parallelBranchReadOnlyReason.value, // A6-3-4/W3-2a: never save a non-round-trippable loaded join
+    parallelBranchKeyError: parallelBranchKeyError.value, // W3-2a: frontend mirror of backend branch bounds/keys
+    parallelBranchActionError: parallelBranchActionError.value, // W3-2a: nested branch actions must be executable, not executor-failing shells
+    conditionsComplete: draft.value.conditions.conditions.every(areConditionsComplete),
+    firstIncompleteConditionAnchor: firstIncompleteConditionAnchor.value,
+    actions: saveBlockActionSnapshots.value,
+  })
+})
+
+const canSave = computed(() => saveBlockReasons.value.length === 0)
+
+// G-B2-22: click-to-scroll for a save-block reason. Scoped to this drawer's own body so it can
+// never jump to a same-named element in some other open surface. A reason without an anchor (see
+// automationSaveBlockReasons.ts) is a no-op here rather than a guess.
+function scrollToSaveBlockAnchor(anchor?: string): void {
+  if (!anchor) return
+  const target = editorBodyRef.value?.querySelector(anchor)
+  if (target instanceof HTMLElement) target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
 
 function addCondition() {
   addConditionToGroup([])
@@ -3706,5 +3814,48 @@ async function onTestRun(): Promise<void> {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* G-B2-22: reuses the same danger-alert coloring as .meta-rule-editor__error above. */
+.meta-rule-editor__save-block-alert {
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger-dark-2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.meta-rule-editor__save-block-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.meta-rule-editor__save-block-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.meta-rule-editor__save-block-reason {
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  font-size: 12px;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.meta-rule-editor__save-block-reason:disabled {
+  cursor: default;
+  text-decoration: none;
+  opacity: 0.85;
 }
 </style>
