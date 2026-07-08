@@ -34,3 +34,11 @@
 ## 4. R5b 追记(2026-07-07)
 
 §2 中 NIT-a(ResetToPointPicker 英文-only)原判「记录不修」,复判为**纪律归位**:strict-zero 收线后的规则是未来 UI 字符串一律进 typed label 模块,该组件生于收线之后,属规则内新债而非既有债扩展。R5b 微切片将其全部可见字符串收编 `meta-record-labels.ts`(`record.resetPicker*` 命名空间 + `resetPickerRecordCount` 插值 helper)并补 zh;EN 渲染逐字节保形(7 分支 before/after DOM diff 为空),flag(PIT_RESET)休眠零线上风险。
+
+## 5. R5c 追记(2026-07-07)— 本线 strict-zero 穷尽的最后一件
+
+`ResetToPointPicker.vue` 的姊妹组件 `ResetConfirmDialog.vue`(同为 T8-2、同为收线后新生)此前未被 R5b 覆盖。R5c 微切片将其全部硬编码英文字符串(入口按钮 · 对话框 aria-label/标题/关闭按钮 · loading/结果/View-in-Trash · 7 条 `errorCopy` 错误分支 · 非破坏性 revert-等价路径 · 破坏性警告段落含 3 处内联加粗词 · ack 勾选文案 · 输入 `reset` 确认标签/aria-label · 破坏性确认按钮)收编进 `meta-record-labels.ts`:19 个 `record.resetConfirm*` 静态 key + 10 个 asOf/count 插值 helper(`resetConfirmEntryLabel`/`resetConfirmTitle`/`resetConfirmResultSummary`/`resetConfirmRevertEquivIntro`/`resetConfirmRevertButtonLabel`/`resetConfirmDestructiveButtonLabel`/`resetConfirmAckLabel`/`resetConfirmWarnRevertsAt`/`resetConfirmWarnDeleteClause`/`resetConfirmWarnAfterNot`),并补 zh。服务端权威确认字面 `reset`(输入框 + 400 错误文案内嵌)两侧均保持不译。
+
+EN 渲染逐字节保形:改前(现 main 状态)/改后各 17 分支(entry/dialog-chrome/destructive-warn/ack/type/btn/loading/result/revert-equiv×2/7 条 error)DOM 快照 diff 为空(`outerHTML`,归一化 `data-v-*` 编译期哈希后比对)。既有 6 条 spec 零改动全绿 + 补 2 条 zh golden(entry/chrome/destructive 全链路 + revert-equiv/result/7 错误分支)。`vue-tsc -b` 干净;multitable-web-guard 全矩阵本地跑 49 files / 515 tests 绿(511 R5 基线 + R5b 已并入的 2 + 本轮新增 2)。
+
+**strict-zero 穷尽声明:** 对 reset/restore/history/tombstone 相关全部组件(`HistoryBatchChangesList.vue`/`HistoryCenterModal.vue`/`MetaConfigHistoryModal.vue`/`RestoreBatchDialog.vue`/`RestorePreviewDialog.vue`/`TrashModal.vue`/`ResetToPointPicker.vue`/`ResetConfirmDialog.vue`)做静态扫描(aria-label 计入、data-test 不计入),ResetConfirmDialog.vue 收编前为本线最后一处残留;收编后全线**零**残留硬编码用户可见英文串(其余组件此前已各自收口于 `t()`/`l()`/`recordLabel`)。本线(reset/restore/history/tombstone)strict-zero 收编至此穷尽。
