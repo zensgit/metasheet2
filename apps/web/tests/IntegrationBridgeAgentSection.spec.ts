@@ -699,12 +699,6 @@ describe('IntegrationBridgeAgentSection', () => {
   })
 
   it('suggestion builder: typing an object + field names generates the values-free copyable text, including the target-instance name', async () => {
-  // --- BA-UI-4 (docs/development/bridge-agent-admin-page-design-lock-20260707.md §3 BA-UI-4): a
-  // READ-ONLY "scheduled task status" guidance card. First version per lock: no start/stop, no
-  // local-config write, no new backend route — static deployment-convention guidance + a relabeled
-  // BA-UI-2 probe outcome (coarse PASS/FAIL/未探测 only, never the per-step failure detail).
-
-  it('task status: renders the managed-by-scheduled-task guidance and the start/stop pointer, with ZERO control elements', async () => {
     mockRoutes()
     const system = bridgeSystem()
     const root = mountSection([system])
@@ -833,23 +827,27 @@ describe('IntegrationBridgeAgentSection', () => {
   })
 
   it('zh copy: config-check card + suggestion builder render Chinese labels under zh-CN', async () => {
-    const card = q<HTMLDivElement>(root, `bridge-agent-task-status-${system.id}`)
-    const managed = q(root, `bridge-agent-task-managed-${system.id}`)
-    const guidance = q(root, `bridge-agent-task-guidance-${system.id}`)
+    const { setLocale } = useLocale()
+    setLocale('zh-CN')
+    try {
+      mockRoutes()
+      const system = bridgeSystem()
+      const root = mountSection([system])
+      await flushUi()
 
-    expect(managed.textContent).toMatch(/Windows Scheduled Task/i)
-    expect(guidance.textContent).toMatch(/runbook/i)
-    expect(guidance.textContent).toMatch(/no start\/stop/i)
+      expect(root.textContent).toContain('配置校验')
+      expect(q(root, 'bridge-agent-config-check-item-label-authMode').textContent).toContain('未显式声明')
+      expect(root.textContent).toContain('变更建议 / 实施清单')
 
-    // Hard bound: no control of any kind lives inside THIS card (scoped query — the sibling "Check
-    // connection" / "One-click probe" buttons live earlier in the same per-system card and must not
-    // be mistaken for a control belonging to the task-status surface).
-    expect(card.querySelectorAll('button, input[type="button"], input[type="submit"]').length).toBe(0)
-    // Belt-and-braces: no start/stop-shaped testid anywhere in the whole rendered tree.
-    expect(root.querySelector(`[data-testid="bridge-agent-task-start-${system.id}"]`)).toBeNull()
-    expect(root.querySelector(`[data-testid="bridge-agent-task-stop-${system.id}"]`)).toBeNull()
-    expect(root.querySelector('[data-testid*="task-start"]')).toBeNull()
-    expect(root.querySelector('[data-testid*="task-stop"]')).toBeNull()
+      const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+      objectInput.value = 'material_extra'
+      objectInput.dispatchEvent(new Event('input'))
+      await flushUi()
+      const text = q<HTMLTextAreaElement>(root, 'bridge-agent-suggestion-text')
+      expect(text.value).toContain('1. 对象：material_extra')
+    } finally {
+      setLocale('en')
+    }
   })
 
   it('task status: last-check reads 未探测/"Not probed yet" before any probe has run', async () => {
@@ -861,20 +859,6 @@ describe('IntegrationBridgeAgentSection', () => {
     const lastCheck = q(root, `bridge-agent-task-last-check-${system.id}`)
     expect(lastCheck.getAttribute('data-result')).toBe('unknown')
     expect(lastCheck.textContent).toMatch(/not probed yet/i)
-  })
-
-  it('task status: last-check reflects PASS after a successful BA-UI-2 probe run', async () => {
-    mockRoutes()
-    const system = bridgeSystem()
-    const root = mountSection([system])
-    await flushUi()
-
-    q<HTMLButtonElement>(root, `bridge-agent-probe-${system.id}`).click()
-    await flushUi()
-
-    const lastCheck = q(root, `bridge-agent-task-last-check-${system.id}`)
-    expect(lastCheck.getAttribute('data-result')).toBe('pass')
-    expect(lastCheck.textContent).toContain('PASS')
   })
 
   it('task status: last-check reflects FAIL after a failed probe, COARSE ONLY (never names the failed step)', async () => {
@@ -892,6 +876,45 @@ describe('IntegrationBridgeAgentSection', () => {
     expect(lastCheck.getAttribute('data-result')).toBe('fail')
     expect(lastCheck.textContent).toContain('FAIL')
     expect(lastCheck.textContent).not.toMatch(/objects/i)
+  })
+
+  it('task status: last-check reflects PASS after a successful BA-UI-2 probe run', async () => {
+    mockRoutes()
+    const system = bridgeSystem()
+    const root = mountSection([system])
+    await flushUi()
+
+    q<HTMLButtonElement>(root, `bridge-agent-probe-${system.id}`).click()
+    await flushUi()
+
+    const lastCheck = q(root, `bridge-agent-task-last-check-${system.id}`)
+    expect(lastCheck.getAttribute('data-result')).toBe('pass')
+    expect(lastCheck.textContent).toContain('PASS')
+  })
+
+  it('task status: renders the managed-by-scheduled-task guidance and the start/stop pointer, with ZERO control elements', async () => {
+    mockRoutes()
+    const system = bridgeSystem()
+    const root = mountSection([system])
+    await flushUi()
+
+    const card = q<HTMLDivElement>(root, `bridge-agent-task-status-${system.id}`)
+    const managed = q(root, `bridge-agent-task-managed-${system.id}`)
+    const guidance = q(root, `bridge-agent-task-guidance-${system.id}`)
+
+    expect(managed.textContent).toMatch(/Windows Scheduled Task/i)
+    expect(guidance.textContent).toMatch(/runbook/i)
+    expect(guidance.textContent).toMatch(/no start\/stop/i)
+
+    // Hard bound: no control of any kind lives inside THIS card (scoped query — the sibling "Check
+    // connection" / "One-click probe" buttons live earlier in the same per-system card and must not
+    // be mistaken for a control belonging to the task-status surface).
+    expect(card.querySelectorAll('button, input[type="button"], input[type="submit"]').length).toBe(0)
+    // Belt-and-braces: no start/stop-shaped testid anywhere in the whole rendered tree.
+    expect(root.querySelector(`[data-testid="bridge-agent-task-start-${system.id}"]`)).toBeNull()
+    expect(root.querySelector(`[data-testid="bridge-agent-task-stop-${system.id}"]`)).toBeNull()
+    expect(root.querySelector('[data-testid*="task-start"]')).toBeNull()
+    expect(root.querySelector('[data-testid*="task-stop"]')).toBeNull()
   })
 
   it('task status: SENTINEL — no host/path/secret from mocked system/probe state ever reaches this card, success or failure', async () => {
@@ -936,16 +959,6 @@ describe('IntegrationBridgeAgentSection', () => {
       const root = mountSection([system])
       await flushUi()
 
-      expect(root.textContent).toContain('配置校验')
-      expect(q(root, 'bridge-agent-config-check-item-label-authMode').textContent).toContain('未显式声明')
-      expect(root.textContent).toContain('变更建议 / 实施清单')
-
-      const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
-      objectInput.value = 'material_extra'
-      objectInput.dispatchEvent(new Event('input'))
-      await flushUi()
-      const text = q<HTMLTextAreaElement>(root, 'bridge-agent-suggestion-text')
-      expect(text.value).toContain('1. 对象：material_extra')
       expect(q(root, `bridge-agent-task-managed-${system.id}`).textContent).toContain('计划任务')
       expect(q(root, `bridge-agent-task-guidance-${system.id}`).textContent).toContain('runbook')
       expect(q(root, `bridge-agent-task-last-check-${system.id}`).textContent).toContain('未探测')
