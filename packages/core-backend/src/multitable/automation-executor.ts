@@ -41,6 +41,10 @@ import {
   normalizeDingTalkRobotWebhookUrl,
   validateDingTalkRobotResponse,
 } from '../integrations/dingtalk/robot'
+import {
+  decryptDingTalkDestinationSecret,
+  decryptDingTalkDestinationWebhookUrl,
+} from './dingtalk-group-destinations'
 import type {
   AutomationAction,
   AutomationActionType,
@@ -3438,9 +3442,14 @@ export class AutomationExecutor {
 
     for (const destination of orderedDestinations) {
       try {
+        // DT-HARDEN-03: destinations are stored encrypted; decrypt before URL
+        // validation and HMAC signing. Reading the raw column here would feed an
+        // `enc:` blob to normalizeDingTalkRobotWebhookUrl and fail every send.
         runtimeWebhookByDestinationId.set(destination.id, {
-          webhookUrl: normalizeDingTalkRobotWebhookUrl(destination.webhook_url),
-          secret: normalizeDingTalkRobotSecret(destination.secret ?? undefined),
+          webhookUrl: normalizeDingTalkRobotWebhookUrl(
+            decryptDingTalkDestinationWebhookUrl(destination.webhook_url),
+          ),
+          secret: normalizeDingTalkRobotSecret(decryptDingTalkDestinationSecret(destination.secret)),
         })
       } catch (err) {
         failedDestinations.push({

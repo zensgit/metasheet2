@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { Kysely } from 'kysely'
 import type { Database } from '../../src/db/types'
 import { DingTalkGroupDestinationService } from '../../src/multitable/dingtalk-group-destination-service'
+import { decryptStoredSecretValue, isEncryptedSecretValue } from '../../src/security/encrypted-secrets'
 
 let executeQueue: unknown[]
 let executeTakeFirstQueue: unknown[]
@@ -123,7 +124,17 @@ describe('DingTalkGroupDestinationService', () => {
     expect(created.sheetId).toBe('sheet_1')
     const insertChain = roots.insertInto.mock.results[0]?.value as MockChain | undefined
     const values = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
-    expect(values?.secret).toBe('SEC123')
+    // DT-HARDEN-03: credentials are persisted encrypted, never as plain text. The
+    // returned domain object still carries plaintext (asserted above) so signing and
+    // sending keep working.
+    expect(isEncryptedSecretValue(values?.secret)).toBe(true)
+    expect(values?.secret).not.toBe('SEC123')
+    expect(decryptStoredSecretValue(values?.secret as string)).toBe('SEC123')
+    expect(isEncryptedSecretValue(values?.webhook_url)).toBe(true)
+    expect(String(values?.webhook_url)).not.toContain('test-token')
+    expect(decryptStoredSecretValue(values?.webhook_url as string)).toBe(
+      'https://oapi.dingtalk.com/robot/send?access_token=test-token',
+    )
     expect(values?.org_id).toBeNull()
 
     executeQueue.push([destinationRow({ sheet_id: 'sheet_1' }), destinationRow({ id: 'dt_legacy', sheet_id: null })])
