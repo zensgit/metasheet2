@@ -73,6 +73,8 @@ export interface DingTalkWorkNotificationResult {
 
 interface DingTalkRequestOptions {
   fetchFn?: typeof fetch
+  /** Override the default per-request timeout (DT-HARDEN-06). */
+  timeoutMs?: number
 }
 
 export interface DingTalkDepartment {
@@ -191,13 +193,55 @@ async function readJson(response: Response): Promise<Record<string, unknown> | n
   }
 }
 
+/**
+ * DT-HARDEN-06: every DingTalk call that is not the group-robot webhook goes through
+ * here — gettoken, directory sync, work notifications, approval cards, container
+ * login. They used a naked `fetch` with no timeout, so a hung connection blocked an
+ * inline automation execution or a whole directory sync for as long as undici's
+ * default (~300s). Bound them, and surface the timeout as a typed operational error
+ * so callers record a failed run/delivery instead of hanging.
+ */
+export const DINGTALK_REQUEST_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.DINGTALK_REQUEST_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 10_000
+})()
+
+export class DingTalkTimeoutError extends Error {
+  readonly timeoutMs: number
+
+  constructor(timeoutMs: number) {
+    super(`DingTalk request timed out after ${timeoutMs}ms`)
+    this.name = 'DingTalkTimeoutError'
+    this.timeoutMs = timeoutMs
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')
+}
+
 async function requestDingTalkJson(
   input: string,
   init: RequestInit,
   fallbackError: string,
   options?: DingTalkRequestOptions,
 ): Promise<Record<string, unknown>> {
-  const response = await (options?.fetchFn ?? fetch)(input, init)
+  const timeoutMs = options?.timeoutMs ?? DINGTALK_REQUEST_TIMEOUT_MS
+  let response: Response
+  try {
+    response = await (options?.fetchFn ?? fetch)(input, {
+      ...init,
+      // Spread first: an explicit `signal: undefined` in `init` would otherwise
+      // clobber the timeout. A caller-supplied signal still wins.
+      signal: init.signal ?? AbortSignal.timeout(timeoutMs),
+    })
+  } catch (error) {
+    if (isAbortError(error)) {
+      logger.warn(`DingTalk request timed out after ${timeoutMs}ms`)
+      throw new DingTalkTimeoutError(timeoutMs)
+    }
+    throw error
+  }
   const payload = await readJson(response)
 
   if (!response.ok) {
