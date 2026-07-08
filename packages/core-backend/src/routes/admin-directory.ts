@@ -3,6 +3,7 @@ import { Router } from 'express'
 import { auditLog } from '../audit/audit'
 import { Logger } from '../core/logger'
 import {
+  DirectorySyncInProgressError,
   acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser,
   batchAdmitDirectoryAccountUsers,
@@ -329,6 +330,12 @@ export function adminDirectoryRouter(): Router {
       const result = await syncDirectoryIntegration(req.params.integrationId, adminUserId)
       jsonOk(res, result)
     } catch (error) {
+      // DT-HARDEN-05: another sync already holds the lease. Return the active run so the
+      // admin UI can jump straight to it instead of re-triggering a duplicate API pull.
+      if (error instanceof DirectorySyncInProgressError) {
+        jsonError(res, error.statusCode, error.code, error.message, { activeRunId: error.activeRunId })
+        return
+      }
       const message = readErrorMessage(error, 'Failed to sync directory integration')
       jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
     }

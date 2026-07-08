@@ -2682,6 +2682,107 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
   }
 }
 
+/**
+ * DT-HARDEN-05 — how long a `running` run row may sit before another caller may assume
+ * its owner died and reclaim the lease. Deliberately generous: a large-tenant sync is
+ * a long serial walk over the DingTalk directory API.
+ */
+export const DIRECTORY_SYNC_LEASE_TTL_MINUTES = (() => {
+  const raw = Number(process.env.DIRECTORY_SYNC_LEASE_TTL_MINUTES)
+  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 120
+})()
+
+/** Thrown when another sync already holds the lease for this integration. */
+export class DirectorySyncInProgressError extends Error {
+  readonly statusCode = 409
+  readonly code = 'DIRECTORY_SYNC_IN_PROGRESS'
+  readonly activeRunId: string | null
+
+  constructor(activeRunId: string | null) {
+    super(
+      activeRunId
+        ? `A directory sync is already running for this integration (run ${activeRunId})`
+        : 'A directory sync is already running for this integration',
+    )
+    this.name = 'DirectorySyncInProgressError'
+    this.activeRunId = activeRunId
+  }
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '23505'
+}
+
+/**
+ * Close out `running` rows whose owner is gone (crash, redeploy, killed pod). Without
+ * this a single crash would wedge the integration behind a lease nobody holds.
+ * Exported so the scheduler can sweep once at boot rather than waiting for the next
+ * manual trigger to unstick it.
+ */
+export async function reclaimStaleDirectorySyncRuns(integrationId?: string): Promise<number> {
+  const params: unknown[] = [DIRECTORY_SYNC_LEASE_TTL_MINUTES]
+  let scope = ''
+  if (integrationId && normalizeText(integrationId)) {
+    params.push(normalizeText(integrationId))
+    scope = ` AND integration_id = $${params.length}`
+  }
+
+  const result = await query<{ id: string }>(
+    `UPDATE directory_sync_runs
+        SET status = 'failed',
+            finished_at = NOW(),
+            error_message = COALESCE(error_message, 'orphaned: sync lease expired'),
+            updated_at = NOW()
+      WHERE status = 'running'
+        AND started_at < NOW() - ($1::int * INTERVAL '1 minute')${scope}
+      RETURNING id`,
+    params,
+  )
+  if (result.rows.length > 0) {
+    logger.warn(`Reclaimed ${result.rows.length} stale directory sync run(s)`)
+  }
+  return result.rows.length
+}
+
+async function findActiveDirectorySyncRunId(integrationId: string): Promise<string | null> {
+  const result = await query<{ id: string }>(
+    `SELECT id
+       FROM directory_sync_runs
+      WHERE integration_id = $1 AND status = 'running'
+      ORDER BY started_at DESC
+      LIMIT 1`,
+    [integrationId],
+  )
+  return result.rows[0]?.id ?? null
+}
+
+/**
+ * Atomic lease claim: the partial unique index on (integration_id) WHERE status='running'
+ * makes a concurrent second claim a unique violation, so exactly one caller proceeds.
+ * A plain "SELECT then INSERT" check would race under READ COMMITTED.
+ */
+async function claimDirectorySyncRun(
+  integrationId: string,
+  triggeredBy: string,
+  triggerSource: 'manual' | 'scheduler',
+): Promise<{ rows: DirectoryRunRow[] }> {
+  try {
+    return await query<DirectoryRunRow>(
+      `INSERT INTO directory_sync_runs (
+         integration_id, status, started_at, stats, meta, triggered_by, trigger_source, created_at, updated_at
+       )
+       VALUES ($1, 'running', NOW(), '{}'::jsonb, '{}'::jsonb, $2, $3, NOW(), NOW())
+       RETURNING id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at`,
+      [integrationId, triggeredBy, triggerSource],
+    )
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw new DirectorySyncInProgressError(await findActiveDirectorySyncRunId(integrationId))
+    }
+    throw error
+  }
+}
+
 export async function syncDirectoryIntegration(
   integrationId: string,
   triggeredBy: string,
@@ -2703,14 +2804,12 @@ export async function syncDirectoryIntegration(
 
   const config = parseIntegrationConfig(integration)
   let deprovisionOutcome: DirectoryDeprovisionOutcome | null = null
-  const runResult = await query<DirectoryRunRow>(
-    `INSERT INTO directory_sync_runs (
-       integration_id, status, started_at, stats, meta, triggered_by, trigger_source, created_at, updated_at
-     )
-     VALUES ($1, 'running', NOW(), '{}'::jsonb, '{}'::jsonb, $2, $3, NOW(), NOW())
-     RETURNING id, integration_id, status, started_at, finished_at, stats, error_message, triggered_by, trigger_source, created_at, updated_at`,
-    [integrationId, triggeredBy, triggerSource],
-  )
+  // DT-HARDEN-05: claim the run lease BEFORE the first DingTalk call. The API pull that
+  // follows is the expensive, quota-consuming part; a transaction-scoped lock around the
+  // later apply would not protect it. Expired leases are reclaimed first so a crashed
+  // run cannot wedge an integration forever.
+  await reclaimStaleDirectorySyncRuns(integrationId)
+  const runResult = await claimDirectorySyncRun(integrationId, triggeredBy, triggerSource)
   const runId = runResult.rows[0].id
   hooks.onRunStarted?.(runId)
 
