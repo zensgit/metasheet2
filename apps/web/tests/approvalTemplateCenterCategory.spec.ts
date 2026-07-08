@@ -317,6 +317,21 @@ const ElIcon = defineComponent({
   },
 })
 
+// G-B2-17 — this spec always mocks canManageTemplates=true (admin table path), so the
+// !canManageTemplates gallery branch (which uses <el-card>) never actually renders here. The
+// stub is registered anyway so Vue doesn't warn about an unresolved component while resolving
+// the template's compiled component list.
+const ElCard = defineComponent({
+  name: 'ElCard',
+  props: { shadow: String },
+  render() {
+    return h('div', { class: 'el-card' }, [
+      this.$slots.header ? h('div', { class: 'el-card__header' }, this.$slots.header()) : null,
+      h('div', { class: 'el-card__body' }, this.$slots.default?.()),
+    ])
+  },
+})
+
 const stubDirective = { mounted() {}, updated() {} }
 
 async function flushUi(cycles = 4): Promise<void> {
@@ -408,6 +423,7 @@ describe('TemplateCenterView — WP4 slice 1 category filter + clone', () => {
     app.component('ElEmpty', ElEmpty)
     app.component('ElTooltip', ElTooltip)
     app.component('ElIcon', ElIcon)
+    app.component('ElCard', ElCard)
     app.directive('loading', stubDirective)
     app.mount(container!)
     await flushUi()
