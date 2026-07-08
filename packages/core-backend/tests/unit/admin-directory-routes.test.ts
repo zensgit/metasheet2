@@ -1066,7 +1066,7 @@ describe('adminDirectoryRouter', () => {
   })
 
   it('batch binds directory accounts', async () => {
-    directoryMocks.batchBindDirectoryAccounts.mockResolvedValue([
+    directoryMocks.batchBindDirectoryAccounts.mockResolvedValue({ failed: [], succeeded: [
       {
         account: {
           id: 'account-1',
@@ -1093,7 +1093,7 @@ describe('adminDirectoryRouter', () => {
         },
         previousLocalUser: null,
       },
-    ])
+    ] })
 
     const response = await invokeRoute('post', '/accounts/batch-bind', {
       body: {
@@ -1140,6 +1140,89 @@ describe('adminDirectoryRouter', () => {
     })
   })
 
+  // DT-HARDEN-04: the batch used to fail fast. Items already COMMITTED never got their
+  // audit entry (the route audited only after the whole batch returned) and the caller
+  // got one error instead of per-item results.
+  it('audits committed items and reports per-item failures when part of a batch-bind fails', async () => {
+    directoryMocks.batchBindDirectoryAccounts.mockResolvedValue({
+      succeeded: [
+        {
+          account: { id: 'account-1', integrationId: 'dir-1', corpId: 'dingcorp', externalUserId: 'ext-1', localUser: { id: 'u1', email: 'alpha@example.com' } },
+          previousLocalUser: null,
+        },
+      ],
+      failed: [{ accountId: 'account-2', error: 'DingTalk account is already bound to another local user' }],
+    })
+
+    const response = await invokeRoute('post', '/accounts/batch-bind', {
+      body: {
+        bindings: [
+          { accountId: 'account-1', localUserRef: 'alpha@example.com' },
+          { accountId: 'account-2', localUserRef: 'beta@example.com' },
+        ],
+      },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    // Partial failure is a normal batch result, not a total HTTP failure.
+    expect(response.statusCode).toBe(200)
+    // The load-bearing assertion: the committed item still produced an audit entry.
+    expect(auditMocks.auditLog).toHaveBeenCalledTimes(1)
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'bind',
+      resourceId: 'account-1',
+    }))
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        items: [{ id: 'account-1' }],
+        updatedCount: 1,
+        failedCount: 1,
+        failed: [{ accountId: 'account-2', error: expect.stringContaining('already bound') }],
+      },
+    })
+  })
+
+  it('keeps the historical error mapping when a batch-bind commits nothing', async () => {
+    directoryMocks.batchBindDirectoryAccounts.mockResolvedValue({
+      succeeded: [],
+      failed: [{ accountId: 'account-1', error: 'DingTalk account is already bound to another local user' }],
+    })
+
+    const response = await invokeRoute('post', '/accounts/batch-bind', {
+      body: { bindings: [{ accountId: 'account-1', localUserRef: 'alpha@example.com' }] },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('audits committed items when part of a batch-unbind fails', async () => {
+    directoryMocks.batchUnbindDirectoryAccounts.mockResolvedValue({
+      succeeded: [
+        {
+          account: { id: 'account-1', integrationId: 'dir-1', corpId: 'dingcorp', externalUserId: 'ext-1', localUser: null },
+          previousLocalUser: { id: 'u1', email: 'alpha@example.com', name: 'Alpha' },
+        },
+      ],
+      failed: [{ accountId: 'account-2', error: 'Directory account not found' }],
+    })
+
+    const response = await invokeRoute('post', '/accounts/batch-unbind', {
+      body: { accountIds: ['account-1', 'account-2'] },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(auditMocks.auditLog).toHaveBeenCalledTimes(1)
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({ action: 'unbind', resourceId: 'account-1' }))
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: { updatedCount: 1, failedCount: 1, failed: [{ accountId: 'account-2' }] },
+    })
+  })
+
   it('unbinds a directory account', async () => {
     directoryMocks.unbindDirectoryAccount.mockResolvedValue({
       account: {
@@ -1178,7 +1261,7 @@ describe('adminDirectoryRouter', () => {
   })
 
   it('batch unbinds directory accounts', async () => {
-    directoryMocks.batchUnbindDirectoryAccounts.mockResolvedValue([
+    directoryMocks.batchUnbindDirectoryAccounts.mockResolvedValue({ failed: [], succeeded: [
       {
         account: {
           id: 'account-1',
@@ -1207,7 +1290,7 @@ describe('adminDirectoryRouter', () => {
           name: 'Beta',
         },
       },
-    ])
+    ] })
 
     const response = await invokeRoute('post', '/accounts/batch-unbind', {
       body: {

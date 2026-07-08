@@ -3261,24 +3261,46 @@ export async function getDirectoryReviewItem(
   return summarizeReviewItem(row, recommendationsByAccount.get(row.directory_account_id) ?? null)
 }
 
+/**
+ * DT-HARDEN-04: batch bind/unbind commit one account per transaction. A fail-fast loop
+ * threw on the first bad item, so the caller never learned which items had already
+ * COMMITTED — and the route, which wrote its audit entries only after the whole batch
+ * returned, silently dropped the audit trail for every one of them. Compliance gap.
+ *
+ * Each item is now isolated: a failure is a per-item outcome, never a lost success.
+ * Partial failure is a normal batch result, so callers can audit every success and
+ * report exactly which items failed and why.
+ */
+export type DirectoryAccountBatchOutcome = {
+  succeeded: DirectoryAccountMutationResult[]
+  failed: Array<{ accountId: string; error: string }>
+}
+
 export async function batchUnbindDirectoryAccounts(
   directoryAccountIds: string[],
   input: DirectoryAccountUnbindInput,
-): Promise<DirectoryAccountMutationResult[]> {
+): Promise<DirectoryAccountBatchOutcome> {
   const normalizedIds = Array.from(new Set(directoryAccountIds.map((item) => normalizeText(item)).filter(Boolean)))
   if (normalizedIds.length === 0) throw new Error('accountIds are required')
 
-  const results: DirectoryAccountMutationResult[] = []
+  const outcome: DirectoryAccountBatchOutcome = { succeeded: [], failed: [] }
   for (const directoryAccountId of normalizedIds) {
-    results.push(await unbindDirectoryAccount(directoryAccountId, input))
+    try {
+      outcome.succeeded.push(await unbindDirectoryAccount(directoryAccountId, input))
+    } catch (error) {
+      outcome.failed.push({
+        accountId: directoryAccountId,
+        error: readErrorMessage(error, 'Failed to unbind directory account'),
+      })
+    }
   }
-  return results
+  return outcome
 }
 
 export async function batchBindDirectoryAccounts(
   entries: DirectoryAccountBatchBindEntry[],
   input: { adminUserId: string },
-): Promise<DirectoryAccountMutationResult[]> {
+): Promise<DirectoryAccountBatchOutcome> {
   const normalizedEntries = entries
     .map((entry) => ({
       accountId: normalizeText(entry.accountId),
@@ -3289,15 +3311,23 @@ export async function batchBindDirectoryAccounts(
 
   if (normalizedEntries.length === 0) throw new Error('bindings are required')
 
-  const results: DirectoryAccountMutationResult[] = []
+  // DT-HARDEN-04: per-item isolation — see DirectoryAccountBatchOutcome.
+  const outcome: DirectoryAccountBatchOutcome = { succeeded: [], failed: [] }
   for (const entry of normalizedEntries) {
-    results.push(await bindDirectoryAccount(entry.accountId, {
-      localUserRef: entry.localUserRef,
-      adminUserId: input.adminUserId,
-      enableDingTalkGrant: entry.enableDingTalkGrant,
-    }))
+    try {
+      outcome.succeeded.push(await bindDirectoryAccount(entry.accountId, {
+        localUserRef: entry.localUserRef,
+        adminUserId: input.adminUserId,
+        enableDingTalkGrant: entry.enableDingTalkGrant,
+      }))
+    } catch (error) {
+      outcome.failed.push({
+        accountId: entry.accountId,
+        error: readErrorMessage(error, 'Failed to bind directory account'),
+      })
+    }
   }
-  return results
+  return outcome
 }
 
 async function applyDirectoryAccountBindInTransaction(
