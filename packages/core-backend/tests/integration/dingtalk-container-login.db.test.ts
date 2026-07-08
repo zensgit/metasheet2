@@ -146,6 +146,8 @@ describeIfDb('E1 — dingtalk container login (real DB)', () => {
 
   it('gate: auto-provision creates a local user and a union-keyed identity (no fake openId)', async () => {
     vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    // Auto-provision requires a non-empty corp allowlist (DT-HARDEN-09).
+    vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', CORP)
     primeContainerChain(UNION_PROVISION)
     const result = await exchangeEnterpriseAuthCodeForUser('code-provision')
     expect(result.isNewUser).toBe(true)
@@ -163,6 +165,8 @@ describeIfDb('E1 — dingtalk container login (real DB)', () => {
 
   it('golden (§2): container → web → container logins upgrade the identity key exactly once', async () => {
     vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    // Auto-provision requires a non-empty corp allowlist (DT-HARDEN-09).
+    vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', CORP)
 
     // 1) container first: identity lands union-keyed, no openId
     primeContainerChain(UNION_GOLDEN)
@@ -211,6 +215,8 @@ describeIfDb('E1 — dingtalk container login (real DB)', () => {
 
   it('P2-1 (#3771): two emailless container users provision with distinct placeholder emails', async () => {
     vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    // Auto-provision requires a non-empty corp allowlist (DT-HARDEN-09).
+    vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', CORP)
     const UNION_A = `union_${RUN}_noeml_a`
     const UNION_B = `union_${RUN}_noeml_b`
 

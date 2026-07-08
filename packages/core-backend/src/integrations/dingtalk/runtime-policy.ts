@@ -25,6 +25,18 @@ export function readDingTalkAllowedCorpIds(): string[] {
   ))
 }
 
+/**
+ * Whether an explicit, non-empty DINGTALK_ALLOWED_CORP_IDS allowlist is
+ * configured for this deployment. An empty allowlist makes
+ * `isDingTalkCorpAllowed`/`assertDingTalkCorpAllowed` permissive (any corp),
+ * which is fine for read-only login gating but unsafe to pair with
+ * auto-provisioning — callers that create local accounts on first login
+ * should require this to be true before doing so (DT-HARDEN-09).
+ */
+export function isCorpAllowlistConfigured(): boolean {
+  return readDingTalkAllowedCorpIds().length > 0
+}
+
 export function isDingTalkCorpAllowed(corpId: string | null | undefined): boolean {
   const allowedCorpIds = readDingTalkAllowedCorpIds()
   if (allowedCorpIds.length === 0) return true

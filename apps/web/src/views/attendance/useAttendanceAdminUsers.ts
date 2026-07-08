@@ -21,6 +21,13 @@ interface UseAttendanceAdminUsersOptions {
   adminForbidden?: Ref<boolean>
   apiFetch?: ApiFetchFn
   tr?: Translate
+  /**
+   * User-search endpoint. Defaults to the platform admin route
+   * (/api/admin/users, ensurePlatformAdmin). Pass the attendance-scoped
+   * /api/attendance-admin/users/search (rbacGuard('attendance','admin')) so a
+   * delegated attendance admin who is not a platform admin can still search.
+   */
+  endpoint?: string
 }
 
 function defaultTranslate(en: string): string {
@@ -54,6 +61,7 @@ export function useAttendanceAdminUsers({
   adminForbidden,
   apiFetch = defaultApiFetch,
   tr = defaultTranslate,
+  endpoint = '/api/admin/users',
 }: UseAttendanceAdminUsersOptions = {}) {
   const users = ref<AttendanceAdminUserSearchItem[]>([])
   const searchQuery = ref('')
@@ -69,7 +77,7 @@ export function useAttendanceAdminUsers({
       if (normalizedQuery) {
         params.set('q', normalizedQuery)
       }
-      const response = await apiFetch(`/api/admin/users${params.size ? `?${params.toString()}` : ''}`)
+      const response = await apiFetch(`${endpoint}${params.size ? `?${params.toString()}` : ''}`)
       if (response.status === 403) {
         adminForbidden && (adminForbidden.value = true)
         users.value = []

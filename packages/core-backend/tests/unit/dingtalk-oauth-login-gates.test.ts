@@ -174,6 +174,49 @@ describe('dingtalk oauth login gates', () => {
     })
   })
 
+  it('refuses auto-provision when DINGTALK_ALLOWED_CORP_IDS is unset (unscoped allowlist guard, DT-HARDEN-09)', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    // DINGTALK_ALLOWED_CORP_IDS deliberately left unset: isDingTalkCorpAllowed
+    // is permissive when empty, so auto-provision must refuse to create a
+    // local user rather than silently onboard any corp's OAuth user.
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] }) // findIdentityUser: no existing identity link
+
+    await expect(exchangeCodeForUser('code-4')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 403,
+      code: 'unlinked_local_user',
+      message: 'DingTalk account alpha@example.com is not linked to a local user',
+    })
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO users'))).toBe(false)
+  })
+
+  it('auto-provisions a local user when DINGTALK_ALLOWED_CORP_IDS is configured (existing behavior unaffected)', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', 'ding-corp')
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] }) // findIdentityUser: no existing identity link
+      .mockResolvedValueOnce({ rows: [] }) // findUserByEmail: no conflicting local account
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-new',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+        }],
+      }) // INSERT INTO users
+
+    const result = await exchangeCodeForUser('code-5')
+
+    expect(result).toMatchObject({
+      localUserId: 'user-new',
+      localUserEmail: 'alpha@example.com',
+      isNewUser: true,
+    })
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO users'))).toBe(true)
+  })
+
   it('reports runtime status with grant mode and allowlist details', () => {
     vi.stubEnv('DINGTALK_CLIENT_ID', 'dt-client')
     vi.stubEnv('DINGTALK_CLIENT_SECRET', 'dt-secret')
