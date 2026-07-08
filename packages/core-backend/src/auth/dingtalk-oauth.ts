@@ -14,6 +14,7 @@ import {
 import {
   assertDingTalkCorpAllowed,
   DingTalkCorpNotAllowedError,
+  isCorpAllowlistConfigured,
   readDingTalkAllowedCorpIds,
 } from '../integrations/dingtalk/runtime-policy'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
@@ -656,6 +657,31 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
   }
 
   if (!shouldAutoProvision()) {
+    throw createPolicyError(
+      dtUser.email
+        ? `DingTalk account ${dtUser.email} is not linked to a local user`
+        : 'DingTalk account is not linked to a local user',
+      {
+        statusCode: 403,
+        code: 'unlinked_local_user',
+      },
+    )
+  }
+
+  // DT-HARDEN-09: auto-provision + an empty DINGTALK_ALLOWED_CORP_IDS is an
+  // unscoped "any DingTalk corp can self-register a local account" hole —
+  // isDingTalkCorpAllowed/assertDingTalkCorpAllowed are permissive when the
+  // allowlist is empty, so without this fence any corp's OAuth user would be
+  // silently auto-provisioned. Require an explicit non-empty allowlist before
+  // auto-provision is allowed to create anything; fall back to the same
+  // unlinked/403 path used when auto-provision is disabled outright.
+  if (!isCorpAllowlistConfigured()) {
+    logger.warn(
+      'DingTalk auto-provision blocked: DINGTALK_AUTH_AUTO_PROVISION is enabled but ' +
+      'DINGTALK_ALLOWED_CORP_IDS is empty (unscoped allowlist) — refusing to auto-create ' +
+      'a local user; configure DINGTALK_ALLOWED_CORP_IDS to enable auto-provision',
+      { email: dtUser.email || null, unionId: dtUser.unionId || null },
+    )
     throw createPolicyError(
       dtUser.email
         ? `DingTalk account ${dtUser.email} is not linked to a local user`
