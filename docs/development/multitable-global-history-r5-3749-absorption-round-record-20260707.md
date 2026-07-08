@@ -30,3 +30,7 @@
 ## 3. 轮后状态
 
 线状态与 R4 收轮一致:**池空**;五个 owner 闸门不变(ratify 4c-1(U-L8 二择一)/ ratify 4c-2 / T-source 保持A2或简化A1 / O-1 staging 正式跑 / destructive-tier FE 闭合判定)。解锁哨兵在岗。
+
+## 4. R5b 追记(2026-07-07)
+
+§2 中 NIT-a(ResetToPointPicker 英文-only)原判「记录不修」,复判为**纪律归位**:strict-zero 收线后的规则是未来 UI 字符串一律进 typed label 模块,该组件生于收线之后,属规则内新债而非既有债扩展。R5b 微切片将其全部可见字符串收编 `meta-record-labels.ts`(`record.resetPicker*` 命名空间 + `resetPickerRecordCount` 插值 helper)并补 zh;EN 渲染逐字节保形(7 分支 before/after DOM diff 为空),flag(PIT_RESET)休眠零线上风险。
