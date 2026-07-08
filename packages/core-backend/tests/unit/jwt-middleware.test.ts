@@ -35,6 +35,10 @@ describe('jwt auth whitelist', () => {
     expect(isWhitelisted('/api/auth/dingtalk/callback')).toBe(true)
   })
 
+  it('allows DingTalk container login without a bearer token', () => {
+    expect(isWhitelisted('/api/auth/dingtalk/container')).toBe(true)
+  })
+
   it('allows public form context when a public token is present', () => {
     expect(isPublicFormAuthBypass({
       method: 'GET',

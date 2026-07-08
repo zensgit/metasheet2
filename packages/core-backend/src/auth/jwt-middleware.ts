@@ -15,6 +15,7 @@ const AUTH_WHITELIST = [
   '/api/auth/dev-token',
   '/api/auth/dingtalk/launch',
   '/api/auth/dingtalk/callback',
+  '/api/auth/dingtalk/container',
   '/api/plugins',
   '/api/v2/hello',
   '/api/v2/rpc-test',
