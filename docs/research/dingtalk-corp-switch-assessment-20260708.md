@@ -1,9 +1,10 @@
-# Switching a Customer's DingTalk Organization — Assessment and Migration Model
+# Provider-Parametric Org Transfer — Assessment and Migration Model (DingTalk first)
 
 - Date: 2026-07-08
-- Scope: what the DingTalk directory-sync integration does when a customer moves from one DingTalk organization (corp) to a different one, and what a supported "switch org" flow would require.
-- Status: **assessment / design starting point. No code changed by this document.** Every load-bearing claim is anchored to a file:line on `origin/main` at the time of writing.
+- Scope: what the external-directory integration does when a customer moves their tenant from one organization (corp) to a different one, and what a supported, **provider-parametric** "transfer org" flow would require. DingTalk is the first provider driver; the model is designed so WeCom / Feishu are additional drivers, not rewrites (§12).
+- Status: **assessment / design starting point. No code changed by this document.** Every load-bearing claim is anchored to a file:line or a verified live-schema fact.
 - Baseline: `origin/main` @ `d1180d8a2`.
+- **Revision 2 (2026-07-08), after owner review — two factual corrections.** Rev 1 claimed `bindDirectoryAccount` does not write `user_external_identities` and that the login identity re-creates on the user's next login. **That was wrong** — the claim was based on grepping the wrapper, not the helper it delegates to. Bind **upserts** the corp-scoped login identity and can enable the grant (§5, corrected). Rev 1 also under-described `dingtalk_group_destinations` as "keyed by created_by"; it in fact carries local `sheet_id` / `org_id` scope (mutually exclusive), just no corp/integration/provider scope (§11.1, corrected). Both errors were the shallow-verification pattern this project is otherwise hunting; they are fixed in place and flagged. §13 records the staged implementation plan.
 
 ---
 
@@ -72,7 +73,12 @@ The sound migration is the one where the **local user stays put and its DingTalk
 - it resets the `directory_account_links` row back to unlinked;
 - and, optionally, it disables the DingTalk login grant (`disableDingTalkGrant`).
 
-`bindDirectoryAccount` (`directory-sync.ts:3836`) re-establishes the **directory link** for a chosen local user. Note the asymmetry that shapes the flow: **`bindDirectoryAccount` writes only `directory_account_links`; it does not write `user_external_identities`** (that table appears zero times in the bind body). The login identity for corp B is therefore re-created when the user next completes DingTalk login under corp B (`dingtalk-oauth.ts:457–490`), not by the bind call.
+`bindDirectoryAccount` (`directory-sync.ts:3836`) re-establishes **both** layers for a chosen local user. It delegates to `applyDirectoryAccountBindInTransaction` (`directory-sync.ts:3121`), which:
+- **upserts the corp-scoped login identity**: it looks up an existing `user_external_identities` row for `(provider, local_user_id)` and `UPDATE`s it — else `INSERT`s a new one — setting `corp_id` and `external_key` to *this account's* (i.e. corp B's) values (`directory-sync.ts:3186–3218`). So bind pre-seeds the corp-B login identity; it does **not** wait for the user's next login.
+- can **enable the login grant** when asked (`enableDingTalkGrant`, gated by `assertDirectoryAccountCanEnableDingTalkGrant`, `directory-sync.ts:3136`);
+- enforces conflict guards: it throws if the DingTalk identity is already bound to another local user, and if the local user is already linked to another *linked* directory account (`directory-sync.ts:3163–3182`). **This is why the migration order must be unbind-A-then-bind-B** (§6): binding B while the user is still linked to A would throw.
+
+Consequence for the login layer: because the corp-B identity row is present after bind, the user's first login under corp B **resolves to their existing local user** instead of hitting `unlinked_local_user` (§2) or minting a duplicate. The user still authenticates via DingTalk; there is no separate "re-create identity" step.
 
 Both have batch wrappers already: `batchUnbindDirectoryAccounts` (`directory-sync.ts:3082`) and `batchBindDirectoryAccounts` (`:3096`).
 
@@ -87,7 +93,7 @@ A migration can be run today with the existing primitives, in this order, and it
 1. **Stand up corp B alongside corp A.** Create a *new* integration for corp B (different `name`) and run a **preview** first, then a sync. B's accounts land as `pending` links, not `linked` (`directory-sync.ts:2373`) — nothing is auto-attached to a local user yet.
 2. **Reconcile A → B by email / mobile.** New corp = new userids/unionids/openids, so identity can only carry over by unique email or unique mobile. Matches that are unique become bind candidates; missing or ambiguous ones need a human decision.
 3. **Per user: unbind from A, bind to B.** `unbindDirectoryAccount` on the corp-A account clears both layers; `bindDirectoryAccount` attaches the local user to the corp-B account. The local user, its permissions and history are untouched.
-4. **Users re-login under corp B.** This re-creates the corp-B login identity (`user_external_identities`, `corp_id = B`). Until a user does this, their directory link works (sync, routing, notifications) but 免登 does not.
+4. **Login works on first corp-B login — no separate identity step.** Because bind already upserted the corp-B login identity (§5), the user's first DingTalk login under corp B resolves to their existing local user. (The acceptance check for this step is that a corp-B `user_external_identities` row exists **immediately after bind**, not after a login — see §13.)
 5. **Retire corp A.** Today the best available action is to disable the old integration (status / `sync_enabled`); there is no delete path (§3), so its stale accounts linger.
 
 In-flight approvals are safe throughout: `ApprovalDirectoryOrg` bakes `managerId` / `deptHeadId` into the instance at create time and does not re-resolve (`packages/core-backend/src/services/ApprovalDirectoryOrg.ts:11,21`). Only *newly started* approvals re-derive from `directory_account_links (link_status = 'linked')` (`ApprovalDirectoryOrg.ts:37`), so their routing follows corp B as soon as step 3 relinks each user.
@@ -135,7 +141,7 @@ This is a new capability line: it needs a small design lock and explicit sign-of
 
 ## 9. Open uncertainties — verify in staging before relying
 
-- **Two-corp coexistence and the `external_key` collision.** The investigation surfaced a genuine conflict about whether a directory account's stored `external_key` is corp-independent (`unionId || openId || userId`) or corp-scoped. If it is corp-independent, the same natural person present in both corp A and corp B simultaneously could collide on `UNIQUE(provider, external_key)` (`migration:98`) and abort the sync transaction. This was not pinned down in a single verification pass and **must be tested on staging** before choosing a "keep A while standing up B" coexistence window.
+- **Two-corp coexistence and the `external_key` collision — HARD GATE.** The investigation surfaced a genuine conflict about whether a directory account's stored `external_key` is corp-independent (`unionId || openId || userId`) or corp-scoped. If it is corp-independent, the same natural person present in both corp A and corp B simultaneously could collide on `UNIQUE(provider, external_key)` (`migration:98`) and abort the sync transaction. This was not pinned down in a single verification pass. **This is a blocking precondition, not a footnote: automated user migration (the flow that stands up corp B while corp A still exists) must not be implemented until staging proves whether `directory_accounts.external_key` collides across two coexisting corps.** If it does collide, the migration design must resolve it (e.g. corp-scope the key, or serialize A-teardown before B-standup) before any auto-migration code lands.
 - **Member-group and department residue.** Retiring corp A by disabling its integration leaves its projected member groups, role grants, and departments in place; the cleanup semantics were assessed as *likely* but not proven.
 
 ---
@@ -162,12 +168,12 @@ The unifying principle is the same as §2: **the system-side entity is the ancho
 | Binding | Where it lives | Corp-scoped? | Auto-resolvable to corp B? | Transfer decision |
 |---|---|---|---|---|
 | **User identity** | `directory_account_links` + `user_external_identities` | login identity is corp-scoped (§2) | by unique email / mobile (propose → confirm) | re-bind (optionally §8 code) / drop |
-| **Form → DingTalk group** | automation rule `destinationId` → `dingtalk_group_destinations` (`webhook_url`, `secret`) | the webhook points at a specific group in a specific corp | **No** — a webhook has no cross-org identity | customer pastes the new group's webhook/secret (re-bind) or disables it (drop) |
+| **Form → group** | automation rule `destinationId` → `dingtalk_group_destinations` (`webhook_url`, `secret`; local `sheet_id`/`org_id` scope, no corp/provider) | the webhook points at one group in one corp | **No** — a webhook has no cross-corp identity | customer pastes the new group's webhook/secret (re-bind) or disables it (drop) |
 | **Work-notification credentials** | `directory_integrations.config` (appKey/secret/agentId) | yes | supply corp-B creds once | re-bind (new creds) / drop |
 | **Approval-card config** | `directory_integrations.config` (approval-card) | yes | re-configure for corp B | re-bind / drop |
 | **Member-group / department projections** | projected from `directory_departments` | yes | re-project from corp B | re-project / drop |
 
-The **form → group row is the sharp case, and it is why per-item customer confirmation is not optional but necessary.** `dingtalk_group_destinations` is just `{ webhook_url, secret, enabled }` keyed by `created_by` (`packages/core-backend/src/db/migrations/zzzz20260419183000_create_dingtalk_group_destinations.ts:6–18`) — it has no `corp_id` / `integration_id` and no cross-org identity. Unlike a user (which email/mobile can auto-propose), a group binding cannot be auto-matched to corp B at all: the customer must either paste the new corp-B group's webhook (re-bind) or turn it off (drop). The automation rule keeps its `destinationId` either way (`packages/core-backend/src/multitable/automation-actions.ts:113`), so "drop" disables the destination without touching the form.
+The **form → group row is the sharp case, and it is why per-item customer confirmation is not optional but necessary.** `dingtalk_group_destinations` carries local scope — `created_by`, plus a `sheet_id` **or** `org_id` (mutually exclusive by the `dingtalk_group_destinations_scope_exclusive` CHECK; columns added by `zzzz20260420164500_add_sheet_scope_...` and `zzzz20260423130000_add_org_scope_...`). But it has **no `corp_id` / `integration_id` / `provider`, and no cross-corp group identity**: it is a `webhook_url` + `secret` pointing at one chat group in one corp. So unlike a user (which email/mobile can auto-propose), a group binding cannot be auto-matched to the new org at all — the customer must either paste the new group's webhook/secret (re-bind) or turn it off (drop). The automation rule keeps its `destinationId` either way (`packages/core-backend/src/multitable/automation-actions.ts:113`), so "drop" disables the destination without touching the form. (The `org_id` scope is also how a transfer's worklist finds which destinations belong to the migrating tenant.)
 
 ### 11.2 The transfer as a first-class object
 
@@ -210,3 +216,12 @@ Only the provider-specific *behaviour* needs an interface — the engine stays g
 ### 12.3 Recommendation (and a caveat against over-building)
 
 Make the transfer subsystem **provider-parametric**: it operates on the abstract `(provider, tenant, binding-kind)` model, so adding another provider is a driver plus (for groups) one column — never an engine change. But do not build a full provider plugin SPI before a second provider exists: keep the data model provider-tagged (already true), keep the transfer engine provider-generic, keep provider specifics behind a thin driver, and ship DingTalk as driver #1. The generalization is cheap precisely because the schema already treats `provider` as first-class — realize it when a second provider is actually demanded, not speculatively.
+
+---
+
+## 13. Staged implementation plan
+
+The implementation is sequenced in `docs/development/provider-org-transfer-development-plan-20260709.md` (design-lock + guardrails + user/group minimal closed loops, no WeCom/Feishu and no plugin SPI up front). Two constraints from this assessment bind that plan:
+
+- The **external_key coexistence gate (§9)** blocks the automated *user* migration until staging clears it.
+- The migration order is **unbind-A-then-bind-B**, because `bindDirectoryAccount` throws if the local user is still linked to another directory account (§5). Its acceptance asserts a corp-B `user_external_identities` row exists **after bind** (§6.4), since bind pre-seeds the login identity.
