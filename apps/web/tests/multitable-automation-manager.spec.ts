@@ -672,6 +672,27 @@ describe('MetaAutomationManager', () => {
     expect(el!.textContent).toContain('No automations yet')
   })
 
+  it('G-B2-26: the empty state shows recipe cards, and clicking one opens the form pre-filled', async () => {
+    const { client } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    // Recipe cards render in the empty state (one per recipe + the blank starter).
+    const cards = container.querySelectorAll('[data-automation-recipe]:not([data-automation-recipe="__blank"])')
+    expect(cards.length).toBeGreaterThanOrEqual(3)
+
+    // Clicking the field-changed→update recipe opens the quick form ALREADY on that trigger+action:
+    // field.changed → the triggerFieldId picker renders; update_field → targetFieldId renders and
+    // the notify message input does not. A blank openCreateForm would default to record.created/notify.
+    ;(container.querySelector('[data-automation-recipe="field-changed-update"]') as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(container.querySelector('[data-automation-field="triggerType"]')).not.toBeNull()
+    expect(container.querySelector('[data-automation-field="triggerFieldId"]')).not.toBeNull()
+    expect(container.querySelector('[data-automation-field="targetFieldId"]')).not.toBeNull()
+    expect(container.querySelector('[data-automation-field="notifyMessage"]')).toBeNull()
+  })
+
   it('opens the advanced rule editor from the primary new automation entry', async () => {
     const { client } = mockClient([])
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
