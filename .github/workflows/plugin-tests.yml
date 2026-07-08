@@ -240,6 +240,7 @@ jobs:
             tests/integration/multitable-config-restore-realdb.test.ts \
             tests/integration/multitable-sheet-config-revert-realdb.test.ts \
             tests/integration/multitable-field-retype-revert-realdb.test.ts \
+            tests/integration/multitable-lossy-retype-revert-realdb.test.ts \
             tests/integration/multitable-uncreate-config-realdb.test.ts \
             tests/integration/multitable-undelete-config-realdb.test.ts \
             tests/integration/multitable-permission-revert-realdb.test.ts \
