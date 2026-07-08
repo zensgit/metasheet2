@@ -62,18 +62,30 @@ describe('DT-HARDEN-06 DingTalk request timeout', () => {
     await expect(fetchDingTalkAppAccessToken(config, { fetchFn: ok })).resolves.toBe('fresh')
   })
 
-  it('lets a caller-supplied signal win over the default timeout', async () => {
-    const controller = new AbortController()
-    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0 }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    })) as unknown as typeof fetch
+  it('hands the real fetch a live timeout AbortSignal (asserted on what production passes, not a re-implemented merge)', async () => {
+    let seenInit: RequestInit | undefined
+    const fetchFn = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      seenInit = init
+      return new Response(JSON.stringify({ errcode: 0, access_token: 'tok', expires_in: 7200 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as unknown as typeof fetch
 
-    // fetchDingTalkAppAccessToken does not expose init, so assert the precedence rule
-    // directly on the shape requestDingTalkJson builds: spread-then-signal.
-    const init: RequestInit = { method: 'GET', signal: controller.signal }
-    const merged = { ...init, signal: init.signal ?? AbortSignal.timeout(1) }
-    expect(merged.signal).toBe(controller.signal)
-    expect(fetchFn).not.toHaveBeenCalled()
+    await fetchDingTalkAppAccessToken(config, { fetchFn })
+
+    // The previous version re-implemented `{ ...init, signal: init.signal ?? AbortSignal.timeout() }`
+    // in the test and asserted on that local object — a tautology that stayed green even when
+    // production's merge dropped the signal or flipped the spread order. Assert instead on the
+    // init that actually reached fetch: production must hand it a live (un-aborted) AbortSignal —
+    // the timeout. A regression that omits or nulls the signal turns this red.
+    expect(seenInit?.signal).toBeInstanceOf(AbortSignal)
+    expect(seenInit?.signal?.aborted).toBe(false)
   })
+
+  // NOTE on the spread-order precedence (`{ ...init, signal: init.signal ?? … }` vs
+  // `{ signal: …, ...init }`): it cannot be exercised through the public surface because no
+  // in-repo caller passes an `init.signal`, and `requestDingTalkJson` is not exported. The order
+  // in client.ts is correct (spread-first, caller-signal-wins); it is left structurally correct
+  // rather than tested through a re-implemented merge, which proves nothing.
 })
