@@ -1023,6 +1023,81 @@ export function resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(
   return !normalizeText(account.corp_id) || Boolean(normalizeText(account.open_id))
 }
 
+/** The identity fields the matching cascade below needs from a pulled/upserted account. */
+export type DirectoryIdentityMatchAccount = {
+  corpId: string | null
+  externalKey: string
+  unionId: string | null
+  openId: string | null
+  email: string | null
+  mobile: string | null
+}
+
+/** Just enough of the existing link row to decide the already-linked short-circuit. */
+export type DirectoryIdentityExistingLink = {
+  local_user_id: string | null
+  link_status: string
+}
+
+export type DirectoryIdentityMatchMaps = {
+  externalIdentityMap: Map<string, string>
+  scopedUnionIdentityMap: Map<string, string>
+  scopedOpenIdentityMap: Map<string, string>
+  emailMap: Map<string, string>
+  mobileMap: Map<string, string>
+  ambiguousEmailKeys: Set<string>
+  ambiguousMobileKeys: Set<string>
+}
+
+export type DirectoryIdentityMatchOutcome =
+  | { matched: 'already_linked' }
+  | { matched: 'external_identity'; localUserId: string }
+  | { matched: 'email'; localUserId: string }
+  | { matched: 'mobile'; localUserId: string }
+  | { matched: 'ambiguous' }
+  | { matched: 'none' }
+
+/**
+ * The identity-matching cascade `syncDirectoryIntegration` walks for every pulled DingTalk
+ * user, extracted so `previewDirectorySyncIntegration` can walk the exact same cascade
+ * instead of approximating it. Order matters and mirrors apply: already-linked short-circuit,
+ * then external-identity (union/open id or external_key), then unique email, then unique
+ * mobile, then ambiguous-identifier. `{ matched: 'none' }` is the ONLY outcome under which
+ * apply reaches the auto-admission branch — that is the exact condition preview must gate
+ * `autoAdmissionCandidateCount` behind to avoid over-counting accounts that would actually be
+ * linked (or already are) rather than newly created.
+ */
+export function resolveDirectoryIdentityMatch(
+  account: DirectoryIdentityMatchAccount,
+  existingLink: DirectoryIdentityExistingLink | null | undefined,
+  maps: DirectoryIdentityMatchMaps,
+): DirectoryIdentityMatchOutcome {
+  if (existingLink && existingLink.link_status === 'linked' && existingLink.local_user_id) {
+    return { matched: 'already_linked' }
+  }
+
+  const scopedOpenIdentityKey = buildScopedIdentityKey(account.corpId, account.openId)
+  const scopedUnionIdentityKey = buildScopedIdentityKey(account.corpId, account.unionId)
+  const externalIdentityUserId = maps.externalIdentityMap.get(account.externalKey)
+    || (scopedOpenIdentityKey ? maps.scopedOpenIdentityMap.get(scopedOpenIdentityKey) : undefined)
+    || (scopedUnionIdentityKey ? maps.scopedUnionIdentityMap.get(scopedUnionIdentityKey) : undefined)
+  if (externalIdentityUserId) {
+    return { matched: 'external_identity', localUserId: externalIdentityUserId }
+  }
+
+  const emailKey = normalizeText(account.email).toLowerCase()
+  const mobileKey = normalizeMobileIdentifier(account.mobile)
+  const emailUserId = emailKey ? maps.emailMap.get(emailKey) : undefined
+  const mobileUserId = mobileKey ? maps.mobileMap.get(mobileKey) : undefined
+  const hasAmbiguousIdentifierMatch = (emailKey.length > 0 && maps.ambiguousEmailKeys.has(emailKey))
+    || (mobileKey.length > 0 && maps.ambiguousMobileKeys.has(mobileKey))
+
+  if (emailUserId) return { matched: 'email', localUserId: emailUserId }
+  if (mobileUserId) return { matched: 'mobile', localUserId: mobileUserId }
+  if (hasAmbiguousIdentifierMatch) return { matched: 'ambiguous' }
+  return { matched: 'none' }
+}
+
 function normalizeDirectorySyncAuditUserId(adminUserId: string): string | null {
   const normalized = normalizeText(adminUserId)
   if (!normalized || normalized.startsWith('system:')) return null
@@ -2561,156 +2636,156 @@ export async function syncDirectoryIntegration(
         let linkStatus = existing?.link_status ?? 'pending'
         let matchStrategy = existing?.match_strategy ?? null
 
-        if (!(existing && existing.link_status === 'linked' && existing.local_user_id)) {
-          const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
-          const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
-          const externalIdentityUserId = externalIdentityMap.get(account.external_key)
-            || (scopedOpenIdentityKey ? scopedOpenIdentityMap.get(scopedOpenIdentityKey) : undefined)
-            || (scopedUnionIdentityKey ? scopedUnionIdentityMap.get(scopedUnionIdentityKey) : undefined)
-          if (externalIdentityUserId) {
-            localUserId = externalIdentityUserId
+        const identityMatch = resolveDirectoryIdentityMatch(
+          {
+            corpId: account.corp_id,
+            externalKey: account.external_key,
+            unionId: account.union_id,
+            openId: account.open_id,
+            email: account.email,
+            mobile: account.mobile,
+          },
+          existing,
+          { externalIdentityMap, scopedUnionIdentityMap, scopedOpenIdentityMap, emailMap, mobileMap, ambiguousEmailKeys, ambiguousMobileKeys },
+        )
+
+        if (identityMatch.matched !== 'already_linked') {
+          if (identityMatch.matched === 'external_identity') {
+            localUserId = identityMatch.localUserId
             linkStatus = 'linked'
             matchStrategy = 'external_identity'
+          } else if (identityMatch.matched === 'email') {
+            localUserId = identityMatch.localUserId
+            linkStatus = 'pending'
+            matchStrategy = 'email'
+          } else if (identityMatch.matched === 'mobile') {
+            localUserId = identityMatch.localUserId
+            linkStatus = 'pending'
+            matchStrategy = 'mobile'
+          } else if (identityMatch.matched === 'ambiguous') {
+            localUserId = null
+            linkStatus = 'unmatched'
+            matchStrategy = 'none'
           } else {
-            const emailKey = normalizeText(account.email).toLowerCase()
-            const mobileKey = normalizeMobileIdentifier(account.mobile)
-            const emailUserId = emailKey ? emailMap.get(emailKey) : undefined
-            const mobileUserId = mobileKey ? mobileMap.get(mobileKey) : undefined
-            const hasAmbiguousIdentifierMatch = (emailKey.length > 0 && ambiguousEmailKeys.has(emailKey))
-              || (mobileKey.length > 0 && ambiguousMobileKeys.has(mobileKey))
-            if (emailUserId) {
-              localUserId = emailUserId
-              linkStatus = 'pending'
-              matchStrategy = 'email'
-            } else if (mobileUserId) {
-              localUserId = mobileUserId
-              linkStatus = 'pending'
-              matchStrategy = 'mobile'
-            } else if (hasAmbiguousIdentifierMatch) {
-              localUserId = null
-              linkStatus = 'unmatched'
-              matchStrategy = 'none'
-            } else {
-              const autoAdmission = evaluateDirectoryAutoAdmissionEligibility({
-                admissionMode: config.admissionMode,
-                admissionDepartmentIds: config.admissionDepartmentIds,
-                excludeDepartmentIds: config.excludeDepartmentIds,
-                userDepartmentIds: directoryUser?.departmentIds ?? [],
-                departments,
-                email: account.email,
-              })
-              if (autoAdmission.inScope) autoAdmissionCandidateCount += 1
-              if (autoAdmission.excluded) autoAdmissionExcludedCount += 1
+            const autoAdmission = evaluateDirectoryAutoAdmissionEligibility({
+              admissionMode: config.admissionMode,
+              admissionDepartmentIds: config.admissionDepartmentIds,
+              excludeDepartmentIds: config.excludeDepartmentIds,
+              userDepartmentIds: directoryUser?.departmentIds ?? [],
+              departments,
+              email: account.email,
+            })
+            if (autoAdmission.inScope) autoAdmissionCandidateCount += 1
+            if (autoAdmission.excluded) autoAdmissionExcludedCount += 1
 
-              if (autoAdmission.inScope && directoryUser) {
-                try {
-                  const cleanName = sanitizeDirectoryAdmissionName(account.name)
-                  const cleanEmail = account.email ? sanitizeDirectoryAdmissionEmail(account.email) : null
-                  const generatedUsername = cleanEmail
-                    ? null
-                    : buildDirectoryAutoAdmissionUsername({
-                        id: account.id,
-                        external_user_id: account.external_user_id,
-                        union_id: account.union_id,
-                        open_id: account.open_id,
-                      })
-                  const cleanMobile = sanitizeDirectoryAdmissionMobile(account.mobile)
-                  const generatedPassword = generateDirectoryAdmissionTemporaryPassword()
-                  const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
-                  // DT-HARDEN-02: mirror assertDirectoryAccountCanEnableDingTalkGrant's
-                  // condition instead of hardcoding grant=true. A corp-scoped account
-                  // (corp_id set) without an openId cannot use DingTalk login and would
-                  // make the downstream bind throw — previously that threw AFTER the
-                  // users row was inserted (swallowed catch → committed orphan). Now such
-                  // an account is admitted with the grant OFF (directory binding still
-                  // happens), and the assertion is enforced before INSERT (see
-                  // createDirectoryAdmittedUserInTransaction) so no orphan can be created.
-                  const canGrantDingTalkLogin = resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(account)
-                  const created = await createDirectoryAdmittedUserInTransaction(client, {
-                    account: {
+            if (autoAdmission.inScope && directoryUser) {
+              try {
+                const cleanName = sanitizeDirectoryAdmissionName(account.name)
+                const cleanEmail = account.email ? sanitizeDirectoryAdmissionEmail(account.email) : null
+                const generatedUsername = cleanEmail
+                  ? null
+                  : buildDirectoryAutoAdmissionUsername({
                       id: account.id,
-                      integration_id: integrationId,
-                      provider: DEFAULT_PROVIDER,
-                      corp_id: account.corp_id,
                       external_user_id: account.external_user_id,
                       union_id: account.union_id,
                       open_id: account.open_id,
-                      external_key: account.external_key,
-                      name: account.name,
-                      email: account.email,
-                      mobile: account.mobile,
-                    },
-                    adminUserId: triggeredBy,
+                    })
+                const cleanMobile = sanitizeDirectoryAdmissionMobile(account.mobile)
+                const generatedPassword = generateDirectoryAdmissionTemporaryPassword()
+                const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
+                // DT-HARDEN-02: mirror assertDirectoryAccountCanEnableDingTalkGrant's
+                // condition instead of hardcoding grant=true. A corp-scoped account
+                // (corp_id set) without an openId cannot use DingTalk login and would
+                // make the downstream bind throw — previously that threw AFTER the
+                // users row was inserted (swallowed catch → committed orphan). Now such
+                // an account is admitted with the grant OFF (directory binding still
+                // happens), and the assertion is enforced before INSERT (see
+                // createDirectoryAdmittedUserInTransaction) so no orphan can be created.
+                const canGrantDingTalkLogin = resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(account)
+                const created = await createDirectoryAdmittedUserInTransaction(client, {
+                  account: {
+                    id: account.id,
+                    integration_id: integrationId,
+                    provider: DEFAULT_PROVIDER,
+                    corp_id: account.corp_id,
+                    external_user_id: account.external_user_id,
+                    union_id: account.union_id,
+                    open_id: account.open_id,
+                    external_key: account.external_key,
+                    name: account.name,
+                    email: account.email,
+                    mobile: account.mobile,
+                  },
+                  adminUserId: triggeredBy,
+                  name: cleanName,
+                  email: cleanEmail,
+                  username: generatedUsername,
+                  mobile: cleanMobile,
+                  passwordHash,
+                  mustChangePassword: true,
+                  enableDingTalkGrant: canGrantDingTalkLogin,
+                })
+                let inviteToken: string | null = null
+                if (cleanEmail) {
+                  inviteToken = issueInviteToken({
+                    userId: created.userId,
+                    email: cleanEmail,
+                    presetId: null,
+                  })
+                  autoAdmissionInvites.push({
+                    userId: created.userId,
+                    email: cleanEmail,
+                    inviteToken,
+                  })
+                } else {
+                  autoAdmittedNoEmailCount += 1
+                  autoAdmissionOnboardingPackets.push({
+                    userId: created.userId,
                     name: cleanName,
                     email: cleanEmail,
                     username: generatedUsername,
                     mobile: cleanMobile,
-                    passwordHash,
-                    mustChangePassword: true,
-                    enableDingTalkGrant: canGrantDingTalkLogin,
-                  })
-                  let inviteToken: string | null = null
-                  if (cleanEmail) {
-                    inviteToken = issueInviteToken({
-                      userId: created.userId,
+                    temporaryPassword: generatedPassword,
+                    onboarding: buildOnboardingPacket({
                       email: cleanEmail,
-                      presetId: null,
-                    })
-                    autoAdmissionInvites.push({
-                      userId: created.userId,
-                      email: cleanEmail,
-                      inviteToken,
-                    })
-                  } else {
-                    autoAdmittedNoEmailCount += 1
-                    autoAdmissionOnboardingPackets.push({
-                      userId: created.userId,
-                      name: cleanName,
-                      email: cleanEmail,
-                      username: generatedUsername,
-                      mobile: cleanMobile,
-                      temporaryPassword: generatedPassword,
-                      onboarding: buildOnboardingPacket({
+                      accountLabel: resolveDirectoryAdmissionAccountLabel({
                         email: cleanEmail,
-                        accountLabel: resolveDirectoryAdmissionAccountLabel({
-                          email: cleanEmail,
-                          username: generatedUsername,
-                          mobile: cleanMobile,
-                          userId: created.userId,
-                        }),
-                        temporaryPassword: generatedPassword,
-                        preset: null,
-                        inviteToken,
+                        username: generatedUsername,
+                        mobile: cleanMobile,
+                        userId: created.userId,
                       }),
-                    })
-                  }
-                  localUserId = created.userId
-                  linkStatus = 'linked'
-                  matchStrategy = 'auto_admit'
-                  autoAdmittedCount += 1
-                  if (!canGrantDingTalkLogin) autoAdmittedWithoutGrantCount += 1
-                  if (cleanEmail) emailMap.set(cleanEmail.toLowerCase(), created.userId)
-                  if (cleanMobile) mobileMap.set(cleanMobile, created.userId)
-                  if (cleanEmail) ambiguousEmailKeys.delete(cleanEmail.toLowerCase())
-                  if (cleanMobile) ambiguousMobileKeys.delete(cleanMobile)
-                  externalIdentityMap.set(account.external_key, created.userId)
-                  const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
-                  if (scopedOpenIdentityKey) scopedOpenIdentityMap.set(scopedOpenIdentityKey, created.userId)
-                  const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
-                  if (scopedUnionIdentityKey) scopedUnionIdentityMap.set(scopedUnionIdentityKey, created.userId)
-                } catch (error) {
-                  autoAdmissionFailedCount += 1
-                  logger.warn(`Failed to auto-admit DingTalk directory account ${account.id}: ${readErrorMessage(error, 'unknown error')}`)
-                  localUserId = null
-                  linkStatus = 'unmatched'
-                  matchStrategy = 'none'
+                      temporaryPassword: generatedPassword,
+                      preset: null,
+                      inviteToken,
+                    }),
+                  })
                 }
-              } else {
-                if (autoAdmission.missingEmail) autoAdmissionSkippedMissingEmailCount += 1
+                localUserId = created.userId
+                linkStatus = 'linked'
+                matchStrategy = 'auto_admit'
+                autoAdmittedCount += 1
+                if (!canGrantDingTalkLogin) autoAdmittedWithoutGrantCount += 1
+                if (cleanEmail) emailMap.set(cleanEmail.toLowerCase(), created.userId)
+                if (cleanMobile) mobileMap.set(cleanMobile, created.userId)
+                if (cleanEmail) ambiguousEmailKeys.delete(cleanEmail.toLowerCase())
+                if (cleanMobile) ambiguousMobileKeys.delete(cleanMobile)
+                externalIdentityMap.set(account.external_key, created.userId)
+                const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
+                if (scopedOpenIdentityKey) scopedOpenIdentityMap.set(scopedOpenIdentityKey, created.userId)
+                const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
+                if (scopedUnionIdentityKey) scopedUnionIdentityMap.set(scopedUnionIdentityKey, created.userId)
+              } catch (error) {
+                autoAdmissionFailedCount += 1
+                logger.warn(`Failed to auto-admit DingTalk directory account ${account.id}: ${readErrorMessage(error, 'unknown error')}`)
                 localUserId = null
                 linkStatus = 'unmatched'
                 matchStrategy = 'none'
               }
+            } else {
+              if (autoAdmission.missingEmail) autoAdmissionSkippedMissingEmailCount += 1
+              localUserId = null
+              linkStatus = 'unmatched'
+              matchStrategy = 'none'
             }
           }
         }
@@ -2858,9 +2933,17 @@ export async function syncDirectoryIntegration(
  *
  * This pulls the DingTalk directory exactly as the sync does (so it consumes the same API
  * quota, and its numbers are the real ones) and then compares against the database
- * WITHOUT WRITING ANYTHING: no run row, no lease, no upsert, no user. It reuses the same
- * pure eligibility predicate the apply path uses, so preview and apply cannot drift on the
- * question that actually matters — who gets an account created for them.
+ * WITHOUT WRITING ANYTHING: no run row, no lease, no upsert, no user. `autoAdmissionCandidateCount`
+ * walks the exact same `resolveDirectoryIdentityMatch` cascade apply uses (already-linked,
+ * external-identity, unique-email, unique-mobile, ambiguous, THEN eligibility) instead of the
+ * eligibility check alone, so preview no longer counts accounts that are already linked or
+ * would merely be linked (not created).
+ *
+ * Residual known gap (fail-safe, over-counts only): apply mutates its match maps as it
+ * auto-admits users within a single run, so two brand-new in-scope pulled users who share an
+ * email/mobile count as 1 apply-created account but 2 preview candidates. Preview does not
+ * simulate creation order. This does not affect the already-linked / matched / out-of-scope
+ * cases this function was built to fix.
  */
 export type DirectorySyncPreview = {
   integrationId: string
@@ -2906,31 +2989,75 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
   )
   const existingByExternalId = new Map(existingResult.rows.map((row) => [row.external_user_id, row]))
 
+  // Build the same match maps (external-identity / unique-email / unique-mobile / ambiguous)
+  // `syncDirectoryIntegration` builds, from synthetic account rows shaped exactly like the
+  // ones apply upserts (external_key = unionId||openId||userId, corp_id = integration.corp_id
+  // — see apply lines ~2236/2262). `loadMatchMaps` only reads external_key/union_id/open_id/
+  // email/mobile off each row, so the synthetic `id` is never consulted.
+  const pulledAccountsForMatching = Array.from(users.values()).map((user) => ({
+    id: user.userId,
+    corp_id: integration.corp_id,
+    external_user_id: user.userId,
+    union_id: normalizeOptionalText(user.unionId),
+    open_id: normalizeOptionalText(user.openId),
+    external_key: normalizeText(user.unionId || user.openId || user.userId),
+    name: user.name,
+    email: normalizeOptionalText(user.email),
+    mobile: normalizeOptionalText(user.mobile),
+  }))
+  const identityMatchMaps = await loadMatchMaps(pulledAccountsForMatching)
+
   const sampledNewAccounts: DirectorySyncPreview['sampledNewAccounts'] = []
   let wouldCreateAccounts = 0
   let autoAdmissionCandidateCount = 0
   let autoAdmissionSkippedMissingEmailCount = 0
   let autoAdmissionExcludedCount = 0
 
-  for (const user of users.values()) {
+  for (const account of pulledAccountsForMatching) {
+    const user = users.get(account.external_user_id)
+    if (!user) continue
+
     if (!existingByExternalId.has(user.userId)) {
       wouldCreateAccounts += 1
       if (sampledNewAccounts.length < 10) sampledNewAccounts.push({ externalUserId: user.userId, name: user.name })
     }
 
-    // Same predicate the apply path uses — preview and apply cannot disagree about who
-    // would have an account created for them.
+    // Walk the exact cascade apply walks: only an account apply would reach the
+    // auto-admission branch for ('none' matched — not already-linked, not identity/email/
+    // mobile/ambiguous-matched) can possibly be an auto-admission candidate.
+    const existingLink = existingByExternalId.get(user.userId)
+    const identityMatch = resolveDirectoryIdentityMatch(
+      {
+        corpId: account.corp_id,
+        externalKey: account.external_key,
+        unionId: account.union_id,
+        openId: account.open_id,
+        email: account.email,
+        mobile: account.mobile,
+      },
+      existingLink?.linked ? { local_user_id: 'linked', link_status: 'linked' } : null,
+      identityMatchMaps,
+    )
+    if (identityMatch.matched !== 'none') continue
+
     const eligibility = evaluateDirectoryAutoAdmissionEligibility({
       admissionMode: config.admissionMode,
       admissionDepartmentIds: config.admissionDepartmentIds,
       excludeDepartmentIds: config.excludeDepartmentIds,
       userDepartmentIds: user.departmentIds,
       departments,
-      email: user.email ?? null,
+      email: account.email,
     })
-    if (eligibility.inScope) autoAdmissionCandidateCount += 1
     if (eligibility.excluded) autoAdmissionExcludedCount += 1
-    if (eligibility.missingEmail) autoAdmissionSkippedMissingEmailCount += 1
+    // Mirror apply exactly: missingEmail only means "skipped" in the branch apply does NOT
+    // create a user (apply creates a user for an in-scope account regardless of missing
+    // email — it falls back to a generated username). Counting it whenever `missingEmail`
+    // is true (independent of inScope) would over-count vs. apply here too.
+    if (eligibility.inScope) {
+      autoAdmissionCandidateCount += 1
+    } else if (eligibility.missingEmail) {
+      autoAdmissionSkippedMissingEmailCount += 1
+    }
   }
 
   const sampledDeactivations: DirectorySyncPreview['sampledDeactivations'] = []
