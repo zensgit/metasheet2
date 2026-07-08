@@ -10,6 +10,17 @@
       <div class="integration-read-source-composition-authoring__form" data-testid="rscauth-form">
         <h3>新建组合</h3>
 
+        <!-- TC-1 (design-lock docs/development/integration-connector-template-catalog-design-lock-20260708.md,
+             #3879): ADD-ONLY alternative entry point, collapsed by default — the pre-existing
+             wizard/flat-form default surface and every existing assertion about it are untouched.
+             Selecting a card seeds `draft.sourceTarget` (mirrors this panel's own pre-existing default
+             assignment below) and forces the view back to the wizard. -->
+        <IntegrationTemplateCatalogPicker
+          seeds-wizard="composition"
+          testid-prefix="rscauth"
+          @select="applyCompositionTemplate"
+        />
+
         <!-- IU-4 (design-lock docs/development/integration-iu4-composition-wizard-design-lock-20260707.md,
              #3803, sibling of IU-3): the wizard is the DEFAULT surface; this toggle switches to the
              untouched full flat form below (折叠≠删除 — expert mode is retained, never removed).
@@ -207,7 +218,13 @@ import {
   type ReadSourceCompositionFieldError,
   type ReadSourceCompositionSaveResult,
 } from '../../services/integration/readSourceCompositions'
+import {
+  isCompositionTemplateEntry,
+  seedCompositionDraft,
+  type IntegrationTemplateCatalogEntry,
+} from '../../services/integration/readSourceTemplateCatalog'
 import IntegrationCompositionWizard from './IntegrationCompositionWizard.vue'
+import IntegrationTemplateCatalogPicker from './IntegrationTemplateCatalogPicker.vue'
 
 // IU-4 (design-lock docs/development/integration-iu4-composition-wizard-design-lock-20260707.md,
 // #3803): the wizard is the DEFAULT new-composition surface; `initialViewMode` lets a caller (incl.
@@ -280,6 +297,17 @@ watch(savedRow, () => {
   auditOpen.value = false
   auditRows.value = []
 })
+
+// TC-1 (design-lock docs/development/integration-connector-template-catalog-design-lock-20260708.md):
+// same seed-then-present pattern as the read-source panel's applyReadSourceTemplate — mutates only
+// `sourceTarget` on the SAME shared draft, then forces the view back to 'wizard'. The picker is wired
+// with seeds-wizard="composition" so only CompositionTemplateCatalogEntry values are ever emitted here;
+// the type guard is a defensive narrowing, not a behavior branch.
+function applyCompositionTemplate(entry: IntegrationTemplateCatalogEntry): void {
+  if (!isCompositionTemplateEntry(entry)) return
+  seedCompositionDraft(draft, entry)
+  viewMode.value = 'wizard'
+}
 
 function statusLabel(status: CompositionStatus): string {
   if (status === 'approved') return '已审批'

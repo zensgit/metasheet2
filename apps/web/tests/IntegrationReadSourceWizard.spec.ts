@@ -624,4 +624,83 @@ describe('IntegrationReadSourceWizard (via IntegrationReadSourceConfigPanel defa
       setLocale('en')
     }
   })
+
+  // --- TC-1 connector/experience template catalog (design-lock
+  // docs/development/integration-connector-template-catalog-design-lock-20260708.md, #3879) ---------
+  // ADD-ONLY: every test above this point is unchanged. The template catalog picker is a NEW,
+  // collapsed-by-default entry point rendered by the parent panel (IntegrationReadSourceConfigPanel.vue)
+  // above the wizard; these tests exercise it end-to-end through the same real panel this file already
+  // mounts, never a standalone stub of the picker.
+
+  it('TC-1: template catalog picker is collapsed by default — the blank-form wizard path is unaffected', async () => {
+    mockListOnly()
+    const root = mountPanel()
+    await flushUi()
+
+    expect(maybe(root, 'rsc-template-catalog-toggle')).not.toBeNull()
+    const body = maybe(root, 'rsc-template-catalog-body')
+    expect(body).not.toBeNull()
+    expect((body as HTMLElement).style.display).toBe('none')
+
+    // Blank-form entry still works exactly as before: default mode is single_record (existing
+    // 'preset card selection' test already proves the full field set; this just re-confirms the
+    // default survives the picker's presence).
+    await toStep2(root)
+    expect(q(root, 'rsc-wizard-mode-single_record').className).toContain('iu3-wizard__card--selected')
+    expect(maybe(root, 'rsc-wizard-key-field')).not.toBeNull()
+  })
+
+  it('TC-1: selecting a read-source template card seeds draft.mode to EXACTLY what manually clicking that mode\'s preset card would', async () => {
+    mockListOnly()
+    const root = mountPanel()
+    await flushUi()
+
+    // Expand the picker and select the "generic HTTP · list_page" template BEFORE even picking a
+    // system — the seed only ever touches `mode`, so it must survive step-1's system selection
+    // untouched and land on step 2 exactly as if the user had clicked the list_page card there.
+    q<HTMLButtonElement>(root, 'rsc-template-catalog-toggle').click()
+    await flushUi()
+    expect(maybe(root, 'rsc-template-catalog-card-http-read-list-page')).not.toBeNull()
+    q<HTMLButtonElement>(root, 'rsc-template-catalog-card-http-read-list-page').click()
+    await flushUi()
+
+    await toStep2(root)
+    expect(q(root, 'rsc-wizard-mode-list_page').className).toContain('iu3-wizard__card--selected')
+    // Same field set the manual-selection test asserts for list_page: containerPaths only, no keyField.
+    expect(maybe(root, 'rsc-wizard-key-field')).toBeNull()
+    expect(maybe(root, 'rsc-wizard-container-paths')).not.toBeNull()
+    expect(maybe(root, 'rsc-wizard-resolver-rule')).toBeNull()
+  })
+
+  it('TC-1: selecting a template forces the panel back to wizard view even from expert mode', async () => {
+    mockListOnly()
+    const root = mountPanel('expert')
+    await flushUi()
+    expect(maybe(root, 'read-source-wizard')).toBeNull()
+    expect(maybe(root, 'rsc-system')).not.toBeNull()
+
+    q<HTMLButtonElement>(root, 'rsc-template-catalog-toggle').click()
+    await flushUi()
+    q<HTMLButtonElement>(root, 'rsc-template-catalog-card-k3-wise-webapi-single-record').click()
+    await flushUi()
+
+    expect(maybe(root, 'read-source-wizard')).not.toBeNull()
+    expect(maybe(root, 'rsc-system')).toBeNull()
+  })
+
+  it('TC-1: template catalog card copy renders bilingually via useLocale', async () => {
+    const { setLocale } = useLocale()
+    setLocale('zh-CN')
+    try {
+      mockListOnly()
+      const root = mountPanel()
+      await flushUi()
+      expect(q(root, 'rsc-template-catalog-toggle').textContent).toContain('从模板开始')
+      q<HTMLButtonElement>(root, 'rsc-template-catalog-toggle').click()
+      await flushUi()
+      expect(q(root, 'rsc-template-catalog-card-http-read-single-record').textContent).toContain('通用 HTTP 读取源')
+    } finally {
+      setLocale('en')
+    }
+  })
 })

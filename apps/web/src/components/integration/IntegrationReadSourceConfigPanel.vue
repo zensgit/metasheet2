@@ -9,6 +9,18 @@
       <div class="integration-read-source__form" data-testid="read-source-form">
         <h3>新建 / 试配读取源</h3>
 
+        <!-- TC-1 (design-lock docs/development/integration-connector-template-catalog-design-lock-20260708.md,
+             #3879): an ADD-ONLY alternative entry point — collapsed by default, so the pre-existing
+             wizard/flat-form default surface and every existing assertion about it are untouched.
+             Selecting a card seeds `draft.mode` (the exact field IntegrationReadSourceWizard.vue's own
+             `selectMode()` sets) and forces the view back to the wizard, then falls through to the
+             SAME step-1/2/3/4 flow — no new state, no new path. -->
+        <IntegrationTemplateCatalogPicker
+          seeds-wizard="read-source"
+          testid-prefix="rsc"
+          @select="applyReadSourceTemplate"
+        />
+
         <!-- IU-3 (design-lock docs/development/integration-iu3-read-source-wizard-design-lock-20260707.md):
              the wizard is the DEFAULT surface; this toggle switches to the untouched full flat form
              below (折叠≠删除 — expert mode is retained, never removed). Native <button>, not an
@@ -394,7 +406,13 @@ import {
   type ReadSourceSaveResult,
   type ReadSourceStatus,
 } from '../../services/integration/readSourceConfigs'
+import {
+  isReadSourceTemplateEntry,
+  seedReadSourceDraft,
+  type IntegrationTemplateCatalogEntry,
+} from '../../services/integration/readSourceTemplateCatalog'
 import IntegrationReadSourceWizard from './IntegrationReadSourceWizard.vue'
+import IntegrationTemplateCatalogPicker from './IntegrationTemplateCatalogPicker.vue'
 
 // IU-3 (design-lock docs/development/integration-iu3-read-source-wizard-design-lock-20260707.md):
 // the wizard is the DEFAULT new-config surface; `initialViewMode` lets a caller (incl. this file's
@@ -476,6 +494,18 @@ function addFieldMapRow(): void {
 
 function removeFieldMapRow(index: number): void {
   draft.fieldMap.splice(index, 1)
+}
+
+// TC-1 (design-lock docs/development/integration-connector-template-catalog-design-lock-20260708.md):
+// seed-then-present — the SAME shared `draft` the wizard/flat-form already bind to, mutated by exactly
+// one field (`seedReadSourceDraft` mirrors the wizard's own `selectMode()`), then the view is forced
+// back to 'wizard' so the pre-filled state is immediately visible on the surface it was seeded for.
+// The picker is wired with seeds-wizard="read-source" so only ReadSourceTemplateCatalogEntry values are
+// ever emitted here; the type guard is a defensive narrowing, not a behavior branch.
+function applyReadSourceTemplate(entry: IntegrationTemplateCatalogEntry): void {
+  if (!isReadSourceTemplateEntry(entry)) return
+  seedReadSourceDraft(draft, entry)
+  viewMode.value = 'wizard'
 }
 
 function statusLabel(status: ReadSourceStatus): string {
