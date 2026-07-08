@@ -78,7 +78,9 @@
   - **对账修正（gate ③ 语义诚实化）**：owner 硬门③的「白名单」在实现里位于 `pruneHiddenFormData` 之后，而后者已把 formData 收敛到「可见的模板声明字段」——故白名单是**冗余的纵深防御**而非唯一闸。安全性质（未声明/组织探测键不进走图）在 create+preview 两路都成立；证明用一个「条件节点按未声明字段 `route_secret` 分支」的判别式金测：任一层生效即 low 臂，**两层同时移除**才漂到 high 臂（已 mutation 验证 RED）。原「移除白名单即漂路由」的说法不成立，已在代码注释与测试注释更正。
   - **§3 输出契约对齐**：端点线响应严格等于 §3 的 `{ route, truncated }`——底座内部返回的 `totalSteps` 不上线（不转发），并有金测断言 `Object.keys(body)===['route','truncated']` 锁死防漂移。
 - 🟦 **RP-3 端点 as-built（本 PR，backend）**：POST `/api/approval-templates/:id/route-preview`，守卫 `approvalTemplateAdminGuard`（canManageTemplates）——**唯一接受 `sampleRequesterId` 的面**（owner 硬门③：组织探测面仅管理端点可达；B3-05 面永不接受 requester 覆盖）。复用 B3-05 同一只读走图+姓名充实（抽 `walkPreviewRoute` 私有helper，`previewApprovalRoute`/`previewTemplateRoute` 共享——无平行实现）。两处扩展只在 preview 侧生效、create/B3-05 字节不变：①`previewSource:'draft'` 用 publish 同一 `buildRuntimeGraph` 编译 LATEST/草稿版本（作者可试运行未发布编辑，跳过 409 published 门）；②`requesterOverride` 只从 sampleRequesterId 的 userId 现查 org 关系/目录角色（客户端不可喂 roles/dept）。入口 `actor` 仍负责模板可见性鉴权。真库测试 8/8（401/403非管理/400/404/草稿预览+样例发起人驱动路由A≠B/省略回退actor/§3+零写scope）；突变 RED（draft-compile 关→409；sampleRequester 断线→A/B 失效）；create 路径回归 14/14（requester role/dept/title/manager-chain/delegation）。
-- ⬜ **RP-3 FE 试运行面板** —— authoring 页消费上端点：样例发起人 picker（复用 directory/users）+ 样例表单 → 高亮命中路径 + 各节点解析人 + 条件人话（复用 G-B2-19 `conditionSummary`）。可交 Sonnet。
+  - **wedge 契约钉死**：模板按 `requester.department/title/role` 路由而样例发起人缺该属性时，底座 wedge guard **fail-closed 422/503**（与真实 create 同）——preview **不**优雅降级到默认分支（那会显示一条 create 实际会拒绝的假路由，违背 preview===create 保真）。FE 面板据此提示「此样例发起人缺少部门，真实提交会被拒」。已金测钉死（dept-routing 草稿 + 无部门样例 → 422 APPROVAL_REQUESTER_DEPARTMENT_REQUIRED）。
+  - **两处已知背离（记录，非缺陷）**：①草稿 preview **不跑** RA-1b 已策展角色门（publish 与 formula-condition/dry-run 会跑）——依 §4「preview 不重复校验」，故作者可能预览到一条 publish 会拒的未策展角色路由；FE 面板应提示「以发布校验为准」。②`previewSource:'draft'` 载入**最后保存**的版本，非编辑器未保存改动——面板流程是「保存后试运行」。
+- ⬜ **RP-3 FE 试运行面板** —— authoring 页消费上端点：样例发起人 picker（复用 directory/users）+ 样例表单 → 高亮命中路径 + 各节点解析人 + 条件人话（复用 G-B2-19 `conditionSummary`）；wedge 422/未策展角色/保存后预览三态提示如上。可交 Sonnet。
 
 ## 7. Out of scope
 

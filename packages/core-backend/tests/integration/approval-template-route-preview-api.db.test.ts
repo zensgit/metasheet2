@@ -62,6 +62,7 @@ describeIfDatabase('RP-3 — POST /api/approval-templates/:id/route-preview (rea
   let base = ''
   let adminTok = ''
   let draftTemplateId = ''
+  let deptRoutingDraftId = ''
 
   beforeAll(async () => {
     expect(await canListen()).toBe(true)
@@ -98,6 +99,31 @@ describeIfDatabase('RP-3 — POST /api/approval-templates/:id/route-preview (rea
     draftTemplateId = (template as { id: string }).id
     // NOTE: deliberately NOT published — the whole point of B3-06 is previewing un-published edits.
 
+    // A draft that ROUTES on requester.department — for pinning the wedge-guard contract when a
+    // sample requester lacks the department the graph needs.
+    const deptTemplate = await approvals.createTemplate({
+      key: `rp3dept-${TS}`,
+      name: 'RP3 Dept-Routing Draft',
+      formSchema: { fields: [{ id: 'summary', type: 'text', label: 'Summary', required: true }] },
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: 'Start', config: {} },
+          { key: 'cond_1', type: 'condition', name: 'route', config: { branches: [{ edgeKey: 'eng', rules: [], formula: { expression: 'requester.department == "工程部"' } }], defaultEdgeKey: 'other' } },
+          { key: 'approval_eng', type: 'approval', name: '工程审批', config: { mode: 'any', assigneeSources: [{ kind: 'requester' }] } },
+          { key: 'approval_other', type: 'approval', name: '其他审批', config: { mode: 'any', assigneeSources: [{ kind: 'requester' }] } },
+          { key: 'end', type: 'end', name: 'End', config: {} },
+        ],
+        edges: [
+          { key: 'e0', source: 'start', target: 'cond_1' },
+          { key: 'eng', source: 'cond_1', target: 'approval_eng' },
+          { key: 'other', source: 'cond_1', target: 'approval_other' },
+          { key: 'ee', source: 'approval_eng', target: 'end' },
+          { key: 'eo', source: 'approval_other', target: 'end' },
+        ],
+      },
+    } as never, { userId: ADMIN, userName: ADMIN } as never)
+    deptRoutingDraftId = (deptTemplate as { id: string }).id
+
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
     base = `http://127.0.0.1:${server.getAddress()!.port}`
@@ -107,15 +133,16 @@ describeIfDatabase('RP-3 — POST /api/approval-templates/:id/route-preview (rea
   afterAll(async () => {
     try {
       const pool = poolManager.get()
-      if (draftTemplateId) {
-        const iids = (await pool.query(`SELECT id FROM approval_instances WHERE template_id = $1`, [draftTemplateId])).rows.map((r) => r.id as string)
+      for (const tid of [draftTemplateId, deptRoutingDraftId]) {
+        if (!tid) continue
+        const iids = (await pool.query(`SELECT id FROM approval_instances WHERE template_id = $1`, [tid])).rows.map((r) => r.id as string)
         if (iids.length > 0) {
           await pool.query(`DELETE FROM approval_records WHERE instance_id = ANY($1)`, [iids])
           await pool.query(`DELETE FROM approval_assignments WHERE instance_id = ANY($1)`, [iids])
           await pool.query(`DELETE FROM approval_instances WHERE id = ANY($1)`, [iids])
         }
-        await pool.query(`DELETE FROM approval_published_definitions WHERE template_id = $1`, [draftTemplateId])
-        await pool.query(`DELETE FROM approval_templates WHERE id = $1`, [draftTemplateId])
+        await pool.query(`DELETE FROM approval_published_definitions WHERE template_id = $1`, [tid])
+        await pool.query(`DELETE FROM approval_templates WHERE id = $1`, [tid])
       }
       await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[ADMIN, SAMPLE_A, SAMPLE_B]])
     } catch {
@@ -170,6 +197,20 @@ describeIfDatabase('RP-3 — POST /api/approval-templates/:id/route-preview (rea
     expect(res.status, await res.clone().text()).toBe(200)
     const body = (await res.json()) as PreviewBody
     expect(body.route[0]!.assignees.map((a) => a.id)).toEqual([ADMIN])
+  })
+
+  it('PINNED CONTRACT: a requester-attribute wedge fails closed (422), same as create — NOT a fake default route', async () => {
+    // The template routes on requester.department; the sample requester has no department. The
+    // shared substrate's wedge guard fails closed (422) exactly as the real create would — preview
+    // must NOT gracefully show the default branch, because create would REJECT this requester, not
+    // route them to default. Fidelity (preview===create) over convenience. The FE surfaces this as
+    // "此样例发起人缺少部门，真实提交会被拒", not a misleading resolved path.
+    const res = await post(base, `/api/approval-templates/${deptRoutingDraftId}/route-preview`, adminTok, {
+      sampleFormData: { summary: 'dept route' },
+      sampleRequesterId: SAMPLE_A,
+    })
+    expect(res.status).toBe(422)
+    expect(((await res.json()) as { error?: { code?: string } }).error?.code).toBe('APPROVAL_REQUESTER_DEPARTMENT_REQUIRED')
   })
 
   it('§3 output-contract conformance + ZERO writes (scoped to this template)', async () => {
