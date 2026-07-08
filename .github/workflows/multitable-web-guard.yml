@@ -29,6 +29,10 @@ on:
       - 'apps/web/src/multitable/automationSaveBlockReasons.ts'
       - 'apps/web/src/multitable/components/MetaAutomationRuleEditor.vue'
       - 'apps/web/tests/automation-save-block-reasons.spec.ts'
+      # G-B2-25: the per-action collapse-card one-line summary (its matrix spec is the only thing
+      # pinning "honest placeholder, never fabricated" behavior across every action type).
+      - 'apps/web/src/multitable/automationActionSummary.ts'
+      - 'apps/web/tests/automation-action-summary.spec.ts'
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
@@ -115,6 +119,10 @@ on:
       - 'apps/web/src/multitable/utils/personal-config-write.ts'
       - 'apps/web/tests/multitable-reorder-view-fields.spec.ts'
       - 'apps/web/tests/multitable-grid-personal-additive-write.spec.ts'
+      # G-B2-25: the per-action collapse-card one-line summary (its matrix spec is the only thing
+      # pinning "honest placeholder, never fabricated" behavior across every action type).
+      - 'apps/web/src/multitable/automationActionSummary.ts'
+      - 'apps/web/tests/automation-action-summary.spec.ts'
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
@@ -249,4 +257,4 @@ jobs:
         # UF-3: status-color convergence — statusTag (StatusTag.vue + statusDomains.ts unit/mount
         # coverage), AutomationExecutionsView + parallelBranchRunsView (automationRun domain status
         # badges, run + step level, including the parallel-branch readability regression).
-        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-history-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule multitable-person-picker multitable-cell-renderer-person-inactive meta-toolbar-filter-builder meta-filter-group meta-grid-table multitable-grid multitable-reorder-view-fields multitable-restore-preview-dialog multitable-restore-batch-dialog multitable-config-history-modal multitable-workbench-restore-wiring multitable-config-revert-refresh multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-field-visibility multitable-required-if multitable-conditional-formatting statusTag AutomationExecutionsView parallelBranchRunsView automation-save-block-reasons multitable-automation-rule-editor --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-history-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule multitable-person-picker multitable-cell-renderer-person-inactive meta-toolbar-filter-builder meta-filter-group meta-grid-table multitable-grid multitable-reorder-view-fields multitable-restore-preview-dialog multitable-restore-batch-dialog multitable-config-history-modal multitable-workbench-restore-wiring multitable-config-revert-refresh multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-field-visibility multitable-required-if multitable-conditional-formatting statusTag AutomationExecutionsView parallelBranchRunsView automation-save-block-reasons automation-action-summary multitable-automation-rule-editor --reporter=dot
