@@ -47,7 +47,7 @@ owner「完成这条开发线的所有开发」mandate(2026-07-07)达成:能力�
   drift…)。
 - **values-free 全程**:BA 线所有诊断/证据/建议为 count/形状/布尔/coarse 码;raw errorMessage 永不
   渲染;凭据仅"已配置/未配置";sentinel 测试在纯层 + DOM 层双证。
-- **CI 保护面**:integration-guard 单行 vitest union(31 spec);修复一个 rebase-union 引入的
+- **CI 保护面**:integration-guard 单行 vitest union(33 spec pattern);修复一个 rebase-union 引入的
   **重复 run: key 静默丢 spec** 事故(YAML 只认最后一条)。
 - **模型分派**:实现车道 Sonnet(worktree 隔离)+ 主循环 Opus/Fable 质量闸;Fable 不可用回退 Opus。
 
@@ -56,7 +56,7 @@ owner「完成这条开发线的所有开发」mandate(2026-07-07)达成:能力�
 写阶梯 W2+(独立轨 W0 锁 #3515,W1-frozen 为收尾口径,W4 生产写 customer-barred)· 递归 REC
 (双门冻结)· BL 能力线(已关账 #3736)· BA start/stop 与本机 config 直改(BA-UI 第一版明确不做)。
 
-## 4. 收尾三核验(final main HEAD 7d9de81ad)
+## 4. 收尾三核验(在本 PR 各版本的 verified head 上执行;PR 合并 SHA 以 GitHub 为准)
 
 ```text
 核验1 yml run 行 ⊇ 所有存在 integration spec —— PASS(33 spec pattern;JsonAssist 大小写不敏感
