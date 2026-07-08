@@ -97,6 +97,7 @@ export type AutomationLabelKey =
   | 'editor.executionModeLabel'
   | 'editor.executionModeHint'
   | 'editor.executionModeRequiredHint'
+  | 'editor.saveBlockedTitle'
   | 'trigger.title'
   | 'trigger.watchField'
   | 'trigger.selectField'
@@ -181,6 +182,7 @@ export type AutomationLabelKey =
   | 'manager.allowedAudiencePrefix'
   | 'manager.statOk'
   | 'manager.statFail'
+  | 'manager.lastRunNone'
   | 'manager.edit'
   | 'manager.viewLogs'
   | 'manager.viewDeliveries'
@@ -359,6 +361,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'editor.executionModeLabel',
   'editor.executionModeHint',
   'editor.executionModeRequiredHint',
+  'editor.saveBlockedTitle',
   'trigger.title',
   'trigger.watchField',
   'trigger.selectField',
@@ -440,6 +443,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'manager.allowedAudiencePrefix',
   'manager.statOk',
   'manager.statFail',
+  'manager.lastRunNone',
   'manager.edit',
   'manager.viewLogs',
   'manager.viewDeliveries',
@@ -630,6 +634,12 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     en: 'Required and locked on: this rule has an action that requires durable WorkflowJob records (wait for callback, condition branch, or parallel branch).',
     zh: '已强制开启并锁定：本规则包含需要持久 WorkflowJob 记录的动作（等待回调、条件分支或并行分支），无法关闭。',
   },
+  // G-B2-22: title above the save-block reasons list — shown only while Save is disabled by a
+  // validation guard, never while merely mid-save.
+  'editor.saveBlockedTitle': {
+    en: "Can't save yet — fix the following:",
+    zh: '暂时无法保存，请先解决以下问题：',
+  },
   'trigger.title': { en: 'Trigger', zh: '触发器' },
   'trigger.watchField': { en: 'Watch field', zh: '监听字段' },
   'trigger.selectField': { en: '-- select field --', zh: '-- 选择字段 --' },
@@ -738,6 +748,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.allowedAudiencePrefix': { en: 'Allowed audience:', zh: '允许范围：' },
   'manager.statOk': { en: 'ok', zh: '成功' },
   'manager.statFail': { en: 'fail', zh: '失败' },
+  'manager.lastRunNone': { en: 'Not run yet', zh: '尚未运行' },
   'manager.edit': { en: 'Edit', zh: '编辑' },
   'manager.viewLogs': { en: 'View Logs', zh: '查看日志' },
   'manager.viewDeliveries': { en: 'View Deliveries', zh: '查看投递记录' },
@@ -1075,6 +1086,67 @@ export function automationCardLinkSummary(variant: AutomationCardLinkVariant, vi
 export function automationCardStats(count: number, status: AutomationCardStatType, isZh: boolean): string {
   const key = status === 'ok' ? 'manager.statOk' : 'manager.statFail'
   return `${count} ${automationLabel(key, isZh)}`
+}
+
+const LAST_RUN_MINUTE_MS = 60 * 1000
+const LAST_RUN_HOUR_MS = 60 * LAST_RUN_MINUTE_MS
+const LAST_RUN_DAY_MS = 24 * LAST_RUN_HOUR_MS
+
+/**
+ * G-B2-23: relative-time text for a rule card's "last run" chip, e.g. "3 分钟前" /
+ * "3 minutes ago". Returns '' for an unparseable `iso` timestamp so callers can fail
+ * quiet instead of rendering "NaN minutes ago". A timestamp slightly in the future
+ * (clock skew between browser and backend) clamps to "just now" rather than a negative
+ * duration.
+ */
+export function automationLastRunRelativeTime(iso: string, now: Date, isZh: boolean): string {
+  const thenMs = new Date(iso).getTime()
+  if (Number.isNaN(thenMs)) return ''
+  const elapsedMs = Math.max(0, now.getTime() - thenMs)
+  if (elapsedMs < LAST_RUN_MINUTE_MS) return isZh ? '刚刚' : 'just now'
+  if (elapsedMs < LAST_RUN_HOUR_MS) {
+    const minutes = Math.floor(elapsedMs / LAST_RUN_MINUTE_MS)
+    return isZh ? `${minutes} 分钟前` : `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago`
+  }
+  if (elapsedMs < LAST_RUN_DAY_MS) {
+    const hours = Math.floor(elapsedMs / LAST_RUN_HOUR_MS)
+    return isZh ? `${hours} 小时前` : `${hours} ${hours === 1 ? 'hour' : 'hours'} ago`
+  }
+  const days = Math.floor(elapsedMs / LAST_RUN_DAY_MS)
+  return isZh ? `${days} 天前` : `${days} ${days === 1 ? 'day' : 'days'} ago`
+}
+
+/** Which status color a rule card's "last run" chip keys off of; `'none'` = never run. */
+export type AutomationLastRunChipStatus = AutomationExecution['status'] | 'none'
+
+export interface AutomationLastRunChip {
+  status: AutomationLastRunChipStatus
+  text: string
+}
+
+/**
+ * G-B2-23: rule card "last run" chip — glanceable status + relative time, without a
+ * separate serial round-trip per rule (see `automation-rule-concurrent-merge.ts` for the
+ * concurrent fetch/merge that feeds this).
+ *
+ * `executions` is the most-recent-first page from `getAutomationLogs(sheetId, ruleId, 1)`
+ * (0 or 1 entries — this function only ever looks at index 0). An empty array is a
+ * *confirmed* "this rule has never run" — distinct from "we haven't fetched yet", which
+ * is the caller's `v-if` concern before this function is ever invoked — so it renders the
+ * honest "Not run yet" copy rather than a blank chip or a fabricated timestamp.
+ */
+export function automationLastRunChip(
+  executions: readonly AutomationExecution[],
+  now: Date,
+  isZh: boolean,
+): AutomationLastRunChip {
+  const latest = executions[0]
+  if (!latest) {
+    return { status: 'none', text: automationLabel('manager.lastRunNone', isZh) }
+  }
+  const statusText = automationStatusLabel(latest.status, isZh)
+  const relative = automationLastRunRelativeTime(latest.triggeredAt, now, isZh)
+  return { status: latest.status, text: relative ? `${statusText} · ${relative}` : statusText }
 }
 
 /**
