@@ -105,6 +105,34 @@ export class DingTalkLoginPolicyError extends Error {
 }
 
 const pendingStates = new Map<string, StateRecord>()
+
+/**
+ * DT-OPS-05 — the OAuth `state` store and multi-replica deployments.
+ *
+ * `state` proves the callback belongs to a launch we issued, and is single-use. It lives
+ * in Redis when configured and otherwise in an in-process Map. That Map is fine for a
+ * single replica and quietly wrong for more than one: the callback can land on a
+ * different instance than the launch (valid state rejected → login fails), one-time-use
+ * is only guaranteed per process, and a transient Redis outage silently degrades to it.
+ *
+ * Deployments that run more than one replica set this flag and fail closed instead.
+ * Default off: single-replica behavior is unchanged.
+ */
+export function isDingTalkOAuthSharedStateStoreRequired(): boolean {
+  return ['true', '1', 'yes'].includes(
+    String(process.env.DINGTALK_OAUTH_REQUIRE_SHARED_STATE_STORE ?? '').trim().toLowerCase(),
+  )
+}
+
+export class DingTalkOAuthStateStoreUnavailableError extends Error {
+  readonly statusCode = 503
+  readonly code = 'DINGTALK_STATE_STORE_UNAVAILABLE'
+
+  constructor() {
+    super('DingTalk OAuth state store (Redis) is unavailable and a shared store is required')
+    this.name = 'DingTalkOAuthStateStoreUnavailableError'
+  }
+}
 let redisStateClient: Redis | null = null
 let redisStateClientPromise: Promise<Redis | null> | null = null
 let redisFallbackLogged = false
@@ -765,6 +793,14 @@ export async function generateState(options: {
 
   const storedInRedis = await writeStateToRedis(state, record)
   if (!storedInRedis) {
+    // DT-OPS-05: the in-process Map is only a single-replica convenience. Behind more
+    // than one replica the callback can land on a different instance than the launch, so
+    // a valid state is rejected and the login fails; one-time-use is also only guaranteed
+    // per process. Deployments that require a shared store fail closed instead of
+    // silently degrading to memory.
+    if (isDingTalkOAuthSharedStateStoreRequired()) {
+      throw new DingTalkOAuthStateStoreUnavailableError()
+    }
     writeStateToMemory(state, record)
   }
 
@@ -775,6 +811,17 @@ export async function validateState(state: string): Promise<StateValidationResul
   if (!state) return { valid: false, error: 'Missing required parameter: state' }
 
   const redisResult = await validateStateFromRedis(state)
+
+  // DT-OPS-05: when a shared store is required, NEVER consult the per-process Map — a
+  // transient Redis outage must fail the login rather than quietly fall through to a
+  // store the other replicas cannot see. `null` here means the store was unavailable
+  // (a real miss returns an explicit invalid result).
+  if (isDingTalkOAuthSharedStateStoreRequired()) {
+    if (redisResult) return redisResult
+    logger.error('DingTalk OAuth state store is unavailable and a shared store is required; refusing the login')
+    return { valid: false, error: 'DingTalk login is temporarily unavailable. Please try again.' }
+  }
+
   if (redisResult?.valid) return redisResult
   if (redisResult?.error === 'State parameter has expired') return redisResult
 
