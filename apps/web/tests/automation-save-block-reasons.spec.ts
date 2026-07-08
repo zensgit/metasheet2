@@ -386,3 +386,112 @@ describe('automationSaveBlockReasons', () => {
     expect(reasons[0].message).toBe('请填写规则名称。')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Exhaustive top-level guard harness (added on adversarial review).
+//
+// The hand-written cases above left FOUR top-level guards neuterable: you could
+// delete a conjunct and every one of them stayed green. One of those was reachable
+// in production — dropping `savedWebhookSecretConfigured` from the webhook guard
+// would let "edit an existing non-webhook rule → switch trigger to webhook.received
+// → leave the secret blank → save" through, persisting a webhook rule with no secret.
+//
+// Rather than bolt on five more fixtures (which only pins the holes we happened to
+// notice), this walks the full cartesian product of every top-level guard input and
+// asserts the exact reason-key SET for each of the 32,768 combinations. Any guard
+// that is removed, or has a conjunct dropped, changes some combination's key set and
+// turns this red. `expectedKeys` is transcribed independently from the guard
+// semantics, so it does not move when the implementation does.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('computeSaveBlockReasons — exhaustive top-level guard coverage', () => {
+  const BLOCK_MSG = 'blocked'
+
+  function expectedTopLevelKeys(i: SaveBlockReasonsInput): string[] {
+    const keys: string[] = []
+    if (!i.name.trim()) keys.push('name')
+    if (i.actionsCount < 1) keys.push('actionsEmpty')
+    if (i.triggerType === 'approval.completed' && i.approvalCompletedBlockReason) keys.push('approvalCompletedBlockReason')
+    if (i.triggerType === 'approval.task_created' && i.approvalTaskCreatedBlockReason) keys.push('approvalTaskCreatedBlockReason')
+    if (i.triggerType === 'webhook.received' && !i.webhookSecretPresent && !(i.ruleHasId && i.savedWebhookSecretConfigured)) keys.push('webhookSecret')
+    if (i.conditionBranchReadOnlyReason) keys.push('conditionBranchReadOnly')
+    if (i.conditionBranchKeyError) keys.push('conditionBranchKeyError')
+    if (i.parallelBranchReadOnlyReason) keys.push('parallelBranchReadOnly')
+    if (i.parallelBranchKeyError) keys.push('parallelBranchKeyError')
+    if (i.parallelBranchActionError) keys.push('parallelBranchActionError')
+    if (!i.conditionsComplete) keys.push('conditionsIncomplete')
+    return keys
+  }
+
+  it('pins the reason-key set across the full cartesian product of top-level guards', () => {
+    const names = ['', 'My rule']
+    const actionCounts = [0, 1]
+    const triggers = ['record.created', 'approval.completed', 'approval.task_created', 'webhook.received']
+    const bools = [false, true]
+    const strs = ['', BLOCK_MSG]
+    const nulls = [null, BLOCK_MSG]
+
+    let checked = 0
+    let mismatches = 0
+    for (const name of names)
+    for (const actionsCount of actionCounts)
+    for (const triggerType of triggers)
+    for (const approvalCompletedBlockReason of strs)
+    for (const approvalTaskCreatedBlockReason of strs)
+    for (const webhookSecretPresent of bools)
+    for (const ruleHasId of bools)
+    for (const savedWebhookSecretConfigured of bools)
+    for (const conditionBranchReadOnlyReason of nulls)
+    for (const conditionBranchKeyError of nulls)
+    for (const parallelBranchReadOnlyReason of nulls)
+    for (const parallelBranchKeyError of nulls)
+    for (const parallelBranchActionError of nulls)
+    for (const conditionsComplete of bools) {
+      const input: SaveBlockReasonsInput = {
+        ...baseInput(),
+        name,
+        actionsCount,
+        triggerType,
+        approvalCompletedBlockReason,
+        approvalTaskCreatedBlockReason,
+        webhookSecretPresent,
+        ruleHasId,
+        savedWebhookSecretConfigured,
+        conditionBranchReadOnlyReason,
+        conditionBranchKeyError,
+        parallelBranchReadOnlyReason,
+        parallelBranchKeyError,
+        parallelBranchActionError,
+        conditionsComplete,
+        actions: [],
+      }
+      const actual = computeSaveBlockReasons(input).map((r) => r.key)
+      const expected = expectedTopLevelKeys(input)
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+        mismatches += 1
+        if (mismatches === 1) {
+          expect({ input, actual, expected }).toEqual({ input, actual: expected, expected })
+        }
+      }
+      // canSave is derived from the reason list — the two can never disagree.
+      expect(computeSaveBlockReasons(input).length === 0).toBe(originalCanSave({ ...input, actions: [] }))
+      checked += 1
+    }
+    expect(mismatches).toBe(0)
+    expect(checked).toBe(32768)
+  })
+
+  it('REACHABLE HOLE: an existing rule switched to webhook trigger with no stored secret still blocks', () => {
+    // ruleHasId=true but savedWebhookSecretConfigured=false → the `&& savedWebhookSecretConfigured`
+    // conjunct is the only thing standing between the user and a secretless webhook rule.
+    const input: SaveBlockReasonsInput = {
+      ...baseInput(),
+      triggerType: 'webhook.received',
+      webhookSecretPresent: false,
+      ruleHasId: true,
+      savedWebhookSecretConfigured: false,
+      actions: [],
+      actionsCount: 1,
+    }
+    expect(computeSaveBlockReasons(input).map((r) => r.key)).toContain('webhookSecret')
+  })
+})
