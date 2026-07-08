@@ -2320,6 +2320,12 @@ export async function syncDirectoryIntegration(
   integrationId: string,
   triggeredBy: string,
   triggerSource: 'manual' | 'scheduler' = 'manual',
+  /**
+   * DT-OPS-02: fired the moment the run row exists, before the DingTalk pull begins. A
+   * caller that wants to answer 202 needs the runId, and only the runId, up front — it
+   * cannot wait for a large-tenant walk to finish inside an HTTP request.
+   */
+  hooks: { onRunStarted?: (runId: string) => void } = {},
 ): Promise<{
   integration: DirectoryIntegrationSummary
   run: DirectorySyncRunSummary
@@ -2339,6 +2345,7 @@ export async function syncDirectoryIntegration(
     [integrationId, triggeredBy, triggerSource],
   )
   const runId = runResult.rows[0].id
+  hooks.onRunStarted?.(runId)
 
   try {
     const departments = await fetchAllDepartments(config, integration.name)
@@ -2838,6 +2845,122 @@ export async function syncDirectoryIntegration(
     const message = readErrorMessage(error, 'Directory sync failed')
     await markSyncFailure(integrationId, runId, message)
     throw error
+  }
+}
+
+/**
+ * DT-OPS-02 — what a sync WOULD do, without doing it.
+ *
+ * Applying a sync is not a reversible act: `auto_for_scoped_departments` creates local
+ * users on the spot, and the `last_seen_at` sweep deactivates directory accounts. There
+ * was no way to look before leaping — the roadmap's "auto-admission can be safely reviewed
+ * before apply".
+ *
+ * This pulls the DingTalk directory exactly as the sync does (so it consumes the same API
+ * quota, and its numbers are the real ones) and then compares against the database
+ * WITHOUT WRITING ANYTHING: no run row, no lease, no upsert, no user. It reuses the same
+ * pure eligibility predicate the apply path uses, so preview and apply cannot drift on the
+ * question that actually matters — who gets an account created for them.
+ */
+export type DirectorySyncPreview = {
+  integrationId: string
+  integrationName: string
+  departmentsSeen: number
+  accountsSeen: number
+  wouldCreateAccounts: number
+  wouldDeactivateAccounts: number
+  /** Deactivations that still hold a linked local user — the offboardings (see DT-OPS-01). */
+  wouldDeactivateLinkedAccounts: number
+  autoAdmissionMode: DirectoryAdmissionMode
+  autoAdmissionCandidateCount: number
+  autoAdmissionSkippedMissingEmailCount: number
+  autoAdmissionExcludedCount: number
+  sampledNewAccounts: Array<{ externalUserId: string; name: string }>
+  sampledDeactivations: Array<{ externalUserId: string; name: string; linked: boolean }>
+}
+
+type ExistingAccountPreviewRow = {
+  external_user_id: string
+  name: string
+  is_active: boolean
+  linked: boolean
+}
+
+export async function previewDirectorySyncIntegration(integrationId: string): Promise<DirectorySyncPreview> {
+  const integration = await getIntegrationRow(integrationId)
+  if (!integration) throw new Error('Directory integration not found')
+
+  const config = parseIntegrationConfig(integration)
+  const departments = await fetchAllDepartments(config, integration.name)
+  const users = await fetchAllUsers(config, departments)
+
+  const existingResult = await query<ExistingAccountPreviewRow>(
+    `SELECT a.external_user_id,
+            a.name,
+            a.is_active,
+            (l.local_user_id IS NOT NULL AND l.link_status = 'linked') AS linked
+       FROM directory_accounts a
+       LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
+      WHERE a.integration_id = $1`,
+    [integrationId],
+  )
+  const existingByExternalId = new Map(existingResult.rows.map((row) => [row.external_user_id, row]))
+
+  const sampledNewAccounts: DirectorySyncPreview['sampledNewAccounts'] = []
+  let wouldCreateAccounts = 0
+  let autoAdmissionCandidateCount = 0
+  let autoAdmissionSkippedMissingEmailCount = 0
+  let autoAdmissionExcludedCount = 0
+
+  for (const user of users.values()) {
+    if (!existingByExternalId.has(user.userId)) {
+      wouldCreateAccounts += 1
+      if (sampledNewAccounts.length < 10) sampledNewAccounts.push({ externalUserId: user.userId, name: user.name })
+    }
+
+    // Same predicate the apply path uses — preview and apply cannot disagree about who
+    // would have an account created for them.
+    const eligibility = evaluateDirectoryAutoAdmissionEligibility({
+      admissionMode: config.admissionMode,
+      admissionDepartmentIds: config.admissionDepartmentIds,
+      excludeDepartmentIds: config.excludeDepartmentIds,
+      userDepartmentIds: user.departmentIds,
+      departments,
+      email: user.email ?? null,
+    })
+    if (eligibility.inScope) autoAdmissionCandidateCount += 1
+    if (eligibility.excluded) autoAdmissionExcludedCount += 1
+    if (eligibility.missingEmail) autoAdmissionSkippedMissingEmailCount += 1
+  }
+
+  const sampledDeactivations: DirectorySyncPreview['sampledDeactivations'] = []
+  let wouldDeactivateAccounts = 0
+  let wouldDeactivateLinkedAccounts = 0
+
+  for (const row of existingResult.rows) {
+    // Already inactive rows are not a *change*; only a live account vanishing is.
+    if (!row.is_active || users.has(row.external_user_id)) continue
+    wouldDeactivateAccounts += 1
+    if (row.linked) wouldDeactivateLinkedAccounts += 1
+    if (sampledDeactivations.length < 10) {
+      sampledDeactivations.push({ externalUserId: row.external_user_id, name: row.name, linked: Boolean(row.linked) })
+    }
+  }
+
+  return {
+    integrationId,
+    integrationName: integration.name,
+    departmentsSeen: departments.size,
+    accountsSeen: users.size,
+    wouldCreateAccounts,
+    wouldDeactivateAccounts,
+    wouldDeactivateLinkedAccounts,
+    autoAdmissionMode: config.admissionMode,
+    autoAdmissionCandidateCount,
+    autoAdmissionSkippedMissingEmailCount,
+    autoAdmissionExcludedCount,
+    sampledNewAccounts,
+    sampledDeactivations,
   }
 }
 

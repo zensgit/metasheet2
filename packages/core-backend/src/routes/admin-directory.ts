@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { auditLog } from '../audit/audit'
+import { Logger } from '../core/logger'
 import {
   acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser,
@@ -18,6 +19,7 @@ import {
   listDirectoryReviewItems,
   listDirectorySyncAlerts,
   listDirectorySyncRuns,
+  previewDirectorySyncIntegration,
   syncDirectoryIntegration,
   testDirectoryIntegration,
   unbindDirectoryAccount,
@@ -36,6 +38,8 @@ import {
 import { refreshDirectoryIntegrationSchedule } from '../directory/directory-sync-scheduler'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
+
+const logger = new Logger('AdminDirectoryRoutes')
 
 function normalizeAlertFilter(value: unknown): 'all' | 'pending' | 'acknowledged' {
   const normalized = typeof value === 'string' ? value.trim() : ''
@@ -290,12 +294,57 @@ export function adminDirectoryRouter(): Router {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
 
+    // DT-OPS-02: async is OPT-IN. The synchronous response carries the auto-admission
+    // onboarding packets (one-time temporary passwords), which are never persisted — a
+    // 202 would silently throw them away. Callers that do not need them (large tenants,
+    // where the pull outlives any sane request timeout) ask for 202 + runId and poll the
+    // runs endpoint.
+    if (req.body?.async === true) {
+      try {
+        const runId = await new Promise<string>((resolve, reject) => {
+          syncDirectoryIntegration(req.params.integrationId, adminUserId, 'manual', { onRunStarted: resolve })
+            .then((result) => {
+              logger.info(`Async directory sync finished for ${req.params.integrationId} (run ${result.run.id})`)
+            })
+            .catch((error) => {
+              // If this fires before the run row exists the promise rejects and we answer
+              // an error; afterwards `resolve` has already won and this only logs, because
+              // the failure is recorded on the run row and its alert.
+              logger.warn(`Async directory sync failed for ${req.params.integrationId}: ${readErrorMessage(error, 'unknown error')}`)
+              reject(error)
+            })
+        })
+        res.status(202)
+        jsonOk(res, { accepted: true, runId, integrationId: req.params.integrationId })
+        return
+      } catch (error) {
+        const message = readErrorMessage(error, 'Failed to start directory sync')
+        jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
+        return
+      }
+    }
+
     try {
       const result = await syncDirectoryIntegration(req.params.integrationId, adminUserId)
       jsonOk(res, result)
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to sync directory integration')
       jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
+    }
+  })
+
+  // DT-OPS-02: look before you leap. Pulls the DingTalk directory exactly as a sync does
+  // and reports what would change — writing nothing at all.
+  router.post('/integrations/:integrationId/sync/preview', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const preview = await previewDirectorySyncIntegration(req.params.integrationId)
+      jsonOk(res, { preview })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to preview directory sync')
+      jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_PREVIEW_FAILED', message)
     }
   })
 

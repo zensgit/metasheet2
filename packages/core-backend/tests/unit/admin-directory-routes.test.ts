@@ -27,6 +27,7 @@ const directoryMocks = vi.hoisted(() => ({
   listDirectorySyncAlerts: vi.fn(),
   listDirectorySyncRuns: vi.fn(),
   syncDirectoryIntegration: vi.fn(),
+  previewDirectorySyncIntegration: vi.fn(),
   testDirectoryIntegration: vi.fn(),
   unbindDirectoryAccount: vi.fn(),
   updateDirectoryIntegration: vi.fn(),
@@ -68,6 +69,7 @@ vi.mock('../../src/directory/directory-sync', () => ({
   listDirectorySyncAlerts: directoryMocks.listDirectorySyncAlerts,
   listDirectorySyncRuns: directoryMocks.listDirectorySyncRuns,
   syncDirectoryIntegration: directoryMocks.syncDirectoryIntegration,
+  previewDirectorySyncIntegration: directoryMocks.previewDirectorySyncIntegration,
   testDirectoryIntegration: directoryMocks.testDirectoryIntegration,
   unbindDirectoryAccount: directoryMocks.unbindDirectoryAccount,
   updateDirectoryIntegration: directoryMocks.updateDirectoryIntegration,
@@ -170,6 +172,8 @@ describe('adminDirectoryRouter', () => {
     auditMocks.auditLog.mockReset()
     directoryMocks.acknowledgeDirectorySyncAlert.mockReset()
     directoryMocks.admitDirectoryAccountUser.mockReset()
+    directoryMocks.previewDirectorySyncIntegration.mockReset()
+    directoryMocks.syncDirectoryIntegration.mockReset()
     directoryMocks.batchBindDirectoryAccounts.mockReset()
     directoryMocks.batchUnbindDirectoryAccounts.mockReset()
     directoryMocks.bindDirectoryAccount.mockReset()
@@ -487,6 +491,84 @@ describe('adminDirectoryRouter', () => {
         ],
       },
     })
+  })
+
+  // DT-OPS-02: async is opt-in precisely because the synchronous response carries the
+  // auto-admission onboarding packets (one-time temporary passwords, never persisted).
+  // A default 202 would silently throw them away — the test above pins that.
+  it('answers 202 with the runId when async is requested, without waiting for the pull', async () => {
+    let resolveSync: (value: unknown) => void = () => {}
+    directoryMocks.syncDirectoryIntegration.mockImplementation(
+      (_id: string, _actor: string, _source: string, hooks: { onRunStarted?: (runId: string) => void }) => {
+        // The run row exists; the DingTalk walk has not finished (and never does here).
+        hooks?.onRunStarted?.('run-async-1')
+        return new Promise((resolve) => { resolveSync = resolve })
+      },
+    )
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
+      params: { integrationId: 'dir-1' },
+      body: { async: true },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(202)
+    expect(response.body).toMatchObject({ ok: true, data: { accepted: true, runId: 'run-async-1', integrationId: 'dir-1' } })
+    // The request returned while the sync is still in flight.
+    resolveSync({ run: { id: 'run-async-1' } })
+  })
+
+  it('surfaces an error when an async sync fails before the run row exists', async () => {
+    directoryMocks.syncDirectoryIntegration.mockRejectedValue(new Error('Directory integration not found'))
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
+      params: { integrationId: 'missing' },
+      body: { async: true },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(404)
+  })
+
+  it('previews a sync without applying it', async () => {
+    directoryMocks.previewDirectorySyncIntegration.mockResolvedValue({
+      integrationId: 'dir-1',
+      integrationName: 'CN',
+      departmentsSeen: 3,
+      accountsSeen: 12,
+      wouldCreateAccounts: 2,
+      wouldDeactivateAccounts: 1,
+      wouldDeactivateLinkedAccounts: 1,
+      autoAdmissionMode: 'auto_for_scoped_departments',
+      autoAdmissionCandidateCount: 2,
+      autoAdmissionSkippedMissingEmailCount: 0,
+      autoAdmissionExcludedCount: 0,
+      sampledNewAccounts: [],
+      sampledDeactivations: [],
+    })
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync/preview', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.previewDirectorySyncIntegration).toHaveBeenCalledWith('dir-1')
+    // The load-bearing property: previewing must never apply.
+    expect(directoryMocks.syncDirectoryIntegration).not.toHaveBeenCalled()
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: { preview: { wouldCreateAccounts: 2, wouldDeactivateLinkedAccounts: 1 } },
+    })
+  })
+
+  it('requires platform admin for the preview endpoint', async () => {
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync/preview', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'not-admin' },
+    })
+    expect(response.statusCode).toBe(403)
+    expect(directoryMocks.previewDirectorySyncIntegration).not.toHaveBeenCalled()
   })
 
   it('tests a saved integration by forwarding the integrationId and payload to the directory service', async () => {
