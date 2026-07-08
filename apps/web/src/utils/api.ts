@@ -257,8 +257,8 @@ export async function apiFetch(
 /**
  * Make a GET request to the API
  */
-export async function apiGet<T = any>(path: string): Promise<T> {
-  const response = await apiFetch(path)
+export async function apiGet<T = any>(path: string, options?: ApiFetchOptions): Promise<T> {
+  const response = await apiFetch(path, options)
   if (!response.ok) {
     throw new Error(`API error: ${response.status} ${response.statusText}`)
   }
