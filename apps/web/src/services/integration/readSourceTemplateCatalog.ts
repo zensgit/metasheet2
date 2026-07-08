@@ -92,6 +92,13 @@ export interface BridgeTemplateCatalogEntry extends IntegrationTemplateCatalogEn
   // candidate set) but has no interactive picker wiring in TC-1 — see readSourceTemplateCatalog.spec.ts
   // and the TC-1 verification MD for the explicit scoping note. `seed.kind` is carried for forward
   // compatibility with a later TC that deep-links into that section.
+  //
+  // Note on requiredFieldKeys for this entry: `BRIDGE_AGENT_REQUIRED_CONFIG_FIELDS` is a ONE-OF
+  // precedence list (bridgeAgentConfigCheck.ts's requiredFieldsCheck passes if ANY one of
+  // baseUrl/bridgeUrl/url is present — the real Bridge-Agent adapter accepts exactly one connection
+  // field, not all three), unlike a read-source template's requiredFieldKeys, which IS an all-required
+  // set. The field name is shared across the union purely for a uniform catalog entry shape; the
+  // single-source discipline (real constant, never hand-copied) is what's being verified either way.
   seed: { kind: string }
 }
 

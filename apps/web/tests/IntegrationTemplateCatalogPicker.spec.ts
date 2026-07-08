@@ -126,4 +126,38 @@ describe('IntegrationTemplateCatalogPicker', () => {
       setLocale('en')
     }
   })
+
+  // SENTINEL, DOM layer (design-lock §5.2: "sentinel 测试断言占位符形态,DOM 层复证" — the data-level
+  // scan already lives in readSourceTemplateCatalog.spec.ts; this re-verifies the same five patterns
+  // against the ACTUALLY RENDERED grid text, in both locales, mirroring the Bridge-Agent line's
+  // "double proof" discipline (data scan + DOM scan) rather than trusting the data-level scan alone.
+  const DIGIT_RUN_TOO_LONG = /\d{5,}/
+  const HAS_URL_SCHEME = /https?:\/\//i
+  const HAS_HOST_SHAPE = /\b(?:[a-z0-9-]+\.){2,}[a-z]{2,}\b/i
+  const HAS_IPV4_SHAPE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/
+  const HAS_CREDENTIAL_KEYWORD = /(password|secret|token|apikey|api[_-]?key|authorization|credential)/i
+
+  it('SENTINEL (DOM layer): the rendered catalog grid never carries a digit-run/URL/host/IP/credential-shaped string, in either locale', async () => {
+    const { setLocale } = useLocale()
+    for (const locale of ['en', 'zh-CN'] as const) {
+      setLocale(locale)
+      for (const kind of ['read-source', 'composition', 'bridge'] as const) {
+        const root = mount(kind)
+        await flushUi()
+        q<HTMLButtonElement>(root, 'rsc-template-catalog-toggle').click()
+        await flushUi()
+        const gridText = q(root, 'rsc-template-catalog-grid').textContent ?? ''
+        expect(gridText, `${kind}/${locale}`).not.toMatch(DIGIT_RUN_TOO_LONG)
+        expect(gridText, `${kind}/${locale}`).not.toMatch(HAS_URL_SCHEME)
+        expect(gridText, `${kind}/${locale}`).not.toMatch(HAS_HOST_SHAPE)
+        expect(gridText, `${kind}/${locale}`).not.toMatch(HAS_IPV4_SHAPE)
+        expect(gridText, `${kind}/${locale}`).not.toMatch(HAS_CREDENTIAL_KEYWORD)
+        app?.unmount()
+        container?.remove()
+        app = null
+        container = null
+      }
+    }
+    setLocale('en')
+  })
 })

@@ -95,7 +95,11 @@ expect(seeded).toEqual(manual)   // 深等价,不是子集比较
   `if` 改写成对 `BRIDGE_AGENT_REQUIRED_CONFIG_FIELDS` 的循环 —— **行为完全不变**
   (`bridgeAgentConfigCheck.spec.ts` 75 个既有用例改动前后全绿,含 baseUrl/bridgeUrl/url 三路
   fallback 的既有断言)。目录的 `seed.kind`/`targetKind`/`requiredFieldKeys` 现在读的是这两个真实
-  常量,不是手抄的字符串/数组。
+  常量,不是手抄的字符串/数组。**口径说明**:`BRIDGE_AGENT_REQUIRED_CONFIG_FIELDS` 是一个
+  "三选一"优先级列表(真实 adapter 只要求 baseUrl/bridgeUrl/url 三者之一存在,不是三者都必填)——
+  与 read-source 条目的 `requiredFieldKeys`(真正的全部必填集合)语义不同;字段名在两种条目形状间
+  共用只是为了目录条目结构统一,这里验证的核心不变量是"读真实常量、不手抄",而不是"required"
+  这个词本身的精确语义。
 - **composition 条目**:`requiredFieldKeys` = `Object.keys(createReadSourceCompositionDraft())`
   —— 派生自真实 draft 工厂函数自己的字段集,不是手写列表;工厂新增/删减字段会自动反映到这里。
 - **模式集合覆盖**:每个 read-source 条目的构造都要经过 `readSourceModePreset(mode)`——
@@ -146,13 +150,13 @@ picker 默认折叠(`display:none`),不占用任何既有 data-testid,不改变�
 | 文件 | 用例数 | 内容 |
 | --- | --- | --- |
 | `apps/web/tests/readSourceTemplateCatalog.spec.ts`(新) | 19 | 契约/单一真源(3 类)/values-free/round-trip golden(read-source × composition)/覆盖断言 |
-| `apps/web/tests/IntegrationTemplateCatalogPicker.spec.ts`(新) | 5 | picker 独立契约:折叠默认、按 seedsWizard 过滤、emit、zh 文案 |
+| `apps/web/tests/IntegrationTemplateCatalogPicker.spec.ts`(新) | 6 | picker 独立契约:折叠默认、按 seedsWizard 过滤、emit、zh 文案、DOM 层 values-free sentinel 复证(design-lock §5.2) |
 | `apps/web/tests/IntegrationReadSourceWizard.spec.ts`(ADD-ONLY +4) | 15(11 既有 + 4 新) | picker 折叠默认不扰动既有默认路径、seed round-trip DOM 证明、expert→wizard 强制切回、zh 文案 |
 | `apps/web/tests/IntegrationCompositionWizard.spec.ts`(ADD-ONLY +4) | 14(10 既有 + 4 新) | 同上,组合向导侧;含"先手动改值再选模板"非平凡 round-trip |
 | `apps/web/tests/bridgeAgentConfigCheck.spec.ts`(未改动,重跑确认) | 75 | 确认 `firstBaseUrlLike` 重构后行为不变 |
 | `apps/web/tests/IntegrationReadSourceConfigPanel.spec.ts` / `IntegrationReadSourceCompositionAuthoringPanel.spec.ts`(未改动,重跑确认) | 既有全部 | 确认 picker 接入未扰动 expert-mode 既有断言 |
 
-全量 targeted 集合(镜像 `integration-guard.yml` 的单一 `run:` 行)本地跑:36 test files / 515
+全量 targeted 集合(镜像 `integration-guard.yml` 的单一 `run:` 行)本地跑:36 test files / 516
 tests 全绿。`vue-tsc -b` 干净;`vite build` 成功。
 
 ## 7. Bridge 模板的 v1 UI 范围说明(明确的作用域取舍)
