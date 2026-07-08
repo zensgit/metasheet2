@@ -70,6 +70,11 @@ BA-APPLY-3 🔒 apply 后自动复探测确认(复用 BA-UI-2 probe 证明生效
 每 slice:主循环质量闸 + mutation 逐守卫 + 双 Node + values-free sentinel 纯层+DOM。
 ```
 
+## 6. 边界(本锁零开门)
+
+BA-apply 各 rung 待 owner opt-in;写业务数据/生产写/递归/K3-Save 全冻结;#3746 保持 OPEN 作 demand
+anchor。本文只锁设计与阶梯,不实现、不授权任何 runtime。
+
 ## 7. Disposition — 形态 B (2b) = WONTFIX by design(owner 定 2026-07-08)
 
 **本线终态锁定,形态 B「后端写 Agent 只读 config」不实现(WONTFIX by design,非缺功能)。**
@@ -95,8 +100,3 @@ BA-APPLY-3 🔒 apply 后自动复探测确认(复用 BA-UI-2 probe 证明生效
 
 **2b 撤除**:BA-APPLY-2b(给 .ps1 加 config-apply 端点)从阶梯移除,标 WONTFIX-by-design。若未来现场
 强需求全自动,须 owner **显式 ratify 扩 Agent 安全模型 + 本锁修订**,不在本线范围。
-
-## 6. 边界(本锁零开门)
-
-BA-apply 各 rung 待 owner opt-in;写业务数据/生产写/递归/K3-Save 全冻结;#3746 保持 OPEN 作 demand
-anchor。本文只锁设计与阶梯,不实现、不授权任何 runtime。
