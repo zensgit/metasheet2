@@ -89,6 +89,22 @@
             </el-tooltip>
           </span>
         </template>
+        <!-- G-B2-11 (新待办到达刷新 pill): the badge above can go stale relative to the list below
+             it (badge 5 / list 3) once new pending items land server-side after the list was last
+             loaded. We deliberately do NOT auto-refresh the list when that happens — a silent
+             reload would clear the operator's in-progress 批量通过/批量驳回 selection with no
+             warning. Instead this pill only appears here (待我处理 only) once `newTodoPill.visible`
+             flips true, and reloads solely on the operator's own click. See
+             src/approvals/newTodoPill.ts for the count-vs-loaded-rows pitfall this avoids. -->
+        <button
+          v-if="newTodoPill.visible"
+          type="button"
+          class="approval-center__new-todo-pill"
+          data-testid="approval-new-todo-pill"
+          @click="handleNewTodoPillClick"
+        >
+          {{ newTodoPill.delta }} 条新待办 · 点击刷新
+        </button>
         <!-- Wave 2 WP3 slice 2 — bulk 全部标记已读. Disabled until the server
              reports at least one unread row for the current filter so clicking
              never issues a no-op round-trip.
@@ -463,6 +479,7 @@ import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
+import { newTodoPillState } from '../../approvals/newTodoPill'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
 import { useLocale } from '../../composables/useLocale'
@@ -635,7 +652,6 @@ async function dispatchBatchAndHandleResult(
   }
   clearPendingSelection()
   loadCurrentTab()
-  void refreshPendingBadgeCount()
 }
 
 async function runBatch(action: 'approve' | 'reject', comment: string): Promise<void> {
@@ -711,7 +727,6 @@ async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
     await dispatchAction(row.id, { action: 'approve' })
     ElMessage.success('审批已通过')
     loadCurrentTab()
-    void refreshPendingBadgeCount()
   } catch (error) {
     ElMessage.error(error instanceof Error && error.message ? error.message : '操作失败，请重试')
   } finally {
@@ -750,7 +765,6 @@ async function submitRowReject(): Promise<void> {
     ElMessage.success('审批已驳回')
     rowRejectDialogVisible.value = false
     loadCurrentTab()
-    void refreshPendingBadgeCount()
   } catch (error) {
     // Mirrors B1-04's dialog-scoped inline error: keep the dialog open with the server's own
     // reason instead of a toast, so the typed comment is never lost on a retry-in-place.
@@ -796,10 +810,16 @@ function applyPendingBadgeCount(count: number, unreadCount: number): void {
   pendingTotalCount.value = Number.isFinite(count) ? count : 0
 }
 
-async function refreshPendingBadgeCount(): Promise<void> {
+// G-B2-11: `resnapshot` ties a fresh server count to "the list was just (re)loaded" — see
+// `pendingCountAtLoad` below. Only call sites that ALSO reload the pending list (or are the very
+// first load) pass this; a bare badge poll must never move the baseline the pill compares against.
+async function refreshPendingBadgeCount(options?: { resnapshot?: boolean }): Promise<void> {
   try {
     const result = await getPendingCount(sourceSystemFilter.value)
     applyPendingBadgeCount(result.count, result.unreadCount)
+    if (options?.resnapshot) {
+      pendingCountAtLoad.value = result.count
+    }
   } catch {
     // Badge is decorative — do not surface errors here; the tab itself
     // surfaces list-load failures via `store.error`.
@@ -810,12 +830,40 @@ async function refreshPendingBadgeCount(): Promise<void> {
 
 function handleRealtimeCountsUpdated(payload: ApprovalCountsUpdatedPayload): void {
   const scopedCounts = payload.countsBySourceSystem?.[sourceSystemFilter.value] ?? payload
+  // Deliberately NOT resnapshotted: a realtime push updates the live count (and can therefore
+  // surface the G-B2-11 pill below) without ever moving `pendingCountAtLoad` — the whole point of
+  // the pill is to notice this push happened while the list itself sat unrefreshed.
   applyPendingBadgeCount(scopedCounts.count, scopedCounts.unreadCount)
 }
 
 useApprovalCountsRealtime({
   onCountsUpdated: handleRealtimeCountsUpdated,
 })
+
+// G-B2-11 (新待办到达刷新 pill) — see src/approvals/newTodoPill.ts for the full design rationale.
+// `pendingCountAtLoad` is a snapshot of the server's pending `count`, taken at the moment the
+// pending list was last explicitly (re)loaded (mount / tab switch / source-system change / batch
+// action reload / the pill's own click). `null` until the very first load completes, so the pill
+// can never render before there is a baseline to compare against.
+//
+// This is intentionally compared against `pendingTotalCount` (the server's authoritative total),
+// NEVER against `store.pendingApprovals.length` (rows loaded on the current page) — the list is
+// paged, so "server total > rows on this page" would be true forever and misreport ordinary paging
+// as new arrivals.
+const pendingCountAtLoad = ref<number | null>(null)
+const newTodoPill = computed(() => newTodoPillState({
+  activeTab: activeTab.value,
+  pendingCountAtLoad: pendingCountAtLoad.value,
+  currentPendingCount: pendingTotalCount.value,
+}))
+
+// Deliberately NOT an automatic refresh: silently reloading the list out from under the operator
+// would clear whatever rows they currently have checked in the 批量通过/批量驳回 multi-select
+// (`selectedPending`) with no explanation. The pill only reloads when the operator clicks it.
+function handleNewTodoPillClick(): void {
+  clearPendingSelection()
+  loadCurrentTab()
+}
 
 // Wave 2 WP3 slice 2 — bulk 全部标记已读. Honours the current sourceSystem tab
 // so the button's effect matches the tooltip the user is looking at.
@@ -873,15 +921,18 @@ function loadCurrentTab() {
     case 'cc': store.loadCc(query); break
     case 'completed': store.loadCompleted(query); break
   }
+  // G-B2-11: EVERY list reload re-baselines the pill, from the ONE place every reload passes
+  // through. Hanging this off individual call sites is precisely what let handleSearch() and
+  // handlePageChange() skip it — leaving a pill still urging "N 条新待办 · 点击刷新" for todos the
+  // reload had already fetched. A choke point cannot be forgotten by the next call site.
+  void refreshPendingBadgeCount({ resnapshot: true })
 }
 
 function handleTabChange() {
   currentPage.value = 1
   clearPendingSelection()
+  // loadCurrentTab() refreshes the badge and re-baselines the G-B2-11 pill (see its choke point).
   loadCurrentTab()
-  // Refresh badge whenever the user re-enters the 待办 tab so recent actions
-  // reflect immediately.
-  void refreshPendingBadgeCount()
 }
 
 function handleSearch() {
@@ -893,8 +944,9 @@ function handleSearch() {
 function handleSourceSystemChange() {
   currentPage.value = 1
   clearPendingSelection()
+  // The source-system switch changes what `count` even means (a different scope); the reload's
+  // own re-baseline inside loadCurrentTab() handles it.
   loadCurrentTab()
-  void refreshPendingBadgeCount()
 }
 
 function handlePageChange(page: number) {
@@ -945,8 +997,8 @@ function openAttendanceApprovalQueue() {
 }
 
 onMounted(() => {
+  // The first load establishes the pill's initial baseline (no delta possible against itself).
   loadCurrentTab()
-  void refreshPendingBadgeCount()
 })
 </script>
 
@@ -995,6 +1047,26 @@ onMounted(() => {
 
 .approval-center__tab-badge {
   margin-left: 4px;
+}
+
+/* G-B2-11: 新待办到达刷新 pill — a deliberately clickable, un-missable affordance (not a passive
+   badge) since it is the ONLY way this new count ever reaches the list; there is no auto-refresh. */
+.approval-center__new-todo-pill {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 4px 12px;
+  border: 1px solid var(--el-color-primary-light-5);
+  border-radius: 999px;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-size: 13px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.approval-center__new-todo-pill:hover {
+  border-color: var(--el-color-primary);
 }
 
 .approval-center__tab-toolbar {
