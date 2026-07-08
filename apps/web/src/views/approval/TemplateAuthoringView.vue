@@ -957,11 +957,46 @@
           </div>
         </div>
 
+        <!-- G-B2-06 read-only flow spine (LINEAR templates only — a preserved complex graph keeps
+             its own structured/canvas views above, untouched): 发起人 → 步骤1 → 步骤2 → …, derived
+             straight from draft.steps (see linearStepSpine.ts). Not editable here; clicking a step
+             chip scrolls to and briefly highlights the matching card below. -->
+        <div
+          v-if="!graphReadOnly"
+          class="template-authoring__spine"
+          data-testid="approval-template-step-spine"
+        >
+          <template v-for="(chip, chipIndex) in linearStepSpine" :key="chip.key">
+            <button
+              type="button"
+              class="template-authoring__spine-chip"
+              :class="{
+                'template-authoring__spine-chip--requester': chip.role === 'requester',
+                'template-authoring__spine-chip--unresolved': !chip.resolvable,
+              }"
+              :data-testid="chip.role === 'requester' ? 'approval-spine-chip-requester' : 'approval-spine-chip-step'"
+              :data-step-index="chip.stepIndex ?? undefined"
+              :title="chip.stepIndex ? `第 ${chip.stepIndex} 步 · 点击定位到对应步骤卡` : '发起人：提交表单'"
+              @click="focusStepCard(chip)"
+            >
+              <strong>{{ chip.label }}</strong>
+              <span v-if="chip.sourceSummary" class="template-authoring__spine-chip-source">{{ chip.sourceSummary }}</span>
+            </button>
+            <span
+              v-if="chipIndex < linearStepSpine.length - 1"
+              class="template-authoring__spine-arrow"
+              aria-hidden="true"
+            >→</span>
+          </template>
+        </div>
+
         <div
           v-for="(step, index) in draft.steps"
           v-show="!graphReadOnly"
+          :id="`approval-step-card-${step.localId}`"
           :key="step.localId"
           class="template-authoring__item"
+          :class="{ 'template-authoring__item--highlighted': highlightedStepLocalId === step.localId }"
           data-testid="approval-template-step-row"
         >
           <div class="template-authoring__item-toolbar">
@@ -969,6 +1004,14 @@
             <div>
               <el-button size="small" :disabled="readOnly || index === 0" @click="moveStep(index, -1)">上移</el-button>
               <el-button size="small" :disabled="readOnly || index === draft.steps.length - 1" @click="moveStep(index, 1)">下移</el-button>
+              <el-button
+                size="small"
+                :disabled="readOnly"
+                :data-testid="`approval-step-insert-after-${step.localId}`"
+                @click="insertStep(index)"
+              >
+                在下方插入步骤
+              </el-button>
               <el-button size="small" type="danger" :disabled="readOnly || draft.steps.length === 1" @click="removeStep(index)">删除</el-button>
             </div>
           </div>
@@ -1416,6 +1459,7 @@ import { createRoutePreviewController } from '../../approvals/routePreviewContro
 import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
 import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
 import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewFields'
+import { buildLinearStepSpine, type LinearStepSpineChip } from '../../approvals/linearStepSpine'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import {
   buildApprovalGraph,
@@ -1429,6 +1473,7 @@ import {
   DETAIL_LEAF_FIELD_TYPES,
   draftFromTemplate,
   graphReadOnlyReason,
+  insertStepAt,
   parseIdsText,
   stepFieldAccess,
   setStepFieldPermission,
@@ -1523,6 +1568,22 @@ const canSave = computed(() => canManageTemplates.value && !unsupportedReason.va
 // G-1 read-only structured render of a preserved complex graph: a per-node summary of the
 // config the v1 editor doesn't yet author, so authors can SEE the flow they're preserving.
 const graphPreviewNodes = computed<ApprovalNode[]>(() => draft.value.preservedGraph?.nodes ?? [])
+
+// G-B2-06 read-only flow spine for a LINEAR template (see `linearStepSpine.ts`) — 发起人 → 步骤1 →
+// 步骤2 → …, derived straight from `draft.value.steps`. Never used for a preserved complex graph
+// (rendered instead, unchanged, via `graphPreviewNodes` above): the view gates it on `!graphReadOnly`.
+const linearStepSpine = computed<LinearStepSpineChip[]>(() => buildLinearStepSpine(draft.value.steps))
+// Read-only-spine → step-card affordance: clicking a step chip briefly highlights (and scrolls to)
+// its matching card below. Purely cosmetic — no editing happens on the spine itself.
+const highlightedStepLocalId = ref<string | null>(null)
+let highlightStepTimer: ReturnType<typeof setTimeout> | undefined
+function focusStepCard(chip: LinearStepSpineChip): void {
+  if (chip.role !== 'step') return
+  highlightedStepLocalId.value = chip.key
+  if (highlightStepTimer) clearTimeout(highlightStepTimer)
+  highlightStepTimer = setTimeout(() => { highlightedStepLocalId.value = null }, 1600)
+  document.getElementById(`approval-step-card-${chip.key}`)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+}
 
 const NODE_TYPE_LABELS: Record<string, string> = {
   start: '发起',
@@ -2154,6 +2215,13 @@ function addStep() {
   draft.value.steps = [...draft.value.steps, createEmptyStepDraft(draft.value.steps.length + 1)]
 }
 
+// G-B2-06 — insert (not just append): a fresh blank step lands right after `index`, and any
+// STILL-DEFAULT-named trailing step is renumbered to stay self-consistent (see `insertStepAt`'s
+// own doc in templateAuthoring.ts for exactly what counts as "still default").
+function insertStep(index: number) {
+  draft.value.steps = insertStepAt(draft.value.steps, index)
+}
+
 function removeStep(index: number) {
   if (draft.value.steps.length === 1) return
   draft.value.steps = draft.value.steps.filter((_, i) => i !== index)
@@ -2405,6 +2473,7 @@ watch(isDraftDirty, (dirty) => {
 
 onUnmounted(() => {
   window.onbeforeunload = null
+  if (highlightStepTimer) clearTimeout(highlightStepTimer)
 })
 </script>
 
@@ -2513,10 +2582,71 @@ onUnmounted(() => {
   padding: 14px;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .template-authoring__item + .template-authoring__item {
   margin-top: 12px;
+}
+
+/* G-B2-06 — brief highlight when a step card is reached via a flow-spine chip click. */
+.template-authoring__item--highlighted {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
+}
+
+/* G-B2-06 read-only linear flow spine. */
+.template-authoring__spine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-light);
+}
+
+.template-authoring__spine-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 6px 10px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  background: var(--ms-bg-card);
+  color: var(--el-text-color-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.template-authoring__spine-chip:hover {
+  border-color: var(--el-color-primary);
+}
+
+.template-authoring__spine-chip--requester {
+  background: var(--el-fill-color);
+  cursor: default;
+}
+
+.template-authoring__spine-chip--requester:hover {
+  border-color: var(--el-border-color);
+}
+
+.template-authoring__spine-chip--unresolved {
+  border-style: dashed;
+  border-color: var(--el-color-warning);
+}
+
+.template-authoring__spine-chip-source {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.template-authoring__spine-arrow {
+  color: var(--el-text-color-secondary);
 }
 
 .template-authoring__item-toolbar {

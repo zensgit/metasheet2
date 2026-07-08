@@ -29,6 +29,10 @@ on:
       - 'apps/web/src/approvals/amountAutoSum.ts'
       - 'apps/web/src/approvals/useAutoSumTotal.ts'
       - 'apps/web/src/approvals/lineDerivation.ts'
+      # G-B2-06: 线性模板流程脊柱 + 步骤间插入 — linearStepSpine.ts pure chip-descriptor helper
+      # (consumed by TemplateAuthoringView's read-only linear spine) + its matrix spec.
+      - 'apps/web/src/approvals/linearStepSpine.ts'
+      - 'apps/web/tests/approval-template-authoring-linear-step-spine.test.ts'
       # G-B2-11 / G-B2-12: the 待办 list's pill re-baseline choke point + per-row 催办 state.
       - 'apps/web/src/approvals/newTodoPill.ts'
       - 'apps/web/src/approvals/urgeButtonState.ts'
@@ -170,6 +174,10 @@ on:
       - 'apps/web/src/approvals/amountAutoSum.ts'
       - 'apps/web/src/approvals/useAutoSumTotal.ts'
       - 'apps/web/src/approvals/lineDerivation.ts'
+      # G-B2-06: 线性模板流程脊柱 + 步骤间插入 — linearStepSpine.ts pure chip-descriptor helper
+      # (consumed by TemplateAuthoringView's read-only linear spine) + its matrix spec.
+      - 'apps/web/src/approvals/linearStepSpine.ts'
+      - 'apps/web/tests/approval-template-authoring-linear-step-spine.test.ts'
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
       - 'apps/web/src/views/approval/ApprovalNewView.vue'
       - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
@@ -366,4 +374,4 @@ jobs:
         # files and asserts zero static style= attributes and zero hex/rgb() literals inside
         # <style> blocks (var() references + transparent/inherit/currentColor/none allowed);
         # had no gate before this wiring.
-        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields ui-foundation-style-guard uiFoundationTexture --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine --reporter=dot
