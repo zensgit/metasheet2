@@ -1487,6 +1487,67 @@ describe('AutomationExecutor', () => {
     expect(payload.msg.markdown.text.length).toBeLessThan(20_200)
   })
 
+  // DT-OPS-04: a DingTalk userid only means anything inside its own corp. Credentials must
+  // come from the integration the recipient is actually bound under — not from whichever
+  // integration happens to sort first as "latest active".
+  it('resolves work-notification credentials from the recipients own integration (DT-OPS-04)', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ local_user_id: 'user_1', local_user_active: true, dingtalk_user_id: 'dt-1', integration_id: 'dir-A' }],
+      })
+      .mockResolvedValue({ rows: [] })
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'tok' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_1'], titleTemplate: 'T', bodyTemplate: 'B' } }],
+    })
+    const result = await executor.execute(rule, { recordId: 'r1', data: {}, sheetId: 'sheet_1', actorId: 'user_1' })
+
+    expect(result.status).toBe('success')
+    // The recipient query must surface the binding's integration so the config resolver
+    // can be scoped to it.
+    expect(String(queryFn.mock.calls[0]?.[0] ?? '')).toContain('integration_id')
+  })
+
+  it('refuses to notify recipients bound under different DingTalk integrations (DT-OPS-04)', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [
+          { local_user_id: 'user_1', local_user_active: true, dingtalk_user_id: 'dt-1', integration_id: 'dir-A' },
+          { local_user_id: 'user_2', local_user_active: true, dingtalk_user_id: 'dt-2', integration_id: 'dir-B' },
+        ],
+      })
+      .mockResolvedValue({ rows: [] })
+    const fetchFn = vi.fn() as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_1', 'user_2'], titleTemplate: 'T', bodyTemplate: 'B' } }],
+    })
+    const result = await executor.execute(rule, { recordId: 'r1', data: {}, sheetId: 'sheet_1', actorId: 'user_1' })
+
+    // The load-bearing assertion: rather than notifying corp B's user with corp A's
+    // credentials, refuse — and never reach the DingTalk API.
+    expect(result.status).toBe('failed')
+    expect(result.steps[0]?.error).toMatch(/multiple DingTalk integrations/i)
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
   it('fails send_dingtalk_person_message when the internal processing view is not in the sheet', async () => {
     process.env.DINGTALK_APP_KEY = 'dt-app-key'
     process.env.DINGTALK_APP_SECRET = 'dt-app-secret'

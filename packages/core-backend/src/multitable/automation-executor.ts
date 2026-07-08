@@ -2939,12 +2939,17 @@ export class AutomationExecutor {
     }
 
     const recipientsResult = await this.deps.queryFn(
+      // DT-OPS-04: carry the integration the recipient is actually bound under. A
+      // DingTalk userid is only meaningful inside its own corp, so the credentials used
+      // to notify them must come from that integration — not from whichever integration
+      // happens to sort first as "latest active".
       `SELECT u.id AS local_user_id,
               u.is_active AS local_user_active,
-              linked.external_user_id AS dingtalk_user_id
+              linked.external_user_id AS dingtalk_user_id,
+              linked.integration_id AS integration_id
          FROM users u
          LEFT JOIN LATERAL (
-           SELECT a.external_user_id
+           SELECT a.external_user_id, a.integration_id::text AS integration_id
              FROM directory_account_links l
              JOIN directory_accounts a ON a.id = l.directory_account_id
             WHERE l.local_user_id = u.id
@@ -2958,13 +2963,14 @@ export class AutomationExecutor {
       [userIds],
     )
 
-    const recipientMap = new Map<string, { localUserId: string; dingtalkUserId: string }>()
+    const recipientMap = new Map<string, { localUserId: string; dingtalkUserId: string; integrationId: string }>()
     for (const row of recipientsResult.rows as Array<Record<string, unknown>>) {
       const localUserId = typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''
       const dingtalkUserId = typeof row.dingtalk_user_id === 'string' ? row.dingtalk_user_id.trim() : ''
+      const integrationId = typeof row.integration_id === 'string' ? row.integration_id.trim() : ''
       const isActive = row.local_user_active === true
       if (!localUserId || !isActive || !dingtalkUserId || recipientMap.has(localUserId)) continue
-      recipientMap.set(localUserId, { localUserId, dingtalkUserId })
+      recipientMap.set(localUserId, { localUserId, dingtalkUserId, integrationId })
     }
 
     const missingUserIds = userIds.filter((userId) => !recipientMap.has(userId))
@@ -2985,7 +2991,7 @@ export class AutomationExecutor {
 
     const resolvedRecipients = userIds
       .map((userId) => recipientMap.get(userId))
-      .filter((entry): entry is { localUserId: string; dingtalkUserId: string } => Boolean(entry))
+      .filter((entry): entry is { localUserId: string; dingtalkUserId: string; integrationId: string } => Boolean(entry))
     if (resolvedRecipients.length === 0) {
       return {
         actionType: 'send_dingtalk_person_message',
@@ -2998,6 +3004,27 @@ export class AutomationExecutor {
         },
       }
     }
+
+    // DT-OPS-04: a DingTalk userid only means anything inside its own corp. Sending one
+    // batch of recipients drawn from two integrations would notify some of them with the
+    // wrong corp's credentials, so refuse rather than guess. (Single-integration
+    // deployments — and env-configured ones — are unaffected.)
+    const recipientIntegrationIds = Array.from(
+      new Set(resolvedRecipients.map((recipient) => recipient.integrationId).filter(Boolean)),
+    )
+    if (recipientIntegrationIds.length > 1) {
+      return {
+        actionType: 'send_dingtalk_person_message',
+        status: 'failed',
+        error: 'Recipients are bound under multiple DingTalk integrations; split the rule per integration',
+        output: {
+          notifiedUsers: 0,
+          recipientIntegrationIds,
+        },
+      }
+    }
+    const recipientIntegrationId = recipientIntegrationIds[0]
+
     const batches = chunkItems(resolvedRecipients, DINGTALK_PERSON_BATCH_SIZE)
 
     // DT-HARDEN-06: recipients whose batch already reached DingTalk. A later batch
@@ -3006,7 +3033,10 @@ export class AutomationExecutor {
     const sentRecipients = new Set<(typeof resolvedRecipients)[number]>()
 
     try {
-      const messageConfig = await readDingTalkMessageConfigFromRuntime()
+      // Env-first resolution is preserved inside readDingTalkMessageConfigFromRuntime, so
+      // an env-configured deployment keeps its bootstrap behavior; only the stored-config
+      // path stops falling back to "latest active integration".
+      const messageConfig = await readDingTalkMessageConfigFromRuntime(recipientIntegrationId)
       const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
       let responseCount = 0
 
