@@ -97,6 +97,7 @@ export type AutomationLabelKey =
   | 'editor.executionModeLabel'
   | 'editor.executionModeHint'
   | 'editor.executionModeRequiredHint'
+  | 'editor.saveBlockedTitle'
   | 'trigger.title'
   | 'trigger.watchField'
   | 'trigger.selectField'
@@ -360,6 +361,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'editor.executionModeLabel',
   'editor.executionModeHint',
   'editor.executionModeRequiredHint',
+  'editor.saveBlockedTitle',
   'trigger.title',
   'trigger.watchField',
   'trigger.selectField',
@@ -631,6 +633,12 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'editor.executionModeRequiredHint': {
     en: 'Required and locked on: this rule has an action that requires durable WorkflowJob records (wait for callback, condition branch, or parallel branch).',
     zh: '已强制开启并锁定：本规则包含需要持久 WorkflowJob 记录的动作（等待回调、条件分支或并行分支），无法关闭。',
+  },
+  // G-B2-22: title above the save-block reasons list — shown only while Save is disabled by a
+  // validation guard, never while merely mid-save.
+  'editor.saveBlockedTitle': {
+    en: "Can't save yet — fix the following:",
+    zh: '暂时无法保存，请先解决以下问题：',
   },
   'trigger.title': { en: 'Trigger', zh: '触发器' },
   'trigger.watchField': { en: 'Watch field', zh: '监听字段' },
