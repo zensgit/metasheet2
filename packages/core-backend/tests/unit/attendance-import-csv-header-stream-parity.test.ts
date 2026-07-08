@@ -23,6 +23,10 @@ const DINGTALK_STYLE_CSV = [
   '李四,2026-06-02,1002,09:05,18:02',
 ].join('\n')
 
+// A file with no name+date row anywhere: the readers must still fall back to the
+// first non-empty row so upload validation keeps producing its existing 400.
+const HEADERLESS_CSV = ['随便一行,不是表头', 'a,b'].join('\n')
+
 async function collectInlineRows(csvText: string) {
   const rows: Array<{ workDate: string; fields: Record<string, string>; userId?: string }> = []
   const summary = await helpers.iterateImportRowsFromCsv({
@@ -144,5 +148,62 @@ describe('attendance CSV import header detection — inline vs streaming parity'
       },
     ])
     expect(summary.rowCount).toBe(1)
+  })
+})
+
+// The parser fix alone is not enough: the upload path validates the header via
+// readImportCsvHeaderFromFile BEFORE parsing (validateImportUploadCsvOrThrow), and
+// header diagnostics read it via readImportCsvHeaderFromText. Both used to take the
+// first non-empty row, so a title-row DingTalk export was rejected with
+// "CSV header must include a work date column" and never reached the fixed parser.
+describe('attendance CSV import header readers — title-row aware (DT-HARDEN-10)', () => {
+  const tmpDirs: string[] = []
+  afterEach(() => {
+    while (tmpDirs.length) rmSync(tmpDirs.pop() as string, { recursive: true, force: true })
+  })
+
+  function writeTmpCsv(contents: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'dt-harden-10-'))
+    tmpDirs.push(dir)
+    const csvPath = join(dir, 'import.csv')
+    writeFileSync(csvPath, contents, 'utf8')
+    return csvPath
+  }
+
+  const REAL_HEADER = ['姓名', '日期', 'UserId', '上班1打卡时间', '下班1打卡时间']
+
+  it('isLikelyImportHeaderRow requires both a name and a date column', () => {
+    expect(helpers.isLikelyImportHeaderRow(REAL_HEADER)).toBe(true)
+    expect(helpers.isLikelyImportHeaderRow(['某某集团有限公司考勤明细导出', '', '', '', ''])).toBe(false)
+    expect(helpers.isLikelyImportHeaderRow(['姓名', 'UserId'])).toBe(false)
+    expect(helpers.isLikelyImportHeaderRow(['name', 'work_date'])).toBe(true)
+  })
+
+  it('readImportCsvHeaderFromText skips the title row and returns the real header', () => {
+    expect(helpers.readImportCsvHeaderFromText(DINGTALK_STYLE_CSV, ',')).toEqual(REAL_HEADER)
+  })
+
+  it('readImportCsvHeaderFromFile skips the title row and returns the real header', async () => {
+    const csvPath = writeTmpCsv(DINGTALK_STYLE_CSV)
+    await expect(helpers.readImportCsvHeaderFromFile(csvPath, ',')).resolves.toEqual(REAL_HEADER)
+  })
+
+  it('both readers agree on the same CSV (upload validation vs inline diagnostics)', async () => {
+    const csvPath = writeTmpCsv(DINGTALK_STYLE_CSV)
+    const fromFile = await helpers.readImportCsvHeaderFromFile(csvPath, ',')
+    expect(fromFile).toEqual(helpers.readImportCsvHeaderFromText(DINGTALK_STYLE_CSV, ','))
+  })
+
+  it('falls back to the first non-empty row when no name+date row exists (validation error preserved)', async () => {
+    expect(helpers.readImportCsvHeaderFromText(HEADERLESS_CSV, ',')).toEqual(['随便一行', '不是表头'])
+    const csvPath = writeTmpCsv(HEADERLESS_CSV)
+    await expect(helpers.readImportCsvHeaderFromFile(csvPath, ',')).resolves.toEqual(['随便一行', '不是表头'])
+  })
+
+  it('a normal CSV whose header is already row 0 is unchanged', async () => {
+    const normal = [REAL_HEADER.join(','), '张三,2026-06-01,1001,09:00,18:00'].join('\n')
+    expect(helpers.readImportCsvHeaderFromText(normal, ',')).toEqual(REAL_HEADER)
+    const csvPath = writeTmpCsv(normal)
+    await expect(helpers.readImportCsvHeaderFromFile(csvPath, ',')).resolves.toEqual(REAL_HEADER)
   })
 })

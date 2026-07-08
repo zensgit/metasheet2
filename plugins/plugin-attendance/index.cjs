@@ -6927,15 +6927,31 @@ function normalizeCsvHeaderValue(value) {
   return text
 }
 
+// DT-HARDEN-10: single source of truth for "does this row look like the import
+// header". A real header carries BOTH a name column and a date column. DingTalk
+// exports prepend a title row that has neither, so anything treating the first
+// non-empty row as the header mis-reads those files — the parser skips the title
+// row while upload validation and header diagnostics read it, which 400s the
+// upload before the parser is ever reached.
+function isLikelyImportHeaderRow(normalizedCells) {
+  const row = normalizedCells.filter(Boolean)
+  if (!row.length) return false
+  const hasName = row.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
+  const hasDate = row.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
+  return hasName && hasDate
+}
+
+// Bound the header hunt so a headerless file cannot turn a cheap peek into a
+// full-file read; real title blocks are 1-3 rows.
+const IMPORT_HEADER_SCAN_MAX_ROWS = 50
+
 function detectCsvHeaderIndex(csvText, delimiter) {
   let detectedIndex = 0
   let found = false
   iterateCsvRows(csvText, delimiter, (rawRow, rowIndex) => {
-    const row = rawRow.map(normalizeCsvHeaderValue).filter(Boolean)
-    if (!row.length) return true
-    const hasName = row.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
-    const hasDate = row.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
-    if (hasName && hasDate) {
+    const row = rawRow.map(normalizeCsvHeaderValue)
+    if (!row.filter(Boolean).length) return true
+    if (isLikelyImportHeaderRow(row)) {
       detectedIndex = rowIndex
       found = true
       return false
@@ -7291,32 +7307,48 @@ function normalizeImportHeaderLookupKey(value) {
     .replace(/[\s_-]+/g, '')
 }
 
+// DT-HARDEN-10: prefer the detected header row (name+date) over the first
+// non-empty row, matching `detectCsvHeaderIndex` — otherwise a DingTalk export's
+// title row is read as the header, which 400s upload validation ("must include a
+// work date column") and makes header diagnostics report title cells as columns.
+// Falls back to the first non-empty row so a genuinely headerless file still
+// produces the same validation error it always did.
 async function readImportCsvHeaderFromFile(csvPath, delimiter = ',') {
-  let header = []
+  let firstNonEmpty = []
+  let detected = null
+  let scanned = 0
   const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
   await iterateCsvRowsStreamAsync(csvStream, delimiter, async (rawRow) => {
     const normalized = rawRow.map(normalizeCsvHeaderValue)
-    if (normalized.some((cell) => cell && String(cell).trim().length > 0)) {
-      header = normalized
+    if (!normalized.some((cell) => cell && String(cell).trim().length > 0)) return true
+    if (!firstNonEmpty.length) firstNonEmpty = normalized
+    if (isLikelyImportHeaderRow(normalized)) {
+      detected = normalized
       return false
     }
-    return true
+    scanned += 1
+    return scanned < IMPORT_HEADER_SCAN_MAX_ROWS
   })
-  return header
+  return detected ?? firstNonEmpty
 }
 
 function readImportCsvHeaderFromText(csvText, delimiter = ',') {
   if (typeof csvText !== 'string' || !csvText.trim()) return []
-  let header = []
+  let firstNonEmpty = []
+  let detected = null
+  let scanned = 0
   iterateCsvRows(csvText, delimiter, (rawRow) => {
     const normalized = rawRow.map(normalizeCsvHeaderValue)
-    if (normalized.some((cell) => cell && String(cell).trim().length > 0)) {
-      header = normalized
+    if (!normalized.some((cell) => cell && String(cell).trim().length > 0)) return true
+    if (!firstNonEmpty.length) firstNonEmpty = normalized
+    if (isLikelyImportHeaderRow(normalized)) {
+      detected = normalized
       return false
     }
-    return true
+    scanned += 1
+    return scanned < IMPORT_HEADER_SCAN_MAX_ROWS
   })
-  return header
+  return detected ?? firstNonEmpty
 }
 
 function summarizeImportDiagnosticValues(values, maxItems = 6) {
@@ -20479,8 +20511,11 @@ module.exports = {
   },
   __attendanceImportCsvHeaderForTests: {
     detectCsvHeaderIndex,
+    isLikelyImportHeaderRow,
     iterateImportRowsFromCsv,
     iterateImportRowsFromCsvFileAsync,
+    readImportCsvHeaderFromFile,
+    readImportCsvHeaderFromText,
   },
   __attendanceAutoShiftForTests: {
     AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG,
