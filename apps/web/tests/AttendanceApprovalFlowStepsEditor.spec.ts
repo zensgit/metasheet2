@@ -93,28 +93,30 @@ describe('AttendanceApprovalFlowStepsEditor', () => {
     expect(capturedPickerEndpoints).not.toContain('/api/admin/users')
   })
 
-  it('clears a pending role draft when a step is removed, so Enter cannot add it to the wrong step — review P3', async () => {
+  it('clears a pending role draft when steps reorder, so Enter cannot add it to the wrong step — review P3', async () => {
     const { model, get } = mountEditor([
       { name: 'L1', approverRoleIds: ['manager'] },
       { name: 'L2', approverRoleIds: ['hr'] },
     ])
-    // type a draft into step 2's role input without pressing Enter
+    // type a draft into step 2 (index 1) without pressing Enter
     const roleInputs = get().querySelectorAll('.approval-steps__col:last-child input')
     const step2Input = roleInputs[1] as HTMLInputElement
     step2Input.value = 'oops'
     step2Input.dispatchEvent(new Event('input'))
     await nextTick()
-    // remove step 1 → step 2 shifts to index 0; the draft must not survive to be
-    // committed against the shifted step
-    const removeButtons = get().querySelectorAll('.approval-steps__reorder .attendance__btn--danger')
-    ;(removeButtons[0] as HTMLButtonElement).click()
+    // move step 2 UP → index 1 now holds the OTHER step (old L1). An index-keyed
+    // draft at index 1 would misattribute 'oops' to old L1 on Enter.
+    const upButtons = Array.from(get().querySelectorAll('.approval-steps__reorder .attendance__btn'))
+      .filter(b => b.textContent?.includes('↑'))
+    ;(upButtons[1] as HTMLButtonElement).click()
     await nextTick()
-    expect(model.value).toHaveLength(1)
-    const remainingRoleInput = get().querySelector('.approval-steps__col:last-child input') as HTMLInputElement
-    expect(remainingRoleInput.value).toBe('')
-    remainingRoleInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    expect(model.value.map(s => s.name)).toEqual(['L2', 'L1'])
+    // both index inputs must be empty (drafts cleared on move)
+    const afterInputs = get().querySelectorAll('.approval-steps__col:last-child input')
+    ;(afterInputs[1] as HTMLInputElement).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
     await nextTick()
-    // the surviving step keeps only its own role — no 'oops' leaked in
+    // old L1 (now index 1) keeps only its own role — no 'oops' leaked in
+    expect(model.value[1].approverRoleIds).toEqual(['manager'])
     expect(model.value[0].approverRoleIds).toEqual(['hr'])
   })
 
