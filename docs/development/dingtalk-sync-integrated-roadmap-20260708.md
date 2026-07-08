@@ -1,7 +1,7 @@
 # DingTalk Sync Integrated Roadmap
 
 - Date: 2026-07-08
-- Status: draft for planning (Rev 3.1 — incorporates review pass 2026-07-08: added 6.1b auto-provision fence, 6.11 attendance CSV header parity, multi-replica OAuth state-store in 7.8, deprovision severity note in 7.1, corrected 8.2 supersede scope, deferred-P3 note in 11)
+- Status: draft for planning (Rev 3.2 — adversarial review of PR #3873 verified all 16 code-anchor groups TRUE, 0 P1/P2; this rev applies its 4 polish items: DT-HARDEN-11 ticket + evidence row for 6.10, scoped 6.6 problem statement, corrected 6.10 add-keys list, DT-OPS ticket ordering. Rev 3.1 — incorporates review pass 2026-07-08: added 6.1b auto-provision fence, 6.11 attendance CSV header parity, multi-replica OAuth state-store in 7.8, deprovision severity note in 7.1, corrected 8.2 supersede scope, deferred-P3 note in 11)
 - Source audit: 2026-07-07 full-line DingTalk integration audit (Rev 3), baseline `origin/main @ 3add4c07e`; review-pass premises re-verified against later `origin/main`. This roadmap is self-contained; the detailed audit and review notes are retained as working artifacts outside the repo.
 - Working-tree note: planning and implementation must first refresh `origin/main` and compare it with this source baseline.
 
@@ -200,7 +200,7 @@ Acceptance:
 
 Problem:
 
-- DingTalk client calls use naked `fetch`.
+- DingTalk client calls in `requestDingTalkJson` use naked `fetch` with no timeout — directory sync, person work notification, approval card, and token fetch all go through it. (The group-robot delivery path already applies a 5s abort at the service layer; it is the exception, not the rule.)
 - A hung request can block sync or automation for too long.
 
 Target:
@@ -284,7 +284,7 @@ Problem:
 Target:
 
 - Remove dead DingTalk env keys.
-- Add active keys for container login, agent ID, approval-card link secret, public app URL, and corp allowlist.
+- Add the missing active keys: container login flag, agent ID, approval-card link secret. (Public app URL and corp allowlist already exist in the template — verify and annotate them, including the auto-provision coupling from 6.1b, rather than re-adding.)
 - Add a staging smoke checklist for E1, work notification, approval card, and directory sync.
 
 Acceptance:
@@ -509,11 +509,12 @@ Target:
 | DT-HARDEN-08 | Delivery retention, indexes, response validation | P2 |
 | DT-HARDEN-09 | Auto-provision corp-allowlist fence (6.1b) | P2 |
 | DT-HARDEN-10 | Attendance CSV header detection parity (6.11) | P2 |
+| DT-HARDEN-11 | Env template hygiene + default-off staging smoke checklist (6.10) | P2 |
 | DT-OPS-01 | Deprovision policy executor (P1-severity; Phase 2 by size) | P1 |
 | DT-OPS-02 | Async sync + dry-run preview | P2 |
 | DT-OPS-03 | Run diff, alert delivery, manager coverage metrics | P2 |
-| DT-OPS-05 | Multi-replica OAuth state store precondition (7.8) | P2 |
 | DT-OPS-04 | Explicit integration_id binding for outbound config | P2 |
+| DT-OPS-05 | Multi-replica OAuth state store precondition (7.8) | P2 |
 | DT-PERF-01 | User-list primary source and batch upsert | P2 |
 | DT-STRAT-01 | Event-driven directory sync design lock | P3 |
 | DT-STRAT-02 | Interactive card Slice B design and smoke gate | P3 |
@@ -534,6 +535,7 @@ Target:
 | Primary department | Multi-department account golden; approval manager route test |
 | Dry-run | Preview/apply parity test |
 | Observability | Run diff persistence; alert details UI/API; repeated failure alert delivery |
+| Env template | Template keys diffed against actual code reads (no dead keys, no missing active keys); staging smoke checklist exists and is exercised once per default-off feature |
 
 ## 11. Non-Goals for This Roadmap
 
