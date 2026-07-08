@@ -78,6 +78,7 @@ export default defineConfig({
       // RP-1: route-preview shared substrate goldens (preview===create, zero-write, whitelist gate).
       'tests/integration/approval-route-preview-substrate.db.test.ts',
       'tests/integration/approval-route-preview-api.db.test.ts',
+      'tests/integration/approval-template-route-preview-api.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

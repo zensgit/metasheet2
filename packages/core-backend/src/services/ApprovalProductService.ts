@@ -2402,6 +2402,21 @@ function buildApprovalAssignmentResolver(options: {
   })
 }
 
+/**
+ * Read-only route-preview result shared by B3-05 (previewApprovalRoute) and B3-06
+ * (previewTemplateRoute) — one walk implementation, one shape.
+ */
+export interface ApprovalRoutePreviewResult {
+  route: Array<{
+    nodeKey: string
+    nodeLabel: string
+    assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
+    resolveError?: string
+  }>
+  totalSteps: number
+  truncated: boolean
+}
+
 export class ApprovalProductService {
   /**
    * Wave 2 WP5 slice 1 — optional metrics service injection so tests can
@@ -3259,7 +3274,26 @@ export class ApprovalProductService {
   private async assembleCreationContext(
     request: { templateId: string; formData: Record<string, unknown> },
     actor: CreateApprovalActor,
-    options: { whitelistFormDataToSchema?: boolean } = {},
+    options: {
+      whitelistFormDataToSchema?: boolean
+      // RP-3 (B3-06 authoring 试运行): source the runtime graph from the LATEST (possibly draft)
+      // version, compiled on the fly with the SAME buildRuntimeGraph the publish path uses (no
+      // parallel impl) — lets an author dry-run un-published edits. Default 'active' = the
+      // published/active definition (create + B3-05, byte-identical).
+      previewSource?: 'active' | 'draft'
+      // RP-3 (B3-06): the admin caller may resolve the route AS a sample requester (owner order ③ —
+      // sampleRequesterId only reachable on the canManageTemplates endpoint). The `actor` still
+      // authorizes template access (visibility); only the requester SNAPSHOT is taken from here.
+      //
+      // IDENTITY ONLY, deliberately: every attribute routing actually consumes (directoryDepartment /
+      // directoryTitle / directoryRoles / manager chain) is re-resolved from the DB by this userId
+      // below. Widening this to accept department/roles/etc. would hand a caller an org-attribute
+      // injection channel — so the type structurally forbids it.
+      requesterOverride?: {
+        userId: string
+        userName?: string
+      }
+    } = {},
   ): Promise<{
     bundle: NonNullable<Awaited<ReturnType<ApprovalProductService['loadTemplateBundle']>>>
     formSchema: FormSchema
@@ -3270,7 +3304,8 @@ export class ApprovalProductService {
   }> {
     if (!pool) throw new Error('Database not available')
 
-    const bundle = await this.loadTemplateBundle(request.templateId, undefined, 'active', {
+    const previewFromDraft = options.previewSource === 'draft'
+    const bundle = await this.loadTemplateBundle(request.templateId, undefined, previewFromDraft ? 'latest' : 'active', {
       userId: actor.userId,
       departmentIds: actor.departmentIds ?? (actor.department ? [actor.department] : []),
       roles: actor.roles ?? [],
@@ -3284,9 +3319,16 @@ export class ApprovalProductService {
     if (!bundle) {
       throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
     }
-    if (bundle.template.status !== 'published' || !bundle.publishedDefinition || !bundle.publishedDefinition.is_active) {
+    // The published gate applies to the real create + B3-05 (which route on the frozen published
+    // runtime graph). A draft dry-run (B3-06) legitimately previews an un-published version, so it
+    // compiles the authoring graph below instead of requiring a published definition.
+    if (!previewFromDraft && (bundle.template.status !== 'published' || !bundle.publishedDefinition || !bundle.publishedDefinition.is_active)) {
       throw new ServiceError('Approval template is not published', 409, 'APPROVAL_TEMPLATE_NOT_PUBLISHED')
     }
+    // A never-published template has `publishedDefinition === null` — which the draft path
+    // deliberately tolerates (it compiles `bundle.version.approval_graph` below instead).
+    // `bundle.version` itself is always present: loadTemplateBundleWithClient returns null when it
+    // cannot resolve a version, and that already surfaced as the 404 above.
 
     const formSchema = asFormSchema(bundle.version.form_schema)
     // NOTE: pruneHiddenFormData already restricts formData to VISIBLE declared fields, so undeclared
@@ -3335,18 +3377,38 @@ export class ApprovalProductService {
     // walked only when the published graph uses a management-chain source
     // (continuous_managers or manager_at_level) — so the extra per-hop queries stay
     // off every approval. Absence falls through to the node's emptyAssigneePolicy.
-    const runtimeGraph = asRuntimeGraph(bundle.publishedDefinition.runtime_graph)
+    // Draft dry-run (B3-06) compiles the authoring graph with the SAME compiler the publish path
+    // uses; the default path reads the frozen published runtime graph (create + B3-05, unchanged).
+    // The `!` on the published branch is sound: the non-draft gate above already threw if absent.
+    const runtimeGraph = previewFromDraft
+      ? buildRuntimeGraph(asApprovalGraph(bundle.version.approval_graph), { allowRevoke: false })
+      : asRuntimeGraph(bundle.publishedDefinition!.runtime_graph)
+    // The requester whose org attributes drive routing. Defaults to the actor (create + B3-05); the
+    // B3-06 admin endpoint may override it with a sample requester (owner order ③). Template ACCESS
+    // was already authorized against `actor` above — only routing identity changes here.
+    const effectiveRequester: {
+      userId: string
+      userName?: string
+      email?: string
+      department?: string
+      roles?: string[]
+      permissions?: string[]
+    } = options.requesterOverride
+      // Identity only — the routing-authoritative attributes are re-resolved from the DB below, so
+      // the sample requester's org data can never be client-supplied (owner order ③).
+      ? { userId: options.requesterOverride.userId, userName: options.requesterOverride.userName || options.requesterOverride.userId }
+      : { userId: actor.userId, userName: actor.userName, email: actor.email, department: actor.department, roles: actor.roles, permissions: actor.permissions }
     const needsManagerChain = runtimeGraphUsesManagerChain(runtimeGraph)
     let orgRelations: ApprovalRequesterOrgRelations = {}
     let orgReadFailed = false
     try {
-      orgRelations = await resolveApprovalRequesterOrgRelations(actor.userId, pool.query.bind(pool), {
+      orgRelations = await resolveApprovalRequesterOrgRelations(effectiveRequester.userId, pool.query.bind(pool), {
         includeManagerChain: needsManagerChain,
       })
     } catch (error) {
       orgReadFailed = true
       metricsLogger.warn(
-        `Failed to resolve requester org relations for ${actor.userId}: ${
+        `Failed to resolve requester org relations for ${effectiveRequester.userId}: ${
           error instanceof Error ? error.message : 'unknown error'
         }`,
       )
@@ -3362,11 +3424,11 @@ export class ApprovalProductService {
     let roleReadFailed = false
     if (needsRequesterRoles) {
       try {
-        requesterRoleIds = await resolveApprovalRequesterRoleIds(actor.userId, pool.query.bind(pool))
+        requesterRoleIds = await resolveApprovalRequesterRoleIds(effectiveRequester.userId, pool.query.bind(pool))
       } catch (error) {
         roleReadFailed = true
         metricsLogger.warn(
-          `Failed to resolve requester roles for ${actor.userId}: ${
+          `Failed to resolve requester roles for ${effectiveRequester.userId}: ${
             error instanceof Error ? error.message : 'unknown error'
           }`,
         )
@@ -3449,18 +3511,18 @@ export class ApprovalProductService {
     }
 
     const requesterSnapshot: ApprovalRequesterSnapshot = {
-      id: actor.userId,
-      name: actor.userName || actor.userId,
-      email: actor.email,
-      department: actor.department,
+      id: effectiveRequester.userId,
+      name: effectiveRequester.userName || effectiveRequester.userId,
+      email: effectiveRequester.email,
+      department: effectiveRequester.department,
       ...(orgRelations.primaryDepartmentName ? { directoryDepartment: orgRelations.primaryDepartmentName } : {}),
       ...(orgRelations.primaryTitle ? { directoryTitle: orgRelations.primaryTitle } : {}),
       // RA-1b CURATED-VOCABULARY — FREEZE directoryRoles ALWAYS as an array, INCLUDING `[]`. Genuine-empty is
       // a valid predicate state (routes to DEFAULT), so it must NOT be omitted: an omitted field would thread
       // null at dispatch and fail-closed at eval instead of evaluating membership to false.
       directoryRoles: requesterRoleIds,
-      roles: actor.roles || [],
-      permissions: actor.permissions || [],
+      roles: effectiveRequester.roles || [],
+      permissions: effectiveRequester.permissions || [],
       ...(orgRelations.managerId ? { managerId: orgRelations.managerId } : {}),
       ...(orgRelations.deptHeadId ? { deptHeadId: orgRelations.deptHeadId } : {}),
       ...(orgRelations.managerChainIds ? { managerChainIds: orgRelations.managerChainIds } : {}),
@@ -3495,20 +3557,43 @@ export class ApprovalProductService {
   async previewApprovalRoute(
     request: { templateId: string; formData: Record<string, unknown> },
     actor: CreateApprovalActor,
-  ): Promise<{
-    route: Array<{
-      nodeKey: string
-      nodeLabel: string
-      assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
-      resolveError?: string
-    }>
-    totalSteps: number
-    truncated: boolean
-  }> {
+  ): Promise<ApprovalRoutePreviewResult> {
+    // B3-05: the requester IS the session actor; publish gate applies (active runtime graph).
     const { runtimeGraph, executor } = await this.assembleCreationContext(request, actor, {
       whitelistFormDataToSchema: true,
     })
+    return this.walkPreviewRoute(runtimeGraph, executor)
+  }
 
+  /**
+   * RP-3 (B3-06 authoring 试运行): the template author's dry-run. Identical read-only walk +
+   * name enrichment as B3-05 (shared substrate — NO parallel impl), but it (a) sources the runtime
+   * graph from the LATEST/draft version so un-published edits are testable, and (b) may resolve the
+   * route AS an optional sample requester. Guarded by canManageTemplates at the route so
+   * sampleRequesterId — the org-structure probe surface — is unreachable to ordinary users
+   * (owner order ③). `actor` still authorizes template visibility inside assembleCreationContext.
+   */
+  async previewTemplateRoute(
+    request: { templateId: string; formData: Record<string, unknown> },
+    actor: CreateApprovalActor,
+    options: {
+      // Identity only — see assembleCreationContext.requesterOverride: the sample requester's org
+      // attributes are always re-resolved from the DB, never accepted from the caller.
+      sampleRequester?: { userId: string; userName?: string }
+    } = {},
+  ): Promise<ApprovalRoutePreviewResult> {
+    const { runtimeGraph, executor } = await this.assembleCreationContext(request, actor, {
+      whitelistFormDataToSchema: true,
+      previewSource: 'draft',
+      ...(options.sampleRequester ? { requesterOverride: options.sampleRequester } : {}),
+    })
+    return this.walkPreviewRoute(runtimeGraph, executor)
+  }
+
+  private async walkPreviewRoute(
+    runtimeGraph: RuntimeGraph,
+    executor: ApprovalGraphExecutor,
+  ): Promise<ApprovalRoutePreviewResult> {
     const nodeLabel = (key: string): string => {
       const node = runtimeGraph.nodes.find((entry) => entry.key === key)
       return (node?.name && String(node.name).trim()) || key
