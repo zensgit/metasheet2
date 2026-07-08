@@ -119,6 +119,18 @@ const FUNCTION_DESCRIPTIONS: Record<FormulaFunctionName, LocaleText> = {
   VAR: { en: 'Returns the sample variance of numeric values.', zh: '返回数字值的样本方差。' },
   MEDIAN: { en: 'Returns the median of numeric values.', zh: '返回数字值的中位数。' },
   MODE: { en: 'Returns the most common numeric value.', zh: '返回最常见的数字值。' },
+  IFERROR: { en: 'Returns a fallback value when the given value is an error, otherwise returns the value unchanged.', zh: '当给定值为错误时返回替代值，否则返回原值。' },
+  ISERROR: { en: 'Returns true when the given value is an error result.', zh: '当给定值为错误结果时返回 true。' },
+  ISBLANK: { en: 'Returns true when the value is empty (null, undefined, or an empty string).', zh: '当值为空（null、未定义或空字符串）时返回 true。' },
+  ISNUMBER: { en: 'Returns true when the value is a valid number.', zh: '当值是有效数字时返回 true。' },
+  IFS: { en: 'Evaluates condition/value pairs in order and returns the value for the first true condition.', zh: '依次判断条件/值对，返回第一个为 true 的条件对应的值。' },
+  XOR: { en: 'Returns true when an odd number of the given values are truthy (exclusive OR).', zh: '当给定值中为真的数量为奇数时返回 true（异或）。' },
+  ROUNDUP: { en: 'Rounds a number up, away from zero, to the requested decimal places.', zh: '将数字向上（远离零）舍入到指定小数位。' },
+  ROUNDDOWN: { en: 'Rounds a number down, toward zero, to the requested decimal places.', zh: '将数字向下（趋近零）舍入到指定小数位。' },
+  WEEKDAY: { en: 'Returns the day of the week as a number; use type 2 for a Monday-start week.', zh: '返回星期几对应的数字；type 为 2 时表示以周一为一周的第一天。' },
+  SECOND: { en: 'Returns the second (0–59) of a date-time value.', zh: '返回日期时间值中的秒（0–59）。' },
+  EDATE: { en: 'Returns the date shifted by whole months, clamped to the end of the target month.', zh: '返回按整月偏移后的日期，并限制在目标月份的最后一天内。' },
+  DAYS: { en: 'Returns the number of calendar days between two dates (end date minus start date).', zh: '返回两个日期之间的日历天数（结束日期减去开始日期）。' },
 }
 
 const DIAGNOSTIC_LABELS: Record<FormulaDiagnosticLabelKey, LocaleText> = {
