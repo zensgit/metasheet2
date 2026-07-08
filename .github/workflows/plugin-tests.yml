@@ -323,6 +323,7 @@ jobs:
             tests/integration/approval-projection-visibility.db.test.ts \
             tests/integration/approval-projection-participant-read.db.test.ts \
             tests/integration/approval-route-preview-substrate.db.test.ts \
+            tests/integration/approval-route-preview-api.db.test.ts \
             tests/integration/multitable-date-reminder-trigger.test.ts \
             tests/integration/multitable-webhook-event-bridge.test.ts \
             tests/integration/multitable-webhook-retry-tick.test.ts \
