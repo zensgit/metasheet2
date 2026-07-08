@@ -610,20 +610,23 @@ describe('Approval E2E Permissions', () => {
       expect(historyItems.length).toBe(2)
     })
 
-    it('template center renders without "发起审批" button for draft templates', async () => {
+    it('template center renders the requester card gallery (not the admin table), with no "发起申请" button for a draft template', async () => {
       setMockPermissions(['approvals:read'])
-      // Template center shows a table. Only published templates have a "发起审批" link button.
-      // Draft templates should not show it. We verify by providing only draft templates.
+      // G-B2-17: !canManageTemplates users get the requester card gallery instead of the admin
+      // table. A draft template is never actionable, so its card shows no "发起申请" button
+      // (mirrors the admin table's row.status === 'published' gate on "发起审批").
       mockTemplates.value = [
         { ...mockDraftTemplate(), id: 'tpl_d1', name: '草稿模板' },
       ]
       await mountTemplateCenterView()
 
-      // The table renders. Since the column uses scoped slots that are not invoked by our stub,
-      // we verify the table exists and loadTemplates was called.
       expect(loadTemplatesSpy).toHaveBeenCalled()
-      const table = container!.querySelector('[data-el-table]')
-      expect(table).toBeTruthy()
+      expect(container!.querySelector('[data-el-table]')).toBeFalsy()
+      expect(container!.querySelector('[data-testid="template-center-gallery"]')).toBeTruthy()
+
+      const startButtons = Array.from(container!.querySelectorAll('button'))
+        .filter((b) => b.textContent?.includes('发起申请'))
+      expect(startButtons.length).toBe(0)
     })
   })
 
@@ -704,6 +707,23 @@ describe('Approval E2E Permissions', () => {
       const visibleLabels = Array.from(container!.querySelectorAll('[data-el-form-item] label'))
         .map((label) => label.textContent?.trim())
       expect(visibleLabels).toContain('补充说明')
+    })
+
+    it('template center gallery shows "发起申请" for a published template and routes to the same start-approval path as the admin table', async () => {
+      // G-B2-17: writer (non-manager) sees the gallery; its primary action reuses the exact
+      // same `/approvals/new/:id` route the admin table's "发起审批" button pushes to.
+      setMockPermissions(['approvals:read', 'approvals:write'])
+      mockTemplates.value = [mockPublishedTemplate({ id: 'tpl_pub_1', name: '出差申请' })]
+      await mountTemplateCenterView()
+
+      const startBtn = Array.from(container!.querySelectorAll('button'))
+        .find((b) => b.textContent?.includes('发起申请'))
+      expect(startBtn).toBeTruthy()
+
+      startBtn!.click()
+      await flushUi()
+
+      expect(pushSpy).toHaveBeenCalledWith({ path: '/approvals/new/tpl_pub_1' })
     })
 
     it('writer viewing a pending approval with no assignment sees action buttons (view-level)', async () => {
