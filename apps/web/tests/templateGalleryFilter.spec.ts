@@ -11,7 +11,7 @@ import { filterGalleryTemplates, type GalleryFilterableTemplate } from '../src/a
 function tpl(overrides: Partial<GalleryFilterableTemplate>): GalleryFilterableTemplate {
   return {
     name: '模板',
-    description: null,
+    key: null,
     category: null,
     ...overrides,
   }
@@ -19,10 +19,10 @@ function tpl(overrides: Partial<GalleryFilterableTemplate>): GalleryFilterableTe
 
 describe('approvals/templateGalleryFilter', () => {
   const fixtures: GalleryFilterableTemplate[] = [
-    tpl({ name: '出差申请', description: '因公出差报销申请', category: '差旅' }),
-    tpl({ name: '采购申请', description: '办公用品采购', category: '采购' }),
-    tpl({ name: '请假申请', description: null, category: '请假' }),
-    tpl({ name: '其他申请', description: '未归类的通用申请', category: null }),
+    tpl({ name: '出差申请', key: 'travel-request', category: '差旅' }),
+    tpl({ name: '采购申请', key: 'purchase-request', category: '采购' }),
+    tpl({ name: '请假申请', key: null, category: '请假' }),
+    tpl({ name: '其他申请', key: 'misc-request', category: null }),
   ]
 
   it('both filters empty → returns the full list unchanged', () => {
@@ -56,15 +56,24 @@ describe('approvals/templateGalleryFilter', () => {
     expect(result.map((t) => t.name)).toEqual(['出差申请'])
   })
 
-  it('search hits the template description (not just the name)', () => {
-    const result = filterGalleryTemplates(fixtures, { search: '办公用品' })
+  // SERVER PARITY — the server predicate is `(name ILIKE %q% OR key ILIKE %q%)`. These two cases
+  // pin both directions of that contract.
+  it('search hits the template key, not just the name (a key-only match must NOT be hidden)', () => {
+    const result = filterGalleryTemplates(fixtures, { search: 'purchase-req' })
     expect(result.map((t) => t.name)).toEqual(['采购申请'])
+  })
+
+  it('search does NOT match description — the server never does, so a card must not vanish on Enter', () => {
+    const withDescription = [
+      { name: '出差申请', key: 'travel-request', category: null, description: '因公出差报销申请' },
+    ] as unknown as GalleryFilterableTemplate[]
+    expect(filterGalleryTemplates(withDescription, { search: '报销' })).toEqual([])
   })
 
   it('search is case-insensitive', () => {
     const englishFixtures: GalleryFilterableTemplate[] = [
-      tpl({ name: 'Travel Request', description: 'Business trip reimbursement' }),
-      tpl({ name: 'Purchase Request', description: 'Office supplies' }),
+      tpl({ name: 'Travel Request', key: 'TRAVEL-REQ' }),
+      tpl({ name: 'Purchase Request', key: 'purchase-req' }),
     ]
     const upper = filterGalleryTemplates(englishFixtures, { search: 'TRAVEL' })
     const lower = filterGalleryTemplates(englishFixtures, { search: 'travel' })
@@ -79,14 +88,19 @@ describe('approvals/templateGalleryFilter', () => {
     expect(result).toEqual([])
   })
 
-  it('a template with a null description never throws and is excluded by an unmatched search', () => {
+  it('a template with a null key never throws and is excluded by an unmatched search', () => {
     const result = filterGalleryTemplates(fixtures, { search: '请假' })
-    // '请假申请' matches on name even though its description is null.
+    // '请假申请' matches on name even though its key is null.
     expect(result.map((t) => t.name)).toEqual(['请假申请'])
   })
 
   it('category AND search combine (both must match)', () => {
-    const result = filterGalleryTemplates(fixtures, { category: '差旅', search: '报销' })
+    const result = filterGalleryTemplates(fixtures, { category: '差旅', search: '出差' })
+    expect(result.map((t) => t.name)).toEqual(['出差申请'])
+  })
+
+  it('category AND a key-only search combine', () => {
+    const result = filterGalleryTemplates(fixtures, { category: '差旅', search: 'travel' })
     expect(result.map((t) => t.name)).toEqual(['出差申请'])
   })
 
