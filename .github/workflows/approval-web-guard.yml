@@ -57,6 +57,13 @@ on:
       - 'apps/web/src/approvals/conditionSummary.ts'
       - 'apps/web/tests/approval-condition-summary.test.ts'
       - 'apps/web/tests/amountAutoSum.test.ts'
+      # G-B2-16: 金额大写回显 — amountInWords.ts pure util + the declared-total caption in
+      # ApprovalNewView (same rounding family as amountAutoSum).
+      - 'apps/web/src/approvals/amountInWords.ts'
+      - 'apps/web/tests/approval-amount-in-words.test.ts'
+      # G-B2-14: 填单草稿自动保存 — formDraft.ts pure helpers + ApprovalNewView restore alert.
+      - 'apps/web/src/approvals/formDraft.ts'
+      - 'apps/web/tests/approval-form-draft.test.ts'
       - 'apps/web/tests/useAutoSumTotal.test.ts'
       - 'apps/web/tests/lineDerivation.test.ts'
       - 'apps/web/src/views/approval/ApprovalMobileList.vue'
@@ -175,6 +182,13 @@ on:
       - 'apps/web/src/approvals/conditionSummary.ts'
       - 'apps/web/tests/approval-condition-summary.test.ts'
       - 'apps/web/tests/amountAutoSum.test.ts'
+      # G-B2-16: 金额大写回显 — amountInWords.ts pure util + the declared-total caption in
+      # ApprovalNewView (same rounding family as amountAutoSum).
+      - 'apps/web/src/approvals/amountInWords.ts'
+      - 'apps/web/tests/approval-amount-in-words.test.ts'
+      # G-B2-14: 填单草稿自动保存 — formDraft.ts pure helpers + ApprovalNewView restore alert.
+      - 'apps/web/src/approvals/formDraft.ts'
+      - 'apps/web/tests/approval-form-draft.test.ts'
       - 'apps/web/tests/useAutoSumTotal.test.ts'
       - 'apps/web/tests/lineDerivation.test.ts'
       - 'apps/web/src/views/approval/ApprovalMobileList.vue'
@@ -336,4 +350,4 @@ jobs:
         # files and asserts zero static style= attributes and zero hex/rgb() literals inside
         # <style> blocks (var() references + transparent/inherit/currentColor/none allowed);
         # had no gate before this wiring.
-        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout approval-condition-summary amountAutoSum useAutoSumTotal lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView ui-foundation-style-guard uiFoundationTexture --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle approval-inbox-auth-guard myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView ui-foundation-style-guard uiFoundationTexture --reporter=dot
