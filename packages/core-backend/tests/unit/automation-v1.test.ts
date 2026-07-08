@@ -1487,10 +1487,13 @@ describe('AutomationExecutor', () => {
     expect(payload.msg.markdown.text.length).toBeLessThan(20_200)
   })
 
-  // DT-OPS-04: a DingTalk userid only means anything inside its own corp. Credentials must
-  // come from the integration the recipient is actually bound under — not from whichever
-  // integration happens to sort first as "latest active".
-  it('resolves work-notification credentials from the recipients own integration (DT-OPS-04)', async () => {
+  // DT-OPS-04. NOTE what this test can and cannot prove. It sets DINGTALK_APP_KEY, and
+  // `readDingTalkMessageConfigFromRuntime` returns env config BEFORE it consults the
+  // integrationId argument — so the scoping itself is INVISIBLE here, and the assertion below
+  // is a string pin on the SQL, nothing more. The behaviour (corp A's employee gets corp A's
+  // token, corp B's gets corp B's) is proved with no env vars and real stored credentials in
+  // `tests/integration/dingtalk-person-message-integration-scoping.db.test.ts`.
+  it('surfaces the binding integration_id in the recipient query (DT-OPS-04 SQL shape)', async () => {
     process.env.DINGTALK_APP_KEY = 'dt-app-key'
     process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
     process.env.DINGTALK_AGENT_ID = '123456789'
@@ -1518,7 +1521,11 @@ describe('AutomationExecutor', () => {
     expect(String(queryFn.mock.calls[0]?.[0] ?? '')).toContain('integration_id')
   })
 
-  it('refuses to notify recipients bound under different DingTalk integrations (DT-OPS-04)', async () => {
+  // §7.5 asked for correct credentials, never for a refusal — and a refusal would ALSO abort
+  // the unrelated actions that follow, because `executeActions` fail-stops. Recipients are
+  // grouped by integration and each group is sent with its own token. Which token reaches
+  // which recipient is env-free and proved in the real-DB lane (see the note above).
+  it('splits a two-corp audience into one batch per integration rather than refusing (DT-OPS-04)', async () => {
     process.env.DINGTALK_APP_KEY = 'dt-app-key'
     process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
     process.env.DINGTALK_AGENT_ID = '123456789'
@@ -1531,7 +1538,8 @@ describe('AutomationExecutor', () => {
         ],
       })
       .mockResolvedValue({ rows: [] })
-    const fetchFn = vi.fn() as unknown as typeof fetch
+    const fetchFn = vi.fn()
+      .mockResolvedValue(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'tok', expires_in: 7200 }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as unknown as typeof fetch
 
     deps = createMockDeps({ queryFn, fetchFn })
     executor = new AutomationExecutor(deps)
@@ -1541,11 +1549,14 @@ describe('AutomationExecutor', () => {
     })
     const result = await executor.execute(rule, { recordId: 'r1', data: {}, sheetId: 'sheet_1', actorId: 'user_1' })
 
-    // The load-bearing assertion: rather than notifying corp B's user with corp A's
-    // credentials, refuse — and never reach the DingTalk API.
-    expect(result.status).toBe('failed')
-    expect(result.steps[0]?.error).toMatch(/multiple DingTalk integrations/i)
-    expect(fetchFn).not.toHaveBeenCalled()
+    expect(result.status).toBe('success')
+    expect(result.steps[0]?.output).toMatchObject({ notifiedUsers: 2, integrationCount: 2, batchCount: 2 })
+
+    // Two corps → two sends, and a corp's userid is never carried in the other corp's batch.
+    const sends = (fetchFn as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .filter((call) => String(call[0] ?? '').includes('asyncsend'))
+      .map((call) => JSON.parse(String((call[1] as RequestInit).body ?? '{}')).userid_list as string)
+    expect(sends.sort()).toEqual(['dt-1', 'dt-2'])
   })
 
   it('fails send_dingtalk_person_message when the internal processing view is not in the sheet', async () => {

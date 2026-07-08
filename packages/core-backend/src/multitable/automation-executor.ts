@@ -1773,11 +1773,14 @@ export class AutomationExecutor {
     }
 
     const recipientResult = await this.deps.queryFn(
+      // DT-OPS-04: the rule creator's userid is only meaningful inside their own corp, so
+      // carry the integration they are bound under and notify them with its credentials.
       `SELECT u.id AS local_user_id,
-              linked.external_user_id AS dingtalk_user_id
+              linked.external_user_id AS dingtalk_user_id,
+              linked.integration_id AS integration_id
          FROM users u
          LEFT JOIN LATERAL (
-           SELECT a.external_user_id
+           SELECT a.external_user_id, a.integration_id::text AS integration_id
              FROM directory_account_links l
              JOIN directory_accounts a ON a.id = l.directory_account_id
             WHERE l.local_user_id = u.id
@@ -1794,6 +1797,7 @@ export class AutomationExecutor {
     )
     const row = (recipientResult.rows[0] ?? null) as Record<string, unknown> | null
     const dingtalkUserId = typeof row?.dingtalk_user_id === 'string' ? row.dingtalk_user_id.trim() : ''
+    const ruleCreatorIntegrationId = typeof row?.integration_id === 'string' ? row.integration_id.trim() : ''
 
     if (!row || !dingtalkUserId) {
       await recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
@@ -1812,7 +1816,7 @@ export class AutomationExecutor {
     }
 
     try {
-      const messageConfig = await readDingTalkMessageConfigFromRuntime()
+      const messageConfig = await readDingTalkMessageConfigFromRuntime(ruleCreatorIntegrationId || undefined)
       const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
       const result = await sendDingTalkWorkNotification(
         accessToken,
@@ -2641,10 +2645,11 @@ export class AutomationExecutor {
     const recipientResult = await this.deps.queryFn(
       `SELECT u.id AS local_user_id,
               u.is_active AS local_user_active,
-              linked.external_user_id AS dingtalk_user_id
+              linked.external_user_id AS dingtalk_user_id,
+              linked.integration_id AS integration_id
          FROM users u
          LEFT JOIN LATERAL (
-           SELECT a.external_user_id
+           SELECT a.external_user_id, a.integration_id::text AS integration_id
              FROM directory_account_links l
              JOIN directory_accounts a ON a.id = l.directory_account_id
             WHERE l.local_user_id = u.id
@@ -2657,8 +2662,12 @@ export class AutomationExecutor {
         WHERE u.id = $1`,
       [assigneeUserId],
     )
-    const recipientRow = (recipientResult.rows[0] ?? null) as { local_user_active?: boolean; dingtalk_user_id?: string | null } | null
+    const recipientRow = (recipientResult.rows[0] ?? null) as { local_user_active?: boolean; dingtalk_user_id?: string | null; integration_id?: string | null } | null
     const dingtalkUserId = typeof recipientRow?.dingtalk_user_id === 'string' ? recipientRow.dingtalk_user_id.trim() : ''
+    // DT-OPS-04: send the card with the assignee's own corp credentials. (Persisting the
+    // integration on the delivery row — so the approve/reject callback can resolve it too —
+    // needs a migration and is tracked separately.)
+    const assigneeIntegrationId = typeof recipientRow?.integration_id === 'string' ? recipientRow.integration_id.trim() : ''
     if (!recipientRow || recipientRow.local_user_active !== true || !dingtalkUserId) {
       await recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
         localUserId: assigneeUserId,
@@ -2697,7 +2706,7 @@ export class AutomationExecutor {
     ].filter(Boolean)
 
     try {
-      const messageConfig = await readDingTalkMessageConfigFromRuntime()
+      const messageConfig = await readDingTalkMessageConfigFromRuntime(assigneeIntegrationId || undefined)
       const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
       const result = await sendDingTalkWorkNotificationActionCard(
         accessToken,
@@ -3005,27 +3014,23 @@ export class AutomationExecutor {
       }
     }
 
-    // DT-OPS-04: a DingTalk userid only means anything inside its own corp. Sending one
-    // batch of recipients drawn from two integrations would notify some of them with the
-    // wrong corp's credentials, so refuse rather than guess. (Single-integration
-    // deployments — and env-configured ones — are unaffected.)
-    const recipientIntegrationIds = Array.from(
-      new Set(resolvedRecipients.map((recipient) => recipient.integrationId).filter(Boolean)),
-    )
-    if (recipientIntegrationIds.length > 1) {
-      return {
-        actionType: 'send_dingtalk_person_message',
-        status: 'failed',
-        error: 'Recipients are bound under multiple DingTalk integrations; split the rule per integration',
-        output: {
-          notifiedUsers: 0,
-          recipientIntegrationIds,
-        },
-      }
+    // DT-OPS-04: a DingTalk userid only means anything inside its own corp, so each
+    // recipient must be notified with the credentials of the integration they are bound
+    // under. Recipients are grouped by integration and each group is sent with its own
+    // token — never refused. A rule whose audience spans two corps is a legitimate rule
+    // (a member group can hold both), and failing it would also abort the unrelated
+    // actions that follow it in `executeActions`, which fail-stops.
+    const recipientsByIntegration = new Map<string, typeof resolvedRecipients>()
+    for (const recipient of resolvedRecipients) {
+      const group = recipientsByIntegration.get(recipient.integrationId) ?? []
+      group.push(recipient)
+      recipientsByIntegration.set(recipient.integrationId, group)
     }
-    const recipientIntegrationId = recipientIntegrationIds[0]
 
-    const batches = chunkItems(resolvedRecipients, DINGTALK_PERSON_BATCH_SIZE)
+    const batches = Array.from(recipientsByIntegration.entries()).flatMap(
+      ([integrationId, recipients]) =>
+        chunkItems(recipients, DINGTALK_PERSON_BATCH_SIZE).map((batch) => ({ integrationId, batch })),
+    )
 
     // DT-HARDEN-06: recipients whose batch already reached DingTalk. A later batch
     // throwing must not re-mark them failed — that used to write BOTH a success and a
@@ -3033,22 +3038,31 @@ export class AutomationExecutor {
     const sentRecipients = new Set<(typeof resolvedRecipients)[number]>()
 
     try {
-      // Env-first resolution is preserved inside readDingTalkMessageConfigFromRuntime, so
-      // an env-configured deployment keeps its bootstrap behavior; only the stored-config
-      // path stops falling back to "latest active integration".
-      const messageConfig = await readDingTalkMessageConfigFromRuntime(recipientIntegrationId)
-      const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
       let responseCount = 0
+      // One token per integration, fetched once and reused across that integration's batches.
+      type ResolvedCredentials = { messageConfig: Awaited<ReturnType<typeof readDingTalkMessageConfigFromRuntime>>; accessToken: string }
+      const configCache = new Map<string, ResolvedCredentials>()
 
-      for (const batch of batches) {
+      for (const { integrationId, batch } of batches) {
+        let credentials = configCache.get(integrationId)
+        if (!credentials) {
+          // Env-first resolution is preserved inside readDingTalkMessageConfigFromRuntime, so
+          // an env-configured deployment keeps its bootstrap behavior; only the stored-config
+          // path stops falling back to "latest active integration".
+          const messageConfig = await readDingTalkMessageConfigFromRuntime(integrationId)
+          const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
+          credentials = { messageConfig, accessToken }
+          configCache.set(integrationId, credentials)
+        }
+
         const result = await sendDingTalkWorkNotification(
-          accessToken,
+          credentials.accessToken,
           {
             userIds: batch.map((recipient) => recipient.dingtalkUserId),
             title: renderedTitle,
             content: bodyWithLinks,
           },
-          messageConfig,
+          credentials.messageConfig,
           { fetchFn: this.deps.fetchFn },
         )
         const responseBody = stringifyResponseBody(result.raw)
@@ -3088,6 +3102,7 @@ export class AutomationExecutor {
           memberGroupRecipientFieldPath: memberGroupRecipientFieldPaths[0] ?? null,
           memberGroupRecipientFieldPaths,
           batchCount: batches.length,
+          integrationCount: recipientsByIntegration.size,
           linkCount: linkLines.length,
           responseCount,
         },

@@ -78,6 +78,10 @@ export default defineConfig({
       'tests/integration/automation-approval-task-created-trigger.test.ts',
       // A-2b approval-card action chain: DATABASE_URL-gated. Same two-point wiring (no skip-green).
       'tests/integration/automation-dingtalk-approval-card-action.test.ts',
+      // DT-OPS-04 per-corp credential scoping: DATABASE_URL-gated. It deliberately UNSETS the
+      // DingTalk env vars (the env-first short-circuit is what hid the bug), so it must never run
+      // in the no-DB job. Wired as a WHOLE FILE into the multitable real-DB step.
+      'tests/integration/dingtalk-person-message-integration-scoping.db.test.ts',
       // A-4 card-delivery wrapper: DATABASE_URL-gated. Same two-point wiring (no skip-green).
       'tests/integration/approval-card-delivery-wrapper.db.test.ts',
       // DT-HARDEN-07 primary-department write → approval-routing golden: DATABASE_URL-gated
