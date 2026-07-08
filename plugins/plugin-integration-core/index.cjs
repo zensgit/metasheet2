@@ -21,6 +21,10 @@ const { createDb } = require('./lib/db.cjs')
 const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
 const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
 const { createReadSourceCompositionConfigStore } = require('./lib/read-source-composition-config-store.cjs')
+// BA-APPLY-2a (design-lock docs/development/bridge-agent-controlled-apply-design-lock-20260708.md §2
+// 形态 B backend channel): approval gate + values-free checklist staging ONLY — this store never
+// contacts the Bridge Agent.
+const { createBridgeAgentChecklistStore } = require('./lib/bridge-agent-change-checklist-store.cjs')
 const { createAdapterRegistry } = require('./lib/contracts.cjs')
 const { createHttpAdapterFactory, HTTP_ADAPTER_METADATA } = require('./lib/adapters/http-adapter.cjs')
 const { createYuantusPlmWrapperAdapterFactory, YUANTUS_PLM_ADAPTER_METADATA } = require('./lib/adapters/plm-yuantus-wrapper.cjs')
@@ -51,6 +55,7 @@ let credentialStore = null
 let externalSystemRegistry = null
 let readSourceConfigStore = null
 let readSourceCompositionConfigStore = null
+let bridgeAgentChecklistStore = null
 let adapterRegistry = null
 let pipelineRegistry = null
 let templateRegistry = null
@@ -219,6 +224,9 @@ module.exports = {
     // C-R4-1 (#1709): the composition config store validates each step's read config is approved at
     // save time via readSourceConfigStore.getForRuntime, and the run route re-loads them at runtime.
     readSourceCompositionConfigStore = createReadSourceCompositionConfigStore({ db, readSourceConfigStore })
+    // BA-APPLY-2a: content-keyed checklist versions + values-free audit + approval gate. Persists
+    // ONLY — no credential/system dependency, and NOTHING here ever contacts the Bridge Agent.
+    bridgeAgentChecklistStore = createBridgeAgentChecklistStore({ db })
     adapterRegistry = createAdapterRegistry({ logger })
       .registerAdapter('http', createHttpAdapterFactory(), { metadata: HTTP_ADAPTER_METADATA })
       .registerAdapter('plm:yuantus-wrapper', createYuantusPlmWrapperAdapterFactory(), { metadata: YUANTUS_PLM_ADAPTER_METADATA })
@@ -273,6 +281,7 @@ module.exports = {
         externalSystemRegistry,
         readSourceConfigStore,
         readSourceCompositionConfigStore,
+        bridgeAgentChecklistStore,
         adapterRegistry,
         pipelineRegistry,
         templateRegistry,
@@ -299,6 +308,7 @@ module.exports = {
     externalSystemRegistry = null
     readSourceConfigStore = null
     readSourceCompositionConfigStore = null
+    bridgeAgentChecklistStore = null
     adapterRegistry = null
     pipelineRegistry = null
     templateRegistry = null
