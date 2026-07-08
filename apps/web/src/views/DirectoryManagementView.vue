@@ -1421,8 +1421,30 @@
               >
                 {{ acknowledgingAlertId === alert.id ? '确认中...' : alert.acknowledgedAt ? '已确认' : '确认告警' }}
               </button>
+              <button
+                v-if="hasAlertDetails(alert)"
+                class="directory-admin__button directory-admin__button--secondary"
+                type="button"
+                @click="toggleAlertDetails(alert.id)"
+              >
+                {{ expandedAlertDetailIds[alert.id] ? '收起详情' : '查看详情' }}
+              </button>
             </div>
+            <pre
+              v-if="hasAlertDetails(alert) && expandedAlertDetailIds[alert.id]"
+              class="directory-admin__alert-details"
+            >{{ formatAlertDetails(alert) }}</pre>
           </article>
+          <div v-if="!loadingAlerts && hasMoreAlerts" class="directory-admin__actions">
+            <button
+              class="directory-admin__button directory-admin__button--secondary"
+              type="button"
+              :disabled="loadingMoreAlerts"
+              @click="void loadMoreAlerts()"
+            >
+              {{ loadingMoreAlerts ? '加载中...' : `加载更多 (${Math.min(alertPageSize, alertTotal - alerts.length)})` }}
+            </button>
+          </div>
         </section>
 
         <section v-if="selectedIntegration" class="directory-admin__section">
@@ -1805,6 +1827,9 @@
             <div>
               <h3>运行记录</h3>
               <p class="directory-admin__hint">展示最近同步执行结果与聚合统计。</p>
+              <p v-if="runTotal > 0" class="directory-admin__hint">
+                当前已加载 {{ runs.length }} / {{ runTotal }} 条。
+              </p>
             </div>
             <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="loadingRuns" @click="void loadRuns(selectedIntegration.id)">
               {{ loadingRuns ? '刷新中...' : '刷新记录' }}
@@ -1838,6 +1863,16 @@
             </p>
             <p v-if="run.errorMessage" class="directory-admin__status directory-admin__status--error">{{ run.errorMessage }}</p>
           </article>
+          <div v-if="!loadingRuns && hasMoreRuns" class="directory-admin__actions">
+            <button
+              class="directory-admin__button directory-admin__button--secondary"
+              type="button"
+              :disabled="loadingMoreRuns"
+              @click="void loadMoreRuns()"
+            >
+              {{ loadingMoreRuns ? '加载中...' : `加载更多 (${Math.min(runPageSize, runTotal - runs.length)})` }}
+            </button>
+          </div>
         </section>
       </section>
     </div>
@@ -2194,8 +2229,10 @@ const pendingFocusedAccountScroll = ref(false)
 const selectedIntegrationId = ref('')
 const loading = ref(false)
 const loadingRuns = ref(false)
+const loadingMoreRuns = ref(false)
 const loadingSchedule = ref(false)
 const loadingAlerts = ref(false)
+const loadingMoreAlerts = ref(false)
 const loadingReviewItems = ref(false)
 const loadingMoreReviewItems = ref(false)
 const loadingAccounts = ref(false)
@@ -2235,6 +2272,7 @@ const userSearchLoading = reactive<Record<string, boolean>>({})
 const userSearchError = reactive<Record<string, string>>({})
 const manualAdmissionDrafts = reactive<Record<string, ManualAdmissionDraft>>({})
 const manualAdmissionExpanded = reactive<Record<string, boolean>>({})
+const expandedAlertDetailIds = reactive<Record<string, boolean>>({})
 const manualAdmissionResult = ref<ManualAdmissionResult | null>(null)
 const autoAdmissionOnboardingPackets = ref<AutoAdmissionOnboardingPacket[]>([])
 const grantToggles = reactive<Record<string, boolean>>({})
@@ -2243,6 +2281,13 @@ const reviewDisableDingTalkGrant = ref(true)
 const reviewPageSize = 100
 const reviewPage = ref(1)
 const reviewTotal = ref(0)
+const runPageSize = 10
+const runPage = ref(1)
+const runTotal = ref(0)
+const alertPageSize = 20
+const alertPage = ref(1)
+const alertTotal = ref(0)
+const alertServerCounts = ref<{ total: number; pending: number; acknowledged: number }>({ total: 0, pending: 0, acknowledged: 0 })
 const appliedDirectoryNavigationKey = ref('')
 const alertFilterOptions = [
   { value: 'all' as const, label: '全部' },
@@ -2332,16 +2377,19 @@ const accountRangeEnd = computed(() => (
     ? 0
     : Math.min(accountPage.value * accountPageSize.value, accountTotal.value)
 ))
+// Counts come from the server (`listDirectorySyncAlerts` returns a global all/pending/acknowledged
+// breakdown independent of the current filter/page) so the filter chips stay accurate even though
+// `alerts.value` only holds the currently loaded (filtered, paginated) page.
 const alertCounts = computed<Record<DirectoryAlertFilter, number>>(() => ({
-  all: alerts.value.length,
-  pending: alerts.value.filter((item) => !item.acknowledgedAt).length,
-  acknowledged: alerts.value.filter((item) => Boolean(item.acknowledgedAt)).length,
+  all: alertServerCounts.value.total,
+  pending: alertServerCounts.value.pending,
+  acknowledged: alertServerCounts.value.acknowledged,
 }))
-const filteredAlerts = computed(() => {
-  if (alertFilter.value === 'pending') return alerts.value.filter((item) => !item.acknowledgedAt)
-  if (alertFilter.value === 'acknowledged') return alerts.value.filter((item) => Boolean(item.acknowledgedAt))
-  return alerts.value
-})
+// Filtering is now applied server-side (loadAlerts sends `filter`), so the loaded page already
+// matches alertFilter — no client-side re-filtering needed.
+const filteredAlerts = computed(() => alerts.value)
+const hasMoreRuns = computed(() => runs.value.length < runTotal.value)
+const hasMoreAlerts = computed(() => alerts.value.length < alertTotal.value)
 const reviewCounts = computed<Record<DirectoryReviewItemFilter, number>>(() => ({
   all: reviewItems.value.length,
   pending_binding: reviewItems.value.filter((item) => item.kind === 'pending_binding').length,
@@ -2645,6 +2693,8 @@ function resetDraft() {
   selectedIntegrationId.value = ''
   testResult.value = null
   runs.value = []
+  runPage.value = 1
+  runTotal.value = 0
   accounts.value = []
   departments.value = []
   departmentsLoaded.value = false
@@ -2656,6 +2706,10 @@ function resetDraft() {
   reviewBatchProgress.value = null
   scheduleSnapshot.value = null
   alerts.value = []
+  alertPage.value = 1
+  alertTotal.value = 0
+  alertServerCounts.value = { total: 0, pending: 0, acknowledged: 0 }
+  for (const key of Object.keys(expandedAlertDetailIds)) delete expandedAlertDetailIds[key]
   reviewItems.value = []
   reviewPage.value = 1
   reviewTotal.value = 0
@@ -3479,6 +3533,12 @@ async function selectIntegration(integrationId: string): Promise<void> {
   accountTotal.value = 0
   reviewBatchProgress.value = null
   alertFilter.value = 'all'
+  alertPage.value = 1
+  alertTotal.value = 0
+  alertServerCounts.value = { total: 0, pending: 0, acknowledged: 0 }
+  for (const key of Object.keys(expandedAlertDetailIds)) delete expandedAlertDetailIds[key]
+  runPage.value = 1
+  runTotal.value = 0
   reviewFilter.value = 'all'
   pendingBindingView.value = 'recommended'
   pendingBindingViewTouched.value = false
@@ -4326,19 +4386,42 @@ async function loadDepartments(integrationId: string, options: { force?: boolean
   }
 }
 
-async function loadRuns(integrationId: string) {
-  loadingRuns.value = true
+function readNormalizedTotal(body: unknown, fallback: number): number {
+  const rawTotal = (body as { data?: { total?: unknown } } | null | undefined)?.data?.total
+  const total = typeof rawTotal === 'number' ? rawTotal : Number(rawTotal ?? fallback)
+  return Number.isFinite(total) && total >= 0 ? total : fallback
+}
+
+async function loadRuns(integrationId: string, options: { append?: boolean } = {}) {
+  const append = options.append === true
+  if (append) loadingMoreRuns.value = true
+  else loadingRuns.value = true
   try {
-    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/runs?page=1&pageSize=10`)
+    const nextPage = append ? runPage.value + 1 : 1
+    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/runs?page=${nextPage}&pageSize=${runPageSize}`)
     const body = await readJson(response)
     if (!response.ok) throw new Error(readApiError(body, '加载同步记录失败'))
-    runs.value = Array.isArray(body?.data?.items) ? body.data.items : []
+    const items = Array.isArray(body?.data?.items) ? body.data.items : []
+    runs.value = append ? [...runs.value, ...items] : items
+    runTotal.value = readNormalizedTotal(body, items.length)
+    if (!append) runPage.value = 1
+    else if (items.length > 0) runPage.value = nextPage
   } catch (error) {
-    runs.value = []
+    if (!append) {
+      runs.value = []
+      runPage.value = 1
+      runTotal.value = 0
+    }
     setStatus(error instanceof Error ? error.message : '加载同步记录失败', 'error')
   } finally {
-    loadingRuns.value = false
+    if (append) loadingMoreRuns.value = false
+    else loadingRuns.value = false
   }
+}
+
+async function loadMoreRuns() {
+  if (!selectedIntegration.value || !hasMoreRuns.value || loadingMoreRuns.value) return
+  await loadRuns(selectedIntegration.value.id, { append: true })
 }
 
 async function loadScheduleSnapshot(integrationId: string) {
@@ -4356,19 +4439,88 @@ async function loadScheduleSnapshot(integrationId: string) {
   }
 }
 
-async function loadAlerts(integrationId: string) {
-  loadingAlerts.value = true
+function readAlertServerCounts(body: unknown): { total: number; pending: number; acknowledged: number } | null {
+  const counts = (body as { data?: { counts?: unknown } } | null | undefined)?.data?.counts
+  if (!counts || typeof counts !== 'object') return null
+  const raw = counts as Record<string, unknown>
+  const readCount = (value: unknown): number => {
+    const numeric = typeof value === 'number' ? value : Number(value ?? 0)
+    return Number.isFinite(numeric) && numeric >= 0 ? numeric : 0
+  }
+  return {
+    total: readCount(raw.total),
+    pending: readCount(raw.pending),
+    acknowledged: readCount(raw.acknowledged),
+  }
+}
+
+async function loadAlerts(integrationId: string, options: { append?: boolean } = {}) {
+  const append = options.append === true
+  if (append) loadingMoreAlerts.value = true
+  else loadingAlerts.value = true
   try {
-    const params = new URLSearchParams({ page: '1', pageSize: '20', filter: 'all' })
+    const nextPage = append ? alertPage.value + 1 : 1
+    const params = new URLSearchParams({
+      page: String(nextPage),
+      pageSize: String(alertPageSize),
+      filter: alertFilter.value,
+    })
     const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/alerts?${params.toString()}`)
     const body = await readJson(response)
     if (!response.ok) throw new Error(readApiError(body, '加载最近告警失败'))
-    alerts.value = Array.isArray(body?.data?.items) ? body.data.items : []
+    const items = Array.isArray(body?.data?.items) ? body.data.items : []
+    alerts.value = append ? [...alerts.value, ...items] : items
+    alertTotal.value = readNormalizedTotal(body, items.length)
+    const serverCounts = readAlertServerCounts(body)
+    if (serverCounts) alertServerCounts.value = serverCounts
+    if (!append) alertPage.value = 1
+    else if (items.length > 0) alertPage.value = nextPage
   } catch (error) {
-    alerts.value = []
+    if (!append) {
+      alerts.value = []
+      alertPage.value = 1
+      alertTotal.value = 0
+    }
     setStatus(error instanceof Error ? error.message : '加载最近告警失败', 'error')
   } finally {
-    loadingAlerts.value = false
+    if (append) loadingMoreAlerts.value = false
+    else loadingAlerts.value = false
+  }
+}
+
+async function loadMoreAlerts() {
+  if (!selectedIntegration.value || !hasMoreAlerts.value || loadingMoreAlerts.value) return
+  await loadAlerts(selectedIntegration.value.id, { append: true })
+}
+
+const ALERT_DETAILS_SENSITIVE_KEY_PATTERN = /token|secret|password|credential|authorization|app_?key/i
+
+function redactAlertDetailsValue(value: unknown, keyHint = ''): unknown {
+  if (ALERT_DETAILS_SENSITIVE_KEY_PATTERN.test(keyHint)) return '******'
+  if (Array.isArray(value)) return value.map((item) => redactAlertDetailsValue(item))
+  if (value && typeof value === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      result[key] = redactAlertDetailsValue(nested, key)
+    }
+    return result
+  }
+  return value
+}
+
+function hasAlertDetails(alert: DirectorySyncAlert): boolean {
+  return Boolean(alert.details) && Object.keys(alert.details as Record<string, unknown>).length > 0
+}
+
+function toggleAlertDetails(alertId: string): void {
+  expandedAlertDetailIds[alertId] = !expandedAlertDetailIds[alertId]
+}
+
+function formatAlertDetails(alert: DirectorySyncAlert): string {
+  try {
+    return JSON.stringify(redactAlertDetailsValue(alert.details), null, 2)
+  } catch {
+    return ''
   }
 }
 
@@ -4459,6 +4611,8 @@ async function loadReviewItems(integrationId: string, options: { append?: boolea
 
 async function updateAlertFilter(value: DirectoryAlertFilter) {
   alertFilter.value = value
+  if (!selectedIntegration.value) return
+  await loadAlerts(selectedIntegration.value.id)
 }
 
 async function updateReviewFilter(value: DirectoryReviewItemFilter) {
@@ -5498,6 +5652,20 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.directory-admin__alert-details {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .directory-admin__review-head,

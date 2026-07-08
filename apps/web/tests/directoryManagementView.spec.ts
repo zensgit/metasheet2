@@ -44,6 +44,14 @@ function findAccountsSection(container: HTMLElement): HTMLElement {
   return section
 }
 
+function findSectionByHeading(container: HTMLElement, heading: string): HTMLElement {
+  const section = Array.from(container.querySelectorAll('.directory-admin__section')).find((candidate) => candidate.querySelector('h3')?.textContent === heading)
+  if (!(section instanceof HTMLElement)) {
+    throw new Error(`Section with heading "${heading}" not found`)
+  }
+  return section
+}
+
 function createIntegration(overrides: Record<string, unknown> = {}) {
   return {
     id: 'dir-1',
@@ -163,7 +171,9 @@ function createScheduleSnapshotPayload(overrides: Record<string, unknown> = {}) 
   }
 }
 
-function createAlertListPayload(items: Record<string, unknown>[]) {
+function createAlertListPayload(items: Record<string, unknown>[], overrides: Record<string, unknown> = {}) {
+  const pendingCount = items.filter((item) => !item.acknowledgedAt).length
+  const acknowledgedCount = items.length - pendingCount
   return {
     ok: true,
     data: {
@@ -172,6 +182,8 @@ function createAlertListPayload(items: Record<string, unknown>[]) {
       page: 1,
       pageSize: 20,
       filter: 'all',
+      counts: { total: items.length, pending: pendingCount, acknowledged: acknowledgedCount },
+      ...overrides,
     },
   }
 }
@@ -5965,6 +5977,264 @@ describe('DirectoryManagementView', () => {
     expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/alerts?page=1&pageSize=20&filter=all')
     expect(container?.textContent).toContain('目录告警已确认')
     expect(container?.textContent).toContain('已确认')
+  })
+
+  it('loads more sync runs and requests the next page from the server', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [createIntegration()] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'run-1',
+              status: 'completed',
+              startedAt: '2026-04-08T01:00:00.000Z',
+              finishedAt: '2026-04-08T01:05:00.000Z',
+              stats: {},
+              errorMessage: null,
+            },
+          ],
+          total: 12,
+          page: 1,
+          pageSize: 10,
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([createAccount()])))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'run-2',
+              status: 'failed',
+              startedAt: '2026-04-07T01:00:00.000Z',
+              finishedAt: '2026-04-07T01:05:00.000Z',
+              stats: {},
+              errorMessage: '连接超时',
+            },
+          ],
+          total: 12,
+          page: 2,
+          pageSize: 10,
+        },
+      }))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const runsSection = findSectionByHeading(container!, '运行记录')
+    expect(runsSection.textContent).toContain('当前已加载 1 / 12 条')
+
+    const loadMoreButton = Array.from(runsSection.querySelectorAll('button')).find((button) => button.textContent?.includes('加载更多'))
+    expect(loadMoreButton).toBeTruthy()
+    loadMoreButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(6)
+
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/runs?page=2&pageSize=10')
+    expect(runsSection.textContent).toContain('当前已加载 2 / 12 条')
+    expect(runsSection.textContent).toContain('连接超时')
+  })
+
+  it('renders alert filter counts from the server-provided counts rather than the loaded page', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [createIntegration()] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [], total: 0, page: 1, pageSize: 10 },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload(
+          [
+            {
+              id: 'alert-1',
+              integrationId: 'dir-1',
+              runId: 'run-1',
+              level: 'warning',
+              code: 'root_department_sparse',
+              message: '根部门直属成员过少',
+              details: {},
+              createdAt: '2026-04-08T01:06:00.000Z',
+              acknowledgedAt: null,
+              acknowledgedBy: null,
+            },
+          ],
+          // Deliberately mismatched with what client-side counting of the single loaded item
+          // would produce (1/1/0), to prove the labels come from the server-provided counts.
+          { counts: { total: 57, pending: 50, acknowledged: 7 }, total: 57 },
+        ),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([createAccount()])))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const alertsSection = findSectionByHeading(container!, '最近告警')
+    expect(alertsSection.textContent).toContain('全部 (57)')
+    expect(alertsSection.textContent).toContain('待确认 (50)')
+    expect(alertsSection.textContent).toContain('已确认 (7)')
+  })
+
+  it('pushes the selected alert filter down to the server', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [createIntegration()] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [], total: 0, page: 1, pageSize: 10 },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([
+          {
+            id: 'alert-1',
+            integrationId: 'dir-1',
+            runId: 'run-1',
+            level: 'warning',
+            code: 'root_department_sparse',
+            message: '根部门直属成员过少',
+            details: {},
+            createdAt: '2026-04-08T01:06:00.000Z',
+            acknowledgedAt: null,
+            acknowledgedBy: null,
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([createAccount()])))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload(
+          [
+            {
+              id: 'alert-2',
+              integrationId: 'dir-1',
+              runId: 'run-2',
+              level: 'error',
+              code: 'sync_failed',
+              message: '同步失败：连接超时',
+              details: {},
+              createdAt: '2026-04-08T02:06:00.000Z',
+              acknowledgedAt: null,
+              acknowledgedBy: null,
+            },
+          ],
+          { counts: { total: 5, pending: 5, acknowledged: 0 } },
+        ),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const alertsSection = findSectionByHeading(container!, '最近告警')
+    const pendingButton = Array.from(alertsSection.querySelectorAll('button')).find((button) => button.textContent?.trim().startsWith('待确认'))
+    expect(pendingButton).toBeTruthy()
+    pendingButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(6)
+
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-1/alerts?page=1&pageSize=20&filter=pending')
+    expect(alertsSection.textContent).toContain('同步失败：连接超时')
+    expect(alertsSection.textContent).not.toContain('根部门直属成员过少')
+  })
+
+  it('expands alert details as formatted JSON and redacts sensitive keys, but hides the toggle when details are empty', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [createIntegration()] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [], total: 0, page: 1, pageSize: 10 },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([
+          {
+            id: 'alert-1',
+            integrationId: 'dir-1',
+            runId: 'run-1',
+            level: 'error',
+            code: 'webhook_delivery_failed',
+            message: '告警 webhook 投递失败',
+            details: {
+              region: 'cn',
+              accessToken: 'abc123',
+              nested: { password: 'zzz' },
+            },
+            createdAt: '2026-04-08T01:06:00.000Z',
+            acknowledgedAt: null,
+            acknowledgedBy: null,
+          },
+          {
+            id: 'alert-2',
+            integrationId: 'dir-1',
+            runId: 'run-2',
+            level: 'warning',
+            code: 'root_department_sparse',
+            message: '根部门直属成员过少',
+            details: {},
+            createdAt: '2026-04-08T02:06:00.000Z',
+            acknowledgedAt: null,
+            acknowledgedBy: null,
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([createAccount()])))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const alertsSection = findSectionByHeading(container!, '最近告警')
+    const alertArticles = Array.from(alertsSection.querySelectorAll('.directory-admin__alert'))
+    expect(alertArticles).toHaveLength(2)
+
+    const detailedArticle = alertArticles.find((article) => article.textContent?.includes('webhook_delivery_failed'))
+    const emptyDetailsArticle = alertArticles.find((article) => article.textContent?.includes('root_department_sparse'))
+    expect(detailedArticle).toBeTruthy()
+    expect(emptyDetailsArticle).toBeTruthy()
+
+    expect(Array.from(emptyDetailsArticle!.querySelectorAll('button')).some((button) => button.textContent?.includes('查看详情'))).toBe(false)
+
+    const toggleButton = Array.from(detailedArticle!.querySelectorAll('button')).find((button) => button.textContent?.includes('查看详情'))
+    expect(toggleButton).toBeTruthy()
+    expect(detailedArticle!.querySelector('pre')).toBeFalsy()
+
+    toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    const detailsPre = detailedArticle!.querySelector('pre')
+    expect(detailsPre).toBeTruthy()
+    expect(detailsPre?.textContent).toContain('"region": "cn"')
+    expect(detailsPre?.textContent).toContain('"accessToken": "******"')
+    expect(detailsPre?.textContent).toContain('"password": "******"')
+    expect(detailsPre?.textContent).not.toContain('abc123')
+
+    const collapseButton = Array.from(detailedArticle!.querySelectorAll('button')).find((button) => button.textContent?.includes('收起详情'))
+    collapseButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(detailedArticle!.querySelector('pre')).toBeFalsy()
   })
 
   it('does not show the sparse root-member warning when child departments are present', async () => {
