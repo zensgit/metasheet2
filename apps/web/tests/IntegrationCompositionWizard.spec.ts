@@ -88,11 +88,14 @@ const APPROVED_RESOLVER_ROWS = [
 
 function routeApiFetch(handlers: {
   save?: (init?: RequestInit) => Response | Promise<Response>
+  approve?: (id: string) => Response | Promise<Response>
 } = {}): (url: string, init?: RequestInit) => Promise<Response> {
   return async (url: string, init?: RequestInit) => {
     if (url.startsWith('/api/integration/read-source-configs')) {
       return jsonResponse(APPROVED_RESOLVER_ROWS.filter((row) => row.status === 'approved'))
     }
+    const approveMatch = /\/api\/integration\/read-source-compositions\/([^/?]+)\/approve/.exec(url)
+    if (approveMatch) return handlers.approve ? handlers.approve(approveMatch[1]) : jsonResponse({})
     if (url.startsWith('/api/integration/read-source-compositions')) {
       return handlers.save ? handlers.save(init) : jsonResponse({})
     }
@@ -103,10 +106,13 @@ function routeApiFetch(handlers: {
 describe('IntegrationCompositionWizard (via IntegrationReadSourceCompositionAuthoringPanel default surface)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
+  let originalConfirm: typeof window.confirm
 
   beforeEach(() => {
     apiFetchMock.mockReset()
     if (typeof localStorage?.clear === 'function') localStorage.clear()
+    originalConfirm = window.confirm
+    window.confirm = vi.fn(() => true)
   })
 
   afterEach(() => {
@@ -114,6 +120,7 @@ describe('IntegrationCompositionWizard (via IntegrationReadSourceCompositionAuth
     if (container) container.remove()
     app = null
     container = null
+    window.confirm = originalConfirm
   })
 
   function mountPanel(initialViewMode?: 'wizard' | 'expert'): HTMLDivElement {
@@ -320,9 +327,41 @@ describe('IntegrationCompositionWizard (via IntegrationReadSourceCompositionAuth
         ],
       },
     })
-    // The existing "已保存组合" side panel (approve/retire/audit) is unconditional on view mode —
-    // step ③'s "→提交审批" is satisfied through it, with zero duplicated approve wiring.
+    // The existing "已保存组合" side panel (approve/retire/audit, unconditional on view mode) shows the
+    // same saved row too — it stays the surface for retire/audit once a composition is approved.
     expect(q(root, 'rscauth-saved').textContent).toContain('rscc_1')
+  })
+
+  it('step-3 "提交审批" approves the just-saved id via the existing approve path (design-lock §1 step ③)', async () => {
+    const approveCalls: string[] = []
+    apiFetchMock.mockImplementation(routeApiFetch({
+      save: () => jsonResponse({ id: 'rscc_wiz', name: 'material_to_bom_v1', version: 1, status: 'draft', contentKey: 'ck', updatedAt: '2026-07-05', reused: false }, 201),
+      approve: (id) => {
+        approveCalls.push(id)
+        return jsonResponse({ id, name: 'material_to_bom_v1', version: 1, status: 'approved', contentKey: 'ck', updatedAt: '2026-07-05' })
+      },
+    }))
+    grantWrite()
+    const root = mountPanel()
+    await waitUntil(() => root.querySelector('[data-testid="iu4-wizard-hop1-rsc_material_lookup"]') !== null, 'hop cards load')
+    await toStep2(root)
+    q<HTMLButtonElement>(root, 'iu4-wizard-next').click()
+    await flushUi()
+    setInput(root, 'iu4-wizard-name', 'material_to_bom_v1')
+    await flushUi()
+
+    // No approve affordance before a save exists.
+    expect(maybe(root, 'iu4-wizard-approve')).toBeNull()
+
+    q<HTMLButtonElement>(root, 'iu4-wizard-save').click()
+    await waitUntil(() => root.querySelector('[data-testid="iu4-wizard-approve"]') !== null, 'approve button appears')
+
+    q<HTMLButtonElement>(root, 'iu4-wizard-approve').click()
+    await waitUntil(() => q(root, 'rscauth-saved').textContent?.includes('已审批') === true, 'row becomes approved')
+    expect(approveCalls).toEqual(['rscc_wiz'])
+    // Once approved, the in-wizard approve button retires (mirrors the side panel's own
+    // draft-status-only gating) — retire/audit for an approved row live in the shared side panel only.
+    expect(maybe(root, 'iu4-wizard-approve')).toBeNull()
   })
 
   // THE byte-equality hard-lock test (design-lock §2): the same inputs driven through the wizard

@@ -35,10 +35,12 @@
           :picker-error="pickerError"
           :can-write="canWrite"
           :saving="saving"
+          :approving="approving"
           :action-error="actionError"
           :save-field-errors="saveFieldErrors"
           :saved-row="savedRow"
           @save="save"
+          @approve="approve"
         />
 
         <template v-else>

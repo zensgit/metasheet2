@@ -11,7 +11,7 @@
 | `apps/web/src/components/integration/IntegrationCompositionWizard.vue` | **新增**：el-steps 三步向导组件（纯重排壳，零 service 调用） |
 | `apps/web/src/components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue` | 向导设为默认新建面 + `专家表单` 切换；新 `initialViewMode` prop。**平铺表单本体一行未动**（`draft`/`resolverConfigs`/`save()`/`savedRow` 审批-停用-审计区全部原样） |
 | `apps/web/src/services/integration/readSourceCompositions.ts` | **未改动**（零后端/契约变化，锁 §2 首条硬锁） |
-| `apps/web/tests/IntegrationCompositionWizard.spec.ts` | **新增**：向导 9 条组件测试（含 1 条字节等价） |
+| `apps/web/tests/IntegrationCompositionWizard.spec.ts` | **新增**：向导 10 条组件测试（含 1 条字节等价 + 1 条 step-3 内审批） |
 | `apps/web/tests/IntegrationReadSourceCompositionAuthoringPanel.spec.ts` | 仅 `mountPanel()` 增加 `initialViewMode: 'expert'` prop（注释说明）；**零断言变化**（锁 §2 既有测试不变量）— diff 全文只有该一行 |
 | `apps/web/tests/ui-foundation-style-guard.spec.ts` | TARGET_FILES += 向导组件（token-only 门覆盖新文件） |
 | `.github/workflows/integration-guard.yml` | path filters 加入新 source/spec 文件；**顺带修复**一个既有缺陷（见 §6） |
@@ -22,7 +22,7 @@
 | --- | --- | --- |
 | ① 选两跳 | 从父面板既有 `resolverConfigs`（已按 `status=approved` 查询 + `mode==='resolver_lookup'` 客户端过滤，flat 表单同一份引用）渲染两组卡片（hop1/hop2，同一份 configs 列表），点选写入共享 draft 的 `step1ConfigId`/`step2ConfigId`；两跳都选定且不相同才可下一步（相同会给出内联提示，不阻断修正） | `iu4-wizard-hop1-<id>`、`iu4-wizard-hop2-<id>`、`iu4-wizard-hop-same-hint`、`iu4-wizard-next` |
 | ② 接线可视 | 固定两节点+一条连线的静态示意图：hop1 节点显示其 `id·object` 与「输出字段」= `draft.sourceTarget`（可编辑输入框，紧邻示意图，非画布内编辑）；hop2 节点显示其 `id·object` 与「key 输入」= 固定常量 `key`（composition payload 的 `toInput` 本就是编译期常量，不是任何 config 字段，故不存在"读不到"的问题）；sourceTarget 非空才可下一步 | `iu4-wizard-wiring`、`iu4-wizard-wiring-hop1`/`-hop2`、`iu4-wizard-wiring-output`、`iu4-wizard-wiring-input`、`iu4-wizard-source-target` |
-| ③ 审批 | name 输入 + 复用父面板既有 `save()`（emit 上抛，同一函数，同一 `saveReadSourceCompositionVersion` 调用）；保存成功后指引到既有「已保存组合」侧栏（`rscauth-saved`，approve/retire/audit **不重复**，与视图模式无关地始终渲染）完成提交审批 —— 零新增 approve/retire 调用点 | `iu4-wizard-name`、`iu4-wizard-save`、`iu4-wizard-save-result`、`iu4-wizard-permission-hint` |
+| ③ 审批 | name 输入 + 复用父面板既有 `save()`（emit 上抛，同一函数，同一 `saveReadSourceCompositionVersion` 调用）；保存出现 `status==='draft'` 的行后，同一步内出现「提交审批」按钮，emit 上抛到父面板既有 `approve()`（同一 `approveReadSourceComposition` 调用 + 同一 `window.confirm` 守卫，与既有「已保存组合」侧栏的审批按钮**同一函数、两个入口**，同 IU-3 step-4 save/approve 手法）；一旦已审批，按钮退场，之后的停用/审计仍只在侧栏（`rscauth-saved`，与视图模式无关地始终渲染） | `iu4-wizard-name`、`iu4-wizard-save`、`iu4-wizard-approve`、`iu4-wizard-save-result`、`iu4-wizard-permission-hint` |
 
 上一步可回改（`iu4-wizard-back`，状态保留）；步进指示用 `el-steps`（装饰层；导航由原生按钮驱动，测试环境无 EP 也全功能，同 IU-3 手法）。
 
@@ -123,14 +123,22 @@ apiFetch mock 层截获两次 POST 的 **raw body 字符串**，断言 `wizardBo
 
 | 检查 | Node 20 (v20.20.2, nvm) | 默认 (v25.9.0) |
 | --- | --- | --- |
-| integration-guard web 名单（27 spec files，含新 1 个） | **271/271 绿** | **271/271 绿** |
+| integration-guard web 名单（27 spec files，含新 1 个） | **272/272 绿** | **272/272 绿** |
 | `vue-tsc -b` | clean | — |
 | `vite build`（`pnpm build`） | 成功 | — |
 | `ui-foundation-style-guard.spec.ts`（81 tests，含新文件） | 绿 | — |
+| `approval-web-guard.yml` 完整名单（30 spec files，本 PR 因改了该 workflow 名单里的 `ui-foundation-style-guard.spec.ts` 而会被触发） | **566/566 绿** | — |
 
-新增测试：`IntegrationCompositionWizard.spec.ts` 9 条（默认面 golden、hop 过滤、步进门×2、接线图
+新增测试：`IntegrationCompositionWizard.spec.ts` 10 条（默认面 golden、hop 过滤、步进门×2、接线图
 渲染+编辑联动+门控、写权限门×2（禁用态/放行态分两个 mount，因 `canWrite` 是无响应式依赖的
-`computed`，见测试内注释）、字节等价、expert 切换、zh 文案）。
+`computed`，见测试内注释）、step-3 内「提交审批」（既有 `approveReadSourceComposition` + confirm
+守卫）、字节等价、expert 切换、zh 文案）。
+
+**CI 触达确认**：`ui-foundation-style-guard.spec.ts` 属于 `approval-web-guard.yml`（非
+`integration-guard.yml`），其 `paths:` 过滤器**已经**列出该测试文件本身（第 126/242 行）——本 PR
+修改了这个文件（TARGET_FILES 追加一行），所以 `approval-web-guard.yml` **会**在这个 PR 上真实触发，
+新组件的 token-only 门不是"只在本地验证过"，而是有实际 CI 覆盖（本地跑过该 workflow 完整 30-spec
+名单，566/566 绿，见上表）。
 
 ## 11. 边界内自查
 

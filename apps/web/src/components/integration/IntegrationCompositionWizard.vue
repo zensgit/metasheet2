@@ -135,6 +135,19 @@
           :disabled="!canSave"
           @click="emit('save')"
         >{{ saving ? bi('保存中…', 'Saving…') : bi('保存组合版本', 'Save composition version') }}</button>
+        <!-- Same-step "→提交审批" (design-lock §1 step ③): shown once a draft-status save exists, emits
+             to the parent's EXISTING `approve()` — same function + same window.confirm guard the
+             "已保存组合" side panel's own approve button already calls (unconditional on view mode, still
+             the surface for retire/audit). Two UI entry points, one service path — same pattern as IU-3's
+             step-4 `rsc-wizard-approve` → `approveSavedResult()`. -->
+        <button
+          v-if="savedRow && savedRow.status === 'draft'"
+          type="button"
+          class="iu4-wizard__button"
+          data-testid="iu4-wizard-approve"
+          :disabled="!canApprove"
+          @click="emit('approve')"
+        >{{ approving ? bi('审批中…', 'Approving…') : bi('提交审批', 'Submit for approval') }}</button>
       </div>
 
       <p v-if="actionError" class="iu4-wizard__error" data-testid="iu4-wizard-error">{{ actionError }}</p>
@@ -147,8 +160,6 @@
           ? bi(`已复用现有版本 v${savedRow.version}`, `Reused existing version v${savedRow.version}`)
           : bi(`已保存新版本 v${savedRow.version}`, `Saved new version v${savedRow.version}`) }}
         (status: {{ savedRow.status }})
-        —
-        {{ bi('前往右侧「已保存组合」提交审批。', 'Go to the "saved composition" panel on the right to submit for approval.') }}
       </p>
     </section>
 
@@ -187,11 +198,12 @@
 // IntegrationCompositionWizard.spec.ts's byte-equality test, which drives real DOM inputs through both
 // surfaces and diffs the captured wire body.
 //
-// `save` is EMITTED to the parent, which runs the exact same `save()` function the expert form's own
-// button calls — one function, two UI entry points. No new route, no new validator (design-lock §2
-// hard lock). Approve/retire/audit are intentionally NOT duplicated here — the parent's existing
-// "已保存组合" panel (savedRow block, unconditional on view mode) already renders them for the
-// composition just saved, so step ③'s "→提交审批" is satisfied via that existing, un-duplicated UI.
+// `save`/`approve` are EMITTED to the parent, which runs the exact same `save()`/`approve()` functions
+// the expert form's own buttons call — one function each, two UI entry points (same pattern as IU-3's
+// step-4 save/approve). No new route, no new validator, no new approve path (design-lock §2 hard
+// lock). Retire/audit are intentionally NOT duplicated here — the parent's existing "已保存组合" panel
+// (savedRow block, unconditional on view mode) already renders them once a composition is approved;
+// step ③ only needs to get a fresh draft to draft→approved, which the in-step approve button now does.
 import { computed, ref } from 'vue'
 import { Check, Right } from '@element-plus/icons-vue'
 import { useLocale } from '../../composables/useLocale'
@@ -211,6 +223,7 @@ const props = defineProps<{
   pickerError: string
   canWrite: boolean
   saving: boolean
+  approving: boolean
   actionError: string
   saveFieldErrors: ReadSourceCompositionFieldError[]
   savedRow: ReadSourceCompositionSaveResult | null
@@ -218,6 +231,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'save'): void
+  (e: 'approve'): void
 }>()
 
 const { locale } = useLocale()
@@ -252,6 +266,8 @@ const canAdvanceStep2 = computed(() => props.draft.sourceTarget.trim().length > 
 // never invents its own validation rule, so it can never drift from the flat form's or the server's.
 const draftProblems = computed(() => validateReadSourceCompositionDraft(props.draft))
 const canSave = computed(() => !props.saving && props.canWrite && draftProblems.value.length === 0)
+// Mirrors the parent's own `canApprove` computed exactly (readSourceCompositions.ts side panel).
+const canApprove = computed(() => !props.approving && props.canWrite)
 
 function goNext(): void {
   if (currentStep.value === 1 && !canAdvanceStep1.value) return
