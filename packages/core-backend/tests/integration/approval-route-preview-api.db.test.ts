@@ -24,6 +24,11 @@ const NAMED_DISPLAY = `预览审批人甲-${TS}`
 // Owner hard-gate ③ discriminator fixture: a condition node that branches on an UNDECLARED field.
 const BRANCH_HIGH = `u_rp2_hi_${TS}`
 const BRANCH_LOW = `u_rp2_lo_${TS}`
+// Role-enrichment fixture: a role WITH a display name (enrichment must surface it) and a role
+// whose name is blank (enrichment must fall back to the honest id — same branch as an absent row).
+const ROLE_NAMED = `rp2_role_${TS}`
+const ROLE_DISPLAY = `财务角色-${TS}`
+const ROLE_BLANK = `rp2_role_blank_${TS}`
 
 async function canListen(): Promise<boolean> {
   return await new Promise((r) => {
@@ -58,6 +63,7 @@ describeIfDatabase('RP-2 — POST /api/approvals/preview (real-DB HTTP)', () => 
   let requesterTok = ''
   let templateId = ''
   let branchTemplateId = ''
+  let roleTemplateId = ''
   let approvals: ApprovalProductService
 
   beforeAll(async () => {
@@ -94,6 +100,18 @@ describeIfDatabase('RP-2 — POST /api/approvals/preview (real-DB HTTP)', () => 
         [uid, `${uid}@rp2.test`],
       )
     }
+    // Roles for the enrichment fixture — approval_usable so a static_role node may assign them.
+    // ROLE_NAMED carries a display name; ROLE_BLANK a whitespace-only name (id-fallback branch).
+    await pool.query(
+      `INSERT INTO roles (id, name, approval_usable) VALUES ($1, $2, TRUE)
+       ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, approval_usable = TRUE`,
+      [ROLE_NAMED, ROLE_DISPLAY],
+    )
+    await pool.query(
+      `INSERT INTO roles (id, name, approval_usable) VALUES ($1, '  ', TRUE)
+       ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, approval_usable = TRUE`,
+      [ROLE_BLANK],
+    )
 
     approvals = new ApprovalProductService()
     const template = await approvals.createTemplate({
@@ -147,6 +165,29 @@ describeIfDatabase('RP-2 — POST /api/approvals/preview (real-DB HTTP)', () => 
     branchTemplateId = (branchTemplate as { id: string }).id
     await approvals.publishTemplate(branchTemplateId, { policy: { allowRevoke: true } } as never)
 
+    // Role-enrichment template: two approval nodes assigned via static_role — one to a named role
+    // (enrichment must surface its display name), one to a blank-named role (honest id fallback).
+    const roleTemplate = await approvals.createTemplate({
+      key: `rp2r-${TS}`,
+      name: 'RP2 Preview Role Template',
+      formSchema: { fields: [{ id: 'summary', type: 'text', label: 'Summary', required: true }] },
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: 'Start', config: {} },
+          { key: 'approval_role_named', type: 'approval', name: '角色审批甲', config: { mode: 'any', assigneeSources: [{ kind: 'static_role', roleIds: [ROLE_NAMED] }] } },
+          { key: 'approval_role_blank', type: 'approval', name: '角色审批乙', config: { mode: 'any', assigneeSources: [{ kind: 'static_role', roleIds: [ROLE_BLANK] }] } },
+          { key: 'end', type: 'end', name: 'End', config: {} },
+        ],
+        edges: [
+          { key: 'e1', source: 'start', target: 'approval_role_named' },
+          { key: 'e2', source: 'approval_role_named', target: 'approval_role_blank' },
+          { key: 'e3', source: 'approval_role_blank', target: 'end' },
+        ],
+      },
+    } as never, { userId: REQUESTER, userName: REQUESTER } as never)
+    roleTemplateId = (roleTemplate as { id: string }).id
+    await approvals.publishTemplate(roleTemplateId, { policy: { allowRevoke: true } } as never)
+
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
     base = `http://127.0.0.1:${server.getAddress()!.port}`
@@ -156,7 +197,7 @@ describeIfDatabase('RP-2 — POST /api/approvals/preview (real-DB HTTP)', () => 
   afterAll(async () => {
     try {
       const pool = poolManager.get()
-      for (const tid of [templateId, branchTemplateId]) {
+      for (const tid of [templateId, branchTemplateId, roleTemplateId]) {
         if (!tid) continue
         const iids = (await pool.query(`SELECT id FROM approval_instances WHERE template_id = $1`, [tid])).rows.map((r) => r.id as string)
         if (iids.length > 0) {
@@ -168,6 +209,7 @@ describeIfDatabase('RP-2 — POST /api/approvals/preview (real-DB HTTP)', () => 
         await pool.query(`DELETE FROM approval_templates WHERE id = $1`, [tid])
       }
       await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[REQUESTER, APPROVER_NAMED, APPROVER_BLANK, BRANCH_HIGH, BRANCH_LOW]])
+      await pool.query(`DELETE FROM roles WHERE id = ANY($1::text[])`, [[ROLE_NAMED, ROLE_BLANK]])
     } catch {
       /* best effort */
     }
@@ -255,5 +297,17 @@ describeIfDatabase('RP-2 — POST /api/approvals/preview (real-DB HTTP)', () => 
     const body = (await res.json()) as PreviewBody
     expect(body.route.map((n) => n.nodeKey)).toEqual(['approval_low'])
     expect(body.route[0]!.assignees.map((a) => a.id)).toEqual([BRANCH_LOW])
+  })
+
+  it('role-type assignees are display-enriched from the roles table, with honest id fallback', async () => {
+    // The one path with NO other real-DB coverage: static_role assignments run through the
+    // `SELECT id, name FROM roles` enrichment. A named role must surface its display name; a
+    // blank-named (or absent) role must fall back to the honest id — never a blank chip.
+    const res = await post(base, '/api/approvals/preview', requesterTok, { templateId: roleTemplateId, formData: { summary: 'role run' } })
+    expect(res.status, await res.clone().text()).toBe(200)
+    const body = (await res.json()) as PreviewBody
+    expect(body.route.map((n) => n.nodeKey)).toEqual(['approval_role_named', 'approval_role_blank'])
+    expect(body.route[0]!.assignees).toEqual([{ id: ROLE_NAMED, name: ROLE_DISPLAY, assignmentType: 'role' }])
+    expect(body.route[1]!.assignees).toEqual([{ id: ROLE_BLANK, name: ROLE_BLANK, assignmentType: 'role' }])
   })
 })
