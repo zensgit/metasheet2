@@ -48,6 +48,10 @@ on:
       - 'apps/web/src/components/integration/IntegrationExternalWritePanel.vue'
       - 'apps/web/src/components/integration/IntegrationTableActionsPanel.vue'
       - 'apps/web/src/components/integration/IntegrationFieldOptionSyncPanel.vue'
+      - 'apps/web/src/components/integration/IntegrationOptionSetsStructuredEditor.vue'
+      - 'apps/web/src/components/integration/JsonAssist.vue'
+      - 'apps/web/src/utils/jsonAssist.ts'
+      - 'apps/web/src/utils/optionSetsStructured.ts'
       - 'apps/web/src/components/integration/integrationWorkbenchSectionTypes.ts'
       - 'apps/web/src/components/integration/JsonAssist.vue'
       - 'apps/web/src/utils/jsonAssist.ts'
@@ -80,6 +84,8 @@ on:
       - 'apps/web/tests/IntegrationExternalWritePanel.spec.ts'
       - 'apps/web/tests/IntegrationTableActionsPanel.spec.ts'
       - 'apps/web/tests/IntegrationFieldOptionSyncPanel.spec.ts'
+      - 'apps/web/tests/IntegrationOptionSetsStructuredEditor.spec.ts'
+      - 'apps/web/tests/utils/optionSetsStructured.spec.ts'
       - 'apps/web/tests/IntegrationK3WiseSetupView.spec.ts'
       - 'apps/web/tests/IntegrationHelpView.spec.ts'
       - 'apps/web/tests/JsonAssist.spec.ts'
@@ -113,6 +119,10 @@ on:
       - 'apps/web/src/components/integration/IntegrationExternalWritePanel.vue'
       - 'apps/web/src/components/integration/IntegrationTableActionsPanel.vue'
       - 'apps/web/src/components/integration/IntegrationFieldOptionSyncPanel.vue'
+      - 'apps/web/src/components/integration/IntegrationOptionSetsStructuredEditor.vue'
+      - 'apps/web/src/components/integration/JsonAssist.vue'
+      - 'apps/web/src/utils/jsonAssist.ts'
+      - 'apps/web/src/utils/optionSetsStructured.ts'
       - 'apps/web/src/components/integration/integrationWorkbenchSectionTypes.ts'
       - 'apps/web/src/components/integration/JsonAssist.vue'
       - 'apps/web/src/utils/jsonAssist.ts'
@@ -145,6 +155,8 @@ on:
       - 'apps/web/tests/IntegrationExternalWritePanel.spec.ts'
       - 'apps/web/tests/IntegrationTableActionsPanel.spec.ts'
       - 'apps/web/tests/IntegrationFieldOptionSyncPanel.spec.ts'
+      - 'apps/web/tests/IntegrationOptionSetsStructuredEditor.spec.ts'
+      - 'apps/web/tests/utils/optionSetsStructured.spec.ts'
       - 'apps/web/tests/IntegrationK3WiseSetupView.spec.ts'
       - 'apps/web/tests/IntegrationHelpView.spec.ts'
       - 'apps/web/tests/JsonAssist.spec.ts'
@@ -201,4 +213,4 @@ jobs:
       # Consolidated here into the SINGLE unioned list (verified green on both Node 20 and this repo's
       # default Node before landing) — do not reintroduce a second `run:` key; add new specs to this one.
       - name: Run integration web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured --reporter=dot

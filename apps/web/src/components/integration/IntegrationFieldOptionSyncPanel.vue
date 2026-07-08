@@ -15,13 +15,46 @@
         </option>
       </select>
     </label>
-    <label>
+    <div class="integration-workbench__inline-field integration-workbench__mode-toggle">
+      <span>{{ bi('编辑模式', 'Edit mode') }}</span>
+      <button
+        type="button"
+        class="integration-workbench__button"
+        data-testid="field-options-mode-toggle"
+        :disabled="mode === 'expert' && !isCurrentTextStructurable"
+        @click="toggleMode"
+      >
+        {{ mode === 'structured'
+          ? bi('切换到专家 JSON', 'Switch to expert JSON')
+          : bi('切换到结构化编辑', 'Switch to structured editor') }}
+      </button>
+    </div>
+    <p
+      v-if="mode === 'expert' && !isCurrentTextStructurable"
+      class="integration-workbench__hint"
+      data-testid="field-options-structured-unavailable-hint"
+    >
+      {{ bi(
+        '当前内容不是结构化编辑器支持的字段选项形状（例如包含 optionSources/configInfo，或选项缺少 value/label），已使用专家 JSON 模式；修正为受支持的形状后可切换回结构化编辑。',
+        'The current content is not a shape the structured editor supports (e.g. it carries optionSources/configInfo, or an option is missing value/label) — using expert JSON mode; fix it to a supported shape to switch back to the structured editor.',
+      ) }}
+    </p>
+    <IntegrationOptionSetsStructuredEditor
+      v-if="mode === 'structured'"
+      v-model="stockPreparationOptionSyncText"
+    />
+    <label v-show="mode === 'expert'">
       <span>optionSets JSON</span>
       <textarea
         v-model="stockPreparationOptionSyncText"
         data-testid="stock-option-sync-json"
         rows="8"
         :placeholder="stockPreparationOptionSyncPlaceholder"
+      />
+      <JsonAssist
+        v-model="stockPreparationOptionSyncText"
+        test-id="stock-option-sync-json"
+        :placeholder-example="stockPreparationOptionSyncPlaceholder"
       />
     </label>
     <p class="integration-workbench__hint" data-testid="stock-option-sync-boundary">
@@ -54,8 +87,30 @@
 // stage D — `int-sec-run-push` decomposition): field-option-sync panel, one of five focused
 // sub-panels the prior monolithic `int-sec-run-push` section bundled. Pure template/markup move —
 // no state or service-call logic lives here. The `optionSets JSON` textarea
-// (`data-testid="stock-option-sync-json"`) is kept exactly as a raw JSON textarea — structuring it
-// is IU-5's job (§2 IU-5, gated on IU-2 landing), not this slice's.
+// (`data-testid="stock-option-sync-json"`) was originally kept exactly as a raw JSON textarea —
+// structuring it was IU-5's job (§2 IU-5, gated on IU-2 landing); D2 (below) is that slice.
+//
+// D2 (site 5 of IU-5, gated on IU-2 landing + this panel's own landing #3822): the raw textarea
+// is now the EXPERT fallback (`mode === 'expert'`) beside a default structured
+// (repeatable-row) editor (`mode === 'structured'`). Zero backend/service change either way — both
+// modes write the SAME `stockPreparationOptionSyncText` model the parent already owns and
+// `syncFieldOptions` already reads; see `../../utils/optionSetsStructured.ts` for the
+// structured<->JSON contract and closed-shape rules.
+//
+// The expert-mode `<label>` block uses `v-show` (not `v-if`) — the textarea and its
+// `data-testid="stock-option-sync-json"` must stay reachable in the DOM at all times (an existing
+// spec pins `querySelector(...)` finding it as a `TEXTAREA` unconditionally; `v-show` only toggles
+// CSS display, so that assertion needed zero changes). The structured editor uses `v-if` instead
+// (cheaper: it only needs to parse the current text once, at the moment the user switches into
+// structured mode — see that component's own header comment on why a remount-on-toggle beats a
+// reactive text->rows watcher for avoiding an edit feedback loop).
+//
+// Mode defaults to `structured` unless the initial text isn't structurable (`parseOptionSets`
+// fails), in which case it starts in `expert` so nothing existing is ever hidden behind a broken
+// toggle. Switching FROM expert TO structured re-checks structurability live (the user may have
+// hand-edited the textarea) and is blocked (button disabled + a values-free hint) when the current
+// text doesn't parse into the closed shape — switching FROM structured TO expert is always
+// allowed (structured edits always produce valid, structurable JSON).
 //
 // Same permission-gate note as `IntegrationStockPrepPanel.vue`: the `integration:admin` gate
 // stays on this block's own root `v-if` exactly where the pre-extraction markup had it, driven by
@@ -65,6 +120,12 @@
 //
 // FOS-3: only the stock-preparation preset is wired today (see the view's own comment above
 // `fieldOptionSyncPresets`); this local type mirrors that `as const` array's element shape.
+import { computed, ref } from 'vue'
+import { useLocale } from '../../composables/useLocale'
+import { parseOptionSets } from '../../utils/optionSetsStructured'
+import JsonAssist from './JsonAssist.vue'
+import IntegrationOptionSetsStructuredEditor from './IntegrationOptionSetsStructuredEditor.vue'
+
 interface FieldOptionSyncPreset {
   presetId: string
   label: string
@@ -83,11 +144,51 @@ defineProps<{
 
 const fieldOptionSyncPresetId = defineModel<string>('fieldOptionSyncPresetId', { default: '' })
 const stockPreparationOptionSyncText = defineModel<string>('stockPreparationOptionSyncText', { default: '' })
+
+const { locale } = useLocale()
+
+function bi(zh: string, en: string): string {
+  return locale.value === 'zh-CN' ? zh : en
+}
+
+// Initial mode is decided ONCE, from the model's value at mount — never re-derived reactively off
+// `stockPreparationOptionSyncText` (that would fight in-progress structured-mode edits). Defaults
+// to structured unless the starting text isn't structurable, so nothing existing lands behind a
+// broken toggle.
+const mode = ref<'structured' | 'expert'>(
+  parseOptionSets(stockPreparationOptionSyncText.value).ok ? 'structured' : 'expert',
+)
+
+// Read live only while in expert mode, to gate the toggle button (whether switching BACK to
+// structured is currently safe) and the unavailable hint — this is a read-only status check, not
+// a rebuild of any editor state, so it carries none of the text->rows loop risk.
+const isCurrentTextStructurable = computed(() => parseOptionSets(stockPreparationOptionSyncText.value).ok)
+
+function toggleMode(): void {
+  if (mode.value === 'structured') {
+    mode.value = 'expert'
+    return
+  }
+  if (!isCurrentTextStructurable.value) return
+  mode.value = 'structured'
+}
 </script>
 
 <style scoped>
 /* Verbatim copies (selectively trimmed to the tags/classes this component actually renders) of
    the rules in IntegrationWorkbenchView.vue's <style scoped> block that target this markup. */
+
+/* D2: mode-toggle row (new, not carried over from the pre-D2 markup). */
+.integration-workbench__mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-2);
+  margin-top: var(--ms-space-2);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ms-text-1);
+}
+
 .integration-workbench__table-action {
   margin: 16px 0;
   padding: 14px;
