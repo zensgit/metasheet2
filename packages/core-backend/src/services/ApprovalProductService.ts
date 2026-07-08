@@ -3289,6 +3289,11 @@ export class ApprovalProductService {
     }
 
     const formSchema = asFormSchema(bundle.version.form_schema)
+    // NOTE: pruneHiddenFormData already restricts formData to VISIBLE declared fields, so undeclared
+    // keys are dropped here on BOTH the create and preview paths. The whitelist below is therefore
+    // REDUNDANT defense-in-depth for the owner's gate ③, not the sole enforcer — see the
+    // route-preview-api "HARD GATE ③" golden, which stays green if either layer holds and only
+    // flips if BOTH are removed.
     const normalizedFormData = pruneHiddenFormData(formSchema, request.formData)
     // RP-1 hard gate (owner order, ratified lock): on the PREVIEW path formData is interpreted
     // STRICTLY per the template field whitelist — unknown keys are dropped BEFORE validation,

@@ -21,6 +21,9 @@ const REQUESTER = `u_rp2_req_${TS}`
 const APPROVER_NAMED = `u_rp2_named_${TS}`
 const APPROVER_BLANK = `u_rp2_blank_${TS}`
 const NAMED_DISPLAY = `预览审批人甲-${TS}`
+// Owner hard-gate ③ discriminator fixture: a condition node that branches on an UNDECLARED field.
+const BRANCH_HIGH = `u_rp2_hi_${TS}`
+const BRANCH_LOW = `u_rp2_lo_${TS}`
 
 async function canListen(): Promise<boolean> {
   return await new Promise((r) => {
@@ -55,6 +58,8 @@ describeIfDatabase('RP-2 — POST /api/approvals/preview (real-DB HTTP)', () => 
   let base = ''
   let requesterTok = ''
   let templateId = ''
+  let branchTemplateId = ''
+  let approvals: ApprovalProductService
 
   beforeAll(async () => {
     expect(await canListen()).toBe(true)
@@ -81,7 +86,17 @@ describeIfDatabase('RP-2 — POST /api/approvals/preview (real-DB HTTP)', () => 
       [REQUESTER, `${REQUESTER}@rp2.test`],
     )
 
-    const approvals = new ApprovalProductService()
+    // BRANCH_HIGH/LOW back the discriminator template's two condition arms.
+    for (const uid of [BRANCH_HIGH, BRANCH_LOW]) {
+      await pool.query(
+        `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+         VALUES ($1, $2, $1, 'x', 'user', '[]'::jsonb, TRUE, FALSE)
+         ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
+        [uid, `${uid}@rp2.test`],
+      )
+    }
+
+    approvals = new ApprovalProductService()
     const template = await approvals.createTemplate({
       key: `rp2-${TS}`,
       name: 'RP2 Preview API Template',
@@ -103,6 +118,36 @@ describeIfDatabase('RP-2 — POST /api/approvals/preview (real-DB HTTP)', () => 
     templateId = (template as { id: string }).id
     await approvals.publishTemplate(templateId, { policy: { allowRevoke: true } } as never)
 
+    // Owner hard-gate ③ discriminator: cond_1 routes on `route_secret`, which is deliberately NOT
+    // a declared formSchema field. With the whitelist ON (as create-parity requires), a request
+    // body carrying `route_secret` is stripped before the walk → default (low) arm; only if the
+    // gate were removed would the smuggled key flip the route to the high arm. This is the sink
+    // the non-branching linear template cannot exercise, so it is the test that actually PROVES
+    // the gate (mutation-verified: disabling the whitelist turns the golden below RED).
+    const branchTemplate = await approvals.createTemplate({
+      key: `rp2b-${TS}`,
+      name: 'RP2 Preview Branch Template',
+      formSchema: { fields: [{ id: 'summary', type: 'text', label: 'Summary', required: true }] },
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: 'Start', config: {} },
+          { key: 'cond_1', type: 'condition', name: 'route', config: { branches: [{ edgeKey: 'to-high', rules: [{ fieldId: 'route_secret', operator: 'eq', value: 'high' }] }], defaultEdgeKey: 'to-low' } },
+          { key: 'approval_high', type: 'approval', name: '高', config: { mode: 'any', assigneeSources: [{ kind: 'static_user', userIds: [BRANCH_HIGH] }] } },
+          { key: 'approval_low', type: 'approval', name: '低', config: { mode: 'any', assigneeSources: [{ kind: 'static_user', userIds: [BRANCH_LOW] }] } },
+          { key: 'end', type: 'end', name: 'End', config: {} },
+        ],
+        edges: [
+          { key: 'e0', source: 'start', target: 'cond_1' },
+          { key: 'to-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'to-low', source: 'cond_1', target: 'approval_low' },
+          { key: 'eh', source: 'approval_high', target: 'end' },
+          { key: 'el', source: 'approval_low', target: 'end' },
+        ],
+      },
+    } as never, { userId: REQUESTER, userName: REQUESTER } as never)
+    branchTemplateId = (branchTemplate as { id: string }).id
+    await approvals.publishTemplate(branchTemplateId, { policy: { allowRevoke: true } } as never)
+
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
     base = `http://127.0.0.1:${server.getAddress()!.port}`
@@ -112,15 +157,18 @@ describeIfDatabase('RP-2 — POST /api/approvals/preview (real-DB HTTP)', () => 
   afterAll(async () => {
     try {
       const pool = poolManager.get()
-      const iids = (await pool.query(`SELECT id FROM approval_instances WHERE template_id = $1`, [templateId])).rows.map((r) => r.id as string)
-      if (iids.length > 0) {
-        await pool.query(`DELETE FROM approval_records WHERE instance_id = ANY($1)`, [iids])
-        await pool.query(`DELETE FROM approval_assignments WHERE instance_id = ANY($1)`, [iids])
-        await pool.query(`DELETE FROM approval_instances WHERE id = ANY($1)`, [iids])
+      for (const tid of [templateId, branchTemplateId]) {
+        if (!tid) continue
+        const iids = (await pool.query(`SELECT id FROM approval_instances WHERE template_id = $1`, [tid])).rows.map((r) => r.id as string)
+        if (iids.length > 0) {
+          await pool.query(`DELETE FROM approval_records WHERE instance_id = ANY($1)`, [iids])
+          await pool.query(`DELETE FROM approval_assignments WHERE instance_id = ANY($1)`, [iids])
+          await pool.query(`DELETE FROM approval_instances WHERE id = ANY($1)`, [iids])
+        }
+        await pool.query(`DELETE FROM approval_published_definitions WHERE template_id = $1`, [tid])
+        await pool.query(`DELETE FROM approval_templates WHERE id = $1`, [tid])
       }
-      await pool.query(`DELETE FROM approval_published_definitions WHERE template_id = $1`, [templateId])
-      await pool.query(`DELETE FROM approval_templates WHERE id = $1`, [templateId])
-      await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[REQUESTER, APPROVER_NAMED, APPROVER_BLANK]])
+      await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[REQUESTER, APPROVER_NAMED, APPROVER_BLANK, BRANCH_HIGH, BRANCH_LOW]])
     } catch {
       /* best effort */
     }
@@ -157,11 +205,13 @@ describeIfDatabase('RP-2 — POST /api/approvals/preview (real-DB HTTP)', () => 
 
   it('200 happy path: resolved route with display-name enrichment + honest id fallback, and ZERO writes', async () => {
     const pool = poolManager.get()
+    // Scope the zero-write proof to THIS test's templates — a global COUNT(*) would be polluted by
+    // any other real-DB test file writing concurrently against the shared Postgres.
     const countRows = async () => {
       const [i, a, r] = await Promise.all([
-        pool.query('SELECT COUNT(*)::int AS c FROM approval_instances'),
-        pool.query('SELECT COUNT(*)::int AS c FROM approval_assignments'),
-        pool.query('SELECT COUNT(*)::int AS c FROM approval_records'),
+        pool.query('SELECT COUNT(*)::int AS c FROM approval_instances WHERE template_id = ANY($1)', [[templateId, branchTemplateId]]),
+        pool.query('SELECT COUNT(*)::int AS c FROM approval_assignments WHERE instance_id IN (SELECT id FROM approval_instances WHERE template_id = ANY($1))', [[templateId, branchTemplateId]]),
+        pool.query('SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id IN (SELECT id FROM approval_instances WHERE template_id = ANY($1))', [[templateId, branchTemplateId]]),
       ])
       return { instances: i.rows[0].c as number, assignments: a.rows[0].c as number, records: r.rows[0].c as number }
     }
@@ -180,5 +230,27 @@ describeIfDatabase('RP-2 — POST /api/approvals/preview (real-DB HTTP)', () => 
     expect(body.route[1]!.assignees).toEqual([{ id: APPROVER_BLANK, name: APPROVER_BLANK, assignmentType: 'user' }])
 
     expect(await countRows()).toEqual(before)
+  })
+
+  it('HARD GATE ③: an undeclared branch-driver key cannot smuggle a different route through preview', async () => {
+    // Over the wire, through the same guard chain, carrying an org-probing / branch-smuggling key
+    // (`route_secret`) that is NOT a declared field of the template. The condition arm keys on it;
+    // it must be stripped before the walk so the default (low) arm resolves — otherwise a crafted
+    // request body would turn preview into a route-divergence oracle.
+    //
+    // NON-VACUOUS: this key genuinely reaches a live sink (the condition rule). It is stripped by
+    // TWO redundant layers — pruneHiddenFormData (visible-declared-fields only; shared with the
+    // CREATE path) and the RP-1 preview-only formData whitelist. Either layer alone keeps this
+    // golden green; disabling BOTH flips the route to the high arm (mutation-verified). So the
+    // whitelist is redundant defense-in-depth over pruneHiddenFormData, not the sole gate — and
+    // this golden proves the owner-mandated OUTCOME end-to-end regardless of which layer holds.
+    const res = await post(base, '/api/approvals/preview', requesterTok, {
+      templateId: branchTemplateId,
+      formData: { summary: 'branch run', route_secret: 'high', requesterId: 'someone_else', managerChainIds: ['x'] },
+    })
+    expect(res.status, await res.clone().text()).toBe(200)
+    const body = (await res.json()) as PreviewBody
+    expect(body.route.map((n) => n.nodeKey)).toEqual(['approval_low'])
+    expect(body.route[0]!.assignees.map((a) => a.id)).toEqual([BRANCH_LOW])
   })
 })

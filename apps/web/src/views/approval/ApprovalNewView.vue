@@ -459,6 +459,7 @@ import {
 import { summarizeApprovalFlow, type ApprovalFlowStep } from '../../approvals/graphSummary'
 import { previewApprovalRoute, type ApprovalRoutePreview } from '../../approvals/api'
 import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
+import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { getApproval } from '../../approvals/api'
 import { prefillFromSnapshot } from '../../approvals/prefillFromSnapshot'
 
@@ -543,37 +544,25 @@ const flowPreviewSteps = computed<ApprovalFlowStep[]>(() => {
   return summarizeApprovalFlow(graph, template.value?.formSchema ?? null)
 })
 
-// RP-2 (B3-05): live route preview state. Compute-at-click; any form edit clears the resolved
-// path (stale resolution must never keep rendering as if it matched the current values).
+// RP-2 (B3-05): live route preview state. Compute-at-click; any form edit invalidates the resolved
+// path (stale resolution must never keep rendering as if it matched the current values). The
+// generation race-guard lives in createRoutePreviewController so it is unit-testable.
 const routePreview = ref<ApprovalRoutePreview | null>(null)
 const routePreviewLoading = ref(false)
 const routePreviewError = ref('')
 
+const routePreviewController = createRoutePreviewController(previewApprovalRoute, (patch) => {
+  if ('preview' in patch) routePreview.value = patch.preview ?? null
+  if (patch.loading !== undefined) routePreviewLoading.value = patch.loading
+  if (patch.error !== undefined) routePreviewError.value = patch.error
+})
+
 async function loadRoutePreview() {
   if (!template.value) return
-  routePreviewLoading.value = true
-  routePreviewError.value = ''
-  try {
-    routePreview.value = await previewApprovalRoute({
-      templateId: template.value.id,
-      formData: { ...formData },
-    })
-  } catch (error) {
-    routePreview.value = null
-    routePreviewError.value = error instanceof Error ? error.message : '路径预览失败'
-  } finally {
-    routePreviewLoading.value = false
-  }
+  await routePreviewController.run({ templateId: template.value.id, formData: { ...formData } })
 }
 
-watch(
-  formData,
-  () => {
-    routePreview.value = null
-    routePreviewError.value = ''
-  },
-  { deep: true },
-)
+watch(formData, () => routePreviewController.invalidate(), { deep: true })
 
 // Detail-row auto-sum (design-lock #3189, Gate B): when the template declares amountConsistencyCheck the
 // total field is derived from the detail rows (read-only) — auto-fill (UX) + backend total-check

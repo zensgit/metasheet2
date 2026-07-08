@@ -74,7 +74,8 @@
 
 - ✅ **RP-0** ratify（owner 2026-07-07）
 - ✅ **RP-1** 共享底座抽取——本 PR：assembleCreationContext（create 前缀原文抽取，preview 永不漂移）+ previewApprovalRoute 只读走图（逐节点容错/诚实截断）+ formData 白名单硬门（仅 preview 路径）+ 真库金测 6/6（preview===create/零写 RED-before/委托一致/容错/白名单）
-- ✅ **RP-2** B3-05 端点 + ApprovalNewView 预览条 —— as-built：POST `/api/approvals/preview`（与 create 同门链 authenticate+rbacGuard approvals:write，body 仅进只读底座），服务端批量姓名充实（users/roles 单次只读查询，缺行诚实回退 id），发起页流程卡内「按当前表单预览路径」（compute-at-click，表单再编辑即清除结果；未解析节点渲染「（审批人待定）」）；路由级真库测试（401/403/400/404/200+零写入）+ FE 摘要矩阵测试；守卫三处突变验证 RED
+- ✅ **RP-2** B3-05 端点 + ApprovalNewView 预览条 —— as-built：POST `/api/approvals/preview`（与 create 同门链 authenticate+rbacGuard approvals:write，body 仅进只读底座），服务端批量姓名充实（users/roles 单次只读查询，缺行诚实回退 id），发起页流程卡内「按当前表单预览路径」（compute-at-click；race-guard 抽为 `routePreviewController`——飞行中改表单/连点均按 generation 作废旧响应，陈旧路径永不回填；未解析节点渲染「（审批人待定）」）；路由级真库测试（401/403/400/404/200+零写入按模板 scope）+ FE 摘要矩阵 + controller race 单测；守卫突变验证 RED（门链 write→read、充实回退、preview 偷换 create）
+  - **对账修正（gate ③ 语义诚实化）**：owner 硬门③的「白名单」在实现里位于 `pruneHiddenFormData` 之后，而后者已把 formData 收敛到「可见的模板声明字段」——故白名单是**冗余的纵深防御**而非唯一闸。安全性质（未声明/组织探测键不进走图）在 create+preview 两路都成立；证明用一个「条件节点按未声明字段 `route_secret` 分支」的判别式金测：任一层生效即 low 臂，**两层同时移除**才漂到 high 臂（已 mutation 验证 RED）。原「移除白名单即漂路由」的说法不成立，已在代码注释与测试注释更正。
 - ⬜ **RP-3** B3-06 端点 + authoring 试运行面板 —— RP-1 后，可与 RP-2 并行
 - 🔒 依赖提醒：RP-3 的条件人话展示消费 G-B2-19 `conditionSummary`（在飞）
 
