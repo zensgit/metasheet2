@@ -74,6 +74,56 @@
               <el-icon><Refresh /></el-icon>
               {{ isChecking(system.id) ? bi('检查中…', 'Checking…') : bi('检查连接', 'Check connection') }}
             </button>
+            <button
+              type="button"
+              class="integration-workbench__button"
+              :data-testid="`bridge-agent-probe-${system.id}`"
+              :disabled="isProbing(system.id)"
+              @click="runProbe(system)"
+            >
+              <el-icon><Refresh /></el-icon>
+              {{ isProbing(system.id) ? bi('探测中…', 'Probing…') : bi('一键探测', 'One-click probe') }}
+            </button>
+
+            <div
+              v-if="probeResultFor(system.id)"
+              class="bridge-agent__probe-evidence"
+              :data-testid="`bridge-agent-probe-evidence-${system.id}`"
+            >
+              <h4>{{ bi('探测证据（values-free）', 'Probe evidence (values-free)') }}</h4>
+              <p
+                class="bridge-agent__probe-overall"
+                :data-result="probeResultFor(system.id)!.overallPass ? 'pass' : 'fail'"
+                :data-testid="`bridge-agent-probe-overall-${system.id}`"
+              >{{ overallLabel(probeResultFor(system.id)!) }}</p>
+              <ul>
+                <li
+                  v-for="step in probeResultFor(system.id)!.steps"
+                  :key="step.step"
+                  :data-testid="`bridge-agent-probe-step-${step.step}-${system.id}`"
+                  :data-ok="step.ok ? 'true' : 'false'"
+                >
+                  <strong>{{ probeStepLabel(step.step) }}</strong>
+                  <span> — ok: {{ step.ok ? 'true' : 'false' }}</span>
+                  <span v-if="step.durationBucket"> · durationBucket: {{ step.durationBucket }}</span>
+                  <span v-if="step.objectCount !== undefined"> · objectCount: {{ step.objectCount }}</span>
+                  <span v-if="step.fieldCount !== undefined"> · fieldCount: {{ step.fieldCount }}</span>
+                  <span v-if="step.skipped" :data-testid="`bridge-agent-probe-step-skipped-${system.id}`">
+                    · {{ bi('未采样对象（对象列表为空）', 'no object sampled (empty object list)') }}
+                  </span>
+                  <template v-if="!step.ok">
+                    <p
+                      class="bridge-agent__error"
+                      :data-testid="`bridge-agent-probe-step-error-${step.step}-${system.id}`"
+                    >{{ probeStepErrorLabel(step) }}</p>
+                    <p
+                      class="bridge-agent__probe-guidance"
+                      :data-testid="`bridge-agent-probe-step-guidance-${step.step}-${system.id}`"
+                    >{{ probeStepGuidance(step.step, step.code) }}</p>
+                  </template>
+                </li>
+              </ul>
+            </div>
           </div>
         </div>
 
@@ -254,7 +304,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { Connection, Lock, Refresh } from '@element-plus/icons-vue'
 import { useLocale } from '../../composables/useLocale'
-import { integrationErrorCodeDisplayLabel } from '../../services/integration/errorCodeLabels'
+import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../../services/integration/errorCodeLabels'
 import { integrationFieldHint, type IntegrationFieldHintKey } from '../../services/integration/fieldHints'
 import {
   getExternalSystemSchema,
@@ -476,6 +526,175 @@ async function toggleSchema(objectName: string): Promise<void> {
   }
 }
 
+// --- BA-UI-2 (docs/development/bridge-agent-admin-page-design-lock-20260707.md §3 BA-UI-2): values-
+// free one-click probe. Sequential health -> objects -> schema, early-stopping at the first step that
+// fails (a later step is simply never called — no partial/best-effort continuation). Reuses the exact
+// same three read-only generic service calls the rest of this section already consumes above
+// (testExternalSystemConnection / listExternalSystemObjects / getExternalSystemSchema) — ZERO new
+// backend routes, zero new credential path. Evidence is ephemeral component state only (no
+// persistence/backend storage; BA-UI-3's change-suggestion flow is a later, unopened slice).
+//
+// Evidence vocabulary (values-free, per lock §3): ok (boolean) / durationBucket (coarse bucket, never
+// a raw millisecond count that could fingerprint infra) / objectCount (objects step) / fieldCount of a
+// single SAMPLED object (schema step, never the object's name or any field value) / a humanized error
+// label + guidance line on failure, both routed through the IU-1 `errorCodeLabels` module (never a raw
+// code string, never a raw error message — see the script-block security-bounds note above, which this
+// slice does not relax).
+
+type ProbeStepKey = 'health' | 'objects' | 'schema'
+type DurationBucket = '<1s' | '1-5s' | '>5s'
+
+interface ProbeStepResult {
+  step: ProbeStepKey
+  ok: boolean
+  // Absent only for the schema step when it is SKIPPED (objects step returned zero objects — nothing
+  // to sample; this is not a failure, so no fetch/timing happened for this step).
+  durationBucket?: DurationBucket
+  objectCount?: number // objects step only
+  fieldCount?: number // schema step only — field count of the single sampled object
+  skipped?: boolean // schema step only
+  // Real registered code for a health failure (its response carries `.code`); ALWAYS null for
+  // objects/schema failures — their thrown Error carries no machine-readable code (BA-UI-1 scout
+  // finding: workbench.ts's parseIntegrationResponse only preserves `.message`). Routing a `null` code
+  // through the same IU-1 label helper still yields a coarse, values-free "unknown error" label — it is
+  // deliberately NOT a special-cased string here.
+  code: string | null
+}
+
+interface ProbeRunResult {
+  overallPass: boolean
+  failedStep: ProbeStepKey | null
+  steps: ProbeStepResult[]
+}
+
+const probing = reactive<Record<string, boolean>>({})
+const probeResults = reactive<Record<string, ProbeRunResult>>({})
+
+function isProbing(systemId: string): boolean {
+  return Boolean(probing[systemId])
+}
+
+function probeResultFor(systemId: string): ProbeRunResult | null {
+  return probeResults[systemId] || null
+}
+
+function bucketFor(durationMs: number): DurationBucket {
+  if (durationMs < 1000) return '<1s'
+  if (durationMs < 5000) return '1-5s'
+  return '>5s'
+}
+
+// Times a step and normalizes both the success and throw paths into one shape — `Date.now()` (not
+// `performance.now()`) so tests can pin exact deltas via `vi.spyOn(Date, 'now')` without needing fake
+// timers to cooperate with real microtask scheduling.
+async function measureStep<T>(
+  fn: () => Promise<T>,
+): Promise<{ durationBucket: DurationBucket; value: T | null; threw: boolean }> {
+  const start = Date.now()
+  try {
+    const value = await fn()
+    return { durationBucket: bucketFor(Date.now() - start), value, threw: false }
+  } catch {
+    return { durationBucket: bucketFor(Date.now() - start), value: null, threw: true }
+  }
+}
+
+function probeStepLabel(step: ProbeStepKey): string {
+  if (step === 'health') return bi('健康检查', 'Health check')
+  if (step === 'objects') return bi('对象列表', 'Objects')
+  return bi('Schema 预览', 'Schema preview')
+}
+
+// Always routed through the IU-1 module — see the `code` field comment on ProbeStepResult above for
+// why a `null` code (objects/schema) is expected and still renders a humanized, values-free label.
+function probeStepErrorLabel(step: ProbeStepResult): string {
+  return integrationErrorCodeDisplayLabel(step.code, locale.value)
+}
+
+const PROBE_STEP_FALLBACK_GUIDANCE: Record<ProbeStepKey, { zh: string; en: string }> = {
+  health: {
+    zh: '本机 Bridge Agent 可能未启动或不可达，请检查其计划任务/进程后重新探测。',
+    en: 'The local Bridge Agent may not be running or reachable; check its scheduled task or process, then re-probe.',
+  },
+  objects: {
+    zh: '请检查连接状态后重试对象列表探测。',
+    en: 'Check the connection status, then retry the objects probe.',
+  },
+  schema: {
+    zh: '请检查所采样对象是否仍在本机 allowlist 中后重试。',
+    en: 'Check whether the sampled object is still allowlisted locally, then retry.',
+  },
+}
+
+// A registered code's own hint (IU-6 hint style — e.g. BRIDGE_AGENT_UNREACHABLE/TIMEOUT already carry
+// one) takes precedence when present; otherwise this fixed, values-free per-step fallback guarantees a
+// guidance line always renders on failure, even for the codeless objects/schema routes.
+function probeStepGuidance(step: ProbeStepKey, code: string | null): string {
+  const hint = integrationErrorCodeHint(code, locale.value)
+  if (hint) return hint
+  return locale.value === 'zh-CN' ? PROBE_STEP_FALLBACK_GUIDANCE[step].zh : PROBE_STEP_FALLBACK_GUIDANCE[step].en
+}
+
+function overallLabel(result: ProbeRunResult): string {
+  if (result.overallPass) return 'PASS'
+  return `FAIL: ${probeStepLabel(result.failedStep as ProbeStepKey)}`
+}
+
+async function runProbe(system: WorkbenchExternalSystem): Promise<void> {
+  const systemId = system.id
+  probing[systemId] = true
+  const steps: ProbeStepResult[] = []
+  let failedStep: ProbeStepKey | null = null
+  try {
+    // Step 1/3: health — the SAME generic test route the status card above uses.
+    const health = await measureStep(() => testExternalSystemConnection(systemId, props.scope))
+    const healthOk = !health.threw && health.value?.ok === true
+    const healthCode = !healthOk && !health.threw && typeof health.value?.code === 'string' ? health.value.code : null
+    steps.push({ step: 'health', ok: healthOk, durationBucket: health.durationBucket, code: healthCode })
+    if (!healthOk) {
+      failedStep = 'health'
+      return
+    }
+
+    // Step 2/3: objects — early-stop here means schema (step 3) is NEVER called.
+    const objects = await measureStep(() => listExternalSystemObjects(systemId, props.scope))
+    const objectsOk = !objects.threw
+    steps.push({
+      step: 'objects',
+      ok: objectsOk,
+      durationBucket: objects.durationBucket,
+      objectCount: objectsOk ? (objects.value?.length ?? 0) : undefined,
+      code: null,
+    })
+    if (!objectsOk) {
+      failedStep = 'objects'
+      return
+    }
+
+    // Step 3/3: schema of a single sampled object (the first object returned). An empty allowlist
+    // (objectCount === 0) is NOT a failure — there is simply nothing to sample, so this step is marked
+    // skipped rather than run.
+    const sample = objects.value && objects.value.length > 0 ? objects.value[0] : null
+    if (!sample) {
+      steps.push({ step: 'schema', ok: true, skipped: true, code: null })
+      return
+    }
+    const schema = await measureStep(() => getExternalSystemSchema(systemId, { ...props.scope, object: sample.name }))
+    const schemaOk = !schema.threw
+    steps.push({
+      step: 'schema',
+      ok: schemaOk,
+      durationBucket: schema.durationBucket,
+      fieldCount: schemaOk ? (schema.value?.fields.length ?? 0) : undefined,
+      code: null,
+    })
+    if (!schemaOk) failedStep = 'schema'
+  } finally {
+    probeResults[systemId] = { overallPass: failedStep === null, failedStep, steps }
+    probing[systemId] = false
+  }
+}
+
 watch(
   bridgeSystems,
   (list) => {
@@ -679,6 +898,47 @@ watch(
   background: var(--el-color-danger-light-9);
   color: var(--el-color-danger);
   font-size: 12px;
+}
+
+.bridge-agent__probe-evidence {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px dashed var(--ms-border);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.bridge-agent__probe-evidence h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--ms-text-1);
+}
+
+.bridge-agent__probe-evidence ul {
+  margin: 0;
+  padding-left: 16px;
+  display: grid;
+  gap: 6px;
+}
+
+.bridge-agent__probe-overall {
+  margin: 0 0 6px;
+  font-weight: 700;
+  color: var(--ms-text-1);
+}
+
+.bridge-agent__probe-overall[data-result='fail'] {
+  color: var(--el-color-danger);
+}
+
+.bridge-agent__probe-overall[data-result='pass'] {
+  color: var(--el-color-success-dark-2);
+}
+
+.bridge-agent__probe-guidance {
+  margin: 2px 0 0;
+  color: var(--ms-text-3);
 }
 
 .bridge-agent__instances,
