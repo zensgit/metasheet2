@@ -2,23 +2,21 @@
   <!-- Entry: rendered ONLY when the flag-derived capability is on (true flag-off hidden — the FE half of
        "inert until enabled"; pitResetEnabled already encodes canManageSheetAccess). Destructive styling, distinct
        from any Revert affordance. -->
-  <button v-if="pitResetEnabled" class="reset-entry" data-test="reset-entry" @click="openDialog">
-    Reset to {{ asOf }}…
-  </button>
+  <button v-if="pitResetEnabled" class="reset-entry" data-test="reset-entry" @click="openDialog">{{ ' ' }}{{ resetConfirmEntryLabel(asOf, isZh) }}{{ ' ' }}</button>
 
   <teleport to="body">
     <div v-if="open" class="reset-confirm-overlay" data-test="reset-confirm" @click.self="onCancel">
-      <div class="reset-confirm-modal reset-confirm-modal--destructive" role="dialog" aria-label="Reset sheet to a point in time">
+      <div class="reset-confirm-modal reset-confirm-modal--destructive" role="dialog" :aria-label="l('record.resetConfirmDialogAria')">
         <div class="reset-confirm__header">
-          <h3 class="reset-confirm__title">Reset sheet to {{ asOf }}</h3>
-          <button class="reset-confirm__close" aria-label="Cancel" @click="onCancel">&times;</button>
+          <h3 class="reset-confirm__title">{{ resetConfirmTitle(asOf, isZh) }}</h3>
+          <button class="reset-confirm__close" :aria-label="l('record.resetConfirmCancelAria')" @click="onCancel">&times;</button>
         </div>
         <div class="reset-confirm__body">
-          <p v-if="loading" class="reset-confirm__hint" data-test="reset-confirm-loading">Loading preview…</p>
+          <p v-if="loading" class="reset-confirm__hint" data-test="reset-confirm-loading">{{ l('record.resetConfirmLoading') }}</p>
 
           <p v-else-if="result" class="reset-confirm__hint" data-test="reset-confirm-result">
-            {{ deletedCount }} record(s) moved to the recycle bin · {{ result.revertedCount ?? 0 }} reverted to {{ asOf }}.
-            <a href="#trash" class="reset-confirm__trash-link" data-test="reset-confirm-trash-link">View in Trash</a>
+            {{ resetConfirmResultSummary(deletedCount, result.revertedCount ?? 0, asOf, isZh) }}
+            <a href="#trash" class="reset-confirm__trash-link" data-test="reset-confirm-trash-link">{{ l('record.resetConfirmViewInTrash') }}</a>
           </p>
 
           <p v-else-if="error" class="reset-confirm__hint reset-confirm__hint--warn" role="alert" data-test="reset-confirm-error">{{ errorCopy }}</p>
@@ -26,35 +24,22 @@
           <template v-else-if="preview">
             <!-- Non-destructive path: nothing created after T → plain Revert-equivalent, no typed confirm. -->
             <template v-if="deleteCount === 0">
-              <p class="reset-confirm__hint" data-test="reset-confirm-revert-equiv">
-                Nothing was created after {{ asOf }}. This reverts {{ revertCount }} record(s) to their state at
-                {{ asOf }} — non-destructive, the same as <strong>Revert</strong>.
-              </p>
-              <button class="reset-confirm__btn" data-test="reset-confirm-btn" :disabled="!hasIdentity" @click="onConfirm">
-                Revert to {{ asOf }}
-              </button>
+              <p class="reset-confirm__hint" data-test="reset-confirm-revert-equiv">{{ ' ' }}{{ resetConfirmRevertEquivIntro(asOf, revertCount, isZh) }} <strong>{{ l('record.resetConfirmRevertWord') }}</strong>.{{ ' ' }}</p>
+              <button class="reset-confirm__btn" data-test="reset-confirm-btn" :disabled="!hasIdentity" @click="onConfirm">{{ ' ' }}{{ resetConfirmRevertButtonLabel(asOf, isZh) }}</button>
             </template>
 
             <!-- Destructive path: typed two-step confirm (type `reset` AND acknowledge the deleted-count). -->
             <template v-else>
-              <p class="reset-confirm__warn" role="alert" data-test="reset-confirm-warn">
-                <strong>Reset</strong> reverts every record to its state at {{ asOf }}
-                <strong>and moves the {{ deleteCount }} record(s) created after {{ asOf }} to the recycle bin</strong>
-                — recoverable from Trash, but this is <strong>not</strong> a normal restore.
-                Need to keep records created after {{ asOf }}? Use <strong>Revert</strong> instead — it changes nothing destructively.
-              </p>
+              <p class="reset-confirm__warn" role="alert" data-test="reset-confirm-warn"><strong>{{ l('record.resetConfirmWarnResetWord') }}</strong> {{ resetConfirmWarnRevertsAt(asOf, isZh) }} <strong>{{ resetConfirmWarnDeleteClause(deleteCount, asOf, isZh) }}</strong> {{ l('record.resetConfirmWarnBeforeNot') }} <strong>{{ l('record.resetConfirmWarnNotWord') }}</strong> {{ resetConfirmWarnAfterNot(asOf, isZh) }} <strong>{{ l('record.resetConfirmRevertWord') }}</strong> {{ l('record.resetConfirmWarnInstead') }}{{ ' ' }}</p>
               <label class="reset-confirm__ack" data-test="reset-confirm-ack">
                 <input type="checkbox" v-model="ackCount" />
-                I understand {{ deleteCount }} record(s) will be moved to the recycle bin.
+                {{ resetConfirmAckLabel(deleteCount, isZh) }}{{ ' ' }}
               </label>
-              <label class="reset-confirm__type">
-                Type <code>reset</code> to confirm:
-                <input data-test="reset-confirm-type" v-model="typed" aria-label="type reset to confirm" />
+              <label class="reset-confirm__type">{{ ' ' }}{{ l('record.resetConfirmTypePrefix') }} <code>reset</code> {{ l('record.resetConfirmTypeSuffix') }}
+                <input data-test="reset-confirm-type" v-model="typed" :aria-label="l('record.resetConfirmTypeAria')" />
               </label>
               <button class="reset-confirm__btn reset-confirm__btn--destructive" data-test="reset-confirm-btn"
-                      :disabled="!canConfirm" @click="onConfirm">
-                Reset — move {{ deleteCount }} to recycle bin
-              </button>
+                      :disabled="!canConfirm" @click="onConfirm">{{ ' ' }}{{ resetConfirmDestructiveButtonLabel(deleteCount, isZh) }}{{ ' ' }}</button>
             </template>
           </template>
         </div>
@@ -67,6 +52,13 @@
 import { computed, ref } from 'vue'
 
 import type { ResetPreview, ResetResult } from '../api/client'
+import { useLocale } from '../../composables/useLocale'
+import {
+  recordLabel, resetConfirmEntryLabel, resetConfirmTitle, resetConfirmResultSummary,
+  resetConfirmRevertEquivIntro, resetConfirmRevertButtonLabel, resetConfirmDestructiveButtonLabel,
+  resetConfirmAckLabel, resetConfirmWarnRevertsAt, resetConfirmWarnDeleteClause, resetConfirmWarnAfterNot,
+  type MetaRecordLabelKey,
+} from '../utils/meta-record-labels'
 
 const props = defineProps<{
   /** flag-derived capability (MULTITABLE_ENABLE_PIT_RESET on AND canManageSheetAccess). Off/absent ⇒ entry hidden. */
@@ -78,6 +70,9 @@ const props = defineProps<{
   resetExecute: (asOf: string, previewIdentity: string) => Promise<ResetResult>
   onDone?: () => void
 }>()
+
+const { isZh } = useLocale()
+const l = (key: MetaRecordLabelKey): string => recordLabel(key, isZh.value)
 
 const open = ref(false)
 const loading = ref(false)
@@ -96,13 +91,11 @@ const canConfirm = computed(() => hasIdentity.value && typed.value.trim() === 'r
 
 const errorCopy = computed(() => {
   const s = error.value?.status, c = error.value?.code
-  if (s === 403) return c === 'RESET_DISABLED' ? 'Reset is not enabled here.' : 'You do not have permission to reset this sheet.'
-  if (s === 409) return c === 'RESET_BLOCKED'
-    ? 'A target record is locked or denied — nothing was changed.'
-    : 'The sheet changed since the preview — please re-preview and try again.'
-  if (s === 413) return 'This sheet has too many records for a one-shot reset.'
-  if (s === 400) return 'Type "reset" to confirm.'
-  return 'Reset could not be completed. Please re-preview and try again.'
+  if (s === 403) return c === 'RESET_DISABLED' ? l('record.resetConfirmErrorDisabled') : l('record.resetConfirmErrorForbidden')
+  if (s === 409) return c === 'RESET_BLOCKED' ? l('record.resetConfirmErrorBlocked') : l('record.resetConfirmErrorStale')
+  if (s === 413) return l('record.resetConfirmErrorTooLarge')
+  if (s === 400) return l('record.resetConfirmErrorTypeMismatch')
+  return l('record.resetConfirmErrorGeneric')
 })
 
 const asErr = (e: unknown): { status?: number; code?: string } => ({
