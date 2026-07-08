@@ -40,7 +40,9 @@
 
 ## 3. 实现（`plugins/plugin-attendance/index.cjs`,后端唯一改动面）
 
-- 归一化(`normalizeOvertimeBankPolicy`,`:12842` 附近):`validityDays` 已归一化为正整数或 null(核对)。
+- 归一化(`normalizeOvertimeBankPolicySetting`):`validityDays` **在 normalizer 内**收敛为正整数或 null
+  (`Number.isInteger(raw) && raw>0 ? raw : null`,与 `compTimeFromOvertime.expiresInDays` sibling 同契约)——
+  不再依赖两层外的 zod`.int()`(review P2-2 修:原 normalizer 用 parseNumber 会放行小数,§3 曾失实)。
 - 调用点 `:28662-28706`:banked 分支求 `bankedExpiresInDays = (bankPolicy.enabled === true && positiveInt(bankPolicy.validityDays)) ? bankPolicy.validityDays : expiresInDays`,
   作为 lot INSERT 的 `$6`。dormant 分支参数不动。
 - `partitionOvertimeBankGrantLots` **纯函数不动**(守恒/池化/§6 法定下限语义全保留)。
@@ -62,8 +64,28 @@
 - 银行启用 + `validityDays=90` + `expiresInDays=30` → banked lot ≈ now()+90d(**覆盖**),证明优先级。
 - 银行**关闭** + `expiresInDays=30` → 单 NULL-source lot ≈ now()+30d(**dormant 逐字节不变**)。
 - 重放同 requestId → 无重复 lot(ON CONFLICT),`expires_at` 不被改写。
-- Mutation:拆覆盖逻辑(恒用 expiresInDays)→ 覆盖用例红;拆 `enabled` 门 → dormant 用例红。
+- **P2-1 上界**:`validityDays` 有 zod `.max(36500)` + resolve 层 `<= MAX_LOT_VALIDITY_DAYS(36500)` 双防;
+  集成 5e:PUT `999999999` → **400**(save 时拦,不再 200 后审批 500);36500 边界值被受理并生效。
+- **P2-2 顺序**:resolve **先 floor 再判正**,`0<raw<1` → 0 → fallback(非"一到就过期"死 lot);normalizer 整数化。
+- **P3-2 既有 lot 不改**:集成 5f 直接重发同 lot INSERT 换不同 `$6`,断言 `expires_at` 不变(ON CONFLICT DO NOTHING + 无 UPDATE 触及 comp_time)。
+- Mutation:拆覆盖(恒用 expiresInDays)→ 集成覆盖用例红;拆 cap → 5e 红;拆 floor 顺序 → 单测 0.5 用例红。
+  ⚠**enabled 门是 resolve 内的防御性死码**(resolve 只在 `bankPolicy.enabled===true` 分支被调用)→ 拆它只单测红、集成保持绿(dormant 路径根本不调 resolve);故 mutation 契约按此如实标注。
 
-## 6. 完成口径
+## 6. 部署预检门(review P3-4;money-adjacent 行为翻转,advisor caution)
 
-实现 → opus 对抗审阅 0 P1/P2 → 三红线 → 验证 MD → 账本回填。**S1b(maxMinutesPerPeriod 强制)紧随其后,独立设计锁。**
+覆盖生效对"**已启用银行且已设 validityDays**"的既有 org 是**交付其配置**(既有 lot 不改、仅新 grant),非剥夺 →
+非缺陷。但属 money-adjacent 无公告行为翻转,**部署前预检 live 设置行**:
+```sql
+SELECT value::jsonb->'overtimeBankPolicy' AS bank FROM system_configs WHERE key='attendance.settings';
+```
+`bank->>'enabled'='true' AND bank->>'validityDays' IS NOT NULL` → 命中则需发布说明 + 管理员再确认后部署;
+未命中(预期,银行档 LATENT 默认关)→ 直接放行。验证 MD 记此门。
+
+## 7. Pre-existing 跟进(不进本刀 — 遵 advisor 对 parity fix 的 caution)
+
+`compTimeFromOvertime.expiresInDays` 有**同类**无上界 zod(int overflow 500),但**API-only 无 FE surface、main 上已存在**(非 S1 引入)。
+本刀**只封 S1 引入的可达路径 `validityDays`**;`expiresInDays` 的 `.max` parity 作独立小刀,避免扩大 S1 blast radius。
+
+## 8. 完成口径
+
+实现 → opus 对抗审阅(P2 已修,额度恢复补确认;主循环已按 #3729 先例逐条 mutation/真DB 自证)→ 三红线 → 验证 MD → 账本回填。**S1b(maxMinutesPerPeriod 强制)紧随其后,独立设计锁。**

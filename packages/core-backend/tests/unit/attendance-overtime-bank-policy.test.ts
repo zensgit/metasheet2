@@ -58,6 +58,10 @@ describe('#8/加班银行 v1-1a — OvertimeBankPolicy normalizer (LATENT, compl
     expect(norm({ validityDays: 90 }).validityDays).toBe(90)
     expect(norm({ validityDays: 0 }).validityDays).toBeNull()
     expect(norm({ validityDays: -3 }).validityDays).toBeNull()
+    // P2-2: the normalizer now guarantees a positive integer or null (fractions
+    // rejected here, not merely two layers away in zod) — matches the sibling.
+    expect(norm({ validityDays: 0.5 }).validityDays).toBeNull()
+    expect(norm({ validityDays: 90.7 }).validityDays).toBeNull()
   })
 })
 
@@ -83,9 +87,19 @@ describe('S1 — resolveBankedLotExpiresInDays (banked-lot validity precedence)'
     expect(resolve(undefined, null)).toBeNull()
   })
 
-  it('coerces a fractional validity down to whole days and rejects a non-positive fallback', () => {
+  it('floors before the positivity check so 0<raw<1 falls back (no dead-on-arrival lot) — review P2-2', () => {
     expect(resolve({ enabled: true, validityDays: 90.9 }, null)).toBe(90)
+    expect(resolve({ enabled: true, validityDays: 0.5 }, 30)).toBe(30)   // floors to 0 → fallback, NOT expires-now
+    expect(resolve({ enabled: true, validityDays: 0.5 }, null)).toBeNull()
     expect(resolve({ enabled: false, validityDays: null }, 0)).toBeNull()
     expect(resolve({ enabled: false, validityDays: null }, -1)).toBeNull()
+  })
+
+  it('caps validity at MAX_LOT_VALIDITY_DAYS so a huge value falls back instead of overflowing PG interval — review P2-1', () => {
+    expect(resolve({ enabled: true, validityDays: 36500 }, null)).toBe(36500)  // boundary in-range
+    expect(resolve({ enabled: true, validityDays: 36501 }, 30)).toBe(30)       // just over → fallback
+    expect(resolve({ enabled: true, validityDays: 999999999 }, null)).toBeNull()
+    expect(resolve({ enabled: true, validityDays: Infinity }, 30)).toBe(30)
+    expect(resolve({ enabled: true, validityDays: NaN }, 30)).toBe(30)
   })
 })
