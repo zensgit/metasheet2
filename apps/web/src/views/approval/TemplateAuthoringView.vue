@@ -1142,8 +1142,11 @@
         <div v-if="templateFormFields.length === 0" class="template-authoring__hint">
           请先在上方添加表单字段，再试运行。
         </div>
+        <!-- G-B2-21 发起人视角: only fields a requester would SEE for the current sample values are
+             rendered here (visibility resolved by the same getVisibleFormFields the submit page and
+             the backend prune use). Editing a sample value flips visibility live. -->
         <el-form v-else label-position="top" class="template-authoring__grid">
-          <template v-for="field in templateFormFields" :key="field.id">
+          <template v-for="field in requesterVisibleFields" :key="field.id">
             <el-form-item
               v-if="!sampleFieldUnsupportedReason(field)"
               :label="field.label || field.id"
@@ -1230,6 +1233,29 @@
             </div>
           </template>
         </el-form>
+
+        <!-- G-B2-21: fields the current sample values HIDE from a requester — shown (not silently
+             dropped) with WHY, so the author can verify their visibilityRule. Their sample values
+             stay in sampleFormData but the backend prunes hidden fields before routing, so they do
+             not participate in condition evaluation. -->
+        <el-collapse v-if="requesterHiddenFields.length > 0" class="template-authoring__tryrun-hidden">
+          <el-collapse-item
+            :title="`发起人视角下当前隐藏 ${requesterHiddenFields.length} 个字段（不参与走图）`"
+            name="hidden"
+            data-testid="approval-template-tryrun-hidden"
+          >
+            <ul class="template-authoring__tryrun-hidden-list">
+              <li
+                v-for="entry in requesterHiddenFields"
+                :key="entry.field.id"
+                data-testid="approval-template-tryrun-hidden-field"
+              >
+                <span class="template-authoring__tryrun-hidden-label">{{ entry.field.label || entry.field.id }}</span>
+                <span class="template-authoring__tryrun-hidden-reason">{{ entry.reason }}</span>
+              </li>
+            </ul>
+          </el-collapse-item>
+        </el-collapse>
 
         <div class="template-authoring__tryrun-actions">
           <el-tooltip v-if="tryRunDisabledReason" :content="tryRunDisabledReason" placement="top">
@@ -1348,6 +1374,7 @@ import {
 import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
 import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
+import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewFields'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import {
   buildApprovalGraph,
@@ -2234,6 +2261,13 @@ watch(isDraftDirty, (dirty) => {
 // skipped with an inline note rather than faked; every other field type gets a plain input.
 const templateFormFields = computed<FormField[]>(() => buildFormSchema(draft.value).fields)
 
+// G-B2-21: the requester-view split for the 试运行 sample values. Delegates visibility to the
+// shared getVisibleFormFields (see requesterPreviewFields) so the panel, the submit page, and the
+// backend prune never disagree. templateFormFields stays the FULL field list for the other callers.
+const requesterPreview = computed(() => computeRequesterPreviewFields(buildFormSchema(draft.value), sampleFormData.value))
+const requesterVisibleFields = computed<FormField[]>(() => requesterPreview.value.visible)
+const requesterHiddenFields = computed(() => requesterPreview.value.hidden)
+
 function sampleFieldUnsupportedReason(field: FormField): string | null {
   if (field.type === 'detail') return '试运行暂不支持明细子表单的样例值，已跳过（不影响其余字段的走图）'
   if (field.type === 'attachment') return '试运行暂不支持附件类型的样例值，已跳过'
@@ -2640,6 +2674,29 @@ pre {
   margin-top: 10px;
   font-size: 12px;
   color: var(--el-color-danger);
+}
+
+.template-authoring__tryrun-hidden {
+  margin-top: 10px;
+}
+
+.template-authoring__tryrun-hidden-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.template-authoring__tryrun-hidden-list li {
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+.template-authoring__tryrun-hidden-label {
+  color: var(--el-text-color-primary);
+  margin-right: 8px;
+}
+
+.template-authoring__tryrun-hidden-reason {
+  color: var(--el-text-color-secondary);
 }
 
 .template-authoring__tryrun-truncated {

@@ -742,6 +742,26 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saved.mock.calls[0][0].executionMode).toBe('workflow_job_v1')
   })
 
+  it('G-B2-24: the execution-mode toggle starts COLLAPSED in Advanced for a plain rule (off the first screen)', async () => {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+    // The toggle still exists (queryable), but its Advanced panel is not expanded by default.
+    expect(container.querySelector('[data-field="executionModeToggle"]')).toBeTruthy()
+    expect(container.querySelectorAll('.meta-rule-editor__advanced .el-collapse-item.is-active')).toHaveLength(0)
+  })
+
+  it('G-B2-24: Advanced AUTO-EXPANDS when the rule requires job mode, so the forced-on toggle is never hidden', async () => {
+    const rule = {
+      id: 'atr_sa_expand', sheetId: 'sheet_1', name: 'sa', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: { templateId: 'tmpl_9', formDataMapping: { amount: 'fld_2' } },
+      enabled: true, executionMode: 'workflow_job_v1',
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule })
+    await flushPromises()
+    expect(container.querySelectorAll('.meta-rule-editor__advanced .el-collapse-item.is-active')).toHaveLength(1)
+  })
+
   it('force-corrects a loaded LEGACY start_approval rule (executionMode: null) to workflow_job_v1 on save', async () => {
     const saved = vi.fn()
     const rule = {

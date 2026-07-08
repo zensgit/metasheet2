@@ -18,17 +18,31 @@
         <label class="meta-rule-editor__label">{{ automationLabel('editor.name', isZh) }}</label>
         <el-input v-model="draft.name" type="text" :placeholder="automationLabel('editor.namePlaceholder', isZh)" data-field="name" />
 
-        <!-- Execution mode (A6-1 opt-in): persist a per-action WorkflowJob plane -->
-        <el-checkbox
-          class="meta-rule-editor__label"
-          data-field="executionModeToggle"
-          :model-value="draft.executionMode === 'workflow_job_v1' || requiresJobMode"
-          :disabled="requiresJobMode"
-          @change="setExecutionMode($event === true)"
-        >
-          {{ automationLabel('editor.executionModeLabel', isZh) }}
-        </el-checkbox>
-        <div class="meta-rule-editor__hint" data-field="executionModeHint">{{ requiresJobMode ? automationLabel('editor.executionModeRequiredHint', isZh) : automationLabel('editor.executionModeHint', isZh) }}</div>
+        <!-- G-B2-24: the execution-mode toggle is an ENGINE-TERM concern (persist per-action
+             WorkflowJob records) that used to sit second on the form, dominating the first screen.
+             Collapsed into an "Advanced" section so the first screen reads trigger → condition →
+             action. It auto-expands when the rule REQUIRES job mode (e.g. start_approval) so the
+             forced-on state is never hidden. The toggle keeps its data-field/behavior unchanged. -->
+        <el-collapse v-model="advancedSectionOpen" class="meta-rule-editor__advanced">
+          <el-collapse-item name="advanced" data-field="advancedSection">
+            <!-- Header via slot (not the `title` prop) so no HTML title attribute is added — the
+                 a11y guard asserts the authored surface introduces no [title] noise. -->
+            <template #title>
+              <span class="meta-rule-editor__advanced-title">{{ automationLabel('editor.advancedSection', isZh) }}</span>
+            </template>
+            <!-- Execution mode (A6-1 opt-in): persist a per-action WorkflowJob plane -->
+            <el-checkbox
+              class="meta-rule-editor__label"
+              data-field="executionModeToggle"
+              :model-value="draft.executionMode === 'workflow_job_v1' || requiresJobMode"
+              :disabled="requiresJobMode"
+              @change="setExecutionMode($event === true)"
+            >
+              {{ automationLabel('editor.executionModeLabel', isZh) }}
+            </el-checkbox>
+            <div class="meta-rule-editor__hint" data-field="executionModeHint">{{ requiresJobMode ? automationLabel('editor.executionModeRequiredHint', isZh) : automationLabel('editor.executionModeHint', isZh) }}</div>
+          </el-collapse-item>
+        </el-collapse>
 
         <!-- 1. Trigger selector -->
         <section class="meta-rule-editor__section">
@@ -1286,7 +1300,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
-import { ElButton, ElCheckbox, ElCheckboxGroup, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
+import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { useLocale } from '../../composables/useLocale'
 import type { MultitableApiClient } from '../api/client'
 import type {
@@ -2186,6 +2200,16 @@ const JOB_MODE_REQUIRING_ACTION_TYPES: AutomationActionType[] = ['wait_for_callb
 const requiresJobMode = computed(() =>
   draft.value.actions.some((a) => JOB_MODE_REQUIRING_ACTION_TYPES.includes(a.type)),
 )
+// G-B2-24: the Advanced section is collapsed by default (keeps the engine-term execution-mode
+// toggle off the first screen) but force-opens when job mode is REQUIRED, so a forced-on toggle is
+// never hidden behind a collapsed panel. Modeled as a writable computed rather than a watched ref
+// so expansion is a pure reactive dependency of requiresJobMode (no load-order/tick races): until
+// the user manually toggles it, "open" == requiresJobMode; a manual toggle then takes over.
+const advancedManualOpen = ref<string[] | null>(null)
+const advancedSectionOpen = computed<string[]>({
+  get: () => advancedManualOpen.value ?? (requiresJobMode.value ? ['advanced'] : []),
+  set: (value) => { advancedManualOpen.value = value },
+})
 const hasDeleteRecordAction = computed(() => draft.value.actions.some((a) => a.type === 'delete_record'))
 
 // A6-3-2a: empty drafts for a fresh condition_branch action.
