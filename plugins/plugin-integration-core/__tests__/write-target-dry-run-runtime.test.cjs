@@ -484,6 +484,30 @@ function isPlainObjectLike(value) {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// L. No token-shaped export — W2-b (token issuance) and W3 (redemption) are separate later opt-ins;
+//    this module must not pre-emptively expose a mint/issue/consume/redeem surface (design-lock §5.3:
+//    "no W2 route or export accepts/consumes the token -- static assertion on module exports").
+// ---------------------------------------------------------------------------------------------------
+
+function testNoTokenShapedExport() {
+  const moduleExports = require(MODULE_PATH)
+  const forbiddenNamePattern = /mint|issue|token|consume|redeem/i
+  for (const exportName of Object.keys(moduleExports)) {
+    if (exportName === '__internals') continue
+    assert.ok(
+      !forbiddenNamePattern.test(exportName),
+      `export "${exportName}" looks token-shaped -- W2-b token issuance / W3 redemption must not exist in this module`,
+    )
+  }
+  for (const internalName of Object.keys(moduleExports.__internals)) {
+    assert.ok(
+      !forbiddenNamePattern.test(internalName),
+      `__internals export "${internalName}" looks token-shaped -- W2-b/W3 must not exist in this module`,
+    )
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------
 
 testHappyDryRun()
 testZeroWriteProof()
@@ -494,6 +518,7 @@ testKeyMissing()
 testValuesFreeSentinelScan()
 testExactCodeFamilyAndClamp()
 testWriteDispatchGuard()
+testNoTokenShapedExport()
 testStaticSourceScan()
 testInternals()
 
