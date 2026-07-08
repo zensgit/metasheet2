@@ -41,7 +41,7 @@ export function createRoutePreviewController<Req = CreateApprovalRequest>(
       gen++
       onState({ preview: null, error: '', loading: false })
     },
-    async run(req: CreateApprovalRequest) {
+    async run(req: Req) {
       const g = ++gen
       onState({ loading: true, error: '' })
       try {
