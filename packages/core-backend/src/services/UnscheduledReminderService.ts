@@ -1,6 +1,7 @@
 import { query as defaultQuery } from '../db/pg'
 import { Logger } from '../core/logger'
 import { resolveAttendanceDefaultDeliveryChannel } from './AttendanceNotificationDeliveryWorker'
+import { getZonedParts, isValidIanaTimeZone } from '../multitable/automation-timezone'
 
 /**
  * ⑤ Unscheduled-shift reminder job (design-lock attendance-unscheduled-reminder-design-lock-20260604).
@@ -11,6 +12,15 @@ import { resolveAttendanceDefaultDeliveryChannel } from './AttendanceNotificatio
  * outbox rows. The delivery worker is the only component that may turn those rows into external sends.
  *
  * Default OFF: only wired when ATTENDANCE_UNSCHEDULED_REMINDER_ENABLED=true (see AttendanceScheduler).
+ *
+ * R9: `run()`'s CLAIM step is org-timezone-aware. Each org's default `attendance_rules.timezone` (fallback
+ * UTC — preserving the pre-R9 behaviour byte-for-byte when a rule/timezone is absent or invalid) decides
+ * that org's LOCAL calendar "tomorrow", via the same `getZonedParts` UTC→local helper the multitable
+ * date-reminder/scheduler already use (`../multitable/automation-timezone`) — not a second hand-rolled
+ * zoned-date variant. `computeTargetDate()` itself stays UTC-only (unchanged signature/behaviour — the
+ * staging smoke script and existing unit tests call it directly); the new `computeTargetDateForTimeZone`
+ * is additive. See the design-lock's §7 "Org-timezone-aware target_date … deferred residual risk" — this
+ * closes that gap without touching the v1 "env-global enable/lookahead" scoping.
  */
 
 export type UnscheduledReminderQuery = <T = unknown>(
@@ -80,14 +90,18 @@ export function clampLookaheadDays(value: number | undefined): number {
  *  - the two NOT EXISTS == the predicate's coverage check (schedule-group membership OR shift assignment
  *    covering the date), same open-end sentinel.
  */
+// Factored out of SCAN_SQL so `resolveEligibleOrgIds()` (R9 org fan-out) shares the EXACT same
+// applicability guard rather than re-deriving an approximation — one shape, two consumers.
+const ELIGIBLE_MEMBERS_SQL = `
+  SELECT m.org_id, m.user_id
+  FROM attendance_group_members m
+  JOIN attendance_groups g ON g.id = m.group_id AND g.org_id = m.org_id
+  GROUP BY m.org_id, m.user_id
+  HAVING bool_and(g.attendance_type = 'scheduled_shift')
+`
+
 const SCAN_SQL = `
-  WITH eligible AS (
-    SELECT m.org_id, m.user_id
-    FROM attendance_group_members m
-    JOIN attendance_groups g ON g.id = m.group_id AND g.org_id = m.org_id
-    GROUP BY m.org_id, m.user_id
-    HAVING bool_and(g.attendance_type = 'scheduled_shift')
-  )
+  WITH eligible AS ( ${ELIGIBLE_MEMBERS_SQL} )
   SELECT e.org_id, e.user_id
   FROM eligible e
   WHERE NOT EXISTS (
@@ -119,12 +133,79 @@ export class UnscheduledReminderService {
     this.logger = options.logger ?? new Logger('UnscheduledReminderService')
   }
 
-  /** The upcoming date to remind about: today's UTC date + lookaheadDays (tz-aware target = deferred). */
+  /**
+   * The upcoming date to remind about: today's UTC date + lookaheadDays. Kept UTC-only and byte-identical
+   * to pre-R9 — the staging smoke script (`scripts/ops/staging-attendance-c5-delivery-smoke.ts`) and the
+   * unit tests call this directly as a plain, clock-only helper. `run()`'s per-org claim now uses
+   * `computeTargetDateForTimeZone` instead (see class docstring); this method is the UTC fallback + the
+   * value reported on `UnscheduledReminderResult.targetDate` (a nominal reference date, not necessarily
+   * what every org's claim actually used once orgs have distinct timezones).
+   */
   computeTargetDate(): string {
     const base = this.now()
     const utc = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate()))
     utc.setUTCDate(utc.getUTCDate() + this.lookaheadDays)
     return utc.toISOString().slice(0, 10)
+  }
+
+  /**
+   * R9: the upcoming date to remind about, in `timeZone`'s LOCAL calendar — today's local date (via
+   * `getZonedParts`, the same UTC→local helper `automation-date-reminder`/`automation-scheduler` use) +
+   * lookaheadDays. For `timeZone==='UTC'` this is identical to `computeTargetDate()` (Intl's UTC formatting
+   * matches `getUTCFullYear/Month/Date` exactly), so callers that fall back to 'UTC' see no behaviour change.
+   * Throws only if `getZonedParts` throws (invalid tz); callers must pass an already-validated zone
+   * (`resolveOrgTimeZone` only ever returns 'UTC' or a validated IANA zone) — defended again here anyway.
+   */
+  computeTargetDateForTimeZone(timeZone: string): string {
+    try {
+      const p = getZonedParts(this.now().getTime(), timeZone)
+      const shifted = new Date(Date.UTC(p.year, p.month - 1, p.day + this.lookaheadDays))
+      return shifted.toISOString().slice(0, 10)
+    } catch {
+      this.logger.warn(
+        'UnscheduledReminderService: computeTargetDateForTimeZone failed — falling back to UTC target date',
+      )
+      return this.computeTargetDate()
+    }
+  }
+
+  /**
+   * R9: distinct org_ids that MAY have unscheduled-reminder candidates (the applicability guard, without
+   * the date-dependent coverage filters) — the org fan-out for the per-org, timezone-aware claim in `run()`.
+   * Deliberately derived from `attendance_group_members`/`attendance_groups`, NOT from `attendance_rules`:
+   * an org can have real scheduled_shift members with no `attendance_rules` row at all (the pre-existing
+   * integration test fixture is exactly this case), and such an org must still be claimed (UTC fallback) —
+   * sourcing the org list from `attendance_rules` would silently starve it. False positives (an org with a
+   * scheduled_shift-only member but full coverage on every date) just cost one harmless no-op iteration.
+   */
+  async resolveEligibleOrgIds(): Promise<string[]> {
+    const { rows } = await this.query<{ org_id: string }>(
+      `SELECT DISTINCT org_id FROM ( ${ELIGIBLE_MEMBERS_SQL} ) eligible ORDER BY org_id`,
+    )
+    return rows.map((row) => row.org_id)
+  }
+
+  /**
+   * R9: `orgId`'s target-date timezone — its default `attendance_rules` row's `timezone`, iff that value
+   * is a recognized IANA zone. Absent rule / absent timezone / unrecognized value ⇒ `'UTC'` (the pre-R9
+   * behaviour, never guessed past) — a warning is logged only for the "present but invalid" case (a real
+   * misconfiguration), not for the common "no rule on file yet" case. Values-free: only `orgId` is logged,
+   * never the raw (user-configured, arbitrary-text) timezone string.
+   */
+  async resolveOrgTimeZone(orgId: string): Promise<string> {
+    const { rows } = await this.query<{ timezone: string | null }>(
+      `SELECT timezone FROM attendance_rules WHERE org_id = $1 AND is_default = true ORDER BY created_at DESC LIMIT 1`,
+      [orgId],
+    )
+    const raw = rows[0]?.timezone
+    const tz = typeof raw === 'string' ? raw.trim() : ''
+    if (!tz) return 'UTC'
+    if (isValidIanaTimeZone(tz)) return tz
+    this.logger.warn(
+      'UnscheduledReminderService: org attendance_rules.timezone is not a recognized IANA zone — falling back to UTC for target-date computation',
+      { orgId },
+    )
+    return 'UTC'
   }
 
   /** Pure read: the unscheduled candidates for `targetDate`. No side effects (used by the parity test). */
@@ -133,14 +214,21 @@ export class UnscheduledReminderService {
     return rows.map((row) => ({ orgId: row.org_id, userId: row.user_id }))
   }
 
-  async claimDispatches(targetDate: string): Promise<DispatchRow[]> {
+  /**
+   * Claim dispatches for `targetDate`. `orgId` omitted ⇒ the ORIGINAL global (all-orgs, single shared date)
+   * behaviour — byte-identical SQL/params to pre-R9 (the staging smoke script calls it exactly this way).
+   * `orgId` present ⇒ scoped to that org only (R9's per-org, timezone-aware `run()` loop uses this form).
+   */
+  async claimDispatches(targetDate: string, orgId?: string): Promise<DispatchRow[]> {
+    const scanSql = orgId ? `${SCAN_SQL} AND e.org_id = $2` : SCAN_SQL
+    const params: unknown[] = orgId ? [targetDate, orgId] : [targetDate]
     const { rows } = await this.query<DispatchRow>(
       `INSERT INTO attendance_unscheduled_reminder_dispatch (org_id, user_id, target_date, reminder_type)
        SELECT c.org_id, c.user_id, $1::date, '${REMINDER_TYPE}'
-       FROM ( ${SCAN_SQL} ) c
+       FROM ( ${scanSql} ) c
        ON CONFLICT (org_id, user_id, target_date, reminder_type) DO NOTHING
        RETURNING id::text AS id, org_id, user_id, target_date::text AS target_date, reminder_type`,
-      [targetDate],
+      params,
     )
     return rows
   }
@@ -241,22 +329,50 @@ export class UnscheduledReminderService {
   }
 
   /**
-   * Scan → claim (at-most-once) → produce C5 outbox rows. A re-entrancy guard (mirrors the expiry
-   * tick's `running` flag) keeps a slow scan from overlapping itself; the UNIQUE-constraint claim and
-   * delivery source_key already make overlap merely wasteful, not wrong.
+   * Scan (org fan-out) → claim per org, in THAT org's local target date (at-most-once) → produce C5
+   * outbox rows. A re-entrancy guard (mirrors the expiry tick's `running` flag) keeps a slow scan from
+   * overlapping itself; the UNIQUE-constraint claim and delivery source_key already make overlap merely
+   * wasteful, not wrong.
+   *
+   * R9: the claim step now fans out per org (`resolveEligibleOrgIds`) so each org's target date is computed
+   * in ITS OWN timezone (`resolveOrgTimeZone` + `computeTargetDateForTimeZone`) rather than one UTC date
+   * applied to every org. Each org's resolve+claim is isolated in its own try/catch — mirrors the
+   * scheduler's existing "each job in its own try/catch" isolation (§3 of the design-lock) — so one org's
+   * DB hiccup never blocks the rest of the tick. `findDispatchesMissingDeliveries`/
+   * `produceDeliveriesForDispatches` stay global, single-call, unchanged — reconciliation was already
+   * org-agnostic and doesn't need a target date.
+   *
+   * `targetDate` on the returned result stays the plain UTC reference (`computeTargetDate()`) — with
+   * multiple orgs now potentially claiming against DIFFERENT local dates in the same tick, no single
+   * string can faithfully represent "the" date; this field is for logging/back-compat only (unchanged
+   * value from pre-R9 for any deployment that never sets a non-UTC `attendance_rules.timezone`).
    */
   async run(): Promise<UnscheduledReminderResult> {
     const targetDate = this.computeTargetDate()
     if (this.running) return { targetDate, claimed: 0, deliveries: 0 }
     this.running = true
     try {
-      const claimed = await this.claimDispatches(targetDate)
+      const orgIds = await this.resolveEligibleOrgIds()
+      let claimedTotal = 0
+      for (const orgId of orgIds) {
+        try {
+          const timeZone = await this.resolveOrgTimeZone(orgId)
+          const orgTargetDate = this.computeTargetDateForTimeZone(timeZone)
+          const claimed = await this.claimDispatches(orgTargetDate, orgId)
+          claimedTotal += claimed.length
+        } catch (error) {
+          this.logger.warn(
+            'UnscheduledReminderService: per-org claim failed — skipping this org for this tick',
+            error instanceof Error ? error : undefined,
+          )
+        }
+      }
       const pendingDispatches = await this.findDispatchesMissingDeliveries()
       const deliveries = await this.produceDeliveriesForDispatches(pendingDispatches)
       this.logger.info(
-        `Unscheduled-shift reminders claimed=${claimed.length} deliveries=${deliveries} target=${targetDate}`,
+        `Unscheduled-shift reminders claimed=${claimedTotal} deliveries=${deliveries} orgs=${orgIds.length} target=${targetDate}`,
       )
-      return { targetDate, claimed: claimed.length, deliveries }
+      return { targetDate, claimed: claimedTotal, deliveries }
     } finally {
       this.running = false
     }

@@ -229,6 +229,83 @@ describeDb('⑤ unscheduled-shift reminder (real DB)', () => {
       await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [[...allUsers, ownerActive, subOwnerInactive]]).catch(() => undefined)
     }
   })
+
+  it('R9: claims using the org attendance_rules timezone (not UTC); an invalid stored timezone falls back to UTC', async () => {
+    const suffix = `urtz${Date.now().toString(36)}`
+    const orgTz = `org-tz-${suffix}`
+    const orgBadTz = `org-badtz-${suffix}`
+    const uTz = `u-tz-${suffix}`
+    const uBadTz = `u-badtz-${suffix}`
+    const gTz = randomUUID()
+    const gBadTz = randomUUID()
+    const ruleTz = randomUUID()
+    const ruleBadTz = randomUUID()
+    // 2026-07-01T18:00:00Z is already 2026-07-02T02:00 in Shanghai (+8) — the LOCAL calendar day has rolled
+    // over while UTC's has not. lookahead=1 ⇒ naive UTC calc = 2026-07-02; Shanghai-local calc = 2026-07-03.
+    const atCutover = () => new Date('2026-07-01T18:00:00.000Z')
+
+    try {
+      const seedUser = (uid: string) =>
+        pool.query(
+          `INSERT INTO users (id, email, password_hash, name, role, is_active)
+           VALUES ($1,$2,'hash',$3,'user',true) ON CONFLICT (id) DO NOTHING`,
+          [uid, `${uid}@example.test`, uid],
+        )
+      await seedUser(uTz)
+      await seedUser(uBadTz)
+      await pool.query(
+        `INSERT INTO attendance_groups (id, org_id, name, attendance_type) VALUES ($1,$2,'sched-tz','scheduled_shift')`,
+        [gTz, orgTz],
+      )
+      await pool.query(
+        `INSERT INTO attendance_groups (id, org_id, name, attendance_type) VALUES ($1,$2,'sched-badtz','scheduled_shift')`,
+        [gBadTz, orgBadTz],
+      )
+      await pool.query(
+        `INSERT INTO attendance_group_members (id, org_id, group_id, user_id) VALUES ($1,$2,$3,$4)`,
+        [randomUUID(), orgTz, gTz, uTz],
+      )
+      await pool.query(
+        `INSERT INTO attendance_group_members (id, org_id, group_id, user_id) VALUES ($1,$2,$3,$4)`,
+        [randomUUID(), orgBadTz, gBadTz, uBadTz],
+      )
+      // orgTz's default rule sets a real, valid IANA zone; orgBadTz's stores unusable free text (no CHECK
+      // constraint on attendance_rules.timezone rejects it at write-time — resolveOrgTimeZone must catch it).
+      await pool.query(
+        `INSERT INTO attendance_rules (id, org_id, name, timezone, is_default) VALUES ($1,$2,'r9-tz-rule','Asia/Shanghai',true)`,
+        [ruleTz, orgTz],
+      )
+      await pool.query(
+        `INSERT INTO attendance_rules (id, org_id, name, timezone, is_default) VALUES ($1,$2,'r9-badtz-rule','Not/AZone',true)`,
+        [ruleBadTz, orgBadTz],
+      )
+
+      const svc = new UnscheduledReminderService({ query: serviceQuery, now: atCutover, lookaheadDays: 1 })
+      const result = await svc.run()
+      expect(result.claimed).toBeGreaterThanOrEqual(2) // scan is global; tolerate other orgs also claiming
+
+      const dispatchTargetDates = async (orgId: string, uid: string) =>
+        (await pool.query(
+          `SELECT target_date::text AS target_date FROM attendance_unscheduled_reminder_dispatch WHERE org_id=$1 AND user_id=$2`,
+          [orgId, uid],
+        )).rows
+
+      const tzRows = await dispatchTargetDates(orgTz, uTz)
+      expect(tzRows).toHaveLength(1)
+      expect(tzRows[0].target_date).toBe('2026-07-03') // Shanghai-local date — the R9 fix
+
+      const badTzRows = await dispatchTargetDates(orgBadTz, uBadTz)
+      expect(badTzRows).toHaveLength(1)
+      expect(badTzRows[0].target_date).toBe('2026-07-02') // invalid stored value ⇒ UTC fallback, unchanged
+    } finally {
+      await pool.query('DELETE FROM attendance_notification_deliveries WHERE org_id = ANY($1::text[])', [[orgTz, orgBadTz]]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_unscheduled_reminder_dispatch WHERE org_id = ANY($1::text[])', [[orgTz, orgBadTz]]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_group_members WHERE org_id = ANY($1::text[])', [[orgTz, orgBadTz]]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_groups WHERE org_id = ANY($1::text[])', [[orgTz, orgBadTz]]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_rules WHERE org_id = ANY($1::text[])', [[orgTz, orgBadTz]]).catch(() => undefined)
+      await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [[uTz, uBadTz]]).catch(() => undefined)
+    }
+  })
 })
 
 function parsePayload(value: unknown): Record<string, unknown> {
