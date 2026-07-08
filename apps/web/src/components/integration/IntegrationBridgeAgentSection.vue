@@ -511,6 +511,67 @@
               </div>
             </template>
           </div>
+
+          <div class="bridge-agent__reprobe-confirm">
+            <button
+              type="button"
+              class="integration-workbench__button"
+              data-testid="bridge-agent-reprobe-toggle"
+              @click="toggleConfirm"
+            >
+              <el-icon><Refresh /></el-icon>
+              {{ confirmVisible ? bi('收起生效确认', 'Hide apply confirmation') : bi('复探测确认是否生效', 'Re-probe to confirm applied') }}
+            </button>
+
+            <template v-if="confirmVisible">
+              <p class="integration-workbench__hint">{{ bi(
+                '运维按上方清单在受控后端/脚本手工应用后，点此用只读探测复查预期的只读对象/字段是否已出现；本操作只重新读取（复用上方“刷新对象”探测），不写入任何配置、不启停 Agent、不改凭据——Agent 始终只读。请先在上方“刷新对象”并展开相关对象 schema，再看下方逐项结果。',
+                'After operations manually apply the checklist above via the controlled backend/script, click here to re-check whether the expected readonly objects/fields now appear, using a read-only probe only; this merely re-reads (reusing the “Refresh objects” probe above) — it writes no config, does not start/stop the Agent, and never touches credentials; the Agent stays read-only. Refresh objects above (and expand the relevant object schema) first, then read the per-item results below.',
+              ) }}</p>
+
+              <div
+                v-if="reProbeConfirmation.total === 0"
+                class="integration-workbench__empty"
+                data-testid="bridge-agent-reprobe-empty"
+              >
+                <strong>{{ bi(
+                  '暂无待确认项：先在上方填写至少一个对象名，生成实施清单后再复探测确认。',
+                  'Nothing to confirm yet: enter at least one object name above to build a checklist, then re-probe.',
+                ) }}</strong>
+              </div>
+              <div v-else class="bridge-agent__suggestion-output" data-testid="bridge-agent-reprobe-output">
+                <p
+                  class="bridge-agent__reprobe-overall"
+                  data-testid="bridge-agent-reprobe-status"
+                  :data-status="reProbeConfirmation.status"
+                >{{ reProbeStatusLabel(reProbeConfirmation.status) }}
+                  <span class="integration-workbench__hint">({{ reProbeConfirmation.present }}/{{ reProbeConfirmation.total }})</span>
+                </p>
+                <ul class="bridge-agent__reprobe-list">
+                  <li
+                    v-for="row in reProbeConfirmation.rows"
+                    :key="row.objectName"
+                    data-testid="bridge-agent-reprobe-object"
+                    :data-object-present="row.objectPresent ? 'yes' : 'no'"
+                  >
+                    <span class="bridge-agent__reprobe-name">{{ row.objectName }}</span>
+                    <span class="bridge-agent__reprobe-flag">{{ reProbePresenceLabel(row.objectPresent) }}</span>
+                    <ul v-if="row.fields.length > 0" class="bridge-agent__reprobe-fields">
+                      <li
+                        v-for="field in row.fields"
+                        :key="field.key"
+                        data-testid="bridge-agent-reprobe-field"
+                        :data-field-present="field.present ? 'yes' : 'no'"
+                      >
+                        <span class="bridge-agent__reprobe-name">{{ field.key }}</span>
+                        <span class="bridge-agent__reprobe-flag">{{ reProbePresenceLabel(field.present) }}</span>
+                      </li>
+                    </ul>
+                  </li>
+                </ul>
+              </div>
+            </template>
+          </div>
         </div>
       </template>
     </el-card>
@@ -1160,6 +1221,73 @@ function downloadChecklistJson(): void {
   if (typeof URL.revokeObjectURL === 'function') {
     window.setTimeout(() => URL.revokeObjectURL(url), 0)
   }
+}
+
+// --- BA-APPLY-3 (docs/development/bridge-agent-controlled-apply-design-lock-20260708.md §7 terminal
+// state, refs #3746): "复探测确认" — the FINAL rung. After an OPERATOR has MANUALLY applied the
+// exported checklist (form-A handoff, outside this platform — a human runbook step, NOT this page),
+// this card lets the admin confirm it took effect by RE-READING the connector via the SAME read-only
+// object/schema probe the page already uses (loadObjects / toggleSchema). It performs NO apply, NO
+// config write, NO start/stop, NO credential handling, NO raw-config edit, and adds NO new fetch or
+// backend route — the Agent stays readonly:true. It reads `implementationChecklist.checklist.operations`
+// (the SAME safe-identifier-filtered operations the export emits — single source, no re-filtering) and
+// intersects each EXPECTED name with the CURRENTLY-LOADED read-only `objects` / `schemaByObject`.
+// Confirmation is DERIVED from that probed state (expected-name ∈ probed names), never hardcoded.
+// Values-free by construction: object/field-key NAMES + present/absent booleans + a coarse status only.
+interface ReProbeFieldConfirmation {
+  key: string
+  present: boolean
+}
+interface ReProbeObjectConfirmation {
+  objectName: string
+  objectPresent: boolean
+  fields: ReProbeFieldConfirmation[]
+}
+type ReProbeStatus = 'applied' | 'partial' | 'absent' | 'empty'
+const reProbeConfirmation = computed(() => {
+  const operations = implementationChecklist.value.checklist.operations
+  const probedObjectNames = new Set(objects.value.map((object) => object.name))
+  const rows: ReProbeObjectConfirmation[] = operations.map((operation) => {
+    const objectPresent = probedObjectNames.has(operation.objectName)
+    const probedFieldNames = new Set((schemaByObject.value[operation.objectName] ?? []).map((field) => field.name))
+    const fields: ReProbeFieldConfirmation[] = operation.fieldKeys.map((key) => ({
+      key,
+      // a field is confirmed only if its parent object is present AND that object's schema (re-)probe
+      // has actually surfaced the key — both facts come from the read-only probe, never assumed
+      present: objectPresent && probedFieldNames.has(key),
+    }))
+    return { objectName: operation.objectName, objectPresent, fields }
+  })
+  const checks: boolean[] = []
+  for (const row of rows) {
+    checks.push(row.objectPresent)
+    for (const field of row.fields) checks.push(field.present)
+  }
+  const total = checks.length
+  const present = checks.filter(Boolean).length
+  const status: ReProbeStatus =
+    total === 0 ? 'empty' : present === total ? 'applied' : present === 0 ? 'absent' : 'partial'
+  return { rows, total, present, status }
+})
+
+const confirmVisible = ref(false)
+function toggleConfirm(): void {
+  confirmVisible.value = !confirmVisible.value
+}
+function reProbeStatusLabel(status: ReProbeStatus): string {
+  switch (status) {
+    case 'applied':
+      return bi('已生效', 'Applied')
+    case 'partial':
+      return bi('部分生效', 'Partially applied')
+    case 'absent':
+      return bi('未生效', 'Not applied')
+    default:
+      return bi('无待确认项', 'Nothing to confirm')
+  }
+}
+function reProbePresenceLabel(present: boolean): string {
+  return present ? bi('已出现', 'Present') : bi('未出现', 'Absent')
 }
 
 watch(suggestionDrafts, () => {
