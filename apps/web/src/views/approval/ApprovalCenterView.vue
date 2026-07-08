@@ -652,7 +652,6 @@ async function dispatchBatchAndHandleResult(
   }
   clearPendingSelection()
   loadCurrentTab()
-  void refreshPendingBadgeCount({ resnapshot: true })
 }
 
 async function runBatch(action: 'approve' | 'reject', comment: string): Promise<void> {
@@ -728,7 +727,6 @@ async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
     await dispatchAction(row.id, { action: 'approve' })
     ElMessage.success('审批已通过')
     loadCurrentTab()
-    void refreshPendingBadgeCount({ resnapshot: true })
   } catch (error) {
     ElMessage.error(error instanceof Error && error.message ? error.message : '操作失败，请重试')
   } finally {
@@ -767,7 +765,6 @@ async function submitRowReject(): Promise<void> {
     ElMessage.success('审批已驳回')
     rowRejectDialogVisible.value = false
     loadCurrentTab()
-    void refreshPendingBadgeCount({ resnapshot: true })
   } catch (error) {
     // Mirrors B1-04's dialog-scoped inline error: keep the dialog open with the server's own
     // reason instead of a toast, so the typed comment is never lost on a retry-in-place.
@@ -866,7 +863,6 @@ const newTodoPill = computed(() => newTodoPillState({
 function handleNewTodoPillClick(): void {
   clearPendingSelection()
   loadCurrentTab()
-  void refreshPendingBadgeCount({ resnapshot: true })
 }
 
 // Wave 2 WP3 slice 2 — bulk 全部标记已读. Honours the current sourceSystem tab
@@ -925,17 +921,18 @@ function loadCurrentTab() {
     case 'cc': store.loadCc(query); break
     case 'completed': store.loadCompleted(query); break
   }
+  // G-B2-11: EVERY list reload re-baselines the pill, from the ONE place every reload passes
+  // through. Hanging this off individual call sites is precisely what let handleSearch() and
+  // handlePageChange() skip it — leaving a pill still urging "N 条新待办 · 点击刷新" for todos the
+  // reload had already fetched. A choke point cannot be forgotten by the next call site.
+  void refreshPendingBadgeCount({ resnapshot: true })
 }
 
 function handleTabChange() {
   currentPage.value = 1
   clearPendingSelection()
+  // loadCurrentTab() refreshes the badge and re-baselines the G-B2-11 pill (see its choke point).
   loadCurrentTab()
-  // Refresh badge whenever the user re-enters the 待办 tab so recent actions
-  // reflect immediately. `resnapshot: true` also resets the G-B2-11 pill's baseline — switching
-  // INTO (or within) the tab counts as an explicit reload, so any pill from before this switch
-  // must clear rather than linger against a now-stale comparison.
-  void refreshPendingBadgeCount({ resnapshot: true })
 }
 
 function handleSearch() {
@@ -947,10 +944,9 @@ function handleSearch() {
 function handleSourceSystemChange() {
   currentPage.value = 1
   clearPendingSelection()
+  // The source-system switch changes what `count` even means (a different scope); the reload's
+  // own re-baseline inside loadCurrentTab() handles it.
   loadCurrentTab()
-  // resnapshot: true — the source-system switch changes what `count` even means (a different
-  // scope), so the G-B2-11 pill's baseline must reset here too.
-  void refreshPendingBadgeCount({ resnapshot: true })
 }
 
 function handlePageChange(page: number) {
@@ -1001,10 +997,8 @@ function openAttendanceApprovalQueue() {
 }
 
 onMounted(() => {
+  // The first load establishes the pill's initial baseline (no delta possible against itself).
   loadCurrentTab()
-  // resnapshot: true — this is the very first load, so it establishes the G-B2-11 pill's initial
-  // baseline (no delta possible against itself).
-  void refreshPendingBadgeCount({ resnapshot: true })
 })
 </script>
 

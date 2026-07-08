@@ -5,6 +5,8 @@
  * function that the view's computed wraps. See src/approvals/newTodoPill.ts for the design
  * rationale (why comparing count-vs-loaded-rows is wrong, why no auto-refresh).
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { newTodoPillState } from '../src/approvals/newTodoPill'
 
@@ -76,5 +78,30 @@ describe('approvals/newTodoPill', () => {
       pendingCountAtLoad: 0,
       currentPendingCount: 1,
     })).toEqual({ visible: true, delta: 1 })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Static tripwire: the pill's re-baseline must live at the ONE place every list
+// reload passes through (`loadCurrentTab`), never at individual call sites.
+//
+// It originally sat at six call sites — and `handleSearch()` / `handlePageChange()`
+// were both missed, leaving a pill still urging "N 条新待办 · 点击刷新" for todos the
+// reload had already fetched. A choke point cannot be forgotten by the next caller.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('G-B2-11 re-baseline choke point (static tripwire)', () => {
+  const source = readFileSync(join(__dirname, '..', 'src/views/approval/ApprovalCenterView.vue'), 'utf8')
+
+  it('resnapshot is requested exactly once in the whole view', () => {
+    const occurrences = source.split('refreshPendingBadgeCount({ resnapshot: true })').length - 1
+    expect(occurrences).toBe(1)
+  })
+
+  it('that single occurrence sits inside loadCurrentTab()', () => {
+    const start = source.indexOf('function loadCurrentTab()')
+    expect(start).toBeGreaterThan(-1)
+    // end of the function = the first line that closes it at column 0 indent
+    const body = source.slice(start, source.indexOf('\n}', start) + 2)
+    expect(body).toContain('refreshPendingBadgeCount({ resnapshot: true })')
   })
 })
