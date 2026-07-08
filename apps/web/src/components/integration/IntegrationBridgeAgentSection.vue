@@ -275,6 +275,143 @@
             </tbody>
           </table>
         </div>
+
+        <!-- BA-UI-3 (docs/development/bridge-agent-admin-page-design-lock-20260707.md §3 BA-UI-3):
+             values-free config-validation checklist, scoped to the instance selected above (reuses
+             `selectedSystemId` + the already-fetched `objects` — zero new network calls). -->
+        <div class="bridge-agent__config-check" data-testid="bridge-agent-config-check">
+          <h3>
+            <el-icon class="bridge-agent__card-icon"><List /></el-icon>
+            {{ bi('配置校验', 'Config validation') }}
+          </h3>
+          <p class="integration-workbench__hint">{{ bi(
+            '针对当前选中实例的公开配置形状与已加载的对象列表做只读校验；只显示通过/提示/未通过状态与固定说明文字，不回显任何具体配置值。',
+            "Read-only checklist against the selected instance's public config shape and the already-loaded object list; only a pass/attention/fail status and fixed copy are shown — no configuration value is ever echoed.",
+          ) }}</p>
+          <ul class="bridge-agent__checklist" data-testid="bridge-agent-config-check-list">
+            <li
+              v-for="item in configCheckItems"
+              :key="item.id"
+              class="bridge-agent__checklist-item"
+              :data-testid="`bridge-agent-config-check-item-${item.id}`"
+              :data-status="item.status"
+            >
+              <el-icon
+                class="bridge-agent__checklist-icon"
+                :class="`bridge-agent__checklist-icon--${item.status}`"
+              >
+                <CircleCheck v-if="item.status === 'pass'" />
+                <Warning v-else-if="item.status === 'warn'" />
+                <CircleClose v-else />
+              </el-icon>
+              <span class="bridge-agent__checklist-title">{{ configCheckTitleLabel(item.id) }}</span>
+              <span
+                class="bridge-agent__badge"
+                :class="`bridge-agent__badge--check-${item.status}`"
+              >{{ configCheckStatusLabel(item.status) }}</span>
+              <span
+                class="bridge-agent__checklist-text"
+                :data-testid="`bridge-agent-config-check-item-label-${item.id}`"
+              >{{ configCheckItemLabel(item) }}</span>
+            </li>
+          </ul>
+        </div>
+
+        <!-- BA-UI-3: change-suggestion / implementation checklist builder — operator-typed object/
+             field-KEY names (never values) -> a values-free, copyable suggestion text. Purely local:
+             no apply endpoint, no local-config write, no .ps1 invocation (lock §3). -->
+        <div class="bridge-agent__suggestion" data-testid="bridge-agent-suggestion-builder">
+          <h3>
+            <el-icon class="bridge-agent__card-icon"><DocumentCopy /></el-icon>
+            {{ bi('变更建议 / 实施清单', 'Change suggestion / implementation checklist') }}
+          </h3>
+          <p class="integration-workbench__hint">{{ bi(
+            '在此列出你希望新增暴露的对象与字段名（仅名称，不涉及任何取值）；生成的建议文本供人工确认后，由受控后端或运维脚本落地——本页不会据此做任何直接修改，也不会调用任何写入接口。',
+            'List the objects and field-key names you want to newly expose here (names only, never values); the generated suggestion text is for a human to hand to the controlled backend or ops script to apply — this page never makes any direct change or calls any write endpoint from it.',
+          ) }}</p>
+
+          <div
+            v-for="(row, index) in suggestionDrafts"
+            :key="index"
+            class="bridge-agent__suggestion-row"
+            :data-testid="`bridge-agent-suggestion-row-${index}`"
+          >
+            <label class="bridge-agent__suggestion-field">
+              <span>{{ bi('对象名', 'Object name') }}</span>
+              <input
+                v-model="row.objectName"
+                type="text"
+                :data-testid="`bridge-agent-suggestion-object-${index}`"
+                :placeholder="bi('例如 material_extra', 'e.g. material_extra')"
+              >
+            </label>
+            <label class="bridge-agent__suggestion-field">
+              <span>{{ bi('字段名（逗号分隔）', 'Field names (comma-separated)') }}</span>
+              <input
+                v-model="row.fieldKeysText"
+                type="text"
+                :data-testid="`bridge-agent-suggestion-fields-${index}`"
+                :placeholder="bi('例如 field_a, field_b', 'e.g. field_a, field_b')"
+              >
+            </label>
+            <button
+              type="button"
+              class="integration-workbench__link-button"
+              :data-testid="`bridge-agent-suggestion-remove-${index}`"
+              :disabled="suggestionDrafts.length <= 1"
+              @click="removeSuggestionDraftRow(index)"
+            >{{ bi('删除', 'Remove') }}</button>
+          </div>
+          <button
+            type="button"
+            class="integration-workbench__button"
+            data-testid="bridge-agent-suggestion-add-row"
+            @click="addSuggestionDraftRow"
+          >{{ bi('添加一行', 'Add row') }}</button>
+
+          <div
+            v-if="suggestionResult.entries.length === 0"
+            class="integration-workbench__empty"
+            data-testid="bridge-agent-suggestion-empty"
+          >
+            <strong data-testid="bridge-agent-suggestion-empty-what">{{ bi(
+              '这里会把上面填写的对象/字段名整理成一份可复制的变更建议文本。',
+              'This turns the object/field names you enter above into a copyable change-suggestion text.',
+            ) }}</strong>
+            <p data-testid="bridge-agent-suggestion-empty-first-step">{{ bi(
+              '第一步：在上方填写至少一个对象名（可选填字段名），建议文本会自动生成。',
+              'First step: enter at least one object name above (field names are optional); the suggestion text is generated automatically.',
+            ) }}</p>
+          </div>
+          <div v-else class="bridge-agent__suggestion-output">
+            <h4>{{ bi('生成的建议文本（可复制）', 'Generated suggestion text (copyable)') }}</h4>
+            <textarea
+              class="bridge-agent__suggestion-text"
+              data-testid="bridge-agent-suggestion-text"
+              readonly
+              :value="suggestionResult.text"
+            />
+            <button
+              type="button"
+              class="integration-workbench__button"
+              data-testid="bridge-agent-suggestion-copy"
+              @click="copySuggestionText"
+            >
+              <el-icon><DocumentCopy /></el-icon>
+              {{ bi('复制建议文本', 'Copy suggestion text') }}
+            </button>
+            <span
+              v-if="copyState === 'copied'"
+              data-testid="bridge-agent-suggestion-copy-state"
+              class="integration-workbench__hint"
+            >{{ bi('已复制', 'Copied') }}</span>
+            <span
+              v-else-if="copyState === 'failed'"
+              data-testid="bridge-agent-suggestion-copy-state"
+              class="bridge-agent__error"
+            >{{ bi('复制失败，请手动选择文本复制。', 'Copy failed; select the text manually to copy.') }}</span>
+          </div>
+        </div>
       </template>
     </el-card>
   </section>
@@ -291,8 +428,13 @@
 // `POST /query/:object` (the data-plane read) is never called here either (design-lock §4).
 //
 // Security bounds (lock §2.1, binding):
-//   - No credential/host/connection-string/config is ever rendered — only the coarse
-//     `system.hasCredentials` boolean ("已配置/未配置"), never `system.config`/`system.credentials`.
+//   - No credential/host/connection-string is ever rendered — only the coarse `system.hasCredentials`
+//     boolean ("已配置/未配置"), never `system.credentials`. BA-UI-3 (below) is a lock-authorized,
+//     narrower exception for `system.config`: its pure checklist (bridgeAgentConfigCheck.ts) reads a
+//     handful of `system.config` KEY NAMES for PRESENCE/SHAPE only (is baseUrl set? is its hostname
+//     loopback-shaped? is authMode declared? …) — no config VALUE is ever placed into the DOM, only a
+//     fixed pass/warn/fail status + a non-interpolated `labelKey` string. `system.config` itself is
+//     still never read directly by THIS file — only handed, opaque, to the pure util below.
 //   - No raw error text is ever rendered. Every failure surface routes through the IU-1
 //     `integrationErrorCodeDisplayLabel` helper (label-only). Unlike the closed, backend-owned code
 //     families IU-1 already labels, a Bridge Agent HTTP error body can carry an operator-supplied
@@ -301,9 +443,23 @@
 //     unregistered/dynamic code safely degrades to the generic "unknown error" label). Object/schema
 //     load failures carry no code at all (the shared `parseIntegrationResponse` helper does not
 //     preserve one), so those use a fixed, values-free bilingual string.
+//   - BA-UI-3's change-suggestion builder (buildBridgeAgentChangeSuggestion) never calls any apply
+//     endpoint, never edits local config, never touches the .ps1 script — it is a pure, local text
+//     generator from OPERATOR-TYPED object/field-KEY names (never values), gated by an identifier-safe
+//     pattern so a secret/host/connection-string-shaped string typed into a name field is dropped
+//     (counted, never echoed) rather than rendered (lock §3: applied only by a controlled backend or
+//     ops script, never this page).
 import { computed, reactive, ref, watch } from 'vue'
-import { Connection, Lock, Refresh } from '@element-plus/icons-vue'
+import { CircleCheck, CircleClose, Connection, DocumentCopy, List, Lock, Refresh, Warning } from '@element-plus/icons-vue'
 import { useLocale } from '../../composables/useLocale'
+import {
+  bridgeAgentConfigCheckLabel,
+  buildBridgeAgentChangeSuggestion,
+  computeBridgeAgentConfigCheck,
+  type BridgeAgentConfigCheckItem,
+  type BridgeAgentConfigCheckStatus,
+  type BridgeAgentSuggestionObjectDraft,
+} from '../../services/integration/bridgeAgentConfigCheck'
 import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../../services/integration/errorCodeLabels'
 import { integrationFieldHint, type IntegrationFieldHintKey } from '../../services/integration/fieldHints'
 import {
@@ -719,6 +875,96 @@ watch(
   },
   { immediate: true },
 )
+
+// --- BA-UI-3 (docs/development/bridge-agent-admin-page-design-lock-20260707.md §3 BA-UI-3): config
+// validation + change-suggestion checklist. Both cards are purely DERIVED/LOCAL — zero new network
+// calls: the checklist is computed off state this section already holds (the selected instance's
+// `system.config` + the already-fetched `objects` name list), and the suggestion builder is a local
+// text generator over operator-typed drafts. Neither ever calls an apply endpoint, edits local config,
+// or touches the .ps1 script (lock §3: applied only by a controlled backend or ops script).
+
+const selectedBridgeSystem = computed(() => bridgeSystems.value.find((system) => system.id === selectedSystemId.value) || null)
+
+// Values-free by construction: computeBridgeAgentConfigCheck() never returns a config value, only a
+// fixed status + labelKey per item (see bridgeAgentConfigCheck.ts's module header).
+const configCheckItems = computed<BridgeAgentConfigCheckItem[]>(() => {
+  const system = selectedBridgeSystem.value
+  if (!system) return []
+  return computeBridgeAgentConfigCheck({
+    config: system.config,
+    objectNames: objects.value.map((object) => object.name),
+  })
+})
+
+function configCheckItemLabel(item: BridgeAgentConfigCheckItem): string {
+  return bridgeAgentConfigCheckLabel(item.labelKey, locale.value)
+}
+
+function configCheckStatusLabel(status: BridgeAgentConfigCheckStatus): string {
+  if (status === 'pass') return bi('通过', 'Pass')
+  if (status === 'warn') return bi('提示', 'Attention')
+  return bi('未通过', 'Fail')
+}
+
+function configCheckTitleLabel(id: BridgeAgentConfigCheckItem['id']): string {
+  if (id === 'requiredFields') return bi('必填字段', 'Required fields')
+  if (id === 'limits') return bi('Limits', 'Limits')
+  if (id === 'authMode') return bi('Auth mode', 'Auth mode')
+  if (id === 'localhostBoundary') return bi('本机边界', 'Localhost boundary')
+  if (id === 'rawSqlForbidden') return bi('禁止 raw SQL', 'Raw SQL forbidden')
+  return bi('对象 allowlist 完整性', 'Object allowlist completeness')
+}
+
+// --- Change-suggestion builder: operator-typed object/field-KEY names (never values) -> a values-free
+// copyable suggestion text. Row state stays as raw strings (comma-separated field keys) so the input
+// controls are simple text fields; parsing/validation happens in the pure util on every recompute.
+interface SuggestionDraftRow {
+  objectName: string
+  fieldKeysText: string
+}
+
+function newSuggestionDraftRow(): SuggestionDraftRow {
+  return { objectName: '', fieldKeysText: '' }
+}
+
+const suggestionDrafts = ref<SuggestionDraftRow[]>([newSuggestionDraftRow()])
+
+function addSuggestionDraftRow(): void {
+  suggestionDrafts.value = [...suggestionDrafts.value, newSuggestionDraftRow()]
+}
+
+function removeSuggestionDraftRow(index: number): void {
+  if (suggestionDrafts.value.length <= 1) return
+  suggestionDrafts.value = suggestionDrafts.value.filter((_, i) => i !== index)
+}
+
+const suggestionResult = computed(() => {
+  const drafts: BridgeAgentSuggestionObjectDraft[] = suggestionDrafts.value.map((row) => ({
+    objectName: row.objectName,
+    fieldKeys: row.fieldKeysText.split(',').map((key) => key.trim()).filter(Boolean),
+  }))
+  return buildBridgeAgentChangeSuggestion(drafts, locale.value, selectedBridgeSystem.value?.name ?? null)
+})
+
+const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
+
+async function copySuggestionText(): Promise<void> {
+  copyState.value = 'idle'
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(suggestionResult.value.text)
+      copyState.value = 'copied'
+      return
+    }
+  } catch {
+    // fall through to the failed state below
+  }
+  copyState.value = 'failed'
+}
+
+watch(suggestionDrafts, () => {
+  copyState.value = 'idle'
+}, { deep: true })
 </script>
 
 <style scoped>
@@ -997,5 +1243,129 @@ watch(
   .bridge-agent__objects-head {
     display: grid;
   }
+}
+
+/* BA-UI-3 own classes below (docs/development/bridge-agent-admin-page-design-lock-20260707.md §3
+   BA-UI-3) — fresh prefixes, token-only colors, same discipline as the BA-UI-1 classes above. */
+
+.bridge-agent__config-check,
+.bridge-agent__suggestion {
+  margin-top: 20px;
+}
+
+.bridge-agent__config-check h3,
+.bridge-agent__suggestion h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bridge-agent__checklist {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.bridge-agent__checklist-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--ms-text-1);
+}
+
+.bridge-agent__checklist-icon--pass {
+  color: var(--el-color-success);
+}
+
+.bridge-agent__checklist-icon--warn {
+  color: var(--el-color-warning);
+}
+
+.bridge-agent__checklist-icon--fail {
+  color: var(--el-color-danger);
+}
+
+.bridge-agent__checklist-title {
+  font-weight: 700;
+  min-width: 140px;
+}
+
+.bridge-agent__checklist-text {
+  color: var(--ms-text-2);
+  flex: 1;
+  min-width: 200px;
+}
+
+.bridge-agent__badge--check-pass {
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
+}
+
+.bridge-agent__badge--check-warn {
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
+}
+
+.bridge-agent__badge--check-fail {
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
+}
+
+.bridge-agent__suggestion-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.bridge-agent__suggestion-field {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ms-text-2);
+  flex: 1;
+  min-width: 180px;
+}
+
+.bridge-agent__suggestion-field input {
+  border: 1px solid var(--ms-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: var(--ms-text-1);
+  font: inherit;
+}
+
+.bridge-agent__suggestion-output {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.bridge-agent__suggestion-output h4 {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ms-text-1);
+}
+
+.bridge-agent__suggestion-text {
+  width: 100%;
+  min-height: 120px;
+  border: 1px solid var(--ms-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--ms-text-1);
+  background: var(--ms-bg-page);
+  font: inherit;
+  font-family: inherit;
+  white-space: pre-wrap;
+  resize: vertical;
 }
 </style>

@@ -628,4 +628,225 @@ describe('IntegrationBridgeAgentSection', () => {
       setLocale('en')
     }
   })
+
+  // --- BA-UI-3 (docs/development/bridge-agent-admin-page-design-lock-20260707.md §3 BA-UI-3): config
+  // validation checklist + change-suggestion builder. Both cards are purely DERIVED/LOCAL — no new
+  // fetch is issued for either (the checklist reuses the already-fetched `objects`; the suggestion
+  // builder is a local text generator over operator-typed drafts). ADD-ONLY to this spec file.
+
+  it('config-check card: renders the 6 checklist items derived from the selected instance config + loaded objects', async () => {
+    mockRoutes() // default OBJECTS_PAYLOAD = ['material', 'bom'] -- no bom_child
+    const system = bridgeSystem() // config.baseUrl = loopback; no authMode; no sampleLimit/maxLimit
+    const root = mountSection([system])
+    await flushUi()
+
+    q(root, 'bridge-agent-config-check')
+    q(root, 'bridge-agent-config-check-list')
+    expect(q(root, 'bridge-agent-config-check-item-requiredFields').getAttribute('data-status')).toBe('pass')
+    expect(q(root, 'bridge-agent-config-check-item-limits').getAttribute('data-status')).toBe('pass')
+    expect(q(root, 'bridge-agent-config-check-item-authMode').getAttribute('data-status')).toBe('warn')
+    expect(q(root, 'bridge-agent-config-check-item-localhostBoundary').getAttribute('data-status')).toBe('pass')
+    expect(q(root, 'bridge-agent-config-check-item-rawSqlForbidden').getAttribute('data-status')).toBe('pass')
+    // material + bom present but not bom_child -> partial (advisory warn, not a hard failure)
+    expect(q(root, 'bridge-agent-config-check-item-objectAllowlist').getAttribute('data-status')).toBe('warn')
+    expect(q(root, 'bridge-agent-config-check-item-label-authMode').textContent).toMatch(/no auth mode is explicitly declared/i)
+  })
+
+  it('config-check card: mutation-relevant per-item branches (fail on missing baseUrl, fail on non-loopback host — never rendering the host)', async () => {
+    mockRoutes({ objects: () => jsonResponse([]) })
+    const noBaseUrlSystem = bridgeSystem({ config: {} })
+    const root = mountSection([noBaseUrlSystem])
+    await flushUi()
+
+    expect(q(root, 'bridge-agent-config-check-item-requiredFields').getAttribute('data-status')).toBe('fail')
+    expect(q(root, 'bridge-agent-config-check-item-localhostBoundary').getAttribute('data-status')).toBe('warn')
+    expect(q(root, 'bridge-agent-config-check-item-objectAllowlist').getAttribute('data-status')).toBe('warn')
+    expect(q(root, 'bridge-agent-config-check-item-label-objectAllowlist').textContent).toMatch(/allowlist is currently empty/i)
+
+    app!.unmount()
+    container!.remove()
+    const hostileHostSystem = bridgeSystem({ config: { baseUrl: 'http://10.0.0.9:19091/' } })
+    const root2 = mountSection([hostileHostSystem])
+    await flushUi()
+    expect(q(root2, 'bridge-agent-config-check-item-localhostBoundary').getAttribute('data-status')).toBe('fail')
+    expect(root2.innerHTML).not.toContain('10.0.0.9')
+  })
+
+  it('SENTINEL (BA-UI-3 config-check): the default system config sentinels never leak through the checklist card', async () => {
+    mockRoutes()
+    const system = bridgeSystem() // carries SENTINEL.configSecret / SENTINEL.connectionString in .config
+    const root = mountSection([system])
+    await flushUi()
+
+    const checklist = q(root, 'bridge-agent-config-check-list')
+    for (const [key, sentinel] of Object.entries(SENTINEL)) {
+      expect(checklist.innerHTML.includes(sentinel), `config-check sentinel leak: ${key}`).toBe(false)
+    }
+  })
+
+  it('suggestion builder: shows the IU-6 guided empty state (what + first step) until a valid object name is entered', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+
+    q(root, 'bridge-agent-suggestion-builder')
+    q(root, 'bridge-agent-suggestion-empty')
+    const what = q(root, 'bridge-agent-suggestion-empty-what')
+    const firstStep = q(root, 'bridge-agent-suggestion-empty-first-step')
+    expect(what.textContent?.trim().length ?? 0).toBeGreaterThan(0)
+    expect(firstStep.textContent).toMatch(/enter at least one object name/i)
+    expect(root.querySelector('[data-testid="bridge-agent-suggestion-text"]')).toBeNull()
+  })
+
+  it('suggestion builder: typing an object + field names generates the values-free copyable text, including the target-instance name', async () => {
+    mockRoutes()
+    const system = bridgeSystem()
+    const root = mountSection([system])
+    await flushUi()
+
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    const fieldsInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-fields-0')
+    objectInput.value = 'material_extra'
+    objectInput.dispatchEvent(new Event('input'))
+    fieldsInput.value = 'field_a, field_b'
+    fieldsInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    expect(root.querySelector('[data-testid="bridge-agent-suggestion-empty"]')).toBeNull()
+    const text = q<HTMLTextAreaElement>(root, 'bridge-agent-suggestion-text')
+    expect(text.value).toContain('1. Object: material_extra')
+    expect(text.value).toContain('New field mappings: field_a, field_b')
+    expect(text.value).toContain(`Target instance: ${system.name}`)
+    expect(text.value).toMatch(/this page makes no direct change/i)
+  })
+
+  it('suggestion builder: add row / remove row manage independent drafts, and each is reflected in the generated text', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-suggestion-add-row').click()
+    await flushUi()
+    q(root, 'bridge-agent-suggestion-row-1')
+
+    const object0 = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    object0.value = 'material_extra'
+    object0.dispatchEvent(new Event('input'))
+    const object1 = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-1')
+    object1.value = 'bom_child_extra'
+    object1.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    const text = q<HTMLTextAreaElement>(root, 'bridge-agent-suggestion-text')
+    expect(text.value).toContain('1. Object: material_extra')
+    expect(text.value).toContain('2. Object: bom_child_extra')
+
+    q<HTMLButtonElement>(root, 'bridge-agent-suggestion-remove-0').click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="bridge-agent-suggestion-row-1"]')).toBeNull()
+    const textAfterRemove = q<HTMLTextAreaElement>(root, 'bridge-agent-suggestion-text')
+    expect(textAfterRemove.value).toContain('1. Object: bom_child_extra')
+    expect(textAfterRemove.value).not.toContain('material_extra')
+  })
+
+  it('SENTINEL (BA-UI-3 suggestion builder): a secret/host-shaped object or field name typed by the operator is dropped, never echoed', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    objectInput.value = `password=${SENTINEL.configSecret}`
+    objectInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    // The only "object" typed is invalid-shaped -> zero valid entries -> guided empty state renders
+    // (never the copy/textarea surface), and the sentinel never appears anywhere in the DOM.
+    q(root, 'bridge-agent-suggestion-empty')
+    expect(root.innerHTML).not.toContain(SENTINEL.configSecret)
+    expect(root.innerHTML).not.toContain('password=')
+
+    // A second row: valid object name, but a hostile field key alongside a legit one.
+    q<HTMLButtonElement>(root, 'bridge-agent-suggestion-add-row').click()
+    await flushUi()
+    const object1 = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-1')
+    object1.value = 'material_extra'
+    object1.dispatchEvent(new Event('input'))
+    const fields1 = q<HTMLInputElement>(root, 'bridge-agent-suggestion-fields-1')
+    fields1.value = `field_a, token=${SENTINEL.configSecret}, ${SENTINEL.connectionString}`
+    fields1.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    const text = q<HTMLTextAreaElement>(root, 'bridge-agent-suggestion-text')
+    expect(text.value).toContain('field_a')
+    expect(text.value).not.toContain(SENTINEL.configSecret)
+    expect(text.value).not.toContain(SENTINEL.connectionString)
+    expect(text.value).not.toContain('token=')
+    expect(root.innerHTML).not.toContain(SENTINEL.configSecret)
+    expect(root.innerHTML).not.toContain(SENTINEL.connectionString)
+  })
+
+  it('suggestion builder: copy button writes the exact values-free text to the clipboard and shows a copied state', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    try {
+      const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+      objectInput.value = 'material_extra'
+      objectInput.dispatchEvent(new Event('input'))
+      await flushUi()
+
+      q<HTMLButtonElement>(root, 'bridge-agent-suggestion-copy').click()
+      await flushUi()
+
+      expect(writeText).toHaveBeenCalledTimes(1)
+      expect(String(writeText.mock.calls[0][0])).toContain('1. Object: material_extra')
+      expect(q(root, 'bridge-agent-suggestion-copy-state').textContent).toMatch(/copied/i)
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (navigator as any).clipboard
+    }
+  })
+
+  it('suggestion builder: a missing/non-functional clipboard API renders a failed-copy fallback message, never throwing', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    objectInput.value = 'material_extra'
+    objectInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-suggestion-copy').click()
+    await flushUi()
+
+    expect(q(root, 'bridge-agent-suggestion-copy-state').textContent).toMatch(/copy failed/i)
+  })
+
+  it('zh copy: config-check card + suggestion builder render Chinese labels under zh-CN', async () => {
+    const { setLocale } = useLocale()
+    setLocale('zh-CN')
+    try {
+      mockRoutes()
+      const system = bridgeSystem()
+      const root = mountSection([system])
+      await flushUi()
+
+      expect(root.textContent).toContain('配置校验')
+      expect(q(root, 'bridge-agent-config-check-item-label-authMode').textContent).toContain('未显式声明')
+      expect(root.textContent).toContain('变更建议 / 实施清单')
+
+      const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+      objectInput.value = 'material_extra'
+      objectInput.dispatchEvent(new Event('input'))
+      await flushUi()
+      const text = q<HTMLTextAreaElement>(root, 'bridge-agent-suggestion-text')
+      expect(text.value).toContain('1. 对象：material_extra')
+    } finally {
+      setLocale('en')
+    }
+  })
 })
