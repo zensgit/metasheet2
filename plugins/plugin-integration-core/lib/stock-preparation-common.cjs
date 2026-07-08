@@ -1,4 +1,8 @@
 'use strict'
+// SCOPING NOTE (review #3892): matching-family semantics — only the modules that already carried
+// byte-identical variants (readonly-intake/material-match/unit-rule-match) consume this. Other stock-prep
+// modules use DIFFERENT semantics (e.g. mvp-generation null!==null; large-bom-jobs/option-sync ''-blank,
+// non-coercing) — do NOT naively migrate them onto this common helper; it would silently change behavior.
 
 function isPlainObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
