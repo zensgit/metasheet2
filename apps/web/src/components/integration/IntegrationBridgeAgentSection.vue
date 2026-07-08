@@ -435,6 +435,82 @@
               class="bridge-agent__error"
             >{{ bi('复制失败，请手动选择文本复制。', 'Copy failed; select the text manually to copy.') }}</span>
           </div>
+
+          <!-- BA-APPLY-1 (docs/development/bridge-agent-controlled-apply-design-lock-20260708.md §2
+               形态 A, #3876): export the SAME drafts as a machine-readable, values-free implementation
+               checklist. Independently gated (own guided-empty state), sibling to the prose suggestion
+               above rather than nested inside it. EXPORT/render only — no apply endpoint, no write, no
+               Agent write. -->
+          <div class="bridge-agent__checklist-export">
+            <button
+              type="button"
+              class="integration-workbench__button"
+              data-testid="bridge-agent-checklist-export"
+              @click="toggleChecklist"
+            >
+              <el-icon><DocumentCopy /></el-icon>
+              {{ checklistVisible ? bi('收起实施清单', 'Hide implementation checklist') : bi('导出实施清单', 'Export implementation checklist') }}
+            </button>
+
+            <template v-if="checklistVisible">
+              <p class="integration-workbench__hint">{{ bi(
+                '机读格式：仅含对象名、字段键名与固定操作枚举（add_readonly_object / add_readonly_field），不含取值/host/凭据/自由文本；本导出不会调用任何写入接口，也不会做任何直接修改——供人工确认后交由受控后端或运维脚本按既有 runbook 应用。',
+                'Machine-readable: object names, field-key names, and a fixed operation enum only (add_readonly_object / add_readonly_field) — never a value/host/credential/free-form text; this export calls no write endpoint and makes no direct change — a human hands it to the controlled backend or an ops script to apply per the existing runbook.',
+              ) }}</p>
+
+              <div
+                v-if="implementationChecklist.checklist.operations.length === 0"
+                class="integration-workbench__empty"
+                data-testid="bridge-agent-checklist-empty"
+              >
+                <strong data-testid="bridge-agent-checklist-empty-what">{{ bi(
+                  '这里会把上面填写的对象/字段名整理成一份机读的实施清单（JSON）。',
+                  'This turns the object/field names you enter above into a machine-readable implementation checklist (JSON).',
+                ) }}</strong>
+                <p data-testid="bridge-agent-checklist-empty-first-step">{{ bi(
+                  '第一步：在上方填写至少一个对象名（可选填字段名），清单会自动生成。',
+                  'First step: enter at least one object name above (field names are optional); the checklist is generated automatically.',
+                ) }}</p>
+              </div>
+              <div v-else class="bridge-agent__suggestion-output" data-testid="bridge-agent-checklist-output">
+                <h4>{{ bi('机读实施清单（JSON，可复制/下载）', 'Machine-readable implementation checklist (JSON; copyable/downloadable)') }}</h4>
+                <textarea
+                  class="bridge-agent__suggestion-text"
+                  data-testid="bridge-agent-checklist-text"
+                  readonly
+                  :value="checklistText"
+                />
+                <button
+                  type="button"
+                  class="integration-workbench__button"
+                  data-testid="bridge-agent-checklist-copy"
+                  @click="copyChecklistText"
+                >
+                  <el-icon><DocumentCopy /></el-icon>
+                  {{ bi('复制清单 JSON', 'Copy checklist JSON') }}
+                </button>
+                <button
+                  type="button"
+                  class="integration-workbench__button"
+                  data-testid="bridge-agent-checklist-download"
+                  @click="downloadChecklistJson"
+                >
+                  <el-icon><DocumentCopy /></el-icon>
+                  {{ bi('下载清单 JSON', 'Download checklist JSON') }}
+                </button>
+                <span
+                  v-if="checklistCopyState === 'copied'"
+                  data-testid="bridge-agent-checklist-copy-state"
+                  class="integration-workbench__hint"
+                >{{ bi('已复制', 'Copied') }}</span>
+                <span
+                  v-else-if="checklistCopyState === 'failed'"
+                  data-testid="bridge-agent-checklist-copy-state"
+                  class="bridge-agent__error"
+                >{{ bi('复制失败，请手动选择文本复制。', 'Copy failed; select the text manually to copy.') }}</span>
+              </div>
+            </template>
+          </div>
         </div>
       </template>
     </el-card>
@@ -479,6 +555,7 @@ import { useLocale } from '../../composables/useLocale'
 import {
   bridgeAgentConfigCheckLabel,
   buildBridgeAgentChangeSuggestion,
+  buildImplementationChecklist,
   computeBridgeAgentConfigCheck,
   type BridgeAgentConfigCheckItem,
   type BridgeAgentConfigCheckStatus,
@@ -1021,6 +1098,72 @@ async function copySuggestionText(): Promise<void> {
 
 watch(suggestionDrafts, () => {
   copyState.value = 'idle'
+}, { deep: true })
+
+// --- BA-APPLY-1 (docs/development/bridge-agent-controlled-apply-design-lock-20260708.md §2 形态 A,
+// #3876): "导出实施清单" — renders the SAME operator-typed drafts above as a machine-readable, values-
+// free implementation checklist (`buildImplementationChecklist`), instead of the prose suggestion text.
+// This is an EXPORT/render only: no apply endpoint, no local-config write, no .ps1 invocation, no Agent
+// write — the JSON below is handed to a controlled backend or ops script by a human (a LATER, unopened
+// rung). `implementationChecklist` recomputes from `suggestionDrafts` directly (not from
+// `suggestionResult.entries`) so this surface independently re-applies the safe-identifier gate rather
+// than trusting the sibling suggestion builder's output.
+const implementationChecklist = computed(() => {
+  const drafts: BridgeAgentSuggestionObjectDraft[] = suggestionDrafts.value.map((row) => ({
+    objectName: row.objectName,
+    fieldKeys: row.fieldKeysText.split(',').map((key) => key.trim()).filter(Boolean),
+  }))
+  return buildImplementationChecklist(drafts)
+})
+
+// The exact serialized artifact — `{ schemaVersion, operations }` only, no counts/labels/free text —
+// is what gets previewed, copied, and downloaded.
+const checklistText = computed(() => JSON.stringify(implementationChecklist.value.checklist, null, 2))
+
+const checklistVisible = ref(false)
+
+function toggleChecklist(): void {
+  checklistVisible.value = !checklistVisible.value
+}
+
+const checklistCopyState = ref<'idle' | 'copied' | 'failed'>('idle')
+
+async function copyChecklistText(): Promise<void> {
+  checklistCopyState.value = 'idle'
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(checklistText.value)
+      checklistCopyState.value = 'copied'
+      return
+    }
+  } catch {
+    // fall through to the failed state below
+  }
+  checklistCopyState.value = 'failed'
+}
+
+// Values-free by construction: the downloaded file's own content is `checklistText` (object names/
+// field-key names/op enum only — see the module header) and its filename carries nothing but a
+// client-side timestamp, never a system name or config value.
+function downloadChecklistJson(): void {
+  if (typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') return
+  const blob = new Blob([checklistText.value], { type: 'application/json;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `bridge-agent-implementation-checklist-${Date.now()}.json`
+  anchor.rel = 'noopener'
+  anchor.style.display = 'none'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  if (typeof URL.revokeObjectURL === 'function') {
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
+}
+
+watch(suggestionDrafts, () => {
+  checklistCopyState.value = 'idle'
 }, { deep: true })
 </script>
 
