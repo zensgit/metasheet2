@@ -234,6 +234,7 @@ import {
   type YjsInvalidator,
 } from '../multitable/post-commit-hooks'
 import { listRecordRevisions, recordRecordRevision, type RecordRevisionEntry } from '../multitable/record-history-service'
+import { replayInboundLinks, isRecordUndeleteInboundEnabled } from '../multitable/inbound-link-replay'
 import {
   isPersonalViewsEnabled,
   applyPersonalViewOverlay,
@@ -10126,6 +10127,7 @@ export function univerMetaRouter(): Router {
       // rebuilds OUTBOUND meta_links (L3; NO inbound — L4 A: inbound re-appears on the linking record's next save), and
       // appends a 'restore' create-revision (the Time Machine source, NOT a plain 'rest' create). Realtime post-commit.
       const resurrectedIds: string[] = []
+      const undeleteInboundTotals = { replayed: 0, total: 0 }
       if (resurrects.length > 0) {
         // Mirror-read-only hardening (C2/I-1): resurrect only WRITABLE (forward) links, never the mirror side of a
         // twoWay link (the patchContext guard's `readOnly` = `isFieldAlwaysReadOnly` ⇒ `mirrorOf`). Explicit skip so
@@ -10151,6 +10153,27 @@ export function univerMetaRouter(): Router {
                 }
               }
               await recordRecordRevision(query, { sheetId, recordId: r.recordId, version: 1, action: 'create', source: 'restore', changedFieldIds: Object.keys(r.snapshot), patch: r.snapshot, snapshot: r.snapshot, actorId: undeleteActorId })
+              // 4c-3 §7: the SECOND resurrection surface reuses the SAME replay helper — never a
+              // parallel inbound semantic. Anchor = this record's LATEST delete revision: the record
+              // does not exist right now (id-occupied guard above), so the most recent delete IS the
+              // deletion that destroyed the currently-missing inbound edges — deterministic, not a
+              // vintage guess. A deletion without capture (uncaptured path, or capture flag off, or
+              // retention) simply yields zero tombstones ⇒ zero replay, honest. Runs AFTER the
+              // outbound loop (NOT EXISTS must see those rows; self-link stays single).
+              if (isRecordUndeleteInboundEnabled()) {
+                const anchorRes = await query(
+                  `SELECT id FROM meta_record_revisions
+                    WHERE sheet_id = $1 AND record_id = $2 AND action = 'delete'
+                    ORDER BY created_at DESC, version DESC, id DESC LIMIT 1`,
+                  [sheetId, r.recordId],
+                )
+                const anchorId = ((anchorRes.rows as Array<{ id?: string }>)[0]?.id) ?? null
+                if (anchorId) {
+                  const replay = await replayInboundLinks(query, anchorId)
+                  undeleteInboundTotals.replayed += replay.replayed
+                  undeleteInboundTotals.total += replay.total
+                }
+              }
               resurrectedIds.push(r.recordId)
             }
           })
@@ -10187,7 +10210,7 @@ export function univerMetaRouter(): Router {
         }
       }
       const revertedCount = outcomes.filter((o) => o.status === 'reverted').length
-      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount, resurrectedCount: resurrectedIds.length, undeleteRecordIds: resurrectedIds } })
+      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount, resurrectedCount: resurrectedIds.length, undeleteRecordIds: resurrectedIds, ...(isRecordUndeleteInboundEnabled() && resurrectedIds.length > 0 ? { undeleteInbound: undeleteInboundTotals } : {}) } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
       const hint = getDbNotReadyMessage(err)
@@ -16080,7 +16103,8 @@ export function univerMetaRouter(): Router {
           return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
         },
       })
-      return res.json({ ok: true, data: { restored: result.recordId, sheetId: result.sheetId } })
+      // 4c-3 §6 honest signal (omitted-when-off/absent — flag-off responses stay byte-identical):
+      return res.json({ ok: true, data: { restored: result.recordId, sheetId: result.sheetId, ...(result.inbound ? { inbound: result.inbound } : {}) } })
     } catch (err) {
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)
