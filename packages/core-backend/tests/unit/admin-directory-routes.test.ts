@@ -12,6 +12,7 @@ const auditMocks = vi.hoisted(() => ({
 const directoryMocks = vi.hoisted(() => ({
   acknowledgeDirectorySyncAlert: vi.fn(),
   admitDirectoryAccountUser: vi.fn(),
+  batchAdmitDirectoryAccountUsers: vi.fn(),
   batchBindDirectoryAccounts: vi.fn(),
   batchUnbindDirectoryAccounts: vi.fn(),
   bindDirectoryAccount: vi.fn(),
@@ -52,6 +53,7 @@ vi.mock('../../src/audit/audit', () => ({
 vi.mock('../../src/directory/directory-sync', () => ({
   acknowledgeDirectorySyncAlert: directoryMocks.acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser: directoryMocks.admitDirectoryAccountUser,
+  batchAdmitDirectoryAccountUsers: directoryMocks.batchAdmitDirectoryAccountUsers,
   batchBindDirectoryAccounts: directoryMocks.batchBindDirectoryAccounts,
   batchUnbindDirectoryAccounts: directoryMocks.batchUnbindDirectoryAccounts,
   bindDirectoryAccount: directoryMocks.bindDirectoryAccount,
@@ -1195,6 +1197,113 @@ describe('adminDirectoryRouter', () => {
     })
 
     expect(response.statusCode).toBe(409)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('batch-creates and binds directory accounts with grant disabled by default', async () => {
+    directoryMocks.batchAdmitDirectoryAccountUsers.mockResolvedValue({
+      succeeded: [
+        {
+          account: {
+            id: 'account-1',
+            integrationId: 'dir-1',
+            corpId: 'dingcorp',
+            externalUserId: '0447654442691174',
+            localUser: {
+              id: 'user-1',
+              email: null,
+              username: 'dt_0447654442691174_account1',
+            },
+          },
+          previousLocalUser: null,
+          user: {
+            id: 'user-1',
+            email: null,
+            username: 'dt_0447654442691174_account1',
+            name: '林岚',
+            mobile: '13900001234',
+            role: 'user',
+            is_active: true,
+          },
+          temporaryPassword: 'Temp#123456',
+          inviteToken: null,
+          onboarding: {
+            accountLabel: 'dt_0447654442691174_account1',
+            acceptInviteUrl: '',
+            inviteMessage: '账号：dt_0447654442691174_account1',
+          },
+        },
+      ],
+      failed: [{ accountId: 'account-2', error: 'User with this username already exists' }],
+    })
+
+    const response = await invokeRoute('post', '/accounts/batch-admit-users', {
+      body: {
+        accountIds: ['account-1', 'account-2'],
+      },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.batchAdmitDirectoryAccountUsers).toHaveBeenCalledWith(['account-1', 'account-2'], {
+      adminUserId: 'admin-1',
+      enableDingTalkGrant: false,
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledTimes(2)
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'create',
+      resourceType: 'user',
+      resourceId: 'user-1',
+      meta: expect.objectContaining({
+        source: 'directory_bulk_manual_admission',
+        mode: 'bulk_manual_admission',
+        selectionSize: 2,
+      }),
+    }))
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'bind',
+      resourceType: 'directory-account-link',
+      resourceId: 'account-1',
+      meta: expect.objectContaining({
+        enableDingTalkGrant: false,
+        mode: 'bulk_manual_admission',
+        selectionSize: 2,
+      }),
+    }))
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        items: [{ id: 'account-1' }],
+        users: [{ id: 'user-1', username: 'dt_0447654442691174_account1' }],
+        onboardingPackets: [{
+          userId: 'user-1',
+          username: 'dt_0447654442691174_account1',
+          temporaryPassword: 'Temp#123456',
+        }],
+        updatedCount: 1,
+        failedCount: 1,
+        failed: [{ accountId: 'account-2', error: expect.stringContaining('username') }],
+        enableDingTalkGrant: false,
+      },
+    })
+  })
+
+  it('keeps the historical error mapping when a batch admission commits nothing', async () => {
+    directoryMocks.batchAdmitDirectoryAccountUsers.mockResolvedValue({
+      succeeded: [],
+      failed: [{ accountId: 'account-1', error: 'User with this username already exists' }],
+    })
+
+    const response = await invokeRoute('post', '/accounts/batch-admit-users', {
+      body: { accountIds: ['account-1'] },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_BATCH_ADMISSION_FAILED' },
+    })
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
