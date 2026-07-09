@@ -1,5 +1,6 @@
 import { io } from 'socket.io-client'
 import { getApiBase } from '../../utils/api'
+import { useAuth } from '../../composables/useAuth'
 import {
   normalizeMultitableComment,
   normalizeMultitableCommentFieldId,
@@ -158,9 +159,13 @@ export type MultitableCommentSheetRealtimeSubscribe = (
 export const subscribeToMultitableCommentSheetRealtime: MultitableCommentSheetRealtimeSubscribe = (spreadsheetId, handlers) => {
   if (typeof window === 'undefined' || !spreadsheetId) return () => {}
 
+  // The comment room join is now auth-gated server-side (same read gate as join-sheet), so the socket
+  // must present the caller's token — otherwise the join is denied and no comment events arrive.
+  const token = useAuth().getToken()
   const socket = io(resolveMultitableCommentsRealtimeBaseUrl(), {
     path: '/socket.io',
     transports: ['websocket', 'polling'],
+    auth: token ? { token } : undefined,
   })
   const handleConnect = () => {
     socket.emit('join-comment-sheet', { spreadsheetId })
@@ -189,9 +194,12 @@ export const subscribeToMultitableCommentSheetRealtime: MultitableCommentSheetRe
 export const subscribeToMultitableCommentsRealtime: MultitableCommentsRealtimeSubscribe = (scope, handlers) => {
   if (typeof window === 'undefined') return () => {}
 
+  // Same auth-gated join as the sheet subscription above — present the caller's token.
+  const token = useAuth().getToken()
   const socket = io(resolveMultitableCommentsRealtimeBaseUrl(), {
     path: '/socket.io',
     transports: ['websocket', 'polling'],
+    auth: token ? { token } : undefined,
   })
   const handleConnect = () => {
     emitRoomSubscription(socket, 'join-comment-record', scope)
