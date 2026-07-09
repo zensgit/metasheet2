@@ -110,6 +110,9 @@ export default defineConfig({
       // skip-green here, re-opening the "real-DB spec silently skips in the no-DB lane" hole) —
       // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts',
+      // 4c-3 RB matrix: real Postgres only — whole-file wired into `Run multitable real-DB
+      // integration` in plugin-tests.yml (describeIfDatabase alone would skip-green here).
+      'tests/integration/multitable-undelete-inbound-replay-realdb.test.ts',
       // W6 full-HTTP-path approve->resume seam: mounts authRouter + approvalsRouter on an
       // ephemeral port against real Postgres, so it is excluded from the default run and wired
       // into the dedicated `Run multitable real-DB integration` job in plugin-tests.yml.
