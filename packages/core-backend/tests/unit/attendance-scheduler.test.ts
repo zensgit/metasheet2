@@ -284,6 +284,12 @@ describe('Attendance C5 delivery worker primitives', () => {
       retryable: false,
       error: 'fake_non_retryable_failure',
     })
+    await expect(channel.send({ ...base, payload: { fakeDelivery: 'skip' } })).resolves.toEqual({
+      ok: false,
+      retryable: false,
+      skip: true,
+      error: 'fake_structural_skip',
+    })
   })
 
   it('uses bounded exponential retry backoff', () => {
@@ -338,7 +344,7 @@ describe('Attendance C5 delivery worker primitives', () => {
     )
   })
 
-  it('real DingTalk channel fails visibly without a unique active recipient binding', async () => {
+  it('real DingTalk channel skips (not fails) an unbound/blank recipient identity, but still fails visibly on ambiguous bindings', async () => {
     const base = {
       id: 'delivery-1',
       orgId: 'default',
@@ -350,6 +356,8 @@ describe('Attendance C5 delivery worker primitives', () => {
       channel: 'dingtalk_work_notification',
       payload: {},
     }
+    // No linked+active binding at all: the ordinary "not onboarded to DingTalk yet" gap. Structural,
+    // not a fault — the worker must terminate this as `skipped`, so the channel flags skip: true.
     const noBinding = new DingTalkAttendanceDeliveryChannel({
       query: async () => ({ rows: [], rowCount: 0 }),
       readConfig: async () => { throw new Error('should not read config') },
@@ -357,9 +365,12 @@ describe('Attendance C5 delivery worker primitives', () => {
     await expect(noBinding.send(base)).resolves.toEqual({
       ok: false,
       retryable: false,
+      skip: true,
       error: 'dingtalk_recipient_not_bound',
     })
 
+    // Two+ active linked bindings for the same user is a directory data-integrity anomaly worth an
+    // operator's attention (dedupe the links) — this must stay a real, visible `failed`, not skip: true.
     const ambiguous = new DingTalkAttendanceDeliveryChannel({
       query: async () => ({
         rows: [
@@ -375,6 +386,8 @@ describe('Attendance C5 delivery worker primitives', () => {
       error: 'dingtalk_recipient_ambiguous',
     })
 
+    // A linked, unambiguous binding whose external_user_id is blank has no usable identity either —
+    // same structural class as "not bound", so this also skips rather than failing.
     const blankExternalUser = new DingTalkAttendanceDeliveryChannel({
       query: async () => ({
         rows: [{ integration_id: 'dir-1', external_user_id: '   ' }],
@@ -384,6 +397,7 @@ describe('Attendance C5 delivery worker primitives', () => {
     await expect(blankExternalUser.send(base)).resolves.toEqual({
       ok: false,
       retryable: false,
+      skip: true,
       error: 'dingtalk_recipient_external_user_id_missing',
     })
   })
