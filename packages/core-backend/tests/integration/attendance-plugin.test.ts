@@ -6117,6 +6117,10 @@ attendanceIntegrationDescribe(
       expect((await approve(dormId)).status).toBe(200)
       expect(await expiryDaysOf(dormId)).toEqual([{ overtime_source: null, days: 30 }])
 
+      // 5g — expiresInDays parity: the sibling knob is now bounded too, so an over-large value is rejected at
+      // save (400) — before this it had no zod .max and would 500 the comp-time grant just like validityDays did.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 999999999 } })).status).toBe(400)
+
       // 5e — P2-1: an over-large validityDays is rejected at settings-save (400), so it can never reach the
       // banked INSERT and overflow the PG interval (was: 200 at PUT, then 500 on the next approval).
       expect((await putSettings({ overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: 999999999 } })).status).toBe(400)
