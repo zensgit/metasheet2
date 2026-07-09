@@ -6207,7 +6207,7 @@ attendanceIntegrationDescribe(
       // the source OT request's work_date). Robust to per-source lot keys (…:workday) unlike lotsFor.
       const bankedMinutesForMonth = async (monthPrefix: string) => (await pool.query(
         `SELECT COALESCE(SUM(b.amount_minutes),0)::int AS banked
-           FROM attendance_leave_balances b JOIN attendance_requests r ON r.id = b.source_id
+           FROM attendance_leave_balances b JOIN attendance_requests r ON r.id::text = b.source_id
           WHERE b.org_id='default' AND b.user_id=$1 AND b.leave_type_code='comp_time'
             AND b.source_type='overtime_conversion' AND b.overtime_source IS NOT NULL
             AND to_char(r.work_date, 'YYYY-MM') = $2`,

@@ -33,13 +33,16 @@
   ```sql
   SELECT COALESCE(SUM(b.amount_minutes),0)::int AS banked
     FROM attendance_leave_balances b
-    JOIN attendance_requests r ON r.id = b.source_id
+    JOIN attendance_requests r ON r.id::text = b.source_id   -- id=uuid, source_id=text ⇒ 强制 ::text 转换
    WHERE b.org_id=$1 AND b.user_id=$2 AND b.leave_type_code='comp_time'
      AND b.source_type='overtime_conversion'
      AND b.overtime_source IS NOT NULL     -- 只数池化(banked)lots,同 newBanked 口径(§6)
      AND r.work_date >= $3 AND r.work_date <= $4
      AND b.source_id <> $5                 -- 排除本请求,重放幂等
   ```
+  > ⚠ `attendance_leave_balances.source_id` 是 **text**、`attendance_requests.id` 是 **uuid** ⇒ JOIN 必须
+  > `r.id::text = b.source_id`(转 uuid→text 恒安全;非 uuid 的 text source_id 自然不匹配),否则
+  > `operator does not exist: uuid = text` 会 500 审批。测试 headroom 辅助查询同口径。
 - 新纯 helper `overtimeBankCapDecision({ maxMinutesPerPeriod, existingBanked, newBanked })` →
   `{ blocked: boolean, cap, projected }`(cap≤0 → 永不 blocked;projected=existing+new)。可单测。
 - **强制点**:banked 分支(`:28810` 附近),在 lots INSERT **之前**:

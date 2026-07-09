@@ -17397,7 +17397,7 @@ async function sumBankedOvertimeMinutesForMonth(trx, { orgId, userId, monthStart
   const rows = await trx.query(
     `SELECT COALESCE(SUM(b.amount_minutes), 0)::int AS banked
        FROM attendance_leave_balances b
-       JOIN attendance_requests r ON r.id = b.source_id
+       JOIN attendance_requests r ON r.id::text = b.source_id
       WHERE b.org_id = $1 AND b.user_id = $2
         AND b.leave_type_code = 'comp_time'
         AND b.source_type = 'overtime_conversion'
