@@ -109,6 +109,14 @@ async function afterDeleteState(recordId: string) {
   return reconstructRecordsAtT(q, SHEET, new Date(Date.now() + 1_000).toISOString(), [recordId])
 }
 
+async function linkCount(recordId: string): Promise<number> {
+  const res = await q(
+    'SELECT COUNT(*)::int AS n FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1',
+    [recordId],
+  )
+  return Number((res.rows[0] as { n?: number } | undefined)?.n ?? 0)
+}
+
 describeIfDatabase('Global History D-1 uncaptured hard-delete revisions (real DB)', () => {
   beforeAll(async () => {
     await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1,$2,$3)', [BASE, 'D1 Delete Base', ACTOR])
@@ -138,6 +146,30 @@ describeIfDatabase('Global History D-1 uncaptured hard-delete revisions (real DB
        BEFORE INSERT ON meta_record_revisions
        FOR EACH ROW EXECUTE FUNCTION d1_delete_revision_fail_${TS}()`,
     )
+    // D1-5b (review P2-1): fail the RECORD DELETE step itself — the LAST statement of the delete flow —
+    // so the earlier same-flow writes (link purge + delete revision) MUST roll back for the golden to
+    // pass. The original D1-5 pair injects at the revision INSERT, which precedes the DELETE: nothing
+    // after it has run yet, so those tests pass with or without a transaction. This trigger is what makes
+    // the withTransaction plumbing observable: neuter it into a sequential fallback and these goldens go
+    // red (a delete revision committed for a record that still exists = the exact half-state D-1 must
+    // never produce, plus the seeded inbound link vanishes).
+    await q(
+      `CREATE OR REPLACE FUNCTION d1_record_delete_fail_${TS}()
+       RETURNS trigger AS $$
+       BEGIN
+         IF OLD.id LIKE 'rec_d1_${TS}_txfail_%' THEN
+           RAISE EXCEPTION 'forced D1 record delete failure';
+         END IF;
+         RETURN OLD;
+       END;
+       $$ LANGUAGE plpgsql`,
+    )
+    await q('DROP TRIGGER IF EXISTS d1_record_delete_fail_trigger ON meta_records')
+    await q(
+      `CREATE TRIGGER d1_record_delete_fail_trigger
+       BEFORE DELETE ON meta_records
+       FOR EACH ROW EXECUTE FUNCTION d1_record_delete_fail_${TS}()`,
+    )
   })
 
   afterEach(async () => {
@@ -149,6 +181,8 @@ describeIfDatabase('Global History D-1 uncaptured hard-delete revisions (real DB
   afterAll(async () => {
     await q('DROP TRIGGER IF EXISTS d1_delete_revision_fail_trigger ON meta_record_revisions').catch(() => {})
     await q(`DROP FUNCTION IF EXISTS d1_delete_revision_fail_${TS}()`).catch(() => {})
+    await q('DROP TRIGGER IF EXISTS d1_record_delete_fail_trigger ON meta_records').catch(() => {})
+    await q(`DROP FUNCTION IF EXISTS d1_record_delete_fail_${TS}()`).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET]).catch(() => {})
@@ -232,5 +266,59 @@ describeIfDatabase('Global History D-1 uncaptured hard-delete revisions (real DB
     await expect(transaction(({ query }) => deleteRecord({ query, sheetId: SHEET, recordId }))).rejects.toThrow('forced D1 delete revision failure')
     expect(await recordExists(recordId)).toBe(true)
     expect(await deleteRevisionCount(recordId)).toBe(0)
+  })
+
+  // ── D1-5b (adversarial-review P2-1): the DELETE step itself fails ───────────────────────────────────
+  // The D1-5 pair above injects at the revision INSERT, which runs BEFORE the record DELETE — nothing
+  // later has executed, so those goldens pass with or without a transaction (mutation-verified: neutering
+  // withTransaction left the whole suite green). These two pin the transaction plumbing itself: the
+  // failure fires at the LAST statement, so the earlier link purge and delete revision MUST roll back.
+  // A sequential (non-transactional) implementation commits both → deleteRevisionCount===1 for a record
+  // that still exists (a PIT "record is dead" lie, worse than the original defect) and the link vanishes.
+
+  test('D1-5b: automation record-DELETE failure rolls back the delete revision AND the link purge (true atomicity)', async () => {
+    const recordId = `rec_d1_${TS}_txfail_auto`
+    const neighborId = `rec_d1_${TS}_nb_auto`
+    const snapshot = { name: 'automation-tx-atomicity' }
+    await insertRecord(recordId, snapshot, 1)
+    await insertRecord(neighborId, { name: 'neighbor' }, 1)
+    await seedCreateRevision(recordId, snapshot, 1)
+    await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [
+      `lnk_d1_${TS}_auto`,
+      FIELD_NAME,
+      neighborId,
+      recordId,
+    ])
+    expect(await linkCount(recordId)).toBe(1)
+
+    const execution = await makeExecutor().execute(deleteRule(), { sheetId: SHEET, recordId, actorId: ACTOR, data: snapshot })
+    expect(execution.steps[0]?.status).toBe('failed')
+    expect(execution.steps[0]?.error).toContain('forced D1 record delete failure')
+
+    expect(await recordExists(recordId)).toBe(true)
+    expect(await deleteRevisionCount(recordId)).toBe(0) // revision rolled back with the txn
+    expect(await linkCount(recordId)).toBe(1) // link purge rolled back with the txn
+  })
+
+  test('D1-5b: plugin-SDK record-DELETE failure rolls back the delete revision AND the link purge (true atomicity)', async () => {
+    const recordId = `rec_d1_${TS}_txfail_plugin`
+    const neighborId = `rec_d1_${TS}_nb_plugin`
+    const snapshot = { name: 'plugin-tx-atomicity' }
+    await insertRecord(recordId, snapshot, 1)
+    await insertRecord(neighborId, { name: 'neighbor' }, 1)
+    await seedCreateRevision(recordId, snapshot, 1)
+    await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [
+      `lnk_d1_${TS}_plugin`,
+      FIELD_NAME,
+      neighborId,
+      recordId,
+    ])
+    expect(await linkCount(recordId)).toBe(1)
+
+    await expect(transaction(({ query }) => deleteRecord({ query, sheetId: SHEET, recordId }))).rejects.toThrow('forced D1 record delete failure')
+
+    expect(await recordExists(recordId)).toBe(true)
+    expect(await deleteRevisionCount(recordId)).toBe(0)
+    expect(await linkCount(recordId)).toBe(1)
   })
 })
