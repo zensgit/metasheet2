@@ -31,6 +31,7 @@ import { invalidateUserPerms } from '../rbac/service'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import { SimpleCronExpression } from '../services/SchedulerService'
+import { deliverDirectorySyncFailureAlert } from './directory-sync-alert-delivery'
 
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
@@ -542,6 +543,11 @@ export type DirectoryAccountBatchBindEntry = {
   enableDingTalkGrant?: boolean
 }
 
+export type DirectoryAccountBatchAdmissionInput = {
+  adminUserId: string
+  enableDingTalkGrant?: boolean
+}
+
 export type DirectoryAccountUnbindInput = {
   adminUserId: string
   disableDingTalkGrant?: boolean
@@ -579,6 +585,11 @@ export type DirectoryAccountManualAdmissionResult = DirectoryAccountMutationResu
   temporaryPassword?: string
   inviteToken: string | null
   onboarding: ReturnType<typeof buildOnboardingPacket>
+}
+
+export type DirectoryAccountBatchAdmissionOutcome = {
+  succeeded: DirectoryAccountManualAdmissionResult[]
+  failed: Array<{ accountId: string; error: string }>
 }
 
 export type DirectoryAutoAdmissionOnboardingPacket = {
@@ -829,6 +840,535 @@ export function evaluateDirectoryAutoAdmissionEligibility(options: {
     inScope: true,
     missingEmail: !normalizeText(options.email),
   }
+}
+
+/**
+ * DT-HARDEN-07 — which department is the requester's PRIMARY one.
+ *
+ * `directory_account_departments.is_primary` is what `ApprovalDirectoryOrg` anchors on:
+ * `direct_manager` and the whole `continuous_managers` chain start from the primary
+ * department. It was derived as `departmentIds[0]`, i.e. wherever DingTalk happened to
+ * put the department in `dept_id_list` (and, for a user first seen through another
+ * department's listing, wherever the merge happened to put it). A multi-department
+ * employee could therefore route approvals up the wrong management chain.
+ *
+ * DingTalk's `topapi/v2/user/get` has no unambiguous "main department" field. It returns
+ * `dept_order_list: [{dept_id, order}]`, whose `order` is the employee's sort position
+ * within each department — conventionally lowest for the primary department, but that is
+ * NOT contractually documented. Silently switching the signal would change live approval
+ * routing on an unverified assumption, so the order-based resolver ships DEFAULT-OFF
+ * behind `DIRECTORY_PRIMARY_DEPT_FROM_ORDER`. Roadmap §6.8 gates enabling it on
+ * confirming the field shape against a real tenant in staging.
+ *
+ * Either way the choice is now explicit, deterministic and testable rather than an
+ * accident of array order.
+ */
+export function isDirectoryPrimaryDepartmentFromOrderEnabled(): boolean {
+  return ['true', '1', 'yes'].includes(
+    String(process.env.DIRECTORY_PRIMARY_DEPT_FROM_ORDER ?? '').trim().toLowerCase(),
+  )
+}
+
+type DirectoryDepartmentOrderEntry = { departmentId: string; order: number }
+
+export function parseDirectoryDepartmentOrderList(raw: unknown): DirectoryDepartmentOrderEntry[] {
+  const source = asJsonRecord(raw)
+  if (!source) return []
+  const list = source.dept_order_list ?? source.deptOrderList
+  if (!Array.isArray(list)) return []
+
+  const entries: DirectoryDepartmentOrderEntry[] = []
+  for (const item of list) {
+    const record = asJsonRecord(item)
+    if (!record) continue
+    const departmentId = normalizeText(record.dept_id ?? record.deptId)
+    const order = parseDepartmentOrderValue(record.order)
+    if (!departmentId || order === null) continue
+    entries.push({ departmentId, order })
+  }
+  return entries
+}
+
+/**
+ * `Number()` folds null, '', [], and false to 0 — and 0 is the winning order. A missing or
+ * malformed `order` must drop the entry, never silently elect its department primary.
+ */
+function parseDepartmentOrderValue(raw: unknown): number | null {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+    if (!trimmed) return null
+    const parsed = Number(trimmed)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function asJsonRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+export function resolveDirectoryPrimaryDepartmentId(user: {
+  departmentIds: string[]
+  source?: unknown
+}): string | null {
+  const departmentIds = user.departmentIds.map((value) => normalizeText(value)).filter(Boolean)
+  if (departmentIds.length === 0) return null
+  if (departmentIds.length === 1) return departmentIds[0]
+
+  if (isDirectoryPrimaryDepartmentFromOrderEnabled()) {
+    const ranked = parseDirectoryDepartmentOrderList(user.source)
+      // Only departments the user actually belongs to; guards against stale entries.
+      .filter((entry) => departmentIds.includes(entry.departmentId))
+    if (ranked.length > 0) {
+      // Lowest order wins; ties break by the user's own dept_id_list position so the
+      // result is stable across syncs rather than dependent on payload iteration order.
+      const best = ranked.reduce((winner, candidate) => {
+        if (candidate.order !== winner.order) return candidate.order < winner.order ? candidate : winner
+        return departmentIds.indexOf(candidate.departmentId) < departmentIds.indexOf(winner.departmentId)
+          ? candidate
+          : winner
+      })
+      return best.departmentId
+    }
+  }
+
+  return departmentIds[0]
+}
+
+export type DirectoryAccountDepartmentWriteSummary = {
+  membershipsWritten: number
+  /** Accounts that ended the write with exactly one department flagged primary. */
+  accountsWithPrimary: number
+  /** Accounts whose departments were all unknown to this integration — nothing written. */
+  accountsWithoutKnownDepartment: number
+}
+
+/**
+ * DT-HARDEN-07 — writes `directory_account_departments`, including the `is_primary` flag
+ * that `ApprovalDirectoryOrg` anchors approval routing on.
+ *
+ * This is a seam, not decoration. The flag used to be computed inline inside
+ * `syncDirectoryIntegration`, whose orchestration has no test (it needs a live DingTalk).
+ * The one line that decided a person's management chain was therefore unreachable from any
+ * test: reverting it left the whole suite green. Extracting the write lets a real-DB golden
+ * drive it directly — and any future rewrite of this body (a bulk `unnest` insert, say) has
+ * to keep that golden passing rather than silently reverting to `departmentIds[0]`.
+ */
+/**
+ * DT-PERF-01 — flatten (employee × department) membership into three parallel arrays for a
+ * single `unnest` upsert. Exported because the per-row loop it replaced was the sync's largest
+ * source of round trips, and its semantics — which pair exists, which one is primary, how a
+ * repeated pair collapses — must be pinned by tests rather than re-derived by a reader.
+ *
+ * `isPrimary` comes from `resolveDirectoryPrimaryDepartmentId`, NOT from `departmentIds[0]`.
+ * Reintroducing the array index here would silently revert DT-HARDEN-07's approval-routing fix,
+ * which is why the real-DB golden drives the writer rather than this builder.
+ */
+export function buildDirectoryAccountDepartmentRows(
+  users: Iterable<{ userId: string; departmentIds: string[]; source?: unknown }>,
+  accountIdByExternalUserId: Map<string, { id: string }>,
+  departmentIdByExternalDepartmentId: Map<string, string>,
+): { accountIds: string[]; departmentIds: string[]; isPrimary: boolean[]; summary: DirectoryAccountDepartmentWriteSummary } {
+  const accountIds: string[] = []
+  const departmentIds: string[] = []
+  const isPrimary: boolean[] = []
+  const seen = new Set<string>()
+  const summary: DirectoryAccountDepartmentWriteSummary = {
+    membershipsWritten: 0,
+    accountsWithPrimary: 0,
+    accountsWithoutKnownDepartment: 0,
+  }
+
+  for (const user of users) {
+    const account = accountIdByExternalUserId.get(user.userId)
+    if (!account) continue
+
+    // An explicit, deterministic primary department — approval manager routing anchors on
+    // is_primary, so this must not be an accident of array order.
+    const primaryDepartmentId = resolveDirectoryPrimaryDepartmentId(user)
+    let wrotePrimary = false
+    let wroteAny = false
+
+    for (const departmentId of user.departmentIds) {
+      const directoryDepartmentId = departmentIdByExternalDepartmentId.get(departmentId)
+      if (!directoryDepartmentId) continue
+      const pairKey = `${account.id}:${directoryDepartmentId}`
+      if (seen.has(pairKey)) continue
+      seen.add(pairKey)
+
+      const primary = departmentId === primaryDepartmentId
+      accountIds.push(account.id)
+      departmentIds.push(directoryDepartmentId)
+      isPrimary.push(primary)
+      summary.membershipsWritten += 1
+      wroteAny = true
+      wrotePrimary = wrotePrimary || primary
+    }
+
+    if (!wroteAny) summary.accountsWithoutKnownDepartment += 1
+    else if (wrotePrimary) summary.accountsWithPrimary += 1
+  }
+
+  return { accountIds, departmentIds, isPrimary, summary }
+}
+
+export async function upsertDirectoryAccountDepartments(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  input: {
+    users: Iterable<{ userId: string; departmentIds: string[]; source?: unknown }>
+    /** external_user_id → the account row (only `id` is read). */
+    accountIdMap: Map<string, { id: string }>
+    /** external_department_id → directory_departments.id */
+    departmentIdMap: Map<string, string>
+  },
+): Promise<DirectoryAccountDepartmentWriteSummary> {
+  const rows = buildDirectoryAccountDepartmentRows(input.users, input.accountIdMap, input.departmentIdMap)
+
+  // DT-PERF-01: this is the highest-cardinality write in the sync — one row per
+  // (employee × department), so a 2,000-employee tenant issued thousands of single-row round
+  // trips inside the apply transaction, holding its locks open for the whole walk. One `unnest`
+  // statement writes them all with identical semantics.
+  if (rows.accountIds.length > 0) {
+    await client.query(
+      `INSERT INTO directory_account_departments (
+         directory_account_id, directory_department_id, is_primary, created_at
+       )
+       SELECT account_id, department_id, is_primary, NOW()
+         FROM unnest($1::uuid[], $2::uuid[], $3::boolean[])
+           AS t(account_id, department_id, is_primary)
+       ON CONFLICT (directory_account_id, directory_department_id)
+       DO UPDATE SET is_primary = EXCLUDED.is_primary`,
+      [rows.accountIds, rows.departmentIds, rows.isPrimary],
+    )
+  }
+
+  return rows.summary
+}
+
+/**
+ * DT-HARDEN-02: whether an auto-admitted account can be granted DingTalk login.
+ * A grant needs a stable identity key: corp-scoped accounts key on corpId+openId,
+ * so a corp account WITHOUT an openId cannot be granted (directory 通讯录's
+ * user/get does not return openId — it only appears after a real DingTalk OAuth
+ * bind); non-corp accounts key on unionId and are grantable. Mirrors
+ * `assertDirectoryAccountCanEnableDingTalkGrant` exactly so auto-admission never
+ * requests a grant the assertion would reject (which previously threw AFTER the
+ * users row was inserted, leaving a committed orphan).
+ */
+export function resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(
+  account: { corp_id: string | null; open_id: string | null },
+): boolean {
+  return !normalizeText(account.corp_id) || Boolean(normalizeText(account.open_id))
+}
+
+/** The identity fields the matching cascade below needs from a pulled/upserted account. */
+export type DirectoryIdentityMatchAccount = {
+  corpId: string | null
+  externalKey: string
+  unionId: string | null
+  openId: string | null
+  email: string | null
+  mobile: string | null
+}
+
+/** Just enough of the existing link row to decide the already-linked short-circuit. */
+export type DirectoryIdentityExistingLink = {
+  local_user_id: string | null
+  link_status: string
+}
+
+export type DirectoryIdentityMatchMaps = {
+  externalIdentityMap: Map<string, string>
+  scopedUnionIdentityMap: Map<string, string>
+  scopedOpenIdentityMap: Map<string, string>
+  emailMap: Map<string, string>
+  mobileMap: Map<string, string>
+  ambiguousEmailKeys: Set<string>
+  ambiguousMobileKeys: Set<string>
+}
+
+export type DirectoryIdentityMatchOutcome =
+  | { matched: 'already_linked' }
+  | { matched: 'external_identity'; localUserId: string }
+  | { matched: 'email'; localUserId: string }
+  | { matched: 'mobile'; localUserId: string }
+  | { matched: 'ambiguous' }
+  | { matched: 'none' }
+
+/**
+ * The identity-matching cascade `syncDirectoryIntegration` walks for every pulled DingTalk
+ * user, extracted so `previewDirectorySyncIntegration` can walk the exact same cascade
+ * instead of approximating it. Order matters and mirrors apply: already-linked short-circuit,
+ * then external-identity (union/open id or external_key), then unique email, then unique
+ * mobile, then ambiguous-identifier. `{ matched: 'none' }` is the ONLY outcome under which
+ * apply reaches the auto-admission branch — that is the exact condition preview must gate
+ * `autoAdmissionCandidateCount` behind to avoid over-counting accounts that would actually be
+ * linked (or already are) rather than newly created.
+ */
+export function resolveDirectoryIdentityMatch(
+  account: DirectoryIdentityMatchAccount,
+  existingLink: DirectoryIdentityExistingLink | null | undefined,
+  maps: DirectoryIdentityMatchMaps,
+): DirectoryIdentityMatchOutcome {
+  if (existingLink && existingLink.link_status === 'linked' && existingLink.local_user_id) {
+    return { matched: 'already_linked' }
+  }
+
+  const scopedOpenIdentityKey = buildScopedIdentityKey(account.corpId, account.openId)
+  const scopedUnionIdentityKey = buildScopedIdentityKey(account.corpId, account.unionId)
+  const externalIdentityUserId = maps.externalIdentityMap.get(account.externalKey)
+    || (scopedOpenIdentityKey ? maps.scopedOpenIdentityMap.get(scopedOpenIdentityKey) : undefined)
+    || (scopedUnionIdentityKey ? maps.scopedUnionIdentityMap.get(scopedUnionIdentityKey) : undefined)
+  if (externalIdentityUserId) {
+    return { matched: 'external_identity', localUserId: externalIdentityUserId }
+  }
+
+  const emailKey = normalizeText(account.email).toLowerCase()
+  const mobileKey = normalizeMobileIdentifier(account.mobile)
+  const emailUserId = emailKey ? maps.emailMap.get(emailKey) : undefined
+  const mobileUserId = mobileKey ? maps.mobileMap.get(mobileKey) : undefined
+  const hasAmbiguousIdentifierMatch = (emailKey.length > 0 && maps.ambiguousEmailKeys.has(emailKey))
+    || (mobileKey.length > 0 && maps.ambiguousMobileKeys.has(mobileKey))
+
+  if (emailUserId) return { matched: 'email', localUserId: emailUserId }
+  if (mobileUserId) return { matched: 'mobile', localUserId: mobileUserId }
+  if (hasAmbiguousIdentifierMatch) return { matched: 'ambiguous' }
+  return { matched: 'none' }
+}
+
+/**
+ * DT-OPS-01 — offboarding policy executor.
+ *
+ * `directory_integrations.default_deprovision_policy` and
+ * `directory_accounts.deprovision_policy_override` have been stored since the schema was
+ * created and never enforced. Removing a member from DingTalk marked the shadow account
+ * inactive and dropped it into the admin review queue, but their LOCAL account stayed
+ * active: password login kept working, and `unbind` only cleared the identity.
+ *
+ * Two hazards shape this design:
+ *  1. the column's DB default is already `mark_inactive`, so simply honouring the stored
+ *     value would silently start deactivating users on the very next sync of every
+ *     existing integration;
+ *  2. deactivating the wrong person locks a real employee out.
+ *
+ * So the executor is env-gated (`DIRECTORY_DEPROVISION_ENABLED`, default off). With it
+ * off — the shipped default — nothing is written and the run reports exactly what it
+ * WOULD have done, giving an operator the preview the roadmap asks for before enabling.
+ */
+export type DirectoryDeprovisionPolicy = 'manual_review' | 'disable_grant_only' | 'mark_inactive'
+
+export const DIRECTORY_DEPROVISION_POLICIES: readonly DirectoryDeprovisionPolicy[] = [
+  'manual_review',
+  'disable_grant_only',
+  'mark_inactive',
+]
+
+export function isDirectoryDeprovisionEnabled(): boolean {
+  return ['true', '1', 'yes'].includes(
+    String(process.env.DIRECTORY_DEPROVISION_ENABLED ?? '').trim().toLowerCase(),
+  )
+}
+
+/**
+ * An unrecognised stored value must never be interpreted as "do something destructive".
+ * Anything we do not understand degrades to review-only.
+ */
+export function resolveDirectoryDeprovisionPolicy(
+  integrationDefault: string | null | undefined,
+  accountOverride: string | null | undefined,
+): DirectoryDeprovisionPolicy {
+  const candidate = normalizeText(accountOverride) || normalizeText(integrationDefault)
+  return (DIRECTORY_DEPROVISION_POLICIES as readonly string[]).includes(candidate)
+    ? (candidate as DirectoryDeprovisionPolicy)
+    : 'manual_review'
+}
+
+export type DirectoryDeprovisionOutcome = {
+  applied: boolean
+  /** Number of PEOPLE, not accounts — a user reached through two departed accounts counts once. */
+  candidateCount: number
+  manualReviewCount: number
+  grantsDisabledCount: number
+  usersDeactivatedCount: number
+  /** Set when the circuit breaker refused to act; `applied` is forced false. */
+  abortedReason: DirectoryDeprovisionAbortReason | null
+  affected: Array<{
+    directoryAccountId: string
+    localUserId: string
+    policy: DirectoryDeprovisionPolicy
+  }>
+}
+
+type DeprovisionCandidateRow = {
+  directory_account_id: string
+  local_user_id: string
+  deprovision_policy_override: string | null
+}
+
+/**
+ * Least-destructive wins. A user reached through several departed accounts is deprovisioned
+ * by the *safest* policy any of them names: if one binding says review-only, a human looks.
+ */
+const DEPROVISION_POLICY_SEVERITY: Record<DirectoryDeprovisionPolicy, number> = {
+  manual_review: 0,
+  disable_grant_only: 1,
+  mark_inactive: 2,
+}
+
+/**
+ * DT-OPS-01 circuit breaker. "Absent from the fetch" is NOT the same as "departed": a blank
+ * `name` is silently dropped by the client, a missing `list` yields zero users with no error,
+ * `contain_access_limit:false` hides restricted members (this repo already ships
+ * `sampleRootDepartmentDiagnostics` precisely because that happens), and a narrowed
+ * `rootDepartmentId` shrinks the whole tree. Before this executor existed,
+ * `directory_accounts.is_active` was never load-bearing — now it decides whether a person
+ * can log in, and there is no reactivation path in the product. So a suspicious fetch
+ * refuses to deprovision anyone rather than trusting a flag that was never built for this.
+ */
+export const DIRECTORY_DEPROVISION_MAX_BATCH = (() => {
+  const raw = Number(process.env.DIRECTORY_DEPROVISION_MAX_BATCH)
+  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 25
+})()
+
+export type DirectoryDeprovisionAbortReason = 'empty_directory_fetch' | 'batch_exceeds_max'
+
+export function evaluateDirectoryDeprovisionCircuitBreaker(options: {
+  syncedAccountCount: number
+  candidateCount: number
+  maxBatch?: number
+}): DirectoryDeprovisionAbortReason | null {
+  // Every account "vanished" — that is a broken fetch, not an evacuated company.
+  if (options.syncedAccountCount === 0) return 'empty_directory_fetch'
+  if (options.candidateCount > (options.maxBatch ?? DIRECTORY_DEPROVISION_MAX_BATCH)) return 'batch_exceeds_max'
+  return null
+}
+
+export async function applyDirectoryDeprovisionPolicies(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  options: {
+    integrationId: string
+    /** Ids of the accounts this run *transitioned* to inactive. NOT the lifetime backlog. */
+    deactivatedAccountIds: string[]
+    /** How many accounts the DingTalk fetch actually returned — the circuit breaker's input. */
+    syncedAccountCount: number
+    integrationDefaultPolicy: string
+    enabled: boolean
+    maxBatch?: number
+  },
+): Promise<DirectoryDeprovisionOutcome> {
+  const outcome: DirectoryDeprovisionOutcome = {
+    applied: options.enabled,
+    candidateCount: 0,
+    manualReviewCount: 0,
+    grantsDisabledCount: 0,
+    usersDeactivatedCount: 0,
+    abortedReason: null,
+    affected: [],
+  }
+
+  if (options.deactivatedAccountIds.length === 0) return outcome
+
+  // Accounts this run just deactivated, whose linked local user has NO other active linked
+  // directory account ANYWHERE.
+  //
+  // The sibling guard is deliberately NOT scoped by integration_id, and that is the whole
+  // point: `directory_account_links` is unique on directory_account_id only — local_user_id
+  // carries a plain index — so N accounts map to 1 user. A rehire (the old account departs,
+  // the new one links via the stable unionId) or a second integration would otherwise
+  // deactivate a person who is actively employed, with no way to undo it.
+  const candidates = await client.query(
+    `SELECT a.id::text AS directory_account_id,
+            l.local_user_id,
+            a.deprovision_policy_override
+       FROM directory_accounts a
+       JOIN directory_account_links l
+         ON l.directory_account_id = a.id
+        AND l.link_status = 'linked'
+        AND l.local_user_id IS NOT NULL
+      WHERE a.id = ANY($1::uuid[])
+        AND NOT EXISTS (
+          SELECT 1
+            FROM directory_account_links sibling_link
+            JOIN directory_accounts sibling ON sibling.id = sibling_link.directory_account_id
+           WHERE sibling_link.local_user_id = l.local_user_id
+             AND sibling_link.link_status = 'linked'
+             AND sibling.is_active = true
+        )`,
+    [options.deactivatedAccountIds],
+  )
+
+  // One decision per PERSON, not per account: a user reached through two departed accounts
+  // must not be audited twice, nor deactivated under the harsher of two policies.
+  const byUser = new Map<string, { directoryAccountId: string; policy: DirectoryDeprovisionPolicy }>()
+  for (const row of candidates.rows as DeprovisionCandidateRow[]) {
+    const policy = resolveDirectoryDeprovisionPolicy(options.integrationDefaultPolicy, row.deprovision_policy_override)
+    const existing = byUser.get(row.local_user_id)
+    if (!existing || DEPROVISION_POLICY_SEVERITY[policy] < DEPROVISION_POLICY_SEVERITY[existing.policy]) {
+      byUser.set(row.local_user_id, { directoryAccountId: row.directory_account_id, policy })
+    }
+  }
+
+  outcome.candidateCount = byUser.size
+
+  const abortReason = evaluateDirectoryDeprovisionCircuitBreaker({
+    syncedAccountCount: options.syncedAccountCount,
+    candidateCount: outcome.candidateCount,
+    maxBatch: options.maxBatch,
+  })
+  if (abortReason) {
+    outcome.abortedReason = abortReason
+    outcome.applied = false
+    logger.error(
+      `Directory deprovision ABORTED for ${options.integrationId}: ${abortReason} `
+      + `(${outcome.candidateCount} candidate(s), ${options.syncedAccountCount} account(s) fetched). `
+      + 'Nothing was deprovisioned. Verify the DingTalk fetch (contact-scope, root department, access-limited members) before retrying.',
+    )
+    return outcome
+  }
+
+  for (const [localUserId, { directoryAccountId, policy }] of byUser) {
+    if (policy === 'manual_review') {
+      outcome.manualReviewCount += 1
+      continue
+    }
+
+    outcome.affected.push({ directoryAccountId, localUserId, policy })
+
+    outcome.grantsDisabledCount += 1
+    if (options.enabled) {
+      await client.query(
+        `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+         VALUES ($1, $2, FALSE, $3, NOW(), NOW())
+         ON CONFLICT (provider, local_user_id)
+         DO UPDATE SET enabled = FALSE, updated_at = NOW()`,
+        [DEFAULT_PROVIDER, localUserId, 'system:directory-deprovision'],
+      )
+    }
+
+    if (policy === 'mark_inactive') {
+      outcome.usersDeactivatedCount += 1
+      if (options.enabled) {
+        await client.query(
+          `UPDATE users SET is_active = FALSE, updated_at = NOW() WHERE id = $1::text`,
+          [localUserId],
+        )
+      }
+    }
+  }
+
+  if (!options.enabled && outcome.candidateCount > 0) {
+    logger.info(
+      `Directory deprovision preview for ${options.integrationId}: ${outcome.candidateCount} person(s) — `
+      + `${outcome.grantsDisabledCount} grant(s) and ${outcome.usersDeactivatedCount} local user(s) would be disabled. `
+      + `Affected: ${outcome.affected.map((a) => a.localUserId).join(', ') || '(none)'}. `
+      + 'Set DIRECTORY_DEPROVISION_ENABLED=true to apply.',
+    )
+  }
+
+  return outcome
 }
 
 function normalizeDirectorySyncAuditUserId(adminUserId: string): string | null {
@@ -1986,6 +2526,18 @@ function buildDepartmentPathMap(departments: Map<string, DingTalkDepartment>): M
   return cache
 }
 
+async function readIntegrationNameForAlert(integrationId: string): Promise<string> {
+  try {
+    const result = await query<{ name: string }>(
+      `SELECT name FROM directory_integrations WHERE id = $1`,
+      [integrationId],
+    )
+    return result.rows[0]?.name || integrationId
+  } catch {
+    return integrationId
+  }
+}
+
 async function markSyncFailure(integrationId: string, runId: string, message: string): Promise<void> {
   await query(
     `UPDATE directory_integrations
@@ -2013,6 +2565,12 @@ async function markSyncFailure(integrationId: string, runId: string, message: st
   } catch (error) {
     logger.warn(`Failed to persist directory alert: ${readErrorMessage(error, 'unknown error')}`)
   }
+
+  // DT-OPS-03: the alert row is useless if nobody opens the table. Deliver it over the
+  // channel the product already owns. Best-effort by construction — a failed sync must
+  // never be made worse by a failed webhook.
+  const integrationName = await readIntegrationNameForAlert(integrationId)
+  await deliverDirectorySyncFailureAlert({ integrationId, integrationName, runId, message })
 }
 
 export function buildUniqueLocalUserMatchMap(
@@ -2128,6 +2686,12 @@ export async function syncDirectoryIntegration(
   integrationId: string,
   triggeredBy: string,
   triggerSource: 'manual' | 'scheduler' = 'manual',
+  /**
+   * DT-OPS-02: fired the moment the run row exists, before the DingTalk pull begins. A
+   * caller that wants to answer 202 needs the runId, and only the runId, up front — it
+   * cannot wait for a large-tenant walk to finish inside an HTTP request.
+   */
+  hooks: { onRunStarted?: (runId: string) => void } = {},
 ): Promise<{
   integration: DirectoryIntegrationSummary
   run: DirectorySyncRunSummary
@@ -2138,6 +2702,7 @@ export async function syncDirectoryIntegration(
   if (!integration) throw new Error('Directory integration not found')
 
   const config = parseIntegrationConfig(integration)
+  let deprovisionOutcome: DirectoryDeprovisionOutcome | null = null
   const runResult = await query<DirectoryRunRow>(
     `INSERT INTO directory_sync_runs (
        integration_id, status, started_at, stats, meta, triggered_by, trigger_source, created_at, updated_at
@@ -2147,6 +2712,7 @@ export async function syncDirectoryIntegration(
     [integrationId, triggeredBy, triggerSource],
   )
   const runId = runResult.rows[0].id
+  hooks.onRunStarted?.(runId)
 
   try {
     const departments = await fetchAllDepartments(config, integration.name)
@@ -2276,12 +2842,18 @@ export async function syncDirectoryIntegration(
          WHERE integration_id = $1 AND last_seen_at < $2`,
         [integrationId, syncTimestamp],
       )
-      await client.query(
+      // DT-OPS-01: `AND is_active = true` makes this a TRANSITION, not a re-stamp of the
+      // whole backlog. Without it the deprovision executor re-processed every account ever
+      // deactivated on every sync — audit spam, and it would stomp a reactivation.
+      // RETURNING gives the executor exactly the accounts that departed in THIS run.
+      const deactivatedAccountsResult = await client.query(
         `UPDATE directory_accounts
          SET is_active = false, updated_at = NOW()
-         WHERE integration_id = $1 AND last_seen_at < $2`,
+         WHERE integration_id = $1 AND last_seen_at < $2 AND is_active = true
+         RETURNING id::text AS id`,
         [integrationId, syncTimestamp],
       )
+      const deactivatedAccountIds = (deactivatedAccountsResult.rows as Array<{ id: string }>).map((row) => row.id)
 
       const [departmentRows, accountRows] = await Promise.all([
         client.query(
@@ -2316,23 +2888,11 @@ export async function syncDirectoryIntegration(
         [integrationId],
       )
 
-      for (const user of users.values()) {
-        const account = accountIdMap.get(user.userId)
-        if (!account) continue
-        for (const departmentId of user.departmentIds) {
-          const directoryDepartmentId = departmentIdMap.get(departmentId)
-          if (!directoryDepartmentId) continue
-          await client.query(
-            `INSERT INTO directory_account_departments (
-               directory_account_id, directory_department_id, is_primary, created_at
-             )
-             VALUES ($1, $2, $3, NOW())
-             ON CONFLICT (directory_account_id, directory_department_id)
-             DO UPDATE SET is_primary = EXCLUDED.is_primary`,
-            [account.id, directoryDepartmentId, departmentId === user.departmentIds[0]],
-          )
-        }
-      }
+      await upsertDirectoryAccountDepartments(client, {
+        users: users.values(),
+        accountIdMap,
+        departmentIdMap,
+      })
 
       const {
         externalIdentityMap,
@@ -2362,6 +2922,7 @@ export async function syncDirectoryIntegration(
       let autoAdmissionCandidateCount = 0
       let autoAdmittedCount = 0
       let autoAdmittedNoEmailCount = 0
+      let autoAdmittedWithoutGrantCount = 0
       let autoAdmissionSkippedMissingEmailCount = 0
       let autoAdmissionExcludedCount = 0
       let autoAdmissionFailedCount = 0
@@ -2373,146 +2934,156 @@ export async function syncDirectoryIntegration(
         let linkStatus = existing?.link_status ?? 'pending'
         let matchStrategy = existing?.match_strategy ?? null
 
-        if (!(existing && existing.link_status === 'linked' && existing.local_user_id)) {
-          const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
-          const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
-          const externalIdentityUserId = externalIdentityMap.get(account.external_key)
-            || (scopedOpenIdentityKey ? scopedOpenIdentityMap.get(scopedOpenIdentityKey) : undefined)
-            || (scopedUnionIdentityKey ? scopedUnionIdentityMap.get(scopedUnionIdentityKey) : undefined)
-          if (externalIdentityUserId) {
-            localUserId = externalIdentityUserId
+        const identityMatch = resolveDirectoryIdentityMatch(
+          {
+            corpId: account.corp_id,
+            externalKey: account.external_key,
+            unionId: account.union_id,
+            openId: account.open_id,
+            email: account.email,
+            mobile: account.mobile,
+          },
+          existing,
+          { externalIdentityMap, scopedUnionIdentityMap, scopedOpenIdentityMap, emailMap, mobileMap, ambiguousEmailKeys, ambiguousMobileKeys },
+        )
+
+        if (identityMatch.matched !== 'already_linked') {
+          if (identityMatch.matched === 'external_identity') {
+            localUserId = identityMatch.localUserId
             linkStatus = 'linked'
             matchStrategy = 'external_identity'
+          } else if (identityMatch.matched === 'email') {
+            localUserId = identityMatch.localUserId
+            linkStatus = 'pending'
+            matchStrategy = 'email'
+          } else if (identityMatch.matched === 'mobile') {
+            localUserId = identityMatch.localUserId
+            linkStatus = 'pending'
+            matchStrategy = 'mobile'
+          } else if (identityMatch.matched === 'ambiguous') {
+            localUserId = null
+            linkStatus = 'unmatched'
+            matchStrategy = 'none'
           } else {
-            const emailKey = normalizeText(account.email).toLowerCase()
-            const mobileKey = normalizeMobileIdentifier(account.mobile)
-            const emailUserId = emailKey ? emailMap.get(emailKey) : undefined
-            const mobileUserId = mobileKey ? mobileMap.get(mobileKey) : undefined
-            const hasAmbiguousIdentifierMatch = (emailKey.length > 0 && ambiguousEmailKeys.has(emailKey))
-              || (mobileKey.length > 0 && ambiguousMobileKeys.has(mobileKey))
-            if (emailUserId) {
-              localUserId = emailUserId
-              linkStatus = 'pending'
-              matchStrategy = 'email'
-            } else if (mobileUserId) {
-              localUserId = mobileUserId
-              linkStatus = 'pending'
-              matchStrategy = 'mobile'
-            } else if (hasAmbiguousIdentifierMatch) {
-              localUserId = null
-              linkStatus = 'unmatched'
-              matchStrategy = 'none'
-            } else {
-              const autoAdmission = evaluateDirectoryAutoAdmissionEligibility({
-                admissionMode: config.admissionMode,
-                admissionDepartmentIds: config.admissionDepartmentIds,
-                excludeDepartmentIds: config.excludeDepartmentIds,
-                userDepartmentIds: directoryUser?.departmentIds ?? [],
-                departments,
-                email: account.email,
-              })
-              if (autoAdmission.inScope) autoAdmissionCandidateCount += 1
-              if (autoAdmission.excluded) autoAdmissionExcludedCount += 1
+            const autoAdmission = evaluateDirectoryAutoAdmissionEligibility({
+              admissionMode: config.admissionMode,
+              admissionDepartmentIds: config.admissionDepartmentIds,
+              excludeDepartmentIds: config.excludeDepartmentIds,
+              userDepartmentIds: directoryUser?.departmentIds ?? [],
+              departments,
+              email: account.email,
+            })
+            if (autoAdmission.inScope) autoAdmissionCandidateCount += 1
+            if (autoAdmission.excluded) autoAdmissionExcludedCount += 1
 
-              if (autoAdmission.inScope && directoryUser) {
-                try {
-                  const cleanName = sanitizeDirectoryAdmissionName(account.name)
-                  const cleanEmail = account.email ? sanitizeDirectoryAdmissionEmail(account.email) : null
-                  const generatedUsername = cleanEmail
-                    ? null
-                    : buildDirectoryAutoAdmissionUsername({
-                        id: account.id,
-                        external_user_id: account.external_user_id,
-                        union_id: account.union_id,
-                        open_id: account.open_id,
-                      })
-                  const cleanMobile = sanitizeDirectoryAdmissionMobile(account.mobile)
-                  const generatedPassword = generateDirectoryAdmissionTemporaryPassword()
-                  const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
-                  const created = await createDirectoryAdmittedUserInTransaction(client, {
-                    account: {
+            if (autoAdmission.inScope && directoryUser) {
+              try {
+                const cleanName = sanitizeDirectoryAdmissionName(account.name)
+                const cleanEmail = account.email ? sanitizeDirectoryAdmissionEmail(account.email) : null
+                const generatedUsername = cleanEmail
+                  ? null
+                  : buildDirectoryAutoAdmissionUsername({
                       id: account.id,
-                      integration_id: integrationId,
-                      provider: DEFAULT_PROVIDER,
-                      corp_id: account.corp_id,
                       external_user_id: account.external_user_id,
                       union_id: account.union_id,
                       open_id: account.open_id,
-                      external_key: account.external_key,
-                      name: account.name,
-                      email: account.email,
-                      mobile: account.mobile,
-                    },
-                    adminUserId: triggeredBy,
+                    })
+                const cleanMobile = sanitizeDirectoryAdmissionMobile(account.mobile)
+                const generatedPassword = generateDirectoryAdmissionTemporaryPassword()
+                const passwordHash = await bcrypt.hash(generatedPassword, getBcryptSaltRounds())
+                // DT-HARDEN-02: mirror assertDirectoryAccountCanEnableDingTalkGrant's
+                // condition instead of hardcoding grant=true. A corp-scoped account
+                // (corp_id set) without an openId cannot use DingTalk login and would
+                // make the downstream bind throw — previously that threw AFTER the
+                // users row was inserted (swallowed catch → committed orphan). Now such
+                // an account is admitted with the grant OFF (directory binding still
+                // happens), and the assertion is enforced before INSERT (see
+                // createDirectoryAdmittedUserInTransaction) so no orphan can be created.
+                const canGrantDingTalkLogin = resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(account)
+                const created = await createDirectoryAdmittedUserInTransaction(client, {
+                  account: {
+                    id: account.id,
+                    integration_id: integrationId,
+                    provider: DEFAULT_PROVIDER,
+                    corp_id: account.corp_id,
+                    external_user_id: account.external_user_id,
+                    union_id: account.union_id,
+                    open_id: account.open_id,
+                    external_key: account.external_key,
+                    name: account.name,
+                    email: account.email,
+                    mobile: account.mobile,
+                  },
+                  adminUserId: triggeredBy,
+                  name: cleanName,
+                  email: cleanEmail,
+                  username: generatedUsername,
+                  mobile: cleanMobile,
+                  passwordHash,
+                  mustChangePassword: true,
+                  enableDingTalkGrant: canGrantDingTalkLogin,
+                })
+                let inviteToken: string | null = null
+                if (cleanEmail) {
+                  inviteToken = issueInviteToken({
+                    userId: created.userId,
+                    email: cleanEmail,
+                    presetId: null,
+                  })
+                  autoAdmissionInvites.push({
+                    userId: created.userId,
+                    email: cleanEmail,
+                    inviteToken,
+                  })
+                } else {
+                  autoAdmittedNoEmailCount += 1
+                  autoAdmissionOnboardingPackets.push({
+                    userId: created.userId,
                     name: cleanName,
                     email: cleanEmail,
                     username: generatedUsername,
                     mobile: cleanMobile,
-                    passwordHash,
-                    mustChangePassword: true,
-                    enableDingTalkGrant: true,
-                  })
-                  let inviteToken: string | null = null
-                  if (cleanEmail) {
-                    inviteToken = issueInviteToken({
-                      userId: created.userId,
+                    temporaryPassword: generatedPassword,
+                    onboarding: buildOnboardingPacket({
                       email: cleanEmail,
-                      presetId: null,
-                    })
-                    autoAdmissionInvites.push({
-                      userId: created.userId,
-                      email: cleanEmail,
-                      inviteToken,
-                    })
-                  } else {
-                    autoAdmittedNoEmailCount += 1
-                    autoAdmissionOnboardingPackets.push({
-                      userId: created.userId,
-                      name: cleanName,
-                      email: cleanEmail,
-                      username: generatedUsername,
-                      mobile: cleanMobile,
-                      temporaryPassword: generatedPassword,
-                      onboarding: buildOnboardingPacket({
+                      accountLabel: resolveDirectoryAdmissionAccountLabel({
                         email: cleanEmail,
-                        accountLabel: resolveDirectoryAdmissionAccountLabel({
-                          email: cleanEmail,
-                          username: generatedUsername,
-                          mobile: cleanMobile,
-                          userId: created.userId,
-                        }),
-                        temporaryPassword: generatedPassword,
-                        preset: null,
-                        inviteToken,
+                        username: generatedUsername,
+                        mobile: cleanMobile,
+                        userId: created.userId,
                       }),
-                    })
-                  }
-                  localUserId = created.userId
-                  linkStatus = 'linked'
-                  matchStrategy = 'auto_admit'
-                  autoAdmittedCount += 1
-                  if (cleanEmail) emailMap.set(cleanEmail.toLowerCase(), created.userId)
-                  if (cleanMobile) mobileMap.set(cleanMobile, created.userId)
-                  if (cleanEmail) ambiguousEmailKeys.delete(cleanEmail.toLowerCase())
-                  if (cleanMobile) ambiguousMobileKeys.delete(cleanMobile)
-                  externalIdentityMap.set(account.external_key, created.userId)
-                  const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
-                  if (scopedOpenIdentityKey) scopedOpenIdentityMap.set(scopedOpenIdentityKey, created.userId)
-                  const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
-                  if (scopedUnionIdentityKey) scopedUnionIdentityMap.set(scopedUnionIdentityKey, created.userId)
-                } catch (error) {
-                  autoAdmissionFailedCount += 1
-                  logger.warn(`Failed to auto-admit DingTalk directory account ${account.id}: ${readErrorMessage(error, 'unknown error')}`)
-                  localUserId = null
-                  linkStatus = 'unmatched'
-                  matchStrategy = 'none'
+                      temporaryPassword: generatedPassword,
+                      preset: null,
+                      inviteToken,
+                    }),
+                  })
                 }
-              } else {
-                if (autoAdmission.missingEmail) autoAdmissionSkippedMissingEmailCount += 1
+                localUserId = created.userId
+                linkStatus = 'linked'
+                matchStrategy = 'auto_admit'
+                autoAdmittedCount += 1
+                if (!canGrantDingTalkLogin) autoAdmittedWithoutGrantCount += 1
+                if (cleanEmail) emailMap.set(cleanEmail.toLowerCase(), created.userId)
+                if (cleanMobile) mobileMap.set(cleanMobile, created.userId)
+                if (cleanEmail) ambiguousEmailKeys.delete(cleanEmail.toLowerCase())
+                if (cleanMobile) ambiguousMobileKeys.delete(cleanMobile)
+                externalIdentityMap.set(account.external_key, created.userId)
+                const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
+                if (scopedOpenIdentityKey) scopedOpenIdentityMap.set(scopedOpenIdentityKey, created.userId)
+                const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
+                if (scopedUnionIdentityKey) scopedUnionIdentityMap.set(scopedUnionIdentityKey, created.userId)
+              } catch (error) {
+                autoAdmissionFailedCount += 1
+                logger.warn(`Failed to auto-admit DingTalk directory account ${account.id}: ${readErrorMessage(error, 'unknown error')}`)
                 localUserId = null
                 linkStatus = 'unmatched'
                 matchStrategy = 'none'
               }
+            } else {
+              if (autoAdmission.missingEmail) autoAdmissionSkippedMissingEmailCount += 1
+              localUserId = null
+              linkStatus = 'unmatched'
+              matchStrategy = 'none'
             }
           }
         }
@@ -2566,15 +3137,40 @@ export async function syncDirectoryIntegration(
         if (normalizedUserId) governedUserIds.add(normalizedUserId)
       }
 
+      // DT-OPS-01: run after the link loop so the linked/unmatched state is final.
+      // Default-off: this only counts what it WOULD do unless explicitly enabled.
+      deprovisionOutcome = await applyDirectoryDeprovisionPolicies(client, {
+        integrationId,
+        deactivatedAccountIds,
+        // The circuit breaker's input: how many accounts DingTalk actually returned. Zero
+        // means the fetch is broken, not that the company evacuated.
+        syncedAccountCount: users.size,
+        integrationDefaultPolicy: integration.default_deprovision_policy,
+        enabled: isDirectoryDeprovisionEnabled(),
+      })
+
       const stats = {
         departmentsSynced: departments.size,
         accountsSynced: users.size,
+        deprovisionApplied: deprovisionOutcome.applied,
+        deprovisionCandidateCount: deprovisionOutcome.candidateCount,
+        deprovisionManualReviewCount: deprovisionOutcome.manualReviewCount,
+        deprovisionGrantsDisabledCount: deprovisionOutcome.grantsDisabledCount,
+        deprovisionUsersDeactivatedCount: deprovisionOutcome.usersDeactivatedCount,
+        deprovisionAbortedReason: deprovisionOutcome.abortedReason,
+        // Identities, not just a number: an operator deciding whether to flip
+        // DIRECTORY_DEPROVISION_ENABLED needs to see WHO would lose access, and there is no
+        // reactivation path if they guess wrong. Capped so a pathological run cannot bloat
+        // the stats JSONB.
+        deprovisionAffected: deprovisionOutcome.affected.slice(0, 100),
+        deprovisionAffectedTruncated: deprovisionOutcome.affected.length > 100,
         linkedCount,
         pendingCount,
         unmatchedCount,
         autoAdmissionCandidateCount,
         autoAdmittedCount,
         autoAdmittedNoEmailCount,
+        autoAdmittedWithoutGrantCount,
         autoAdmissionSkippedMissingEmailCount,
         autoAdmissionExcludedCount,
         autoAdmissionFailedCount,
@@ -2619,6 +3215,45 @@ export async function syncDirectoryIntegration(
       })
     }
 
+    // DT-OPS-01: audit offboarding AFTER the transaction commits (mirrors the invite
+    // ledger below) and only for effects that actually happened. A revoked grant or a
+    // deactivated user must leave a trail — this is the access-closure record.
+    if (deprovisionOutcome?.applied && deprovisionOutcome.affected.length > 0) {
+      // Imported lazily on purpose. The audit stack binds a repository to the shared pg
+      // pool when it loads, and directory-sync is imported by unit suites that mock
+      // `db/pg` down to { query, transaction } — an eager import made them fail at module
+      // load. That is a module-graph coupling, not a behavioural one, and the lazy form is
+      // also the honest one: the audit stack is only needed once an offboarding took effect.
+      const { auditLog } = await import('../audit/audit')
+
+      for (const affected of deprovisionOutcome.affected) {
+        // No try/catch: `auditLog` catches internally and never rejects (audit/audit.ts:22-40),
+        // so a wrapper here would be dead code pretending to be a safety net. A lost audit
+        // write surfaces as that module's own `warn`, which is the honest state of affairs.
+        // The durable record of *who* triggered this lives in `meta.triggeredBy`, because
+        // `audit.user_id` is numeric and our `users.id` is TEXT — an upstream limitation,
+        // recorded here rather than papered over.
+        await auditLog({
+          actorId: triggeredBy,
+          actorType: triggeredBy.startsWith('system:') ? 'system' : 'user',
+          action: 'deprovision',
+          resourceType: 'directory-account-link',
+          resourceId: affected.directoryAccountId,
+          meta: {
+            integrationId,
+            directoryAccountId: affected.directoryAccountId,
+            localUserId: affected.localUserId,
+            policy: affected.policy,
+            grantDisabled: true,
+            userDeactivated: affected.policy === 'mark_inactive',
+            triggeredBy,
+          },
+        })
+        // A deactivated or grant-revoked user must not keep cached permissions.
+        invalidateUserPerms(affected.localUserId)
+      }
+    }
+
     for (const userId of governedUserIds) {
       invalidateUserPerms(userId)
     }
@@ -2646,6 +3281,174 @@ export async function syncDirectoryIntegration(
     const message = readErrorMessage(error, 'Directory sync failed')
     await markSyncFailure(integrationId, runId, message)
     throw error
+  }
+}
+
+/**
+ * DT-OPS-02 — what a sync WOULD do, without doing it.
+ *
+ * Applying a sync is not a reversible act: `auto_for_scoped_departments` creates local
+ * users on the spot, and the `last_seen_at` sweep deactivates directory accounts. There
+ * was no way to look before leaping — the roadmap's "auto-admission can be safely reviewed
+ * before apply".
+ *
+ * This pulls the DingTalk directory exactly as the sync does (so it consumes the same API
+ * quota, and its numbers are the real ones) and then compares against the database
+ * WITHOUT WRITING ANYTHING: no run row, no lease, no upsert, no user. `autoAdmissionCandidateCount`
+ * walks the exact same `resolveDirectoryIdentityMatch` cascade apply uses (already-linked,
+ * external-identity, unique-email, unique-mobile, ambiguous, THEN eligibility) instead of the
+ * eligibility check alone, so preview no longer counts accounts that are already linked or
+ * would merely be linked (not created).
+ *
+ * Residual known gap (fail-safe, over-counts only): apply mutates its match maps as it
+ * auto-admits users within a single run, so two brand-new in-scope pulled users who share an
+ * email/mobile count as 1 apply-created account but 2 preview candidates. Preview does not
+ * simulate creation order. This does not affect the already-linked / matched / out-of-scope
+ * cases this function was built to fix.
+ */
+export type DirectorySyncPreview = {
+  integrationId: string
+  integrationName: string
+  departmentsSeen: number
+  accountsSeen: number
+  wouldCreateAccounts: number
+  wouldDeactivateAccounts: number
+  /** Deactivations that still hold a linked local user — the offboardings (see DT-OPS-01). */
+  wouldDeactivateLinkedAccounts: number
+  autoAdmissionMode: DirectoryAdmissionMode
+  autoAdmissionCandidateCount: number
+  autoAdmissionSkippedMissingEmailCount: number
+  autoAdmissionExcludedCount: number
+  sampledNewAccounts: Array<{ externalUserId: string; name: string }>
+  sampledDeactivations: Array<{ externalUserId: string; name: string; linked: boolean }>
+}
+
+type ExistingAccountPreviewRow = {
+  external_user_id: string
+  name: string
+  is_active: boolean
+  linked: boolean
+}
+
+export async function previewDirectorySyncIntegration(integrationId: string): Promise<DirectorySyncPreview> {
+  const integration = await getIntegrationRow(integrationId)
+  if (!integration) throw new Error('Directory integration not found')
+
+  const config = parseIntegrationConfig(integration)
+  const departments = await fetchAllDepartments(config, integration.name)
+  const users = await fetchAllUsers(config, departments)
+
+  const existingResult = await query<ExistingAccountPreviewRow>(
+    `SELECT a.external_user_id,
+            a.name,
+            a.is_active,
+            (l.local_user_id IS NOT NULL AND l.link_status = 'linked') AS linked
+       FROM directory_accounts a
+       LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
+      WHERE a.integration_id = $1`,
+    [integrationId],
+  )
+  const existingByExternalId = new Map(existingResult.rows.map((row) => [row.external_user_id, row]))
+
+  // Build the same match maps (external-identity / unique-email / unique-mobile / ambiguous)
+  // `syncDirectoryIntegration` builds, from synthetic account rows shaped exactly like the
+  // ones apply upserts (external_key = unionId||openId||userId, corp_id = integration.corp_id
+  // — see apply lines ~2236/2262). `loadMatchMaps` only reads external_key/union_id/open_id/
+  // email/mobile off each row, so the synthetic `id` is never consulted.
+  const pulledAccountsForMatching = Array.from(users.values()).map((user) => ({
+    id: user.userId,
+    corp_id: integration.corp_id,
+    external_user_id: user.userId,
+    union_id: normalizeOptionalText(user.unionId),
+    open_id: normalizeOptionalText(user.openId),
+    external_key: normalizeText(user.unionId || user.openId || user.userId),
+    name: user.name,
+    email: normalizeOptionalText(user.email),
+    mobile: normalizeOptionalText(user.mobile),
+  }))
+  const identityMatchMaps = await loadMatchMaps(pulledAccountsForMatching)
+
+  const sampledNewAccounts: DirectorySyncPreview['sampledNewAccounts'] = []
+  let wouldCreateAccounts = 0
+  let autoAdmissionCandidateCount = 0
+  let autoAdmissionSkippedMissingEmailCount = 0
+  let autoAdmissionExcludedCount = 0
+
+  for (const account of pulledAccountsForMatching) {
+    const user = users.get(account.external_user_id)
+    if (!user) continue
+
+    if (!existingByExternalId.has(user.userId)) {
+      wouldCreateAccounts += 1
+      if (sampledNewAccounts.length < 10) sampledNewAccounts.push({ externalUserId: user.userId, name: user.name })
+    }
+
+    // Walk the exact cascade apply walks: only an account apply would reach the
+    // auto-admission branch for ('none' matched — not already-linked, not identity/email/
+    // mobile/ambiguous-matched) can possibly be an auto-admission candidate.
+    const existingLink = existingByExternalId.get(user.userId)
+    const identityMatch = resolveDirectoryIdentityMatch(
+      {
+        corpId: account.corp_id,
+        externalKey: account.external_key,
+        unionId: account.union_id,
+        openId: account.open_id,
+        email: account.email,
+        mobile: account.mobile,
+      },
+      existingLink?.linked ? { local_user_id: 'linked', link_status: 'linked' } : null,
+      identityMatchMaps,
+    )
+    if (identityMatch.matched !== 'none') continue
+
+    const eligibility = evaluateDirectoryAutoAdmissionEligibility({
+      admissionMode: config.admissionMode,
+      admissionDepartmentIds: config.admissionDepartmentIds,
+      excludeDepartmentIds: config.excludeDepartmentIds,
+      userDepartmentIds: user.departmentIds,
+      departments,
+      email: account.email,
+    })
+    if (eligibility.excluded) autoAdmissionExcludedCount += 1
+    // Mirror apply exactly: missingEmail only means "skipped" in the branch apply does NOT
+    // create a user (apply creates a user for an in-scope account regardless of missing
+    // email — it falls back to a generated username). Counting it whenever `missingEmail`
+    // is true (independent of inScope) would over-count vs. apply here too.
+    if (eligibility.inScope) {
+      autoAdmissionCandidateCount += 1
+    } else if (eligibility.missingEmail) {
+      autoAdmissionSkippedMissingEmailCount += 1
+    }
+  }
+
+  const sampledDeactivations: DirectorySyncPreview['sampledDeactivations'] = []
+  let wouldDeactivateAccounts = 0
+  let wouldDeactivateLinkedAccounts = 0
+
+  for (const row of existingResult.rows) {
+    // Already inactive rows are not a *change*; only a live account vanishing is.
+    if (!row.is_active || users.has(row.external_user_id)) continue
+    wouldDeactivateAccounts += 1
+    if (row.linked) wouldDeactivateLinkedAccounts += 1
+    if (sampledDeactivations.length < 10) {
+      sampledDeactivations.push({ externalUserId: row.external_user_id, name: row.name, linked: Boolean(row.linked) })
+    }
+  }
+
+  return {
+    integrationId,
+    integrationName: integration.name,
+    departmentsSeen: departments.size,
+    accountsSeen: users.size,
+    wouldCreateAccounts,
+    wouldDeactivateAccounts,
+    wouldDeactivateLinkedAccounts,
+    autoAdmissionMode: config.admissionMode,
+    autoAdmissionCandidateCount,
+    autoAdmissionSkippedMissingEmailCount,
+    autoAdmissionExcludedCount,
+    sampledNewAccounts,
+    sampledDeactivations,
   }
 }
 
@@ -3079,24 +3882,46 @@ export async function getDirectoryReviewItem(
   return summarizeReviewItem(row, recommendationsByAccount.get(row.directory_account_id) ?? null)
 }
 
+/**
+ * DT-HARDEN-04: batch bind/unbind commit one account per transaction. A fail-fast loop
+ * threw on the first bad item, so the caller never learned which items had already
+ * COMMITTED — and the route, which wrote its audit entries only after the whole batch
+ * returned, silently dropped the audit trail for every one of them. Compliance gap.
+ *
+ * Each item is now isolated: a failure is a per-item outcome, never a lost success.
+ * Partial failure is a normal batch result, so callers can audit every success and
+ * report exactly which items failed and why.
+ */
+export type DirectoryAccountBatchOutcome = {
+  succeeded: DirectoryAccountMutationResult[]
+  failed: Array<{ accountId: string; error: string }>
+}
+
 export async function batchUnbindDirectoryAccounts(
   directoryAccountIds: string[],
   input: DirectoryAccountUnbindInput,
-): Promise<DirectoryAccountMutationResult[]> {
+): Promise<DirectoryAccountBatchOutcome> {
   const normalizedIds = Array.from(new Set(directoryAccountIds.map((item) => normalizeText(item)).filter(Boolean)))
   if (normalizedIds.length === 0) throw new Error('accountIds are required')
 
-  const results: DirectoryAccountMutationResult[] = []
+  const outcome: DirectoryAccountBatchOutcome = { succeeded: [], failed: [] }
   for (const directoryAccountId of normalizedIds) {
-    results.push(await unbindDirectoryAccount(directoryAccountId, input))
+    try {
+      outcome.succeeded.push(await unbindDirectoryAccount(directoryAccountId, input))
+    } catch (error) {
+      outcome.failed.push({
+        accountId: directoryAccountId,
+        error: readErrorMessage(error, 'Failed to unbind directory account'),
+      })
+    }
   }
-  return results
+  return outcome
 }
 
 export async function batchBindDirectoryAccounts(
   entries: DirectoryAccountBatchBindEntry[],
   input: { adminUserId: string },
-): Promise<DirectoryAccountMutationResult[]> {
+): Promise<DirectoryAccountBatchOutcome> {
   const normalizedEntries = entries
     .map((entry) => ({
       accountId: normalizeText(entry.accountId),
@@ -3107,15 +3932,111 @@ export async function batchBindDirectoryAccounts(
 
   if (normalizedEntries.length === 0) throw new Error('bindings are required')
 
-  const results: DirectoryAccountMutationResult[] = []
+  // DT-HARDEN-04: per-item isolation — see DirectoryAccountBatchOutcome.
+  const outcome: DirectoryAccountBatchOutcome = { succeeded: [], failed: [] }
   for (const entry of normalizedEntries) {
-    results.push(await bindDirectoryAccount(entry.accountId, {
-      localUserRef: entry.localUserRef,
-      adminUserId: input.adminUserId,
-      enableDingTalkGrant: entry.enableDingTalkGrant,
-    }))
+    try {
+      outcome.succeeded.push(await bindDirectoryAccount(entry.accountId, {
+        localUserRef: entry.localUserRef,
+        adminUserId: input.adminUserId,
+        enableDingTalkGrant: entry.enableDingTalkGrant,
+      }))
+    } catch (error) {
+      outcome.failed.push({
+        accountId: entry.accountId,
+        error: readErrorMessage(error, 'Failed to bind directory account'),
+      })
+    }
   }
-  return results
+  return outcome
+}
+
+/**
+ * P2-1 (post-#3972 review): "only admit pending items with no local user and no
+ * recommendation candidate" is enforced ONLY in the Vue computed
+ * (`selectedReviewAdmissionIds` in DirectoryManagementView.vue) — a direct POST to
+ * batch-admit-users bypasses it entirely. This mirrors that rule at the minimum-safe
+ * level for the server: reject an account that is already linked to a local user, or
+ * whose email/mobile (case-insensitively — recommendations themselves are built from a
+ * case-insensitive email match, see loadDirectoryReviewRecommendations) already maps to
+ * an existing active user, instead of silently admitting a duplicate or overwriting an
+ * existing link.
+ */
+async function assertDirectoryAccountEligibleForBatchAdmission(
+  account: Pick<DirectoryBindingTargetAccountRow, 'id' | 'email' | 'mobile'>,
+): Promise<void> {
+  const linkResult = await query<{ link_status: string | null; local_user_id: string | null }>(
+    `SELECT link_status, local_user_id
+     FROM directory_account_links
+     WHERE directory_account_id = $1::uuid
+     LIMIT 1`,
+    [account.id],
+  )
+  const link = linkResult.rows[0]
+  if (link?.link_status === 'linked' && normalizeText(link.local_user_id)) {
+    throw new Error('Directory account is already linked to a local user')
+  }
+
+  const normalizedEmail = normalizeText(account.email).toLowerCase()
+  const normalizedMobile = normalizeText(account.mobile)
+  if (!normalizedEmail && !normalizedMobile) return
+
+  const matchResult = await query<{ id: string }>(
+    `SELECT id
+     FROM users
+     WHERE COALESCE(is_active, TRUE) = TRUE
+       AND (
+         ($1::text <> '' AND lower(email) = $1::text)
+         OR ($2::text <> '' AND mobile = $2::text)
+       )
+     LIMIT 1`,
+    [normalizedEmail, normalizedMobile],
+  )
+  if (matchResult.rows.length > 0) {
+    throw new Error('A local user with this email or mobile already exists; confirm the recommended binding instead of admitting a new account')
+  }
+}
+
+export async function batchAdmitDirectoryAccountUsers(
+  directoryAccountIds: string[],
+  input: DirectoryAccountBatchAdmissionInput,
+): Promise<DirectoryAccountBatchAdmissionOutcome> {
+  const normalizedIds = Array.from(new Set(directoryAccountIds.map((item) => normalizeText(item)).filter(Boolean)))
+  const normalizedAdminUserId = normalizeText(input.adminUserId)
+  if (normalizedIds.length === 0) throw new Error('accountIds are required')
+  if (!normalizedAdminUserId) throw new Error('adminUserId is required')
+
+  const outcome: DirectoryAccountBatchAdmissionOutcome = { succeeded: [], failed: [] }
+  for (const accountId of normalizedIds) {
+    try {
+      const account = await loadDirectoryBindingTargetAccount(accountId)
+      if (!account) throw new Error('Directory account not found')
+      await assertDirectoryAccountEligibleForBatchAdmission(account)
+      const fallbackName = normalizeText(account.external_user_id) || account.id
+      const admissionName = normalizeText(account.name).length >= 2 ? account.name : fallbackName
+      outcome.succeeded.push(await admitDirectoryAccountUser(account.id, {
+        adminUserId: normalizedAdminUserId,
+        name: admissionName,
+        email: account.email ?? undefined,
+        username: account.email
+          ? undefined
+          : buildDirectoryAutoAdmissionUsername({
+            id: account.id,
+            external_user_id: account.external_user_id,
+            union_id: account.union_id,
+            open_id: account.open_id,
+          }),
+        mobile: account.mobile,
+        enableDingTalkGrant: input.enableDingTalkGrant === true,
+      }))
+    } catch (error) {
+      outcome.failed.push({
+        accountId,
+        error: readErrorMessage(error, 'Failed to create and bind local user for directory account'),
+      })
+    }
+  }
+  return outcome
 }
 
 async function applyDirectoryAccountBindInTransaction(
@@ -3280,6 +4201,15 @@ async function createDirectoryAdmittedUserInTransaction(
   },
 ): Promise<{ userId: string }> {
   const userId = crypto.randomUUID()
+  // DT-HARDEN-02: assert grant feasibility BEFORE inserting the users row — the cheapest
+  // and most common orphan cause (grant requested for an account that cannot hold one).
+  // But this alone is not sufficient: applyDirectoryAccountBindInTransaction (called AFTER
+  // the INSERT below) still throws when the account has no openId/unionId at all — even with
+  // grant disabled — or when its identity is already bound to another local user. Those
+  // throws, swallowed by the sync loop's catch, historically committed an orphan. The
+  // SAVEPOINT around INSERT+bind (below) makes the whole admission all-or-nothing: a bind
+  // that throws for ANY reason rolls the users row back, so the loop's swallow is safe.
+  assertDirectoryAccountCanEnableDingTalkGrant(options.account, options.enableDingTalkGrant)
   if (options.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(options.email)) {
     throw new Error('Invalid email format')
   }
@@ -3292,10 +4222,19 @@ async function createDirectoryAdmittedUserInTransaction(
   }
 
   if (options.email) {
+    // Case-insensitive on purpose: directory sync's own account↔user matching (see
+    // loadDirectoryReviewRecommendations, LOWER(email) = ANY(...)) and AuthService's login
+    // lookup (lower(email) = $1) both treat email identity as case-insensitive, but
+    // AuthService.register stores the raw-case value and the `idx_users_email` unique index is
+    // ALSO case-sensitive — so it does not backstop this at the DB layer. A case-sensitive
+    // check here let a differently-cased admission (e.g. `alice@x.com` vs a stored
+    // `Alice@x.com`) slip past and create a second `users` row for the same person. Matches
+    // the users_email_lower_idx (lower(email)) index already in place for this exact lookup
+    // shape.
     const existingUserResult = await client.query(
       `SELECT id
        FROM users
-       WHERE email = $1::text
+       WHERE lower(email) = lower($1::text)
        LIMIT 1`,
       [options.email],
     )
@@ -3330,26 +4269,52 @@ async function createDirectoryAdmittedUserInTransaction(
     }
   }
 
-  await client.query(
-    `INSERT INTO users (id, email, username, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
-     VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean, 'user', $8::jsonb, TRUE, FALSE, NOW(), NOW())`,
-    [userId, options.email, options.username, options.name, options.mobile, options.passwordHash, options.mustChangePassword, JSON.stringify([])],
-  )
+  // DT-HARDEN-02: INSERT + bind are one all-or-nothing unit. A bind throw after the INSERT
+  // (missing openId/unionId, or an identity already bound to another local user) would
+  // otherwise leave a committed orphan once the sync loop swallows the error — the exact
+  // hazard this ticket exists to close, and the one the pre-INSERT assert above does not cover.
+  await client.query('SAVEPOINT directory_admit_user')
+  try {
+    await client.query(
+      `INSERT INTO users (id, email, username, name, mobile, password_hash, must_change_password, role, permissions, is_active, is_admin, created_at, updated_at)
+       VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::boolean, 'user', $8::jsonb, TRUE, FALSE, NOW(), NOW())`,
+      [userId, options.email, options.username, options.name, options.mobile, options.passwordHash, options.mustChangePassword, JSON.stringify([])],
+    )
 
-  await applyDirectoryAccountBindInTransaction(client, {
-    normalizedAccountId: options.account.id,
-    normalizedAdminUserId: options.adminUserId,
-    enableDingTalkGrant: options.enableDingTalkGrant,
-    account: options.account,
-    localUser: {
-      id: userId,
-      email: options.email,
-      username: options.username,
-      name: options.name,
-    },
-  })
+    await applyDirectoryAccountBindInTransaction(client, {
+      normalizedAccountId: options.account.id,
+      normalizedAdminUserId: options.adminUserId,
+      enableDingTalkGrant: options.enableDingTalkGrant,
+      account: options.account,
+      localUser: {
+        id: userId,
+        email: options.email,
+        username: options.username,
+        name: options.name,
+      },
+    })
+  } catch (error) {
+    // Undo the users INSERT (and recover the transaction if the throw came from a failed
+    // statement), then release, so the outer sync transaction stays usable for the next account.
+    await client.query('ROLLBACK TO SAVEPOINT directory_admit_user')
+    await client.query('RELEASE SAVEPOINT directory_admit_user')
+    throw error
+  }
+  await client.query('RELEASE SAVEPOINT directory_admit_user')
 
   return { userId }
+}
+
+/**
+ * DT-HARDEN-02: internals exposed only so the orphan-prevention invariant can be
+ * asserted directly — "a grant that cannot be honored must throw BEFORE the users
+ * row is inserted". The invariant is not observable through the exported surface
+ * (the manual-admission path asserts earlier; the sync path now computes the grant
+ * from openId presence), so without this seam a regression at the call site would
+ * pass every test.
+ */
+export const __directorySyncInternalsForTests = {
+  createDirectoryAdmittedUserInTransaction,
 }
 
 async function applyDirectoryProjectedMemberGroupGovernanceInTransaction(

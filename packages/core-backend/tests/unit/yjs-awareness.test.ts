@@ -106,6 +106,13 @@ describe('Yjs awareness presence socket protocol', () => {
       return token.slice('token-'.length)
     })
     adapter.setAuthChecker(async (userId, recordId) => {
+      if (recordId === 'rec_masked') {
+        return {
+          canRead: true,
+          canWrite: userId !== 'user_readonly',
+          canReadAllFields: false,
+        }
+      }
       if (recordId !== 'rec_presence') return null
       return {
         canRead: true,
@@ -194,6 +201,30 @@ describe('Yjs awareness presence socket protocol', () => {
         recordId: 'rec_presence',
         code: 'FORBIDDEN',
       })
+    } finally {
+      client.disconnect()
+    }
+  })
+
+  it('rejects record-wide Yjs sync when the actor cannot read every field', async () => {
+    const client = await connectClient(baseUrl, 'token-user_alice')
+
+    try {
+      const error = waitForEvent(client, 'yjs:error', (payload: any) => (
+        payload.recordId === 'rec_masked'
+        && payload.code === 'FORBIDDEN'
+      ))
+      const noSync = waitForNoEvent(client, 'yjs:message')
+      const noPresence = waitForNoEvent(client, 'yjs:presence')
+
+      client.emit('yjs:subscribe', { recordId: 'rec_masked' })
+
+      await expect(error).resolves.toMatchObject({
+        recordId: 'rec_masked',
+        code: 'FORBIDDEN',
+      })
+      await expect(noSync).resolves.toBeUndefined()
+      await expect(noPresence).resolves.toBeUndefined()
     } finally {
       client.disconnect()
     }

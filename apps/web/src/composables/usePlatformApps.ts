@@ -192,7 +192,9 @@ async function syncRuntimeInstallStates(appList: PlatformAppSummary[]): Promise<
     .filter((app) => app.runtimeModel === 'instance' && app.runtimeBindings?.currentPath)
     .map(async (app) => {
       try {
-        const response = await apiGet<unknown>(app.runtimeBindings!.currentPath!)
+        const response = await apiGet<unknown>(app.runtimeBindings!.currentPath!, {
+          suppressUnauthorizedRedirect: true,
+        })
         setPlatformAppRuntimeInstallState(
           app.id,
           normalizeRuntimeInstallState(response),

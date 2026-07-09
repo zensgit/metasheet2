@@ -7,6 +7,35 @@
 
 ---
 
+## ⚠ 2026-07-08 审计校正 + 当前权威（S8 refresh — 读这里,别被下方历史注记误导）
+
+> **本账本正文写于 06-01,回填注记多停在 06-26,严重落后 origin/main。** 2026-07-08 三路审计
+> （账本档位 × refresh v3 阶梯 × **代码实证**）结论如下。下方 §0.x-§6 的历史注记是**准确的时点记录,不重写**,
+> 但**当前状态以本节 + 余量规划为权威**。基线更新:origin/main @ `8ec4da2a1`(2026-07-08)。
+>
+> **档位内能力 100% 闭环**（下方多处标 🟡 的 backfill 注记是过时快照,实际均已 ✅,勿重开发）:
+> - **C5 外发通知**:已 real DingTalk staging PASS 闭环 ✅（§0.3 表 L212;注记 L88/L90/L92「C5 保持 🟡」为历史）。
+> - **调度 D5 / 换班 SW5 / 小组织 SO3**:均 staging-proven ✅（§2 对账表 L213;各自 prep 注记「保持 🟡」为历史;
+>   2026-07-08 另在 on-prem 主机 222 对收官版 `972518a8f` 复证 PASS residue=0）。
+> - **HMR 人工缺卡提醒**:HMR-0..5 整线 ✅（HMR-5 于 on-prem 222 PASS `hmr5-smoke-run3` residue=0;§0.6）。
+> - MUST×6 / SHOULD×5 / OPTIONAL×3 / §0.5 四切片(RT/TA/销假/NS) / A2 自动写入 / 年假 L0-L6 / S2 内外勤 全 ✅。
+>
+> **真余量（= 当前目标池;详见 `attendance-benchmark-remaining-plan-20260708.md` #3925）**:
+> 1. **假配置落地缺陷**(admin UI 有旋钮、引擎零强制):**S1** overtimeBankPolicy.validityDays〔已修 #3927,与
+>    真旋钮 compTimeFromOvertime.expiresInDays 冲突〕→ **S1b** maxMinutesPerPeriod 每周期上限〔PROPOSED,3 分叉待 owner〕;
+>    **S2** requirePhoto 不在线上 zod;**S3** 年假计提无定时 job（手工路由触发）。
+> 2. **能力补齐**:S4 SMS/WeCom 渠道 · S5 报表 xlsx 导出 · S6 批量改余额 · **S7 A2 审批人 resolver**〔owner-gated,
+>    等看 A1 结构化审批编辑器 #3893 live 手感〕。
+> 3. **owner/operator 门**:五连 staging smoke（MP-6/HMR-5/AE-4/RD-4-5/OT-bank v1-8,harness 全备）· **E4 真机**（#3843,
+>    注册钉钉微应用）· 档 B 中央审批融合（治理门冻结）。
+> 4. **审计红线澄清**:服务端 `punchPolicy.geoFence` 经纬度围栏**已实现并 staging 实跑**（#2308）;§6 OUT 禁的是
+>    自研**原生/硬件级**围栏与设备绑定（WiFi/蓝牙/人脸/极速打卡/上班前推送均零命中,属新增能力须 owner 立项）。
+>
+> **方法红线（防再被坑）**:本账本的 backfill 注记 = 时点快照,常滞后;判断"还剩什么"**必须 `git log origin/main` +
+> 代码实证**,不可只读注记(本会话已两次被 stale 注记误导:S2、三条 staging 线)。
+
+---
+
 ## 0. 三视野（北极星）
 
 | 视野 | 范围 | 量级 | 现在做？ |
@@ -152,16 +181,16 @@
 
 ## 0.6 下一候选目标（PROPOSED, 2026-06-26）— 人工提醒应到未打卡
 
-> post-H2 小切片目标提案：在已闭环的 attendance records/anomalies 事实基础 + C5 delivery outbox 上，补一个管理员主动提醒 selected owed-punch users 的 humane operation。正式设计锁：`attendance-manual-missed-punch-reminder-design-lock-20260626.md`。本节记录 HMR stack；**HMR-5 staging PASS 前不标整线完成**。
+> post-H2 小切片目标提案：在已闭环的 attendance records/anomalies 事实基础 + C5 delivery outbox 上，补一个管理员主动提醒 selected owed-punch users 的 humane operation。正式设计锁：`attendance-manual-missed-punch-reminder-design-lock-20260626.md`。本节记录 HMR stack；**2026-07-08 整线完成 ✅**:HMR-5 于 on-prem 主机 192.168.1.222(等价环境替代 staging,#3845)对 deploy `972518a8f` PASS——`HMR5_API_DB_SMOKE_PASS deploy=972518a8f stamp=hmr5-smoke-run3 sendPosture=worker-off:pending-only residue=0`,32 断言(API/DB 一致性/候选池/replay 幂等/stale·out-of-scope guards);worker delivery 段由 C5-5 既证路径覆盖(HMR rows 走同一 outbox/worker claim,source-type 无关,C5-5b 真实 DingTalk sent 已证)。
 
 | Slice | 内容 | 当前状态 | 完成口径 |
 |---|---|---|---|
-| HMR-0 | 设计锁 + tracker proposal | 🟡 #3268 | 锁 v1：records-backed owed-punch candidates；只写 C5 outbox、不直发；新增 scheduler-scope `remind` action；affected employee only；idempotency key 防双发 |
+| HMR-0 | 设计锁 + tracker proposal | ✅ #3268 | 锁 v1：records-backed owed-punch candidates；只写 C5 outbox、不直发；新增 scheduler-scope `remind` action；affected employee only；idempotency key 防双发 |
 | HMR-1 | scheduler-scope `remind` action | ✅ #3269 | allowlist + UI labels + regression，证明 existing actions 不回归 |
 | HMR-2 | owed-punch candidate read/filter | ✅ #3270 | records-backed `absent`/`partial` 候选 + pending request hint + scoped/central authority tests |
 | HMR-3 | manual reminder enqueue route | ✅ #3271 | `manual_missed_punch_reminder` delivery rows；replay no-op；payload conflict 409；out-of-scope 403；stale candidate 409；producer 不直接 send |
 | HMR-4 | admin UI | ✅ #3272 | admin notification-deliveries operation；candidate load + selected remind confirm/result；confirm snapshot authoritative；web regressions |
-| HMR-5 | staging smoke | 🟡 runbook + helper prepared | scoped actor enqueue → worker delivery → repeat no duplicate → stale/out-of-scope guards → residue=0；runbook `attendance-manual-missed-punch-reminder-hmr5-staging-runbook-20260626.md` + helper `scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs` |
+| HMR-5 | staging smoke | ✅ on-prem 222 PASS(2026-07-08) | scoped actor enqueue → worker delivery → repeat no duplicate → stale/out-of-scope guards → residue=0；runbook `attendance-manual-missed-punch-reminder-hmr5-staging-runbook-20260626.md` + helper `scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs` |
 
 ---
 
@@ -210,7 +239,7 @@
 | 临时班次 | SHOULD | ✅ | design-lock `attendance-temporary-shift-design-lock-20260609.md` 已锁；T0 temp metadata schema #2437 → replace-only backend runtime #2439 → T5 admin UI #2441（`5edaf08b`）→ T6 runtime closeout #2443（`46b2185`）→ staging smoke PASS `temp-shift-t6-mq7vn6uc`。v1 范围仍为 one-day replace-only temporary overlay：draft create only、direct immediate-active 拒绝、publish revalidate、effective-calendar/planned-minutes overlay 不双算、published temp cancel soft-deactivate restores base、fixed-schedule rebuild preserves exact temp overlay、admin UI 只对已发布常规分配创建替班草稿；rotation replacement / add mode / immediate-active interim 仍稳定拒绝。完成口径（backend runtime + admin UI + 反向测试 + staging smoke）已满足 |
 | 加班三段引擎 | SHOULD | ✅ | design-lock `attendance-overtime-segmentation-engine-design-lock-20260609.md` 已锁；O1 pure helper + O2 request metadata snapshot + O3 records/summary loaders + O4 report fields/sync + O5 comp-time consume + O6 staging smoke 已闭环：overtime request create/update 与 final approval 在 `overtimeSegmentation.enabled=true` 时写/刷新 versioned segmentation snapshot，records/summary/report fields/report sync/comp-time grant 从 snapshot 聚合三段 bucket，并（O6/v1 时）稳定拒绝 cross-midnight 窗口；历史无 snapshot 记录仍走 documented fallback。**⚠️ 该 cross-midnight v1 hard-reject 已于 §0.5 #8（NS-0/1/2/3，2026-06-24）解除：one-midnight 窗口现按各自本地日期分桶受理（守恒 / replay 幂等 / workDate-anchor），多午夜 / off-workDate / reversed 仍拒；NS-4 staging PASS。**staging smoke PASS 2026-06-10（deploy `a55576fa66683719a643d4e7c480da068a214e20`，stamp `overtime-o6-mq89b8gp`，log `/tmp/staging-overtime-o6-smoke-20260610T160158Z.log`，47/47，residue=0）：effective-calendar parity workday/restday/holiday；request metadata versioned snapshot；records/meta/report_values 三段 bucket；summary total + workday/restday/holiday + comp-time buckets；comp-time lots/events consume `compTimeGrantMinutes` as 45/75/105 |
 | C5 外发通知 / 负责人 fan-out | 通知增强 | ✅ | **§0.3 新目标已闭环**：design-lock `attendance-c5-notification-delivery-design-lock-20260611.md` 锁定 outbox、delivery status/retry、未排班 + `comp_time` 到期两 source、本人 + owner/sub_owner fan-out、DingTalk work-notification channel gating、staging smoke。C5-0 #2487 / C5-1a #2498 / C5-1b #2502 / C5-2 #2504 / C5-3 #2507 / C5-4 #2515 已落；C5-5a fake-channel staging PASS `c5-delivery-mqajq5o8`（deploy `a1d8a6c62e5feb526d5d854dbc7805770c904941`，residue=0）证明 delivery-state；C5-5b real DingTalk staging PASS `c5-delivery-mqek2lt9`（deploy `9179c65bb4a6d0014801896645f6108e94466a79`，channel `dingtalk`，residue=0，27/27）证明真实 work-notification delivery 与 C5-4 counters |
-| 调度 / 换班 / 小组织 | OPTIONAL | ✅ | **小组织挂部门 ✅**：design-lock `attendance-small-organization-scheduling-design-lock-20260612.md` → SO0 #2534 → SO1 #2535 → SO2 #2536 → SO3 staging PASS（deploy `38e912719613c254d715442c45527c8dc76793cb`，stamp `smallorg-so3-mqaxdjp5`，log `/tmp/staging-small-org-so3-smoke-20260612T125111Z.log`，24/24，residue=0）。**换班 ✅**：design-lock `attendance-shift-swap-design-lock-20260612.md` → SW1 #2539 → SW2 #2540 → SW3 #2541 → SW4 #2542 → SW5 #2543 + staging PASS（deploy `38e912719613c254d715442c45527c8dc76793cb`，stamp `shift-swap-sw5-mqawta7y`，log `/tmp/staging-shift-swap-sw5-smoke-fixed-20260612T123526Z.log`，32/32，residue=0）。**调度 ✅ D1–D5 staging-proven**：design-lock `attendance-dispatch-multisite-design-lock-20260612.md` → D1 #2551（latent `schedule_dispatch` schema/request type/approval-flow/OpenAPI/SDK + generic `/requests` 422 guard）→ D2 dedicated API（create/list/read/cancel approval envelope + detail；scheduler-scope `dispatch` user+target group+department guard；no assignment/membership final write）→ D3 final approval writer（approve 事务内写 `producer_type='schedule_dispatch'` published assignment + optional `attendance_schedule_group_members.source='schedule_dispatch'` membership；revalidates latest target group department dispatch scope；conflict/edit-window/shiftCompliance/protected-generated-row guards rollback before status flip；no generic adjustment event；#2570 补齐 existing membership id reuse + temporary/shift_swap/auto_shift_match 保护）→ D4 admin/employee UI（Advanced scheduling 创建/只读列表 + 员工端只读 `schedule_dispatch` 入口，daily-only copy，不宣称小时支援/成本分摊）→ D5 staging smoke PASS（deploy `9179c65bb4a6d0014801896645f6108e94466a79`，stamp `dispatch-d5-mqegy7eh`，workDate `2026-07-06`，targetUser `dispatch-d5-mqegy7eh-user`，27/27，residue=0）：pending no side effects、final approval 写 exact assignment provenance + membership、effective-calendar resolves through shift path、replay no-dup、无 generic adjustment event、settings restored。多门店仍通过 schedule group department/attendance-group 归属表达，不新建硬件/薪酬子系统 |
+| 调度 / 换班 / 小组织 | OPTIONAL | ✅ | **小组织挂部门 ✅**：design-lock `attendance-small-organization-scheduling-design-lock-20260612.md` → SO0 #2534 → SO1 #2535 → SO2 #2536 → SO3 staging PASS（deploy `38e912719613c254d715442c45527c8dc76793cb`，stamp `smallorg-so3-mqaxdjp5`，log `/tmp/staging-small-org-so3-smoke-20260612T125111Z.log`，24/24，residue=0）。**换班 ✅**：design-lock `attendance-shift-swap-design-lock-20260612.md` → SW1 #2539 → SW2 #2540 → SW3 #2541 → SW4 #2542 → SW5 #2543 + staging PASS（deploy `38e912719613c254d715442c45527c8dc76793cb`，stamp `shift-swap-sw5-mqawta7y`，log `/tmp/staging-shift-swap-sw5-smoke-fixed-20260612T123526Z.log`，32/32，residue=0）。**调度 ✅ D1–D5 staging-proven**：design-lock `attendance-dispatch-multisite-design-lock-20260612.md` → D1 #2551（latent `schedule_dispatch` schema/request type/approval-flow/OpenAPI/SDK + generic `/requests` 422 guard）→ D2 dedicated API（create/list/read/cancel approval envelope + detail；scheduler-scope `dispatch` user+target group+department guard；no assignment/membership final write）→ D3 final approval writer（approve 事务内写 `producer_type='schedule_dispatch'` published assignment + optional `attendance_schedule_group_members.source='schedule_dispatch'` membership；revalidates latest target group department dispatch scope；conflict/edit-window/shiftCompliance/protected-generated-row guards rollback before status flip；no generic adjustment event；#2570 补齐 existing membership id reuse + temporary/shift_swap/auto_shift_match 保护）→ D4 admin/employee UI（Advanced scheduling 创建/只读列表 + 员工端只读 `schedule_dispatch` 入口，daily-only copy，不宣称小时支援/成本分摊）→ D5 staging smoke PASS（deploy `9179c65bb4a6d0014801896645f6108e94466a79`，stamp `dispatch-d5-mqegy7eh`，workDate `2026-07-06`，targetUser `dispatch-d5-mqegy7eh-user`，27/27，residue=0）：pending no side effects、final approval 写 exact assignment provenance + membership、effective-calendar resolves through shift path、replay no-dup、无 generic adjustment event、settings restored。多门店仍通过 schedule group department/attendance-group 归属表达，不新建硬件/薪酬子系统。**2026-07-08 on-prem 222 复证**:D5/SW5/SO3 三条 smoke 于 192.168.1.222 对 deploy `972518a8f`(E-line 收官版)rerun 全 PASS residue=0(stamps:`dispatch-d5`/`shift-swap-sw5` 各自 rerun、`smallorg-so3-mrbnwk7k`),前置 helper 时区/settings-restore 修复 #3875 |
 
 **余下量（2026-06-14 复核）**：MUST 已闭环；§0.1 的 **H2 SHOULD 收口**四项已全部按完成口径闭环；§0.2 的 **H2+ A2 自动写入**已 staging-proven；§0.3 **C5 外发通知与负责人 fan-out** 已通过真实 DingTalk staging smoke 闭环。OPTIONAL 中的 **换班**、**小组织挂部门**、**调度/多门店** 均已 staging-proven；多门店 v1 继续通过 schedule group department/attendance-group 归属表达，不新建硬件/薪酬子系统。当前 tracker 内列入本阶段的考勤对标目标已全部 ✅；后续若要继续超越钉钉，应另起新的 owner 目标/设计锁。
 

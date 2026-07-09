@@ -92,7 +92,9 @@
       <el-tab-pane label="已归档" name="archived" />
     </el-tabs>
 
+    <!-- G-B2-17: admin path unchanged — the management table stays exactly as before. -->
     <el-table
+      v-if="canManageTemplates"
       v-loading="store.loading"
       :data="store.templates"
       class="ms-w-100pct"
@@ -172,6 +174,61 @@
       </template>
     </el-table>
 
+    <!-- G-B2-17: requester (!canManageTemplates) card gallery. 普通员工's only real intent
+         here is "find a template → start a request" — the admin table's columns (visibility
+         scope, created/updated timestamps, clone) are management chrome they never act on, so
+         the gallery surfaces just name / description / category / the one primary action. -->
+    <div
+      v-else
+      v-loading="store.loading"
+      class="template-center__gallery-wrap"
+      data-testid="template-center-gallery"
+    >
+      <div v-if="visibleGalleryTemplates.length > 0" class="template-center__gallery">
+        <el-card
+          v-for="tpl in visibleGalleryTemplates"
+          :key="tpl.id"
+          class="template-center__gallery-card"
+          shadow="hover"
+          data-testid="template-center-gallery-card"
+        >
+          <div class="template-center__gallery-card-head">
+            <span class="template-center__gallery-card-name">{{ tpl.name }}</span>
+            <StatusTag domain="approvalTemplate" :status="tpl.status" size="sm" force-locale="zh" />
+          </div>
+          <p class="template-center__gallery-card-desc">
+            {{ tpl.description || '暂无描述' }}
+          </p>
+          <div class="template-center__gallery-card-footer">
+            <el-tag
+              v-if="tpl.category"
+              size="small"
+              type="info"
+              effect="plain"
+              data-testid="template-center-gallery-category"
+            >
+              {{ tpl.category }}
+            </el-tag>
+            <span v-else class="template-center__category-empty">未分组</span>
+            <el-button
+              v-if="tpl.status === 'published' && canWrite"
+              type="primary"
+              size="small"
+              data-testid="template-center-gallery-start-button"
+              @click="startApproval(tpl.id)"
+            >
+              发起申请
+            </el-button>
+          </div>
+        </el-card>
+      </div>
+      <EmptyState
+        v-else
+        data-testid="template-center-gallery-empty"
+        :title="searchText || categoryFilter ? '未找到匹配的模板' : '暂无可用的审批模板'"
+      />
+    </div>
+
     <el-pagination
       v-if="store.total > pageSize"
       class="template-center__pagination"
@@ -189,7 +246,8 @@
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import StatusTag from '../../components/status/StatusTag.vue'
-import { ref, onMounted } from 'vue'
+import EmptyState from '../../components/status/EmptyState.vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -199,6 +257,7 @@ import { useApprovalPermissions } from '../../approvals/permissions'
 import { cloneTemplate, listTemplateCategories } from '../../approvals/api'
 import { listRecentTemplates, type RecentTemplateEntry } from '../../approvals/recentTemplates'
 import { useAuth } from '../../composables/useAuth'
+import { filterGalleryTemplates } from '../../approvals/templateGalleryFilter'
 
 const router = useRouter()
 const store = useApprovalTemplateStore()
@@ -213,6 +272,17 @@ const categories = ref<string[]>([])
 const cloningId = ref<string | null>(null)
 const currentPage = ref(1)
 const pageSize = ref(10)
+
+// G-B2-17 — the requester gallery re-filters the current page's templates instantly as
+// categoryFilter/searchText change (no need to wait for handleSearch's Enter/blur), on top of
+// whatever the backend already returned. The admin table below does NOT consume this: it keeps
+// rendering `store.templates` directly, unchanged.
+const visibleGalleryTemplates = computed(() =>
+  filterGalleryTemplates(store.templates, {
+    category: categoryFilter.value,
+    search: searchText.value,
+  }),
+)
 
 function visibilityScopeLabel(scope: ApprovalTemplateListItemDTO['visibilityScope']) {
   if (!scope || scope.type === 'all') return '全员可见'
@@ -355,5 +425,55 @@ onMounted(() => {
 
 .template-center__recent-chip {
   cursor: pointer;
+}
+
+/* G-B2-17: requester card gallery. */
+.template-center__gallery-wrap {
+  min-height: 160px;
+}
+
+.template-center__gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--ms-space-4);
+}
+
+.template-center__gallery-card :deep(.el-card__body) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-2);
+}
+
+.template-center__gallery-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--ms-space-2);
+}
+
+.template-center__gallery-card-name {
+  font-size: var(--ms-font-size-section-title);
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-1);
+  line-height: 1.4;
+}
+
+.template-center__gallery-card-desc {
+  margin: 0;
+  min-height: 40px;
+  font-size: 13px;
+  color: var(--ms-text-2);
+  line-height: 1.5;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.template-center__gallery-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ms-space-2);
 }
 </style>
