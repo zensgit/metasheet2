@@ -615,8 +615,10 @@ export function adminDirectoryRouter(): Router {
           enableDingTalkGrant: typeof entry.enableDingTalkGrant === 'boolean' ? entry.enableDingTalkGrant : true,
         }))
 
-      const results = await batchBindDirectoryAccounts(bindings, { adminUserId })
-      await Promise.all(results.map((result) => auditLog({
+      const outcome = await batchBindDirectoryAccounts(bindings, { adminUserId })
+      // DT-HARDEN-04: audit every COMMITTED item, even when a later item failed. The
+      // batch used to fail fast, so items already committed lost their audit trail.
+      await Promise.all(outcome.succeeded.map((result) => auditLog({
         actorId: adminUserId,
         actorType: 'user',
         action: 'bind',
@@ -636,9 +638,18 @@ export function adminDirectoryRouter(): Router {
           selectionSize: bindings.length,
         },
       })))
+
+      // Nothing committed → keep the historical error mapping. Otherwise a partial
+      // failure is a normal batch result the caller can act on per item.
+      if (outcome.succeeded.length === 0 && outcome.failed.length > 0) {
+        throw new Error(outcome.failed[0].error)
+      }
+
       jsonOk(res, {
-        items: results.map((result) => result.account),
-        updatedCount: results.length,
+        items: outcome.succeeded.map((result) => result.account),
+        updatedCount: outcome.succeeded.length,
+        failedCount: outcome.failed.length,
+        failed: outcome.failed,
       })
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to batch bind directory accounts')
@@ -700,11 +711,12 @@ export function adminDirectoryRouter(): Router {
       const rawAccountIds = Array.isArray(req.body?.accountIds) ? req.body.accountIds : []
       const accountIds = rawAccountIds.filter((value): value is string => typeof value === 'string')
       const disableDingTalkGrant = req.body?.disableDingTalkGrant === true
-      const results = await batchUnbindDirectoryAccounts(accountIds, {
+      const outcome = await batchUnbindDirectoryAccounts(accountIds, {
         adminUserId,
         disableDingTalkGrant,
       })
-      await Promise.all(results.map((result) => auditLog({
+      // DT-HARDEN-04: audit every COMMITTED item, even when a later item failed.
+      await Promise.all(outcome.succeeded.map((result) => auditLog({
         actorId: adminUserId,
         actorType: 'user',
         action: 'unbind',
@@ -723,9 +735,16 @@ export function adminDirectoryRouter(): Router {
           selectionSize: accountIds.length,
         },
       })))
+
+      if (outcome.succeeded.length === 0 && outcome.failed.length > 0) {
+        throw new Error(outcome.failed[0].error)
+      }
+
       jsonOk(res, {
-        items: results.map((result) => result.account),
-        updatedCount: results.length,
+        items: outcome.succeeded.map((result) => result.account),
+        updatedCount: outcome.succeeded.length,
+        failedCount: outcome.failed.length,
+        failed: outcome.failed,
         disableDingTalkGrant,
       })
     } catch (error) {

@@ -34,7 +34,7 @@ vi.mock('../../src/auth/invite-tokens', () => ({
   issueInviteToken: inviteTokenMocks.issueInviteToken,
 }))
 
-import { admitDirectoryAccountUser, bindDirectoryAccount, unbindDirectoryAccount } from '../../src/directory/directory-sync'
+import { admitDirectoryAccountUser, batchBindDirectoryAccounts, batchUnbindDirectoryAccounts, bindDirectoryAccount, unbindDirectoryAccount } from '../../src/directory/directory-sync'
 
 describe('bindDirectoryAccount', () => {
   beforeEach(() => {
@@ -987,5 +987,157 @@ describe('bindDirectoryAccount', () => {
       expect.stringContaining('INSERT INTO user_external_auth_grants'),
       ['dingtalk', 'user-1', 'admin-1'],
     )
+  })
+
+  // DT-HARDEN-04: each account commits in its own transaction. A fail-fast loop threw on
+  // the first bad item, so the caller never learned which items had already COMMITTED —
+  // and the route, auditing only after the whole batch returned, dropped their audit trail.
+  it('isolates a failing item so already-committed items are still returned (batch unbind)', async () => {
+    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    pgMocks.query
+      // account-1 loads, unbinds, and reloads its summary
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-1',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: 'ext-1',
+          union_id: 'union-1',
+          open_id: 'open-1',
+          external_key: 'union-1',
+          name: '林岚',
+          email: null,
+          mobile: null,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ local_user_id: 'user-1', local_user_email: 'alpha@example.com', local_user_name: 'Alpha' }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          directory_account_id: 'account-1',
+          external_user_id: 'ext-1',
+          union_id: 'union-1',
+          open_id: 'open-1',
+          external_key: 'union-1',
+          account_name: '林岚',
+          account_email: null,
+          account_mobile: null,
+          account_is_active: true,
+          account_updated_at: '2026-07-08T00:00:00.000Z',
+          link_status: 'unmatched',
+          match_strategy: 'manual_unbound',
+          reviewed_by: null,
+          review_note: null,
+          link_updated_at: '2026-07-08T00:00:00.000Z',
+          local_user_id: null,
+          local_user_email: null,
+          local_user_name: null,
+          department_paths: [],
+        }],
+      })
+      // account-2 does not exist → unbindDirectoryAccount throws
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const outcome = await batchUnbindDirectoryAccounts(['account-1', 'account-2'], {
+      adminUserId: 'admin-1',
+    })
+
+    // The load-bearing invariant: the committed item survives the later failure.
+    expect(outcome.succeeded).toHaveLength(1)
+    expect(outcome.succeeded[0].account.id).toBe('account-1')
+    expect(outcome.failed).toEqual([
+      { accountId: 'account-2', error: expect.stringMatching(/not found/i) },
+    ])
+    // account-1 really did commit (its transaction ran).
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+  })
+
+  // DT-HARDEN-04: symmetric to the batch-unbind isolation test above. A fail-fast bind
+  // loop would abort the whole batch on the first bad item, so a valid bind earlier in
+  // the batch would never be reported (or even attempted, once the batch is reordered).
+  it('isolates a failing item so already-committed items are still returned (batch bind)', async () => {
+    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    pgMocks.query
+      // account-1: loads with no previous link, resolves the local user, binds, and reloads its summary
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-1',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: 'open-1',
+          external_key: 'union-1',
+          name: '林岚',
+          email: null,
+          mobile: '13900001234',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          local_user_id: null,
+          local_user_email: null,
+          local_user_name: null,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          directory_account_id: 'account-1',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: 'open-1',
+          external_key: 'union-1',
+          account_name: '林岚',
+          account_email: null,
+          account_mobile: '13900001234',
+          account_is_active: true,
+          account_updated_at: '2026-07-08T00:00:00.000Z',
+          link_status: 'linked',
+          match_strategy: 'manual_admin',
+          reviewed_by: 'admin-1',
+          review_note: null,
+          link_updated_at: '2026-07-08T00:00:00.000Z',
+          local_user_id: 'user-1',
+          local_user_email: 'alpha@example.com',
+          local_user_name: 'Alpha',
+          department_paths: ['DingTalk CN'],
+        }],
+      })
+      // account-2 does not exist → bindDirectoryAccount throws before ever opening a transaction
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const outcome = await batchBindDirectoryAccounts([
+      { accountId: 'account-1', localUserRef: 'alpha@example.com', enableDingTalkGrant: true },
+      { accountId: 'account-2', localUserRef: 'beta@example.com', enableDingTalkGrant: true },
+    ], { adminUserId: 'admin-1' })
+
+    // The load-bearing invariant: the committed bind survives the later failure.
+    expect(outcome.succeeded).toHaveLength(1)
+    expect(outcome.succeeded[0].account.id).toBe('account-1')
+    expect(outcome.failed).toEqual([
+      { accountId: 'account-2', error: expect.stringMatching(/not found/i) },
+    ])
+    // account-1 really did commit (its transaction ran); account-2 never opened one.
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
   })
 })
