@@ -125,6 +125,11 @@ export default defineConfig({
       // integration` in plugin-tests.yml (describeIfDatabase alone would skip-green here).
       'tests/integration/multitable-undelete-inbound-replay-realdb.test.ts',
       'tests/integration/multitable-undelete-pit-inbound-replay-realdb.test.ts',
+      // 4c-3 §7 R8 absorption-audit hardening (P3-1/P3-2): PIT-resurrect inbound-replay anchor
+      // heuristic goldens + PIT-reset inline-delete inbound-capture goldens. Real Postgres only —
+      // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-undelete-inbound-resurrect-realdb.test.ts',
+      'tests/integration/multitable-reset-pit-inbound-capture-realdb.test.ts',
       // W6 full-HTTP-path approve->resume seam: mounts authRouter + approvalsRouter on an
       // ephemeral port against real Postgres, so it is excluded from the default run and wired
       // into the dedicated `Run multitable real-DB integration` job in plugin-tests.yml.

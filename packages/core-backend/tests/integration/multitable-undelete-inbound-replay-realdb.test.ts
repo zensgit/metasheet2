@@ -10,6 +10,11 @@
  * RB12 (mutations) is executed OUTSIDE this file: each precondition in
  * `inbound-link-replay.ts` / the retention floor is neutered in src → exactly the matching golden
  * here goes red → precise revert. Recorded in the PR body.
+ *
+ * RB13/RB14 (R8 absorption-audit hardening, P3-3/NIT-3 — post-hoc, no product behaviour changed):
+ * both preconditions were ALREADY correctly implemented (precondition 2's `JOIN meta_records n` and
+ * the `recoverable: replay.total > 0` computation in record-service.ts) but had no dedicated golden.
+ * See `/tmp/pr3975-4c3-absorption-audit-claude-20260709.md`.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -294,5 +299,35 @@ describeIfDatabase('4c-3 — record-undelete inbound-edge replay (real DB, RB ma
     expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [R])).rows).toHaveLength(1)
     expect((await q('SELECT 1 FROM meta_records_trash WHERE record_id = $1', [R])).rows).toHaveLength(0)
     expect(await edgeCount(F, N, R)).toBeLessThanOrEqual(1)
+  })
+
+  test('RB13 neighborGone: N hard-deleted inside the window — that edge is skipped (not a 23503/FK surprise), R restore still succeeds', async () => {
+    process.env[INBOUND_FLAG] = 'true'
+    const { F, R, N } = await fixture('rb13')
+    expect((await httpDelete(R)).status).toBe(200)
+    // Hard-delete the neighbour itself (no cascade concern: its inbound-owning meta_links row was
+    // already destroyed by R's delete above — this only removes N's own meta_records row).
+    await q('DELETE FROM meta_records WHERE id = $1', [N])
+    const res = await httpRestore(R)
+    expect(res.status).toBe(200)
+    expect(res.body?.data?.inbound?.replayed).toBe(0)
+    expect(res.body?.data?.inbound?.skipped?.neighborGone).toBe(1)
+    expect(await edgeCount(F, N, R)).toBe(0) // N no longer exists — nothing to point at it
+  })
+
+  test('RB14 anchor present but ZERO tombstones (capture was OFF for this one delete): recoverable=false, zero replay, no error', async () => {
+    process.env[INBOUND_FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'false' // capture off for THIS delete only — anchor still gets written (record-service always pre-generates it)
+    const { F, R, N } = await fixture('rb14')
+    expect((await httpDelete(R)).status).toBe(200)
+    process.env[CAPTURE_FLAG] = 'true' // restore the suite default before the restore call below
+    const trashRow = (await q('SELECT delete_revision_id FROM meta_records_trash WHERE record_id = $1', [R])).rows[0] as { delete_revision_id: string | null }
+    expect(trashRow.delete_revision_id).toBeTruthy() // anchor is unconditional — NOT gated by the capture flag
+    const tombstones = await q('SELECT 1 FROM meta_link_tombstones WHERE source_revision_id = $1::uuid', [trashRow.delete_revision_id])
+    expect(tombstones.rows).toHaveLength(0) // nothing was captured — capture was off at delete time
+    const res = await httpRestore(R)
+    expect(res.status).toBe(200)
+    expect(res.body?.data?.inbound).toMatchObject({ replayed: 0, recoverable: false }) // honest, not fabricated
+    expect(await edgeCount(F, N, R)).toBe(0)
   })
 })
