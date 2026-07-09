@@ -52,6 +52,7 @@ import {
 } from './automation-scheduler'
 import { RedisLeaderLock, type RedisLeaderLockClient } from './redis-leader-lock'
 import { getRedisClient } from '../db/redis'
+import { poolManager } from '../integration/db/connection-pool'
 import { randomBytes } from 'crypto'
 import { AutomationLogService } from './automation-log-service'
 import { AutomationJobService } from './automation-job-service'
@@ -836,6 +837,20 @@ export class AutomationService {
     const deps: AutomationDeps = {
       eventBus,
       queryFn,
+      transaction: async (handler) => poolManager.get().transaction(async ({ query }) => {
+        const txQuery: AutomationQueryFn = async (sqlText, params) => {
+          const result = await query(sqlText, params)
+          return {
+            rows: Array.isArray((result as { rows?: unknown[] }).rows)
+              ? (result as { rows: unknown[] }).rows
+              : [],
+            rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+              ? (result as { rowCount: number }).rowCount
+              : undefined,
+          }
+        }
+        return handler({ query: txQuery })
+      }),
       fetchFn,
       notificationService,
     }

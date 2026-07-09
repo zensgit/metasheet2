@@ -362,6 +362,25 @@
               </div>
             </div>
 
+            <!-- G-B2-25: the config below (update_record .. parallel_branch, ~700 lines across 3
+                 actions per the operation-UX benchmark) is wrapped in a collapse so an author sees
+                 a one-line summary instead of a control wall. Only the config collapses — the
+                 header above (type select / reorder / remove) stays outside it and always visible.
+                 el-collapse-item keeps its content in the DOM when collapsed (v-show, not v-if —
+                 same as the G-B2-24 Advanced section), so every data-field selector below still
+                 resolves and every existing assertion in multitable-automation-rule-editor.spec.ts
+                 keeps working unchanged. See isActionExpanded()/setActionExpanded() for the default
+                 policy (persisted vs. freshly-added/type-changed actions). -->
+            <el-collapse
+              :model-value="isActionExpanded(action) ? ['config'] : []"
+              class="meta-rule-editor__action-collapse"
+              @update:model-value="(value) => setActionExpanded(action, Array.isArray(value) ? value.includes('config') : value === 'config')"
+            >
+              <el-collapse-item name="config" data-field="actionConfigSection">
+                <template #title>
+                  <span class="meta-rule-editor__action-summary" data-field="actionSummary">{{ actionSummaries[idx] }}</span>
+                </template>
+
             <!-- update_record config -->
             <div v-if="action.type === 'update_record'" class="meta-rule-editor__action-config">
               <div v-for="(pair, pidx) in (action.config.fieldUpdates as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
@@ -378,7 +397,44 @@
             <!-- create_record config -->
             <div v-if="action.type === 'create_record'" class="meta-rule-editor__action-config">
               <label class="meta-rule-editor__label">{{ automationLabel('actionConfig.targetSheetId', isZh) }}</label>
-              <el-input v-model="action.config.targetSheetId" type="text" :placeholder="automationLabel('actionConfig.sheetIdPlaceholder', isZh)" />
+              <!-- G-B2-27: dropdown sourced from listSheets() so non-developers don't have to paste
+                   a raw sheet ID. The manual-entry toggle covers what the dropdown can't: listSheets
+                   may omit cross-base/future sheets (isManualTargetSheetEntry defaults to manual when
+                   the currently-configured id isn't in the fetched list, so a stale/foreign value is
+                   never silently hidden). A missing/failed/empty listSheets() falls all the way back
+                   to the plain text input in the v-else branch below. -->
+              <template v-if="targetSheetOptions.length > 0">
+                <el-select
+                  v-if="!isManualTargetSheetEntry(action)"
+                  v-model="(action.config.targetSheetId as string)"
+                  filterable
+                  class="meta-rule-editor__select"
+                  :placeholder="automationLabel('actionConfig.sheetIdPlaceholder', isZh)"
+                  data-field="createRecordTargetSheetId"
+                >
+                  <el-option value="" data-value="" :label="automationLabel('actionConfig.sheetIdPlaceholder', isZh)" />
+                  <el-option v-for="opt in targetSheetOptions" :key="opt.value" :value="opt.value" :data-value="opt.value" :label="opt.label" />
+                </el-select>
+                <el-input
+                  v-else
+                  v-model="action.config.targetSheetId"
+                  type="text"
+                  :placeholder="automationLabel('actionConfig.sheetIdPlaceholder', isZh)"
+                  data-field="createRecordTargetSheetId"
+                />
+                <el-button
+                  size="small"
+                  class="meta-rule-editor__btn"
+                  data-field="createRecordTargetSheetToggle"
+                  @click="toggleManualTargetSheetEntry(action)"
+                >{{ isManualTargetSheetEntry(action) ? automationLabel('actionConfig.targetSheetUseListToggle', isZh) : automationLabel('actionConfig.targetSheetManualToggle', isZh) }}</el-button>
+              </template>
+              <!-- Load-bearing fallback, not just cosmetic degradation: this is a plain el-input so
+                   `.meta-rule-editor__action-config .el-input__inner` still resolves to it when no
+                   sheets are loaded (no client / listSheets() failed or empty) — an existing
+                   multitable-automation-rule-editor.spec.ts case types into exactly that selector.
+                   Collapsing this to an always-on el-select would silently break that test. -->
+              <el-input v-else v-model="action.config.targetSheetId" type="text" :placeholder="automationLabel('actionConfig.sheetIdPlaceholder', isZh)" data-field="createRecordTargetSheetId" />
               <div v-for="(pair, pidx) in (action.config.fieldValues as FieldPair[] || [])" :key="pidx" class="meta-rule-editor__field-pair">
                 <el-input v-model="pair.fieldId" class="meta-rule-editor__input--sm" type="text" :placeholder="automationLabel('actionConfig.fieldIdPlaceholder', isZh)" />
                 <el-input v-model="pair.value" class="meta-rule-editor__input--sm" type="text" :placeholder="automationLabel('editor.value', isZh)" />
@@ -1228,6 +1284,8 @@
                 <div v-if="parallelBranchActionError" class="meta-rule-editor__error" data-field="parallel-branch-action-error">{{ parallelBranchActionError }}</div>
               </template>
             </div>
+              </el-collapse-item>
+            </el-collapse>
           </div>
           <el-button
             v-if="draft.actions.length < 3"
@@ -1299,7 +1357,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue'
 import { ElButton, ElCheckbox, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElDrawer, ElInput, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { useLocale } from '../../composables/useLocale'
 import type { MultitableApiClient } from '../api/client'
@@ -1313,6 +1371,7 @@ import type {
   ConditionGroup,
   DingTalkGroupDestination,
   MetaSheetPermissionCandidate,
+  MetaSheet,
   MetaView,
 } from '../types'
 import { applyDingTalkNotificationPreset, type DingTalkNotificationPreset } from '../utils/dingtalkNotificationPresets'
@@ -1378,6 +1437,11 @@ import {
   type SaveBlockActionSnapshot,
   type SaveBlockReason,
 } from '../automationSaveBlockReasons'
+import {
+  summarizeAutomationAction,
+  type ActionSummarySnapshot,
+} from '../automationActionSummary'
+import { automationTargetSheetOptions } from '../utils/automation-target-sheet-options'
 
 interface FieldPair {
   fieldId: string
@@ -1479,6 +1543,29 @@ const dingTalkDestinationsError = ref('')
 // start_approval template picker. Empty (incl. on a 401/403 for an author lacking `approvals:read`) →
 // the config block degrades to a free-text template-id input; the select is never a hard dependency.
 const approvalTemplates = ref<Array<{ id: string; name?: string }>>([])
+// G-B2-27: create_record's target-sheet picker. Empty (no client, listSheets() unavailable/failed,
+// or the base simply has no other sheets yet) → the config block degrades to the original free-text
+// sheet-ID input further below — never a hard dependency, same shape as approvalTemplates above.
+const availableSheets = ref<MetaSheet[]>([])
+const targetSheetOptions = computed(() => automationTargetSheetOptions(availableSheets.value))
+// Per-action manual-vs-dropdown override for the target-sheet field, keyed by the action's stable
+// draftId (survives reordering, unlike an array index). Undefined means "no explicit choice yet" —
+// isManualTargetSheetEntry then defaults to manual whenever the currently-configured sheet id isn't
+// among targetSheetOptions, so an off-list value (cross-base sheet, or set before listSheets loaded)
+// is always visible/editable rather than silently swallowed by a dropdown that can't represent it.
+const manualTargetSheetOverride = ref<Record<string, boolean>>({})
+
+function isManualTargetSheetEntry(action: DraftAction): boolean {
+  const override = manualTargetSheetOverride.value[action.draftId]
+  if (override !== undefined) return override
+  const current = typeof action.config.targetSheetId === 'string' ? action.config.targetSheetId.trim() : ''
+  if (!current) return false
+  return !targetSheetOptions.value.some((opt) => opt.value === current)
+}
+
+function toggleManualTargetSheetEntry(action: DraftAction) {
+  manualTargetSheetOverride.value[action.draftId] = !isManualTargetSheetEntry(action)
+}
 const personRecipientSuggestions = ref<Record<number, MetaSheetPermissionCandidate[]>>({})
 const personRecipientLoading = ref<Record<number, boolean>>({})
 const personRecipientErrors = ref<Record<number, string>>({})
@@ -2442,9 +2529,18 @@ watch(
         } catch {
           approvalTemplates.value = []
         }
+        try {
+          // Best-effort: any error (network, older host without the endpoint, etc.) → empty →
+          // the create_record target-sheet field falls back to its original free-text input.
+          const res = await props.client.listSheets()
+          availableSheets.value = Array.isArray(res?.sheets) ? res.sheets : []
+        } catch {
+          availableSheets.value = []
+        }
       } else {
         dingTalkDestinations.value = []
         approvalTemplates.value = []
+        availableSheets.value = []
       }
     }
   },
@@ -2546,6 +2642,128 @@ const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
   })
 })
 
+// G-B2-25: resolves a field id authored in an action's config to its display name, for the
+// one-line summary only (never used for save/validation — buildPayload keeps working off raw
+// fieldIds). '' input or an id no longer present in `fields` falls back to the raw id itself, so
+// the summary still shows SOMETHING real instead of silently blanking a valid reference.
+function fieldLabelById(fieldId: unknown): string {
+  const trimmed = typeof fieldId === 'string' ? fieldId.trim() : ''
+  if (!trimmed) return ''
+  return props.fields.find((f) => f.id === trimmed)?.name ?? trimmed
+}
+
+function countAuthoredFieldPairs(pairs: unknown): number {
+  if (!Array.isArray(pairs)) return 0
+  return pairs.filter((pair) => isPlainRecord(pair) && typeof pair.fieldId === 'string' && pair.fieldId.trim()).length
+}
+
+// G-B2-25: builds the plain, Vue-free snapshot automationActionSummary.ts turns into a sentence.
+// Only the field/approval-template NAME lookups happen here (this component already has them);
+// everything else is a pass-through of the same config/parse-helper values saveBlockActionSnapshots
+// uses above, so the summary and the save-block reasons can never silently disagree about counts.
+function buildActionSummarySnapshot(action: DraftAction): ActionSummarySnapshot {
+  const snapshot: ActionSummarySnapshot = { type: action.type }
+  if (action.type === 'update_record') {
+    const pairs = (action.config.fieldUpdates as FieldPair[] | undefined) ?? []
+    snapshot.updateRecord = {
+      fieldUpdates: pairs.map((pair) => ({
+        fieldLabel: fieldLabelById(pair.fieldId),
+        value: typeof pair.value === 'string' ? pair.value : '',
+      })),
+    }
+  } else if (action.type === 'create_record') {
+    snapshot.createRecord = {
+      targetSheetId: typeof action.config.targetSheetId === 'string' ? action.config.targetSheetId : '',
+      fieldValueCount: countAuthoredFieldPairs(action.config.fieldValues),
+    }
+  } else if (action.type === 'send_webhook') {
+    snapshot.webhook = {
+      url: typeof action.config.url === 'string' ? action.config.url : '',
+      method: typeof action.config.method === 'string' ? action.config.method : '',
+    }
+  } else if (action.type === 'send_notification') {
+    snapshot.notification = {
+      userId: typeof action.config.userId === 'string' ? action.config.userId : '',
+      message: typeof action.config.message === 'string' ? action.config.message : '',
+    }
+  } else if (action.type === 'start_approval') {
+    const templateId = typeof action.config.templateId === 'string' ? action.config.templateId.trim() : ''
+    const templateName = approvalTemplates.value.find((t) => t.id === templateId)?.name
+    snapshot.startApproval = {
+      templateLabel: templateName || templateId,
+      mappingCount: countAuthoredFieldPairs(action.config.formDataMappingPairs),
+    }
+  } else if (action.type === 'send_email') {
+    snapshot.email = {
+      recipientCount: parseEmailRecipientsText(action.config.recipientsText).length,
+      subjectTemplate: typeof action.config.subjectTemplate === 'string' ? action.config.subjectTemplate : '',
+    }
+  } else if (action.type === 'send_dingtalk_group_message') {
+    const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
+    const destinationFieldPaths = parseRecipientFieldPathsText(action.config.destinationFieldPath)
+    snapshot.dingTalkGroupMessage = {
+      destinationCount: destinationIds.length + destinationFieldPaths.length,
+      titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate : '',
+    }
+  } else if (action.type === 'send_dingtalk_person_message') {
+    const userIds = parseUserIdsText(action.config.userIdsText)
+    const memberGroupIds = parseMemberGroupIdsText(action.config.memberGroupIdsText)
+    const recipientFieldPaths = parseRecipientFieldPathsText(action.config.recipientFieldPath)
+    const memberGroupRecipientFieldPaths = parseRecipientFieldPathsText(action.config.memberGroupRecipientFieldPath)
+    snapshot.dingTalkPersonMessage = {
+      recipientCount: userIds.length + memberGroupIds.length + recipientFieldPaths.length + memberGroupRecipientFieldPaths.length,
+      titleTemplate: typeof action.config.titleTemplate === 'string' ? action.config.titleTemplate : '',
+    }
+  } else if (action.type === 'lock_record') {
+    snapshot.lockRecord = { locked: action.config.locked === true }
+  } else if (action.type === 'delete_record') {
+    snapshot.deleteRecord = { acknowledged: isDeleteRecordAcknowledged(action) }
+  } else if (action.type === 'condition_branch') {
+    snapshot.conditionBranch = {
+      branchCount: (action.config.branches as BranchDraft[] | undefined)?.length ?? 0,
+      hasDefaultBranch: !!action.config.defaultBranch,
+    }
+  } else if (action.type === 'parallel_branch') {
+    snapshot.parallelBranch = {
+      branchCount: (action.config.parallelBranches as ParallelBranchDraft[] | undefined)?.length ?? 0,
+    }
+  }
+  return snapshot
+}
+
+const actionSummaries = computed<string[]>(() =>
+  draft.value.actions.map((action) => summarizeAutomationAction(buildActionSummarySnapshot(action), isZh.value)),
+)
+
+// G-B2-25: per-action collapse state. DEFAULT policy: an action loaded from an already-saved rule
+// (action.persisted === true) starts COLLAPSED behind its one-line summary; a brand-new action
+// (the starter action in a fresh rule, or one pushed by addAction()) starts EXPANDED so its config
+// is visible immediately. onDraftActionTypeChange() already flips `persisted` back to false on a
+// type change (pre-existing, used for the delete-record-ack reset) — reused here as-is, so
+// switching an existing action's type also re-expands it (the old config is gone; the author needs
+// to see the new one) with zero extra bookkeeping. A manual toggle always overrides this default
+// for THAT action from then on, mirroring the advancedSectionOpen precedent (G-B2-24): once the
+// author has interacted with a card's collapse state directly, the heuristic stops fighting them.
+const actionManualExpandOverrides = ref<Record<string, boolean>>({})
+
+function isActionExpanded(action: DraftAction): boolean {
+  const override = actionManualExpandOverrides.value[action.draftId]
+  if (override === true) return true
+  if (override === false) return false
+  return action.persisted !== true
+}
+
+function setActionExpanded(action: DraftAction, expanded: boolean): void {
+  actionManualExpandOverrides.value = { ...actionManualExpandOverrides.value, [action.draftId]: expanded }
+}
+
+function clearActionExpandOverride(draftId: string): void {
+  if (actionManualExpandOverrides.value[draftId] === undefined) return
+  const next = { ...actionManualExpandOverrides.value }
+  delete next[draftId]
+  actionManualExpandOverrides.value = next
+}
+
 // G-B2-22: locates the first entry collectConditionEditorEntries would flag as incomplete, in the
 // same depth-first order areConditionsComplete's recursive `.every()` short-circuits on — so this
 // always names the same condition/group the boolean check would have failed on first.
@@ -2595,8 +2813,24 @@ const canSave = computed(() => saveBlockReasons.value.length === 0)
 // G-B2-22: click-to-scroll for a save-block reason. Scoped to this drawer's own body so it can
 // never jump to a same-named element in some other open surface. A reason without an anchor (see
 // automationSaveBlockReasons.ts) is a no-op here rather than a guess.
+//
+// G-B2-25 addendum: an action-scoped anchor (`[data-action-index="N"] ...`) can now live inside a
+// COLLAPSED action card. The element is still in the DOM (el-collapse-item keeps content mounted),
+// but scrollIntoView is a no-op on a display:none subtree — so a collapsed card would silently
+// swallow the click. Expand that action first (never re-collapse it automatically afterward — see
+// isActionExpanded/setActionExpanded) and scroll on the next tick once it has re-rendered.
 function scrollToSaveBlockAnchor(anchor?: string): void {
   if (!anchor) return
+  const actionIndexMatch = anchor.match(/data-action-index="(\d+)"/)
+  const action = actionIndexMatch ? draft.value.actions[Number(actionIndexMatch[1])] : undefined
+  if (action && !isActionExpanded(action)) {
+    setActionExpanded(action, true)
+    void nextTick().then(() => {
+      const target = editorBodyRef.value?.querySelector(anchor)
+      if (target instanceof HTMLElement) target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+    return
+  }
   const target = editorBodyRef.value?.querySelector(anchor)
   if (target instanceof HTMLElement) target.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
@@ -3216,6 +3450,10 @@ function defaultConfigForActionType(type: AutomationActionType): DraftActionConf
 function onDraftActionTypeChange(action: DraftAction) {
   action.config = defaultConfigForActionType(action.type)
   action.persisted = false
+  // G-B2-25: a type change clears any manual collapse override so isActionExpanded() falls back
+  // to its persisted-based default — which just went false, so the card re-expands to show the
+  // (now empty) config for the newly-picked type instead of staying collapsed on stale text.
+  clearActionExpandOverride(action.draftId)
   if (action.type === 'delete_record') {
     setDeleteRecordAcknowledged(action, false)
   } else if (deleteRecordAcknowledgements.value[action.draftId] !== undefined) {
@@ -3228,6 +3466,7 @@ function onDraftActionTypeChange(action: DraftAction) {
 
 function removeAction(idx: number) {
   const [removed] = draft.value.actions.splice(idx, 1)
+  if (removed?.draftId) clearActionExpandOverride(removed.draftId)
   if (removed?.draftId && deleteRecordAcknowledgements.value[removed.draftId] !== undefined) {
     const next = { ...deleteRecordAcknowledgements.value }
     delete next[removed.draftId]
@@ -3714,6 +3953,14 @@ async function onTestRun(): Promise<void> {
   flex-direction: column;
   gap: 6px;
   padding-left: 20px;
+}
+
+/* G-B2-25: progressive disclosure wrapper around one action's config. No border/background
+   overrides — this reuses el-collapse's own default chrome (same as .meta-rule-editor__advanced
+   above), it just needs its title text styled as a muted one-line summary, not a section title. */
+.meta-rule-editor__action-summary {
+  color: var(--ms-text-2);
+  font-size: 13px;
 }
 
 .meta-rule-editor__preset-row {

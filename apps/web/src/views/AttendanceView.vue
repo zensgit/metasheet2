@@ -1384,6 +1384,9 @@
             <button class="attendance__btn" :disabled="exporting || loading || reportsExportBlocked" @click="exportCsv">
               {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
             </button>
+            <button class="attendance__btn" data-testid="attendance-export-xlsx" :disabled="exportingXlsx || loading || reportsExportBlocked" @click="exportXlsx">
+              {{ exportingXlsx ? tr('Exporting...', '导出中...') : tr('Export Excel', '导出 Excel') }}
+            </button>
           </div>
         </div>
         <small class="attendance__field-hint">{{ recordsTimezoneContextHint }}</small>
@@ -3022,6 +3025,9 @@
                     data-overtime-bank="cap"
                     :placeholder="tr('0 = no cap', '0＝不限')"
                   />
+                  <small class="attendance__field-hint" data-overtime-bank-hint="cap">
+                    {{ tr('Caps the comp-time banked from overtime per calendar month. An approval that would push the month past this cap is blocked. 0 = no cap.', '限制每自然月由加班转入调休池的额度上限。若某次审批会使当月超过该上限，则阻断该审批。0＝不限。') }}
+                  </small>
                 </label>
                 <label class="attendance__field" for="attendance-overtime-bank-validity">
                   <span>{{ tr('Lot validity (days, empty = no expiry)', '额度有效期（天，留空＝不过期）') }}</span>
@@ -3034,6 +3040,9 @@
                     data-overtime-bank="validity"
                     :placeholder="tr('Empty = no expiry', '留空＝不过期')"
                   />
+                  <small class="attendance__field-hint" data-overtime-bank-hint="validity">
+                    {{ tr('Applies to banked (source-tagged) lots; overrides the comp-time conversion validity. Empty = fall back to it.', '作用于加班银行的分源额度，覆盖调休转换的有效期；留空则回落到该有效期。') }}
+                  </small>
                 </label>
                 <button
                   class="attendance__btn attendance__btn--primary"
@@ -9814,6 +9823,7 @@ import {
   type AttendanceImportMappingColumnLike,
 } from './attendance/importTemplateColumns'
 import { withCsvBom } from './attendance/csvExport'
+import { REPORT_XLSX_MIME, csvTextToXlsxArrayBuffer, xlsxFilenameFromCsv } from './attendance/reportXlsxExport'
 import {
   parseCsvHeaderFromText,
   readBlobHeadText,
@@ -11533,6 +11543,7 @@ const statusMeta = ref<AttendanceStatusMeta | null>(null)
 const calendarMonth = ref(new Date())
 const pluginsLoaded = ref(false)
 const exporting = ref(false)
+const exportingXlsx = ref(false)
 const exportCsvHeaderMode = ref<'label' | 'code'>('label')
 const settingsLoading = ref(false)
 const attendanceSettings = ref<AttendanceSettings | null>(null)
@@ -21806,6 +21817,65 @@ async function exportCsv() {
     )
   } finally {
     exporting.value = false
+  }
+}
+
+// S5: same server report CSV (identical fields/filters/fingerprint) rendered to
+// a real .xlsx client-side — Excel opens it without the ANSI/GBK 乱码 guess.
+async function exportXlsx() {
+  if (reportsExportBlocked.value) {
+    setStatus(
+      appendStatusContext(
+        reportsUnavailable.value
+          ? tr('Reload the report before exporting.', '请先重载报表再导出。')
+          : tr('Filters changed. Reload the report before exporting.', '筛选条件已变化，请先重载报表再导出。'),
+        recordsTimezoneContextHint.value,
+      ),
+      'error',
+    )
+    return
+  }
+  exportingXlsx.value = true
+  try {
+    const query = buildQuery({
+      from: fromDate.value,
+      to: toDate.value,
+      orgId: normalizedOrgId(),
+      userId: normalizedUserId(),
+      header: exportCsvHeaderMode.value,
+    })
+    const response = await apiFetch(`/api/attendance/export?${query.toString()}`)
+    const text = await response.text()
+    if (!response.ok) {
+      let message = tr('Export failed', '导出失败')
+      try {
+        message = readErrorMessage(JSON.parse(text), message)
+      } catch {
+        message = text || message
+      }
+      throw new Error(message)
+    }
+    const disposition = response.headers.get('content-disposition')
+    const match = disposition?.match(/filename="?([^";]+)"?/)
+    const filename = xlsxFilenameFromCsv(match?.[1] || 'attendance-export.csv')
+    const bytes = await csvTextToXlsxArrayBuffer(text)
+    const blob = new Blob([bytes], { type: REPORT_XLSX_MIME })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    setStatus(appendStatusContext(tr('Excel export ready.', 'Excel 导出完成。'), recordsTimezoneContextHint.value))
+  } catch (error: any) {
+    setStatus(
+      appendStatusContext(readErrorMessage(error, tr('Export failed', '导出失败')), recordsTimezoneContextHint.value),
+      'error',
+    )
+  } finally {
+    exportingXlsx.value = false
   }
 }
 
