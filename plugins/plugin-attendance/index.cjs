@@ -20540,6 +20540,12 @@ async function isApproverAllowed(db, userId, step, logger) {
 }
 
 module.exports = {
+  // Top-level so the integration harness's
+  // getAttendancePluginForTest().resetAttendanceSettingsCacheForTests?.() (in
+  // attendance-plugin.test.ts beforeEach) actually runs — it was previously only
+  // exported nested one bag down, so the top-level optional call silently no-op'd
+  // and the 60s settings cache leaked across tests in the shared attendance suite.
+  resetAttendanceSettingsCacheForTests,
   __attendanceLeaveCancellationForTests: {
     reverseLeaveBalanceDeduction,
   },
