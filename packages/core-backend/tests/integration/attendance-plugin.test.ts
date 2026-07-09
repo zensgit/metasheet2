@@ -6117,6 +6117,46 @@ attendanceIntegrationDescribe(
       expect((await approve(dormId)).status).toBe(200)
       expect(await expiryDaysOf(dormId)).toEqual([{ overtime_source: null, days: 30 }])
 
+      // 5g — expiresInDays parity: the sibling knob is now bounded too, so an over-large value is rejected at
+      // save (400) — before this it had no zod .max and would 500 the comp-time grant just like validityDays did.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 999999999 } })).status).toBe(400)
+
+      // 5h — legacy-row defense (review P2-1): a settings row saved BEFORE the zod .max (or seeded by another
+      // writer) can hold expiresInDays > MAX; the normalize-on-read path does NOT cap it, so the read-point
+      // clampLotValidityDays is the ONLY thing that stops it 500-ing the grant INSERT. Over-bind the persisted
+      // value directly (bypassing PUT/zod) and prove both the dormant and banked grant paths clamp to 36500
+      // instead of overflowing the PG interval.
+      const overbindPersistedExpiry = async () => {
+        await pool.query(
+          `UPDATE system_configs
+              SET value = jsonb_set(value::jsonb, '{compTimeFromOvertime,expiresInDays}', '999999999')::text
+            WHERE key = 'attendance.settings'`,
+        )
+        // the plugin caches settings for 60s — force a re-read of the over-bound row. (The reset helper is
+        // nested under __attendanceReportFieldCatalogForTests; the top-level `?.()` accessor is a silent no-op.)
+        const plugin = getAttendancePluginForTest() as unknown as { __attendanceReportFieldCatalogForTests?: { resetAttendanceSettingsCacheForTests?: () => void } }
+        plugin.__attendanceReportFieldCatalogForTests?.resetAttendanceSettingsCacheForTests?.()
+      }
+
+      // 5h-dormant: bank OFF, over-bound expiresInDays → single NULL-source lot clamps to 36500 days, 200 (was 500).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 30 }, overtimeBankPolicy: { enabled: false, pooledSources: [], validityDays: null } })).status).toBe(200)
+      await overbindPersistedExpiry()
+      const legacyDormantId = await createOvertime('2026-09-16', 60)
+      expect((await approve(legacyDormantId)).status).toBe(200)
+      expect(await expiryDaysOf(legacyDormantId)).toEqual([{ overtime_source: null, days: 36500 }])
+
+      // 5h-banked: bank ON (validityDays null → falls back to expiresInDays), over-bound expiresInDays →
+      // source-tagged lot clamps to 36500 days via the resolveBankedLotExpiresInDays fallback, 200 (was 500).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 30 }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: null } })).status).toBe(200)
+      await overbindPersistedExpiry()
+      const legacyBankedId = await createOvertime('2026-09-17', 60)
+      await pool.query(
+        `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+        [legacyBankedId, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-09-17', dayType: 'workday', segments: { workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: 60, compTimeGrantMinutes: 60 })],
+      )
+      expect((await approve(legacyBankedId)).status).toBe(200)
+      expect(await expiryDaysOf(legacyBankedId)).toEqual([{ overtime_source: 'workday', days: 36500 }])
+
       // 5e — P2-1: an over-large validityDays is rejected at settings-save (400), so it can never reach the
       // banked INSERT and overflow the PG interval (was: 200 at PUT, then 500 on the next approval).
       expect((await putSettings({ overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: 999999999 } })).status).toBe(400)

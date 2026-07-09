@@ -10628,6 +10628,18 @@ function partitionOvertimeBankGrantLots({ requestId, totalMinutes, segments, ove
 // admin gets a clean 400 at save-time, not a 500 on the next approval). Review P2-1.
 const MAX_LOT_VALIDITY_DAYS = 36500
 
+// Clamp a lot-validity-days input to a safe positive integer or null. expires_at
+// is now() + N×24h, and PG raises "interval out of range" (22008) past ~1.07e8
+// days. The S1 slice bounded overtimeBankPolicy.validityDays; this shares the
+// same clamp for compTimeFromOvertime.expiresInDays (its sibling knob) so a
+// legacy settings row saved before the zod .max still can't 500 a comp-time
+// grant. Out-of-range → MAX (preserve the "has an expiry" intent, no overflow).
+function clampLotValidityDays(raw) {
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n <= 0) return null
+  return n <= MAX_LOT_VALIDITY_DAYS ? n : MAX_LOT_VALIDITY_DAYS
+}
+
 // 加班银行 S1 (overtime-bank-validity design-lock §2): which validity governs a BANKED (source-tagged) lot.
 // The bank card's `validityDays` wins when the bank is ENABLED and the value is a positive integer within
 // bounds; otherwise we fall back to compTimeFromOvertime.expiresInDays — the pre-S1 behaviour, byte-identical.
@@ -20578,6 +20590,7 @@ module.exports = {
     resolveOvertimeBankSourceMinutes,
     partitionOvertimeBankGrantLots,
     resolveBankedLotExpiresInDays,
+    clampLotValidityDays,
     buildCycleSettlementRows,
   },
   __attendanceLeaveOffsetForTests: {
@@ -21762,7 +21775,7 @@ module.exports = {
       // or null = no expiry).
       compTimeFromOvertime: z.object({
         enabled: z.boolean().optional(),
-        expiresInDays: z.number().int().positive().nullable().optional(),
+        expiresInDays: z.number().int().positive().max(36500).nullable().optional(),
       }).optional(),
       // 加班银行 (overtime bank) — OvertimeBankPolicy v1-1a latent config. Round-trips through PUT/GET; no
       // runtime enforces it yet. pooledSources enum EXCLUDES statutory_holiday (compliance floor §6 — 法定
@@ -28760,7 +28773,7 @@ module.exports = {
                   // expires_at = granted_at + N×24h — a FIXED 24h-per-day duration, computed in SQL from
                   // the statement's now() (granted_at also defaults to now() → exact). null = no expiry
                   // (unchanged C2 behaviour). The AttendanceExpiryService (C4-1) reaps these.
-                  const expiresInDays = compTimeSettings.compTimeFromOvertime.expiresInDays ?? null
+                  const expiresInDays = clampLotValidityDays(compTimeSettings.compTimeFromOvertime.expiresInDays)
                   // 加班银行 v1-1b (design-lock §3 账1): gate per-source tagging on overtimeBankPolicy. DORMANT
                   // (default, every current org) keeps the EXISTING single overtime_conversion lot with
                   // overtime_source NULL — byte-identical to pre-v1-1b. ENABLED splits the rule-normalized
