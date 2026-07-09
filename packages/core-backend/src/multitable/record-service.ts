@@ -241,6 +241,15 @@ export type RecordPatchResult = {
   patch: Record<string, unknown>
 }
 
+// 4c-3: mirrors permission-service's 42703 guard — lets a deploy window where the code ships before
+// the delete_revision_id migration degrade to the legacy trash INSERT instead of failing the delete.
+function isUndefinedColumnError(err: unknown, columnName: string): boolean {
+  const code = (err as { code?: string } | null)?.code
+  const message = err instanceof Error ? err.message : String(err)
+  if (code === '42703') return message.includes(columnName)
+  return false
+}
+
 function isUndefinedTableError(err: unknown, tableName: string): boolean {
   const code = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : null
   const message = typeof (err as { message?: unknown })?.message === 'string' ? (err as { message: string }).message : ''
@@ -853,12 +862,27 @@ export class RecordService {
           | Record<string, unknown>
           | undefined
         const baseId = baseRow && typeof baseRow.base_id === 'string' ? baseRow.base_id : null
-        await query(
-          `INSERT INTO meta_records_trash
-             (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
-           VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
-          [recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, originalCreatedAt, originalUpdatedAt],
-        )
+        // 4c-3 anchor (§2): record the delete revision's pre-generated id so restore can NAME this
+        // deletion's inbound-link tombstones (`WHERE source_revision_id = … AND reason='record_delete'`).
+        // A deploy window where this code runs against a pre-migration schema degrades to the legacy
+        // INSERT shape (delete_revision_id stays NULL ⇒ restore honestly reports
+        // inboundEdgesRecoverable=false) — the delete itself must never fail on the anchor column.
+        try {
+          await query(
+            `INSERT INTO meta_records_trash
+               (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at, delete_revision_id)
+             VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`,
+            [recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, originalCreatedAt, originalUpdatedAt, recordDeleteRevisionId],
+          )
+        } catch (err) {
+          if (!isUndefinedColumnError(err, 'delete_revision_id')) throw err
+          await query(
+            `INSERT INTO meta_records_trash
+               (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
+             VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
+            [recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, originalCreatedAt, originalUpdatedAt],
+          )
+        }
       } catch (err) {
         if (!isUndefinedTableError(err, 'meta_records_trash')) throw err
       }
