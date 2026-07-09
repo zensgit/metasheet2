@@ -31,6 +31,12 @@ export default defineConfig({
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
       // cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
       'tests/integration/directory-sync-admission-orphan-guard.db.test.ts',
+      // P2-1 (post-#3972 review): proves the create-time email existence check is
+      // case-insensitive and that batchAdmitDirectoryAccountUsers enforces server-side
+      // eligibility (no duplicate `users` row for a differently-cased email; no silent
+      // re-admission of an already-linked account). DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
+      'tests/integration/directory-admission-case-insensitive-uniqueness.db.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',

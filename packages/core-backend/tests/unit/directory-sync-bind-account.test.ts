@@ -1084,6 +1084,10 @@ describe('bindDirectoryAccount', () => {
           mobile: '13900001234',
         }],
       })
+      // P2-1 eligibility gate: no existing directory_account_links row for account-bulk-1
+      .mockResolvedValueOnce({ rows: [] })
+      // P2-1 eligibility gate: no active user matches account-bulk-1's mobile
+      .mockResolvedValueOnce({ rows: [] })
       // admitDirectoryAccountUser reloads account-1 + previous link
       .mockResolvedValueOnce({
         rows: [{
@@ -1165,6 +1169,81 @@ describe('bindDirectoryAccount', () => {
     expect(outcome.succeeded[0].temporaryPassword).toMatch(/^Tmp-/)
     expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
     expect(inviteLedgerMocks.recordInvite).not.toHaveBeenCalled()
+  })
+
+  // P2-1 (post-#3972 review): a direct batch-admit call bypasses the UI's "no recommendation
+  // candidate" filter. The server must reject an account whose email case-insensitively
+  // matches an existing active user, instead of creating a duplicate `users` row.
+  it('rejects batch-admit for an account whose email case-insensitively matches an existing user', async () => {
+    pgMocks.transaction.mockImplementation(async () => {
+      throw new Error('transaction should not open for an ineligible account')
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-case-mismatch',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691175',
+          union_id: 'union-2',
+          open_id: null,
+          external_key: 'union-2',
+          name: 'Alice',
+          email: 'alice@x.com',
+          mobile: null,
+        }],
+      })
+      // P2-1 eligibility gate: no existing directory_account_links row
+      .mockResolvedValueOnce({ rows: [] })
+      // P2-1 eligibility gate: an active user already matches this email case-insensitively
+      .mockResolvedValueOnce({ rows: [{ id: 'user-existing' }] })
+
+    const outcome = await batchAdmitDirectoryAccountUsers(['account-case-mismatch'], {
+      adminUserId: 'admin-1',
+    })
+
+    expect(outcome.succeeded).toEqual([])
+    expect(outcome.failed).toEqual([
+      { accountId: 'account-case-mismatch', error: expect.stringMatching(/already exists/i) },
+    ])
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
+  })
+
+  // P2-1: an account already linked to a local user must not be silently re-admitted into a
+  // brand new user (which would orphan the existing link).
+  it('rejects batch-admit for an account already linked to a local user', async () => {
+    pgMocks.transaction.mockImplementation(async () => {
+      throw new Error('transaction should not open for an ineligible account')
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-already-linked',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691176',
+          union_id: 'union-3',
+          open_id: null,
+          external_key: 'union-3',
+          name: 'Bob',
+          email: null,
+          mobile: null,
+        }],
+      })
+      // P2-1 eligibility gate: this account is already linked
+      .mockResolvedValueOnce({ rows: [{ link_status: 'linked', local_user_id: 'user-existing' }] })
+
+    const outcome = await batchAdmitDirectoryAccountUsers(['account-already-linked'], {
+      adminUserId: 'admin-1',
+    })
+
+    expect(outcome.succeeded).toEqual([])
+    expect(outcome.failed).toEqual([
+      { accountId: 'account-already-linked', error: expect.stringMatching(/already linked/i) },
+    ])
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
   })
 
   // DT-HARDEN-04: symmetric to the batch-unbind isolation test above. A fail-fast bind
