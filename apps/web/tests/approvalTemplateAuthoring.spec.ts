@@ -865,6 +865,97 @@ describe('TemplateAuthoringView', () => {
     expect(payload.approvalGraph.edges).toEqual(graph.edges)
   })
 
+  // G-B2-18: the complex-graph approval-node static_user/static_role editor gets the SAME directory
+  // typeahead as the linear step picker (approval-step-user-picker), instead of a bare-ID allow-create
+  // select. cc node forces the preserved-graph (complex) path so the structured editor renders.
+  describe('G-B2-18: complex-node assignee picker', () => {
+    // Real per-character typing (reading the DOM value fresh before each keystroke, exactly like a
+    // browser) — NOT a one-shot `input.value = finalString; dispatchEvent(...)`. A one-shot set would
+    // pass even against a naive `ids.join(', ')`-derived display that fights the controlled <el-input>
+    // on every keystroke; only per-character typing can red-light that regression.
+    async function typeChars(input: HTMLInputElement, chars: string) {
+      for (const ch of chars) {
+        input.value = input.value + ch
+        input.dispatchEvent(new Event('input'))
+        await flushUi()
+        // eslint-disable-next-line no-console
+        console.log('DEBUG after char', JSON.stringify(ch), '-> dom value =', JSON.stringify(input.value))
+      }
+    }
+
+    it('renders the user picker (not the role picker) for static_user, hydrated to the stored id via the fallback join', async () => {
+      routeParams = { id: 'tpl_g5_static_user' }
+      getTemplateSpy.mockResolvedValue(buildTemplate({
+        approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['legacy-user-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+      }))
+      await mountView()
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-node-source-user-picker"]')).not.toBeNull()
+      expect(container!.querySelector('[data-testid="approval-node-source-role-picker"]')).toBeNull()
+      expect((container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement).value).toBe('legacy-user-1')
+    })
+
+    it('renders the role picker for static_role', async () => {
+      routeParams = { id: 'tpl_g5_static_role' }
+      getTemplateSpy.mockResolvedValue(buildTemplate({
+        approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_role', roleIds: ['mgr'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+      }))
+      await mountView()
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-node-source-role-picker"]')).not.toBeNull()
+      expect(container!.querySelector('[data-testid="approval-node-source-user-picker"]')).toBeNull()
+      expect((container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement).value).toBe('mgr')
+    })
+
+    // KEYSTONE regression for the controlled-<el-input> bug the manual fallback almost shipped with:
+    // deriving the box's displayed text from `ids.join(', ')` re-parsed on every keystroke fights
+    // Vue's DOM patch (it resets the input back to the re-derived text after each render), so a
+    // separator can never be typed and a second id can never be entered. Typed char-by-char, the FIX
+    // (a raw per-node text buffer, independent of the ids array until parsed) must let the full
+    // string through untouched.
+    it('keystone: typing a full multi-id string char-by-char into the manual fallback is never truncated', async () => {
+      routeParams = { id: 'tpl_g5_manual_typing' }
+      getTemplateSpy.mockResolvedValue(buildTemplate({
+        approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_user', userIds: [] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+      }))
+      await mountView()
+      await flushUi()
+
+      const idsText = container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement
+      await typeChars(idsText, 'u1, u2')
+      expect(idsText.value).toBe('u1, u2') // NOT "u1u2" — separators survive every re-render.
+
+      ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+      const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+      const approval1 = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1')
+      expect(approval1.config.assigneeSources).toEqual([{ kind: 'static_user', userIds: ['u1', 'u2'] }])
+    })
+
+    // The manual-text buffer is keyed only by nodeKey, not by (nodeKey, kind) — switching the SOURCE
+    // KIND away and back must not leak the OTHER kind's stale typed text into the box.
+    it('switching source kind clears the manual fallback text (no stale cross-kind leak)', async () => {
+      routeParams = { id: 'tpl_g5_kind_switch' }
+      getTemplateSpy.mockResolvedValue(buildTemplate({
+        approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_role', roleIds: ['mgr'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+      }))
+      await mountView()
+      await flushUi()
+      expect((container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement).value).toBe('mgr')
+
+      const kindSelect = container!.querySelector('[data-testid="approval-node-source-kind"]') as HTMLSelectElement
+      kindSelect.value = 'static_user'
+      kindSelect.dispatchEvent(new Event('change'))
+      await flushUi()
+
+      expect((container!.querySelector('[data-testid="approval-node-source-ids-text"]') as HTMLInputElement).value).toBe('')
+    })
+  })
+
   // #3161 §1 — FE authoring preserve. The editor does not author amountConsistencyCheck, so the
   // load→rebuild it runs on every save must carry it through verbatim or a preset-shipped control
   // (#3183) is silently dropped on the first authoring-page save.

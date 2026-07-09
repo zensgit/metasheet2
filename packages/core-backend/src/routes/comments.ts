@@ -9,7 +9,7 @@ import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
 import { apiTokenWriteRateLimit } from '../middleware/rate-limiter'
 import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import { poolManager } from '../integration/db/connection-pool'
-import { resolveSheetReadableCapabilities } from '../multitable/permission-service'
+import { loadDeniedRecordIds, loadRowLevelReadDenyEnabled, resolveSheetReadableCapabilities } from '../multitable/permission-service'
 import {
   CommentAccessError,
   CommentConflictError,
@@ -120,7 +120,8 @@ function respondCommentError(res: Response, error: unknown, fallbackMessage: str
  * sheet, so the comments surface carries no existence oracle beyond what the interactive read path
  * already exposes. Fail-closed (a resolver throw propagates to the route catch → 500, never a serve).
  *
- * Every gated call site is `if (!(await ensureSheetReadable(req, res, spreadsheetId))) return`.
+ * Every gated call site resolves `resolveCommentReadContext(req, res, spreadsheetId)` and returns when it
+ * fails. That context carries both sheet-read and row-deny state for read surfaces.
  *
  * SCOPE: this gates the routes that take an explicit `spreadsheetId`/`containerId` (the enumerable,
  * attacker-supplied surface — list/summary/presence/mention-candidates/mention-summary read + create/
@@ -129,14 +130,40 @@ function respondCommentError(res: Response, error: unknown, fallbackMessage: str
  * sheet-id lookup) and the user-scoped cross-sheet `inbox`/`unread-count` aggregates (would need result
  * filtering by the actor's readable-sheet set, not a single-sheet 403).
  */
-async function ensureSheetReadable(req: Request, res: Response, spreadsheetId: string): Promise<boolean> {
+type CommentReadContext = {
+  userId: string
+  deniedRowIds: Set<string>
+}
+
+async function resolveCommentReadContext(req: Request, res: Response, spreadsheetId: string): Promise<CommentReadContext | null> {
   const pool = poolManager.get()
-  const { capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), spreadsheetId)
+  const query = pool.query.bind(pool)
+  const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, spreadsheetId)
   if (!capabilities.canRead) {
     res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Not permitted to access comments on this sheet' } })
-    return false
+    return null
   }
-  return true
+
+  const deniedRowIds = new Set<string>()
+  if (!access.isAdminRole && await loadRowLevelReadDenyEnabled(query, spreadsheetId)) {
+    for (const rowId of await loadDeniedRecordIds(query, spreadsheetId, access.userId)) {
+      deniedRowIds.add(rowId)
+    }
+  }
+  return { userId: access.userId || getUserId(req), deniedRowIds }
+}
+
+function isRowDenied(context: CommentReadContext, rowId?: string): boolean {
+  return typeof rowId === 'string' && rowId.trim().length > 0 && context.deniedRowIds.has(rowId.trim())
+}
+
+function deniedRows(context: CommentReadContext): string[] {
+  return [...context.deniedRowIds]
+}
+
+function filterDeniedRows(rowIds: string[] | undefined, context: CommentReadContext): string[] | undefined {
+  if (!rowIds) return undefined
+  return rowIds.filter((rowId) => !isRowDenied(context, rowId))
 }
 
 export function commentsRouter(injector?: Injector): Router {
@@ -185,7 +212,14 @@ export function commentsRouter(injector?: Injector): Router {
       if (!spreadsheetId) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'spreadsheetId or containerId required' } })
       }
-      if (!(await ensureSheetReadable(req, res, spreadsheetId))) return // G-8 sheet-visibility gate
+      const context = await resolveCommentReadContext(req, res, spreadsheetId)
+      if (!context) return // G-8 sheet-visibility gate
+      const requestedRowId = pickFirstNonEmpty(parsed.data.targetId, parsed.data.rowId)
+      if (isRowDenied(context, requestedRowId)) {
+        const limit = clampLimit(parsed.data.limit)
+        const offset = clampOffset(parsed.data.offset)
+        return res.json({ ok: true, data: { items: [], total: 0, limit, offset } })
+      }
       const limit = clampLimit(parsed.data.limit)
       const offset = clampOffset(parsed.data.offset)
       const options: CommentQueryOptions = {
@@ -197,7 +231,8 @@ export function commentsRouter(injector?: Injector): Router {
         limit,
         offset,
         // B6: lets getComments compute reactedByMe on each comment's reactions.
-        viewerId: getUserId(req),
+        viewerId: context.userId,
+        excludeRowIds: deniedRows(context),
       }
       const result = await commentService.getComments(spreadsheetId, options)
       return res.json({ ok: true, data: { items: result.items, total: result.total, limit, offset } })
@@ -223,7 +258,8 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
-      if (!(await ensureSheetReadable(req, res, parsed.data.spreadsheetId))) return // G-8 sheet-visibility gate
+      const context = await resolveCommentReadContext(req, res, parsed.data.spreadsheetId)
+      if (!context) return // G-8 sheet-visibility gate
       const limit = clampLimit(parsed.data.limit)
       const result = await commentService.listMentionCandidates(parsed.data.spreadsheetId, {
         q: parsed.data.q,
@@ -296,8 +332,9 @@ export function commentsRouter(injector?: Injector): Router {
       if (!spreadsheetId) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'spreadsheetId or containerId required' } })
       }
-      if (!(await ensureSheetReadable(req, res, spreadsheetId))) return // G-8 sheet-visibility gate
-      const result = await commentService.getMentionSummary(spreadsheetId, getUserId(req))
+      const context = await resolveCommentReadContext(req, res, spreadsheetId)
+      if (!context) return // G-8 sheet-visibility gate
+      const result = await commentService.getMentionSummary(spreadsheetId, context.userId, deniedRows(context))
       return res.json({ ok: true, data: result })
     } catch (error) {
       logger.error('Failed to load mention summary', error as Error)
@@ -327,12 +364,14 @@ export function commentsRouter(injector?: Injector): Router {
       if (!spreadsheetId) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'spreadsheetId or containerId required' } })
       }
-      if (!(await ensureSheetReadable(req, res, spreadsheetId))) return // G-8 sheet-visibility gate
-      const rowIds = parsed.data.targetIds ?? parsed.data.rowIds
+      const context = await resolveCommentReadContext(req, res, spreadsheetId)
+      if (!context) return // G-8 sheet-visibility gate
+      const rowIds = filterDeniedRows(parsed.data.targetIds ?? parsed.data.rowIds, context)
       const result = await commentService.getCommentPresenceSummary(
         spreadsheetId,
         rowIds,
-        getUserId(req),
+        context.userId,
+        deniedRows(context),
       )
       return res.json({ ok: true, data: { items: result.items, total: result.total } })
     } catch (error) {
@@ -368,7 +407,11 @@ export function commentsRouter(injector?: Injector): Router {
       if (!rowId) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'rowId or targetId required' } })
       }
-      if (!(await ensureSheetReadable(req, res, spreadsheetId))) return // G-8 sheet-visibility gate (canComment && canRead)
+      const context = await resolveCommentReadContext(req, res, spreadsheetId)
+      if (!context) return // G-8 sheet-visibility gate (canComment && canRead)
+      if (isRowDenied(context, rowId)) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Not permitted to comment on this record' } })
+      }
       const comment = await commentService.createComment({
         spreadsheetId,
         containerId: spreadsheetId,
@@ -379,7 +422,7 @@ export function commentsRouter(injector?: Injector): Router {
         content: parsed.data.content,
         parentId: parsed.data.parentId,
         mentions: parsed.data.mentions,
-        authorId: getUserId(req),
+        authorId: context.userId,
         oapiAudit: buildOapiAuditContext(req, 'create', 'comments:write'),
       })
       return res.status(201).json({ ok: true, data: { comment } })
@@ -495,8 +538,9 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
-      if (!(await ensureSheetReadable(req, res, parsed.data.spreadsheetId))) return // G-8 sheet-visibility gate
-      await commentService.markMentionsRead(parsed.data.spreadsheetId, getUserId(req))
+      const context = await resolveCommentReadContext(req, res, parsed.data.spreadsheetId)
+      if (!context) return // G-8 sheet-visibility gate
+      await commentService.markMentionsRead(parsed.data.spreadsheetId, context.userId, deniedRows(context))
       return res.status(204).send()
     } catch (error) {
       logger.error('Failed to mark mentions read', error as Error)
@@ -546,7 +590,8 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
-      if (!(await ensureSheetReadable(req, res, spreadsheetId))) return // G-8 sheet-visibility gate
+      const context = await resolveCommentReadContext(req, res, spreadsheetId)
+      if (!context) return // G-8 sheet-visibility gate
       const limit = clampLimit(parsed.data.limit ?? 10)
       const result = await commentService.listMentionCandidates(spreadsheetId, {
         q: parsed.data.q,
@@ -586,10 +631,11 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
-      if (!(await ensureSheetReadable(req, res, spreadsheetId))) return // G-8 sheet-visibility gate
+      const context = await resolveCommentReadContext(req, res, spreadsheetId)
+      if (!context) return // G-8 sheet-visibility gate
       // Prefer body userId; fall back to authenticated user
-      const userId = parsed.data.userId?.trim() || getUserId(req)
-      const count = await commentService.markAllCommentsRead(spreadsheetId, userId)
+      const userId = parsed.data.userId?.trim() || context.userId
+      const count = await commentService.markAllCommentsRead(spreadsheetId, userId, deniedRows(context))
       return res.json({ ok: true, data: { markedRead: count } })
     } catch (error) {
       logger.error('Failed to mark all comments as read', error as Error)
@@ -623,15 +669,17 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
-      if (!(await ensureSheetReadable(req, res, spreadsheetId))) return // G-8 sheet-visibility gate
+      const context = await resolveCommentReadContext(req, res, spreadsheetId)
+      if (!context) return // G-8 sheet-visibility gate
       const result = await commentService.getCommentPresenceSummaryWithViewers(
         spreadsheetId,
-        parsed.data.rowIds,
-        getUserId(req),
+        filterDeniedRows(parsed.data.rowIds, context),
+        context.userId,
         // OAPI-1 comments:read — a token request can read presence counts but MUST NOT egress viewer
         // identities (a creator-acting token shouldn't surface who-is-viewing). Force includeViewers=false
         // on the token path regardless of the query param; session requests are unchanged.
         req.apiTokenScopes ? false : (parsed.data.includeViewers ?? false),
+        deniedRows(context),
       )
       return res.json({ ok: true, data: result })
     } catch (error) {

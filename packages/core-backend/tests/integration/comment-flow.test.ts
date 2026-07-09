@@ -95,6 +95,7 @@ const mockCollab = {
   join: vi.fn(),
   leave: vi.fn(),
   onConnection: vi.fn(),
+  getCommentInboxSubscriberIds: vi.fn(() => ['user_inbox']),
 }
 
 const mockLogger: ILogger = {
@@ -195,6 +196,7 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
     queueTakeFirst = dbMod.__takeFirstQueue
     queueExec.length = 0
     queueTakeFirst.length = 0
+    mockCollab.getCommentInboxSubscriberIds.mockReturnValue(['user_inbox'])
 
     svc = new CommentService(mockCollab as unknown as CollabService, mockLogger)
   })
