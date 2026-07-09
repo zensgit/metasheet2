@@ -89,6 +89,19 @@ async function deleteRevisionsOf(recordId: string): Promise<Array<{ source: stri
   return res.rows as never[]
 }
 
+async function revisionCutoffAfter(recordId: string, action: 'create' | 'delete'): Promise<string> {
+  const res = await q(
+    `SELECT (created_at + interval '1 microsecond')::text AS as_of
+       FROM meta_record_revisions
+      WHERE sheet_id = $1 AND record_id = $2 AND action = $3
+      ORDER BY created_at DESC, version DESC, id DESC
+      LIMIT 1`,
+    [SHEET, recordId, action],
+  )
+  expect(res.rows).toHaveLength(1)
+  return String((res.rows[0] as { as_of: string }).as_of)
+}
+
 async function pitAlive(recordId: string, asOfIso: string): Promise<boolean> {
   const state = await reconstructRecordsAtT(q, SHEET, asOfIso, [recordId])
   return state.get(recordId)?.exists === true
@@ -120,8 +133,7 @@ describeIfDatabase('D-1 — delete-revision parity for plugin-SDK + automation h
   test('PLUGIN path: delete emits action=delete source=plugin with the final snapshot — and PIT stops lying', async () => {
     const recId = `rec_d1_plugin_${TS}`
     await insertRecord(recId, { title: 'plugin victim' })
-    const beforeDelete = new Date().toISOString()
-    await new Promise((r) => setTimeout(r, 25))
+    const beforeDelete = await revisionCutoffAfter(recId, 'create')
 
     await pluginDeleteRecord({ query: q as never, sheetId: SHEET, recordId: recId } as never)
 
@@ -132,8 +144,7 @@ describeIfDatabase('D-1 — delete-revision parity for plugin-SDK + automation h
     expect(revs[0]!.version).toBe(3)
     expect(revs[0]!.snapshot).toMatchObject({ title: 'plugin victim' })
 
-    await new Promise((r) => setTimeout(r, 25))
-    const afterDelete = new Date().toISOString()
+    const afterDelete = await revisionCutoffAfter(recId, 'delete')
 
     // PIT GOLDEN both directions: alive before the delete, dead after it. Before D-1 the second
     // assertion failed forever — the record's last revision was the create.
@@ -144,8 +155,7 @@ describeIfDatabase('D-1 — delete-revision parity for plugin-SDK + automation h
   test('AUTOMATION path: delete_record emits action=delete source=automation with actor + snapshot — and PIT stops lying', async () => {
     const recId = `rec_d1_auto_${TS}`
     await insertRecord(recId, { title: 'automation victim' })
-    const beforeDelete = new Date().toISOString()
-    await new Promise((r) => setTimeout(r, 25))
+    const beforeDelete = await revisionCutoffAfter(recId, 'create')
 
     const exec = await makeExecutor().execute(deleteRuleFor(recId), {
       recordId: recId,
@@ -161,8 +171,7 @@ describeIfDatabase('D-1 — delete-revision parity for plugin-SDK + automation h
     expect(revs[0]!.source).toBe('automation')
     expect(revs[0]!.snapshot).toMatchObject({ title: 'automation victim' })
 
-    await new Promise((r) => setTimeout(r, 25))
-    const afterDelete = new Date().toISOString()
+    const afterDelete = await revisionCutoffAfter(recId, 'delete')
     expect(await pitAlive(recId, beforeDelete)).toBe(true)
     expect(await pitAlive(recId, afterDelete)).toBe(false)
   })
