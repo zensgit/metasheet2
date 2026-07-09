@@ -78,7 +78,7 @@ export const EMPTY_INBOUND_REPLAY: InboundReplayResult = Object.freeze({
 
 /**
  * Replay one deletion's captured inbound edges. MUST run inside the caller's restore transaction,
- * strictly AFTER (a) the restored record's INSERT INTO meta_records and (b) the outbound-link
+ * strictly AFTER (a) the restored record row has been inserted into the records table and (b) the outbound-link
  * replay (guard 7 must see outbound rows). Never throws on a disqualified edge — each is skipped
  * individually and counted (design-lock C2: per-edge tolerance, not whole-restore failure).
  */
