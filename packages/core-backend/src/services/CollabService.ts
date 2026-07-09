@@ -11,6 +11,12 @@ export function buildAuthenticatedUserRoom(userId: string): string {
 
 export type SocketTokenVerifier = (token: string) => Promise<string | null>
 export type SheetRoomAuthChecker = (input: { sheetId: string; userId: string; socketId: string }) => Promise<boolean>
+export type CommentRoomAuthChecker = (input: {
+  spreadsheetId: string
+  rowId?: string
+  userId: string
+  socketId: string
+}) => Promise<boolean>
 
 type AuthenticatedSocketData = {
   trustedUserId?: string | null
@@ -29,6 +35,7 @@ export class CollabService {
     return user?.id?.toString().trim() || null
   }
   private sheetRoomAuthChecker: SheetRoomAuthChecker = async () => false
+  private commentRoomAuthChecker: CommentRoomAuthChecker | null = null
 
   constructor(
     private logger: ILogger,
@@ -43,6 +50,10 @@ export class CollabService {
 
   setSheetRoomAuthChecker(checker: SheetRoomAuthChecker): void {
     this.sheetRoomAuthChecker = checker
+  }
+
+  setCommentRoomAuthChecker(checker: CommentRoomAuthChecker): void {
+    this.commentRoomAuthChecker = checker
   }
 
   private setupEventListeners() {
@@ -264,12 +275,10 @@ export class CollabService {
     this.emitSheetPresence(sheetId)
   }
 
-  // Shared auth+read gate for the comment rooms that expose a sheet's comment bodies (comment-sheet /
-  // comment-record broadcast full `comment:created` payloads): the socket must carry a verified identity
-  // AND that user must be allowed to read the target sheet — the SAME `sheetRoomAuthChecker` the live
-  // editing `join-sheet` path uses. Returns false (and denies the join) otherwise. Without this, any
-  // socket could join an arbitrary sheet's comment room and receive every comment body broadcast there.
-  private async authorizeCommentSheetAccess(socket: Socket, spreadsheetId: string): Promise<boolean> {
+  // Shared auth+read gate for comment rooms that expose comment bodies. Record rooms require row-level
+  // read access; sheet-wide rooms are delegated to `commentRoomAuthChecker` so row-deny-enabled sheets can
+  // fail closed instead of receiving unfilterable full-comment broadcasts.
+  private async authorizeCommentRoomAccess(socket: Socket, spreadsheetId: string, rowId?: string): Promise<boolean> {
     const userId = await this.resolveTrustedUserId(socket)
     if (!socket.connected) return false
     if (!userId) {
@@ -278,7 +287,11 @@ export class CollabService {
     }
     let allowed = false
     try {
-      allowed = await this.sheetRoomAuthChecker({ sheetId: spreadsheetId, userId, socketId: socket.id })
+      if (this.commentRoomAuthChecker) {
+        allowed = await this.commentRoomAuthChecker({ spreadsheetId, rowId, userId, socketId: socket.id })
+      } else {
+        allowed = await this.sheetRoomAuthChecker({ sheetId: spreadsheetId, userId, socketId: socket.id })
+      }
     } catch (error) {
       this.logger.warn('WebSocket comment room auth check failed', error instanceof Error ? error : undefined)
     }
@@ -298,7 +311,7 @@ export class CollabService {
   private async handleJoinCommentRecord(socket: Socket, payload: unknown): Promise<void> {
     const scope = this.parseCommentRecordScope(payload)
     if (!scope) return
-    if (!(await this.authorizeCommentSheetAccess(socket, scope.spreadsheetId))) return
+    if (!(await this.authorizeCommentRoomAccess(socket, scope.spreadsheetId, scope.rowId))) return
     if (!socket.connected) return
     const room = buildCommentRecordRoom(scope)
     socket.join(room)
@@ -309,7 +322,7 @@ export class CollabService {
   private async handleJoinCommentSheet(socket: Socket, payload: unknown): Promise<void> {
     const spreadsheetId = this.parseSheetScope(payload)
     if (!spreadsheetId) return
-    if (!(await this.authorizeCommentSheetAccess(socket, spreadsheetId))) return
+    if (!(await this.authorizeCommentRoomAccess(socket, spreadsheetId))) return
     if (!socket.connected) return
     const room = buildCommentSheetRoom({ spreadsheetId })
     socket.join(room)

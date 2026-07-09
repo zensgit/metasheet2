@@ -90,6 +90,13 @@ describe('WebSocket Rooms - basic flow', () => {
     collabService.setSheetRoomAuthChecker(async ({ sheetId, userId }) => {
       return ['sheet_ops', 'sheet_orders'].includes(sheetId) && ['user_a', 'user_b', 'user_reader', 'a', 'b'].includes(userId)
     })
+    collabService.setCommentRoomAuthChecker(async ({ spreadsheetId, rowId, userId }) => {
+      const canReadSheet = ['sheet_ops', 'sheet_orders'].includes(spreadsheetId) && ['user_a', 'user_b', 'user_reader', 'a', 'b'].includes(userId)
+      if (!canReadSheet) return false
+      if (spreadsheetId === 'sheet_orders' && rowId === 'rec_secret') return false
+      if (spreadsheetId === 'sheet_orders' && !rowId) return false
+      return true
+    })
   })
 
   afterAll(async () => {
@@ -481,6 +488,46 @@ describe('WebSocket Rooms - basic flow', () => {
     const denied = waitForEvent(client, 'comment-join-denied', 'comment-sheet join forbidden')
     client.emit('join-comment-sheet', { spreadsheetId: 'sheet_orders' })
     await expect(denied).resolves.toEqual({ scope: 'sheet_orders', reason: 'forbidden' })
+
+    client.close()
+  })
+
+  it('SECURITY: rejects join-comment-record when the authenticated user is row-denied', async () => {
+    if (!baseUrl || !server) return
+    const client = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:user_a' } })
+    await waitForConnect(client, 'row-denied-comment-record')
+
+    const denied = waitForEvent(client, 'comment-join-denied', 'comment-record row denied')
+    client.emit('join-comment-record', { spreadsheetId: 'sheet_orders', rowId: 'rec_secret' })
+    await expect(denied).resolves.toEqual({ scope: 'sheet_orders', reason: 'forbidden' })
+
+    const noBody = expectNoEvent(client, 'comment:created', 'row-denied comment-record socket')
+    // @ts-ignore access private for test
+    server['createCoreAPI']().websocket.broadcastTo('comments:sheet_orders:rec_secret', 'comment:created', {
+      spreadsheetId: 'sheet_orders',
+      comment: { id: 'leak', rowId: 'rec_secret', body: 'secret' },
+    })
+    await noBody
+
+    client.close()
+  })
+
+  it('SECURITY: rejects join-comment-sheet when row-deny makes the sheet-wide comment room unfilterable', async () => {
+    if (!baseUrl || !server) return
+    const client = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:user_a' } })
+    await waitForConnect(client, 'row-denied-comment-sheet')
+
+    const denied = waitForEvent(client, 'comment-join-denied', 'comment-sheet row-deny forbidden')
+    client.emit('join-comment-sheet', { spreadsheetId: 'sheet_orders' })
+    await expect(denied).resolves.toEqual({ scope: 'sheet_orders', reason: 'forbidden' })
+
+    const noBody = expectNoEvent(client, 'comment:created', 'row-denied comment-sheet socket')
+    // @ts-ignore access private for test
+    server['createCoreAPI']().websocket.broadcastTo('comments-sheet:sheet_orders', 'comment:created', {
+      spreadsheetId: 'sheet_orders',
+      comment: { id: 'leak', rowId: 'rec_secret', body: 'secret' },
+    })
+    await noBody
 
     client.close()
   })
