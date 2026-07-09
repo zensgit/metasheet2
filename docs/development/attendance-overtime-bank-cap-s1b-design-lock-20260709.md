@@ -48,6 +48,7 @@
 - **强制点**:banked 分支(`:28810` 附近),在 lots INSERT **之前**:
   `newBanked = Σ lots.minutes`;若 `bankPolicy.maxMinutesPerPeriod>0`:
   monthStart=`attendanceMonthStartKey(requestRow.work_date)`, monthEnd=`attendanceMonthEndKey(monthStart)`;
+  **先取 txn 级 advisory lock** `pg_advisory_xact_lock(hashtext('…:org:user:monthStart'))`(见不变式 6);
   existing=`sumBankedOvertimeMinutesForMonth(...)`;`overtimeBankCapDecision` blocked → throw 422 `OVERTIME_BANK_CAP_EXCEEDED`
   (含 cap/projected/period,审批回滚,request 保持 pending)。
 - FE:`maxMinutesPerPeriod` hint 从"尚未强制"改为说明作用域(每月 banked 上限,超限阻断审批)。
@@ -60,6 +61,11 @@
 3. `maxMinutesPerPeriod=0/未设` ⇒ 行为逐字节不变(cap≤0 → 永不 block)。
 4. 强制是**审批前 pre-check**,超限 throw → 全回滚,**0 lot 副作用**(不写半截)。
 5. 重放:re-approve 已被 request-status 门 400 拦(先),即便到 grant 也因排除自身 headroom 不误判。
+6. **并发 TOCTOU 关闭**:审批只 `FOR UPDATE` 自己的 request 行,故两笔同 user/月的 OT 并发审批会各自在对方 commit 前
+   读 headroom → 双双放行 → 超 cap。故在 headroom 读之前取 **txn 级 `pg_advisory_xact_lock(hashtext(org:user:monthStart))`**:
+   第二笔等第一笔 commit(锁随 txn 释放)后再读,读到第一笔已 commit 的 lots。**仅 capped banked 路径取锁**
+   (uncapped/dormant 无锁 → 不变式 3 保持)。月边界口径:`normalizeDateOnly` 用 **local** getters + pg DATE→本地午夜
+   Date ⇒ 日历日无 TZ 偏移(6f 经验证)。
 
 ## 5. 测试契约（真 DB,`attendance-plugin.test.ts`)
 
@@ -69,6 +75,8 @@
 - **跨月**:上月 workDate 的 banked 不计入本月 headroom(月边界正确)。
 - **重放**:超 cap 边界的 approve 幂等——re-approve 被 status 门拦,不因把自己算入 headroom 而误 block。
 - dormant(银行关)+ cap 设值 → 单 NULL-source lot 照发,cap 不作用。
+- **月边界(6f)**:cap=120,月首(02-01)60 + 月末(02-28)60 填满本月;再来月中 60 → 180>120 → 422
+  ⇒ 首/末日均归本月(若首日漏到上月或末日漏到下月,headroom<120、月中不会 block)。
 - 单测 `overtimeBankCapDecision`:cap≤0 永不 block / 恰到 cap 不 block / 超 1 分钟 block。
 - Mutation:拆 cap pre-check → 超限用例变 200(红);拆排除自身 → 重放误 block(红)。
 

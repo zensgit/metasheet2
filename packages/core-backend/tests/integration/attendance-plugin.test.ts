@@ -6263,6 +6263,25 @@ attendanceIntegrationDescribe(
       const dormantLots = await lotsFor(dormantBig)
       expect(dormantLots).toHaveLength(1)
       expect(dormantLots[0].amount_minutes).toBe(600)
+
+      // 6f — month-boundary attribution: the FIRST day and the LAST day of a month must both attribute to
+      // THAT month (guards against a TZ/UTC off-by-one shifting a boundary work_date into an adjacent month).
+      // cap=120: Feb-01 (60) + Feb-28 (60) fill Feb exactly; a mid-Feb 60 then reaches 180>120 → 422. If the
+      // first-day leaked to Jan or the last-day to Mar, Feb headroom would be < 120 and the mid-Feb grant
+      // would NOT block — so the 422 proves both boundary lots attribute to Feb.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], maxMinutesPerPeriod: 120, validityDays: null } })).status).toBe(200)
+      const febFirst = await createOvertime('2027-02-01', 60)
+      await segmentWorkday(febFirst, '2027-02-01', 60)
+      expect((await approve(febFirst)).status).toBe(200)
+      const febLast = await createOvertime('2027-02-28', 60)
+      await segmentWorkday(febLast, '2027-02-28', 60)
+      expect((await approve(febLast)).status).toBe(200)
+      expect(await bankedMinutesForMonth('2027-02')).toBe(120) // both boundary days counted in Feb
+      const febMid = await createOvertime('2027-02-15', 60)
+      await segmentWorkday(febMid, '2027-02-15', 60)
+      const febBlocked = await approve(febMid)
+      expect(febBlocked.status).toBe(422)
+      expect((febBlocked.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('OVERTIME_BANK_CAP_EXCEEDED')
     } finally {
       if (token && Object.keys(originalSettings).length > 0) {
         await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)

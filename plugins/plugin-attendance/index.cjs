@@ -28862,6 +28862,14 @@ module.exports = {
                       const newBanked = lots.reduce((sum, lot) => sum + (Number(lot.minutes) || 0), 0)
                       const capMonthStart = attendanceMonthStartKey(requestRow.work_date)
                       const capMonthEnd = attendanceMonthEndKey(capMonthStart)
+                      // Serialize concurrent banked grants for the SAME (org, user, month) so the cap can't be
+                      // overshot by a TOCTOU race: the approval only locks its OWN request row (FOR UPDATE), so
+                      // two different OT requests approved concurrently would each read headroom before either
+                      // commits and both pass. A txn-scoped advisory lock keyed on (org:user:month) makes the
+                      // second wait until the first commits, so its headroom read sees the first's lots. Taken
+                      // ONLY on the capped banked path (uncapped/dormant stays lock-free — invariant 3). Auto-
+                      // released at commit/rollback.
+                      await trx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`attendance:otbank-cap:${orgId}:${requestRow.user_id}:${capMonthStart}`])
                       const existingBanked = await sumBankedOvertimeMinutesForMonth(trx, {
                         orgId,
                         userId: requestRow.user_id,
