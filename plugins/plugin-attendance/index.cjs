@@ -10655,6 +10655,21 @@ function resolveBankedLotExpiresInDays(overtimeBankPolicy, fallbackExpiresInDays
   return days > 0 && days <= MAX_LOT_VALIDITY_DAYS ? days : fallback
 }
 
+// 加班银行 S1b (overtime-bank-cap design-lock §3): pure decision for the per-period (natural-month) BANKED
+// accrual cap. `maxMinutesPerPeriod` is the admin's "每周期加班银行上限(分钟, 0＝不限)". cap<=0 (unset/0) →
+// NEVER blocked (byte-identical to pre-S1b — invariant 3). Otherwise blocked when the projected total
+// (already-banked this period + this grant's pooled minutes) STRICTLY exceeds the cap; landing exactly on
+// the cap is allowed. Both inputs share the "pooled banked minutes"口径 (§6: statutory_holiday is must-pay,
+// never pooled), so the comparison is apples-to-apples. Kept pure (no I/O) so the boundary is unit-testable.
+function overtimeBankCapDecision({ maxMinutesPerPeriod, existingBanked, newBanked } = {}) {
+  const cap = Number(maxMinutesPerPeriod)
+  const existing = Math.max(0, Number(existingBanked) || 0)
+  const added = Math.max(0, Number(newBanked) || 0)
+  const projected = existing + added
+  if (!Number.isFinite(cap) || cap <= 0) return { blocked: false, cap: null, projected, existing, added }
+  return { blocked: projected > cap, cap, projected, existing, added }
+}
+
 function applyOvertimeSegmentationSnapshotToApprovedEntry(entry, snapshot) {
   if (!entry || !snapshot) return
   entry.workdayOvertimeMinutes += snapshot.workdayOvertimeMinutes
@@ -17369,6 +17384,31 @@ async function deductCompTimeBalance(trx, { orgId, userId, requestId, minutes })
   })
 }
 
+// 加班银行 S1b (overtime-bank-cap design-lock §3 D3): sum a user's already-POOLED banked comp-time minutes
+// for the natural month that [monthStart, monthEnd] delimits — the headroom baseline for the per-period cap.
+// Only source-tagged lots (overtime_source IS NOT NULL) count: that matches `newBanked = Σ pooled lots`
+// (§6 statutory_holiday never pooled), so headroom and the new grant use one口径 and dormant NULL-source
+// history (full-amount, statutory-inclusive) can't inflate the bank total. amount_minutes = GRANTED/accrued
+// (not remaining) — the cap is a per-period accrual ceiling, so spending then re-accruing must not reopen it.
+// The month is keyed off the SOURCE OT request's work_date, and excludeRequestId drops THIS request's own
+// lots (defense-in-depth for replay; the pending-status guard already blocks re-approve before grant).
+async function sumBankedOvertimeMinutesForMonth(trx, { orgId, userId, monthStart, monthEnd, excludeRequestId }) {
+  if (!orgId || !userId || !monthStart || !monthEnd) return 0
+  const rows = await trx.query(
+    `SELECT COALESCE(SUM(b.amount_minutes), 0)::int AS banked
+       FROM attendance_leave_balances b
+       JOIN attendance_requests r ON r.id::text = b.source_id
+      WHERE b.org_id = $1 AND b.user_id = $2
+        AND b.leave_type_code = 'comp_time'
+        AND b.source_type = 'overtime_conversion'
+        AND b.overtime_source IS NOT NULL
+        AND r.work_date >= $3 AND r.work_date <= $4
+        AND b.source_id <> $5`,
+    [orgId, userId, monthStart, monthEnd, excludeRequestId]
+  )
+  return Number(rows[0]?.banked) || 0
+}
+
 // #7 leave cancellation / 销假 (design-lock #3034): reverse the balance a leave's approval deducted, when
 // that approved leave is later cancelled. Keyed on the request's own deduct events (source_id = requestId,
 // event_type = 'deduct'), so it reverses WHATEVER was deducted — annual_leave AND comp_time_leave both
@@ -20597,6 +20637,7 @@ module.exports = {
     partitionOvertimeBankGrantLots,
     resolveBankedLotExpiresInDays,
     clampLotValidityDays,
+    overtimeBankCapDecision,
     buildCycleSettlementRows,
   },
   __attendanceLeaveOffsetForTests: {
@@ -28814,6 +28855,47 @@ module.exports = {
                       ? { workdayMinutes: snap.workdayOvertimeMinutes, restdayMinutes: snap.restdayOvertimeMinutes, holidayMinutes: snap.holidayOvertimeMinutes }
                       : null
                     const { lots } = partitionOvertimeBankGrantLots({ requestId, totalMinutes: amountMinutes, segments, overtimeBankPolicy: bankPolicy })
+                    // 加班银行 S1b (overtime-bank-cap design-lock §3): enforce the per-period (natural-month)
+                    // BANKED accrual cap BEFORE any lot is inserted — a pre-check, so an over-cap grant throws
+                    // and the ENTIRE approval txn rolls back (0 lot side-effects, request stays pending). Runs
+                    // only when maxMinutesPerPeriod > 0 (unset/0 → byte-identical no-op, invariant 3) and only
+                    // on the banked branch (dormant never reaches here). newBanked = Σ pooled lots and the
+                    // headroom counts only pooled (source-tagged) lots — one口径 (§6: statutory never pooled).
+                    // The period is keyed off THIS OT request's own work_date; excludeRequestId drops its own
+                    // lots (replay defense-in-depth — the pending-status guard already blocks re-approve first).
+                    const bankCapMinutes = Number(bankPolicy.maxMinutesPerPeriod)
+                    if (Number.isFinite(bankCapMinutes) && bankCapMinutes > 0) {
+                      const newBanked = lots.reduce((sum, lot) => sum + (Number(lot.minutes) || 0), 0)
+                      const capMonthStart = attendanceMonthStartKey(requestRow.work_date)
+                      const capMonthEnd = attendanceMonthEndKey(capMonthStart)
+                      // Serialize concurrent banked grants for the SAME (org, user, month) so the cap can't be
+                      // overshot by a TOCTOU race: the approval only locks its OWN request row (FOR UPDATE), so
+                      // two different OT requests approved concurrently would each read headroom before either
+                      // commits and both pass. A txn-scoped advisory lock keyed on (org:user:month) makes the
+                      // second wait until the first commits, so its headroom read sees the first's lots. Taken
+                      // ONLY on the capped banked path (uncapped/dormant stays lock-free — invariant 3). Auto-
+                      // released at commit/rollback.
+                      await trx.query('SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))', [`attendance:otbank-cap:${orgId}:${requestRow.user_id}`, String(capMonthStart)])
+                      const existingBanked = await sumBankedOvertimeMinutesForMonth(trx, {
+                        orgId,
+                        userId: requestRow.user_id,
+                        monthStart: capMonthStart,
+                        monthEnd: capMonthEnd,
+                        excludeRequestId: requestId,
+                      })
+                      const capDecision = overtimeBankCapDecision({
+                        maxMinutesPerPeriod: bankCapMinutes,
+                        existingBanked,
+                        newBanked,
+                      })
+                      if (capDecision.blocked) {
+                        throw new HttpError(
+                          422,
+                          'OVERTIME_BANK_CAP_EXCEEDED',
+                          `Overtime bank monthly cap exceeded for ${capMonthStart ? capMonthStart.slice(0, 7) : 'period'}: cap ${capDecision.cap} min, already banked ${capDecision.existing} min, this grant ${capDecision.added} min would reach ${capDecision.projected} min`
+                        )
+                      }
+                    }
                     // 加班银行 S1 (overtime-bank-validity design-lock): the bank card owns the BANKED (source-
                     // tagged) lots' validity. `overtimeBankPolicy.validityDays`, when set, governs their
                     // expires_at and overrides compTimeFromOvertime.expiresInDays for THESE lots only; unset
