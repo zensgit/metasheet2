@@ -1,6 +1,8 @@
 # Multitable Time Machine+ TODO
 
-Status: PLANNED / GATED. This TODO depends on `multitable-time-machine-plus-design-lock-20260619.md`. Runtime work is not authorized until the design-lock open decisions are ratified.
+Status: RECONCILED AS-BUILT (2026-07-09) — historical slice queue, recovered from a stranded branch (landing PR #3381 was withdrawn 2026-06-29; commit `a3286d405` never merged). The per-slice statuses below are **frozen at 2026-06-19** and are NOT current: the T-slice scope and acceptance criteria were substantially met by the Global History line (R1–R8 rounds). The authoritative current-reality view is `multitable-global-history-verified-state-map-and-decision-menu-20260703.md` (#3542); the per-slice plan→as-built mapping and deltas live in `multitable-timemachine-masterplan-todo-20260629.md` §9. Preserved verbatim below as the design record of this arc.
+
+> (Original 2026-06-19 status header: "PLANNED / GATED … Runtime work is not authorized until the design-lock open decisions are ratified." The open decisions were subsequently resolved piecewise via per-slice design-locks; the runtime has since shipped behind default-off flags.)
 
 Grounding: created on 2026-06-19 after the multitable history / restore / trash line reached product-grade UX. This document is the implementation queue for the next arc: a global, permission-safe Time Machine+ history center.
 

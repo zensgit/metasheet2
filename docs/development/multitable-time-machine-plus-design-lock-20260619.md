@@ -1,6 +1,8 @@
 # Multitable Time Machine+ Design Lock
 
-Status: DESIGN / OWNER-RATIFY BEFORE RUNTIME. No code changes are authorized by this document. The first implementation PR must start from T1/T4 in the companion TODO only after this design is accepted.
+Status: RECONCILED AS-BUILT (2026-07-09) — recovered historical design provenance. This draft was written 2026-06-19 and stranded off-main (its landing PR #3381 was withdrawn 2026-06-29; commit `a3286d405` never merged; the two files sat untracked in the working tree for six weeks). The arc it specifies was subsequently ratified **piecewise** via per-slice design-locks and **built** on the Global History line — authoritative current-reality view = `multitable-global-history-verified-state-map-and-decision-menu-20260703.md` (#3542); plan→as-built ledger = `multitable-timemachine-masterplan-todo-20260629.md` §9. LOCK-1..LOCK-8 were carried into the as-built system (batch-first UX unit, permission-filter-before-counts, forward-writing restore, preview-before-execute, read-only view before point-in-time restore, config/data restore separation, provenance attribution). §8's open decisions were resolved as recorded in the masterplan §9.1. The text below is preserved verbatim as the design record.
+
+> (Original 2026-06-19 status header: "DESIGN / OWNER-RATIFY BEFORE RUNTIME. No code changes are authorized by this document…" — historical; the runtime has since shipped behind default-off flags.)
 
 Grounding: drafted on 2026-06-19 against the completed multitable history / restore / trash line on `origin/main` (record history, per-field restore, readable trash titles, actor display names, and rule-deny-aware trash/restore are already shipped). This design intentionally starts a new product arc: a global history center and restore workflow that goes beyond per-record history.
 
