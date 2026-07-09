@@ -232,6 +232,7 @@ jobs:
             tests/integration/multitable-history-audit-reveal-taint-realdb.test.ts \
             tests/integration/multitable-record-reconstructor-realdb.test.ts \
             tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts \
+            tests/integration/multitable-d1-delete-revisions-realdb.test.ts \
             tests/integration/multitable-undelete-inbound-replay-realdb.test.ts \
             tests/integration/multitable-undelete-pit-inbound-replay-realdb.test.ts \
             tests/integration/multitable-undelete-inbound-resurrect-realdb.test.ts \
