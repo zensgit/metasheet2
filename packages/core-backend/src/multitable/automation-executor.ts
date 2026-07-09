@@ -10,7 +10,7 @@ import { withAutomationEventId } from './automation-event-dedup'
 import { redactString } from './automation-log-redact'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
-import { isRichLongTextProperty, sanitizeRichLongText } from './field-codecs'
+import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
 import { resolveCrossBaseWriteAuthority } from './cross-base-write-authority'
 import { publishMultitableSheetRealtime } from './realtime-publish'
@@ -818,6 +818,9 @@ export async function consumeSharedCrossBaseWriteQuota(
 export interface AutomationDeps {
   eventBus: EventBus
   queryFn: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
+  transaction?: <T>(
+    handler: (client: { query: AutomationDeps['queryFn'] }) => Promise<T>,
+  ) => Promise<T>
   fetchFn?: typeof fetch
   notificationService?: Pick<NotificationService, 'send'>
   /** Optional cross-base write quota override (limit/window/store). Omit → process-global default. */
@@ -2256,77 +2259,79 @@ export class AutomationExecutor {
         effectiveRecordId = targetRecordId
       }
 
-      // Record-lock guard: you cannot delete a record locked by someone you can't unlock. The SELECT and
-      // the DELETE below BOTH read `effectiveSheetId`/`effectiveRecordId`, so a cross-base delete checks
-      // the TARGET record's lock (not the trigger record's) — lock priority over base-write.
-      // D-1: also fetch data+version here — same row, same predicate, zero extra query. The delete
-      // revision below needs the record's final snapshot, and after the DELETE the row is gone.
-      const lockRes = await this.deps.queryFn(
-        'SELECT locked, locked_by, created_by, data, version FROM meta_records WHERE id = $1 AND sheet_id = $2',
-        [effectiveRecordId, effectiveSheetId],
-      )
-      const lockRow = lockRes.rows[0] as
-        | { locked?: unknown; locked_by?: unknown; created_by?: unknown; data?: Record<string, unknown>; version?: unknown }
-        | undefined
-      // ②b claim==truth for the record: a cross-base delete must address a record that ACTUALLY lives in
-      // `targetSheetId`. No row → the targetRecordId does not exist there → fail-closed (never a silent
-      // no-op success). Same-base keeps its leniency (a missing trigger record yields a 0-row DELETE
-      // reported as success) to avoid any behavior regression vs the other same-base sinks.
-      if (gate.crossBase && !lockRow) {
-        return {
-          actionType: 'delete_record',
-          status: 'failed',
-          error: `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+      const step = await this.withTransaction(async (query) => {
+        // Record-lock guard: you cannot delete a record locked by someone you can't unlock. The SELECT and
+        // the DELETE below BOTH read `effectiveSheetId`/`effectiveRecordId`, so a cross-base delete checks
+        // the TARGET record's lock (not the trigger record's) — lock priority over base-write.
+        //
+        // D-1: lock the row and capture version+data inside the SAME transaction as the hard delete and
+        // delete revision. Without the delete revision, point-in-time reconstruction kept treating
+        // automation-deleted records as alive forever.
+        const lockRes = await query(
+          `SELECT locked, locked_by, created_by, version, data
+             FROM meta_records
+            WHERE id = $1 AND sheet_id = $2
+            FOR UPDATE`,
+          [effectiveRecordId, effectiveSheetId],
+        )
+        const lockRow = lockRes.rows[0] as
+          | { locked?: unknown; locked_by?: unknown; created_by?: unknown; version?: unknown; data?: unknown }
+          | undefined
+        // ②b claim==truth for the record: a cross-base delete must address a record that ACTUALLY lives in
+        // `targetSheetId`. No row → the targetRecordId does not exist there → fail-closed (never a silent
+        // no-op success). Same-base keeps its leniency (a missing trigger record yields a 0-row DELETE
+        // reported as success) to avoid any behavior regression vs the other same-base sinks.
+        if (gate.crossBase && !lockRow) {
+          return {
+            actionType: 'delete_record',
+            status: 'failed',
+            error: `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+          } satisfies AutomationStepResult
         }
-      }
-      if (lockRow) {
-        ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
-      }
+        if (lockRow) {
+          ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
+        }
 
-      // Clean up links FIRST (mirrors the same-base delete sinks `records.deleteRecord` /
-      // `RecordService.deleteRecord`): the FK cascade only covers the `record_id` side, so the
-      // `foreign_record_id` side must be deleted explicitly or it dangles. (This statement touches
-      // meta_links, NOT meta_records, so the cross-base write-guard regex does not match it.)
-      await this.deps.queryFn(
-        'DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1',
-        [effectiveRecordId],
-      )
+        // Clean up links FIRST (mirrors the same-base delete sinks `records.deleteRecord` /
+        // `RecordService.deleteRecord`): the FK cascade only covers the `record_id` side, so the
+        // `foreign_record_id` side must be deleted explicitly or it dangles. (This statement touches
+        // meta_links, NOT meta_records, so the cross-base write-guard regex does not match it.)
+        await query(
+          'DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1',
+          [effectiveRecordId],
+        )
 
-      // HARD delete — the system has NO soft-delete for records: `meta_records` has no `deleted_at`
-      // column and both same-base delete sinks (`records.ts`, `record-service.ts`) hard-`DELETE`. A
-      // soft-delete here would target a non-existent column AND would be a silent no-op (no read path
-      // filters `deleted_at`). So this mirrors the proven sinks. No `version = version + 1` (the row is
-      // gone); `sheet_id` scoping matches the update template.
-      // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
-      // delete is rejected before this DELETE unless claim==truth + trigger-actor base-write.
-      // lock-guarded: automation delete_record (C2a) — ensureRecordNotLocked enforced just above.
-      const deleteRes = await this.deps.queryFn(
-        'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2',
-        [effectiveRecordId, effectiveSheetId],
-      )
+        if (lockRow) {
+          const version = Number(lockRow.version ?? 1)
+          await recordRecordRevision(query, {
+            sheetId: effectiveSheetId,
+            recordId: effectiveRecordId,
+            version: Number.isFinite(version) ? version : 1,
+            action: 'delete',
+            source: 'automation',
+            actorId: context.actorId ?? null,
+            changedFieldIds: [],
+            patch: {},
+            snapshot: normalizeJson(lockRow.data),
+          })
+        }
 
-      // D-1 (destruction-path gap audit, owner-ratified): emit the delete revision. PIT/as-of-T
-      // existence is derived PURELY from meta_record_revisions — before this, an automation-deleted
-      // record's last revision stayed create/update, so Global History and every PIT consumer treated
-      // it as alive forever. Emitted AFTER the hard delete (this lane has no enclosing transaction):
-      // if this INSERT fails we degrade to the old missing-revision behavior for one record — never
-      // the reverse lie of a delete revision for a row that still exists. Gated on the row having
-      // actually existed AND the DELETE having removed it (same-base keeps its 0-row-success leniency
-      // WITHOUT fabricating a revision for a record that was never there). Recoverability (trash /
-      // tombstone) is deliberately NOT added — that is the owner-gated D-2 rung.
-      if (lockRow && (deleteRes.rowCount ?? 0) > 0) {
-        await recordRecordRevision(this.deps.queryFn, {
-          sheetId: effectiveSheetId,
-          recordId: effectiveRecordId,
-          version: Number(lockRow.version ?? 1),
-          action: 'delete',
-          source: 'automation',
-          actorId: context.actorId ?? null,
-          changedFieldIds: [],
-          patch: {},
-          snapshot: lockRow.data ?? null,
-        })
-      }
+        // HARD delete — the system has NO soft-delete for records: `meta_records` has no `deleted_at`
+        // column and both same-base delete sinks (`records.ts`, `record-service.ts`) hard-`DELETE`. A
+        // soft-delete here would target a non-existent column AND would be a silent no-op (no read path
+        // filters `deleted_at`). So this mirrors the proven sinks. No `version = version + 1` (the row is
+        // gone); `sheet_id` scoping matches the update template.
+        // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
+        // delete is rejected before this DELETE unless claim==truth + trigger-actor base-write.
+        // lock-guarded: automation delete_record (C2a) — ensureRecordNotLocked enforced just above.
+        await query(
+          'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2',
+          [effectiveRecordId, effectiveSheetId],
+        )
+
+        return null
+      })
+      if (step) return step
 
       // Emit event for chaining (mirrors the updated/created emits + the same-base delete sink's
       // `multitable.record.deleted` shape). C1 real-time invalidation fan-out to the target base's room
@@ -2345,6 +2350,15 @@ export class AutomationExecutor {
     } catch (err) {
       return { actionType: 'delete_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
     }
+  }
+
+  private async withTransaction<T>(
+    handler: (query: AutomationDeps['queryFn']) => Promise<T>,
+  ): Promise<T> {
+    if (this.deps.transaction) {
+      return this.deps.transaction(async ({ query }) => handler(query))
+    }
+    return handler(this.deps.queryFn)
   }
 
   private async executeCreateRecord(
