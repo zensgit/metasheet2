@@ -48,8 +48,9 @@
         <span class="stock-prep__badge">{{ bi('只读', 'readonly') }} · GET</span>
         <code>{{ activeView.endpoint }}</code>
       </p>
-      <!-- View 1 (project-workspace) is a real readonly view; the other five tabs keep the placeholder. -->
+      <!-- Views 1-2 are real readonly views; the other four tabs keep the placeholder. -->
       <StockPreparationProjectWorkspaceView v-if="activeKey === 'project-workspace'" />
+      <StockPreparationSnapshotDiffView v-else-if="activeKey === 'bom-snapshot-diff'" />
       <p v-else class="stock-prep__panel-pending" data-testid="stock-prep-panel-pending">
         {{ bi('该视图将在后续 wave 落地,当前为容器占位。', 'This view lands in a later wave; this is a container placeholder for now.') }}
       </p>
@@ -72,6 +73,7 @@ import { useLocale } from '../../../composables/useLocale'
 import PageShell from '../../layout/PageShell.vue'
 import PageHeader from '../../layout/PageHeader.vue'
 import StockPreparationProjectWorkspaceView from './StockPreparationProjectWorkspaceView.vue'
+import StockPreparationSnapshotDiffView from './StockPreparationSnapshotDiffView.vue'
 
 const { locale } = useLocale()
 
