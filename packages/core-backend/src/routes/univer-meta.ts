@@ -10501,6 +10501,11 @@ export function univerMetaRouter(): Router {
         if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError || err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) {
           return res.status(409).json({ ok: false, error: { code: 'RESET_BLOCKED', message: 'Reset is all-or-nothing: a target is forbidden/locked, so nothing was written.' } })
         }
+        // 4c-3 c4 (review P3-1): a cap breach inside the reset txn rolls the WHOLE reset back
+        // (fail-closed) — map it to the same 422 the delete route uses instead of a generic 500.
+        if (err instanceof TombstoneCaptureCapExceededError) {
+          return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
+        }
         throw err
       }
       if (updatedRows.length > 0) {
