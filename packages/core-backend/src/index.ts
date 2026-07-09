@@ -2311,6 +2311,7 @@ export class MetaSheetServer {
       const { YjsSyncService } = await import('./collab/yjs-sync-service')
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
       const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
+      const { canReadEveryYjsFieldForUser } = await import('./collab/yjs-field-read-access')
       const { RecordWriteService } = await import('./multitable/record-write-service')
       const { loadSheetMemberUserIdSet, loadFieldPermissionScopeMap } = await import('./multitable/permission-service')
       const { createYjsInvalidationPostCommitHook } = await import('./multitable/post-commit-hooks')
@@ -2380,8 +2381,11 @@ export class MetaSheetServer {
               && (await isRecordReadDeniedForUser(pool.query.bind(pool), sheetId, recordId, userId))) {
               return { canRead: false, canWrite: false }
             }
+            const canReadAllFields = capabilities.canRead
+              ? await canReadEveryYjsFieldForUser(pool.query.bind(pool), sheetId, userId, capabilities)
+              : false
             const canWrite = canWriteRecord(capabilities, sheetScope, isAdminRole, userId, createdBy)
-            return { canRead: capabilities.canRead, canWrite }
+            return { canRead: capabilities.canRead, canWrite, canReadAllFields }
           } catch {
             return null
           }
