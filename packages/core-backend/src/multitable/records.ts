@@ -4,11 +4,12 @@ import {
   acquireAutoNumberSheetWriteLock,
   allocateAutoNumberValues,
 } from './auto-number-service'
-import { validateLongTextValue } from './field-codecs'
+import { normalizeJson, validateLongTextValue } from './field-codecs'
 import { fieldTypeRegistry } from './field-type-registry'
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
 import { MultitableRecordLockedError, MultitableRecordNotFoundError, MultitableRecordValidationError } from './record-errors'
 import { ensureRecordNotLocked, mapRecordLockState } from './record-lock'
+import { recordRecordRevision } from './record-history-service'
 import { isFieldAlwaysReadOnly } from './permission-derivation'
 import {
   listRecords as listRecordsViaQueryService,
@@ -553,12 +554,36 @@ export async function deleteRecord(
   // be deleted via the SDK (it must be unlocked first through the explicit unlock action).
   await guardRecordNotLockedForPlugin(query, input.sheetId, input.recordId)
 
+  const current = await query(
+    `SELECT version, data
+       FROM meta_records
+      WHERE id = $1 AND sheet_id = $2
+      FOR UPDATE`,
+    [input.recordId, input.sheetId],
+  )
+  const currentRow = (current.rows as Array<{ version?: unknown; data?: unknown }>)[0]
+  if (!currentRow) {
+    throw new MultitableRecordNotFoundError(`Record not found: ${input.recordId}`)
+  }
+
   // 4c-2 scope boundary (design-lock §8, out-of-scope): this plugin-SDK delete path is intentionally
-  // NOT wired to tombstone-capture (nor to meta_records_trash / meta_record_revisions). It already
-  // destroys the row irrecoverably today, independent of MULTITABLE_TOMBSTONE_CAPTURE_ENABLED — the
-  // flag's "every destruction is captured" guarantee covers only record-service.deleteRecord and
-  // dropFieldCascade. Giving this path trash+capture parity is a separate follow-up rung, not 4c-2.
+  // NOT wired to tombstone-capture (nor to meta_records_trash). It still destroys the row irrecoverably
+  // today, independent of MULTITABLE_TOMBSTONE_CAPTURE_ENABLED — the flag's "every destruction is
+  // captured" guarantee covers only record-service.deleteRecord and dropFieldCascade. D-1 only adds the
+  // append-only delete revision needed for point-in-time correctness; trash+capture parity is D-2.
   await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [input.recordId])
+
+  const version = Number(currentRow.version ?? 1)
+  await recordRecordRevision(query, {
+    sheetId: input.sheetId,
+    recordId: input.recordId,
+    version: Number.isFinite(version) ? version : 1,
+    action: 'delete',
+    source: 'plugin',
+    changedFieldIds: [],
+    patch: {},
+    snapshot: normalizeJson(currentRow.data),
+  })
 
   // lock-guarded: plugin-SDK deleteRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
   const deleted = await query(
@@ -574,6 +599,6 @@ export async function deleteRecord(
   return {
     id: input.recordId,
     sheetId: input.sheetId,
-    version: Number(row.version ?? 1),
+    version: Number(row.version ?? version),
   }
 }
