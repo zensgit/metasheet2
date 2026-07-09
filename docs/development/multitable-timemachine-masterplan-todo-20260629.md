@@ -40,7 +40,7 @@
 | T5 | **恢复预览 dry-run**（批/记录/字段/变更级；报 denied/schema-drift/missing/版本冲突/link·formula 副作用；preview token） | ✅ 各恢复族 preview 端点 + preview-identity（`restore-preview-identity.ts`；#3606 跨族 token 拒绝矩阵 8 族/56 对；as-built 偏差见 §9.1） | T3 + T4 | 还原前预演 |
 | T6 | **范围化恢复**（按预览身份：选中记录/字段/变更/权限过滤子集；写 forward revision + `source=restore` 批次 + 回链） | ✅ field-subset + restore-batch preview/execute（PARTIAL 默认 + allOrNothing opt-in）· forward-writing `source:'restore'` · execute 时重跑 per-record deny/version 门 | T5 | 选择性还原 |
 | T7 | **时间点只读视图**（重建为 T 时刻、只读；字段掩码 + rule-deny + 删除策略 + 大表分页） | ✅ `reconstructRecordsAtT` 只读重建原语（delete-aware，确定序）+ PIT 预览面；as-built 形态=API/预览而非独立浏览页（§9.1） | T1/T3/T4 成熟 | 看成 T 时刻 |
-| T8 | **时间点恢复（核心）**：把 sheet/子集回滚到 T 时刻 | ✅ T8-1 revert-to-T（非破坏，常开）+ T8-2 reset-to-T（破坏，flag，12 goldens + RESET_RETENTION_CONFLICT 护栏）+ PIT undelete（flag）+ D-3 reset 补捕获 + D-1 侧门删除 revision 补齐（#3969/#3992）→ PIT-as-of-T 正确性闭合；FE=`ResetToPointPicker`/`ResetConfirmDialog` + T-source A2 锚定选点（#3749） | T7 + 回滚语义单独 ratify | **整表一键还原到历史版本** |
+| T8 | **时间点恢复（核心）**：把 sheet/子集回滚到 T 时刻 | ✅ T8-1 revert-to-T（非破坏，常开）+ T8-2 reset-to-T（破坏，flag，13 条 realdb 测试 +3 inbound-capture + RESET_RETENTION_CONFLICT 护栏）+ PIT undelete（flag）+ D-3 reset 补捕获 + D-1 侧门删除 revision 补齐（#3969/#3992）→ PIT-as-of-T 正确性闭合；FE=`ResetToPointPicker`/`ResetConfirmDialog` + T-source A2 锚定选点（#3749） | T7 + 回滚语义单独 ratify | **整表一键还原到历史版本** |
 | T9 | **配置/Schema 历史**：加/删字段、改类型、视图/筛选/权限/自动化 变更 捕获+展示（恢复另设计） | ✅ 捕获+展示（`meta_config_revisions` 4 实体类型；`MetaConfigHistoryModal`）+ 安全子集恢复常开 + 5 个 revert tier（flag）+ 破坏性 tier FE typed-confirm（#3749，硬化 #3857）；恢复与数据恢复分离如设计（LOCK-7） | 数据历史后单独立项 | 配置维度历史（完整对齐的最后一块） |
 
 ## 3. Track S — schema-inclusive 快照（Layer 2，可选纵深）
@@ -94,7 +94,7 @@ count/filter/分页 泄漏 denied 计数 · filter facet 泄漏 hidden 字段名
 > （`023385499`/`b6301f944`/`100b6dd59`/`f4f38bb90`/`5dcea0b6f`/`a1522034d`/`19e467e73`/`dc8c08e03`/`c4533ec9c`/`05a8593aa` 等）。
 
 ### 9.1 as-built 偏差（设计允许项内的选择，非缺陷）
-- **T1 投影层**：未建 `history_batches`/`history_changes` 物化表（全仓无此表名）；读模型 = **读时投影**，
+- **T1 投影层**：未建 `history_batches`/`history_changes` 物化表（全仓无此物化表/DDL 定义；表名仅见于两份设计文档 prose）；读模型 = **读时投影**，
   锚 = `meta_record_revisions.batch_id`（迁移 `zzzz20260619120000`）+ `meta_config_revisions`。
   这是设计锁 §8 开放决策 1 明列的第三选项（"initially projected from revisions on read"），非偏离。
 - **T5 预览**：按恢复族分端点（record / PIT revert / PIT reset / config / restore-batch），未做单一
@@ -110,7 +110,7 @@ count/filter/分页 泄漏 denied 计数 · filter facet 泄漏 hidden 字段名
 4c-2 forward tombstone-capture #3901（`023385499`）· 4c-1 lossy retype revert #3922（`b6301f944`，type-era guard）·
 4c-3 record-undelete inbound-edge replay #3975（`100b6dd59`）+ R8 硬化 #3985（`f4f38bb90`）+ PIT-resurrect 修复 #3983 ·
 D-1 侧门删除 revision 补齐 #3969（`a1522034d`）+ 事务化 #3992（`5dcea0b6f`）· D-6 config-restore 后 field-cache
-失效修复 #3952 · O-1 三 tier staging 验收 **PASSED**（2026-07-08 正式跑）· i18n strict-zero 收官（R5b/R5c）。
+失效修复 #3952 · O-1 三 tier staging 验收 **PASSED**（2026-07-08 正式跑；staging ops 证据，git 外）· i18n strict-zero 收官（R5b/R5c）。
 
 ### 9.3 剩余池（2026-07-09 起点；本轮 /goal 的目标池基线）
 - 🧭 **O-2 operator flag 阶梯**：前置全清（#3983）；阶梯文档 = `multitable-global-history-o2-operator-flag-ladder-20260709.md`
