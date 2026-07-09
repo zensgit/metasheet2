@@ -566,6 +566,36 @@ describe('CommentService', () => {
       expect(mentionedUserIds).toContain('user-new')
       expect(mentionedUserIds).not.toContain('user-old')
     })
+
+    it('does not send a new mention notification when the mentioned user cannot read the target row', async () => {
+      service.setCommentTargetReadChecker(async ({ userId }) => userId !== 'user-denied')
+      const existingRow = makeCommentRow({
+        id: 'cmt_up_denied',
+        author_id: 'user-author',
+        mentions: JSON.stringify([]),
+      })
+      const updatedRow = makeCommentRow({
+        id: 'cmt_up_denied',
+        author_id: 'user-author',
+        row_id: 'row-secret',
+        target_id: 'row-secret',
+        content: '@[Denied](user-denied)',
+        mentions: JSON.stringify(['user-denied']),
+      })
+
+      pushTakeFirst(existingRow) // getRequiredCommentRow
+      pushExec([])               // updateTable execute
+      pushTakeFirst(updatedRow)  // getComment reload
+
+      await service.updateComment('cmt_up_denied', 'user-author', {
+        content: '@[Denied](user-denied)',
+      })
+
+      const sendToCalls = mockCollabService.sendTo.mock.calls.filter(
+        (call: unknown[]) => call[1] === 'comment:mention',
+      )
+      expect(sendToCalls.map((call: unknown[]) => call[0])).not.toContain('user-denied')
+    })
   })
 
   // ── resolveComment ────────────────────────────────────────────────────

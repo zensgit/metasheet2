@@ -13,7 +13,7 @@ import crypto from 'crypto'
 import { EventEmitter } from 'eventemitter3'
 import { Injector } from '@wendellhu/redi' // IoC Container
 import { createContainer } from './di/container'
-import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService } from './di/identifiers'
+import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService, ICommentService } from './di/identifiers'
 import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
 import {
@@ -65,6 +65,7 @@ import {
   type MultitableRecordsQueryFn,
 } from './multitable/records'
 import { resolveSheetCapabilitiesForUser } from './multitable/sheet-capabilities'
+import { isRecordReadDeniedForUser, loadRowLevelReadDenyEnabled } from './multitable/permission-service'
 import {
   assertPluginOwnsObject,
   assertPluginOwnsSheet,
@@ -2292,6 +2293,44 @@ export class MetaSheetServer {
             userId,
           )
           return capabilities.canRead
+        } catch {
+          return false
+        }
+      })
+      collabService.setCommentRoomAuthChecker(async ({ spreadsheetId, rowId, userId }) => {
+        try {
+          const pool = poolManager.get()
+          const query = pool.query.bind(pool)
+          const { capabilities, isAdminRole } = await resolveSheetCapabilitiesForUser(
+            query,
+            spreadsheetId,
+            userId,
+          )
+          if (!capabilities.canRead) return false
+          if (isAdminRole) return true
+          if (rowId) {
+            return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))
+          }
+          // Sheet-wide comment rooms receive unfilterable full-comment broadcasts.
+          // Under row-level deny, non-admin users must subscribe to row rooms only.
+          return !(await loadRowLevelReadDenyEnabled(query, spreadsheetId))
+        } catch {
+          return false
+        }
+      })
+      const commentService = this.injector.get(ICommentService)
+      commentService.setCommentTargetReadChecker(async ({ spreadsheetId, rowId, userId }) => {
+        try {
+          const pool = poolManager.get()
+          const query = pool.query.bind(pool)
+          const { capabilities, isAdminRole } = await resolveSheetCapabilitiesForUser(
+            query,
+            spreadsheetId,
+            userId,
+          )
+          if (!capabilities.canRead) return false
+          if (isAdminRole) return true
+          return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))
         } catch {
           return false
         }
