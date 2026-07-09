@@ -220,7 +220,7 @@ export class CommentService {
       throw new Error('Updated comment could not be reloaded')
     }
 
-    this.publishCommentUpdated(comment, normalizedUserId)
+    await this.publishCommentUpdated(comment, normalizedUserId)
 
     for (const mentionUserId of mentions) {
       if (!mentionUserId || mentionUserId === normalizedUserId || previousMentions.includes(mentionUserId)) continue
@@ -261,7 +261,7 @@ export class CommentService {
       await trx.deleteFrom('meta_comments').where('id', '=', commentId).execute()
     })
 
-    this.publishCommentDeleted(existing, normalizedUserId)
+    await this.publishCommentDeleted(existing, normalizedUserId)
   }
 
   /**
@@ -369,21 +369,17 @@ export class CommentService {
       'comment:created',
       createdPayload,
     )
-    this.collabService.broadcastTo(
-      buildCommentInboxRoom(),
-      'comment:activity',
-      {
-        kind: 'created',
-        containerId: data.spreadsheetId,
-        targetId: data.rowId,
-        targetFieldId: effectiveFieldId ?? null,
-        spreadsheetId: data.spreadsheetId,
-        rowId: data.rowId,
-        fieldId: effectiveFieldId,
-        commentId: comment.id,
-        authorId: data.authorId,
-      } satisfies CommentActivityPayload,
-    )
+    await this.publishCommentActivity({
+      kind: 'created',
+      containerId: data.spreadsheetId,
+      targetId: data.rowId,
+      targetFieldId: effectiveFieldId ?? null,
+      spreadsheetId: data.spreadsheetId,
+      rowId: data.rowId,
+      fieldId: effectiveFieldId,
+      commentId: comment.id,
+      authorId: data.authorId,
+    })
     for (const mentionUserId of mentions) {
       if (mentionUserId && mentionUserId !== data.authorId) {
         if (!(await this.canNotifyUserAboutCommentTarget(data.spreadsheetId, data.rowId, mentionUserId))) continue
@@ -1014,20 +1010,16 @@ export class CommentService {
         'comment:resolved',
         resolvedPayload,
       )
-      this.collabService.broadcastTo(
-        buildCommentInboxRoom(),
-        'comment:activity',
-        {
-          kind: 'resolved',
-          containerId: result.container_id,
-          targetId: result.target_id,
-          targetFieldId: result.target_field_id ?? null,
-          spreadsheetId: result.spreadsheet_id,
-          rowId: result.row_id,
-          fieldId: result.field_id ?? undefined,
-          commentId,
-        } satisfies CommentActivityPayload,
-      )
+      await this.publishCommentActivity({
+        kind: 'resolved',
+        containerId: result.container_id,
+        targetId: result.target_id,
+        targetFieldId: result.target_field_id ?? null,
+        spreadsheetId: result.spreadsheet_id,
+        rowId: result.row_id,
+        fieldId: result.field_id ?? undefined,
+        commentId,
+      })
     }
   }
 
@@ -1072,7 +1064,22 @@ export class CommentService {
     }
   }
 
-  private publishCommentUpdated(comment: Comment, authorId: string): void {
+  private async publishCommentActivity(payload: CommentActivityPayload): Promise<void> {
+    const getSubscriberIds = (this.collabService as { getCommentInboxSubscriberIds?: () => string[] })
+      .getCommentInboxSubscriberIds
+    if (!getSubscriberIds) return
+    const subscriberIds = getSubscriberIds.call(this.collabService)
+    for (const userId of subscriberIds) {
+      if (!(await this.canNotifyUserAboutCommentTarget(payload.spreadsheetId, payload.rowId, userId))) continue
+      this.collabService.broadcastTo(
+        buildCommentInboxRoom({ userId }),
+        'comment:activity',
+        payload,
+      )
+    }
+  }
+
+  private async publishCommentUpdated(comment: Comment, authorId: string): Promise<void> {
     const payload = {
       containerId: comment.containerId,
       targetId: comment.targetId,
@@ -1092,24 +1099,20 @@ export class CommentService {
       'comment:updated',
       payload,
     )
-    this.collabService.broadcastTo(
-      buildCommentInboxRoom(),
-      'comment:activity',
-      {
-        kind: 'updated',
-        containerId: comment.containerId,
-        targetId: comment.targetId,
-        targetFieldId: comment.targetFieldId,
-        spreadsheetId: comment.spreadsheetId,
-        rowId: comment.rowId,
-        fieldId: comment.fieldId,
-        commentId: comment.id,
-        authorId,
-      } satisfies CommentActivityPayload,
-    )
+    await this.publishCommentActivity({
+      kind: 'updated',
+      containerId: comment.containerId,
+      targetId: comment.targetId,
+      targetFieldId: comment.targetFieldId,
+      spreadsheetId: comment.spreadsheetId,
+      rowId: comment.rowId,
+      fieldId: comment.fieldId,
+      commentId: comment.id,
+      authorId,
+    })
   }
 
-  private publishCommentDeleted(row: CommentRow, authorId: string): void {
+  private async publishCommentDeleted(row: CommentRow, authorId: string): Promise<void> {
     const payload = {
       containerId: row.container_id,
       targetId: row.target_id,
@@ -1129,21 +1132,17 @@ export class CommentService {
       'comment:deleted',
       payload,
     )
-    this.collabService.broadcastTo(
-      buildCommentInboxRoom(),
-      'comment:activity',
-      {
-        kind: 'deleted',
-        containerId: row.container_id,
-        targetId: row.target_id,
-        targetFieldId: row.target_field_id ?? null,
-        spreadsheetId: row.spreadsheet_id,
-        rowId: row.row_id,
-        fieldId: row.field_id ?? undefined,
-        commentId: row.id,
-        authorId,
-      } satisfies CommentActivityPayload,
-    )
+    await this.publishCommentActivity({
+      kind: 'deleted',
+      containerId: row.container_id,
+      targetId: row.target_id,
+      targetFieldId: row.target_field_id ?? null,
+      spreadsheetId: row.spreadsheet_id,
+      rowId: row.row_id,
+      fieldId: row.field_id ?? undefined,
+      commentId: row.id,
+      authorId,
+    })
   }
 
   private async getComment(id: string): Promise<Comment | undefined> {

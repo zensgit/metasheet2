@@ -27,6 +27,8 @@ export class CollabService {
   private io: SocketServer | null = null
   private sheetPresenceBySheet = new Map<string, Map<string, Set<string>>>()
   private sheetMembershipBySocket = new Map<string, Set<string>>()
+  private commentInboxUserBySocket = new Map<string, string>()
+  private commentInboxSocketsByUser = new Map<string, Set<string>>()
   private tokenVerifier: SocketTokenVerifier = async (token) => {
     // AuthService pulls in RBAC/metrics modules; keep it lazy so importing CollabService
     // does not register global metrics during parallel unit-test collection.
@@ -331,19 +333,37 @@ export class CollabService {
 
   private async handleJoinCommentInbox(socket: Socket): Promise<void> {
     // The comment inbox is a cross-sheet activity stream (metadata: ids/authorId, no bodies). It requires
-    // a verified identity to join — closing unauthenticated access to the stream. Per-user activity
-    // routing (so an authed user only sees activity for sheets they can read) is a broadcast-semantics
-    // change tracked as a follow-up; this gate is the security-critical part (no anonymous access).
+    // a verified identity and joins a per-user room; publishers still re-check target read access before
+    // emitting to that room.
     const userId = await this.resolveTrustedUserId(socket)
     if (!socket.connected) return
     if (!userId) {
       this.denyCommentJoin(socket, 'comment-inbox', 'unauthorized')
       return
     }
-    const room = buildCommentInboxRoom()
+    const room = buildCommentInboxRoom({ userId })
     socket.join(room)
+    this.trackCommentInboxMembership(socket.id, userId)
     this.logger.info(`Client ${socket.id} joined ${room}`)
     socket.emit('joined-comment-inbox')
+  }
+
+  private trackCommentInboxMembership(socketId: string, userId: string): void {
+    this.untrackCommentInboxMembership(socketId)
+    this.commentInboxUserBySocket.set(socketId, userId)
+    const socketIds = this.commentInboxSocketsByUser.get(userId) ?? new Set<string>()
+    socketIds.add(socketId)
+    this.commentInboxSocketsByUser.set(userId, socketIds)
+  }
+
+  private untrackCommentInboxMembership(socketId: string): string | undefined {
+    const userId = this.commentInboxUserBySocket.get(socketId)
+    if (!userId) return undefined
+    this.commentInboxUserBySocket.delete(socketId)
+    const socketIds = this.commentInboxSocketsByUser.get(userId)
+    socketIds?.delete(socketId)
+    if (!socketIds || socketIds.size === 0) this.commentInboxSocketsByUser.delete(userId)
+    return userId
   }
 
   initialize(httpServer: HttpServer): void {
@@ -372,6 +392,7 @@ export class CollabService {
           this.untrackSocketSheetMembership(socket.id, sheetId)
           this.emitSheetPresence(sheetId)
         }
+        this.untrackCommentInboxMembership(socket.id)
         this.logger.info(`WebSocket client disconnected: ${socket.id}`)
       })
 
@@ -432,7 +453,9 @@ export class CollabService {
       })
 
       socket.on('leave-comment-inbox', () => {
-        const room = buildCommentInboxRoom()
+        const userId = this.untrackCommentInboxMembership(socket.id) ?? this.getTrustedUserId(socket)
+        if (!userId) return
+        const room = buildCommentInboxRoom({ userId })
         socket.leave(room)
         this.logger.info(`Client ${socket.id} left ${room}`)
       })
@@ -524,5 +547,9 @@ export class CollabService {
     } catch {
       return []
     }
+  }
+
+  getCommentInboxSubscriberIds(): string[] {
+    return [...this.commentInboxSocketsByUser.keys()]
   }
 }
