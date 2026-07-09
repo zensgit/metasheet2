@@ -4,6 +4,7 @@ import { auditLog } from '../audit/audit'
 import {
   acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser,
+  batchAdmitDirectoryAccountUsers,
   batchBindDirectoryAccounts,
   batchUnbindDirectoryAccounts,
   bindDirectoryAccount,
@@ -661,6 +662,98 @@ export function adminDirectoryRouter(): Router {
             ? 400
             : 500
       jsonError(res, statusCode, 'DIRECTORY_BATCH_BIND_FAILED', message)
+    }
+  })
+
+  router.post('/accounts/batch-admit-users', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const rawAccountIds = Array.isArray(req.body?.accountIds) ? req.body.accountIds : []
+      const accountIds = rawAccountIds.filter((value): value is string => typeof value === 'string')
+      const enableDingTalkGrant = req.body?.enableDingTalkGrant === true
+      const outcome = await batchAdmitDirectoryAccountUsers(accountIds, {
+        adminUserId,
+        enableDingTalkGrant,
+      })
+
+      await Promise.all(outcome.succeeded.flatMap((result) => [
+        auditLog({
+          actorId: adminUserId,
+          actorType: 'user',
+          action: 'create',
+          resourceType: 'user',
+          resourceId: result.user.id,
+          meta: {
+            adminUserId,
+            source: 'directory_bulk_manual_admission',
+            directoryAccountId: result.account.id,
+            integrationId: result.account.integrationId,
+            email: result.user.email,
+            username: result.user.username,
+            name: result.user.name,
+            mobile: result.user.mobile,
+            generatedPassword: typeof result.temporaryPassword === 'string',
+            mode: 'bulk_manual_admission',
+            selectionSize: accountIds.length,
+          },
+        }),
+        auditLog({
+          actorId: adminUserId,
+          actorType: 'user',
+          action: 'bind',
+          resourceType: 'directory-account-link',
+          resourceId: result.account.id,
+          meta: {
+            adminUserId,
+            directoryAccountId: result.account.id,
+            integrationId: result.account.integrationId,
+            previousLocalUserId: result.previousLocalUser?.id ?? null,
+            previousLocalUserEmail: result.previousLocalUser?.email ?? null,
+            localUserId: result.user.id,
+            localUserEmail: result.user.email,
+            localUserUsername: result.user.username,
+            externalUserId: result.account.externalUserId,
+            corpId: result.account.corpId,
+            enableDingTalkGrant,
+            mode: 'bulk_manual_admission',
+            selectionSize: accountIds.length,
+          },
+        }),
+      ]))
+
+      if (outcome.succeeded.length === 0 && outcome.failed.length > 0) {
+        throw new Error(outcome.failed[0].error)
+      }
+
+      jsonOk(res, {
+        items: outcome.succeeded.map((result) => result.account),
+        users: outcome.succeeded.map((result) => result.user),
+        onboardingPackets: outcome.succeeded.map((result) => ({
+          userId: result.user.id,
+          name: result.user.name,
+          email: result.user.email,
+          username: result.user.username,
+          mobile: result.user.mobile,
+          temporaryPassword: result.temporaryPassword ?? '',
+          onboarding: result.onboarding,
+        })),
+        updatedCount: outcome.succeeded.length,
+        failedCount: outcome.failed.length,
+        failed: outcome.failed,
+        enableDingTalkGrant,
+      })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to batch create and bind local users for directory accounts')
+      const statusCode = /not found/i.test(message)
+        ? 404
+        : /already exists|already bound|already linked/i.test(message)
+          ? 409
+          : /required|invalid|password|cannot be pre-bound|missing DingTalk openId/i.test(message)
+            ? 400
+            : 500
+      jsonError(res, statusCode, 'DIRECTORY_BATCH_ADMISSION_FAILED', message)
     }
   })
 

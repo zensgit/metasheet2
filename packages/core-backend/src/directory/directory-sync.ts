@@ -542,6 +542,11 @@ export type DirectoryAccountBatchBindEntry = {
   enableDingTalkGrant?: boolean
 }
 
+export type DirectoryAccountBatchAdmissionInput = {
+  adminUserId: string
+  enableDingTalkGrant?: boolean
+}
+
 export type DirectoryAccountUnbindInput = {
   adminUserId: string
   disableDingTalkGrant?: boolean
@@ -579,6 +584,11 @@ export type DirectoryAccountManualAdmissionResult = DirectoryAccountMutationResu
   temporaryPassword?: string
   inviteToken: string | null
   onboarding: ReturnType<typeof buildOnboardingPacket>
+}
+
+export type DirectoryAccountBatchAdmissionOutcome = {
+  succeeded: DirectoryAccountManualAdmissionResult[]
+  failed: Array<{ accountId: string; error: string }>
 }
 
 export type DirectoryAutoAdmissionOnboardingPacket = {
@@ -3324,6 +3334,47 @@ export async function batchBindDirectoryAccounts(
       outcome.failed.push({
         accountId: entry.accountId,
         error: readErrorMessage(error, 'Failed to bind directory account'),
+      })
+    }
+  }
+  return outcome
+}
+
+export async function batchAdmitDirectoryAccountUsers(
+  directoryAccountIds: string[],
+  input: DirectoryAccountBatchAdmissionInput,
+): Promise<DirectoryAccountBatchAdmissionOutcome> {
+  const normalizedIds = Array.from(new Set(directoryAccountIds.map((item) => normalizeText(item)).filter(Boolean)))
+  const normalizedAdminUserId = normalizeText(input.adminUserId)
+  if (normalizedIds.length === 0) throw new Error('accountIds are required')
+  if (!normalizedAdminUserId) throw new Error('adminUserId is required')
+
+  const outcome: DirectoryAccountBatchAdmissionOutcome = { succeeded: [], failed: [] }
+  for (const accountId of normalizedIds) {
+    try {
+      const account = await loadDirectoryBindingTargetAccount(accountId)
+      if (!account) throw new Error('Directory account not found')
+      const fallbackName = normalizeText(account.external_user_id) || account.id
+      const admissionName = normalizeText(account.name).length >= 2 ? account.name : fallbackName
+      outcome.succeeded.push(await admitDirectoryAccountUser(account.id, {
+        adminUserId: normalizedAdminUserId,
+        name: admissionName,
+        email: account.email ?? undefined,
+        username: account.email
+          ? undefined
+          : buildDirectoryAutoAdmissionUsername({
+            id: account.id,
+            external_user_id: account.external_user_id,
+            union_id: account.union_id,
+            open_id: account.open_id,
+          }),
+        mobile: account.mobile,
+        enableDingTalkGrant: input.enableDingTalkGrant === true,
+      }))
+    } catch (error) {
+      outcome.failed.push({
+        accountId,
+        error: readErrorMessage(error, 'Failed to create and bind local user for directory account'),
       })
     }
   }
