@@ -376,12 +376,12 @@ describe('WebSocket Rooms - basic flow', () => {
     b.close()
   })
 
-  it('join-comment-inbox scopes activity delivery to inbox subscribers', async () => {
+  it('join-comment-inbox scopes activity delivery to the authenticated user inbox room', async () => {
     if (!baseUrl || !server) return
 
-    // the comment inbox now requires an authenticated identity to join (no anonymous access to the stream)
+    // the comment inbox requires an authenticated identity and joins only that user's inbox room.
     const a = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:user_a' } })
-    const b = ioClient(baseUrl, { transports: ['websocket'] })
+    const b = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:user_b' } })
 
     await Promise.all([
       new Promise<void>((resolve, reject) => {
@@ -402,6 +402,14 @@ describe('WebSocket Rooms - basic flow', () => {
       })
       a.emit('join-comment-inbox')
     })
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('B inbox join timeout')), 3000)
+      b.on('joined-comment-inbox', () => {
+        clearTimeout(t)
+        resolve()
+      })
+      b.emit('join-comment-inbox')
+    })
 
     const gotA = new Promise<any>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('A did not receive inbox activity')), 3000)
@@ -412,7 +420,7 @@ describe('WebSocket Rooms - basic flow', () => {
     b.on('comment:activity', () => { gotB = true })
 
     // @ts-ignore
-    server['createCoreAPI']().websocket.broadcastTo('comments-inbox', 'comment:activity', {
+    server['createCoreAPI']().websocket.broadcastTo('comments-inbox:user_a', 'comment:activity', {
       kind: 'created',
       spreadsheetId: 'sheet_orders',
       rowId: 'rec_1',

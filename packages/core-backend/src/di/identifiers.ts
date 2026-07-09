@@ -64,6 +64,8 @@ export interface ICollabService {
   onConnection(handler: (socket: Socket) => void): void;
   /** Return user IDs currently present in the given Socket.IO room. */
   getRoomMembers(room: string): Promise<string[]>;
+  /** Return user IDs that currently joined the comment inbox stream. */
+  getCommentInboxSubscriberIds(): string[];
 }
 
 export interface ICollectionManager {

@@ -80,6 +80,7 @@ const mockCollabService = {
   join: vi.fn(),
   leave: vi.fn(),
   onConnection: vi.fn(),
+  getCommentInboxSubscriberIds: vi.fn(() => ['user-inbox']),
 }
 
 const mockLogger: ILogger = {
@@ -161,6 +162,7 @@ describe('CommentService', () => {
     queueExec.length = 0
     queueTakeFirst.length = 0
     mockNotifyRecordSubscribersWithKysely.mockResolvedValue({ inserted: 0, userIds: [] })
+    mockCollabService.getCommentInboxSubscriberIds.mockReturnValue(['user-inbox'])
     service = new CommentService(
       mockCollabService as unknown as CollabService,
       mockLogger,
@@ -499,6 +501,23 @@ describe('CommentService', () => {
       expect(activityCalls.length).toBeGreaterThanOrEqual(1)
       const payload = activityCalls[0][2] as { kind: string }
       expect(payload.kind).toBe('deleted')
+    })
+
+    it('only emits comment:activity to inbox subscribers that can read the target record', async () => {
+      mockCollabService.getCommentInboxSubscriberIds.mockReturnValue(['user-allowed', 'user-denied'])
+      service.setCommentTargetReadChecker(async ({ userId }) => userId === 'user-allowed')
+      const row = makeCommentRow({ id: 'cmt_del_acl', author_id: 'user-author' })
+      pushTakeFirst(row)
+      pushTakeFirst(undefined)
+
+      await service.deleteComment('cmt_del_acl', 'user-author')
+
+      const activityCalls = mockCollabService.broadcastTo.mock.calls.filter(
+        (call: unknown[]) => call[1] === 'comment:activity',
+      )
+      expect(activityCalls).toHaveLength(1)
+      expect(activityCalls[0][0]).toBe('comments-inbox:user-allowed')
+      expect(JSON.stringify(activityCalls)).not.toContain('user-denied')
     })
 
     it('rejects deletion by non-author', async () => {
