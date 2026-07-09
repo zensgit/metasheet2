@@ -31,6 +31,7 @@ import { invalidateUserPerms } from '../rbac/service'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import { SimpleCronExpression } from '../services/SchedulerService'
+import { deliverDirectorySyncFailureAlert } from './directory-sync-alert-delivery'
 
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
@@ -2253,6 +2254,18 @@ function buildDepartmentPathMap(departments: Map<string, DingTalkDepartment>): M
   return cache
 }
 
+async function readIntegrationNameForAlert(integrationId: string): Promise<string> {
+  try {
+    const result = await query<{ name: string }>(
+      `SELECT name FROM directory_integrations WHERE id = $1`,
+      [integrationId],
+    )
+    return result.rows[0]?.name || integrationId
+  } catch {
+    return integrationId
+  }
+}
+
 async function markSyncFailure(integrationId: string, runId: string, message: string): Promise<void> {
   await query(
     `UPDATE directory_integrations
@@ -2280,6 +2293,12 @@ async function markSyncFailure(integrationId: string, runId: string, message: st
   } catch (error) {
     logger.warn(`Failed to persist directory alert: ${readErrorMessage(error, 'unknown error')}`)
   }
+
+  // DT-OPS-03: the alert row is useless if nobody opens the table. Deliver it over the
+  // channel the product already owns. Best-effort by construction — a failed sync must
+  // never be made worse by a failed webhook.
+  const integrationName = await readIntegrationNameForAlert(integrationId)
+  await deliverDirectorySyncFailureAlert({ integrationId, integrationName, runId, message })
 }
 
 export function buildUniqueLocalUserMatchMap(
