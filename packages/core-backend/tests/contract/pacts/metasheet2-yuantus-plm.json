@@ -4083,6 +4083,13 @@
                   "match": "type"
                 }
               ]
+            },
+            "$.threads[*].last_comment_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
             }
           }
         }
@@ -4259,6 +4266,13 @@
               ]
             },
             "$.history": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.last_comment_at": {
               "matchers": [
                 {
                   "match": "type"
