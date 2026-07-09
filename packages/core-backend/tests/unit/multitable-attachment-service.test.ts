@@ -335,6 +335,8 @@ describe('attachment-service: readAttachmentMetadata & readAttachmentBinary', ()
       {
         id: 'att_1',
         sheet_id: 's1',
+        record_id: 'rec_1',
+        field_id: 'fld_files',
         storage_file_id: 'file_42',
         filename: 'report.pdf',
         original_name: 'Report.pdf',
@@ -346,6 +348,8 @@ describe('attachment-service: readAttachmentMetadata & readAttachmentBinary', ()
     expect(result).toEqual({
       id: 'att_1',
       sheetId: 's1',
+      recordId: 'rec_1',
+      fieldId: 'fld_files',
       storageFileId: 'file_42',
       filename: 'report.pdf',
       originalName: 'Report.pdf',
