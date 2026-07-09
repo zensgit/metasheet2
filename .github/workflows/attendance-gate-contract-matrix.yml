@@ -2,6 +2,8 @@ name: Attendance Gate Contract Matrix
 
 on:
   workflow_dispatch:
+  merge_group:
+    types: [checks_requested]
   schedule:
     # Nightly contract regression after attendance gates complete.
     - cron: '45 4 * * *'

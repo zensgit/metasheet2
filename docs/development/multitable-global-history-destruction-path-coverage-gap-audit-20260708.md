@@ -8,8 +8,8 @@
 |---|---|---|---|---|---|---|---|
 | 1 | `record-service.ts:867` `deleteRecord`(治理路径) | ✓ | ✓ | ✓ | ✓ inbound | 完整(2a;inbound 待 4c-3) | ✅ 正确 |
 | 2 | `univer-meta.ts:10066` **PIT-reset 内联删除** | ✓ | ✓(`action:'delete'`) | ✓ | **✗** | 记录可恢复,**inbound 边永久丢失** | ✅ 正确 |
-| 3 | `records.ts:565` plugin-SDK `deleteRecord` | ✓ | **✗** | **✗** | ✗ | **不可恢复** | ❌ **错误** |
-| 4 | `automation-executor.ts:2269` automation `delete_record` | ✓ | **✗** | **✗** | **✗** | **不可恢复** | ❌ **错误** |
+| 3 | `records.ts:565` plugin-SDK `deleteRecord` | ✓ | ✓ **(D-1, source:'plugin')** | **✗** | ✗ | **不可恢复**(=D-2, owner-gated) | ✅ 正确 **(D-1 修复)** |
+| 4 | `automation-executor.ts:2269` automation `delete_record` | ✓ | ✓ **(D-1, source:'automation')** | **✗** | **✗** | **不可恢复**(=D-2, owner-gated) | ✅ 正确 **(D-1 修复)** |
 
 核实点:`meta_links` 的 `record_id` 有 FK(`ON DELETE CASCADE`)、`foreign_record_id` **无 FK**,故四条路径都必须显式 `DELETE FROM meta_links WHERE record_id=$1 OR foreign_record_id=$1`——**四条都清掉了 inbound 边**,只有路径 1 在清之前捕获。
 
@@ -42,12 +42,12 @@ SELECT DISTINCT ON (record_id) record_id, action, snapshot, version
 
 ## 4. owner 决策菜单(本文不实现任何一项)
 
-- **D-1(推荐,纯缺陷修复):** 让 automation / plugin-SDK 的删除**发射 delete revision**(`source:'automation'` / `'plugin'`,枚举位已存在)。**只修 PIT 正确性,不改可恢复性**(不加 trash)。用户可见行为变化仅为「Global History 如实记录该删除、PIT 不再谎报记录存活」。难度中(automation 走 raw-SQL 车道)。**属跨车道改动**(automation-executor 归自动化线),需路由到该线会话或 owner 点名。
+- **D-1(推荐,纯缺陷修复)— ✅ 已落地(owner ratify 2026-07-09,最小版:只补 revision,不开 recoverability;真库金测双向 PIT + mutation 证明:multitable-d1-delete-revision-parity-realdb.test.ts):** 让 automation / plugin-SDK 的删除**发射 delete revision**(`source:'automation'` / `'plugin'`,枚举位已存在)。**只修 PIT 正确性,不改可恢复性**(不加 trash)。用户可见行为变化仅为「Global History 如实记录该删除、PIT 不再谎报记录存活」。难度中(automation 走 raw-SQL 车道)。**属跨车道改动**(automation-executor 归自动化线),需路由到该线会话或 owner 点名。
 - **D-2(更大,产品决定):** 再给这两条路径补 `meta_records_trash` + tombstone 捕获 ⇒ 删除变为可恢复、并进回收站。**改变产品语义**,需 owner 签核。
 - **D-3(4c-3 内解决,已在 4c-3 锁提案):** 给 PIT-reset 内联删除(路径 2)补 tombstone 捕获(它已写 trash+revision,只差 anchor 与捕获调用)。
 - **D-4(文档诚实,已随本轮执行):** 4c-2 锁 §1/§8 补齐四条路径实情——**已在同批 PR 落地**,C2 口径明确限定为路径 1(+ 4c-3 后含路径 2)。
 - **D-5:** retention 地板 / 恢复面 `inboundEdgesRecoverable` 信号 —— 已写入 4c-3 锁,随 4c-3 impl 落地。
-- **D-6(4c-1 审阅期确证的既有 latent bug,建议单开 rung):** **Tier-1/2 config-restore execute 的成功路径从不调用 `invalidateFieldCache`**(命中数 = 0),而 uncreate / undelete / 4c-1 lossy 三条分支都调了。`metaFieldCache` **无 TTL、进程内常驻**,并经 `loadSheetFields` 喂给**记录写路径** ⇒ **一次 Tier-2 schema-only retype revert 之后,同一进程会继续用 revert 前的 type/property 去 coerce 后续写入。** 这是真实的缓存陈旧缺陷(非 4c-1 引入;4c-1 分支已自行失效)。**不塞进破坏性面的 PR**,建议单开修复 rung。
+- **D-6(4c-1 审阅期确证的既有 latent bug,已由 R7 #3952 修复):** **Tier-1/2 config-restore execute 的成功路径从不调用 `invalidateFieldCache`**,而 uncreate / undelete / 4c-1 lossy 三条分支都调了。`metaFieldCache`(`univer-meta.ts` 无 TTL、进程内常驻)**只被 `loadSheetFields` 消费**。**机理更正(R7 impl 期逐调用点核实,推翻本文初稿的"喂记录写路径"措辞):** 记录写路径的值 coercion 走的是**另一个未缓存的 loader `loadFieldsForSheet`(`loaders.ts`)**,`record-service` 用的正是它 —— **不受此缓存影响**。真正读陈旧缓存的消费者是 `GET /view` 的字段列表、create/duplicate 回显 mask、以及 `recalcNewRecordFormulas`。因此本缺陷是**读路径 / 公式重算的陈旧**(而非写路径值损坏),严重度低于初稿描述,但仍是真实缓存陈旧缺陷(非 4c-1 引入;4c-1 分支已自行失效)。修法 = 在 Tier-1/2 execute 成功且 `entity_type==='field'` 时补一行 `invalidateFieldCache(sheetId)`,镜像三个兄弟分支;golden mutation-proven。
 
 **未取的默认:** 本文不替 owner 选择 D-1/D-2。在 owner 裁决前,4c-3 的锁文以「可达边界仅路径 1(+D-3 后含路径 2)」如实收窄,不虚构恢复力。
 

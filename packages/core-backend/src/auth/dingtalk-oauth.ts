@@ -498,6 +498,54 @@ async function upsertExternalIdentity(localUserId: string, dtUser: DingTalkUserI
   })
 }
 
+// Directory-managed users can be found by unionId before their web-OAuth openId
+// is known. Enrich that missing openId without granting a rejected login.
+async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: DingTalkUserInfo): Promise<void> {
+  if (!dtUser.openId) return
+
+  const config = readDingTalkOauthConfig()
+  const externalKey = buildExternalKey(dtUser)
+  const openId = dtUser.openId
+  const unionId = dtUser.unionId || ''
+  const profile = JSON.stringify(dtUser)
+
+  await transaction(async (client) => {
+    const conflictResult = await client.query(
+      `SELECT local_user_id
+       FROM user_external_identities
+       WHERE provider = $1
+         AND local_user_id <> $2
+         AND (
+           external_key = $3
+           OR ($4 <> '' AND provider_open_id = $4 AND corp_id IS NOT DISTINCT FROM $6)
+           OR ($5 <> '' AND provider_union_id = $5 AND corp_id IS NOT DISTINCT FROM $6)
+         )
+       LIMIT 1`,
+      [PROVIDER, localUserId, externalKey, openId, unionId, config.corpId || null],
+    )
+    if (conflictResult.rows.length > 0) {
+      throw createPolicyError('DingTalk identity is already bound to another local user', {
+        statusCode: 409,
+        code: 'identity_already_bound',
+      })
+    }
+
+    await client.query(
+      `UPDATE user_external_identities
+       SET external_key = $3,
+           provider_union_id = COALESCE($4, provider_union_id),
+           provider_open_id = $5,
+           corp_id = COALESCE($6, corp_id),
+           profile = $7::jsonb,
+           updated_at = NOW()
+       WHERE provider = $1
+         AND local_user_id = $2
+         AND COALESCE(provider_open_id, '') = ''`,
+      [PROVIDER, localUserId, externalKey, dtUser.unionId || null, openId, config.corpId || null, profile],
+    )
+  })
+}
+
 async function findUserByEmail(email: string): Promise<LocalUserRow | null> {
   const result = await query<LocalUserRow>(
     `SELECT id,
@@ -632,12 +680,14 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
     assertLocalUserLoginAllowed(identityUser)
     const grantEnabled = await readGrantEnabled(identityUser.id)
     if (requireGrant && grantEnabled !== true) {
+      await enrichMissingOpenIdForRejectedLogin(identityUser.id, dtUser)
       throw createPolicyError('DingTalk login is not enabled for this user', {
         statusCode: 403,
         code: 'grant_required',
       })
     }
     if (grantEnabled === false) {
+      await enrichMissingOpenIdForRejectedLogin(identityUser.id, dtUser)
       throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
         statusCode: 403,
         code: 'grant_disabled',

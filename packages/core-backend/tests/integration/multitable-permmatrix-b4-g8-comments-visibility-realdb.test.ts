@@ -159,3 +159,127 @@ describeIfDatabase('W1-2 B4 G-8 — comments × sheet-visibility (real DB) — g
     expect(body).not.toContain(F_STATUS)
   })
 })
+
+describeIfDatabase('F1 — comments respect row-level read deny (real DB)', () => {
+  const ts = Date.now()
+  const baseId = `base_f1_comments_${ts}`
+  const sheetId = `sheet_f1_comments_${ts}`
+  const fieldId = `fld_f1_status_${ts}`
+  const visibleRecordId = `rec_f1_visible_${ts}`
+  const deniedRecordId = `rec_f1_denied_${ts}`
+  const visibleCommentId = `cmt_f1_visible_${ts}`
+  const deniedCommentId = `cmt_f1_denied_${ts}`
+  const actor = `user_f1_actor_${ts}`
+  const author = `user_f1_author_${ts}`
+  const visibleContent = 'F1_VISIBLE_COMMENT_CONTENT'
+  const deniedContent = 'F1_DENIED_COMMENT_CONTENT'
+
+  beforeAll(async () => {
+    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x'), ($2,'x') ON CONFLICT (id) DO NOTHING", [actor, author])
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [baseId, 'F1 Comments Base'])
+    await q('INSERT INTO meta_sheets (id, base_id, name, row_level_read_permissions_enabled) VALUES ($1,$2,$3,TRUE)', [sheetId, baseId, 'F1 Comments Sheet'])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [fieldId, sheetId, 'Status', 'string', '{}', 1])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1), ($4,$2,$5::jsonb,1)', [
+      visibleRecordId,
+      sheetId,
+      JSON.stringify({ [fieldId]: 'visible' }),
+      deniedRecordId,
+      JSON.stringify({ [fieldId]: 'denied' }),
+    ])
+    await q(
+      `INSERT INTO record_permissions (sheet_id, record_id, subject_type, subject_id, access_level)
+       VALUES ($1,$2,'user',$3,'none')`,
+      [sheetId, deniedRecordId, actor],
+    )
+    await q(
+      `INSERT INTO meta_comments (
+         id, spreadsheet_id, row_id, field_id, container_id, target_id, target_field_id,
+         author_id, content, mentions, created_at, updated_at
+       )
+       VALUES
+         ($1,$3,$4,$6,$3,$4,$6,$7,$8,$10::jsonb, now(), now()),
+         ($2,$3,$5,$6,$3,$5,$6,$7,$9,$10::jsonb, now(), now())`,
+      [
+        visibleCommentId,
+        deniedCommentId,
+        sheetId,
+        visibleRecordId,
+        deniedRecordId,
+        fieldId,
+        author,
+        visibleContent,
+        deniedContent,
+        JSON.stringify([actor]),
+      ],
+    )
+  })
+
+  afterAll(async () => {
+    await q('DELETE FROM meta_comment_reads WHERE comment_id = ANY($1::text[])', [[visibleCommentId, deniedCommentId]]).catch(() => {})
+    await q('DELETE FROM meta_comments WHERE spreadsheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM record_permissions WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [baseId]).catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[actor, author]]).catch(() => {})
+  })
+
+  function actorApp(): Express {
+    return buildApp(actor, ['multitable:read', 'comments:read', 'comments:write'])
+  }
+
+  test('list comments filters row-denied comment bodies and row identifiers', async () => {
+    const res = await request(actorApp()).get('/api/comments').query({ spreadsheetId: sheetId })
+    expect(res.status).toBe(200)
+    const body = JSON.stringify(res.body)
+    expect(body).toContain(visibleContent)
+    expect(body).toContain(visibleRecordId)
+    expect(body).not.toContain(deniedContent)
+    expect(body).not.toContain(deniedRecordId)
+
+    const deniedRow = await request(actorApp()).get('/api/comments').query({ spreadsheetId: sheetId, rowId: deniedRecordId })
+    expect(deniedRow.status).toBe(200)
+    expect(deniedRow.body.data.items).toEqual([])
+    expect(deniedRow.body.data.total).toBe(0)
+    expect(JSON.stringify(deniedRow.body)).not.toContain(deniedContent)
+  })
+
+  test('summary, presence, and mention-summary exclude row-denied vectors', async () => {
+    const summary = await request(actorApp())
+      .get('/api/comments/summary')
+      .query({ spreadsheetId: sheetId, rowIds: [visibleRecordId, deniedRecordId] })
+    expect(summary.status).toBe(200)
+    expect(summary.body.data.items).toHaveLength(1)
+    expect(summary.body.data.items[0].rowId).toBe(visibleRecordId)
+    expect(JSON.stringify(summary.body)).not.toContain(deniedRecordId)
+
+    const presence = await request(actorApp())
+      .get(`/api/multitable/${sheetId}/comments/presence`)
+      .query({ rowIds: [visibleRecordId, deniedRecordId] })
+    expect(presence.status).toBe(200)
+    expect(presence.body.data.items).toHaveLength(1)
+    expect(presence.body.data.items[0].rowId).toBe(visibleRecordId)
+    expect(JSON.stringify(presence.body)).not.toContain(deniedRecordId)
+
+    const mentionSummary = await request(actorApp()).get('/api/comments/mention-summary').query({ spreadsheetId: sheetId })
+    expect(mentionSummary.status).toBe(200)
+    expect(mentionSummary.body.data.mentionedRecordCount).toBe(1)
+    expect(mentionSummary.body.data.unresolvedMentionCount).toBe(1)
+    expect(JSON.stringify(mentionSummary.body)).toContain(visibleRecordId)
+    expect(JSON.stringify(mentionSummary.body)).not.toContain(deniedRecordId)
+  })
+
+  test('create on a row-denied record is rejected and does not insert a comment', async () => {
+    const res = await request(actorApp())
+      .post('/api/comments')
+      .send({ spreadsheetId: sheetId, rowId: deniedRecordId, content: 'F1_DENIED_WRITE_SENTINEL' })
+    expect(res.status).toBe(403)
+
+    const inserted = await q(
+      "SELECT count(*)::int AS c FROM meta_comments WHERE spreadsheet_id = $1 AND content = 'F1_DENIED_WRITE_SENTINEL'",
+      [sheetId],
+    )
+    expect(Number((inserted.rows[0] as { c: number }).c)).toBe(0)
+  })
+})

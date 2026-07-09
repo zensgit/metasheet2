@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# G-CI (2026-07-08): the ALWAYS-ON, required-eligible web test gate.
+#
+# Why this exists: the required `test (20.x)` job only *builds* apps/web — it never runs its vitest
+# specs. Web specs otherwise run only in the NON-required, path-filtered approval-web-guard /
+# multitable-web-guard, so a green PR did not mean any frontend test passed. This script runs the
+# curated, verified-stable union of those two guards' filters UNCONDITIONALLY, so a single job can
+# be added to branch-protection required contexts without the path-filtered-required footgun
+# (a required check that never triggers leaves PRs hanging forever).
+#
+# Maintenance: when you add a web spec to approval-web-guard or multitable-web-guard, add it here
+# too (same two-point discipline). The 19 pre-existing red files (approvalStaticPicker,
+# approvalMobileDetailActions, several multitable-workbench/*, attendance/*, featureFlags,
+# k3WiseSetup, platform-app-launcher, …) are deliberately OUT of this set until fixed; broaden
+# toward full-suite-minus-quarantine once they are triaged.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec npx vitest run amountAutoSum approval-amount-in-words approval-assignee-source approval-center approval-common-template-presets approval-condition-summary approval-detail-field approval-e2e-lifecycle approval-e2e-permissions approval-field-visibility approval-form-draft approval-graph-layout approval-graph-summary approval-graph-topology-edit approval-inbox-auth-guard approval-number-field-props approval-prefill-from-snapshot approval-route-preview-controller approval-route-preview-summary approval-template-route-preview-api approval-template-authoring-approval-node-edit approval-template-authoring-cc-edit approval-template-authoring-complex-node-config-allowlist approval-template-authoring-condition-edit approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-linear-step-spine approval-template-authoring-parallel-edit approval-upcoming-nodes approval-urge-button-state approvalCenterRemindBadge approvalCenterSourceFilter approvalCenterTable approvalCenterUnreadBadge approvalDelegationStatus approvalDelegationView approvalMobileI18n approvalMobileResponsive approvalTemplateAuthoring approvalTemplateCenterCategory automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView lineDerivation meta-automation-labels meta-filter-group meta-grid-table meta-toolbar-filter-builder multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-field-manager multitable-field-visibility multitable-grid multitable-history-fe multitable-kanban-view multitable-person-picker multitable-record-permission-manager multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-workbench-restore-wiring multitable-yjs-cell-editor multitable-yjs-scalar-cell myDelegationView newTodoPill pageShell parallelBranchRunsView requesterPreviewFields routePreviewErrors statusTag templateGalleryFilter ui-foundation-style-guard uiFoundationTexture useAutoSumTotal workflowHubView --reporter=dot

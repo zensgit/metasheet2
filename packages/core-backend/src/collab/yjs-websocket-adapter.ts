@@ -17,7 +17,7 @@ const MSG_SYNC = 0
 export type YjsAuthChecker = (
   userId: string,
   recordId: string,
-) => Promise<{ canRead: boolean; canWrite: boolean } | null>
+) => Promise<{ canRead: boolean; canWrite: boolean; canReadAllFields?: boolean } | null>
 
 /**
  * Callback to verify a JWT token and return the trusted userId.
@@ -199,6 +199,13 @@ export class YjsWebSocketAdapter {
             return
           }
           if (!access.canRead) {
+            socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'No read access' })
+            return
+          }
+          // Yjs sync is record-wide. A field-masked actor cannot safely receive
+          // a partial doc here, so the realtime path fails closed and the client
+          // falls back to REST reads where field masking is response-scoped.
+          if (access.canReadAllFields === false) {
             socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'No read access' })
             return
           }

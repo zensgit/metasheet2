@@ -13,7 +13,7 @@ import crypto from 'crypto'
 import { EventEmitter } from 'eventemitter3'
 import { Injector } from '@wendellhu/redi' // IoC Container
 import { createContainer } from './di/container'
-import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService } from './di/identifiers'
+import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService, ICommentService } from './di/identifiers'
 import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
 import {
@@ -65,6 +65,7 @@ import {
   type MultitableRecordsQueryFn,
 } from './multitable/records'
 import { resolveSheetCapabilitiesForUser } from './multitable/sheet-capabilities'
+import { isRecordReadDeniedForUser, loadRowLevelReadDenyEnabled } from './multitable/permission-service'
 import {
   assertPluginOwnsObject,
   assertPluginOwnsSheet,
@@ -2296,6 +2297,44 @@ export class MetaSheetServer {
           return false
         }
       })
+      collabService.setCommentRoomAuthChecker(async ({ spreadsheetId, rowId, userId }) => {
+        try {
+          const pool = poolManager.get()
+          const query = pool.query.bind(pool)
+          const { capabilities, isAdminRole } = await resolveSheetCapabilitiesForUser(
+            query,
+            spreadsheetId,
+            userId,
+          )
+          if (!capabilities.canRead) return false
+          if (isAdminRole) return true
+          if (rowId) {
+            return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))
+          }
+          // Sheet-wide comment rooms receive unfilterable full-comment broadcasts.
+          // Under row-level deny, non-admin users must subscribe to row rooms only.
+          return !(await loadRowLevelReadDenyEnabled(query, spreadsheetId))
+        } catch {
+          return false
+        }
+      })
+      const commentService = this.injector.get(ICommentService)
+      commentService.setCommentTargetReadChecker(async ({ spreadsheetId, rowId, userId }) => {
+        try {
+          const pool = poolManager.get()
+          const query = pool.query.bind(pool)
+          const { capabilities, isAdminRole } = await resolveSheetCapabilitiesForUser(
+            query,
+            spreadsheetId,
+            userId,
+          )
+          if (!capabilities.canRead) return false
+          if (isAdminRole) return true
+          return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))
+        } catch {
+          return false
+        }
+      })
       collabService.initialize(this.httpServer)
     } catch (e) {
       this.logger.error('Failed to initialize WebSocket service', e as Error)
@@ -2311,6 +2350,7 @@ export class MetaSheetServer {
       const { YjsSyncService } = await import('./collab/yjs-sync-service')
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
       const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
+      const { canReadEveryYjsFieldForUser } = await import('./collab/yjs-field-read-access')
       const { RecordWriteService } = await import('./multitable/record-write-service')
       const { loadSheetMemberUserIdSet, loadFieldPermissionScopeMap } = await import('./multitable/permission-service')
       const { createYjsInvalidationPostCommitHook } = await import('./multitable/post-commit-hooks')
@@ -2380,8 +2420,11 @@ export class MetaSheetServer {
               && (await isRecordReadDeniedForUser(pool.query.bind(pool), sheetId, recordId, userId))) {
               return { canRead: false, canWrite: false }
             }
+            const canReadAllFields = capabilities.canRead
+              ? await canReadEveryYjsFieldForUser(pool.query.bind(pool), sheetId, userId, capabilities)
+              : false
             const canWrite = canWriteRecord(capabilities, sheetScope, isAdminRole, userId, createdBy)
-            return { canRead: capabilities.canRead, canWrite }
+            return { canRead: capabilities.canRead, canWrite, canReadAllFields }
           } catch {
             return null
           }
