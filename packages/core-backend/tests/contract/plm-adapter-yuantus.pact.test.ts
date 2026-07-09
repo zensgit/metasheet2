@@ -375,12 +375,14 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
     expect(detailSuccess).toBeDefined()
     expect(listNotFound).toBeDefined()
 
-    // thread-list request shape: target_type/target_id are required query params
+    // thread-list request shape: target_type/target_id are required query params.
+    // include_resolved/include_children are OMITTED here (not just "false") because the
+    // adapter's guard is truthy-only (`if (options?.includeResolved) ...`), matching the
+    // provider's own false defaults -- the pact must describe what the adapter actually sends.
     expect(listSuccess!.request.method).toBe('GET')
     expect(listSuccess!.request.query).toEqual({
       target_type: ['item'],
       target_id: ['01H000000000000000000000T1'],
-      include_resolved: ['false'],
       limit: ['20'],
     })
     expect(listSuccess!.providerStates![0].name).toContain('01H000000000000000000000T1')
@@ -413,7 +415,6 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
     expect(listNotFound!.request.query).toEqual({
       target_type: ['item'],
       target_id: ['01H000000000000000000000T9'],
-      include_resolved: ['false'],
       limit: ['20'],
     })
     expect(listNotFound!.response.status).toBe(404)

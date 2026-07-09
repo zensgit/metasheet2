@@ -107,7 +107,12 @@ cannot read.
   `this.query('/api/v1/discussions', [params])`, mirroring the existing `getWhereUsed` /
   `getBomCompare` pattern (mock-mode branch, `apiMode !== 'yuantus'` branch, then a plain
   `this.query(...)` pass-through — no extra field remapping, since the provider envelope already
-  matches the consumer type 1:1).
+  matches the consumer type 1:1). **Note the query-param guards are truthy-only**
+  (`` if (options?.includeResolved) params.include_resolved = ... ``), so `includeResolved: false`
+  / `includeChildren: false` (or omitted) are never put on the wire — only `true` is. This matches
+  the provider's own `false` defaults, so the two behave identically; the pact fixtures below
+  reflect this (no `include_resolved` key on the wire when the caller didn't ask for resolved
+  threads).
 - `getDiscussionThread(threadId: string, options?: DiscussionThreadOptions):
   Promise<QueryResult<DiscussionThreadDetail>>` — same shape, calls
   `` this.query(`/api/v1/discussions/${threadId}`, [params]) ``.
@@ -144,8 +149,10 @@ Fixture ids used (fresh, not reused from any other pact interaction): `01H000000
 ### Interaction 1 — thread-list success
 
 Request: `GET /api/v1/discussions`, query
-`{target_type: ["item"], target_id: ["01H000000000000000000000T1"], include_resolved: ["false"],
-limit: ["20"]}`, headers `{Authorization: "Bearer ...", x-tenant-id: "tenant-1"}`.
+`{target_type: ["item"], target_id: ["01H000000000000000000000T1"], limit: ["20"]}` (no
+`include_resolved` key — the caller didn't request resolved threads, and the adapter's guard is
+truthy-only so `false` is never put on the wire), headers `{Authorization: "Bearer ...",
+x-tenant-id: "tenant-1"}`.
 
 Response `200`:
 
@@ -184,8 +191,8 @@ wired through, even though this consumer slice treats `history` as an untyped pa
 ### Interaction 3 — no-leak 404
 
 Request: `GET /api/v1/discussions`, query
-`{target_type: ["item"], target_id: ["01H000000000000000000000T9"], include_resolved: ["false"],
-limit: ["20"]}`, same auth headers.
+`{target_type: ["item"], target_id: ["01H000000000000000000000T9"], limit: ["20"]}`, same auth
+headers.
 
 Response `404`: `{"detail": "discussion target not found"}` — the exact string the Yuantus
 `TargetNotFoundError("discussion target not found")` produces via FastAPI's default
