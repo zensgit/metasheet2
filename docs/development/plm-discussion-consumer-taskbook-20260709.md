@@ -6,11 +6,20 @@
 > **Provider status:** Yuantus Discussion Core R1 is LIVE on yuantus-plm main
 > (PR #1146, squash `2f0320c1`): threads / one-level replies / explicit
 > mentions / resolve-reopen with target-inherited permissions, plus the
-> Phase-2 slice-1 follow-on (My Discussions, mentionable-users lookup, comment
-> edit / soft delete). Program roadmap: yuantus-plm
+> Phase-2 slice-1 follow-on (#1147: My Discussions, mentionable-users lookup,
+> comment edit / soft delete) and the **Phase-6 slice-1 read projections
+> (#1149: `include_history` domain-timeline merge; `include_children`
+> BOM-children aggregation, scoped to the WP1.2 product-structure vocabulary —
+> ASSEMBLY ∩ `is_current=True`)**. Program roadmap: yuantus-plm
 > `docs/development/plm-collab-discussion-visual-collaboration-roadmap-20260709.md`
 > (§4.4 federation hard locks, §11.2 consumer coverage list — this document is
 > that deliverable).
+>
+> **Split:** this taskbook is the CONSUMER-side canonical (ms2 adapter / UI /
+> downgrade / pact consumer interactions). The PROVIDER-side Phase 3 lock
+> (capability manifest, pact provider states, provider-first sequencing, the
+> write-credential design gate) lives in yuantus-plm PR #1153's taskbook —
+> complementary documents, not competing ones.
 
 ## 1. Scope
 
@@ -71,12 +80,15 @@ interface PlmDiscussionProvider {
 
 ## 4. Identity, tokens, and the write channel (C2 gate)
 
-1. **Never reuse the embed token for writes.** It is TTL-capped (600s) with
-   single-use semantics. C2 requires exchanging a valid embed context for a
-   Yuantus-issued, discussion-scoped session credential (dedicated `aud`,
-   target-scoped, refreshable) following the existing embed-token audience
-   pattern — the mint endpoint is a Yuantus-side contract addition and must be
-   taskbooked there before C2 starts.
+1. **Never reuse the embed token for writes.** It is TTL-capped (600s) and
+   jti-AUDITED — single-use enforcement is NOT an implemented property of the
+   shipped pattern (yuantus-plm #1148 review note [M]); it must never carry
+   write authority regardless. C2 requires exchanging a valid embed context
+   for a Yuantus-issued, discussion-scoped session credential (dedicated
+   `aud`, target-scoped, refreshable) following the existing embed-token
+   audience pattern — the mint endpoint is a Yuantus-side contract addition
+   (provider taskbook, PR #1153 lane) and must be taskbooked there before C2
+   starts.
 2. **Identity mapping is explicit.** `mentioned_user_ids` are Yuantus
    identity user ids; MetaSheet user ids are never assumed equal.
 3. Mention picker uses the provider's `GET /api/v1/discussions/
