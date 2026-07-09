@@ -1,0 +1,63 @@
+# Always-on web test gate — the missing required-eligible frontend check.
+#
+# The required `test (20.x)` job (plugin-tests.yml) only BUILDS apps/web; it never runs its vitest
+# specs. Web specs otherwise run only in the NON-required, path-filtered approval-web-guard /
+# multitable-web-guard — so a green PR did not mean any apps/web test passed.
+#
+# This job runs the curated, verified-stable union of those two guards' filters (104 files / 1537
+# tests, all green on main 2026-07-08) UNCONDITIONALLY — no path filter — so it can be added to
+# branch-protection required contexts WITHOUT the path-filtered-required footgun (a required check
+# that never triggers leaves PRs hanging forever). Job name is stable: `web-tests`.
+#
+# To make it required (owner action, after it proves green on a few real PRs):
+#   gh api -X PUT repos/zensgit/metasheet2/branches/main/protection/required_status_checks/contexts \
+#     --input - <<< '["web-tests"]'   # (append to the existing contexts, do not replace)
+name: Web Tests
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+
+jobs:
+  web-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run the always-on web spec gate
+        run: bash apps/web/scripts/run-required-web-tests.sh
