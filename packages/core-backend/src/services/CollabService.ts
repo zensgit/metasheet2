@@ -264,6 +264,75 @@ export class CollabService {
     this.emitSheetPresence(sheetId)
   }
 
+  // Shared auth+read gate for the comment rooms that expose a sheet's comment bodies (comment-sheet /
+  // comment-record broadcast full `comment:created` payloads): the socket must carry a verified identity
+  // AND that user must be allowed to read the target sheet — the SAME `sheetRoomAuthChecker` the live
+  // editing `join-sheet` path uses. Returns false (and denies the join) otherwise. Without this, any
+  // socket could join an arbitrary sheet's comment room and receive every comment body broadcast there.
+  private async authorizeCommentSheetAccess(socket: Socket, spreadsheetId: string): Promise<boolean> {
+    const userId = await this.resolveTrustedUserId(socket)
+    if (!socket.connected) return false
+    if (!userId) {
+      this.denyCommentJoin(socket, spreadsheetId, 'unauthorized')
+      return false
+    }
+    let allowed = false
+    try {
+      allowed = await this.sheetRoomAuthChecker({ sheetId: spreadsheetId, userId, socketId: socket.id })
+    } catch (error) {
+      this.logger.warn('WebSocket comment room auth check failed', error instanceof Error ? error : undefined)
+    }
+    if (!socket.connected) return false
+    if (!allowed) {
+      this.denyCommentJoin(socket, spreadsheetId, 'forbidden')
+      return false
+    }
+    return true
+  }
+
+  private denyCommentJoin(socket: Socket, scope: string, reason: string): void {
+    socket.emit('comment-join-denied', { scope, reason })
+    this.logger.warn(`Client ${socket.id} denied joining comment room ${scope}: ${reason}`)
+  }
+
+  private async handleJoinCommentRecord(socket: Socket, payload: unknown): Promise<void> {
+    const scope = this.parseCommentRecordScope(payload)
+    if (!scope) return
+    if (!(await this.authorizeCommentSheetAccess(socket, scope.spreadsheetId))) return
+    if (!socket.connected) return
+    const room = buildCommentRecordRoom(scope)
+    socket.join(room)
+    this.logger.info(`Client ${socket.id} joined ${room}`)
+    socket.emit('joined-comment-record', scope)
+  }
+
+  private async handleJoinCommentSheet(socket: Socket, payload: unknown): Promise<void> {
+    const spreadsheetId = this.parseSheetScope(payload)
+    if (!spreadsheetId) return
+    if (!(await this.authorizeCommentSheetAccess(socket, spreadsheetId))) return
+    if (!socket.connected) return
+    const room = buildCommentSheetRoom({ spreadsheetId })
+    socket.join(room)
+    this.logger.info(`Client ${socket.id} joined ${room}`)
+  }
+
+  private async handleJoinCommentInbox(socket: Socket): Promise<void> {
+    // The comment inbox is a cross-sheet activity stream (metadata: ids/authorId, no bodies). It requires
+    // a verified identity to join — closing unauthenticated access to the stream. Per-user activity
+    // routing (so an authed user only sees activity for sheets they can read) is a broadcast-semantics
+    // change tracked as a follow-up; this gate is the security-critical part (no anonymous access).
+    const userId = await this.resolveTrustedUserId(socket)
+    if (!socket.connected) return
+    if (!userId) {
+      this.denyCommentJoin(socket, 'comment-inbox', 'unauthorized')
+      return
+    }
+    const room = buildCommentInboxRoom()
+    socket.join(room)
+    this.logger.info(`Client ${socket.id} joined ${room}`)
+    socket.emit('joined-comment-inbox')
+  }
+
   initialize(httpServer: HttpServer): void {
     this.io = new SocketServer(httpServer, {
       cors: {
@@ -322,12 +391,7 @@ export class CollabService {
       })
 
       socket.on('join-comment-record', (payload: unknown) => {
-        const scope = this.parseCommentRecordScope(payload)
-        if (!scope) return
-        const room = buildCommentRecordRoom(scope)
-        socket.join(room)
-        this.logger.info(`Client ${socket.id} joined ${room}`)
-        socket.emit('joined-comment-record', scope)
+        void this.handleJoinCommentRecord(socket, payload)
       })
 
       socket.on('leave-comment-record', (payload: unknown) => {
@@ -339,11 +403,7 @@ export class CollabService {
       })
 
       socket.on('join-comment-sheet', (payload: unknown) => {
-        const spreadsheetId = this.parseSheetScope(payload)
-        if (!spreadsheetId) return
-        const room = buildCommentSheetRoom({ spreadsheetId })
-        socket.join(room)
-        this.logger.info(`Client ${socket.id} joined ${room}`)
+        void this.handleJoinCommentSheet(socket, payload)
       })
 
       socket.on('leave-comment-sheet', (payload: unknown) => {
@@ -355,10 +415,7 @@ export class CollabService {
       })
 
       socket.on('join-comment-inbox', () => {
-        const room = buildCommentInboxRoom()
-        socket.join(room)
-        this.logger.info(`Client ${socket.id} joined ${room}`)
-        socket.emit('joined-comment-inbox')
+        void this.handleJoinCommentInbox(socket)
       })
 
       socket.on('leave-comment-inbox', () => {

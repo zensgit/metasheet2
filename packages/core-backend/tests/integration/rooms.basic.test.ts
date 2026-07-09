@@ -88,7 +88,7 @@ describe('WebSocket Rooms - basic flow', () => {
       return token.slice('token:'.length).trim() || null
     })
     collabService.setSheetRoomAuthChecker(async ({ sheetId, userId }) => {
-      return sheetId === 'sheet_ops' && ['user_a', 'user_b', 'user_reader', 'a', 'b'].includes(userId)
+      return ['sheet_ops', 'sheet_orders'].includes(sheetId) && ['user_a', 'user_b', 'user_reader', 'a', 'b'].includes(userId)
     })
   })
 
@@ -233,7 +233,8 @@ describe('WebSocket Rooms - basic flow', () => {
   it('join-comment-record scopes comment delivery to a single record room', async () => {
     if (!baseUrl || !server) return
 
-    const a = ioClient(baseUrl, { transports: ['websocket'] })
+    // authenticated + authorized to read sheet_orders (comment rooms now require the same read gate as join-sheet)
+    const a = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:user_a' } })
     const b = ioClient(baseUrl, { transports: ['websocket'] })
 
     await Promise.all([
@@ -371,7 +372,8 @@ describe('WebSocket Rooms - basic flow', () => {
   it('join-comment-inbox scopes activity delivery to inbox subscribers', async () => {
     if (!baseUrl || !server) return
 
-    const a = ioClient(baseUrl, { transports: ['websocket'] })
+    // the comment inbox now requires an authenticated identity to join (no anonymous access to the stream)
+    const a = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:user_a' } })
     const b = ioClient(baseUrl, { transports: ['websocket'] })
 
     await Promise.all([
@@ -424,5 +426,76 @@ describe('WebSocket Rooms - basic flow', () => {
 
     a.close()
     b.close()
+  })
+
+  // --- Security: comment rooms expose a sheet's comment bodies (comment:created carries the full
+  // comment), so joining one must require the SAME authenticated read gate as join-sheet. Without it an
+  // anonymous socket could join any sheet's comment room and receive every comment body broadcast there.
+  it('SECURITY: rejects an unauthenticated join-comment-sheet and keeps the socket out of comment-body broadcasts', async () => {
+    if (!baseUrl || !server) return
+    const client = ioClient(baseUrl, { transports: ['websocket'] })
+    await waitForConnect(client, 'unauth-comment-sheet')
+
+    const denied = waitForEvent(client, 'comment-join-denied', 'comment-sheet join denied')
+    client.emit('join-comment-sheet', { spreadsheetId: 'sheet_orders' })
+    await expect(denied).resolves.toEqual({ scope: 'sheet_orders', reason: 'unauthorized' })
+
+    // the denied socket must NOT be in the room — a comment body broadcast there must never reach it
+    const noBody = expectNoEvent(client, 'comment:created', 'denied comment-sheet socket')
+    // @ts-ignore access private for test
+    server['createCoreAPI']().websocket.broadcastTo('comments-sheet:sheet_orders', 'comment:created', {
+      spreadsheetId: 'sheet_orders',
+      comment: { id: 'leak', rowId: 'rec_1', body: 'secret' },
+    })
+    await noBody
+
+    client.close()
+  })
+
+  it('SECURITY: rejects an unauthenticated join-comment-record and keeps the socket out of comment-body broadcasts', async () => {
+    if (!baseUrl || !server) return
+    const client = ioClient(baseUrl, { transports: ['websocket'] })
+    await waitForConnect(client, 'unauth-comment-record')
+
+    const denied = waitForEvent(client, 'comment-join-denied', 'comment-record join denied')
+    client.emit('join-comment-record', { spreadsheetId: 'sheet_orders', rowId: 'rec_1' })
+    await expect(denied).resolves.toEqual({ scope: 'sheet_orders', reason: 'unauthorized' })
+
+    const noBody = expectNoEvent(client, 'comment:created', 'denied comment-record socket')
+    // @ts-ignore access private for test
+    server['createCoreAPI']().websocket.broadcastTo('comments:sheet_orders:rec_1', 'comment:created', {
+      spreadsheetId: 'sheet_orders',
+      comment: { id: 'leak', rowId: 'rec_1', body: 'secret' },
+    })
+    await noBody
+
+    client.close()
+  })
+
+  it('SECURITY: rejects a join-comment-sheet from an authenticated user who cannot read the sheet', async () => {
+    if (!baseUrl || !server) return
+    // a verified identity, but 'intruder' is not in the sheet's read allowlist → forbidden, not just anonymous-denied
+    const client = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:intruder' } })
+    await waitForConnect(client, 'intruder-comment-sheet')
+
+    const denied = waitForEvent(client, 'comment-join-denied', 'comment-sheet join forbidden')
+    client.emit('join-comment-sheet', { spreadsheetId: 'sheet_orders' })
+    await expect(denied).resolves.toEqual({ scope: 'sheet_orders', reason: 'forbidden' })
+
+    client.close()
+  })
+
+  it('SECURITY: rejects an unauthenticated join-comment-inbox', async () => {
+    if (!baseUrl || !server) return
+    const client = ioClient(baseUrl, { transports: ['websocket'] })
+    await waitForConnect(client, 'unauth-inbox')
+
+    const noJoin = expectNoEvent(client, 'joined-comment-inbox', 'unauth inbox join')
+    const denied = waitForEvent(client, 'comment-join-denied', 'inbox join denied')
+    client.emit('join-comment-inbox')
+    await expect(denied).resolves.toEqual({ scope: 'comment-inbox', reason: 'unauthorized' })
+    await noJoin
+
+    client.close()
   })
 })
