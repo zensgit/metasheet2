@@ -14,7 +14,6 @@ import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './f
 import { ensureRecordNotLocked } from './record-lock'
 import { resolveCrossBaseWriteAuthority } from './cross-base-write-authority'
 import { publishMultitableSheetRealtime } from './realtime-publish'
-import { recordRecordRevision } from './record-history-service'
 import { MemoryRateLimitStore, type RateLimitStore } from '../middleware/rate-limiter'
 import {
   DingTalkBusinessError,
