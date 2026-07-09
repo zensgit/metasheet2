@@ -13,6 +13,7 @@ const helpers = attendancePlugin.__attendanceOvertimeBankForTests as {
     policy: { enabled?: boolean; validityDays?: number | null } | null | undefined,
     fallbackExpiresInDays: number | null,
   ) => number | null
+  clampLotValidityDays: (raw: unknown) => number | null
 }
 
 describe('#8/加班银行 v1-1a — OvertimeBankPolicy normalizer (LATENT, compliance-floor)', () => {
@@ -101,5 +102,27 @@ describe('S1 — resolveBankedLotExpiresInDays (banked-lot validity precedence)'
     expect(resolve({ enabled: true, validityDays: 999999999 }, null)).toBeNull()
     expect(resolve({ enabled: true, validityDays: Infinity }, 30)).toBe(30)
     expect(resolve({ enabled: true, validityDays: NaN }, 30)).toBe(30)
+  })
+})
+
+describe('clampLotValidityDays (expiresInDays parity — no PG interval overflow)', () => {
+  const clamp = helpers.clampLotValidityDays
+  it('keeps a positive integer within bounds', () => {
+    expect(clamp(30)).toBe(30)
+    expect(clamp(36500)).toBe(36500)
+  })
+  it('clamps an over-large value down to MAX (36500), never overflowing the interval', () => {
+    expect(clamp(36501)).toBe(36500)
+    expect(clamp(999999999)).toBe(36500)
+    expect(clamp(2147483648)).toBe(36500)
+  })
+  it('rejects non-positive / non-integer / null / garbage → null (no expiry)', () => {
+    expect(clamp(0)).toBeNull()
+    expect(clamp(-5)).toBeNull()
+    expect(clamp(0.5)).toBeNull()
+    expect(clamp(null)).toBeNull()
+    expect(clamp(undefined)).toBeNull()
+    expect(clamp(Infinity)).toBeNull()
+    expect(clamp(NaN)).toBeNull()
   })
 })

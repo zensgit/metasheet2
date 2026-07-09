@@ -626,8 +626,31 @@
 
         <!-- Rule list -->
         <div v-if="loading" class="meta-automation__empty">{{ l('manager.loading') }}</div>
+        <!-- G-B2-26: the empty state guides instead of just announcing emptiness. The bare
+             `manager.empty` line is kept (tests + a11y) and recipe cards sit above it — each
+             pre-fills the quick-form draft with a common trigger→action pair, so the first rule is
+             one click plus light editing rather than a blank form. "Start from blank" preserves the
+             original empty-form path. The two raw add-buttons above are left in place (deliberately
+             not removed — a demote, not a delete). -->
         <div v-else-if="!rules.length && !showForm" class="meta-automation__empty" data-automation-empty="true">
-          {{ l('manager.empty') }}
+          <div class="meta-automation__recipe-title">{{ l('manager.recipeSectionTitle') }}</div>
+          <div class="meta-automation__recipe-grid">
+            <button
+              v-for="recipe in automationRecipes"
+              :key="recipe.key"
+              type="button"
+              class="meta-automation__recipe-card"
+              :data-automation-recipe="recipe.key"
+              @click="applyRecipe(recipe)"
+            >
+              <span class="meta-automation__recipe-card-title">{{ l(recipe.titleKey) }}</span>
+              <span class="meta-automation__recipe-card-desc">{{ l(recipe.descriptionKey) }}</span>
+            </button>
+          </div>
+          <button type="button" class="meta-automation__recipe-blank" data-automation-recipe="__blank" @click="openCreateForm">
+            {{ l('manager.recipeOrBlank') }}
+          </button>
+          <p class="meta-automation__recipe-empty-note">{{ l('manager.empty') }}</p>
         </div>
         <div
           v-for="rule in rules"
@@ -843,6 +866,7 @@ import {
   type AutomationLastRunChip,
 } from '../utils/meta-automation-labels'
 import { loadRuleEntriesConcurrently, mergeRuleEntries } from '../utils/automation-rule-concurrent-merge'
+import { AUTOMATION_RECIPES, applyRecipeToDraft, type AutomationRecipe } from '../automationRecipes'
 
 const props = defineProps<{
   visible: boolean
@@ -1741,6 +1765,20 @@ const canSave = computed(() => {
   return true
 })
 
+// G-B2-26: recipe cards in the empty state. `automationRecipes` feeds the v-for; `applyRecipe`
+// mirrors openCreateForm's reset but overlays the recipe's trigger/action onto the fresh draft, so
+// the quick form opens pre-filled. The recipe only sets triggerType/actionType — every other field
+// keeps its emptyDraft default, so the result is a complete, form-renderable draft.
+const automationRecipes = AUTOMATION_RECIPES
+function applyRecipe(recipe: AutomationRecipe) {
+  editingRuleId.value = null
+  draft.value = applyRecipeToDraft(emptyDraft(), recipe)
+  dingtalkPersonUserSearch.value = ''
+  dingtalkPersonUserSuggestions.value = []
+  dingtalkPersonUserSearchError.value = ''
+  showForm.value = true
+}
+
 function openCreateForm() {
   editingRuleId.value = null
   draft.value = emptyDraft()
@@ -2032,6 +2070,62 @@ watch(
   font-size: 13px;
   background: var(--el-color-danger-light-9);
   color: var(--el-color-danger-dark-2);
+}
+
+.meta-automation__recipe-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--el-text-color-primary);
+}
+
+.meta-automation__recipe-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.meta-automation__recipe-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 8px;
+  background: var(--ms-bg-card);
+  cursor: pointer;
+  text-align: left;
+}
+
+.meta-automation__recipe-card:hover {
+  border-color: var(--el-color-primary);
+}
+
+.meta-automation__recipe-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.meta-automation__recipe-card-desc {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.meta-automation__recipe-blank {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--el-color-primary);
+}
+
+.meta-automation__recipe-empty-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 .meta-automation__empty {

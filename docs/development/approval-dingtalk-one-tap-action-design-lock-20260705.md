@@ -137,11 +137,12 @@ find-then-patch 同族纪律）。台账行不存在或 `card_state != 'sent'` �
 - ✅ **A-3** 移动极简决策页（#3647） + `/launch` 登录/绑定接入（含未绑定 fail-closed 引导）
 - ✅ **A-4** card-delivery 动作端点（#3647） `POST /api/approval-card-deliveries/:deliveryId/actions` +
   channel 注入 wrapper（§4）+ 台账状态回写（raw `/actions` 直连禁令的 tripwire 测试随此项落）
-- 🟡 **A-5** 验证：CI 可测部分已收口（#3665/#3669：单测/台账状态机/wrapper fail-closed 矩阵/伪造
-  instanceId tripwire 全绿；配置面已页面自助化 #3690/#3693/#3698/#3707）；**真钉钉 UAT 仍 ⬜ =
-  owner 实跑（跑通前不写「已验收」）**
+- ✅ **A-5** 验证：CI 可测部分已收口（#3665/#3669：单测/台账状态机/wrapper fail-closed 矩阵/伪造
+  instanceId tripwire 全绿；配置面已页面自助化 #3690/#3693/#3698/#3707）；2026-07-09 真钉钉 UAT
+  主链通过，证据见 `approval-dingtalk-one-tap-a5-verification-20260705.md` §4.1
 - ⬜ **A-6**（增强，可后置）钉钉容器内 JSAPI 免登
-- 🔒 **B-0** Slice B opt-in gate（A-5 验收 + owner 点名解锁）
+- 🟡 **B-0** Slice B opt-in gate（A-5 验收已满足；PROPOSED design-lock:
+  `approval-dingtalk-interactive-card-slice-b-design-lock-20260709.md`，仍需 owner ratify 后才开 runtime）
 - 🔒 **B-1** Stream worker 基建（env-gate 注册 / 重连 / 消费幂等）
 - 🔒 **B-2** 互动卡片模板注册 + 投放（outTrackId=台账 id）
 - 🔒 **B-3** 回调 → wrapper → 卡片原地终态更新（含冲突刷新真实状态）

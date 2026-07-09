@@ -68,6 +68,11 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/sandbox-target/readiness', 'stockPreparationSandboxTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/sandbox-target/ensure', 'stockPreparationSandboxTargetEnsure'],
   ['POST', '/api/integration/stock-preparation/options/sync', 'stockPreparationOptionsSync'],
+  // #3751 MVP: provision the 9 frozen MVP tables (readonly-internal, structure-only, admin-gated).
+  ['GET', '/api/integration/stock-preparation/mvp/readiness', 'stockPreparationMvpReadiness'],
+  ['POST', '/api/integration/stock-preparation/mvp/ensure', 'stockPreparationMvpEnsure'],
+  ['POST', '/api/integration/stock-preparation/mvp/options/sync', 'stockPreparationMvpOptionsSync'],
+  ['POST', '/api/integration/stock-preparation/mvp/sync/plan', 'stockPreparationMvpSyncPlan'],
   // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
   ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
   ['GET', '/api/integration/templates', 'templatesList'],
@@ -225,6 +230,17 @@ const {
   syncStockPreparationSandboxOptions,
   optionSetsFromInput,
 } = require('./stock-preparation-option-sync.cjs')
+// #3751 MVP: readiness / ensure / option-sync for the 9 frozen MVP tables. Metadata-only,
+// structure-only (rows always []), admin-gated, values-free evidence, no external write.
+const {
+  inspectStockPreparationMvpTargets,
+  ensureStockPreparationMvpTargets,
+  syncStockPreparationMvpOptions,
+} = require('./stock-preparation-mvp-provisioning.cjs')
+// #3751 MVP: readonly BOM-snapshot sync-RUN PLAN orchestrator. Pure/deterministic; composes the landed
+// mapper + diff engines into a values-free plan (batch + lines + run + diff + flags). Persists nothing,
+// admin-gated, no external/PLM/K3 write path.
+const { planBomSnapshotSyncRun } = require('./stock-preparation-sync-run-plan.cjs')
 // FOS-4: canonical stock-prep objectId — readiness is bound per TARGET, so any preset targeting this
 // table (v1 replace + the disable-missing prove-the-path preset) reuses the canonical readiness check.
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
@@ -515,6 +531,40 @@ const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
   'optionSources',
   'configInfo',
 ])
+// #3751 MVP: closed allowlists for the MVP readiness/ensure + option-sync routes. `objectIds`
+// (optional) scopes to a subset of the 9 frozen MVP tables; never a sheetId / credentials.
+const VALID_STOCK_PREPARATION_MVP_TARGET_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'baseId',
+  'objectIds',
+])
+const VALID_STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'objectIds',
+  'optionSets',
+  'optionSources',
+  'configInfo',
+])
+// #3751 MVP: closed allowlist for the readonly sync-RUN PLAN route. Carries the readonly plan inputs
+// only — an already-produced expansion result + optional prior batch/lines + plan ids/version/source.
+// NEVER a credential, sheetId, or SQL. `projectId` here is the PLM business project id (preserved
+// verbatim into the plan row), not a workspace sheet id.
+const VALID_STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_KEYS = new Set([
+  'projectId',
+  'syncRunId',
+  'snapshotBatchId',
+  'snapshotVersion',
+  'sourceSystem',
+  'expansionResult',
+  'previousSnapshotBatchId',
+  'previousLines',
+  'readPlan',
+  'defaultDesignUnit',
+])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
 const VALID_FIELD_OPTION_SYNC_REQUEST_KEYS = new Set([
@@ -747,6 +797,109 @@ function stockPreparationOptionSyncInput(req, rawInput = {}) {
     workspaceId: input.workspaceId,
     projectId,
     optionSets: input.optionSets,
+  }
+}
+
+// #3751 MVP: `objectIds` may arrive as a JSON array (POST body) or a
+// comma-separated query string (GET). Collapse to a trimmed string[] or
+// undefined (undefined => all 9 MVP tables). The module validates membership.
+function normalizeRequestedMvpObjectIds(raw) {
+  if (raw === undefined || raw === null) return undefined
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : [raw]
+  const cleaned = []
+  for (const value of list) {
+    const objectId = firstString(value)
+    if (objectId) cleaned.push(objectId)
+  }
+  return cleaned.length ? cleaned : undefined
+}
+
+function normalizeStockPreparationMvpTargetRequest(input = {}) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_TARGET_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!VALID_STOCK_PREPARATION_MVP_TARGET_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_TARGET_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    tenantId: firstString(input.tenantId),
+    workspaceId: firstString(input.workspaceId),
+    projectId: firstString(input.projectId),
+    baseId: firstString(input.baseId),
+    objectIds: normalizeRequestedMvpObjectIds(input.objectIds),
+  }
+}
+
+function stockPreparationMvpTargetInput(req, rawInput = {}) {
+  const input = normalizeStockPreparationMvpTargetRequest(rawInput)
+  const tenantId = resolveTenantId(req, input)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    projectId,
+    baseId: input.baseId,
+    objectIds: input.objectIds,
+  }
+}
+
+function normalizeStockPreparationMvpOptionSyncRequest(input = {}) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!VALID_STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    tenantId: firstString(input.tenantId),
+    workspaceId: firstString(input.workspaceId),
+    projectId: firstString(input.projectId),
+    objectIds: normalizeRequestedMvpObjectIds(input.objectIds),
+    optionSets: optionSetAliasValue(input, 'STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_INVALID'),
+  }
+}
+
+function stockPreparationMvpOptionSyncInput(req, rawInput = {}) {
+  const input = normalizeStockPreparationMvpOptionSyncRequest(rawInput)
+  const tenantId = resolveTenantId(req, input)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    projectId,
+    objectIds: input.objectIds,
+    optionSets: input.optionSets,
+  }
+}
+
+// #3751 MVP: parse the readonly sync-RUN PLAN body against a CLOSED allowlist. Deep validation of the
+// plan inputs lives in the orchestrator; this only rejects unknown fields and passes the readonly plan
+// inputs through. `projectId` is NOT rewritten to a staging sheet id — it is the PLM business project
+// id and must reach the plan row verbatim.
+function stockPreparationMvpSyncPlanInput(rawInput = {}) {
+  if (!isPlainObject(rawInput)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(rawInput)) {
+    if (!VALID_STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    projectId: rawInput.projectId,
+    syncRunId: rawInput.syncRunId,
+    snapshotBatchId: rawInput.snapshotBatchId,
+    snapshotVersion: rawInput.snapshotVersion,
+    sourceSystem: rawInput.sourceSystem,
+    expansionResult: rawInput.expansionResult,
+    previousSnapshotBatchId: rawInput.previousSnapshotBatchId,
+    previousLines: rawInput.previousLines,
+    readPlan: rawInput.readPlan,
+    defaultDesignUnit: rawInput.defaultDesignUnit,
   }
 }
 
@@ -2897,6 +3050,74 @@ function createHandlers(services, options = {}) {
         projectId: input.projectId,
         permission: 'admin',
         optionSets: input.optionSets,
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP: readiness of the 9 frozen MVP tables (or the objectIds subset). Admin-gated;
+    // metadata-only inspection; values-free evidence. Delegates to the MVP provisioning module.
+    async stockPreparationMvpReadiness(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpTargetInput(req, requestQuery(req))
+      const result = await inspectStockPreparationMvpTargets({
+        context,
+        projectId: input.projectId,
+        permission: 'admin',
+        objectIds: input.objectIds,
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP: ensure (create) the MVP tables as MetaSheet-internal structure-only tables
+    // (rows always []). No external/PLM/K3 write. 201 when any table was created, else 200.
+    async stockPreparationMvpEnsure(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpTargetInput(req, requestBody(req))
+      const result = await ensureStockPreparationMvpTargets({
+        context,
+        projectId: input.projectId,
+        baseId: input.baseId,
+        permission: 'admin',
+        objectIds: input.objectIds,
+      })
+      const created = result.tables.some((table) => table.created)
+      return sendOk(res, result, created ? 201 : 200)
+    },
+
+    // #3751 MVP: sync caller-supplied option sets onto the MVP tables' select fields (field
+    // metadata only). Values-free evidence; a table with no option fields is a no-op.
+    async stockPreparationMvpOptionsSync(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpOptionSyncInput(req, requestBody(req))
+      const result = await syncStockPreparationMvpOptions({
+        context,
+        projectId: input.projectId,
+        permission: 'admin',
+        objectIds: input.objectIds,
+        optionSets: input.optionSets,
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP: readonly BOM-snapshot sync-RUN PLAN. Admin-gated; composes the landed mapper + diff
+    // engines into a values-free plan (batch + lines + run + diff + flags) from an already-produced
+    // expansion result + optional prior batch. Persists NOTHING and touches NO records / write API —
+    // structurally read-only. Returns 200 with the computed plan + values-free evidence.
+    async stockPreparationMvpSyncPlan(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpSyncPlanInput(requestBody(req))
+      const result = planBomSnapshotSyncRun({
+        permission: 'admin',
+        projectId: input.projectId,
+        syncRunId: input.syncRunId,
+        snapshotBatchId: input.snapshotBatchId,
+        snapshotVersion: input.snapshotVersion,
+        sourceSystem: input.sourceSystem,
+        expansionResult: input.expansionResult,
+        previousSnapshotBatchId: input.previousSnapshotBatchId,
+        previousLines: input.previousLines,
+        readPlan: input.readPlan,
+        defaultDesignUnit: input.defaultDesignUnit,
       })
       return sendOk(res, result)
     },
