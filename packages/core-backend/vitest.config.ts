@@ -67,6 +67,11 @@ export default defineConfig({
       // a WHOLE FILE into the `Run approval real-DB integration` step in plugin-tests.yml where it
       // runs against real Postgres every PR.
       'tests/integration/dingtalk-approval-card-deliveries.db.test.ts',
+      // DT-OPS-02 P2 follow-up: preview/apply auto-admission-candidate-count parity.
+      // DATABASE_URL-gated (describeIfDatabase). Excluded from the no-DB default job so it
+      // doesn't skip-green, and wired as a WHOLE FILE into the `Run approval real-DB
+      // integration` step in plugin-tests.yml where it runs against real Postgres every PR.
+      'tests/integration/directory-sync-preview-apply-parity.db.test.ts',
       // A-2a approval.task_created trigger chain: DATABASE_URL-gated (describeIfDatabase). Excluded
       // from the no-DB default job so it doesn't skip-green, and wired as a WHOLE FILE into the
       // automation real-DB step in plugin-tests.yml where it runs against real Postgres every PR.
