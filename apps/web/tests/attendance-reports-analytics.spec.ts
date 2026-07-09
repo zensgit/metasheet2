@@ -338,9 +338,11 @@ describe('Attendance reports analytics', () => {
     await flushUi(4)
     // reuses the SAME server export endpoint as CSV — no backend change
     const exportCalls = vi.mocked(apiFetch).mock.calls.slice(before).map(c => String(c[0]))
-    expect(exportCalls.some(u => u.includes('/api/attendance/export?'))).toBe(true)
-    // the xlsx export threads the current header-mode like the CSV export does
-    expect(exportCalls.some(u => u.includes('/api/attendance/export?'))).toBe(true)
+    const xlsxUrl = exportCalls.find(u => u.includes('/api/attendance/export?'))
+    expect(xlsxUrl, 'Excel export hit /api/attendance/export').toBeTruthy()
+    // threads the SAME header-mode as the CSV export (default 'label') — dropping
+    // the header param from exportXlsx makes this go red.
+    expect(xlsxUrl).toContain('header=label')
 
     // gated identically to CSV: a forbidden user filter disables both.
     const userInput = container!.querySelector<HTMLInputElement>('#attendance-user-id')
