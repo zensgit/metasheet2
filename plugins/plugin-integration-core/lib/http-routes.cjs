@@ -73,6 +73,9 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/mvp/ensure', 'stockPreparationMvpEnsure'],
   ['POST', '/api/integration/stock-preparation/mvp/options/sync', 'stockPreparationMvpOptionsSync'],
   ['POST', '/api/integration/stock-preparation/mvp/sync/plan', 'stockPreparationMvpSyncPlan'],
+  // #3751 MVP: COMMIT a previewed sync-run plan — persist its rows into the 9 internal MVP tables
+  // (internal-only via target-scoped records API, idempotent, immutable, admin-gated, values-free).
+  ['POST', '/api/integration/stock-preparation/mvp/sync/persist', 'stockPreparationMvpSyncPersist'],
   // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
   ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
   ['GET', '/api/integration/templates', 'templatesList'],
@@ -241,6 +244,10 @@ const {
 // mapper + diff engines into a values-free plan (batch + lines + run + diff + flags). Persists nothing,
 // admin-gated, no external/PLM/K3 write path.
 const { planBomSnapshotSyncRun } = require('./stock-preparation-sync-run-plan.cjs')
+// #3751 MVP: COMMIT step for a previewed sync-run plan. Recomputes the deterministic plan and persists
+// its batch + line + run rows into the internal MVP tables via a target-scoped records API — the FIRST
+// business-row write. Internal-only (structural), idempotent, immutable, admin-gated, values-free.
+const { persistStockPreparationSyncRun } = require('./stock-preparation-sync-run-persist.cjs')
 // FOS-4: canonical stock-prep objectId — readiness is bound per TARGET, so any preset targeting this
 // table (v1 replace + the disable-missing prove-the-path preset) reuses the canonical readiness check.
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
@@ -887,6 +894,31 @@ function stockPreparationMvpSyncPlanInput(rawInput = {}) {
   for (const key of Object.keys(rawInput)) {
     if (!VALID_STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_KEYS.has(key)) {
       throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    projectId: rawInput.projectId,
+    syncRunId: rawInput.syncRunId,
+    snapshotBatchId: rawInput.snapshotBatchId,
+    snapshotVersion: rawInput.snapshotVersion,
+    sourceSystem: rawInput.sourceSystem,
+    expansionResult: rawInput.expansionResult,
+    previousSnapshotBatchId: rawInput.previousSnapshotBatchId,
+    previousLines: rawInput.previousLines,
+    readPlan: rawInput.readPlan,
+    defaultDesignUnit: rawInput.defaultDesignUnit,
+  }
+}
+
+// #3751 MVP: the COMMIT request allowlist is IDENTICAL to the sync-plan allowlist (same body the admin
+// previewed with /plan is replayed to /persist). Reuse the frozen key set; a persist-specific error code.
+function stockPreparationMvpSyncPersistInput(rawInput = {}) {
+  if (!isPlainObject(rawInput)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PERSIST_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(rawInput)) {
+    if (!VALID_STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PERSIST_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
     }
   }
   return {
@@ -1763,6 +1795,19 @@ function createHandlers(services, options = {}) {
       throw new HttpRouteError(501, 'TABLE_ACTION_RECORDS_API_UNAVAILABLE', 'multitable records API is not available')
     }
     return records
+  }
+
+  // #3751 MVP: multitable provisioning accessor for the sync-run PERSIST route (findObjectSheet resolves
+  // each MVP objectId -> sheetId). Same dep the MVP readiness/ensure paths use (context.api.multitable
+  // .provisioning); we only need findObjectSheet here (persist never creates a sheet).
+  function getMultitableProvisioning() {
+    const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+    if (!provisioning || typeof provisioning.findObjectSheet !== 'function') {
+      throw new HttpRouteError(503, 'STOCK_PREPARATION_MVP_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available', {
+        requiredMethods: ['findObjectSheet'],
+      })
+    }
+    return provisioning
   }
 
   // FOS-2: scoped multitable provisioning API for the generic field-option-sync route. Same dep the
@@ -3120,6 +3165,41 @@ function createHandlers(services, options = {}) {
         defaultDesignUnit: input.defaultDesignUnit,
       })
       return sendOk(res, result)
+    },
+
+    // #3751 MVP: COMMIT a previewed BOM-snapshot sync-run PLAN — the FIRST slice that writes business
+    // rows. Admin-gated; recomputes the SAME deterministic plan the admin previewed with /plan, then
+    // persists the batch + line + run rows into the internal MVP tables through a TARGET-SCOPED records
+    // API (createTargetScopedRecordsApi) bound to each resolved MVP sheet, so a write can never leave an
+    // MVP sheet. Idempotent (an existing snapshotBatchId skips the whole commit) + immutable (createRecord
+    // only; old snapshots are never overwritten). Values-free evidence. 201 when it actually created,
+    // else 200 (skipped an already-persisted batch).
+    async stockPreparationMvpSyncPersist(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpSyncPersistInput(requestBody(req))
+      // The MVP tables were provisioned under the INTERNAL staging project (the same derivation the
+      // readiness/ensure routes use); the business `projectId` stays on the plan rows. Derive the staging
+      // targetProjectId server-side from the auth tenant — never from the request body.
+      const tenantId = resolveTenantId(req, input)
+      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+      const result = await persistStockPreparationSyncRun({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId,
+        projectId: input.projectId,
+        syncRunId: input.syncRunId,
+        snapshotBatchId: input.snapshotBatchId,
+        snapshotVersion: input.snapshotVersion,
+        sourceSystem: input.sourceSystem,
+        expansionResult: input.expansionResult,
+        previousSnapshotBatchId: input.previousSnapshotBatchId,
+        previousLines: input.previousLines,
+        readPlan: input.readPlan,
+        defaultDesignUnit: input.defaultDesignUnit,
+      })
+      return sendOk(res, result, result.persisted ? 201 : 200)
     },
 
     // FOS-2: generic, preset-driven field-option-sync. Admin-gated; resolves a FOS preset from the
