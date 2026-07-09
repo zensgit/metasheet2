@@ -1,6 +1,6 @@
 # Multitable Global History — D-1 Uncaptured-Delete PIT-Correctness — DESIGN-LOCK(PROPOSED)(2026-07-08)
 
-**状态:PROPOSED,待 owner ratify **且** 路由决定。** 起草于线级 /goal 授权下(pre-gate「推进到闸门前最远点」,与 4c-1/4c-2/4c-3 同法 design-lock-first)。**本文不改任何代码、不授权实现。**
+**状态:RATIFIED + IMPLEMENTED as-built(owner 2026-07-09:ratify D-1 最小档 + 路由「本会话做」→ 主会话实现,MERGED #3969)。** 起草于线级 /goal 授权下(pre-gate「推进到闸门前最远点」,与 4c-1/4c-2/4c-3 同法 design-lock-first)。**本文不改任何代码、不授权实现。**
 **⚠️ 跨车道声明:** 修复面在 `automation-executor.ts`(自动化线)与 `records.ts`(plugin-SDK)。本锁是**给 owner 的决策-就绪提案**,**不预设由本会话实现**;owner 需二决:(a) ratify 哪档(D-1 revision-only vs D-2 revision+trash);(b) 由本会话还是自动化线会话实现。
 **来源:** 销毁路径覆盖 gap-audit(#3921)的 D-1;缺陷由本线 PIT 消费者暴露,逐条 primary-source 核实。
 
@@ -65,3 +65,13 @@ D-2 可恢复性、public-form 创建-revision(§6,待确认)、任何 flag、�
 若 owner 点名本会话:强模型/Sonnet 车道(automation-executor 属热核,建议强模型或加严审)+ Opus 对抗审(mutation + 事务边界证明必交)+ auto-merge/keep-sync + wave MD。若路由到自动化线:本锁作为交接规格传递,不自做。
 
 **解锁词示例:「ratify D-1,本会话做」/「ratify D-1,路由自动化线」/「ratify D-1+D-2」。**
+
+## 7. As-built(#3969,2026-07-09)与两处如实偏差
+
+实现与本锁 §2/§3/§4 逐条一致:枚举位复用(`source:'plugin'/'automation'`)、删前快照(automation 并入既有 lock SELECT 零额外查询;plugin 前置 SELECT)、无 flag、无 trash/tombstone(D-2 红线未动)、金测 D1-1..D1-4+D1-6 对应落地(`multitable-d1-delete-revision-parity-realdb.test.ts`,双向 PIT + 双 mutation 精确命中)+ 行为保持金测(两路径对不存在记录语义不变、零捏造)+ scope 金测(两路径均不写 trash/tombstone)。
+
+**偏差 1(D1-5 原子性金测,未按原文实现):** 原文假设「revision 与 DELETE 同事务,失败整体回滚」并自注「事务边界未追,impl 前必确认」。实现期核实:**两条车道均无外层事务**(automation executor 逐语句 autocommit;plugin `input.query` 由调用方提供、不保证事务)。把两车道包进事务=远超 D-1 最小范围。故取**删后发射**的 fail-safe 方向:发射失败 ⇒ 退化回今日缺 revision 行为(单条记录),**绝不**产生「行还活着却谎报已删」的反向半态(反序在无事务下会引入这一**新**失败模式)。D1-5 以「删后发射 + rowCount 门」的降级语义替代,未按原文形状落金测。
+
+**偏差 2(batchId 批量语义,不适用):** automation `delete_record` 每次 action 执行恰删一条记录,不存在批量删除形状;省略 batchId(= revision 自身 id 作 batch,LOCK-12 单记录语义)。若未来出现 bulk delete action,须按原文补共享 batchId。
+
+后续:4c-3(#3975)已落,其可达边界如 §3 所述**不因 D-1 扩大**(这两条路径仍无 tombstone,不可恢复=D-2 owner-gated)。
