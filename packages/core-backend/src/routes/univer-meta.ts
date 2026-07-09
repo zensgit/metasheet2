@@ -10163,12 +10163,23 @@ export function univerMetaRouter(): Router {
               }
               await recordRecordRevision(query, { sheetId, recordId: r.recordId, version: 1, action: 'create', source: 'restore', changedFieldIds: Object.keys(r.snapshot), patch: r.snapshot, snapshot: r.snapshot, actorId: undeleteActorId })
               // 4c-3 §7: the SECOND resurrection surface reuses the SAME replay helper — never a
-              // parallel inbound semantic. Anchor = this record's LATEST delete revision: the record
-              // does not exist right now (id-occupied guard above), so the most recent delete IS the
-              // deletion that destroyed the currently-missing inbound edges — deterministic, not a
-              // vintage guess. A deletion without capture (uncaptured path, or capture flag off, or
-              // retention) simply yields zero tombstones ⇒ zero replay, honest. Runs AFTER the
-              // outbound loop (NOT EXISTS must see those rows; self-link stays single).
+              // parallel inbound semantic. HONEST NOTE (R8 absorption-audit P3-1, reworded from an
+              // earlier "deterministic" claim that overstated this): resurrect has no trash row to
+              // read an anchor off (unlike restoreRecord's `meta_records_trash.delete_revision_id`),
+              // so it falls back to a HEURISTIC — the record's MOST RECENT 'delete' revision, by
+              // `created_at DESC`. Under multi-vintage churn (delete → restore → delete → resurrect
+              // an OLDER vintage via PIT asOf) this anchors to the LATEST deletion even when the
+              // snapshot being resurrected is an older one — it replays that one vintage's captured
+              // edges only, never strings multiple anchors together. If the most recent deletion
+              // happened while capture was off (or its tombstones already aged out via retention),
+              // the anchor still resolves but carries zero tombstones ⇒ zero replay — silent and
+              // honest, never fabricated. Under-replay (missing a vintage's edges) is the only
+              // failure mode this heuristic can produce; OVER-replay stays impossible regardless of
+              // which delete revision is picked, because precondition 6 (neighbour consent — replay
+              // only what N's OWN live `data` still declares) gates every edge independently of the
+              // anchor. See `multitable-undelete-inbound-resurrect-realdb.test.ts` for the pinned
+              // multi-vintage + uncaptured-vintage goldens. Runs AFTER the outbound loop (NOT EXISTS
+              // must see those rows; self-link stays single).
               if (isRecordUndeleteInboundEnabled()) {
                 const anchorRes = await query(
                   `SELECT id FROM meta_record_revisions

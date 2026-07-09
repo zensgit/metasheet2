@@ -79,6 +79,14 @@ vi.mock('../../src/directory/directory-sync-scheduler', () => ({
   refreshDirectoryIntegrationSchedule: schedulerMocks.refreshDirectoryIntegrationSchedule,
 }))
 
+const alertDeliveryMocks = vi.hoisted(() => ({
+  getDirectoryManagerBindingCoverage: vi.fn(),
+}))
+
+vi.mock('../../src/directory/directory-sync-alert-delivery', () => ({
+  getDirectoryManagerBindingCoverage: alertDeliveryMocks.getDirectoryManagerBindingCoverage,
+}))
+
 const approvalCardConfigMocks = vi.hoisted(() => ({
   generateApprovalCardLinkSecret: vi.fn(),
   getApprovalCardConfigStatus: vi.fn(),
@@ -192,6 +200,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.unbindDirectoryAccount.mockReset()
     directoryMocks.updateDirectoryIntegration.mockReset()
     schedulerMocks.refreshDirectoryIntegrationSchedule.mockReset()
+    alertDeliveryMocks.getDirectoryManagerBindingCoverage.mockReset()
     workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore.mockReset()
     workNotificationMocks.saveDingTalkWorkNotificationAgentId.mockReset()
     workNotificationMocks.testDingTalkWorkNotificationAgentId.mockReset()
@@ -831,6 +840,55 @@ describe('adminDirectoryRouter', () => {
           },
         ],
       },
+    })
+  })
+
+  it('returns directory manager binding coverage for an integration (DT-OPS-03)', async () => {
+    alertDeliveryMocks.getDirectoryManagerBindingCoverage.mockResolvedValue({
+      managerCount: 4,
+      linkedManagerCount: 3,
+      coverage: 0.75,
+    })
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/manager-coverage', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(alertDeliveryMocks.getDirectoryManagerBindingCoverage).toHaveBeenCalledWith('dir-1')
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        coverage: { managerCount: 4, linkedManagerCount: 3, coverage: 0.75 },
+      },
+    })
+  })
+
+  it('admin-gates the manager binding coverage route (403 for non-admin)', async () => {
+    rbacMocks.isRbacAdmin.mockResolvedValue(false)
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/manager-coverage', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'user-1', role: 'user' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect(alertDeliveryMocks.getDirectoryManagerBindingCoverage).not.toHaveBeenCalled()
+  })
+
+  it('surfaces manager binding coverage failures as 500', async () => {
+    alertDeliveryMocks.getDirectoryManagerBindingCoverage.mockRejectedValue(new Error('db unreachable'))
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/manager-coverage', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_MANAGER_COVERAGE_FAILED', message: 'db unreachable' },
     })
   })
 

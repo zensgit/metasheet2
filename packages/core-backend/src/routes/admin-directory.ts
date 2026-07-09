@@ -25,6 +25,7 @@ import {
   unbindDirectoryAccount,
   updateDirectoryIntegration,
 } from '../directory/directory-sync'
+import { getDirectoryManagerBindingCoverage } from '../directory/directory-sync-alert-delivery'
 import {
   getDingTalkWorkNotificationRuntimeStatusFromStore,
   saveDingTalkWorkNotificationAgentId,
@@ -486,6 +487,21 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to load directory departments')
       jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_DEPARTMENTS_FAILED', message)
+    }
+  })
+
+  // DT-OPS-03 (§7.4): approval-routing health. Coverage is a read-only derived metric —
+  // no write path, same admin gate and error-handling shape as the sibling GET routes above.
+  router.get('/integrations/:integrationId/manager-coverage', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const coverage = await getDirectoryManagerBindingCoverage(req.params.integrationId)
+      jsonOk(res, { coverage })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to load directory manager binding coverage')
+      jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_MANAGER_COVERAGE_FAILED', message)
     }
   })
 

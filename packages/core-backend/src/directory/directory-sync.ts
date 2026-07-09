@@ -31,6 +31,7 @@ import { invalidateUserPerms } from '../rbac/service'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import { SimpleCronExpression } from '../services/SchedulerService'
+import { deliverDirectorySyncFailureAlert } from './directory-sync-alert-delivery'
 
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
@@ -1096,6 +1097,238 @@ export function resolveDirectoryIdentityMatch(
   if (mobileUserId) return { matched: 'mobile', localUserId: mobileUserId }
   if (hasAmbiguousIdentifierMatch) return { matched: 'ambiguous' }
   return { matched: 'none' }
+}
+
+/**
+ * DT-OPS-01 — offboarding policy executor.
+ *
+ * `directory_integrations.default_deprovision_policy` and
+ * `directory_accounts.deprovision_policy_override` have been stored since the schema was
+ * created and never enforced. Removing a member from DingTalk marked the shadow account
+ * inactive and dropped it into the admin review queue, but their LOCAL account stayed
+ * active: password login kept working, and `unbind` only cleared the identity.
+ *
+ * Two hazards shape this design:
+ *  1. the column's DB default is already `mark_inactive`, so simply honouring the stored
+ *     value would silently start deactivating users on the very next sync of every
+ *     existing integration;
+ *  2. deactivating the wrong person locks a real employee out.
+ *
+ * So the executor is env-gated (`DIRECTORY_DEPROVISION_ENABLED`, default off). With it
+ * off — the shipped default — nothing is written and the run reports exactly what it
+ * WOULD have done, giving an operator the preview the roadmap asks for before enabling.
+ */
+export type DirectoryDeprovisionPolicy = 'manual_review' | 'disable_grant_only' | 'mark_inactive'
+
+export const DIRECTORY_DEPROVISION_POLICIES: readonly DirectoryDeprovisionPolicy[] = [
+  'manual_review',
+  'disable_grant_only',
+  'mark_inactive',
+]
+
+export function isDirectoryDeprovisionEnabled(): boolean {
+  return ['true', '1', 'yes'].includes(
+    String(process.env.DIRECTORY_DEPROVISION_ENABLED ?? '').trim().toLowerCase(),
+  )
+}
+
+/**
+ * An unrecognised stored value must never be interpreted as "do something destructive".
+ * Anything we do not understand degrades to review-only.
+ */
+export function resolveDirectoryDeprovisionPolicy(
+  integrationDefault: string | null | undefined,
+  accountOverride: string | null | undefined,
+): DirectoryDeprovisionPolicy {
+  const candidate = normalizeText(accountOverride) || normalizeText(integrationDefault)
+  return (DIRECTORY_DEPROVISION_POLICIES as readonly string[]).includes(candidate)
+    ? (candidate as DirectoryDeprovisionPolicy)
+    : 'manual_review'
+}
+
+export type DirectoryDeprovisionOutcome = {
+  applied: boolean
+  /** Number of PEOPLE, not accounts — a user reached through two departed accounts counts once. */
+  candidateCount: number
+  manualReviewCount: number
+  grantsDisabledCount: number
+  usersDeactivatedCount: number
+  /** Set when the circuit breaker refused to act; `applied` is forced false. */
+  abortedReason: DirectoryDeprovisionAbortReason | null
+  affected: Array<{
+    directoryAccountId: string
+    localUserId: string
+    policy: DirectoryDeprovisionPolicy
+  }>
+}
+
+type DeprovisionCandidateRow = {
+  directory_account_id: string
+  local_user_id: string
+  deprovision_policy_override: string | null
+}
+
+/**
+ * Least-destructive wins. A user reached through several departed accounts is deprovisioned
+ * by the *safest* policy any of them names: if one binding says review-only, a human looks.
+ */
+const DEPROVISION_POLICY_SEVERITY: Record<DirectoryDeprovisionPolicy, number> = {
+  manual_review: 0,
+  disable_grant_only: 1,
+  mark_inactive: 2,
+}
+
+/**
+ * DT-OPS-01 circuit breaker. "Absent from the fetch" is NOT the same as "departed": a blank
+ * `name` is silently dropped by the client, a missing `list` yields zero users with no error,
+ * `contain_access_limit:false` hides restricted members (this repo already ships
+ * `sampleRootDepartmentDiagnostics` precisely because that happens), and a narrowed
+ * `rootDepartmentId` shrinks the whole tree. Before this executor existed,
+ * `directory_accounts.is_active` was never load-bearing — now it decides whether a person
+ * can log in, and there is no reactivation path in the product. So a suspicious fetch
+ * refuses to deprovision anyone rather than trusting a flag that was never built for this.
+ */
+export const DIRECTORY_DEPROVISION_MAX_BATCH = (() => {
+  const raw = Number(process.env.DIRECTORY_DEPROVISION_MAX_BATCH)
+  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 25
+})()
+
+export type DirectoryDeprovisionAbortReason = 'empty_directory_fetch' | 'batch_exceeds_max'
+
+export function evaluateDirectoryDeprovisionCircuitBreaker(options: {
+  syncedAccountCount: number
+  candidateCount: number
+  maxBatch?: number
+}): DirectoryDeprovisionAbortReason | null {
+  // Every account "vanished" — that is a broken fetch, not an evacuated company.
+  if (options.syncedAccountCount === 0) return 'empty_directory_fetch'
+  if (options.candidateCount > (options.maxBatch ?? DIRECTORY_DEPROVISION_MAX_BATCH)) return 'batch_exceeds_max'
+  return null
+}
+
+export async function applyDirectoryDeprovisionPolicies(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  options: {
+    integrationId: string
+    /** Ids of the accounts this run *transitioned* to inactive. NOT the lifetime backlog. */
+    deactivatedAccountIds: string[]
+    /** How many accounts the DingTalk fetch actually returned — the circuit breaker's input. */
+    syncedAccountCount: number
+    integrationDefaultPolicy: string
+    enabled: boolean
+    maxBatch?: number
+  },
+): Promise<DirectoryDeprovisionOutcome> {
+  const outcome: DirectoryDeprovisionOutcome = {
+    applied: options.enabled,
+    candidateCount: 0,
+    manualReviewCount: 0,
+    grantsDisabledCount: 0,
+    usersDeactivatedCount: 0,
+    abortedReason: null,
+    affected: [],
+  }
+
+  if (options.deactivatedAccountIds.length === 0) return outcome
+
+  // Accounts this run just deactivated, whose linked local user has NO other active linked
+  // directory account ANYWHERE.
+  //
+  // The sibling guard is deliberately NOT scoped by integration_id, and that is the whole
+  // point: `directory_account_links` is unique on directory_account_id only — local_user_id
+  // carries a plain index — so N accounts map to 1 user. A rehire (the old account departs,
+  // the new one links via the stable unionId) or a second integration would otherwise
+  // deactivate a person who is actively employed, with no way to undo it.
+  const candidates = await client.query(
+    `SELECT a.id::text AS directory_account_id,
+            l.local_user_id,
+            a.deprovision_policy_override
+       FROM directory_accounts a
+       JOIN directory_account_links l
+         ON l.directory_account_id = a.id
+        AND l.link_status = 'linked'
+        AND l.local_user_id IS NOT NULL
+      WHERE a.id = ANY($1::uuid[])
+        AND NOT EXISTS (
+          SELECT 1
+            FROM directory_account_links sibling_link
+            JOIN directory_accounts sibling ON sibling.id = sibling_link.directory_account_id
+           WHERE sibling_link.local_user_id = l.local_user_id
+             AND sibling_link.link_status = 'linked'
+             AND sibling.is_active = true
+        )`,
+    [options.deactivatedAccountIds],
+  )
+
+  // One decision per PERSON, not per account: a user reached through two departed accounts
+  // must not be audited twice, nor deactivated under the harsher of two policies.
+  const byUser = new Map<string, { directoryAccountId: string; policy: DirectoryDeprovisionPolicy }>()
+  for (const row of candidates.rows as DeprovisionCandidateRow[]) {
+    const policy = resolveDirectoryDeprovisionPolicy(options.integrationDefaultPolicy, row.deprovision_policy_override)
+    const existing = byUser.get(row.local_user_id)
+    if (!existing || DEPROVISION_POLICY_SEVERITY[policy] < DEPROVISION_POLICY_SEVERITY[existing.policy]) {
+      byUser.set(row.local_user_id, { directoryAccountId: row.directory_account_id, policy })
+    }
+  }
+
+  outcome.candidateCount = byUser.size
+
+  const abortReason = evaluateDirectoryDeprovisionCircuitBreaker({
+    syncedAccountCount: options.syncedAccountCount,
+    candidateCount: outcome.candidateCount,
+    maxBatch: options.maxBatch,
+  })
+  if (abortReason) {
+    outcome.abortedReason = abortReason
+    outcome.applied = false
+    logger.error(
+      `Directory deprovision ABORTED for ${options.integrationId}: ${abortReason} `
+      + `(${outcome.candidateCount} candidate(s), ${options.syncedAccountCount} account(s) fetched). `
+      + 'Nothing was deprovisioned. Verify the DingTalk fetch (contact-scope, root department, access-limited members) before retrying.',
+    )
+    return outcome
+  }
+
+  for (const [localUserId, { directoryAccountId, policy }] of byUser) {
+    if (policy === 'manual_review') {
+      outcome.manualReviewCount += 1
+      continue
+    }
+
+    outcome.affected.push({ directoryAccountId, localUserId, policy })
+
+    outcome.grantsDisabledCount += 1
+    if (options.enabled) {
+      await client.query(
+        `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
+         VALUES ($1, $2, FALSE, $3, NOW(), NOW())
+         ON CONFLICT (provider, local_user_id)
+         DO UPDATE SET enabled = FALSE, updated_at = NOW()`,
+        [DEFAULT_PROVIDER, localUserId, 'system:directory-deprovision'],
+      )
+    }
+
+    if (policy === 'mark_inactive') {
+      outcome.usersDeactivatedCount += 1
+      if (options.enabled) {
+        await client.query(
+          `UPDATE users SET is_active = FALSE, updated_at = NOW() WHERE id = $1::text`,
+          [localUserId],
+        )
+      }
+    }
+  }
+
+  if (!options.enabled && outcome.candidateCount > 0) {
+    logger.info(
+      `Directory deprovision preview for ${options.integrationId}: ${outcome.candidateCount} person(s) — `
+      + `${outcome.grantsDisabledCount} grant(s) and ${outcome.usersDeactivatedCount} local user(s) would be disabled. `
+      + `Affected: ${outcome.affected.map((a) => a.localUserId).join(', ') || '(none)'}. `
+      + 'Set DIRECTORY_DEPROVISION_ENABLED=true to apply.',
+    )
+  }
+
+  return outcome
 }
 
 function normalizeDirectorySyncAuditUserId(adminUserId: string): string | null {
@@ -2253,6 +2486,18 @@ function buildDepartmentPathMap(departments: Map<string, DingTalkDepartment>): M
   return cache
 }
 
+async function readIntegrationNameForAlert(integrationId: string): Promise<string> {
+  try {
+    const result = await query<{ name: string }>(
+      `SELECT name FROM directory_integrations WHERE id = $1`,
+      [integrationId],
+    )
+    return result.rows[0]?.name || integrationId
+  } catch {
+    return integrationId
+  }
+}
+
 async function markSyncFailure(integrationId: string, runId: string, message: string): Promise<void> {
   await query(
     `UPDATE directory_integrations
@@ -2280,6 +2525,12 @@ async function markSyncFailure(integrationId: string, runId: string, message: st
   } catch (error) {
     logger.warn(`Failed to persist directory alert: ${readErrorMessage(error, 'unknown error')}`)
   }
+
+  // DT-OPS-03: the alert row is useless if nobody opens the table. Deliver it over the
+  // channel the product already owns. Best-effort by construction — a failed sync must
+  // never be made worse by a failed webhook.
+  const integrationName = await readIntegrationNameForAlert(integrationId)
+  await deliverDirectorySyncFailureAlert({ integrationId, integrationName, runId, message })
 }
 
 export function buildUniqueLocalUserMatchMap(
@@ -2411,6 +2662,7 @@ export async function syncDirectoryIntegration(
   if (!integration) throw new Error('Directory integration not found')
 
   const config = parseIntegrationConfig(integration)
+  let deprovisionOutcome: DirectoryDeprovisionOutcome | null = null
   const runResult = await query<DirectoryRunRow>(
     `INSERT INTO directory_sync_runs (
        integration_id, status, started_at, stats, meta, triggered_by, trigger_source, created_at, updated_at
@@ -2550,12 +2802,18 @@ export async function syncDirectoryIntegration(
          WHERE integration_id = $1 AND last_seen_at < $2`,
         [integrationId, syncTimestamp],
       )
-      await client.query(
+      // DT-OPS-01: `AND is_active = true` makes this a TRANSITION, not a re-stamp of the
+      // whole backlog. Without it the deprovision executor re-processed every account ever
+      // deactivated on every sync — audit spam, and it would stomp a reactivation.
+      // RETURNING gives the executor exactly the accounts that departed in THIS run.
+      const deactivatedAccountsResult = await client.query(
         `UPDATE directory_accounts
          SET is_active = false, updated_at = NOW()
-         WHERE integration_id = $1 AND last_seen_at < $2`,
+         WHERE integration_id = $1 AND last_seen_at < $2 AND is_active = true
+         RETURNING id::text AS id`,
         [integrationId, syncTimestamp],
       )
+      const deactivatedAccountIds = (deactivatedAccountsResult.rows as Array<{ id: string }>).map((row) => row.id)
 
       const [departmentRows, accountRows] = await Promise.all([
         client.query(
@@ -2839,9 +3097,33 @@ export async function syncDirectoryIntegration(
         if (normalizedUserId) governedUserIds.add(normalizedUserId)
       }
 
+      // DT-OPS-01: run after the link loop so the linked/unmatched state is final.
+      // Default-off: this only counts what it WOULD do unless explicitly enabled.
+      deprovisionOutcome = await applyDirectoryDeprovisionPolicies(client, {
+        integrationId,
+        deactivatedAccountIds,
+        // The circuit breaker's input: how many accounts DingTalk actually returned. Zero
+        // means the fetch is broken, not that the company evacuated.
+        syncedAccountCount: users.size,
+        integrationDefaultPolicy: integration.default_deprovision_policy,
+        enabled: isDirectoryDeprovisionEnabled(),
+      })
+
       const stats = {
         departmentsSynced: departments.size,
         accountsSynced: users.size,
+        deprovisionApplied: deprovisionOutcome.applied,
+        deprovisionCandidateCount: deprovisionOutcome.candidateCount,
+        deprovisionManualReviewCount: deprovisionOutcome.manualReviewCount,
+        deprovisionGrantsDisabledCount: deprovisionOutcome.grantsDisabledCount,
+        deprovisionUsersDeactivatedCount: deprovisionOutcome.usersDeactivatedCount,
+        deprovisionAbortedReason: deprovisionOutcome.abortedReason,
+        // Identities, not just a number: an operator deciding whether to flip
+        // DIRECTORY_DEPROVISION_ENABLED needs to see WHO would lose access, and there is no
+        // reactivation path if they guess wrong. Capped so a pathological run cannot bloat
+        // the stats JSONB.
+        deprovisionAffected: deprovisionOutcome.affected.slice(0, 100),
+        deprovisionAffectedTruncated: deprovisionOutcome.affected.length > 100,
         linkedCount,
         pendingCount,
         unmatchedCount,
@@ -2891,6 +3173,45 @@ export async function syncDirectoryIntegration(
         invitedBy: triggeredBy,
         inviteToken: invite.inviteToken,
       })
+    }
+
+    // DT-OPS-01: audit offboarding AFTER the transaction commits (mirrors the invite
+    // ledger below) and only for effects that actually happened. A revoked grant or a
+    // deactivated user must leave a trail — this is the access-closure record.
+    if (deprovisionOutcome?.applied && deprovisionOutcome.affected.length > 0) {
+      // Imported lazily on purpose. The audit stack binds a repository to the shared pg
+      // pool when it loads, and directory-sync is imported by unit suites that mock
+      // `db/pg` down to { query, transaction } — an eager import made them fail at module
+      // load. That is a module-graph coupling, not a behavioural one, and the lazy form is
+      // also the honest one: the audit stack is only needed once an offboarding took effect.
+      const { auditLog } = await import('../audit/audit')
+
+      for (const affected of deprovisionOutcome.affected) {
+        // No try/catch: `auditLog` catches internally and never rejects (audit/audit.ts:22-40),
+        // so a wrapper here would be dead code pretending to be a safety net. A lost audit
+        // write surfaces as that module's own `warn`, which is the honest state of affairs.
+        // The durable record of *who* triggered this lives in `meta.triggeredBy`, because
+        // `audit.user_id` is numeric and our `users.id` is TEXT — an upstream limitation,
+        // recorded here rather than papered over.
+        await auditLog({
+          actorId: triggeredBy,
+          actorType: triggeredBy.startsWith('system:') ? 'system' : 'user',
+          action: 'deprovision',
+          resourceType: 'directory-account-link',
+          resourceId: affected.directoryAccountId,
+          meta: {
+            integrationId,
+            directoryAccountId: affected.directoryAccountId,
+            localUserId: affected.localUserId,
+            policy: affected.policy,
+            grantDisabled: true,
+            userDeactivated: affected.policy === 'mark_inactive',
+            triggeredBy,
+          },
+        })
+        // A deactivated or grant-revoked user must not keep cached permissions.
+        invalidateUserPerms(affected.localUserId)
+      }
     }
 
     for (const userId of governedUserIds) {
