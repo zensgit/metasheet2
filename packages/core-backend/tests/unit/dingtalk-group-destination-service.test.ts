@@ -283,6 +283,35 @@ describe('DingTalkGroupDestinationService', () => {
     expect(updated.webhookUrl).toContain('access_token=next')
   })
 
+  test('persists rotated credentials encrypted at rest on update (DT-HARDEN-03)', async () => {
+    const { db, roots } = createMockDb()
+    const service = new DingTalkGroupDestinationService(db, vi.fn())
+
+    executeTakeFirstQueue.push(destinationRow())
+    executeTakeFirstQueue.push(destinationRow({
+      webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=rotated',
+      secret: 'SEC_ROTATED',
+    }))
+
+    await service.updateDestination('dt_1', 'user_1', {
+      webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=rotated',
+      secret: 'SEC_ROTATED',
+    })
+
+    // The returned domain object always carries plaintext by design; what matters is
+    // that the row written to `dingtalk_group_destinations` is ciphertext, never the
+    // plaintext webhook token / secret. Guards the encrypt-on-update path against a
+    // regression that would leave credentials at rest in the clear (DT-HARDEN-03 P2-2).
+    const updateChain = roots.updateTable.mock.results[0]?.value as MockChain | undefined
+    const setArg = updateChain?.set?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+    expect(isEncryptedSecretValue(setArg?.webhook_url)).toBe(true)
+    expect(decryptStoredSecretValue(setArg?.webhook_url as string)).toBe(
+      'https://oapi.dingtalk.com/robot/send?access_token=rotated',
+    )
+    expect(isEncryptedSecretValue(setArg?.secret)).toBe(true)
+    expect(decryptStoredSecretValue(setArg?.secret as string)).toBe('SEC_ROTATED')
+  })
+
   test('rejects invalid DingTalk robot webhook URL on update', async () => {
     const { db, roots } = createMockDb()
     const service = new DingTalkGroupDestinationService(db, vi.fn())
