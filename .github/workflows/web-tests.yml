@@ -9,9 +9,12 @@
 # branch-protection required contexts WITHOUT the path-filtered-required footgun (a required check
 # that never triggers leaves PRs hanging forever). Job name is stable: `web-tests`.
 #
-# To make it required (owner action, after it proves green on a few real PRs):
-#   gh api -X PUT repos/zensgit/metasheet2/branches/main/protection/required_status_checks/contexts \
-#     --input - <<< '["web-tests"]'   # (append to the existing contexts, do not replace)
+# Adding it to required contexts is done via APPEND, never PUT — a PUT to
+# .../required_status_checks/contexts REPLACES the whole array, so `PUT ... ["web-tests"]` would
+# silently delete contracts / test (20.x) / pr-validate. Use POST, which appends one context:
+#   gh api -X POST repos/zensgit/metasheet2/branches/main/protection/required_status_checks/contexts \
+#     -f 'contexts[]=web-tests'
+# (already applied to main's branch protection — this note is the safe recipe for reference.)
 name: Web Tests
 
 on:

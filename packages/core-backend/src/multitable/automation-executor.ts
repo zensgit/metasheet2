@@ -4,6 +4,7 @@
  */
 
 import { randomUUID } from 'crypto'
+import { recordRecordRevision } from './record-history-service'
 import { Logger } from '../core/logger'
 import { withAutomationEventId } from './automation-event-dedup'
 import { redactString } from './automation-log-redact'
@@ -86,6 +87,13 @@ function maxWebhookRetries(): number {
 }
 const DINGTALK_PERSON_BATCH_SIZE = 100
 const DINGTALK_FAILURE_ALERT_CONTENT_LIMIT = 1_000
+// DingTalk group/person message limits: robot markdown title tops out around
+// 128 chars and markdown body around 20000 chars upstream. A rendered
+// template that exceeds either would otherwise be rejected (or silently
+// mangled) by DingTalk outright; truncate with an ellipsis so delivery still
+// goes through instead of failing on oversized input.
+const DINGTALK_MESSAGE_TITLE_MAX_LENGTH = 128
+const DINGTALK_MESSAGE_BODY_MAX_LENGTH = 20_000
 const SAFE_PARALLEL_BRANCH_KEY = /^[A-Za-z0-9_-]{1,64}$/
 const MAX_PARALLEL_BRANCHES = 10
 const MAX_PARALLEL_BRANCH_ACTIONS = 20
@@ -338,6 +346,27 @@ function stringifyResponseBody(payload: unknown, fallback: string | null = null)
   } catch {
     return fallback
   }
+}
+
+export function truncateDingTalkMessageText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value
+  if (maxLength <= 1) return value.slice(0, maxLength)
+  return `${value.slice(0, maxLength - 1)}…`
+}
+
+/**
+ * Assemble the message body + its 快捷入口 link block within DingTalk's body limit.
+ * The link block is the actionable part of the message, so it gets its budget first
+ * and the rendered body absorbs the truncation — truncating the assembled string
+ * instead would silently drop the links whenever a template body ran long.
+ */
+export function composeDingTalkBodyWithLinks(renderedBody: string, linkLines: string[]): string {
+  const linkSection = linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : ''
+  const separatorLength = linkSection && renderedBody ? 2 : 0
+  const bodyBudget = Math.max(0, DINGTALK_MESSAGE_BODY_MAX_LENGTH - linkSection.length - separatorLength)
+  return [truncateDingTalkMessageText(renderedBody, bodyBudget), linkSection]
+    .filter(Boolean)
+    .join('\n\n')
 }
 
 function redactDingTalkFailureAlertText(value: unknown): string {
@@ -2226,12 +2255,14 @@ export class AutomationExecutor {
       // Record-lock guard: you cannot delete a record locked by someone you can't unlock. The SELECT and
       // the DELETE below BOTH read `effectiveSheetId`/`effectiveRecordId`, so a cross-base delete checks
       // the TARGET record's lock (not the trigger record's) — lock priority over base-write.
+      // D-1: also fetch data+version here — same row, same predicate, zero extra query. The delete
+      // revision below needs the record's final snapshot, and after the DELETE the row is gone.
       const lockRes = await this.deps.queryFn(
-        'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        'SELECT locked, locked_by, created_by, data, version FROM meta_records WHERE id = $1 AND sheet_id = $2',
         [effectiveRecordId, effectiveSheetId],
       )
       const lockRow = lockRes.rows[0] as
-        | { locked?: unknown; locked_by?: unknown; created_by?: unknown }
+        | { locked?: unknown; locked_by?: unknown; created_by?: unknown; data?: Record<string, unknown>; version?: unknown }
         | undefined
       // ②b claim==truth for the record: a cross-base delete must address a record that ACTUALLY lives in
       // `targetSheetId`. No row → the targetRecordId does not exist there → fail-closed (never a silent
@@ -2265,10 +2296,33 @@ export class AutomationExecutor {
       // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
       // delete is rejected before this DELETE unless claim==truth + trigger-actor base-write.
       // lock-guarded: automation delete_record (C2a) — ensureRecordNotLocked enforced just above.
-      await this.deps.queryFn(
+      const deleteRes = await this.deps.queryFn(
         'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2',
         [effectiveRecordId, effectiveSheetId],
       )
+
+      // D-1 (destruction-path gap audit, owner-ratified): emit the delete revision. PIT/as-of-T
+      // existence is derived PURELY from meta_record_revisions — before this, an automation-deleted
+      // record's last revision stayed create/update, so Global History and every PIT consumer treated
+      // it as alive forever. Emitted AFTER the hard delete (this lane has no enclosing transaction):
+      // if this INSERT fails we degrade to the old missing-revision behavior for one record — never
+      // the reverse lie of a delete revision for a row that still exists. Gated on the row having
+      // actually existed AND the DELETE having removed it (same-base keeps its 0-row-success leniency
+      // WITHOUT fabricating a revision for a record that was never there). Recoverability (trash /
+      // tombstone) is deliberately NOT added — that is the owner-gated D-2 rung.
+      if (lockRow && (deleteRes.rowCount ?? 0) > 0) {
+        await recordRecordRevision(this.deps.queryFn, {
+          sheetId: effectiveSheetId,
+          recordId: effectiveRecordId,
+          version: Number(lockRow.version ?? 1),
+          action: 'delete',
+          source: 'automation',
+          actorId: context.actorId ?? null,
+          changedFieldIds: [],
+          patch: {},
+          snapshot: lockRow.data ?? null,
+        })
+      }
 
       // Emit event for chaining (mirrors the updated/created emits + the same-base delete sink's
       // `multitable.record.deleted` shape). C1 real-time invalidation fan-out to the target base's room
@@ -2672,8 +2726,29 @@ export class AutomationExecutor {
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
-      await markDingTalkApprovalCardDeliverySendFailed(this.deps.queryFn, delivery.id, errorMessage).catch(() => null)
-      return { actionType, status: 'failed', error: errorMessage, output: { deliveryId: delivery.id } }
+      // DT-HARDEN-06: if the ledger row cannot be flipped out of `pending`, the card is
+      // fail-closed but invisible — no sweeper, no admin listing. Swallowing that
+      // silently (`.catch(() => null)`) hid the only signal an operator would ever get.
+      // The send failure is still what we report; the bookkeeping failure is surfaced.
+      let ledgerError: string | null = null
+      try {
+        await markDingTalkApprovalCardDeliverySendFailed(this.deps.queryFn, delivery.id, errorMessage)
+      } catch (markError) {
+        ledgerError = markError instanceof Error ? markError.message : String(markError)
+        logger.error(
+          `DingTalk approval-card delivery ${delivery.id} is stuck pending: failed to record the send failure`,
+          markError instanceof Error ? markError : new Error(ledgerError),
+        )
+      }
+      return {
+        actionType,
+        status: 'failed',
+        error: errorMessage,
+        output: {
+          deliveryId: delivery.id,
+          ...(ledgerError ? { deliveryLedgerError: ledgerError, deliveryStuckPending: true } : {}),
+        },
+      }
     }
   }
 
@@ -2784,12 +2859,12 @@ export class AutomationExecutor {
       actorId: context.actorId ?? '',
       record: context.recordData,
     }
-    const renderedTitle = renderAutomationTemplate(titleTemplate, templateData).trim()
+    const renderedTitle = truncateDingTalkMessageText(
+      renderAutomationTemplate(titleTemplate, templateData).trim(),
+      DINGTALK_MESSAGE_TITLE_MAX_LENGTH,
+    )
     const renderedBody = renderAutomationTemplate(bodyTemplate, templateData).trim()
-    const bodyWithLinks = [
-      renderedBody,
-      linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : '',
-    ].filter(Boolean).join('\n\n')
+    const bodyWithLinks = composeDingTalkBodyWithLinks(renderedBody, linkLines)
 
     let memberGroupUserIds: string[] = []
     if (memberGroupIds.length > 0) {
@@ -2925,6 +3000,11 @@ export class AutomationExecutor {
     }
     const batches = chunkItems(resolvedRecipients, DINGTALK_PERSON_BATCH_SIZE)
 
+    // DT-HARDEN-06: recipients whose batch already reached DingTalk. A later batch
+    // throwing must not re-mark them failed — that used to write BOTH a success and a
+    // failed delivery row for the same recipient in the same send attempt.
+    const sentRecipients = new Set<(typeof resolvedRecipients)[number]>()
+
     try {
       const messageConfig = await readDingTalkMessageConfigFromRuntime()
       const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
@@ -2958,6 +3038,7 @@ export class AutomationExecutor {
           recordId: context.recordId,
           initiatedBy: context.actorId ?? null,
         })))
+        for (const recipient of batch) sentRecipients.add(recipient)
       }
 
       return {
@@ -2990,7 +3071,12 @@ export class AutomationExecutor {
           : null
       const errorMessage = error instanceof Error ? error.message : String(error)
 
-      await Promise.all(resolvedRecipients.map((recipient) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+      // DT-HARDEN-06: only recipients whose batch never reached DingTalk are failures.
+      // Recipients from earlier successful batches keep their success row — the send
+      // did happen for them, and a partial failure is a partial result, not a total one.
+      const unsentRecipients = resolvedRecipients.filter((recipient) => !sentRecipients.has(recipient))
+
+      await Promise.all(unsentRecipients.map((recipient) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
         localUserId: recipient.localUserId,
         dingtalkUserId: recipient.dingtalkUserId,
         sourceType: 'automation',
@@ -3010,6 +3096,11 @@ export class AutomationExecutor {
         actionType: 'send_dingtalk_person_message',
         status: 'failed',
         error: errorMessage,
+        output: {
+          notifiedUsers: sentRecipients.size,
+          failedRecipientCount: unsentRecipients.length,
+          batchCount: batches.length,
+        },
       }
     }
   }
@@ -3273,12 +3364,12 @@ export class AutomationExecutor {
       actorId: context.actorId ?? '',
       record: context.recordData,
     }
-    const renderedTitle = renderAutomationTemplate(titleTemplate, templateData).trim()
+    const renderedTitle = truncateDingTalkMessageText(
+      renderAutomationTemplate(titleTemplate, templateData).trim(),
+      DINGTALK_MESSAGE_TITLE_MAX_LENGTH,
+    )
     const renderedBody = renderAutomationTemplate(bodyTemplate, templateData).trim()
-    const bodyWithLinks = [
-      renderedBody,
-      linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : '',
-    ].filter(Boolean).join('\n\n')
+    const bodyWithLinks = composeDingTalkBodyWithLinks(renderedBody, linkLines)
     const orderedDestinations = destinationIds
       .map((id) => destinationsById.get(id))
       .filter((destination): destination is NonNullable<typeof destination> => Boolean(destination))

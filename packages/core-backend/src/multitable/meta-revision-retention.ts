@@ -211,17 +211,82 @@ async function sweepTombstoneTableRetention(
   if (!config.enabled) return 0
   const batchSize = Math.max(1, Math.floor(config.batchSize))
   const days = Math.max(META_REVISION_RETENTION_MIN_DAYS, Math.floor(config.retentionDays))
+  const anchorColumn = table === META_LINK_TOMBSTONE_RETENTION_TABLE ? 'source_revision_id' : 'config_revision_id'
   try {
-    const result = await query(
+    // 4c-3 §6 — WHOLE-GROUP pruning (fixes 4c-2's torn-set defect): the old shape
+    // (`SELECT id … WHERE created_at < cutoff LIMIT batch`, no ORDER BY, no grouping) could slice a
+    // single capture (all rows share one created_at) into half a set. Prune by ANCHOR GROUP instead:
+    // a group is eligible only when its newest row has aged out, and it is deleted whole. LIMIT now
+    // bounds GROUPS per pass, not rows — a group is at most one capture set, which the capture cap
+    // already bounds (fail-closed at write time), so a pass stays bounded.
+    //
+    // 4c-3 §6 — RETENTION FLOOR (link tombstones only): meta_records_trash is immortal (its only
+    // DELETE is on successful restore) while tombstones age out — without a floor, an old record
+    // stays restorable but its inbound edges silently vanish. A group whose anchor is still
+    // referenced by a LIVE trash row (meta_records_trash.delete_revision_id) is NEVER pruned; it
+    // becomes prunable the moment the trash row is restored (trash row deleted) or the anchor was
+    // never trash-referenced (e.g. field_delete captures — their anchors never appear in trash).
+    const floorPredicate =
+      table === META_LINK_TOMBSTONE_RETENTION_TABLE
+        ? `AND NOT EXISTS (
+             SELECT 1 FROM meta_records_trash tr
+              WHERE tr.delete_revision_id = g.anchor::text
+           )`
+        : ''
+    let grouped = 0
+    try {
+      const groupedRes = await query(
+        `DELETE FROM ${table}
+          WHERE ${anchorColumn} IN (
+            SELECT g.anchor FROM (
+              SELECT ${anchorColumn} AS anchor, max(created_at) AS newest
+                FROM ${table}
+               WHERE ${anchorColumn} IS NOT NULL
+               GROUP BY ${anchorColumn}
+            ) g
+            WHERE g.newest < now() - ($1::int * interval '1 day')
+            ${floorPredicate}
+            LIMIT $2
+          )`,
+        [days, batchSize],
+      )
+      grouped = groupedRes.rowCount ?? 0
+    } catch (err) {
+      // Deploy window: meta_records_trash.delete_revision_id not yet migrated (42703) — degrade to
+      // the floorless group prune rather than wedging the janitor. Old-schema trash rows have no
+      // anchor to protect anyway (their delete_revision_id would be NULL ⇒ no replay ⇒ no floor).
+      const msg = err instanceof Error ? err.message : String(err)
+      const code = (err as { code?: string } | null)?.code
+      if (!(code === '42703' && msg.includes('delete_revision_id'))) throw err
+      const fallbackRes = await query(
+        `DELETE FROM ${table}
+          WHERE ${anchorColumn} IN (
+            SELECT g.anchor FROM (
+              SELECT ${anchorColumn} AS anchor, max(created_at) AS newest
+                FROM ${table}
+               WHERE ${anchorColumn} IS NOT NULL
+               GROUP BY ${anchorColumn}
+            ) g
+            WHERE g.newest < now() - ($1::int * interval '1 day')
+            LIMIT $2
+          )`,
+        [days, batchSize],
+      )
+      grouped = fallbackRes.rowCount ?? 0
+    }
+    // Anchor-less rows (nullable anchor columns) have no group to tear and no trash reference —
+    // prune them individually, exactly as before.
+    const looseRes = await query(
       `DELETE FROM ${table}
         WHERE id IN (
           SELECT id FROM ${table}
-          WHERE created_at < now() - ($1::int * interval '1 day')
+          WHERE ${anchorColumn} IS NULL
+            AND created_at < now() - ($1::int * interval '1 day')
           LIMIT $2
         )`,
       [days, batchSize],
     )
-    return result.rowCount ?? 0
+    return grouped + (looseRes.rowCount ?? 0)
   } catch (err) {
     if (isUndefinedTableError(err, table)) return 0
     throw err
