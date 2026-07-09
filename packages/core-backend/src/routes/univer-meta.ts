@@ -15325,6 +15325,51 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  async function ensureAttachmentDownloadReadable(
+    req: Request,
+    res: Response,
+    query: QueryFn,
+    metadata: {
+      id: string
+      sheetId: string
+      recordId: string | null
+      fieldId: string | null
+    },
+  ): Promise<boolean> {
+    if (!metadata.sheetId) {
+      res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${metadata.id}` } })
+      return false
+    }
+
+    const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, metadata.sheetId)
+    if (!access.userId) {
+      res.status(401).json({ error: 'Authentication required' })
+      return false
+    }
+    if (!capabilities.canRead) {
+      sendForbidden(res)
+      return false
+    }
+
+    if (metadata.recordId && !access.isAdminRole && await loadRowLevelReadDenyEnabled(query, metadata.sheetId)) {
+      const denied = await loadDeniedRecordIds(query, metadata.sheetId, access.userId)
+      if (denied.has(metadata.recordId)) {
+        res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${metadata.id}` } })
+        return false
+      }
+    }
+
+    if (metadata.fieldId) {
+      const allowedFieldIds = await loadAllowedFieldIds(query, metadata.sheetId, access.userId, capabilities)
+      if (!allowedFieldIds.has(metadata.fieldId)) {
+        res.status(403).json({ ok: false, error: { code: 'FIELD_FORBIDDEN', message: 'Attachment field is not readable' } })
+        return false
+      }
+    }
+
+    return true
+  }
+
   router.post('/attachments', async (req: Request, res: Response) => {
     try {
       if (!multitableUpload) {
@@ -15444,13 +15489,8 @@ export function univerMetaRouter(): Router {
       if (!metadata) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${attachmentId}` } })
       }
-      if (metadata.sheetId) {
-        const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), metadata.sheetId)
-        if (!access.userId) {
-          return res.status(401).json({ error: 'Authentication required' })
-        }
-        if (!capabilities.canRead) return sendForbidden(res)
-      }
+      const query = pool.query.bind(pool)
+      if (!await ensureAttachmentDownloadReadable(req, res, query, metadata)) return
 
       const storage = getAttachmentStorageService()
       const buffer = await readAttachmentBinaryShared({ storage, storageFileId: metadata.storageFileId })
