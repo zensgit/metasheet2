@@ -202,7 +202,7 @@ function createQuery(): {
     if (
       normalized.includes('FROM meta_records') &&
       normalized.includes('WHERE id = $1 AND sheet_id = $2') &&
-      normalized.includes('SELECT version, data')
+      (normalized.includes('SELECT version, data') || normalized.includes('SELECT data, version'))
     ) {
       const [recordId, sheetId] = params as [string, string]
       return {
