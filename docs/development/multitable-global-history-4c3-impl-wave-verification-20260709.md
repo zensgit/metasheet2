@@ -3,6 +3,8 @@
 **性质:** 每 wave 设计+验证 MD(4c-2 先例:`…4c2-impl-wave-verification-20260708.md`)。本文对应 **4c-3 record-undelete inbound-edge replay(Option A)的 RATIFIED + AS-BUILT 实现**(PR #3975,merged `100b6dd59`,flag 默认 off)+ **R8 车道对该 PR 的吸收性对抗审计的无裁量硬化轮**(本轮,test-only,不改产品行为)。
 **上游:** design-lock `…4c3-record-undelete-2b-inbound-edge-replay-design-lock-20260708.md`(owner ratify 2026-07-09,路由 Codex 车道实现)。**前置 gap-audit:** `…destruction-path-coverage-gap-audit-20260708.md`(D-1 已于同日经独立 PR #3969/#3977 落地;本文不重复其记录)。
 
+**⚠️ 与并行 PR #3983 的关系(rebase 期发现,记录以防未来读者困惑):** 本 PR 开发期间,主线并行落地了 `test+docs(multitable): O-2 preconditions — resurrect-path goldens (P3-2) + operator flag ladder (P3-3) (#3983)`,来自**同一 PR #3975 的另一条对抗审(其自身的 review,而非本文引用的独立吸收性审计 `/tmp/pr3975-4c3-absorption-audit-claude-20260709.md`)**,该 PR 的 P3-2/P3-3 编号与本文引用的审计**编号不同但同源**(都指向 PIT-resurrect 锚定这同一个覆盖缺口)。#3983 新增 `multitable-undelete-pit-inbound-replay-realdb.test.ts`(单-vintage happy replay + Option A 邻居拒绝 + flag-off)与 `…o2-operator-flag-ladder-20260709.md`(O-2 启用阶梯)。本 PR 的 `multitable-undelete-inbound-resurrect-realdb.test.ts` 与之**部分重叠**(均含 flag-off 字节级不变一测)但**互补,非重复**:本 PR 独有多-vintage 锚定精度(只放最新 vintage、不串代)+ 未捕获-vintage 静默零重放两条 golden,以及把 resurrect 锚注释的 "deterministic" 措辞改诚实。两份 PR 已在 `origin/main` 上 rebase 兼容,9 个相关 realdb 文件(含 #3983 的新文件)同跑 75/75 绿,无 fixture 冲突。
+
 ## 1. 落地内容(逐 § 对锁)
 
 | 锁 § | 实现 | 位置 |
