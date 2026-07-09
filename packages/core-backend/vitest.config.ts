@@ -132,6 +132,13 @@ export default defineConfig({
       // keystone that used to live here moved to comment-reactions.api.test.ts.
       'tests/integration/comments.api.test.ts',
       'tests/integration/events-api.test.ts',
+      // multitable-attachments.api.test.ts self-mocks its DB pool (no live DB needed) and its own
+      // 12/12 pass standalone; it stays excluded here (unrelated to the comments.api.test.ts note
+      // above) and is NOT wired into the real-DB job. Its F2 security-critical subset (attachment
+      // download row-deny 404 / field-mask 403, #3973) is independently covered by a self-contained
+      // real-DB file, tests/integration/multitable-attachment-readgate.security.test.ts, wired as a
+      // WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml — so F2
+      // has a live CI regression guard even though this parent file remains excluded/unwired.
       'tests/integration/multitable-attachments.api.test.ts',
       // multitable-context.api.test.ts needs setup.integration.ts + a live DB (its template
       // catalog/install routes go through rbacGuard, which 403s under the default setup). It
