@@ -41,6 +41,10 @@ const SECRET = 'SECRET_XYZ_9d1f'
 const LEAKY_PROJECT_ID = `tenant_leaky:proj_${SECRET}`
 const LEAKY_DRAWING_NO = `DRW_${SECRET}`
 
+// The MVP tables live under the INTERNAL staging project; the business projectId ('proj_1') is a DIFFERENT
+// value. Sheet resolution must use the staging targetProjectId — a lookup with the business project misses.
+const STAGING_PROJECT_ID = 'tenant_x:integration-core'
+
 let passed = 0
 let failed = 0
 const failures = []
@@ -98,17 +102,26 @@ function makeRecordsApi() {
   }
 }
 
-// Fake provisioning: a DISTINCT sheetId per MVP objectId (sheet_<objectId>). `missing` names objectIds
-// whose sheet is not provisioned (findObjectSheet -> null). Counts findObjectSheet invocations so the
-// admin-gate-first test can assert zero.
-function makeProvisioning({ missing = new Set() } = {}) {
+// Fake provisioning: a DISTINCT sheetId per MVP objectId (sheet_<objectId>), but ONLY under the STAGING
+// project — a lookup with any other projectId (e.g. the business projectId) misses (returns null). This
+// mirrors the real provisioning scope: ensure/readiness provisioned the tables under the staging project,
+// so persist MUST resolve them there. `missing` names objectIds unprovisioned even under staging. Records
+// every projectId seen (so a test can assert sheet resolution used the staging target, not the business
+// project) and counts invocations (so the admin-gate-first test can assert zero).
+function makeProvisioning({ missing = new Set(), stagingProjectId = STAGING_PROJECT_ID } = {}) {
   let findObjectSheetCalls = 0
+  const projectIdsSeen = []
   return {
     get findObjectSheetCalls() {
       return findObjectSheetCalls
     },
-    async findObjectSheet({ objectId } = {}) {
+    get projectIdsSeen() {
+      return projectIdsSeen.slice()
+    },
+    async findObjectSheet({ projectId, objectId } = {}) {
       findObjectSheetCalls += 1
+      projectIdsSeen.push(projectId)
+      if (projectId !== stagingProjectId) return null
       if (missing.has(objectId)) return null
       return { id: `sheet_${objectId}` }
     },
@@ -123,9 +136,13 @@ function cleanExpansionResult() {
   ]
 }
 
+// `projectId` is the BUSINESS project (rides the plan rows); `targetProjectId` is the internal STAGING
+// project used only for sheet resolution — the module destructures it out before recomputing the plan, so
+// it never reaches the plan/business rows. They are deliberately DIFFERENT values here.
 function basePlanInputs(overrides = {}) {
   return {
     projectId: 'proj_1',
+    targetProjectId: STAGING_PROJECT_ID,
     syncRunId: 'run_1',
     snapshotBatchId: 'batch_1',
     defaultDesignUnit: 'pcs',
@@ -182,6 +199,44 @@ async function main() {
     assert.equal(result.evidence.targets.snapshotLine.objectId, LINE_OBJECT_ID)
     assert.equal(result.evidence.targets.syncRun.objectId, RUN_OBJECT_ID)
     assert.equal(result.evidence.plannedLineCount, 2)
+
+    // THE SPLIT: sheet resolution used the STAGING targetProjectId for all three lookups, NOT the business
+    // projectId — while the persisted batch row still carries the BUSINESS projectId as business data.
+    assert.deepEqual(provisioning.projectIdsSeen, [STAGING_PROJECT_ID, STAGING_PROJECT_ID, STAGING_PROJECT_ID])
+    assert.equal(recordsApi.createCalls[0].data.projectId, 'proj_1')
+  })
+
+  // ---- project-scope split: targetProjectId (staging) resolves sheets; business projectId must NOT ----
+  await run('targetProjectId is required — omitting it fails closed with NO provisioning/records access', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ targetProjectId: undefined }),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError && error.status === 422 && error.code === 'PERSIST_CONFIG_INVALID',
+    )
+    assert.equal(provisioning.findObjectSheetCalls, 0, 'no sheet resolved')
+    assert.equal(recordsApi.createCalls.length, 0, 'no write')
+  })
+
+  await run('resolving sheets with the BUSINESS projectId misses — proves the split is load-bearing', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    // Pass the business projectId AS the target — the tables are not provisioned under it, so it fails closed.
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ targetProjectId: 'proj_1' }),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError && error.code === 'PERSIST_TARGET_NOT_PROVISIONED',
+    )
+    assert.equal(recordsApi.createCalls.length, 0, 'no write on a missed target')
   })
 
   // ---- (d) grounding: a stamped missing_child_bom line drops the plan-internal marker on persist ----

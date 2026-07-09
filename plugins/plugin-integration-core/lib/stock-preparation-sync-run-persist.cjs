@@ -159,7 +159,7 @@ async function persistStockPreparationSyncRun(input = {}) {
   if (!isPlainObject(input)) {
     throw new StockPreparationSyncRunPersistError(422, 'PERSIST_CONFIG_INVALID', 'input must be an object')
   }
-  const { context, permission, recordsApi, provisioning: provisioningInput, ...planInputs } = input
+  const { context, permission, recordsApi, provisioning: provisioningInput, targetProjectId: targetProjectIdInput, ...planInputs } = input
 
   // 1. admin gate FIRST — fail-closed before ANY provisioning / records access.
   assertAdminPermission(permission)
@@ -182,11 +182,22 @@ async function persistStockPreparationSyncRun(input = {}) {
   }
   const snapshotLines = Array.isArray(plan.snapshotLines) ? plan.snapshotLines : []
 
-  // 3. resolve ALL three MVP sheets up front (fail-closed if ANY is unprovisioned) and bind a scoped
-  //    records API to each — so every subsequent write is structurally confined to its own MVP sheet.
-  const batchTarget = await resolveScopedTarget(recordsApi, provisioning, projectId, BATCH_OBJECT_ID)
-  const lineTarget = await resolveScopedTarget(recordsApi, provisioning, projectId, LINE_OBJECT_ID)
-  const runTarget = await resolveScopedTarget(recordsApi, provisioning, projectId, RUN_OBJECT_ID)
+  // The MVP tables are provisioned under an INTERNAL STAGING project (readiness/ensure route
+  // resolveIntegrationStagingProjectId -> `<tenant>:integration-core`), NOT the business projectId. So
+  // sheet resolution MUST use the caller-derived targetProjectId (staging); the plan rows keep the
+  // business `projectId`. targetProjectId is derived server-side by the route from the auth tenant — it is
+  // NEVER request-sourced. Required + fail-closed so a route that omits it cannot silently fall back to
+  // the business project (which would raise a spurious PERSIST_TARGET_NOT_PROVISIONED).
+  const targetProjectId = optionalString(targetProjectIdInput)
+  if (!targetProjectId) {
+    throw new StockPreparationSyncRunPersistError(422, 'PERSIST_CONFIG_INVALID', 'targetProjectId (internal staging project) is required for table resolution', { field: 'targetProjectId' })
+  }
+
+  // 3. resolve ALL three MVP sheets up front UNDER THE STAGING PROJECT (fail-closed if ANY is
+  //    unprovisioned) and bind a scoped records API to each — so every write is confined to its own sheet.
+  const batchTarget = await resolveScopedTarget(recordsApi, provisioning, targetProjectId, BATCH_OBJECT_ID)
+  const lineTarget = await resolveScopedTarget(recordsApi, provisioning, targetProjectId, LINE_OBJECT_ID)
+  const runTarget = await resolveScopedTarget(recordsApi, provisioning, targetProjectId, RUN_OBJECT_ID)
 
   // 4. idempotency + immutability: if a BATCH row with this snapshotBatchId already exists, SKIP the
   //    whole commit — old snapshots are immutable, so we never overwrite an existing batch or its lines.

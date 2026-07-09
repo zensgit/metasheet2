@@ -3177,11 +3177,17 @@ function createHandlers(services, options = {}) {
     async stockPreparationMvpSyncPersist(req, res) {
       requireAccess(req, 'admin')
       const input = stockPreparationMvpSyncPersistInput(requestBody(req))
+      // The MVP tables were provisioned under the INTERNAL staging project (the same derivation the
+      // readiness/ensure routes use); the business `projectId` stays on the plan rows. Derive the staging
+      // targetProjectId server-side from the auth tenant — never from the request body.
+      const tenantId = resolveTenantId(req, input)
+      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
       const result = await persistStockPreparationSyncRun({
         context,
         permission: 'admin',
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
+        targetProjectId,
         projectId: input.projectId,
         syncRunId: input.syncRunId,
         snapshotBatchId: input.snapshotBatchId,
