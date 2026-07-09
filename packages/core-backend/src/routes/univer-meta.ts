@@ -235,6 +235,15 @@ import {
 } from '../multitable/post-commit-hooks'
 import { listRecordRevisions, recordRecordRevision, type RecordRevisionEntry } from '../multitable/record-history-service'
 import { replayInboundLinks, isRecordUndeleteInboundEnabled } from '../multitable/inbound-link-replay'
+import { countInboundLinkCaptureRows, insertInboundLinkTombstones } from '../multitable/tombstone-capture'
+
+// 4c-3: pre-migration deploy window guard for the delete_revision_id column (mirrors record-service).
+function isUndefinedColumnError42703(err: unknown, columnName: string): boolean {
+  const code = (err as { code?: string } | null)?.code
+  const msg = err instanceof Error ? err.message : String(err)
+  if (code === '42703') return msg.includes(columnName)
+  return msg.includes(`column "${columnName}" does not exist`)
+}
 import {
   isPersonalViewsEnabled,
   applyPersonalViewOverlay,
@@ -10438,6 +10447,18 @@ export function univerMetaRouter(): Router {
               throw new ServiceValidationError('Record deletion is not allowed', 'FORBIDDEN')
             }
             const snapshot = normalizeJson(row.data)
+            // 4c-3 §7 (D-3): this inline delete wrote trash + a delete revision but never CAPTURED —
+            // it was the second resurrection surface whose inbound edges were silently lost forever.
+            // Pre-generate the revision id so the tombstones can anchor to it (same shape as
+            // record-service.deleteRecord); capture MUST run before the links DELETE below destroys
+            // the rows. Cap breach throws (TombstoneCaptureCapExceededError) → whole reset rolls
+            // back, fail-closed — never a half-captured destruction.
+            const resetDeleteRevisionId = randomUUID()
+            if (isTombstoneCaptureEnabled()) {
+              const totalToCapture = await countInboundLinkCaptureRows(query, candidate.recordId)
+              assertWithinCaptureCap(totalToCapture)
+              await insertInboundLinkTombstones(query, { sheetId, recordId: candidate.recordId, sourceRevisionId: resetDeleteRevisionId })
+            }
             await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [candidate.recordId])
             await recordRecordRevision(query, {
               sheetId,
@@ -10450,13 +10471,24 @@ export function univerMetaRouter(): Router {
               patch: {},
               snapshot,
               batchId,
+              id: resetDeleteRevisionId,
             })
-            await query(
-              `INSERT INTO meta_records_trash
-                 (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
-               VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
-              [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null],
-            )
+            try {
+              await query(
+                `INSERT INTO meta_records_trash
+                   (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at, delete_revision_id)
+                 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`,
+                [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null, resetDeleteRevisionId],
+              )
+            } catch (err) {
+              if (!isUndefinedColumnError42703(err, 'delete_revision_id')) throw err
+              await query(
+                `INSERT INTO meta_records_trash
+                   (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
+                 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
+                [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null],
+              )
+            }
             // lock-guarded: PIT Reset deletes in the same transaction after ensureRecordNotLocked above.
             await query('DELETE FROM meta_records WHERE sheet_id = $1 AND id = $2', [sheetId, candidate.recordId])
             deletedRecordIds.push(candidate.recordId)
