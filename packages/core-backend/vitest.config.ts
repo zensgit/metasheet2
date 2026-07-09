@@ -106,6 +106,10 @@ export default defineConfig({
       // re-add/self-scoped DELETE/reader-deny 403/cascade) is no longer invisible debt.
       'tests/integration/comment-reactions.api.test.ts',
       'tests/integration/multitable-oapi1-comments-read-realdb.test.ts',
+      // D-1 delete-revision parity goldens: real Postgres only (describeIfDatabase would merely
+      // skip-green here, re-opening the "real-DB spec silently skips in the no-DB lane" hole) —
+      // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts',
       // W6 full-HTTP-path approve->resume seam: mounts authRouter + approvalsRouter on an
       // ephemeral port against real Postgres, so it is excluded from the default run and wired
       // into the dedicated `Run multitable real-DB integration` job in plugin-tests.yml.
