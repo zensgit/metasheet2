@@ -39,13 +39,16 @@ Homepage fields:
 <HTTPS_APP_URL>/attendance
 ```
 
-Security domain fields:
+Security domain fields (current DingTalk console naming; older consoles call these `H5安全域名` / `JSAPI安全域名` — same semantics):
 
 ```text
-H5安全域名:
+端内免登地址:
+<HTTPS_APP_URL>/attendance
+
+HTTP 可信域名 (旧版控制台: H5安全域名):
 <DOMAIN_ONLY>
 
-JSAPI安全域名:
+Webview 可信域名 (旧版控制台: JSAPI安全域名):
 <DOMAIN_ONLY>
 ```
 
@@ -107,8 +110,8 @@ APP_BASE_URL=<HTTPS_APP_URL>
 
 DINGTALK_CLIENT_ID=<DINGTALK_CLIENT_ID>
 DINGTALK_CLIENT_SECRET=<redacted>
-DINGTALK_CORP_ID=dingb980...a795
-DINGTALK_ALLOWED_CORP_IDS=dingd1f...455b,dingb980...a795
+DINGTALK_CORP_ID=<NEW_TENANT_CORP_ID>
+DINGTALK_ALLOWED_CORP_IDS=<EXISTING_TENANT_CORP_ID>,<NEW_TENANT_CORP_ID>
 DINGTALK_REDIRECT_URI=<HTTPS_APP_URL>/login/dingtalk/callback
 
 DINGTALK_CONTAINER_LOGIN_ENABLED=true
@@ -150,7 +153,7 @@ Expected fields:
 ```text
 configured=true
 available=true
-corpId=dingb980...a795
+corpId=<NEW_TENANT_CORP_ID>
 ```
 
 Check backend health:
@@ -198,7 +201,7 @@ Evidence to keep:
 E4_DINGTALK_REAL_DEVICE_PASS
 deploy=<current /api/health build.commit>
 client_id=<DINGTALK_CLIENT_ID>
-corp=dingb980...a795
+corp=<NEW_TENANT_CORP_ID>
 homepage=/attendance
 container_login=pass
 action_card_deeplink=pass
@@ -244,7 +247,7 @@ following screenshots manually during E4 and redact them before storing:
 | Screenshot | When to capture | Required redaction |
 |---|---|---|
 | DingTalk app homepage settings | After setting the H5 homepage | Mask full App ID, Client ID suffix is enough (`<DINGTALK_CLIENT_ID>`), mask any secret |
-| H5安全域名 / JSAPI安全域名 | After saving both domains | Domain can remain visible; mask unrelated tenant/app identifiers |
+| HTTP/Webview 可信域名（旧称 H5/JSAPI 安全域名） | After saving both domains | Domain can remain visible; mask unrelated tenant/app identifiers |
 | OAuth / redirect URI setting | After saving callback URL | URL can remain visible; mask app identifiers |
 | API permission page | After granting login/contact APIs | Keep API names visible; mask tenant/app identifiers |
 | Phone micro-app opens `/attendance` | After opening the app in DingTalk mobile | Mask user avatar/name/phone/email; keep URL path visible |
