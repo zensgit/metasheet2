@@ -632,6 +632,8 @@ const YUANTUS_SUPPORTED_OPERATIONS = [
   'cad_properties_update',
   'cad_view_state_update',
   'cad_review_update',
+  // PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY): getDiscussions/getDiscussionThread.
+  'discussions',
 ]
 
 /**
@@ -825,6 +827,83 @@ function isBomMultitableContext(value: unknown): value is BomMultitableContext {
   if (typeof c.sync_status !== 'string') return false;
   if (typeof c.template_key !== 'string') return false;
   return true;
+}
+
+/**
+ * PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY) consumer types: object-bound discussion
+ * threads/comments served by the provider's EXISTING `/api/v1/discussions` routes (Discussion
+ * Core R1 + Phase-2 + Phase-6, already shipped on Yuantus main -- this slice adds NO new
+ * provider route). Bearer-JWT (`get_current_user`) + target-inherited permission via the
+ * provider's closed resolver registry (item / item_version / file / eco / pdm_relationship) --
+ * NOT entitlement-gated: this slice deliberately does no capability/SKU check (the
+ * `discussion_core` manifest key is a separate, not-yet-ratified owner fork). A missing OR
+ * unreadable target/thread is the provider's INDISTINGUISHABLE 404 (no existence leak) --
+ * surfaced here as `QueryResult.error`, never thrown, so a degrading panel can treat "no
+ * threads" and "target unreadable" identically without probing which one happened. Write
+ * routes (create thread / add comment / edit / delete / resolve / reopen) are a LATER slice,
+ * gated on the write-session-credential design, and are deliberately NOT added here.
+ */
+export type DiscussionTargetType = 'item' | 'item_version' | 'file' | 'eco' | 'pdm_relationship';
+
+export interface DiscussionTarget {
+  targetType: DiscussionTargetType;
+  targetId: string;
+}
+
+export interface DiscussionListOptions {
+  includeResolved?: boolean;
+  // Phase-6: item targets only -- also aggregates one-level current-assembly BOM-children
+  // threads (provider's WP1.2 /pdm "ASSEMBLY" containment vocabulary).
+  includeChildren?: boolean;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface DiscussionThreadOptions {
+  // Phase-6: read-only lifecycle/version history merge, item-backed targets only; file/eco
+  // targets come back with no history entries.
+  includeHistory?: boolean;
+}
+
+export interface DiscussionThreadSummary {
+  id: string;
+  target_type: string;
+  target_id: string;
+  title: string | null;
+  status: string;
+  created_by_id: number;
+  created_at: string;
+  resolved_by_id: number | null;
+  resolved_at: string | null;
+  last_comment_at: string | null;
+  comment_count: number;
+  anchor: Record<string, unknown> | null;
+}
+
+export interface DiscussionThreadListResult {
+  threads: DiscussionThreadSummary[];
+  next_cursor: string | null;
+}
+
+export interface DiscussionComment {
+  id: string;
+  parent_comment_id: string | null;
+  // Soft-deleted comments keep their row (audit) but are redacted at the provider's API
+  // surface: body/anchor -> null, mentioned_user_ids -> [].
+  body: string | null;
+  body_format: string;
+  author_user_id: number;
+  mentioned_user_ids: number[];
+  created_at: string;
+  edited_at: string | null;
+  deleted_at: string | null;
+  anchor: Record<string, unknown> | null;
+}
+
+export interface DiscussionThreadDetail extends DiscussionThreadSummary {
+  comments: DiscussionComment[];
+  // Present only when include_history=true was requested (Phase-6 merge).
+  history?: Array<Record<string, unknown>>;
 }
 
 export class PLMAdapter extends HTTPAdapter {
@@ -2321,6 +2400,78 @@ export class PLMAdapter extends HTTPAdapter {
     return this.select<BomEcoRevisionIntentResult>(`/api/v1/bom/multitable/${partId}/eco-intent`, {
       method: 'POST',
     })
+  }
+
+  /**
+   * PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY): list discussion threads bound to a PLM
+   * target (the provider's `GET /api/v1/discussions`). No capability/SKU gate on this read
+   * path -- see the type-block docstring above. A missing/unreadable target comes back as the
+   * provider's indistinguishable 404, surfaced as `result.error` (never thrown).
+   */
+  async getDiscussions(
+    target: DiscussionTarget,
+    options?: DiscussionListOptions
+  ): Promise<QueryResult<DiscussionThreadListResult>> {
+    if (this.mockMode) {
+      return {
+        data: [{ threads: [], next_cursor: null }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussions are not supported for this PLM API mode') }
+    }
+
+    const params: Record<string, unknown> = {
+      target_type: target.targetType,
+      target_id: target.targetId,
+    }
+    if (options?.includeResolved) params.include_resolved = options.includeResolved
+    if (options?.includeChildren) params.include_children = options.includeChildren
+    if (typeof options?.limit === 'number') params.limit = options.limit
+    if (options?.cursor) params.cursor = options.cursor
+
+    return this.query<DiscussionThreadListResult>('/api/v1/discussions', [params])
+  }
+
+  /**
+   * PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY): fetch one discussion thread with its
+   * comments (the provider's `GET /api/v1/discussions/{thread_id}`). Same no-leak contract as
+   * getDiscussions -- an absent thread id and an unreadable target both come back as the
+   * provider's indistinguishable 404.
+   */
+  async getDiscussionThread(
+    threadId: string,
+    options?: DiscussionThreadOptions
+  ): Promise<QueryResult<DiscussionThreadDetail>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          id: threadId,
+          target_type: 'item',
+          target_id: 'mock-item-1',
+          title: 'Mock discussion thread',
+          status: 'open',
+          created_by_id: 1,
+          created_at: new Date().toISOString(),
+          resolved_by_id: null,
+          resolved_at: null,
+          last_comment_at: null,
+          comment_count: 0,
+          anchor: null,
+          comments: [],
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussions are not supported for this PLM API mode') }
+    }
+
+    const params: Record<string, unknown> = {}
+    if (options?.includeHistory) params.include_history = options.includeHistory
+
+    return this.query<DiscussionThreadDetail>(`/api/v1/discussions/${threadId}`, [params])
   }
 
   async getApprovals(options?: ApprovalQueryOptions): Promise<QueryResult<ApprovalRequest>> {

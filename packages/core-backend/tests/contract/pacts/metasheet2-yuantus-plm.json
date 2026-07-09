@@ -3956,6 +3956,374 @@
       }
     },
     {
+      "description": "list discussion threads bound to a readable PLM target",
+      "providerStates": [
+        {
+          "name": "tenant-1 can read item 01H000000000000000000000T1 and it has an open discussion thread 01H000000000000000000000T2"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/discussions",
+        "query": {
+          "target_type": [
+            "item"
+          ],
+          "target_id": [
+            "01H000000000000000000000T1"
+          ],
+          "include_resolved": [
+            "false"
+          ],
+          "limit": [
+            "20"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "threads": [
+            {
+              "id": "01H000000000000000000000T2",
+              "target_type": "item",
+              "target_id": "01H000000000000000000000T1",
+              "title": "Check tolerance on mounting hole",
+              "status": "open",
+              "created_by_id": 1,
+              "created_at": "2026-07-09T00:00:00.000Z",
+              "resolved_by_id": null,
+              "resolved_at": null,
+              "last_comment_at": "2026-07-09T00:05:00.000Z",
+              "comment_count": 2,
+              "anchor": null
+            }
+          ],
+          "next_cursor": null
+        },
+        "matchingRules": {
+          "body": {
+            "$.threads": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.threads[*].id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.threads[*].target_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.threads[*].target_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.threads[*].status": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.threads[*].created_by_id": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.threads[*].created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.threads[*].comment_count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.next_cursor": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "fetch a discussion thread and its comments, including the read-only history merge",
+      "providerStates": [
+        {
+          "name": "tenant-1 can read discussion thread 01H000000000000000000000T2 on item 01H000000000000000000000T1 and it has one comment"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/discussions/01H000000000000000000000T2",
+        "query": {
+          "include_history": [
+            "true"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "id": "01H000000000000000000000T2",
+          "target_type": "item",
+          "target_id": "01H000000000000000000000T1",
+          "title": "Check tolerance on mounting hole",
+          "status": "open",
+          "created_by_id": 1,
+          "created_at": "2026-07-09T00:00:00.000Z",
+          "resolved_by_id": null,
+          "resolved_at": null,
+          "last_comment_at": "2026-07-09T00:05:00.000Z",
+          "comment_count": 1,
+          "anchor": null,
+          "comments": [
+            {
+              "id": "01H000000000000000000000T3",
+              "parent_comment_id": null,
+              "body": "Tolerance looks tight -- can we confirm with the vendor?",
+              "body_format": "text",
+              "author_user_id": 1,
+              "mentioned_user_ids": [],
+              "created_at": "2026-07-09T00:05:00.000Z",
+              "edited_at": null,
+              "deleted_at": null,
+              "anchor": null
+            }
+          ],
+          "history": [
+            {
+              "kind": "lifecycle_transition",
+              "at": "2026-07-08T00:00:00.000Z",
+              "actor_user_id": 1,
+              "from_state": "Draft",
+              "to_state": "Released",
+              "comment": null
+            }
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.target_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.target_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.status": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.created_by_id": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.comment_count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.comments": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.comments[*].id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.comments[*].body": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.comments[*].body_format": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.comments[*].author_user_id": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.comments[*].created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.history": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "list discussion threads for a missing or unreadable target returns the no-leak 404",
+      "providerStates": [
+        {
+          "name": "item 01H000000000000000000000T9 does not exist, or tenant-1 cannot read it (indistinguishable no-leak target)"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/discussions",
+        "query": {
+          "target_type": [
+            "item"
+          ],
+          "target_id": [
+            "01H000000000000000000000T9"
+          ],
+          "include_resolved": [
+            "false"
+          ],
+          "limit": [
+            "20"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "detail": "discussion target not found"
+        }
+      }
+    },
+    {
       "description": "mint a MetaSheet BOM review embed token for the Yuantus parent host",
       "providerStates": [
         {
