@@ -241,6 +241,12 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Integration Help', titleZh: '集成帮助中心', requiresAuth: true },
   },
   {
+    path: '/help/attendance/dingtalk-microapp',
+    name: 'attendance-dingtalk-microapp-help',
+    component: () => import('../views/AttendanceDingTalkMicroappHelpView.vue'),
+    meta: { title: 'DingTalk Microapp Help', titleZh: '钉钉微应用配置帮助', requiresAuth: true },
+  },
+  {
     path: '/integrations/k3-wise',
     name: AppRouteNames.INTEGRATION_K3_WISE,
     component: () => import('../views/IntegrationK3WiseSetupView.vue'),

@@ -10,6 +10,7 @@
         <router-link class="directory-admin__link" to="/admin/users">用户管理</router-link>
         <router-link class="directory-admin__link" to="/admin/roles">角色管理</router-link>
         <router-link class="directory-admin__link" to="/admin/audit">管理审计</router-link>
+        <router-link class="directory-admin__link" to="/help/attendance/dingtalk-microapp">钉钉微应用配置帮助</router-link>
         <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="loading" @click="void loadIntegrations()">
           {{ loading ? '刷新中...' : '刷新列表' }}
         </button>
