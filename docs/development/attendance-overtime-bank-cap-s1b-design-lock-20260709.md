@@ -77,8 +77,13 @@
 - dormant(银行关)+ cap 设值 → 单 NULL-source lot 照发,cap 不作用。
 - **月边界(6f)**:cap=120,月首(02-01)60 + 月末(02-28)60 填满本月;再来月中 60 → 180>120 → 422
   ⇒ 首/末日均归本月(若首日漏到上月或末日漏到下月,headroom<120、月中不会 block)。
+- **dormant 混入(6g)**:某月先 dormant 攒单 NULL-source lot(600),再开银行+cap=120,同月 workday 60 →
+  200(dormant 不计入池化 headroom;池化 headroom=60 非 660)。**证明 §6 `overtime_source IS NOT NULL` 过滤
+  load-bearing**(去掉该过滤 → 该 grant 误 422)。
 - 单测 `overtimeBankCapDecision`:cap≤0 永不 block / 恰到 cap 不 block / 超 1 分钟 block。
-- Mutation:拆 cap pre-check → 超限用例变 200(红);拆排除自身 → 重放误 block(红)。
+- Mutation:①拆 cap pre-check → 超限用例(6b)变 200(红,已证);②拆 §6 `overtime_source IS NOT NULL` → 6g workday
+  grant 误 422(红,已证)。注:`excludeRequestId` 排除自身是 **unreachable 防御冗余**——lots 在 check 之后才 insert、
+  re-approve 被 request-row `FOR UPDATE` + status 门上游拦,故该 param 无法 mutation 证,不作覆盖承诺(不是缺口)。
 
 ## 6. 完成口径
 

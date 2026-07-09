@@ -6282,6 +6282,21 @@ attendanceIntegrationDescribe(
       const febBlocked = await approve(febMid)
       expect(febBlocked.status).toBe(422)
       expect((febBlocked.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('OVERTIME_BANK_CAP_EXCEEDED')
+
+      // 6g — dormant cross-contamination (proves the §6 `overtime_source IS NOT NULL` headroom filter is
+      // load-bearing, not neuter): an org that ran the bank DORMANT earlier in a month accrued a single
+      // NULL-source (un-pooled, full-amount, statutory-inclusive) lot. When the bank is later ENABLED with a
+      // cap mid-month, that dormant lot must NOT count toward the pooled headroom — else it would falsely
+      // block. Here: a dormant 600-min lot in Mar, then bank ON cap=120 + a workday 60 in Mar → 200 (dormant
+      // ignored; pooled headroom = 60, not 660). Drop the filter and this grant false-blocks with 422.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: false, pooledSources: [], maxMinutesPerPeriod: 0, validityDays: null } })).status).toBe(200)
+      const marDormant = await createOvertime('2027-03-05', 600)
+      expect((await approve(marDormant)).status).toBe(200) // dormant → single NULL-source (un-pooled) lot
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], maxMinutesPerPeriod: 120, validityDays: null } })).status).toBe(200)
+      const marBanked = await createOvertime('2027-03-20', 60)
+      await segmentWorkday(marBanked, '2027-03-20', 60)
+      expect((await approve(marBanked)).status).toBe(200) // dormant 600 excluded from pooled headroom → 60<=120
+      expect(await bankedMinutesForMonth('2027-03')).toBe(60) // only the pooled workday lot, NOT 660
     } finally {
       if (token && Object.keys(originalSettings).length > 0) {
         await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
@@ -6295,7 +6310,7 @@ attendanceIntegrationDescribe(
       else process.env.RBAC_BYPASS = previousRbacBypass
       await pool.end().catch(() => undefined)
     }
-  })
+  }, 120000)
 
   it('加班三段 O2 — opt-in request metadata snapshot is written and refreshed on final approval', async () => {
     if (!baseUrl) return

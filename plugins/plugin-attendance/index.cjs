@@ -28869,7 +28869,7 @@ module.exports = {
                       // second wait until the first commits, so its headroom read sees the first's lots. Taken
                       // ONLY on the capped banked path (uncapped/dormant stays lock-free — invariant 3). Auto-
                       // released at commit/rollback.
-                      await trx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`attendance:otbank-cap:${orgId}:${requestRow.user_id}:${capMonthStart}`])
+                      await trx.query('SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))', [`attendance:otbank-cap:${orgId}:${requestRow.user_id}`, String(capMonthStart)])
                       const existingBanked = await sumBankedOvertimeMinutesForMonth(trx, {
                         orgId,
                         userId: requestRow.user_id,

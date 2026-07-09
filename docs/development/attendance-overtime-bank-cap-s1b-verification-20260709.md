@@ -38,6 +38,9 @@
 - **6f** month-boundary:cap=120,月首 `2027-02-01`(60)+ 月末 `2027-02-28`(60)填满 Feb;月中 `2027-02-15`(60)
   → 180>120 → **422**。证明首/末日均归本月、无 TZ off-by-one(`normalizeDateOnly` 用 local getters + pg
   DATE→本地午夜 Date,日历日精确round-trip)。
+- **6g** dormant 混入(审阅 P2-1 补覆盖):某月先 dormant 攒 NULL-source 600,再开银行+cap=120,同月 workday 60
+  → **200**、池化 headroom=60(非 660)。**证明 §6 `overtime_source IS NOT NULL` 过滤 load-bearing**——去掉即误
+  422(审阅经验证 RunA 200 / RunB 422)。
 
 ### 2.3 无回归证明(base-runtime 对照)
 真 DB 全文件跑(154 test):**改动版 = 145 passed / 9 failed;base runtime(改动全撤)= 同样 145/9,失败集合逐个相同**。
@@ -54,11 +57,11 @@
 
 | # | 不变式 | 证据 |
 |---|---|---|
-| 1 | S1 五条守恒/门/§6/fail-closed/幂等保留 | partition/resolve 纯函数未动;单测 22 全绿;C2 §4/§5 全绿 |
+| 1 | S1 五条守恒/门/§6/fail-closed/幂等保留 | partition/resolve 纯函数未动;单测 22 全绿;C2 §4/§5 全绿;**6g 证 §6 `overtime_source IS NOT NULL` 过滤 load-bearing** |
 | 2 | dormant 路径不碰 | 6e:bank OFF + 600 → 单 NULL-source lot,cap 不评估 |
 | 3 | cap=0/未设 逐字节不变 | 单测 cap≤0 永不 block;6c;base-runtime 对照零 diff |
 | 4 | 超限 pre-check → 全回滚 0 lot 副作用 | 6b:422 + pending + 0 lot + 当月总额不变 |
-| 5 | 重放不误判 | request pending-status 门先拦(§4 replay 已证);headroom 排除自身 |
+| 5 | 重放不误判 | request pending-status 门先拦(§4 replay 已证)。headroom `excludeRequestId` 排除自身 = **unreachable 防御冗余**(lots 在 check 后才 insert、re-approve 被 request-row FOR UPDATE + status 门上游拦),无法 mutation 证,不作覆盖承诺(审阅 P3-2) |
 | 6 | 并发 TOCTOU 关闭 | headroom 读前取 `pg_advisory_xact_lock(hashtext(org:user:month))`(txn 级、仅 capped 路径);单线程路径已跑通(取/放锁无死锁),并发正确性 by-construction:第二笔等第一笔 commit 后读到其 lots |
 
 ## 4. v2(additive,各自 gated)
