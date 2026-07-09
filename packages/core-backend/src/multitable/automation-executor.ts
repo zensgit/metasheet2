@@ -87,6 +87,13 @@ function maxWebhookRetries(): number {
 }
 const DINGTALK_PERSON_BATCH_SIZE = 100
 const DINGTALK_FAILURE_ALERT_CONTENT_LIMIT = 1_000
+// DingTalk group/person message limits: robot markdown title tops out around
+// 128 chars and markdown body around 20000 chars upstream. A rendered
+// template that exceeds either would otherwise be rejected (or silently
+// mangled) by DingTalk outright; truncate with an ellipsis so delivery still
+// goes through instead of failing on oversized input.
+const DINGTALK_MESSAGE_TITLE_MAX_LENGTH = 128
+const DINGTALK_MESSAGE_BODY_MAX_LENGTH = 20_000
 const SAFE_PARALLEL_BRANCH_KEY = /^[A-Za-z0-9_-]{1,64}$/
 const MAX_PARALLEL_BRANCHES = 10
 const MAX_PARALLEL_BRANCH_ACTIONS = 20
@@ -339,6 +346,27 @@ function stringifyResponseBody(payload: unknown, fallback: string | null = null)
   } catch {
     return fallback
   }
+}
+
+export function truncateDingTalkMessageText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value
+  if (maxLength <= 1) return value.slice(0, maxLength)
+  return `${value.slice(0, maxLength - 1)}…`
+}
+
+/**
+ * Assemble the message body + its 快捷入口 link block within DingTalk's body limit.
+ * The link block is the actionable part of the message, so it gets its budget first
+ * and the rendered body absorbs the truncation — truncating the assembled string
+ * instead would silently drop the links whenever a template body ran long.
+ */
+export function composeDingTalkBodyWithLinks(renderedBody: string, linkLines: string[]): string {
+  const linkSection = linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : ''
+  const separatorLength = linkSection && renderedBody ? 2 : 0
+  const bodyBudget = Math.max(0, DINGTALK_MESSAGE_BODY_MAX_LENGTH - linkSection.length - separatorLength)
+  return [truncateDingTalkMessageText(renderedBody, bodyBudget), linkSection]
+    .filter(Boolean)
+    .join('\n\n')
 }
 
 function redactDingTalkFailureAlertText(value: unknown): string {
@@ -2831,12 +2859,12 @@ export class AutomationExecutor {
       actorId: context.actorId ?? '',
       record: context.recordData,
     }
-    const renderedTitle = renderAutomationTemplate(titleTemplate, templateData).trim()
+    const renderedTitle = truncateDingTalkMessageText(
+      renderAutomationTemplate(titleTemplate, templateData).trim(),
+      DINGTALK_MESSAGE_TITLE_MAX_LENGTH,
+    )
     const renderedBody = renderAutomationTemplate(bodyTemplate, templateData).trim()
-    const bodyWithLinks = [
-      renderedBody,
-      linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : '',
-    ].filter(Boolean).join('\n\n')
+    const bodyWithLinks = composeDingTalkBodyWithLinks(renderedBody, linkLines)
 
     let memberGroupUserIds: string[] = []
     if (memberGroupIds.length > 0) {
@@ -3336,12 +3364,12 @@ export class AutomationExecutor {
       actorId: context.actorId ?? '',
       record: context.recordData,
     }
-    const renderedTitle = renderAutomationTemplate(titleTemplate, templateData).trim()
+    const renderedTitle = truncateDingTalkMessageText(
+      renderAutomationTemplate(titleTemplate, templateData).trim(),
+      DINGTALK_MESSAGE_TITLE_MAX_LENGTH,
+    )
     const renderedBody = renderAutomationTemplate(bodyTemplate, templateData).trim()
-    const bodyWithLinks = [
-      renderedBody,
-      linkLines.length > 0 ? ['**快捷入口**', ...linkLines].join('\n') : '',
-    ].filter(Boolean).join('\n\n')
+    const bodyWithLinks = composeDingTalkBodyWithLinks(renderedBody, linkLines)
     const orderedDestinations = destinationIds
       .map((id) => destinationsById.get(id))
       .filter((destination): destination is NonNullable<typeof destination> => Boolean(destination))

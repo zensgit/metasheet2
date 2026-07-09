@@ -95,6 +95,8 @@ export type ReadAttachmentMetadataInput = {
 export type ReadAttachmentMetadataResult = {
   id: string
   sheetId: string
+  recordId: string | null
+  fieldId: string | null
   storageFileId: string
   filename: string | null
   originalName: string | null
@@ -469,7 +471,7 @@ export async function readAttachmentMetadata(
 ): Promise<ReadAttachmentMetadataResult | null> {
   const { query, attachmentId } = input
   const result = await query(
-    `SELECT id, sheet_id, storage_file_id, filename, original_name, mime_type, size
+    `SELECT id, sheet_id, record_id, field_id, storage_file_id, filename, original_name, mime_type, size
      FROM multitable_attachments
      WHERE id = $1 AND deleted_at IS NULL`,
     [attachmentId],
@@ -478,10 +480,11 @@ export async function readAttachmentMetadata(
   if (!row) return null
   return {
     id: String(row.id),
-    // Matches the route's pre-extraction behavior: non-string sheet_id is
-    // normalized to '' so the auth block is short-circuited (see
-    // `GET /attachments/:attachmentId` usage).
+    // Non-string sheet_id is normalized to '' so the route can fail closed
+    // before any storage read.
     sheetId: typeof row.sheet_id === 'string' ? row.sheet_id : '',
+    recordId: typeof row.record_id === 'string' ? row.record_id : null,
+    fieldId: typeof row.field_id === 'string' ? row.field_id : null,
     storageFileId: String(row.storage_file_id),
     filename: typeof row.filename === 'string' ? row.filename : null,
     originalName: typeof row.original_name === 'string' ? row.original_name : null,
