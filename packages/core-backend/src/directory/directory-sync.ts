@@ -3951,6 +3951,52 @@ export async function batchBindDirectoryAccounts(
   return outcome
 }
 
+/**
+ * P2-1 (post-#3972 review): "only admit pending items with no local user and no
+ * recommendation candidate" is enforced ONLY in the Vue computed
+ * (`selectedReviewAdmissionIds` in DirectoryManagementView.vue) — a direct POST to
+ * batch-admit-users bypasses it entirely. This mirrors that rule at the minimum-safe
+ * level for the server: reject an account that is already linked to a local user, or
+ * whose email/mobile (case-insensitively — recommendations themselves are built from a
+ * case-insensitive email match, see loadDirectoryReviewRecommendations) already maps to
+ * an existing active user, instead of silently admitting a duplicate or overwriting an
+ * existing link.
+ */
+async function assertDirectoryAccountEligibleForBatchAdmission(
+  account: Pick<DirectoryBindingTargetAccountRow, 'id' | 'email' | 'mobile'>,
+): Promise<void> {
+  const linkResult = await query<{ link_status: string | null; local_user_id: string | null }>(
+    `SELECT link_status, local_user_id
+     FROM directory_account_links
+     WHERE directory_account_id = $1::uuid
+     LIMIT 1`,
+    [account.id],
+  )
+  const link = linkResult.rows[0]
+  if (link?.link_status === 'linked' && normalizeText(link.local_user_id)) {
+    throw new Error('Directory account is already linked to a local user')
+  }
+
+  const normalizedEmail = normalizeText(account.email).toLowerCase()
+  const normalizedMobile = normalizeText(account.mobile)
+  if (!normalizedEmail && !normalizedMobile) return
+
+  const matchResult = await query<{ id: string }>(
+    `SELECT id
+     FROM users
+     WHERE COALESCE(is_active, TRUE) = TRUE
+       AND (
+         ($1::text <> '' AND lower(email) = $1::text)
+         OR ($2::text <> '' AND mobile = $2::text)
+       )
+     LIMIT 1`,
+    [normalizedEmail, normalizedMobile],
+  )
+  if (matchResult.rows.length > 0) {
+    throw new Error('A local user with this email or mobile already exists; confirm the recommended binding instead of admitting a new account')
+  }
+}
+
 export async function batchAdmitDirectoryAccountUsers(
   directoryAccountIds: string[],
   input: DirectoryAccountBatchAdmissionInput,
@@ -3965,6 +4011,7 @@ export async function batchAdmitDirectoryAccountUsers(
     try {
       const account = await loadDirectoryBindingTargetAccount(accountId)
       if (!account) throw new Error('Directory account not found')
+      await assertDirectoryAccountEligibleForBatchAdmission(account)
       const fallbackName = normalizeText(account.external_user_id) || account.id
       const admissionName = normalizeText(account.name).length >= 2 ? account.name : fallbackName
       outcome.succeeded.push(await admitDirectoryAccountUser(account.id, {
@@ -4175,10 +4222,19 @@ async function createDirectoryAdmittedUserInTransaction(
   }
 
   if (options.email) {
+    // Case-insensitive on purpose: directory sync's own account↔user matching (see
+    // loadDirectoryReviewRecommendations, LOWER(email) = ANY(...)) and AuthService's login
+    // lookup (lower(email) = $1) both treat email identity as case-insensitive, but
+    // AuthService.register stores the raw-case value and the `idx_users_email` unique index is
+    // ALSO case-sensitive — so it does not backstop this at the DB layer. A case-sensitive
+    // check here let a differently-cased admission (e.g. `alice@x.com` vs a stored
+    // `Alice@x.com`) slip past and create a second `users` row for the same person. Matches
+    // the users_email_lower_idx (lower(email)) index already in place for this exact lookup
+    // shape.
     const existingUserResult = await client.query(
       `SELECT id
        FROM users
-       WHERE email = $1::text
+       WHERE lower(email) = lower($1::text)
        LIMIT 1`,
       [options.email],
     )
