@@ -41,12 +41,22 @@ type FakeLink = {
   foreign_record_id: string
 }
 
+type FakeRevision = {
+  sheet_id: string
+  record_id: string
+  version: number
+  action: string
+  source: string
+  snapshot: Record<string, unknown> | null
+}
+
 function createQuery(): {
   query: MultitableRecordsQueryFn
   sheets: FakeSheet[]
   fields: FakeField[]
   records: FakeRecord[]
   links: FakeLink[]
+  revisions: FakeRevision[]
 } {
   const sheets: FakeSheet[] = [
     {
@@ -124,6 +134,7 @@ function createQuery(): {
   ]
   const records: FakeRecord[] = []
   const links: FakeLink[] = []
+  const revisions: FakeRevision[] = []
   const autoNumberNextByField = new Map<string, number>()
 
   const query: MultitableRecordsQueryFn = async (sql, params = []) => {
@@ -185,6 +196,19 @@ function createQuery(): {
       const [recordId, sheetId] = params as [string, string]
       return {
         rows: records.filter((record) => record.id === recordId && record.sheet_id === sheetId),
+      }
+    }
+
+    if (
+      normalized.includes('FROM meta_records') &&
+      normalized.includes('WHERE id = $1 AND sheet_id = $2') &&
+      (normalized.includes('SELECT version, data') || normalized.includes('SELECT data, version'))
+    ) {
+      const [recordId, sheetId] = params as [string, string]
+      return {
+        rows: records
+          .filter((record) => record.id === recordId && record.sheet_id === sheetId)
+          .map((record) => ({ version: record.version, data: record.data })),
       }
     }
 
@@ -325,6 +349,31 @@ function createQuery(): {
       return { rows: [], rowCount: 1 }
     }
 
+    if (normalized.startsWith('INSERT INTO meta_record_revisions')) {
+      const [, sheetId, recordId, version, action, source, , , , snapshotJson] = params as [
+        string,
+        string,
+        string,
+        number,
+        string,
+        string,
+        string | null,
+        string[],
+        string,
+        string | null,
+        string | null,
+      ]
+      revisions.push({
+        sheet_id: sheetId,
+        record_id: recordId,
+        version,
+        action,
+        source,
+        snapshot: snapshotJson ? JSON.parse(snapshotJson) : null,
+      })
+      return { rows: [], rowCount: 1 }
+    }
+
     if (normalized.startsWith('DELETE FROM meta_records')) {
       const [recordId, sheetId] = params as [string, string]
       const index = records.findIndex((record) => record.id === recordId && record.sheet_id === sheetId)
@@ -341,7 +390,7 @@ function createQuery(): {
     return { rows: [] }
   }
 
-  return { query, sheets, fields, records, links }
+  return { query, sheets, fields, records, links, revisions }
 }
 
 describe('multitable records helper', () => {
@@ -753,7 +802,7 @@ describe('multitable records helper', () => {
   })
 
   it('deletes an existing record', async () => {
-    const { query, records, links } = createQuery()
+    const { query, records, links, revisions } = createQuery()
     records.push({
       id: 'rec_existing',
       sheet_id: 'sheet_service_ticket',
@@ -781,6 +830,20 @@ describe('multitable records helper', () => {
     })
     expect(records).toHaveLength(0)
     expect(links).toHaveLength(0)
+    expect(revisions).toEqual([
+      expect.objectContaining({
+        sheet_id: 'sheet_service_ticket',
+        record_id: 'rec_existing',
+        version: 2,
+        action: 'delete',
+        source: 'plugin',
+        snapshot: {
+          ticketNo: 'TK-1001',
+          title: 'Broken compressor',
+          priority: 'urgent',
+        },
+      }),
+    ])
   })
 
   it('throws when deleting a missing record', async () => {

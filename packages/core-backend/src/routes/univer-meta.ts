@@ -234,6 +234,16 @@ import {
   type YjsInvalidator,
 } from '../multitable/post-commit-hooks'
 import { listRecordRevisions, recordRecordRevision, type RecordRevisionEntry } from '../multitable/record-history-service'
+import { replayInboundLinks, isRecordUndeleteInboundEnabled } from '../multitable/inbound-link-replay'
+import { countInboundLinkCaptureRows, insertInboundLinkTombstones } from '../multitable/tombstone-capture'
+
+// 4c-3: pre-migration deploy window guard for the delete_revision_id column (mirrors record-service).
+function isUndefinedColumnError42703(err: unknown, columnName: string): boolean {
+  const code = (err as { code?: string } | null)?.code
+  const msg = err instanceof Error ? err.message : String(err)
+  if (code === '42703') return msg.includes(columnName)
+  return msg.includes(`column "${columnName}" does not exist`)
+}
 import {
   isPersonalViewsEnabled,
   applyPersonalViewOverlay,
@@ -10126,6 +10136,7 @@ export function univerMetaRouter(): Router {
       // rebuilds OUTBOUND meta_links (L3; NO inbound — L4 A: inbound re-appears on the linking record's next save), and
       // appends a 'restore' create-revision (the Time Machine source, NOT a plain 'rest' create). Realtime post-commit.
       const resurrectedIds: string[] = []
+      const undeleteInboundTotals = { replayed: 0, total: 0 }
       if (resurrects.length > 0) {
         // Mirror-read-only hardening (C2/I-1): resurrect only WRITABLE (forward) links, never the mirror side of a
         // twoWay link (the patchContext guard's `readOnly` = `isFieldAlwaysReadOnly` ⇒ `mirrorOf`). Explicit skip so
@@ -10151,6 +10162,38 @@ export function univerMetaRouter(): Router {
                 }
               }
               await recordRecordRevision(query, { sheetId, recordId: r.recordId, version: 1, action: 'create', source: 'restore', changedFieldIds: Object.keys(r.snapshot), patch: r.snapshot, snapshot: r.snapshot, actorId: undeleteActorId })
+              // 4c-3 §7: the SECOND resurrection surface reuses the SAME replay helper — never a
+              // parallel inbound semantic. HONEST NOTE (R8 absorption-audit P3-1, reworded from an
+              // earlier "deterministic" claim that overstated this): resurrect has no trash row to
+              // read an anchor off (unlike restoreRecord's `meta_records_trash.delete_revision_id`),
+              // so it falls back to a HEURISTIC — the record's MOST RECENT 'delete' revision, by
+              // `created_at DESC`. Under multi-vintage churn (delete → restore → delete → resurrect
+              // an OLDER vintage via PIT asOf) this anchors to the LATEST deletion even when the
+              // snapshot being resurrected is an older one — it replays that one vintage's captured
+              // edges only, never strings multiple anchors together. If the most recent deletion
+              // happened while capture was off (or its tombstones already aged out via retention),
+              // the anchor still resolves but carries zero tombstones ⇒ zero replay — silent and
+              // honest, never fabricated. Under-replay (missing a vintage's edges) is the only
+              // failure mode this heuristic can produce; OVER-replay stays impossible regardless of
+              // which delete revision is picked, because precondition 6 (neighbour consent — replay
+              // only what N's OWN live `data` still declares) gates every edge independently of the
+              // anchor. See `multitable-undelete-inbound-resurrect-realdb.test.ts` for the pinned
+              // multi-vintage + uncaptured-vintage goldens. Runs AFTER the outbound loop (NOT EXISTS
+              // must see those rows; self-link stays single).
+              if (isRecordUndeleteInboundEnabled()) {
+                const anchorRes = await query(
+                  `SELECT id FROM meta_record_revisions
+                    WHERE sheet_id = $1 AND record_id = $2 AND action = 'delete'
+                    ORDER BY created_at DESC, version DESC, id DESC LIMIT 1`,
+                  [sheetId, r.recordId],
+                )
+                const anchorId = ((anchorRes.rows as Array<{ id?: string }>)[0]?.id) ?? null
+                if (anchorId) {
+                  const replay = await replayInboundLinks(query, anchorId)
+                  undeleteInboundTotals.replayed += replay.replayed
+                  undeleteInboundTotals.total += replay.total
+                }
+              }
               resurrectedIds.push(r.recordId)
             }
           })
@@ -10187,7 +10230,7 @@ export function univerMetaRouter(): Router {
         }
       }
       const revertedCount = outcomes.filter((o) => o.status === 'reverted').length
-      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount, resurrectedCount: resurrectedIds.length, undeleteRecordIds: resurrectedIds } })
+      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount, resurrectedCount: resurrectedIds.length, undeleteRecordIds: resurrectedIds, ...(isRecordUndeleteInboundEnabled() && resurrectedIds.length > 0 ? { undeleteInbound: undeleteInboundTotals } : {}) } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
       const hint = getDbNotReadyMessage(err)
@@ -10415,6 +10458,18 @@ export function univerMetaRouter(): Router {
               throw new ServiceValidationError('Record deletion is not allowed', 'FORBIDDEN')
             }
             const snapshot = normalizeJson(row.data)
+            // 4c-3 §7 (D-3): this inline delete wrote trash + a delete revision but never CAPTURED —
+            // it was the second resurrection surface whose inbound edges were silently lost forever.
+            // Pre-generate the revision id so the tombstones can anchor to it (same shape as
+            // record-service.deleteRecord); capture MUST run before the links DELETE below destroys
+            // the rows. Cap breach throws (TombstoneCaptureCapExceededError) → whole reset rolls
+            // back, fail-closed — never a half-captured destruction.
+            const resetDeleteRevisionId = randomUUID()
+            if (isTombstoneCaptureEnabled()) {
+              const totalToCapture = await countInboundLinkCaptureRows(query, candidate.recordId)
+              assertWithinCaptureCap(totalToCapture)
+              await insertInboundLinkTombstones(query, { sheetId, recordId: candidate.recordId, sourceRevisionId: resetDeleteRevisionId })
+            }
             await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [candidate.recordId])
             await recordRecordRevision(query, {
               sheetId,
@@ -10427,13 +10482,24 @@ export function univerMetaRouter(): Router {
               patch: {},
               snapshot,
               batchId,
+              id: resetDeleteRevisionId,
             })
-            await query(
-              `INSERT INTO meta_records_trash
-                 (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
-               VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
-              [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null],
-            )
+            try {
+              await query(
+                `INSERT INTO meta_records_trash
+                   (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at, delete_revision_id)
+                 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`,
+                [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null, resetDeleteRevisionId],
+              )
+            } catch (err) {
+              if (!isUndefinedColumnError42703(err, 'delete_revision_id')) throw err
+              await query(
+                `INSERT INTO meta_records_trash
+                   (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
+                 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
+                [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null],
+              )
+            }
             // lock-guarded: PIT Reset deletes in the same transaction after ensureRecordNotLocked above.
             await query('DELETE FROM meta_records WHERE sheet_id = $1 AND id = $2', [sheetId, candidate.recordId])
             deletedRecordIds.push(candidate.recordId)
@@ -10445,6 +10511,11 @@ export function univerMetaRouter(): Router {
         }
         if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError || err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) {
           return res.status(409).json({ ok: false, error: { code: 'RESET_BLOCKED', message: 'Reset is all-or-nothing: a target is forbidden/locked, so nothing was written.' } })
+        }
+        // 4c-3 c4 (review P3-1): a cap breach inside the reset txn rolls the WHOLE reset back
+        // (fail-closed) — map it to the same 422 the delete route uses instead of a generic 500.
+        if (err instanceof TombstoneCaptureCapExceededError) {
+          return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
         }
         throw err
       }
@@ -15325,6 +15396,51 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  async function ensureAttachmentDownloadReadable(
+    req: Request,
+    res: Response,
+    query: QueryFn,
+    metadata: {
+      id: string
+      sheetId: string
+      recordId: string | null
+      fieldId: string | null
+    },
+  ): Promise<boolean> {
+    if (!metadata.sheetId) {
+      res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${metadata.id}` } })
+      return false
+    }
+
+    const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, metadata.sheetId)
+    if (!access.userId) {
+      res.status(401).json({ error: 'Authentication required' })
+      return false
+    }
+    if (!capabilities.canRead) {
+      sendForbidden(res)
+      return false
+    }
+
+    if (metadata.recordId && !access.isAdminRole && await loadRowLevelReadDenyEnabled(query, metadata.sheetId)) {
+      const denied = await loadDeniedRecordIds(query, metadata.sheetId, access.userId)
+      if (denied.has(metadata.recordId)) {
+        res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${metadata.id}` } })
+        return false
+      }
+    }
+
+    if (metadata.fieldId) {
+      const allowedFieldIds = await loadAllowedFieldIds(query, metadata.sheetId, access.userId, capabilities)
+      if (!allowedFieldIds.has(metadata.fieldId)) {
+        res.status(403).json({ ok: false, error: { code: 'FIELD_FORBIDDEN', message: 'Attachment field is not readable' } })
+        return false
+      }
+    }
+
+    return true
+  }
+
   router.post('/attachments', async (req: Request, res: Response) => {
     try {
       if (!multitableUpload) {
@@ -15444,13 +15560,8 @@ export function univerMetaRouter(): Router {
       if (!metadata) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${attachmentId}` } })
       }
-      if (metadata.sheetId) {
-        const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), metadata.sheetId)
-        if (!access.userId) {
-          return res.status(401).json({ error: 'Authentication required' })
-        }
-        if (!capabilities.canRead) return sendForbidden(res)
-      }
+      const query = pool.query.bind(pool)
+      if (!await ensureAttachmentDownloadReadable(req, res, query, metadata)) return
 
       const storage = getAttachmentStorageService()
       const buffer = await readAttachmentBinaryShared({ storage, storageFileId: metadata.storageFileId })
@@ -16040,7 +16151,8 @@ export function univerMetaRouter(): Router {
           return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
         },
       })
-      return res.json({ ok: true, data: { restored: result.recordId, sheetId: result.sheetId } })
+      // 4c-3 §6 honest signal (omitted-when-off/absent — flag-off responses stay byte-identical):
+      return res.json({ ok: true, data: { restored: result.recordId, sheetId: result.sheetId, ...(result.inbound ? { inbound: result.inbound } : {}) } })
     } catch (err) {
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)

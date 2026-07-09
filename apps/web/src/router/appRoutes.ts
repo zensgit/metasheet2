@@ -253,6 +253,16 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'K3 WISE Preset', titleZh: 'K3 WISE 预设', requiresAuth: true, permissions: ['integration:write'] }
   },
   {
+    // Stock Preparation MVP (#3751, docs/development/stock-preparation-mvp-design-20260707.md):
+    // readonly-first, tabbed operator workspace. Deliberately a SEPARATE routed shell (not crammed
+    // into the admin IntegrationWorkbenchView) so the six MVP views land later in disjoint files.
+    // Reuses the integration:write gate (same as the Data Factory workbench) — no broader access.
+    path: '/stock-prep',
+    name: AppRouteNames.INTEGRATION_STOCK_PREPARATION,
+    component: () => import('../components/integration/stockPreparation/StockPreparationWorkspace.vue'),
+    meta: { title: 'Stock Preparation', titleZh: '备料工作台', requiresAuth: true, permissions: ['integration:write'] }
+  },
+  {
     path: '/workflows',
     name: 'workflow-list',
     component: () => import('../views/WorkflowHubView.vue'),

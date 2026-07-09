@@ -90,6 +90,13 @@ describe('WebSocket Rooms - basic flow', () => {
     collabService.setSheetRoomAuthChecker(async ({ sheetId, userId }) => {
       return ['sheet_ops', 'sheet_orders'].includes(sheetId) && ['user_a', 'user_b', 'user_reader', 'a', 'b'].includes(userId)
     })
+    collabService.setCommentRoomAuthChecker(async ({ spreadsheetId, rowId, userId }) => {
+      const canReadSheet = ['sheet_ops', 'sheet_orders'].includes(spreadsheetId) && ['user_a', 'user_b', 'user_reader', 'a', 'b'].includes(userId)
+      if (!canReadSheet) return false
+      if (spreadsheetId === 'sheet_orders' && rowId === 'rec_secret') return false
+      if (spreadsheetId === 'sheet_orders' && !rowId) return false
+      return true
+    })
   })
 
   afterAll(async () => {
@@ -369,12 +376,12 @@ describe('WebSocket Rooms - basic flow', () => {
     b.close()
   })
 
-  it('join-comment-inbox scopes activity delivery to inbox subscribers', async () => {
+  it('join-comment-inbox scopes activity delivery to the authenticated user inbox room', async () => {
     if (!baseUrl || !server) return
 
-    // the comment inbox now requires an authenticated identity to join (no anonymous access to the stream)
+    // the comment inbox requires an authenticated identity and joins only that user's inbox room.
     const a = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:user_a' } })
-    const b = ioClient(baseUrl, { transports: ['websocket'] })
+    const b = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:user_b' } })
 
     await Promise.all([
       new Promise<void>((resolve, reject) => {
@@ -395,6 +402,14 @@ describe('WebSocket Rooms - basic flow', () => {
       })
       a.emit('join-comment-inbox')
     })
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('B inbox join timeout')), 3000)
+      b.on('joined-comment-inbox', () => {
+        clearTimeout(t)
+        resolve()
+      })
+      b.emit('join-comment-inbox')
+    })
 
     const gotA = new Promise<any>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('A did not receive inbox activity')), 3000)
@@ -405,7 +420,7 @@ describe('WebSocket Rooms - basic flow', () => {
     b.on('comment:activity', () => { gotB = true })
 
     // @ts-ignore
-    server['createCoreAPI']().websocket.broadcastTo('comments-inbox', 'comment:activity', {
+    server['createCoreAPI']().websocket.broadcastTo('comments-inbox:user_a', 'comment:activity', {
       kind: 'created',
       spreadsheetId: 'sheet_orders',
       rowId: 'rec_1',
@@ -481,6 +496,46 @@ describe('WebSocket Rooms - basic flow', () => {
     const denied = waitForEvent(client, 'comment-join-denied', 'comment-sheet join forbidden')
     client.emit('join-comment-sheet', { spreadsheetId: 'sheet_orders' })
     await expect(denied).resolves.toEqual({ scope: 'sheet_orders', reason: 'forbidden' })
+
+    client.close()
+  })
+
+  it('SECURITY: rejects join-comment-record when the authenticated user is row-denied', async () => {
+    if (!baseUrl || !server) return
+    const client = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:user_a' } })
+    await waitForConnect(client, 'row-denied-comment-record')
+
+    const denied = waitForEvent(client, 'comment-join-denied', 'comment-record row denied')
+    client.emit('join-comment-record', { spreadsheetId: 'sheet_orders', rowId: 'rec_secret' })
+    await expect(denied).resolves.toEqual({ scope: 'sheet_orders', reason: 'forbidden' })
+
+    const noBody = expectNoEvent(client, 'comment:created', 'row-denied comment-record socket')
+    // @ts-ignore access private for test
+    server['createCoreAPI']().websocket.broadcastTo('comments:sheet_orders:rec_secret', 'comment:created', {
+      spreadsheetId: 'sheet_orders',
+      comment: { id: 'leak', rowId: 'rec_secret', body: 'secret' },
+    })
+    await noBody
+
+    client.close()
+  })
+
+  it('SECURITY: rejects join-comment-sheet when row-deny makes the sheet-wide comment room unfilterable', async () => {
+    if (!baseUrl || !server) return
+    const client = ioClient(baseUrl, { transports: ['websocket'], auth: { token: 'token:user_a' } })
+    await waitForConnect(client, 'row-denied-comment-sheet')
+
+    const denied = waitForEvent(client, 'comment-join-denied', 'comment-sheet row-deny forbidden')
+    client.emit('join-comment-sheet', { spreadsheetId: 'sheet_orders' })
+    await expect(denied).resolves.toEqual({ scope: 'sheet_orders', reason: 'forbidden' })
+
+    const noBody = expectNoEvent(client, 'comment:created', 'row-denied comment-sheet socket')
+    // @ts-ignore access private for test
+    server['createCoreAPI']().websocket.broadcastTo('comments-sheet:sheet_orders', 'comment:created', {
+      spreadsheetId: 'sheet_orders',
+      comment: { id: 'leak', rowId: 'rec_secret', body: 'secret' },
+    })
+    await noBody
 
     client.close()
   })

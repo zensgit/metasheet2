@@ -47,9 +47,18 @@ export interface AttendanceDeliveryMessage {
   payload: Record<string, unknown>
 }
 
+/**
+ * `skip` only has meaning alongside `retryable: false` — it tells the worker this recipient is
+ * structurally undeliverable through this channel (no identity to send to, retrying will never help)
+ * as opposed to a genuine send failure worth operator attention. The worker terminates a `skip: true`
+ * result as delivery status `skipped` instead of `failed`, so a partially-onboarded org's ordinary
+ * "this user has no channel identity yet" case does not pollute the dead-letter/failed counter that
+ * exists to surface real delivery faults (API errors, timeouts, quota). Channels MUST NOT set `skip`
+ * on a retryable result; the worker only consults it once `retryable` is already false.
+ */
 export type AttendanceDeliveryChannelResult =
   | { ok: true }
-  | { ok: false; retryable: boolean; error: string }
+  | { ok: false; retryable: boolean; error: string; skip?: boolean }
 
 export interface AttendanceDeliveryChannel {
   readonly name: string
@@ -111,6 +120,7 @@ export interface AttendanceNotificationDeliveryResult {
   sent: number
   retrying: number
   failed: number
+  skipped: number
   lostLease?: number
 }
 
@@ -193,6 +203,12 @@ export class DeterministicFakeAttendanceDeliveryChannel implements AttendanceDel
     }
     if (mode === 'fail' || mode === 'non_retryable_failure') {
       return { ok: false, retryable: false, error: 'fake_non_retryable_failure' }
+    }
+    if (mode === 'skip' || mode === 'structural_skip') {
+      // Deterministic stand-in for a channel-flagged structurally-undeliverable recipient (e.g. the real
+      // DingTalk channel's dingtalk_recipient_not_bound) — exercises the worker's skip: true → `skipped`
+      // dispatch path without needing the real DingTalk channel/directory tables.
+      return { ok: false, retryable: false, skip: true, error: 'fake_structural_skip' }
     }
     return { ok: true }
   }
@@ -323,12 +339,21 @@ export class DingTalkAttendanceDeliveryChannel implements AttendanceDeliveryChan
       [message.recipientUserId, message.orgId],
     )
     if (rows.length === 0) {
+      // No linked+active DingTalk binding at all — the ordinary "not onboarded to DingTalk yet" state
+      // for a partially-adopted org. Nothing about retrying (or alerting on this specific delivery)
+      // would help; the fix is a directory sync/linking action outside this worker's scope. Structural,
+      // not a fault: terminate as `skipped`, not `failed`.
       return {
         ok: false,
-        result: { ok: false, retryable: false, error: 'dingtalk_recipient_not_bound' },
+        result: { ok: false, retryable: false, skip: true, error: 'dingtalk_recipient_not_bound' },
       }
     }
     if (rows.length > 1) {
+      // Two+ active linked bindings for the same local user is a directory DATA INTEGRITY anomaly, not
+      // an expected "not onboarded" gap — it means account-linking let a duplicate/ambiguous state form.
+      // That is worth an operator's attention (dedupe the links), so this intentionally stays `failed`
+      // (visible in the dead-letter counter) rather than `skipped`. Retrying still will not help, hence
+      // retryable: false, but we do not set `skip`.
       return {
         ok: false,
         result: { ok: false, retryable: false, error: 'dingtalk_recipient_ambiguous' },
@@ -336,9 +361,12 @@ export class DingTalkAttendanceDeliveryChannel implements AttendanceDeliveryChan
     }
     const dingTalkUserId = String(rows[0].external_user_id ?? '').trim()
     if (!dingTalkUserId) {
+      // A linked, unambiguous binding row exists but its external_user_id is blank. From this delivery's
+      // perspective there is still no usable DingTalk identity to send to — same structural class as
+      // "not bound" (no action a retry could take), so this also terminates as `skipped`.
       return {
         ok: false,
-        result: { ok: false, retryable: false, error: 'dingtalk_recipient_external_user_id_missing' },
+        result: { ok: false, retryable: false, skip: true, error: 'dingtalk_recipient_external_user_id_missing' },
       }
     }
     return {
@@ -422,9 +450,9 @@ export class AttendanceNotificationDeliveryWorker {
   }
 
   async runBatch(): Promise<AttendanceNotificationDeliveryResult> {
-    if (this.running) return { claimed: 0, sent: 0, retrying: 0, failed: 0 }
+    if (this.running) return { claimed: 0, sent: 0, retrying: 0, failed: 0, skipped: 0 }
     this.running = true
-    const result: AttendanceNotificationDeliveryResult = { claimed: 0, sent: 0, retrying: 0, failed: 0 }
+    const result: AttendanceNotificationDeliveryResult = { claimed: 0, sent: 0, retrying: 0, failed: 0, skipped: 0 }
     try {
       const rows = await this.claimDueDeliveries()
       result.claimed = rows.length
@@ -434,13 +462,14 @@ export class AttendanceNotificationDeliveryWorker {
         if (outcome === 'sent') result.sent += 1
         else if (outcome === 'retrying') result.retrying += 1
         else if (outcome === 'failed') result.failed += 1
+        else if (outcome === 'skipped') result.skipped += 1
         else lostLease += 1
       }
       if (lostLease > 0) {
         result.lostLease = lostLease
       }
       if (result.claimed > 0) {
-        this.logger.info(`Attendance deliveries claimed=${result.claimed} sent=${result.sent} retrying=${result.retrying} failed=${result.failed} lostLease=${lostLease}`)
+        this.logger.info(`Attendance deliveries claimed=${result.claimed} sent=${result.sent} retrying=${result.retrying} failed=${result.failed} skipped=${result.skipped} lostLease=${lostLease}`)
       }
       return result
     } finally {
@@ -448,7 +477,7 @@ export class AttendanceNotificationDeliveryWorker {
     }
   }
 
-  private async deliver(row: DeliveryRow): Promise<'sent' | 'retrying' | 'failed' | 'lost-lease'> {
+  private async deliver(row: DeliveryRow): Promise<'sent' | 'retrying' | 'failed' | 'skipped' | 'lost-lease'> {
     const channel = this.channelsByName.get(row.channel)
     const attemptCount = Number(row.attempt_count)
     if (!channel) {
@@ -482,6 +511,12 @@ export class AttendanceNotificationDeliveryWorker {
 
     const failure = channelResult as Extract<AttendanceDeliveryChannelResult, { ok: false }>
     if (!failure.retryable || attemptCount >= this.maxAttempts) {
+      // Only a genuinely non-retryable, channel-flagged-structural result skips the dead-letter bucket.
+      // A retryable failure that merely ran out of attempts (attemptCount >= maxAttempts) always still
+      // lands in `failed` — it was a real, repeated send failure, not something we should have skipped.
+      if (!failure.retryable && failure.skip) {
+        return await this.markSkipped(row.id, failure.error, attemptCount) ? 'skipped' : 'lost-lease'
+      }
       return await this.markFailed(row.id, failure.error, attemptCount) ? 'failed' : 'lost-lease'
     }
 
@@ -532,6 +567,27 @@ export class AttendanceNotificationDeliveryWorker {
     const result = await this.query(
       `UPDATE attendance_notification_deliveries
           SET status = 'failed',
+              last_error = $2,
+              claim_expires_at = NULL,
+              claim_worker_id = NULL,
+              updated_at = $3::timestamptz
+        WHERE id = $1::uuid
+          AND status = 'sending'
+          AND claim_worker_id = $4
+          AND attempt_count = $5::int`,
+      [id, error.slice(0, 1000), now, this.workerId, attemptCount],
+    )
+    return Number(result.rowCount ?? 0) === 1
+  }
+
+  // Same terminal-state CAS guard as markFailed (only the lease holder, matching attempt_count, may
+  // write) — the only difference is the target status. See the AttendanceDeliveryChannelResult.skip
+  // doc comment for why this is a distinct terminal bucket from `failed`.
+  private async markSkipped(id: string, error: string, attemptCount: number): Promise<boolean> {
+    const now = this.now().toISOString()
+    const result = await this.query(
+      `UPDATE attendance_notification_deliveries
+          SET status = 'skipped',
               last_error = $2,
               claim_expires_at = NULL,
               claim_worker_id = NULL,

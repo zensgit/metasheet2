@@ -1,6 +1,6 @@
-# Multitable Global History — 4c-3 Record-Undelete Slice 2b(inbound 边重放)— DESIGN-LOCK(PROPOSED)(2026-07-08)
+# Multitable Global History — 4c-3 Record-Undelete Slice 2b(inbound 边重放)— DESIGN-LOCK(RATIFIED — AS-BUILT)(2026-07-08)
 
-**状态:PROPOSED,待 owner ratify。** 起草于线级 /goal 授权下(pre-gate 工作,与 4c-1/4c-2 同法:design-lock-first)。**起草 ≠ 开工;impl 仅在 owner 单项签核后排期。**
+**状态:RATIFIED(owner 2026-07-09,路由 Codex 车道实现)+ AS-BUILT #3975(merge commit `100b6dd59`,已在 `origin/main`)。** 起草于线级 /goal 授权下(pre-gate 工作,与 4c-1/4c-2 同法:design-lock-first)。**独立吸收性对抗审计(2026-07-09,`/tmp/pr3975-4c3-absorption-audit-claude-20260709.md`)判定 APPROVE(0 P1、0 P2;3 条 P3 + 5 条 NIT,均为 flag-gated-dormant 面的覆盖硬化,不涉及产品裁量)。** R8 车道(本轮)已补齐全部可无裁量修复的 P3/NIT 缺口(goldens + 文档诚实化);逐条对锁见 `docs/development/multitable-global-history-4c3-impl-wave-verification-20260709.md`。
 **前置(已满足):** 4c-2 forward tombstone-capture impl 已落 main(`023385499`)——inbound 边在 `record-service.deleteRecord` 里已被捕获进 `meta_link_tombstones(reason='record_delete')`,但**明确不重放**(4c-2 把重放留给本锁)。
 
 ## 0. 一句话与可达边界(诚实收窄)
@@ -118,6 +118,12 @@ inbound 边在语义上属于**别的 sheet(乃至别的 base)上的 `N`**;而 r
 | RB10 | retention 地板 | 存活 trash 行引用的 tombstone 不被 sweep 清;整组裁剪(不撕裂) |
 | RB11 | 并发两个 restore | trash 行 `FOR UPDATE` ⇒ 一个成功一个 409,无重复边、无半态 |
 | RB12 | **mutation** | neuter 每道前置(字段存在 / type=link / non-mirror / 邻居同意 / NOT EXISTS)→ 恰好对应 golden 变红;neuter 地板 → RB10 红 |
+
+**AS-BUILT 追记(forward-only,不改上表,只追加事实):** #3975 交付 RB1–RB11(`multitable-undelete-inbound-replay-realdb.test.ts`,CI 三点接线,real DB 12/12 绿);RB12(mutation)由审计与 R8 车道**独立复现 6/6 红**(§2/§4/§6 各道谓词 + retention 地板),但矩阵本身**未列 D-3(PIT-reset 捕获)与 PIT-resurrect 侧**的端到端 golden——这不是 impl 偏离(锁文原表确实没写这两项),而是覆盖缺口。R8 吸收审计(2026-07-09,APPROVE 0P1/0P2)补齐:
+- `multitable-undelete-inbound-replay-realdb.test.ts` 追加 **RB13**(neighborGone)与 **RB14**(anchor 非空+零 tombstone ⇒ `recoverable=false`)。
+- 新文件 `multitable-reset-pit-inbound-capture-realdb.test.ts`:D-3 捕获接线happy path(锚一致 + restore 回放)+ cap 超限 → 422 + 整单回滚。
+- 新文件 `multitable-undelete-inbound-resurrect-realdb.test.ts`:PIT-resurrect 侧多-vintage(只重放最新锚定 vintage,不串代)+ 未捕获 vintage 静默零重放 + flag-off 字节级不变;并把 `univer-meta.ts` 里原先"deterministic"措辞的代码注释改诚实(resurrect 无 trash 行,锚定用启发式,过放不可能因邻居同意谓词兜底)。
+全部 6 个文件均真库 mutation-verified(fail-first→revert),详见 `docs/development/multitable-global-history-4c3-impl-wave-verification-20260709.md`。
 
 ## 10. 实施排布(ratify 后才排)
 

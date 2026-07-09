@@ -141,6 +141,60 @@
       </article>
     </article>
 
+    <article v-if="batchAdmissionOnboardingPackets.length > 0" class="directory-admin__progress-card">
+      <div class="directory-admin__section-head">
+        <div>
+          <h2>批量创建临时凭据</h2>
+          <p class="directory-admin__hint">以下目录成员已批量创建本地用户并完成绑定。扫码登录授权默认未开启，请先通过安全渠道下发登录账号与临时密码。</p>
+        </div>
+        <div class="directory-admin__actions">
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" @click="clearBatchAdmissionOnboardingPackets()">
+            关闭结果
+          </button>
+        </div>
+      </div>
+
+      <article
+        v-for="packet in batchAdmissionOnboardingPackets"
+        :key="packet.userId"
+        class="directory-admin__review-admission"
+      >
+        <div class="directory-admin__account-grid">
+          <div>
+            <strong>本地用户</strong>
+            <div>{{ packet.name || packet.email || packet.username || packet.mobile || packet.userId }}</div>
+          </div>
+          <div>
+            <strong>登录账号</strong>
+            <div>{{ packet.email || packet.username || packet.mobile || packet.userId }}</div>
+          </div>
+          <div>
+            <strong>用户 ID</strong>
+            <div>{{ packet.userId }}</div>
+          </div>
+          <div>
+            <strong>手机号</strong>
+            <div>{{ packet.mobile || '未填写' }}</div>
+          </div>
+        </div>
+        <p class="directory-admin__status">
+          临时密码：{{ packet.temporaryPassword }}
+        </p>
+        <p v-if="packet.onboarding?.acceptInviteUrl" class="directory-admin__hint">
+          邀请链接：
+          <a :href="packet.onboarding.acceptInviteUrl" target="_blank" rel="noreferrer">
+            {{ packet.onboarding.acceptInviteUrl }}
+          </a>
+        </p>
+        <p v-else class="directory-admin__hint">
+          该账号未生成邀请链接，请直接分发登录账号和临时密码。
+        </p>
+        <pre v-if="packet.onboarding?.inviteMessage" class="directory-admin__invite">
+{{ packet.onboarding.inviteMessage }}
+        </pre>
+      </article>
+    </article>
+
     <div class="directory-admin__layout">
       <aside class="directory-admin__panel directory-admin__panel--list">
         <div class="directory-admin__section-head">
@@ -1018,6 +1072,14 @@
               @click="void batchBindReviewItems()"
             >
               {{ reviewBatchProcessing ? '处理中...' : `批量绑定 (${selectedReviewBindEntries.length})` }}
+            </button>
+            <button
+              class="directory-admin__button"
+              type="button"
+              :disabled="reviewBatchProcessing || selectedReviewAdmissionIds.length === 0"
+              @click="void batchAdmitReviewItems()"
+            >
+              {{ reviewBatchProcessing ? '处理中...' : `批量创建并绑定 (${selectedReviewAdmissionIds.length})` }}
             </button>
             <label class="directory-admin__toggle directory-admin__toggle--compact">
               <input v-model="reviewDisableDingTalkGrant" type="checkbox" />
@@ -1978,7 +2040,7 @@ type DirectoryBindingRecommendationStatusCode =
 
 type PendingBindingView = 'all' | 'recommended' | 'manual'
 type PendingBindingManualReasonFilter = 'all' | 'no_exact_match' | 'conflict'
-type ReviewBatchProgressKind = 'bind' | 'recommend' | 'unbind'
+type ReviewBatchProgressKind = 'bind' | 'recommend' | 'admit' | 'unbind'
 type ReviewBatchProgressPhase = 'submitting' | 'refreshing' | 'completed' | 'failed'
 
 type ReviewBatchProgress = {
@@ -2238,6 +2300,7 @@ const manualAdmissionDrafts = reactive<Record<string, ManualAdmissionDraft>>({})
 const manualAdmissionExpanded = reactive<Record<string, boolean>>({})
 const manualAdmissionResult = ref<ManualAdmissionResult | null>(null)
 const autoAdmissionOnboardingPackets = ref<AutoAdmissionOnboardingPacket[]>([])
+const batchAdmissionOnboardingPackets = ref<AutoAdmissionOnboardingPacket[]>([])
 const grantToggles = reactive<Record<string, boolean>>({})
 const selectedReviewIds = reactive<Record<string, boolean>>({})
 const reviewDisableDingTalkGrant = ref(true)
@@ -2573,6 +2636,16 @@ const selectedReviewBindEntries = computed(() => (
     }))
     .filter((item) => item.localUserRef.length > 0)
 ))
+const selectedReviewAdmissionIds = computed(() => (
+  filteredReviewItems.value
+    .filter((item) => (
+      item.kind === 'pending_binding'
+      && selectedReviewIds[item.account.id]
+      && !item.account.localUser
+      && !item.actionable.canConfirmRecommendation
+    ))
+    .map((item) => item.account.id)
+))
 const selectedReviewBatchIds = computed(() => (
   filteredReviewItems.value
     .filter((item) => item.actionable.canBatchUnbind && selectedReviewIds[item.account.id])
@@ -2680,6 +2753,7 @@ function resetDraft() {
   for (const key of Object.keys(grantToggles)) delete grantToggles[key]
   for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
   autoAdmissionOnboardingPackets.value = []
+  batchAdmissionOnboardingPackets.value = []
   draft.name = ''
   draft.corpId = ''
   draft.appKey = ''
@@ -3475,6 +3549,7 @@ async function selectIntegration(integrationId: string): Promise<void> {
   manualDepartmentId.value = ''
   manualDepartmentName.value = ''
   clearAutoAdmissionOnboardingPackets()
+  clearBatchAdmissionOnboardingPackets()
   clearFocusedAccount()
   accountPage.value = 1
   accountTotal.value = 0
@@ -3915,6 +3990,10 @@ function clearAutoAdmissionOnboardingPackets(): void {
   autoAdmissionOnboardingPackets.value = []
 }
 
+function clearBatchAdmissionOnboardingPackets(): void {
+  batchAdmissionOnboardingPackets.value = []
+}
+
 function readCreatedLocalUserOption(data: Record<string, unknown>, fallback: ManualAdmissionDraft): LocalUserOption {
   const user = data.user && typeof data.user === 'object' ? data.user as Record<string, unknown> : null
   const id = typeof user?.id === 'string' ? user.id.trim() : ''
@@ -3934,6 +4013,15 @@ function readCreatedLocalUserOption(data: Record<string, unknown>, fallback: Man
 
 function readAutoAdmissionOnboardingPackets(data: Record<string, unknown> | undefined): AutoAdmissionOnboardingPacket[] {
   const rawPackets = Array.isArray(data?.autoAdmissionOnboardingPackets) ? data.autoAdmissionOnboardingPackets : []
+  return readDirectoryOnboardingPackets(rawPackets)
+}
+
+function readBatchAdmissionOnboardingPackets(data: Record<string, unknown> | undefined): AutoAdmissionOnboardingPacket[] {
+  const rawPackets = Array.isArray(data?.onboardingPackets) ? data.onboardingPackets : []
+  return readDirectoryOnboardingPackets(rawPackets)
+}
+
+function readDirectoryOnboardingPackets(rawPackets: unknown[]): AutoAdmissionOnboardingPacket[] {
   return rawPackets.flatMap((entry) => {
     if (!entry || typeof entry !== 'object') return []
     const packet = entry as Record<string, unknown>
@@ -4526,6 +4614,7 @@ function clearReviewBatchProgress() {
 
 function readReviewBatchProgressKindLabel(kind: ReviewBatchProgressKind): string {
   if (kind === 'recommend') return '推荐绑定确认'
+  if (kind === 'admit') return '批量创建并绑定'
   if (kind === 'unbind') return '批量停权处理'
   return '批量绑定'
 }
@@ -5026,6 +5115,79 @@ async function retryBackfillUserMobileAndBindReviewItem(item: DirectoryReviewIte
   clearMobileConflictHint(item.account.id)
   clearMobileOverrideConfirmation(item.account.id)
   await backfillUserMobileAndBindReviewItem(item)
+}
+
+async function batchAdmitReviewItems() {
+  if (!selectedIntegration.value || selectedReviewAdmissionIds.value.length === 0) return
+  reviewBatchProcessing.value = true
+  let appliedCount = 0
+  const batchIds = [...selectedReviewAdmissionIds.value]
+  try {
+    clearBatchAdmissionOnboardingPackets()
+    setReviewBatchProgress({
+      kind: 'admit',
+      phase: 'submitting',
+      total: batchIds.length,
+      applied: 0,
+      message: '正在批量创建本地用户并绑定目录成员...',
+    })
+    const response = await apiFetch('/api/admin/directory/accounts/batch-admit-users', {
+      method: 'POST',
+      body: JSON.stringify({
+        accountIds: batchIds,
+        enableDingTalkGrant: false,
+      }),
+    })
+    const body = await readJson(response)
+    if (!response.ok) throw new Error(readApiError(body, '批量创建并绑定失败'))
+    const data = body?.data as Record<string, unknown> | undefined
+    const processedItems = Array.isArray(data?.items) ? data.items : []
+    appliedCount = Number(data?.updatedCount ?? processedItems.length)
+    batchAdmissionOnboardingPackets.value = readBatchAdmissionOnboardingPackets(data)
+    setReviewBatchProgress({
+      kind: 'admit',
+      phase: 'refreshing',
+      total: batchIds.length,
+      applied: appliedCount,
+      message: `已创建并绑定 ${appliedCount} / ${batchIds.length}，正在刷新目录成员与待处理队列...`,
+    })
+    await refreshAfterReviewBindings()
+    const failedCount = Number(data?.failedCount ?? 0)
+    const failedItems = Array.isArray(data?.failed) ? data.failed : []
+    const failedPreview = failedItems
+      .slice(0, 2)
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return ''
+        const item = entry as Record<string, unknown>
+        const accountId = typeof item.accountId === 'string' ? item.accountId : ''
+        const error = typeof item.error === 'string' ? item.error : ''
+        return [accountId, error].filter(Boolean).join(': ')
+      })
+      .filter(Boolean)
+      .join('；')
+    const message = failedCount > 0
+      ? `已创建并绑定 ${appliedCount} 个目录成员，另有 ${failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
+      : `已创建并绑定 ${appliedCount} 个目录成员`
+    setStatus(message, failedCount > 0 ? 'error' : 'info')
+    setReviewBatchProgress({
+      kind: 'admit',
+      phase: 'completed',
+      total: batchIds.length,
+      applied: appliedCount,
+      message,
+    })
+  } catch (error) {
+    setReviewBatchProgress({
+      kind: 'admit',
+      phase: 'failed',
+      total: batchIds.length,
+      applied: appliedCount,
+      message: error instanceof Error ? error.message : '批量创建并绑定失败',
+    })
+    setStatus(error instanceof Error ? error.message : '批量创建并绑定失败', 'error')
+  } finally {
+    reviewBatchProcessing.value = false
+  }
 }
 
 async function batchBindReviewItems() {

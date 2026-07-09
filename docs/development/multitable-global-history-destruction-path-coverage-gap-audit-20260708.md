@@ -8,8 +8,8 @@
 |---|---|---|---|---|---|---|---|
 | 1 | `record-service.ts:867` `deleteRecord`(治理路径) | ✓ | ✓ | ✓ | ✓ inbound | 完整(2a;inbound 待 4c-3) | ✅ 正确 |
 | 2 | `univer-meta.ts:10066` **PIT-reset 内联删除** | ✓ | ✓(`action:'delete'`) | ✓ | **✗** | 记录可恢复,**inbound 边永久丢失** | ✅ 正确 |
-| 3 | `records.ts:565` plugin-SDK `deleteRecord` | ✓ | **✗** | **✗** | ✗ | **不可恢复** | ❌ **错误** |
-| 4 | `automation-executor.ts:2269` automation `delete_record` | ✓ | **✗** | **✗** | **✗** | **不可恢复** | ❌ **错误** |
+| 3 | `records.ts:565` plugin-SDK `deleteRecord` | ✓ | ✓ **(D-1, source:'plugin')** | **✗** | ✗ | **不可恢复**(=D-2, owner-gated) | ✅ 正确 **(D-1 修复)** |
+| 4 | `automation-executor.ts:2269` automation `delete_record` | ✓ | ✓ **(D-1, source:'automation')** | **✗** | **✗** | **不可恢复**(=D-2, owner-gated) | ✅ 正确 **(D-1 修复)** |
 
 核实点:`meta_links` 的 `record_id` 有 FK(`ON DELETE CASCADE`)、`foreign_record_id` **无 FK**,故四条路径都必须显式 `DELETE FROM meta_links WHERE record_id=$1 OR foreign_record_id=$1`——**四条都清掉了 inbound 边**,只有路径 1 在清之前捕获。
 
@@ -42,7 +42,7 @@ SELECT DISTINCT ON (record_id) record_id, action, snapshot, version
 
 ## 4. owner 决策菜单(本文不实现任何一项)
 
-- **D-1(推荐,纯缺陷修复):** 让 automation / plugin-SDK 的删除**发射 delete revision**(`source:'automation'` / `'plugin'`,枚举位已存在)。**只修 PIT 正确性,不改可恢复性**(不加 trash)。用户可见行为变化仅为「Global History 如实记录该删除、PIT 不再谎报记录存活」。难度中(automation 走 raw-SQL 车道)。**属跨车道改动**(automation-executor 归自动化线),需路由到该线会话或 owner 点名。
+- **D-1(推荐,纯缺陷修复)— ✅ 已落地(owner ratify 2026-07-09,最小版:只补 revision,不开 recoverability;真库金测双向 PIT + mutation 证明:multitable-d1-delete-revision-parity-realdb.test.ts):** 让 automation / plugin-SDK 的删除**发射 delete revision**(`source:'automation'` / `'plugin'`,枚举位已存在)。**只修 PIT 正确性,不改可恢复性**(不加 trash)。用户可见行为变化仅为「Global History 如实记录该删除、PIT 不再谎报记录存活」。难度中(automation 走 raw-SQL 车道)。**属跨车道改动**(automation-executor 归自动化线),需路由到该线会话或 owner 点名。
 - **D-2(更大,产品决定):** 再给这两条路径补 `meta_records_trash` + tombstone 捕获 ⇒ 删除变为可恢复、并进回收站。**改变产品语义**,需 owner 签核。
 - **D-3(4c-3 内解决,已在 4c-3 锁提案):** 给 PIT-reset 内联删除(路径 2)补 tombstone 捕获(它已写 trash+revision,只差 anchor 与捕获调用)。
 - **D-4(文档诚实,已随本轮执行):** 4c-2 锁 §1/§8 补齐四条路径实情——**已在同批 PR 落地**,C2 口径明确限定为路径 1(+ 4c-3 后含路径 2)。
