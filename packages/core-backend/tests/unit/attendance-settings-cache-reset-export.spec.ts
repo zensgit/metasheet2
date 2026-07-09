@@ -11,7 +11,9 @@ import { describe, expect, it } from 'vitest'
 // reset actually runs. A source assertion (not a module-load one) — the plugin
 // is a large CJS module and asserting its shape via require is flaky across the
 // forks pool's multi-file runs.
-const source = readFileSync(resolve(__dirname, '../../../../plugins/plugin-attendance/index.cjs'), 'utf8')
+// Normalize CRLF → LF so the '\n  …' anchors below hold regardless of the
+// checkout's line endings (review NIT).
+const source = readFileSync(resolve(__dirname, '../../../../plugins/plugin-attendance/index.cjs'), 'utf8').replace(/\r\n/g, '\n')
 
 describe('attendance settings-cache reset export (top-level, so the harness reset is not a no-op)', () => {
   it('exports resetAttendanceSettingsCacheForTests at the top level of module.exports', () => {
